@@ -32,6 +32,7 @@ import { SettingsPage } from './pages/SettingsPage'
 import { applyAppBadge } from './app-badge'
 import { perfEnabled, perfMark, perfMarkFrames, setPerfEnabled } from './perf'
 import { setupInstallPromptCapture } from './install-prompt'
+import { SLASH_COMMAND } from './slash-commands'
 import {
   createServices,
   ServicesContext,
@@ -42,6 +43,7 @@ import {
   hint,
   isApplePlatform,
   keyAria,
+  keyLabel,
   KEYS,
   SHOW_HELP_EVENT,
   useShortcuts,
@@ -650,9 +652,12 @@ function ShellChrome() {
     <ShellActionsContext.Provider value={shellActions}>
       <div class={`shell${mobileRoomChrome ? ' mobile-room-shell' : ''}`}>
         <header class="topbar">
-          <a href="/" class="brand topbar-brand">
-            axon
-          </a>
+          <div class="topbar-brand-lockup">
+            <a href="/" class="brand topbar-brand">
+              axon
+            </a>
+            <ConnectionIndicator />
+          </div>
           {mobileRoomChrome && (
             <a
               href="/"
@@ -663,25 +668,18 @@ function ShellChrome() {
               <MenuIcon />
             </a>
           )}
-          <nav class="topbar-nav">
-            <a href="/settings" title="Settings" aria-label="Settings">
-              <SettingsIcon />
-              <span class="topbar-label">Settings</span>
-            </a>
-          </nav>
           {mobileRoomChrome && (
             <button
               ref={roomTitleButton}
               type="button"
               class="topbar-room-title"
               aria-label="Open room information"
-              title="Room information"
+              title={`Room information (${SLASH_COMMAND.whereami})`}
               onClick={() => roomChrome.action?.()}
             >
               <span>{roomChrome.title ?? 'Room'}</span>
             </button>
           )}
-          <ConnectionIndicator />
           {/* Utility pages have no sidebar to collapse. The toggle lives up here
               rather than in the sidebar because a collapsed sidebar is
               `display: none` and could never render its own way back. */}
@@ -706,53 +704,65 @@ function ShellChrome() {
               type="button"
               class="ghost"
               aria-haspopup="dialog"
+              title={`Jump to a date (${SLASH_COMMAND.jump})`}
               onClick={jumpAction}
             >
               Jump
             </button>
           )}
-          <button
-            type="button"
-            class="ghost topbar-icon-button unread-threads-button"
-            title="Unread threads"
-            aria-label={
-              unreadThreadCount === 0
-                ? 'Unread threads'
-                : `Unread threads, ${unreadThreadCount}`
-            }
-            aria-haspopup="dialog"
-            onClick={() => setUnreadThreadsOpen(true)}
-          >
-            <ThreadIcon />
-            {unreadThreadCount > 0 && (
-              <span class="topbar-count-badge">{unreadThreadCount}</span>
-            )}
-            <span class="topbar-label">Threads</span>
-          </button>
-          <button
-            type="button"
-            class="ghost topbar-icon-button"
-            title={hint('Search messages', KEYS.search)}
-            aria-label="Search messages"
-            aria-keyshortcuts={keyAria(KEYS.search)}
-            aria-haspopup="dialog"
-            onClick={() => openSearch()}
-          >
-            <SearchIcon />
-            <span class="topbar-label">Search</span>
-          </button>
-          {/* Keyboard-free discovery: nothing else tells you the chords exist. */}
-          <button
-            type="button"
-            class="ghost help-button topbar-icon-button"
-            title={hint('Keyboard shortcuts', KEYS.showHelp)}
-            aria-label="Keyboard shortcuts"
-            aria-keyshortcuts={keyAria(KEYS.showHelp)}
-            aria-haspopup="dialog"
-            onClick={() => setHelpOpen(true)}
-          >
-            ?
-          </button>
+          <div class="topbar-actions">
+            <button
+              type="button"
+              class="ghost topbar-icon-button unread-threads-button"
+              title={`Unread threads (${SLASH_COMMAND.unreadthreads})`}
+              aria-label={
+                unreadThreadCount === 0
+                  ? 'Unread threads'
+                  : `Unread threads, ${unreadThreadCount}`
+              }
+              aria-haspopup="dialog"
+              onClick={() => setUnreadThreadsOpen(true)}
+            >
+              <ThreadIcon />
+              {unreadThreadCount > 0 && (
+                <span class="topbar-count-badge">{unreadThreadCount}</span>
+              )}
+              <span class="topbar-label">Threads</span>
+            </button>
+            <button
+              type="button"
+              class="ghost topbar-icon-button"
+              title={`Search messages (${SLASH_COMMAND.search}; ${keyLabel(KEYS.search)})`}
+              aria-label="Search messages"
+              aria-keyshortcuts={keyAria(KEYS.search)}
+              aria-haspopup="dialog"
+              onClick={() => openSearch()}
+            >
+              <SearchIcon />
+              <span class="topbar-label">Search</span>
+            </button>
+            <a
+              href="/settings"
+              class="topbar-icon-button"
+              title="Settings"
+              aria-label="Settings"
+            >
+              <SettingsIcon />
+              <span class="topbar-label">Settings</span>
+            </a>
+            {/* Keyboard-free discovery: nothing else tells you the chords exist. */}
+            <button
+              type="button"
+              class="ghost help-button topbar-icon-button"
+              title={`Keyboard shortcuts (${SLASH_COMMAND.help}; ${keyLabel(KEYS.showHelp)})`}
+              aria-label="Keyboard shortcuts"
+              aria-keyshortcuts={keyAria(KEYS.showHelp)}
+              aria-haspopup="dialog"
+              onClick={() => setHelpOpen(true)}
+            >
+              ?
+            </button>
+          </div>
         </header>
 
         {roomLinkJoinError !== null && (

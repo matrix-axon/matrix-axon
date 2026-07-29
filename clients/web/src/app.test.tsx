@@ -101,6 +101,36 @@ describe('App', () => {
     )
   })
 
+  it('groups connection with the brand and keeps utility actions together', () => {
+    const { getByRole } = render(<App services={testServices()} />)
+    const brand = getByRole('link', { name: 'axon' })
+    const connection = getByRole('status')
+    const threads = getByRole('button', { name: 'Unread threads' })
+    const search = getByRole('button', { name: 'Search messages' })
+    const settings = getByRole('link', { name: 'Settings' })
+    const help = getByRole('button', { name: 'Keyboard shortcuts' })
+
+    expect(brand.parentElement).toBe(connection.parentElement)
+    expect(threads.parentElement).toBe(search.parentElement)
+    expect(search.parentElement).toBe(settings.parentElement)
+    expect(settings.parentElement).toBe(help.parentElement)
+    expect(threads.getAttribute('title')).toBe(
+      'Unread threads (/unreadthreads)',
+    )
+    expect(search.getAttribute('title')).toBe(
+      'Search messages (/search; / or Ctrl-Shift-F)',
+    )
+    expect(threads.compareDocumentPosition(search)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(search.compareDocumentPosition(settings)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(settings.compareDocumentPosition(help)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+  })
+
   it('intercepts Matrix.to room links and joins them in the active account', async () => {
     installRoomPageHandlers()
     const joinedRoom = '!joined:hs'
@@ -1084,7 +1114,7 @@ describe('shell keyboard shortcuts (ADR 0078)', () => {
 
     const button = getByRole('button', { name: 'Keyboard shortcuts' })
     expect(button.getAttribute('title')).toBe(
-      'Keyboard shortcuts (? or Ctrl-/)',
+      'Keyboard shortcuts (/help; ? or Ctrl-/)',
     )
     expect(button.getAttribute('aria-keyshortcuts')).toBe('? Control+/')
 

@@ -1299,7 +1299,7 @@ export function RoomPage() {
           <button
             type="button"
             class="room-title-button"
-            title="Room information"
+            title={`Room information (${SLASH_COMMAND.whereami})`}
             aria-label="Open room information"
             aria-expanded={roomInfoOpen}
             aria-controls="room-info-panel"

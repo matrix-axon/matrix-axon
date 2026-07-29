@@ -23,7 +23,7 @@ export function ConnectionIndicator() {
     <span
       class={`conn conn-${state}`}
       role="status"
-      title={`Live: ${LABELS[state]}`}
+      title={`WebSocket: ${LABELS[state]}`}
     >
       <span class="conn-dot" aria-hidden="true" />
       <span class="conn-label">{LABELS[state]}</span>

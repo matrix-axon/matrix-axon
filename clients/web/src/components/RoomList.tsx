@@ -20,6 +20,7 @@ import {
   KEYS,
   useShortcuts,
 } from '../shortcuts'
+import { SLASH_COMMAND } from '../slash-commands'
 import {
   accountLabels,
   filterRooms,
@@ -750,12 +751,12 @@ export function RoomList() {
             }}
           >
             <summary
-              title={hint('Add a Room', KEYS.roomActions)}
+              title={`Room actions (${KEYS.roomActions.label}; ${SLASH_COMMAND.join}, ${SLASH_COMMAND.dm}, ${SLASH_COMMAND.create}, ${SLASH_COMMAND.find})`}
               aria-label="Add a Room"
               aria-keyshortcuts={keyAria(KEYS.roomActions)}
             >
               <span class="room-actions-plus" aria-hidden="true" />
-              <span class="room-actions-label">Add a Room</span>
+              <span class="room-actions-label">Rooms</span>
             </summary>
             <div class="room-actions-popover">
               <a ref={firstRoomAction} href="/rooms/discover#join">

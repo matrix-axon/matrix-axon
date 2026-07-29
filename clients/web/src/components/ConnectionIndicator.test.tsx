@@ -29,6 +29,7 @@ describe('ConnectionIndicator', () => {
 
     expect(status.textContent).toBe('Offline')
     expect(status.className).toContain('conn-offline')
+    expect(status.getAttribute('title')).toBe('WebSocket: Offline')
 
     live.start()
     await waitFor(() => expect(status.textContent).toBe('Connecting…'))
@@ -37,6 +38,7 @@ describe('ConnectionIndicator', () => {
     socket.emitOpen()
     await waitFor(() => expect(status.textContent).toBe('Live'))
     expect(status.className).toContain('conn-live')
+    expect(status.getAttribute('title')).toBe('WebSocket: Live')
 
     socket.emitClose()
     await waitFor(() => expect(status.textContent).toBe('Reconnecting…'))

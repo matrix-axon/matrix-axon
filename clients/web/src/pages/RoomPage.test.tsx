@@ -347,6 +347,9 @@ describe('RoomPage', () => {
     const titleButton = await findByRole('button', {
       name: 'Open room information',
     })
+    expect(titleButton.getAttribute('title')).toBe(
+      'Room information (/whereami)',
+    )
     fireEvent.click(titleButton)
 
     const panel = await findByRole('complementary', {

@@ -216,10 +216,12 @@ describe('RoomList', () => {
     expect(await findByText('Ops')).toBeTruthy()
     const summary = roomActionsSummary(container)
     expect(summary.getAttribute('aria-label')).toBe('Add a Room')
-    expect(summary.getAttribute('title')).toBe('Add a Room (+)')
+    expect(summary.getAttribute('title')).toBe(
+      'Room actions (+; /join, /dm, /create, /find)',
+    )
     expect(summary.getAttribute('aria-keyshortcuts')).toBe('+')
     expect(summary.getAttribute('role')).toBeNull()
-    expect(summary.textContent).toContain('Add a Room')
+    expect(summary.textContent).toContain('Rooms')
     const actions = ['Join', 'DM', 'Create', 'Find'].map((name) =>
       getByRole('link', { name }),
     )
