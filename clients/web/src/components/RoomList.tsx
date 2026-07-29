@@ -17,6 +17,7 @@ import {
   hint,
   isApplePlatform,
   keyAria,
+  keyLabel,
   KEYS,
   useShortcuts,
 } from '../shortcuts'
@@ -751,8 +752,8 @@ export function RoomList() {
             }}
           >
             <summary
-              title={`Room actions (${KEYS.roomActions.label}; ${SLASH_COMMAND.join}, ${SLASH_COMMAND.dm}, ${SLASH_COMMAND.create}, ${SLASH_COMMAND.find})`}
-              aria-label="Add a Room"
+              title={`Room actions (${keyLabel(KEYS.roomActions)}; ${SLASH_COMMAND.join}, ${SLASH_COMMAND.dm}, ${SLASH_COMMAND.create}, ${SLASH_COMMAND.find})`}
+              aria-label="Rooms"
               aria-keyshortcuts={keyAria(KEYS.roomActions)}
             >
               <span class="room-actions-plus" aria-hidden="true" />

@@ -274,7 +274,6 @@ body {
     order: 4;
   }
 
-  .topbar-actions a,
   .topbar-icon-button,
   .help-button {
     flex: none;
@@ -289,15 +288,6 @@ body {
   font-size: 1.1rem;
   color: var(--fg);
   text-decoration: none;
-}
-
-.topbar-actions a {
-  color: var(--muted);
-  text-decoration: none;
-}
-
-.topbar-actions a:hover {
-  color: var(--fg);
 }
 
 @media (max-width: 47.99rem) {

@@ -215,7 +215,7 @@ describe('RoomList', () => {
 
     expect(await findByText('Ops')).toBeTruthy()
     const summary = roomActionsSummary(container)
-    expect(summary.getAttribute('aria-label')).toBe('Add a Room')
+    expect(summary.getAttribute('aria-label')).toBe('Rooms')
     expect(summary.getAttribute('title')).toBe(
       'Room actions (+; /join, /dm, /create, /find)',
     )

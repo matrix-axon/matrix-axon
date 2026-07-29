@@ -743,7 +743,7 @@ function ShellChrome() {
             </button>
             <a
               href="/settings"
-              class="topbar-icon-button"
+              class="ghost topbar-icon-button"
               title="Settings"
               aria-label="Settings"
             >

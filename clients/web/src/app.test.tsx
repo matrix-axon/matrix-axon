@@ -1101,6 +1101,9 @@ describe('shell keyboard shortcuts (ADR 0078)', () => {
     const textarea = (await findByLabelText(
       'Message Ops',
     )) as HTMLTextAreaElement
+    expect(
+      (await findByRole('button', { name: 'Jump' })).getAttribute('title'),
+    ).toBe('Jump to a date (/jump)')
 
     fireEvent.input(textarea, { target: { value: '/help' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
