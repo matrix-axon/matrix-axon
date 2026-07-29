@@ -1,5 +1,29 @@
 # ADR 0085 — Web client offline-first content cache
 
+## In brief
+
+Persist the room list and each room's newest timeline page in IndexedDB, paint
+them immediately as **stale**, and reconcile through the merge `refreshHead`
+already implements for ADR 0061's reconnect gap-fill. Ship it in four phases,
+`clients/` silo only; phase 1 involves no storage at all and stands alone.
+
+The measured case, on a 1,752-room production account: `/v1/rooms` costs
+**1,298 ms of server-side TTFB**, so the room list is blank for ~1.5 s on a
+*fast desktop connection*; hydrating the same list from IndexedDB on an iPhone
+costs **~1 ms**. Storage constrains nothing (41.2 GB of quota on the phone),
+and no long task appears at the 1,752-row render, so the delay is removed
+rather than relocated.
+
+Two problems this ADR deliberately does **not** fix, both filed: the room-list
+query recomputes every summary from the whole `events` table (#85), and API
+responses are uncompressed (#86). The cache paints over both and replaces
+neither.
+
+The Context below is long because every parameter here is measured rather than
+estimated. **Readers who want the design first should skip to
+[Decision](#decision)**; readers checking whether the numbers support it should
+read straight through.
+
 ## Context
 
 On a slow or intermittent connection the web client shows nothing until the
@@ -199,7 +223,7 @@ the harness does not model. The synthetic room list also came out at 870 KB
 against the 660 KB measured in production, so the test was run against a record
 about 30% larger than the real one.
 
-### The room list is unpaginated, and that is the larger problem
+### The room list has a server-side problem this ADR cannot fix
 
 `RoomsQuery` (`crates/axon-api/src/routes/rooms.rs:30-34`) accepts only
 `account_id` — no `limit`, no cursor — and `list_rooms` returns every room as
@@ -344,9 +368,10 @@ error banner over a successful load.
 
 ### 3. Room list: cached rows, then reconcile
 
-`createRoomsStore` gains a cache-seeded start. Because the read is async, it
-cannot land before the first paint of the very first frame, but it lands far
-ahead of the network on the connections this ADR is about.
+`createRoomsStore` gains a cache-seeded start. Because the read is async it
+cannot land before the very first frame paints, but it beats the network by
+~1,000x — and, as measured, on *every* connection rather than only a poor one,
+because the latency it replaces is server-side.
 
 The store gains a `stale: ReadonlySignal<boolean>` alongside `loading`.
 `loading` keeps its current meaning — *nothing to show* — and becomes false as
@@ -510,6 +535,11 @@ Four PRs, in order, each independently shippable:
   must survive a failed refresh, with `stale` still true), cursor-unknown
   scrollback, echoes excluded from write-back, prune on room-list reconcile,
   and cache-key isolation across accounts and base URLs.
+- One test per decision settled in section 2, since each is a rule an
+  optimization could plausibly undo: a **cached UTD placeholder is replaced**
+  by the merged head once the event decrypts (the win-by-id rule); **any**
+  account's logout clears the **whole** cache, not just its own records; and a
+  second writer's write-back leaves a readable record rather than a torn one.
 - Every new test must be shown to fail against the unfixed code before it
   counts as covering anything.
 - End-to-end throttled-network runs asserting content paints before the
