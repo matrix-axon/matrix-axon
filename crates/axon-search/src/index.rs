@@ -108,7 +108,7 @@ impl SearchIndex {
         let fresh = needs_rebuild(dir)?;
         if fresh && dir.exists() {
             // Drop any stale or partial index so `open_or_create` builds clean.
-            std::fs::remove_dir_all(dir)?;
+            remove_index_dir(dir)?;
         }
         std::fs::create_dir_all(dir)?;
 
@@ -315,6 +315,57 @@ fn regex_escape(value: &str) -> String {
 /// or an interrupted earlier seed) or the marker records a different
 /// [`SCHEMA_VERSION`]. A read error on the marker is treated as "rebuild" — the safe
 /// direction.
+/// Number of attempts [`remove_index_dir`] makes before giving up.
+const WIPE_ATTEMPTS: u32 = 5;
+
+/// Recursively delete the index directory, retrying briefly on the races a
+/// filesystem can legitimately report.
+///
+/// `remove_dir_all` walks the directory, unlinks each entry, then `rmdir`s the
+/// directory itself. That is not atomic: if anything creates a file in the
+/// window between the final read of the directory and the `rmdir`, the `rmdir`
+/// fails with `ENOTEMPTY`. Tantivy makes that window reachable — a live index
+/// handle keeps mmapped segment files open and runs an auto-reloading reader
+/// thread, and a writer's merge threads are detached unless explicitly joined,
+/// so files can still appear under a directory we are trying to remove.
+///
+/// Failing an open here means failing a server boot (or an `axon search
+/// reindex`) on a condition that resolves itself microseconds later, so retry
+/// with a short backoff and only surface the error if it persists.
+fn remove_index_dir(dir: &Path) -> Result<(), SearchError> {
+    remove_with_retry(|| std::fs::remove_dir_all(dir))
+}
+
+/// The retry policy behind [`remove_index_dir`], over an injectable remove
+/// operation so the backoff semantics are testable without racing a real
+/// filesystem.
+fn remove_with_retry<F>(mut remove: F) -> Result<(), SearchError>
+where
+    F: FnMut() -> std::io::Result<()>,
+{
+    for attempt in 1..=WIPE_ATTEMPTS {
+        match remove() {
+            Ok(()) => return Ok(()),
+            // Someone else already removed it; the postcondition holds.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) if is_transient_wipe_error(&err) && attempt < WIPE_ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(10 * u64::from(attempt)));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    unreachable!("the loop returns on the final attempt")
+}
+
+/// Whether a failed directory wipe is worth retrying: something raced us by
+/// creating an entry (`ENOTEMPTY`), or the directory was busy mid-walk.
+fn is_transient_wipe_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::ResourceBusy
+    )
+}
+
 fn needs_rebuild(dir: &Path) -> Result<bool, SearchError> {
     let sidecar = dir.join(SCHEMA_VERSION_FILE);
     match std::fs::read_to_string(&sidecar) {
@@ -339,6 +390,8 @@ pub(crate) fn write_seed_marker(dir: &Path) -> Result<(), SearchError> {
 mod tests {
     use super::*;
     use axon_store::IndexableEvent;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     fn ev(
         account: Uuid,
@@ -658,9 +711,14 @@ mod tests {
             index.index_for_test(&[ev(acct, "$a", "!r", "@u:x", 1, "doomed body")]);
             write_seed_marker(dir.path()).expect("mark seeded");
         }
-        // Reopen in place: the marker matches, so it is not fresh.
-        let (_index, fresh) = SearchIndex::open(dir.path()).expect("reopen");
+        // Reopen in place: the marker matches, so it is not fresh. Bind and drop
+        // it explicitly: a `_`-prefixed *named* binding lives to the end of the
+        // scope, which would leave a live tantivy handle (mmapped files, an
+        // auto-reloading reader thread) on the directory that the open below
+        // wipes — a race that failed intermittently in CI with ENOTEMPTY.
+        let (index, fresh) = SearchIndex::open(dir.path()).expect("reopen");
         assert!(!fresh, "a seeded index reopens in place");
+        drop(index);
 
         // `axon search reindex` removes the marker.
         SearchIndex::mark_for_reseed(dir.path()).expect("mark for reseed");
@@ -673,6 +731,90 @@ mod tests {
             index.is_empty(),
             "the stale index was wiped, ready for re-seed"
         );
+    }
+
+    #[test]
+    fn remove_index_dir_wipes_a_populated_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join("segments/deep");
+        std::fs::create_dir_all(&nested).expect("nested dirs");
+        std::fs::write(nested.join("a.idx"), b"seg").expect("write");
+        std::fs::write(dir.path().join("meta.json"), b"{}").expect("write");
+
+        remove_index_dir(dir.path()).expect("wipe");
+        assert!(!dir.path().exists(), "the directory is gone after a wipe");
+    }
+
+    #[test]
+    fn remove_index_dir_is_ok_when_already_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("never-created");
+        // Nothing to remove is the postcondition we want, not an error.
+        remove_index_dir(&missing).expect("absent dir is ok");
+    }
+
+    /// A remove that fails with `kind` for the first `failures` calls, then
+    /// succeeds — plus a counter so tests can assert how often it was retried.
+    fn flaky_remove(
+        failures: usize,
+        kind: std::io::ErrorKind,
+    ) -> (impl FnMut() -> std::io::Result<()>, Rc<Cell<usize>>) {
+        let calls = Rc::new(Cell::new(0));
+        let seen = Rc::clone(&calls);
+        let remove = move || {
+            let n = seen.get() + 1;
+            seen.set(n);
+            if n <= failures {
+                Err(std::io::Error::from(kind))
+            } else {
+                Ok(())
+            }
+        };
+        (remove, calls)
+    }
+
+    #[test]
+    fn wipe_retries_past_transient_errors_then_succeeds() {
+        let (remove, calls) = flaky_remove(2, std::io::ErrorKind::DirectoryNotEmpty);
+        remove_with_retry(remove).expect("a transient ENOTEMPTY is retried");
+        assert_eq!(calls.get(), 3, "two failures then a success");
+    }
+
+    #[test]
+    fn wipe_gives_up_after_the_attempt_budget() {
+        // Persistent ENOTEMPTY is a real failure, not something to spin on forever.
+        let (remove, calls) = flaky_remove(usize::MAX, std::io::ErrorKind::DirectoryNotEmpty);
+        remove_with_retry(remove).expect_err("a persistent failure surfaces");
+        assert_eq!(calls.get(), WIPE_ATTEMPTS as usize, "bounded retries");
+    }
+
+    #[test]
+    fn wipe_does_not_retry_a_real_error() {
+        let (remove, calls) = flaky_remove(usize::MAX, std::io::ErrorKind::PermissionDenied);
+        remove_with_retry(remove).expect_err("a permissions failure surfaces");
+        assert_eq!(calls.get(), 1, "non-transient errors fail fast");
+    }
+
+    #[test]
+    fn wipe_treats_an_already_removed_directory_as_success() {
+        let (remove, calls) = flaky_remove(usize::MAX, std::io::ErrorKind::NotFound);
+        remove_with_retry(remove).expect("nothing to remove is the postcondition");
+        assert_eq!(calls.get(), 1, "no retry needed");
+    }
+
+    #[test]
+    fn transient_wipe_errors_are_classified() {
+        use std::io::{Error, ErrorKind};
+        assert!(is_transient_wipe_error(&Error::from(
+            ErrorKind::DirectoryNotEmpty
+        )));
+        assert!(is_transient_wipe_error(&Error::from(
+            ErrorKind::ResourceBusy
+        )));
+        // A real failure must not be retried into a timeout.
+        assert!(!is_transient_wipe_error(&Error::from(
+            ErrorKind::PermissionDenied
+        )));
     }
 
     #[test]
