@@ -36,9 +36,15 @@ events, and decoded media are held only in memory:
   (`pages/RoomPage.tsx:233`), so leaving a room and returning **within one
   session** discards the events already fetched and starts over.
 - `createMediaService` refcounts object URLs in a plain `Map`
-  (`media/media-service.ts:202`) that dies with the page, and the server sets
-  no `Cache-Control` on any route, so the browser HTTP cache does not reliably
-  carry thumbnails across a reload either.
+  (`media/media-service.ts:202`) that dies with the page. The media routes do
+  support conditional GETs — `ETag` and `If-None-Match`
+  (`crates/axon-api/src/routes/media.rs:284-287,462-465`), plus `Range` and
+  `Accept-Ranges` — but no route anywhere sets `Cache-Control`, so a reload
+  *revalidates* rather than serving from cache: still a round trip per
+  thumbnail on the connection that hurts most, and nothing at all offline.
+  A further wrinkle is that the bearer-guarded proxy is fetched into a blob and
+  handed to the DOM as an object URL, so the browser cache is keyed on requests
+  the client issues by hand rather than on element `src`s (issue #23).
 - There is no service worker: `public/` holds a `manifest.webmanifest` and
   icons, nothing else. The installed PWA has no offline shell.
 
@@ -180,7 +186,7 @@ restored state is therefore **cursor-unknown**, distinct from cursor-exhausted:
 the settled head fetch may set it. Getting this wrong silently disables
 scrollback, so it gets a dedicated test.
 
-### 5. Media: a Cache API layer under the object-URL cache
+### 5. Media: a Cache API layer, sequenced against issue #23
 
 Thumbnails and avatars go into a `Cache` keyed by the proxy URL (which already
 encodes method and dimensions — `media/use-thumbnail-fallback.ts:28`). The
@@ -188,10 +194,22 @@ refcounted object-URL map stays exactly as it is and sits in front, so blob
 lifetimes and revocation are untouched. Full-size attachment bytes are not
 cached.
 
-Adding `Cache-Control` to `/v1/media/**` would let the HTTP cache do some of
-this for free and is worth doing, but it is a `crates/` change and therefore a
-separate PR under the one-silo rule. The client-side layer works regardless of
-what the server sends, which is why it comes first.
+**This phase overlaps issue #23** ("Service worker for media streaming"), which
+proposes registering a service worker that attaches the bearer token to
+same-origin `/v1/media/*` requests so a media element can point straight at the
+proxy. If that lands, media requests become ordinary browser-issued fetches
+against a server that already speaks `ETag` and `Range` — at which point the
+right media cache is the **HTTP cache**, reached through the service worker,
+plus a `Cache-Control` header on the media routes; a hand-rolled Cache API
+store in front of a blob path would be a second, redundant cache with its own
+eviction policy.
+
+So phase 4 is explicitly **contingent**: if issue #23 is scheduled, phase 4
+should be dropped in favor of a `Cache-Control` PR on `crates/` (separate silo)
+and whatever caching the service worker needs. Phase 4 stands alone only if
+issue #23 stays deferred. Phases 1-3 do not depend on this either way — the
+room list and timeline are JSON the client fetches with an `Authorization`
+header regardless, and no service worker changes that.
 
 ### What is deliberately not cached
 
@@ -214,15 +232,24 @@ The toggle ships in the same phase as the first content cache, not later.
 ## Alternatives considered
 
 - **Service worker / Workbox precache.** Caches the *application shell*, not
-  the data — it makes the bundle load offline while the screen stays empty.
-  Complementary and worth its own ADR; it also brings an update-lifecycle
-  burden (stale-SW-serving-old-bundle) that should not ride along with a data
-  change.
+  the data — it makes the bundle load offline while the screen stays empty, so
+  it does not substitute for anything here. It is nonetheless the largest
+  adjacent decision: **issue #23** already proposes registering a service
+  worker for `/v1/media/*` (to authenticate ranged media requests), and its
+  open questions — token rotation reaching the worker, registration and update
+  lifecycle, the uncontrolled first load, whether it registers at all under the
+  Tauri custom scheme in M-W12, and keeping scope off `/v1/ws` — are the same
+  questions an offline shell would have to answer. If a service worker is
+  going to exist, it should be designed once, in issue #23's terms, rather than
+  arrived at twice. This ADR deliberately introduces none.
 - **`localStorage` for timelines.** Rejected on quota and on synchronous
   main-thread parse cost, per section 1.
-- **`Cache-Control` / `ETag` on `/v1/` responses.** Saves bytes on a repeat
-  fetch but still requires a round trip before first paint, and does nothing
-  offline. Complementary, different silo.
+- **`Cache-Control` / `ETag` on the JSON `/v1/` routes.** The media routes
+  already have `ETag`; extending conditional GETs to `/v1/rooms` and the
+  timeline would save bytes on a repeat fetch. It does not solve this problem:
+  a revalidation is still a round trip before first paint, on exactly the
+  connection where the round trip is the cost, and it does nothing offline.
+  Complementary, and a different silo.
 - **A full local Matrix store in the browser (Element's model).** Duplicates
   what the axon server exists to be, and would need its own sync loop, crypto,
   and reconciliation. Firmly out of scope.
@@ -241,7 +268,8 @@ Four PRs, in order, each independently shippable:
    `stale` signal, `RoomList`'s stale affordance, the settings toggle, and the
    logout wipe.
 3. **Timeline tail cache**, including the cursor-unknown state.
-4. **Media Cache API layer.**
+4. **Media Cache API layer — only if issue #23 stays deferred** (section 5).
+   Phases 1-3 are unaffected by that decision and need not wait on it.
 
 ## Testing
 
@@ -271,8 +299,10 @@ Four PRs, in order, each independently shippable:
   and the logout wipe are correctness requirements with dedicated tests.
 - Storage grows to a bounded ceiling per origin; quota rejection is a
   no-op path, already exercised by the title cache's precedent.
-- The server-side `Cache-Control` work and a service-worker offline shell both
-  become worthwhile follow-ups, tracked separately.
+- A `Cache-Control` header on the media routes becomes worthwhile either way
+  (today's `ETag` support means a reload revalidates instead of hitting cache);
+  it is a `crates/` PR. Whether a service worker joins it is issue #23's call,
+  not this ADR's.
 
 ## Open questions
 
