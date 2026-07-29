@@ -127,8 +127,9 @@ Three things fall out, and two of them are not about caching:
 
 - **91% of the room list's latency is server think-time.** TTFB is 1,298 ms of
   a 1,422 ms total, so only ~124 ms is transfer on a fast link. The 1.52 s
-  measured server-side is list assembly, as suspected — which means paginating
-  `/v1/rooms` is the fix, and no amount of client work touches it.
+  measured server-side is list assembly, as suspected, and no amount of client
+  work touches it. It is a query-shape problem rather than a missing `LIMIT` —
+  see below and issue #85.
 - **The API sends no compression.** `transferred` equals `decoded` to within
   header overhead, and there is no `CompressionLayer` in `crates/` or anything
   in `deploy/` supplying one. JSON of this shape typically compresses 8-12x, so
@@ -196,21 +197,34 @@ one `Vec<RoomDto>`; the client calls it bare (`stores/rooms.ts:482`). At 1,752
 rooms that is 660 KB assembled and returned in one shot, on every load and
 every refresh, and it is where the measured 1.52 s goes.
 
-This ADR cannot fix that — paginating `/v1/rooms` is a `crates/` change, a
-different silo, and should be filed on its own. It does change the reading of
-this one, in both directions: a cache is worth *more* at that scale, because it
-paints while 660 KB is still being assembled; and it is *not* sufficient,
-because the refresh behind it stays unbounded, so the cache can only ever be as
-fresh as the last refresh that completed, and every refresh still costs 1.5 s
-of server work. A room-list cache is a paint-latency fix, not a scalability
-fix, and this ADR should not be read as retiring the need for the server-side
-one.
+**But the missing pagination is not what costs the 1.3 s**, and it is worth
+being precise, because "add `LIMIT`" is the intuitive first move and it would
+not work. `Store::list_rooms` (`crates/axon-store/src/rooms.rs:96`) derives
+every room's summary from scratch on each request, aggregating the **whole
+`events` table** — hundreds of thousands of rows — to produce two columns:
 
-The browser control above settles what that 1.5 s is: **1,298 ms of it is
-time-to-first-byte**, so it is assembly, not the wire. Two server-side issues
-should be filed, and they are independent — pagination for the TTFB, response
-compression for the 660 KB that crosses the wire uncompressed. Neither is in
-this silo, and neither is displaced by the cache.
+```sql
+FROM ( SELECT account_id, room_id, MAX(origin_ts) AS last_activity_ts,
+              (array_agg(event_id ORDER BY origin_ts DESC, id DESC))[1] AS last_event_id
+       FROM events GROUP BY account_id, room_id ) a
+```
+
+with six correlated subqueries per room on top of it. The `GROUP BY` must
+complete before `ORDER BY a.last_activity_ts DESC` can rank anything, so a
+paginated first page still pays the full aggregate. The fix is to stop
+recomputing per-room summaries (issue #85); pagination is worth having for
+response size, and is not the latency fix.
+
+The second server-side finding is independent: **the API sends no compression**
+(issue #86), so those 660 KB cross the wire raw. Compression addresses transfer,
+issue #85 addresses TTFB, and this ADR's cache paints over both without
+removing either.
+
+None of the three substitutes for another, and the cache is the weakest of them
+in one specific sense: it is a paint-latency fix, not a scalability fix. Every
+background refresh still pays the full 1.3 s, so a cached list can only ever be
+as fresh as the last refresh that completed. This ADR should not be read as
+retiring the need for issues #85 and #86.
 
 What remains genuinely uncertain is not size but the race — does
 hydrate-and-paint beat the network by enough to be worth showing stale content
@@ -498,9 +512,11 @@ Four PRs, in order, each independently shippable:
   above). This was the gate on phases 2-3; it is passed.
 - ~~Is storage a constraint on iOS?~~ **No** — 41.2 GB of quota, four times the
   desktop figure.
-- **Two `crates/` issues should be filed off this work**, both out of scope
-  here and neither displaced by the cache: paginating `/v1/rooms` (1,298 ms of
-  TTFB) and compressing API responses (660 KB uncompressed on the wire).
+- ~~Two `crates/` issues should be filed off this work.~~ **Filed: #85** (the
+  room list recomputes every summary from the whole `events` table — the real
+  source of the 1,298 ms, which pagination alone would not fix) and **#86**
+  (API responses are uncompressed). Both are out of scope here and neither is
+  displaced by the cache.
 - **Still genuinely open — and only shipping code can answer it:** in-app marks
   (`cache:read` → `cache:hydrate` → first painted row, in ADR 0077's
   vocabulary) plus a boot counter separating a fresh document load from a
