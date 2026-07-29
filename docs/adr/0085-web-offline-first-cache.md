@@ -103,17 +103,12 @@ predicted:
   ~37 MB; a 30-room cap holds ~0.6 MB. On the 11-room test account the cap was
   inert, which is exactly why that account could not have settled it.
 
-**Whether to cache the whole list or a slice is now an open measurement, not a
-foregone conclusion.** An earlier draft asserted a slice was required; at
-660 KB that is no longer obvious, since 660 KB is trivial to *store* and the
-only question is what it costs to hydrate on a phone. Both options stay on the
-table: the full list (660 KB, everything filterable offline) or the first ~200
-rooms by recent activity (74 KB). The deciding number is the tier-1 hydrate
-measurement below, not storage.
-
-One consequence of a slice that a full list avoids: the room list is
-filterable, and a filter applied to a partial cache silently searches 200 of
-1,752 rooms. If the slice wins, the filter must say so while `stale` is true.
+**Cache the whole room list, not a slice** — settled by the device measurement
+below, which hydrates the full 660 KB in about a millisecond. An earlier draft
+of this ADR asserted a slice was required, on the assumption that a
+megabyte-scale record would be too expensive to read on a phone. It is not, and
+the full list has a property the slice lacks: the room list is filterable, and
+a filter over a partial cache would silently search 200 of 1,752 rooms.
 
 ### What the browser sees (desktop control, Chrome on Windows)
 
@@ -148,6 +143,50 @@ Three things fall out, and two of them are not about caching:
 The user-visible blank window on a *fast desktop connection* is therefore
 ~176 ms to ~1.66 s — about **1.5 seconds of "Loading rooms…" with no network
 problem at all**, which is the clearest statement of the case for phase 2.
+
+### What the device says (iPhone, iOS 18.7 / Safari 27)
+
+A standalone IndexedDB harness served from the client's own origin (quota is
+per-origin, so this had to run there), writing synthetic records at the shapes
+measured above and reading them back — median of 5:
+
+| | |
+| --- | --- |
+| Storage quota | **41.2 GB** (3.08 MB in use) |
+| Full room list, structured clone | **1 ms** (record: 870 KB) |
+| Full room list, string + `JSON.parse` | 1 ms |
+| 200-room slice, either encoding | 0–1 ms |
+| One timeline page | 0 ms (22 KB) |
+| Open database | 0 ms |
+| Write everything (~1.5 MB) | 5–8 ms |
+
+**The race is not close.** Hydrating the entire room list costs ~1 ms against a
+1,298 ms network floor — a margin of three orders of magnitude. Three
+consequences, and the first two close open questions outright:
+
+- **Cache the whole room list, not a slice.** The slice existed only as a hedge
+  against hydrate cost, and there is no hydrate cost to hedge against. Caching
+  all of it keeps offline filtering complete over every room, which a slice
+  would have silently made partial.
+- **Storage is not a constraint on any target.** 41.2 GB on the phone against
+  10.74 GB on the desktop — the phone's quota is *four times larger*. An
+  earlier draft of this ADR assumed iOS would be tight and warned that its
+  quota might not permit phases 2-3; that assumption was wrong, and modern iOS
+  grants quota as a fraction of disk. The LRU cap survives on different
+  grounds: write amplification and staleness, not space.
+- **Structured clone versus stringified JSON is not decided by this data** —
+  both land at the 1 ms floor. The ADR chooses structured clone anyway, because
+  it keeps `JSON.parse` off the read path entirely and needs no encode step;
+  but nothing here proves the other choice would be slower.
+
+Two honest limits on these numbers. **Safari clamps `performance.now()` to
+about 1 ms**, so every figure above is an upper bound at the resolution floor
+rather than a precise reading — which does not weaken the conclusion, since
+even the floor beats the network arm by ~1,000x. And the reads were **warm**,
+taken just after the write; a genuine cold start would add a disk read that
+the harness does not model. The synthetic room list also came out at 870 KB
+against the 660 KB measured in production, so the test was run against a record
+about 30% larger than the real one.
 
 ### The room list is unpaginated, and that is the larger problem
 
@@ -230,12 +269,17 @@ Production adapter: one IndexedDB database `axon-cache` with object stores
 `rooms`, `timelines`, and `meta`. Tests get an in-memory adapter, so no
 `fake-indexeddb` dependency and no jsdom IDB quirks.
 
-IndexedDB rather than `localStorage` because a timeline tail is tens of
-kilobytes of JSON per room against a ~5 MB origin-wide `localStorage` budget
-shared with credentials and settings, and because `localStorage` is
-synchronous: parsing every cached room's history on the main thread at boot is
-precisely the wrong trade on the low-powered phone that motivated ADR 0070 and
-ADR 0071.
+IndexedDB rather than `localStorage`, on two grounds — **quota** and
+**synchrony**. The room list alone is 660 KB and the timeline cache ~0.6 MB,
+against a ~5 MB origin-wide `localStorage` budget shared with credentials and
+settings; IndexedDB was measured at 41.2 GB of quota on the target phone. And
+`localStorage` is synchronous, so every read blocks the main thread by
+construction, whatever it costs.
+
+Note that the *cost* argument this originally rested on did not survive
+measurement: hydrating the full list is ~1 ms on the phone (below), so
+main-thread parse expense is not why `localStorage` loses. Quota is the
+disqualifying constraint; synchrony is the design objection.
 
 **Every cache operation is best-effort.** A failed open (private browsing,
 storage denied), a quota rejection, or a malformed record degrades silently to
@@ -447,39 +491,37 @@ Four PRs, in order, each independently shippable:
   every room, so the cap binds and byte budgeting buys nothing.
 - ~~The sizing sweep needs re-running against a real account.~~ **Done**
   (1,752 rooms, above).
-- **Whole room list or a slice?** 660 KB is trivial to store, so this is now
-  purely a hydrate-cost question for the phone — see the tier-1 measurement
-  below. A slice additionally makes offline filtering partial, which the UI
-  would have to admit to.
+- ~~Whole room list or a slice?~~ **Settled: the whole list.** Hydrate is ~1 ms
+  on the phone, so the slice hedged against a cost that does not exist, and the
+  full list keeps offline filtering complete.
+- ~~Does hydrate beat the network?~~ **Settled by ~1,000x** (iPhone measurement
+  above). This was the gate on phases 2-3; it is passed.
+- ~~Is storage a constraint on iOS?~~ **No** — 41.2 GB of quota, four times the
+  desktop figure.
 - **Two `crates/` issues should be filed off this work**, both out of scope
   here and neither displaced by the cache: paginating `/v1/rooms` (1,298 ms of
   TTFB) and compressing API responses (660 KB uncompressed on the wire).
-- **What still needs a device.** The sweep above measures the network arm of
-  the race; the hydrate arm cannot be measured from the server. In cost order:
-
-  **Tier 0 — no code, run in DevTools.** Done on desktop (above); still needed
-  on the phone, via Safari remote inspection. `navigator.storage.estimate()`
-  for quota and usage, resource timing on `/v1/rooms`, and paint timing. Note
-  that `getEntriesByType('largest-contentful-paint')` is deprecated in Chrome
-  and returns nothing — LCP needs a `PerformanceObserver` with
-  `buffered: true`.
-
-  **Tier 1 — a standalone page, no app changes, opens directly on the phone.**
-  Write synthetic records to IndexedDB (one 660 KB room-list blob, 30 × 21 KB
-  timeline blobs, both at the sizes measured above), then time open → read →
-  hydrate, and compare structured clone against `JSON.parse`. Printing results
-  into the DOM rather than the console makes it usable on iOS with no Mac.
-  **This is what decides whole-list versus slice, and whether records are
-  stored as objects or strings** — and it costs nothing to run before any of
-  the cache is written. If hydrate does not clearly beat 1.52 s, phases 2-3 are
-  not worth their staleness and should not ship.
-
-  **Tier 2 — in-app marks**, which cannot precede the code they instrument:
-  `cache:read` → `cache:hydrate` → first painted row in ADR 0077's vocabulary,
-  plus a boot counter separating a fresh document load from a resumed tab. That
-  counter sets the relative value of phase 1 against phases 2-3, and it is the
-  one input that differs sharply between phone and desktop.
-
+- **Still genuinely open — and only shipping code can answer it:** in-app marks
+  (`cache:read` → `cache:hydrate` → first painted row, in ADR 0077's
+  vocabulary) plus a boot counter separating a fresh document load from a
+  resumed tab. The counter sets the relative value of phase 1 against phases
+  2-3, and it is the one input that differs sharply between phone and desktop.
+  Note also that `getEntriesByType('largest-contentful-paint')` is deprecated
+  in Chrome and returns nothing; LCP needs a buffered `PerformanceObserver`.
+- **Cold-start hydrate is unmeasured.** Every device figure above was taken
+  warm, moments after the write. A real cold start adds a disk read the harness
+  does not model. With a 1,000x margin this is very unlikely to matter, but it
+  is the one number that could still surprise us.
+- **Re-running the harness on a slower phone would not change anything here.**
+  The margin is ~1,000x and the network arm it beats is server-side and
+  therefore device-independent; a device would have to be three orders of
+  magnitude slower to lose. What a slower device *would* expose is the step
+  after hydrate — painting 1,752 rows — which is the room-list rendering path,
+  not the cache, and is tracked separately (issues #26, #32). **A cache that
+  hydrates in 1 ms and then hands an unwindowed list to a slow phone has moved
+  the bottleneck, not removed it**, so phase 2 should be measured end-to-end on
+  the device rather than declared finished at the hydrate boundary.
 - Whether the target install is the home-screen PWA or a plain Safari tab — the
-  latter loses script-writable storage after 7 idle days, which caps how much
-  the cache can be worth there.
+  latter loses script-writable storage after 7 idle days. Quota turned out not
+  to constrain anything, but eviction policy still does, and this is unaffected
+  by the 41 GB figure.
