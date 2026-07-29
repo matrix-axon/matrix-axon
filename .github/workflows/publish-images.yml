@@ -9,9 +9,23 @@ name: Publish images
 # itself); the images link to this repo via the Dockerfiles' image.source label.
 #
 # Trigger by hand (Actions → Publish images → Run workflow) or by pushing a
-# `beta-*` tag. arm64 is built via QEMU (docker/setup-qemu-action), which is slow
-# under emulation on a shared runner; if that's a problem, dispatch with
-# platforms = linux/amd64 to skip it.
+# `beta-*` tag.
+#
+# Builds are amd64-only by default. arm64 has to be emulated through QEMU on an
+# x86 runner, and a release `cargo build` is pure CPU work — the worst case for
+# emulation, commonly 5-15x slower than native. Multi-arch runs were taking over
+# two hours. To publish arm64 as well, dispatch with
+# platforms = linux/amd64,linux/arm64 and expect it to be slow; the durable fix
+# is a native arm64 runner (ubuntu-24.04-arm) with a manifest merge.
+#
+# The layer cache below matters because the Dockerfile's BuildKit cache mounts
+# (cargo registry + target/) do NOT survive on an ephemeral runner the way they
+# did on the old self-hosted builder — nothing exports them. `type=gha` caches
+# image *layers* instead, which pays off most when the sources are unchanged:
+# re-running after a failed push (e.g. a GHCR permissions fix) reuses the build
+# outright. A source change still invalidates `COPY . .` and recompiles the
+# workspace; making that incremental needs a dependency pre-build stage
+# (cargo-chef or manifest-only layer) in the Dockerfile.
 
 on:
   workflow_dispatch:
@@ -21,9 +35,9 @@ on:
         type: string
         default: beta
       platforms:
-        description: "buildx platforms (arm64 needs QEMU on the runner)"
+        description: "buildx platforms (adding linux/arm64 emulates via QEMU — hours, not minutes)"
         type: string
-        default: linux/amd64,linux/arm64
+        default: linux/amd64
   push:
     tags:
       - 'v*' 
@@ -61,10 +75,13 @@ jobs:
             echo "registry=$registry"
             echo "hash=$hash"
             echo "moving=$moving"
-            echo "platforms=${{ inputs.platforms || 'linux/amd64,linux/arm64' }}"
+            echo "platforms=${{ inputs.platforms || 'linux/amd64' }}"
           } >> "$GITHUB_OUTPUT"
 
+      # Only needed when a build actually targets a non-native architecture;
+      # installing binfmt handlers for an amd64-only build is pure overhead.
       - uses: docker/setup-qemu-action@v3
+        if: contains(steps.meta.outputs.platforms, 'arm')
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -86,6 +103,11 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.registry }}/axon-server:${{ steps.meta.outputs.moving }}
             ${{ steps.meta.outputs.registry }}/axon-server:${{ steps.meta.outputs.hash }}
+          # Scoped so the two images don't evict each other from the shared
+          # Actions cache. mode=max keeps intermediate stages, not just the
+          # final layer, which is what makes the builder stage reusable.
+          cache-from: type=gha,scope=axon-server
+          cache-to: type=gha,mode=max,scope=axon-server
 
       - name: Build + push axon-web
         uses: docker/build-push-action@v6
@@ -99,3 +121,5 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.registry }}/axon-web:${{ steps.meta.outputs.moving }}
             ${{ steps.meta.outputs.registry }}/axon-web:${{ steps.meta.outputs.hash }}
+          cache-from: type=gha,scope=axon-web
+          cache-to: type=gha,mode=max,scope=axon-web

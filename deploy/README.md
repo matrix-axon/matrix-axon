@@ -240,8 +240,20 @@ push from CI (`.github/workflows/publish-images.yml`, on a GitHub-hosted
 runner). On the package's *first* push, set its visibility to **Public** in the
 org's Packages settings — GHCR defaults new packages to private, and neither
 `publish.sh` nor the CI workflow's token can change that setting, so it's a
-one-time manual step. The images carry an `org.opencontainers.image.source`
-label, so GHCR links the package to this repo automatically.
+one-time manual step. The package also needs this repository added under
+**Manage Actions access** with the **Write** role, or CI pushes fail with a 403
+even though `docker login` succeeds. The images carry an
+`org.opencontainers.image.source` label, so GHCR links the package to this repo
+automatically.
+
+> **CI publishes `linux/amd64` only.** arm64 has to be emulated through QEMU on
+> a GitHub runner, which turned a release `cargo build` into a multi-hour job, so
+> the workflow defaults to amd64 and arm64 is opt-in (dispatch with
+> `platforms = linux/amd64,linux/arm64`). Apple Silicon and other arm64 hosts can
+> still run these images — Docker emulates them — but startup and runtime are
+> slower. `publish.sh` is unchanged and still builds multi-arch by default, so
+> publishing from a local machine remains the way to get a true arm64 image
+> until CI moves to a native arm64 runner.
 
 ## Operations
 
