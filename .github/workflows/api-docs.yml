@@ -70,6 +70,10 @@ jobs:
 
       - name: Build Redoc API reference into the site
         run: |
+          # jekyll-build-pages is a Docker container action, so it runs as root
+          # and leaves _site owned by root; this step runs as `runner` and would
+          # otherwise fail with EACCES writing into it.
+          sudo chown -R "$(id -u):$(id -g)" _site
           npx --yes @redocly/cli build-docs openapi/openapi.json --output=_site/api.html
 
       - name: Check the site has both pages
