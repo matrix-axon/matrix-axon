@@ -115,6 +115,40 @@ One consequence of a slice that a full list avoids: the room list is
 filterable, and a filter applied to a partial cache silently searches 200 of
 1,752 rooms. If the slice wins, the filter must say so while `stale` is true.
 
+### What the browser sees (desktop control, Chrome on Windows)
+
+The same account, measured from the client with resource and paint timing:
+
+| | |
+| --- | --- |
+| First contentful paint | 176 ms (the shell and "Loading rooms…") |
+| `/v1/rooms` starts | 238 ms |
+| `/v1/rooms` TTFB | **1,298 ms** |
+| `/v1/rooms` total | 1,422 ms — so rows arrive at ~1.66 s |
+| Transferred / decoded | **660,671 / 660,371 bytes** |
+| Storage quota / usage | 10.74 GB / 2.02 MB |
+
+Three things fall out, and two of them are not about caching:
+
+- **91% of the room list's latency is server think-time.** TTFB is 1,298 ms of
+  a 1,422 ms total, so only ~124 ms is transfer on a fast link. The 1.52 s
+  measured server-side is list assembly, as suspected — which means paginating
+  `/v1/rooms` is the fix, and no amount of client work touches it.
+- **The API sends no compression.** `transferred` equals `decoded` to within
+  header overhead, and there is no `CompressionLayer` in `crates/` or anything
+  in `deploy/` supplying one. JSON of this shape typically compresses 8-12x, so
+  660 KB should be well under 100 KB on the wire. This costs nothing on the
+  desktop link measured here and is punishing on a phone — and it is a separate
+  fix from pagination: compression addresses transfer, pagination addresses
+  TTFB, and the cache paints over both.
+- **Storage is a non-constraint on desktop.** A 10.74 GB quota against 2 MB in
+  use means nothing in this ADR is quota-limited there. iOS will not look like
+  this, which is why the phone capture is the one that matters.
+
+The user-visible blank window on a *fast desktop connection* is therefore
+~176 ms to ~1.66 s — about **1.5 seconds of "Loading rooms…" with no network
+problem at all**, which is the clearest statement of the case for phase 2.
+
 ### The room list is unpaginated, and that is the larger problem
 
 `RoomsQuery` (`crates/axon-api/src/routes/rooms.rs:30-34`) accepts only
@@ -133,9 +167,11 @@ of server work. A room-list cache is a paint-latency fix, not a scalability
 fix, and this ADR should not be read as retiring the need for the server-side
 one.
 
-The 1.52 s should be split into time-to-first-byte versus transfer before the
-server-side issue is written, to confirm the cost is query assembly rather than
-the wire: `curl -w '%{time_starttransfer} %{time_total}'` against `/v1/rooms`.
+The browser control above settles what that 1.5 s is: **1,298 ms of it is
+time-to-first-byte**, so it is assembly, not the wire. Two server-side issues
+should be filed, and they are independent — pagination for the TTFB, response
+compression for the 660 KB that crosses the wire uncompressed. Neither is in
+this silo, and neither is displaced by the cache.
 
 What remains genuinely uncertain is not size but the race — does
 hydrate-and-paint beat the network by enough to be worth showing stale content
@@ -415,16 +451,18 @@ Four PRs, in order, each independently shippable:
   purely a hydrate-cost question for the phone — see the tier-1 measurement
   below. A slice additionally makes offline filtering partial, which the UI
   would have to admit to.
-- **Paginating `/v1/rooms` should be filed as a `crates/` issue.** It is out of
-  scope here but bounds how much this ADR can achieve at real scale.
+- **Two `crates/` issues should be filed off this work**, both out of scope
+  here and neither displaced by the cache: paginating `/v1/rooms` (1,298 ms of
+  TTFB) and compressing API responses (660 KB uncompressed on the wire).
 - **What still needs a device.** The sweep above measures the network arm of
   the race; the hydrate arm cannot be measured from the server. In cost order:
 
-  **Tier 0 — no code, run in DevTools today** (desktop directly, iOS via Safari
-  remote inspection). `await navigator.storage.estimate()` for quota and usage;
-  resource timing on `/v1/rooms` to confirm the 1.52 s reaches the browser as a
-  1.5 s blank window; `performance.getEntriesByType('paint')` for when anything
-  first appears.
+  **Tier 0 — no code, run in DevTools.** Done on desktop (above); still needed
+  on the phone, via Safari remote inspection. `navigator.storage.estimate()`
+  for quota and usage, resource timing on `/v1/rooms`, and paint timing. Note
+  that `getEntriesByType('largest-contentful-paint')` is deprecated in Chrome
+  and returns nothing — LCP needs a `PerformanceObserver` with
+  `buffered: true`.
 
   **Tier 1 — a standalone page, no app changes, opens directly on the phone.**
   Write synthetic records to IndexedDB (one 660 KB room-list blob, 30 × 21 KB
