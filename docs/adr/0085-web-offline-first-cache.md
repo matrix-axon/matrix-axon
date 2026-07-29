@@ -8,6 +8,22 @@ network answers. Opening the app paints "Loading rooms…"; opening a room paint
 rendering cost — it is that the client keeps **no durable copy of any content
 it has already seen**.
 
+### This is not a mobile problem
+
+The blocking resource is a network round trip, not a device: a laptop on hotel
+wi-fi, a tether, or a VPN paints the same empty panes. What differs is **how
+often the blank state is reached**, and there the platforms diverge sharply. A
+desktop tab lives for days, so its in-memory stores stay warm and a genuine
+cold start is rare — the cost a desktop user pays repeatedly is the *room
+switch*, which discards a loaded timeline within a single session. A phone
+browser discards backgrounded tabs aggressively, so on mobile nearly every
+return to the app is a cold start.
+
+That maps onto the rollout below: **phase 1 (in-memory, no storage) is the
+desktop fix**, and phases 2-3 are what make a phone's constant cold starts
+cheap. Neither platform is served by only one of them, and phase 1 is the
+cheapest thing here in any case.
+
 ### What the client persists today
 
 Every `localStorage` key the client writes:
@@ -47,6 +63,60 @@ events, and decoded media are held only in memory:
   the client issues by hand rather than on element `src`s (issue #23).
 - There is no service worker: `public/` holds a `manifest.webmanifest` and
   icons, nothing else. The installed PWA has no offline shell.
+
+### What the live data says
+
+A read-only sweep measured the per-record *unit* sizes a cache would hold.
+**The sample is a disposable test account — 11 rooms, 2026-07-29 — and is not
+representative of a real one**; the target is an account with thousands of
+rooms and hundreds of thousands of events. Read the per-unit figures as sound
+and the totals as a floor:
+
+- **~380 bytes per room** in the room-list payload (4.2 KB for 11 rooms).
+- **A 50-event page runs to a median of 18.8 KB**, mean 24.0 KB, min 6.0 KB,
+  max 73.6 KB — roughly 0.5–1.5 KB per event, driven by `formatted_body` HTML,
+  inlined reply fallbacks, and state events carrying `prev_content` (ADR 0074).
+- **Only 4 of 11 rooms had a full 50 events.** In a quiet room the newest page
+  *is* the room's entire history, so the cache holds the whole room and the
+  "cached scrollback goes stale" concern does not arise. A real account inverts
+  this: most rooms will fill the page.
+
+Extrapolated to the real target, the two records behave completely differently,
+and it is the *room list* that is dangerous — the opposite of what the small
+sample suggests:
+
+- **The timeline cache is bounded by construction.** The LRU cap holds it near
+  `cap x 24 KB` — under a megabyte at 30 rooms — no matter how large the
+  account grows. On the test account the cap is inert (11 rooms); at real scale
+  it is load-bearing, and it is what keeps this side of the cache flat.
+- **The room-list record scales with the whole account and sits on the boot
+  path.** At 3,000 rooms it is ~1.1 MB of JSON to store, read, and hydrate
+  before the list can paint — precisely the main-thread cost this ADR claims to
+  avoid. **So the room-list cache must hold a slice, not the list**: the
+  server already returns rooms most-recent-activity-first, so caching the first
+  N (propose 200, ~76 KB) covers everything a user can scroll before the
+  network answers, and the rest arrives with the refresh.
+
+### The room list is unpaginated, and that is the larger problem
+
+`RoomsQuery` (`crates/axon-api/src/routes/rooms.rs:30-34`) accepts only
+`account_id` — no `limit`, no cursor — and `list_rooms` returns every room as
+one `Vec<RoomDto>`; the client calls it bare (`stores/rooms.ts:482`). At
+thousands of rooms that is a single unbounded response that must arrive and
+parse in full before anything appears, on every load and every refresh.
+
+This ADR cannot fix that — paginating `/v1/rooms` is a `crates/` change, a
+different silo, and should be filed on its own. It does change the reading of
+this one, in both directions: a cache is worth *more* at that scale, because it
+paints while a megabyte is still in flight; and it is *not* sufficient, because
+the refresh behind it stays unbounded and the cached slice can only ever be as
+fresh as the last refresh that completed. A room-list cache is a paint-latency
+fix, not a scalability fix, and this ADR should not be read as retiring the
+need for the server-side one.
+
+What remains genuinely uncertain is not size but the race — does
+hydrate-and-paint beat the network by enough to be worth showing stale content
+— and that is a device measurement, not a server one.
 
 So the freshness story for both principal views of server state is "fetched
 once on mount, blank until it returns" — which guardrail 8 in `AGENTS.md`
@@ -309,5 +379,35 @@ Four PRs, in order, each independently shippable:
 - Should the room-list cache survive a *server* change (different `apiBaseUrl`)
   as a separate namespace, or be dropped? Proposed: separate namespace, dropped
   by the LRU like anything else.
-- Is 30 rooms × 50 events the right ceiling? It should be set from the ADR 0077
-  readout on a real device rather than guessed here.
+- ~~Is 30 rooms × 50 events the right ceiling?~~ **Partly settled.** 50 events
+  is not a free parameter at all: it is `PAGE_LIMIT`, because the restore is
+  confirmed by exactly one head fetch of that size, and any surplus below the
+  overlap could never be confirmed by it. The room cap is a plain count-based
+  LRU — bounded by construction, so it stays under a megabyte at any account
+  size, and budgeting it by bytes would buy nothing. What is *not* settled is
+  the **room-list slice size** (proposed 200), which is the record that scales
+  with the account and lands on the boot path.
+- **The sizing sweep needs re-running against a real account.** The 2026-07-29
+  figures come from a disposable 11-room test instance; the per-unit numbers
+  (~380 B/room, 0.5–1.5 KB/event) should hold, but nothing about the totals or
+  the room-list record's boot cost can be trusted until it is measured against
+  an account with thousands of rooms and hundreds of thousands of events.
+- **Paginating `/v1/rooms` should be filed as a `crates/` issue.** It is out of
+  scope here but bounds how much this ADR can achieve at real scale.
+- **What still needs a device**, and needs instrumentation that does not exist
+  yet, so it is phase 2 work rather than a prerequisite:
+  1. `navigator.storage.estimate()` on the target phone — quota and current
+     usage, surfaced in the ADR 0077 overlay. Everything above assumes the
+     quota is comfortably above a few megabytes; that should be observed, not
+     assumed, on iOS.
+  2. **The race that actually decides the feature:** `cache:read` →
+     `cache:hydrate` → first painted row, against the same transition served
+     from the network, on the real device and the real slow link. If hydrate
+     does not clearly win, the staleness is not worth buying.
+  3. **How often a return to the app is a genuine cold start** (a fresh
+     document load) rather than a resumed tab with warm stores. This sets the
+     relative value of phase 1 versus phases 2-3, and it is the one input that
+     differs sharply between phone and desktop.
+  4. Whether the target install is the home-screen PWA or a plain Safari tab —
+     the latter loses script-writable storage after 7 idle days, which caps how
+     much the cache can be worth there.
