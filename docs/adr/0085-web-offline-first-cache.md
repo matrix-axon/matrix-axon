@@ -66,53 +66,76 @@ events, and decoded media are held only in memory:
 
 ### What the live data says
 
-A read-only sweep measured the per-record *unit* sizes a cache would hold.
-**The sample is a disposable test account — 11 rooms, 2026-07-29 — and is not
-representative of a real one**; the target is an account with thousands of
-rooms and hundreds of thousands of events. Read the per-unit figures as sound
-and the totals as a floor:
+A read-only sweep of a **production account — 1,752 rooms, 2026-07-29** —
+measured what a cache would have to hold and what it would paint over
+(`scripts/cache-sizing-sweep.sh`, 40 rooms stride-sampled across the recency
+order):
 
-- **~380 bytes per room** in the room-list payload (4.2 KB for 11 rooms).
-- **A 50-event page runs to a median of 18.8 KB**, mean 24.0 KB, min 6.0 KB,
-  max 73.6 KB — roughly 0.5–1.5 KB per event, driven by `formatted_body` HTML,
-  inlined reply fallbacks, and state events carrying `prev_content` (ADR 0074).
-- **Only 4 of 11 rooms had a full 50 events.** In a quiet room the newest page
-  *is* the room's entire history, so the cache holds the whole room and the
-  "cached scrollback goes stale" concern does not arise. A real account inverts
-  this: most rooms will fill the page.
+| | |
+| --- | --- |
+| Rooms | 1,752 |
+| `/v1/rooms` payload | **660 KB**, 377 B/room |
+| `/v1/rooms` wall time | **1.52 s** |
+| Timeline page (`limit=50`) | median **17.4 KB**, mean 21.0 KB, p95 35.5 KB, max 38.3 KB |
+| Per event | 806 B |
+| Timeline fetch time | 6–68 ms |
+| Rooms hitting the 50-event limit | **4 of 40 (10%)** |
 
-Extrapolated to the real target, the two records behave completely differently,
-and it is the *room list* that is dangerous — the opposite of what the small
-sample suggests:
+Four things follow, one of which contradicts what an earlier draft of this ADR
+predicted:
 
-- **The timeline cache is bounded by construction.** The LRU cap holds it near
-  `cap x 24 KB` — under a megabyte at 30 rooms — no matter how large the
-  account grows. On the test account the cap is inert (11 rooms); at real scale
-  it is load-bearing, and it is what keeps this side of the cache flat.
-- **The room-list record scales with the whole account and sits on the boot
-  path.** At 3,000 rooms it is ~1.1 MB of JSON to store, read, and hydrate
-  before the list can paint — precisely the main-thread cost this ADR claims to
-  avoid. **So the room-list cache must hold a slice, not the list**: the
-  server already returns rooms most-recent-activity-first, so caching the first
-  N (propose 200, ~76 KB) covers everything a user can scroll before the
-  network answers, and the rest arrives with the refresh.
+- **The room list costs 1.52 s before a single row can paint**, on a healthy
+  connection, with no throttling. That is the blank window this ADR exists to
+  close, and it is not bandwidth — 660 KB does not take 1.52 s to move on a
+  fast link, so the bulk is the server assembling an unpaginated list of 1,752
+  rooms. A client cache paints over it; nothing else the client can do will.
+- **Timeline pages are cheap and fast** — 17 KB median, under 70 ms. The
+  per-room cache is a nicety on a fast link and matters on a slow one; the
+  room-list cache matters on *every* link. If only one phase ships, it is the
+  room list.
+- **90% of rooms do not fill a page.** An earlier draft predicted the opposite
+  ("a real account inverts this: most rooms will fill the page") and was
+  wrong: the median room in a 1,752-room account holds ~20 events, so for nine
+  rooms in ten **the cached page is the room's entire history**. The
+  "cached scrollback goes stale below the overlap" worry is therefore rare in
+  practice, and the mean per-room record (21 KB) sits below a full page.
+- **The LRU cap is now load-bearing.** Caching every room's page would be
+  ~37 MB; a 30-room cap holds ~0.6 MB. On the 11-room test account the cap was
+  inert, which is exactly why that account could not have settled it.
+
+**Whether to cache the whole list or a slice is now an open measurement, not a
+foregone conclusion.** An earlier draft asserted a slice was required; at
+660 KB that is no longer obvious, since 660 KB is trivial to *store* and the
+only question is what it costs to hydrate on a phone. Both options stay on the
+table: the full list (660 KB, everything filterable offline) or the first ~200
+rooms by recent activity (74 KB). The deciding number is the tier-1 hydrate
+measurement below, not storage.
+
+One consequence of a slice that a full list avoids: the room list is
+filterable, and a filter applied to a partial cache silently searches 200 of
+1,752 rooms. If the slice wins, the filter must say so while `stale` is true.
 
 ### The room list is unpaginated, and that is the larger problem
 
 `RoomsQuery` (`crates/axon-api/src/routes/rooms.rs:30-34`) accepts only
 `account_id` — no `limit`, no cursor — and `list_rooms` returns every room as
-one `Vec<RoomDto>`; the client calls it bare (`stores/rooms.ts:482`). At
-thousands of rooms that is a single unbounded response that must arrive and
-parse in full before anything appears, on every load and every refresh.
+one `Vec<RoomDto>`; the client calls it bare (`stores/rooms.ts:482`). At 1,752
+rooms that is 660 KB assembled and returned in one shot, on every load and
+every refresh, and it is where the measured 1.52 s goes.
 
 This ADR cannot fix that — paginating `/v1/rooms` is a `crates/` change, a
 different silo, and should be filed on its own. It does change the reading of
 this one, in both directions: a cache is worth *more* at that scale, because it
-paints while a megabyte is still in flight; and it is *not* sufficient, because
-the refresh behind it stays unbounded and the cached slice can only ever be as
-fresh as the last refresh that completed. A room-list cache is a paint-latency
-fix, not a scalability fix, and this ADR should not be read as retiring the
-need for the server-side one.
+paints while 660 KB is still being assembled; and it is *not* sufficient,
+because the refresh behind it stays unbounded, so the cache can only ever be as
+fresh as the last refresh that completed, and every refresh still costs 1.5 s
+of server work. A room-list cache is a paint-latency fix, not a scalability
+fix, and this ADR should not be read as retiring the need for the server-side
+one.
+
+The 1.52 s should be split into time-to-first-byte versus transfer before the
+server-side issue is written, to confirm the cost is query assembly rather than
+the wire: `curl -w '%{time_starttransfer} %{time_total}'` against `/v1/rooms`.
 
 What remains genuinely uncertain is not size but the race — does
 hydrate-and-paint beat the network by enough to be worth showing stale content
@@ -379,35 +402,46 @@ Four PRs, in order, each independently shippable:
 - Should the room-list cache survive a *server* change (different `apiBaseUrl`)
   as a separate namespace, or be dropped? Proposed: separate namespace, dropped
   by the LRU like anything else.
-- ~~Is 30 rooms × 50 events the right ceiling?~~ **Partly settled.** 50 events
-  is not a free parameter at all: it is `PAGE_LIMIT`, because the restore is
-  confirmed by exactly one head fetch of that size, and any surplus below the
-  overlap could never be confirmed by it. The room cap is a plain count-based
-  LRU — bounded by construction, so it stays under a megabyte at any account
-  size, and budgeting it by bytes would buy nothing. What is *not* settled is
-  the **room-list slice size** (proposed 200), which is the record that scales
-  with the account and lands on the boot path.
-- **The sizing sweep needs re-running against a real account.** The 2026-07-29
-  figures come from a disposable 11-room test instance; the per-unit numbers
-  (~380 B/room, 0.5–1.5 KB/event) should hold, but nothing about the totals or
-  the room-list record's boot cost can be trusted until it is measured against
-  an account with thousands of rooms and hundreds of thousands of events.
+- ~~Is 30 rooms × 50 events the right ceiling?~~ **Settled.** 50 events is not
+  a free parameter at all: it is `PAGE_LIMIT`, because the restore is confirmed
+  by exactly one head fetch of that size, and any surplus below the overlap
+  could never be confirmed by it. At production scale the median room holds
+  ~20 events anyway, so the page is usually the whole room. The room cap is a
+  plain count-based LRU: 30 rooms is ~0.6 MB measured, against ~37 MB to cache
+  every room, so the cap binds and byte budgeting buys nothing.
+- ~~The sizing sweep needs re-running against a real account.~~ **Done**
+  (1,752 rooms, above).
+- **Whole room list or a slice?** 660 KB is trivial to store, so this is now
+  purely a hydrate-cost question for the phone — see the tier-1 measurement
+  below. A slice additionally makes offline filtering partial, which the UI
+  would have to admit to.
 - **Paginating `/v1/rooms` should be filed as a `crates/` issue.** It is out of
   scope here but bounds how much this ADR can achieve at real scale.
-- **What still needs a device**, and needs instrumentation that does not exist
-  yet, so it is phase 2 work rather than a prerequisite:
-  1. `navigator.storage.estimate()` on the target phone — quota and current
-     usage, surfaced in the ADR 0077 overlay. Everything above assumes the
-     quota is comfortably above a few megabytes; that should be observed, not
-     assumed, on iOS.
-  2. **The race that actually decides the feature:** `cache:read` →
-     `cache:hydrate` → first painted row, against the same transition served
-     from the network, on the real device and the real slow link. If hydrate
-     does not clearly win, the staleness is not worth buying.
-  3. **How often a return to the app is a genuine cold start** (a fresh
-     document load) rather than a resumed tab with warm stores. This sets the
-     relative value of phase 1 versus phases 2-3, and it is the one input that
-     differs sharply between phone and desktop.
-  4. Whether the target install is the home-screen PWA or a plain Safari tab —
-     the latter loses script-writable storage after 7 idle days, which caps how
-     much the cache can be worth there.
+- **What still needs a device.** The sweep above measures the network arm of
+  the race; the hydrate arm cannot be measured from the server. In cost order:
+
+  **Tier 0 — no code, run in DevTools today** (desktop directly, iOS via Safari
+  remote inspection). `await navigator.storage.estimate()` for quota and usage;
+  resource timing on `/v1/rooms` to confirm the 1.52 s reaches the browser as a
+  1.5 s blank window; `performance.getEntriesByType('paint')` for when anything
+  first appears.
+
+  **Tier 1 — a standalone page, no app changes, opens directly on the phone.**
+  Write synthetic records to IndexedDB (one 660 KB room-list blob, 30 × 21 KB
+  timeline blobs, both at the sizes measured above), then time open → read →
+  hydrate, and compare structured clone against `JSON.parse`. Printing results
+  into the DOM rather than the console makes it usable on iOS with no Mac.
+  **This is what decides whole-list versus slice, and whether records are
+  stored as objects or strings** — and it costs nothing to run before any of
+  the cache is written. If hydrate does not clearly beat 1.52 s, phases 2-3 are
+  not worth their staleness and should not ship.
+
+  **Tier 2 — in-app marks**, which cannot precede the code they instrument:
+  `cache:read` → `cache:hydrate` → first painted row in ADR 0077's vocabulary,
+  plus a boot counter separating a fresh document load from a resumed tab. That
+  counter sets the relative value of phase 1 against phases 2-3, and it is the
+  one input that differs sharply between phone and desktop.
+
+- Whether the target install is the home-screen PWA or a plain Safari tab — the
+  latter loses script-writable storage after 7 idle days, which caps how much
+  the cache can be worth there.
