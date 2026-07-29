@@ -145,6 +145,16 @@ The user-visible blank window on a *fast desktop connection* is therefore
 ~176 ms to ~1.66 s — about **1.5 seconds of "Loading rooms…" with no network
 problem at all**, which is the clearest statement of the case for phase 2.
 
+**And the bottleneck does not simply move.** A `longtask` observer across two
+reloads reported tasks only at 105 ms / 52 ms and 50 ms / 54 ms — both during
+bundle boot. Nothing appears at or after ~1.66 s, when the response lands and
+1,752 rows render, so painting the list costs less than the 50 ms long-task
+threshold. Removing the network wait therefore yields a real improvement rather
+than trading a 1.5 s network stall for a render stall. Two limits on that
+claim: `longtask` cannot see a render split into several sub-50 ms tasks, and
+this is desktop — a phone at 3-5x slower might reach ~250 ms, still an order of
+magnitude better than the wait it replaces.
+
 ### What the device says (iPhone, iOS 18.7 / Safari 27)
 
 A standalone IndexedDB harness served from the client's own origin (quota is
@@ -309,12 +319,28 @@ error banner over a successful load.
 - `meta` holds a schema version. A version mismatch drops the database rather
   than migrating it; the cache is an optimization and re-fetching is always
   correct.
-- **Wipe on logout and on token change.** This is a correctness and privacy
-  requirement, not hygiene — the token clear path in `auth/persistence.ts`
-  gains a `cache.clear()`.
+- **Wipe the entire cache on any logout or token change** — not just the
+  records belonging to the account that logged out. The keys are per-account
+  and a surgical drop would work, but whole-cache is the conservative choice
+  and the cache rebuilds itself from the next refresh at no cost beyond one
+  cold start. A wipe that is too broad is invisible to the user; a wipe that
+  misses something is a privacy failure. `auth/persistence.ts`'s token clear
+  path gains a `cache.clear()`.
+- **Request `navigator.storage.persist()`, and do not depend on it.** It is the
+  only lever against a non-installed Safari tab losing script-writable storage
+  after 7 idle days. Granting is heuristic and silent refusal is expected, so
+  every path must behave identically whether or not it succeeded — an evicted
+  cache is a cold start, which is exactly today's behavior.
+- **Concurrent tabs: last writer wins, deliberately.** Two tabs share one
+  database and both write back after their own refreshes. IndexedDB
+  transactions serialize, so there is no torn record; and because every cached
+  value is server-derived rather than user-authored, a stale overwrite costs at
+  most one extra refresh. No coordination, no locks, no leader election.
 - Bounded size: cap the number of rooms with a persisted timeline (propose 30,
   LRU by last-viewed) and the events per room (see below). The room list itself
-  is one record.
+  is one record. Note that this cap is about write amplification and staleness,
+  not space — quota was measured at 41.2 GB on the phone and 10.7 GB on
+  desktop.
 
 ### 3. Room list: cached rows, then reconcile
 
@@ -352,6 +378,25 @@ Write-back happens on a settled head load and on live ingestion, debounced, and
 **never** includes local echoes. An echo is in-flight work, not history;
 resurrecting one from disk would show a message as sent that was never sent.
 (Unsent composer text is already the device-state store's job, ADR 0048.)
+
+#### Undecryptable events may be cached, and the merge is what saves it
+
+A cached page can contain an event that failed to decrypt. If the key arrives
+later, the server's copy decrypts but the cached one does not, so a restore
+would show a UTD placeholder for an event that is now readable.
+
+This needs no special handling — but only because of a property of the merge
+that is easy to mistake for an incidental detail: **`refreshHead` lets the
+freshly fetched rows win by event id**, which is precisely how it already
+absorbs edits and redactions missed while disconnected. A newly decryptable
+event arrives through the same door. If that rule were ever weakened to "keep
+what we have when the ids match", UTD placeholders would become sticky across
+restarts. The rule is load-bearing; treat it as such.
+
+Note that this makes the *restore* self-correcting but not instantaneous: the
+placeholder is visible for the duration of the head fetch, exactly as stale
+content is. The existing one-shot redecrypt kick (`RoomPage.tsx`) is
+independent and unaffected.
 
 #### Cursors are not cached
 
@@ -496,6 +541,14 @@ Four PRs, in order, each independently shippable:
 - Should the room-list cache survive a *server* change (different `apiBaseUrl`)
   as a separate namespace, or be dropped? Proposed: separate namespace, dropped
   by the LRU like anything else.
+- ~~Wipe granularity, UTD events, concurrent tabs, storage persistence.~~
+  **All four settled in the Decision above**: whole-cache wipe on any logout or
+  token change; UTD placeholders self-correct through the merge's win-by-id
+  rule, which is load-bearing rather than incidental; concurrent tabs are
+  last-writer-wins because every cached value is server-derived; and
+  `storage.persist()` is requested but never depended on.
+- ~~Does the bottleneck just move from network wait to render?~~ **No** — the
+  long-task capture above finds nothing at the room-list render.
 - ~~Is 30 rooms × 50 events the right ceiling?~~ **Settled.** 50 events is not
   a free parameter at all: it is `PAGE_LIMIT`, because the restore is confirmed
   by exactly one head fetch of that size, and any surplus below the overlap
