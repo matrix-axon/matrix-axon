@@ -295,8 +295,9 @@ export function RoomPage() {
     }
     void threads.refresh()
     void members.refresh()
-    // With a deep-linked event the jump effect below owns the initial load.
-    if (highlighted === null) {
+    // A room-event jump owns its initial load, but a thread jump is resolved
+    // by ThreadPanel and must not leave the desktop room stream empty.
+    if (highlighted === null || openThread !== null) {
       void timeline.loadLatest()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per room instance

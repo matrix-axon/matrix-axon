@@ -8,6 +8,7 @@ import {
 import type { ComponentChildren } from 'preact'
 import { EMOJI_PICKER_DATA_SOURCE } from '../emoji'
 import { parseMedia } from '../media/parse-media'
+import { localRoomHref, localThreadEventHref } from '../matrix-to'
 import { useShortcuts } from '../shortcuts'
 import type { SettingsStore } from '../stores/settings'
 import type { ThreadsStore } from '../stores/threads'
@@ -375,6 +376,9 @@ export function MessageEventRow({
   onEdit,
   onOpenThread,
   showThreadAction = true,
+  threadRootId,
+  onReplyContextJump,
+  onMutation,
 }: {
   event: TimelineEvent
   timeline: TimelineStore
@@ -392,6 +396,12 @@ export function MessageEventRow({
   onEdit: (event: EventDto) => void
   onOpenThread?: (rootId: string) => void
   showThreadAction?: boolean
+  /** Keep reply-context jumps inside this thread timeline. */
+  threadRootId?: string
+  /** Let a thread timeline load a reply target without closing its panel. */
+  onReplyContextJump?: (eventId: string) => void
+  /** Clears transient UI state after a successful event mutation. */
+  onMutation?: () => void
 }) {
   const [historyOpen, setHistoryOpen] = useState(false)
   const [confirmingRedact, setConfirmingRedact] = useState(false)
@@ -491,9 +501,10 @@ export function MessageEventRow({
                           label="Confirm delete"
                           className="danger"
                           onClick={() => {
-                            void timeline
-                              .redact(event.event_id)
-                              .then(() => setConfirmingRedact(false))
+                            void timeline.redact(event.event_id).then((ok) => {
+                              if (ok) onMutation?.()
+                              setConfirmingRedact(false)
+                            })
                           }}
                         >
                           <EventActionIcon name="confirm" />
@@ -538,9 +549,12 @@ export function MessageEventRow({
         {replyTo !== null && (
           <ReplyContext
             accountId={accountId}
+            roomId={event.room_id}
+            threadRootId={threadRootId}
             target={timeline.replyTargets.value.get(replyTo)}
             targetId={replyTo}
             members={members}
+            onJump={onReplyContextJump}
           />
         )}
         <div class="event-body">
@@ -559,7 +573,11 @@ export function MessageEventRow({
                 emoji={emoji}
                 tally={tally}
                 tooltip={reactionTooltip(emoji, tally, members)}
-                onToggle={() => void timeline.toggleReaction(event, emoji)}
+                onToggle={() =>
+                  void timeline.toggleReaction(event, emoji).then((ok) => {
+                    if (ok) onMutation?.()
+                  })
+                }
               />
             ))}
           </div>
@@ -575,7 +593,9 @@ export function MessageEventRow({
             settings={settings}
             onReact={(key) => {
               onSetReactionPicker(null)
-              void timeline.toggleReaction(event, key)
+              void timeline.toggleReaction(event, key).then((ok) => {
+                if (ok) onMutation?.()
+              })
             }}
           />
         )}
@@ -1214,18 +1234,46 @@ function reactionTooltip(
 /** The quoted context above a rich reply (ADR 0033 display). */
 function ReplyContext({
   accountId,
+  roomId,
+  threadRootId,
   target,
   targetId,
   members,
+  onJump,
 }: {
   accountId: string
+  roomId: string
+  threadRootId: string | undefined
   target: EventDto | undefined
   targetId: string
   members: MembersStore
+  onJump: ((eventId: string) => void) | undefined
 }) {
+  const href =
+    threadRootId === undefined
+      ? localRoomHref(accountId, roomId, targetId)
+      : localThreadEventHref(accountId, roomId, threadRootId, targetId)
   if (target === undefined) {
     return (
       <blockquote class="reply-context muted">
+        <a
+          class="reply-context-link"
+          href={href}
+          aria-label="Jump to original message"
+          onClick={(event) => {
+            if (
+              onJump !== undefined &&
+              event.button === 0 &&
+              !event.metaKey &&
+              !event.ctrlKey &&
+              !event.altKey &&
+              !event.shiftKey
+            ) {
+              event.preventDefault()
+              onJump(targetId)
+            }
+          }}
+        />
         in reply to <code>{targetId}</code>
       </blockquote>
     )
@@ -1233,6 +1281,24 @@ function ReplyContext({
   const senderDisplay = members.displayName(target.sender)
   return (
     <blockquote class="reply-context">
+      <a
+        class="reply-context-link"
+        href={href}
+        aria-label={`Jump to original message from ${senderDisplay}`}
+        onClick={(event) => {
+          if (
+            onJump !== undefined &&
+            event.button === 0 &&
+            !event.metaKey &&
+            !event.ctrlKey &&
+            !event.altKey &&
+            !event.shiftKey
+          ) {
+            event.preventDefault()
+            onJump(targetId)
+          }
+        }}
+      />
       <UserAvatar
         accountId={accountId}
         userId={target.sender}

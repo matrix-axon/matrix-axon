@@ -196,6 +196,307 @@ test('formatted reply anchors stay compact on tablet width', async ({
   expect(metrics.quoteHeight).toBeLessThan(40)
 })
 
+test('clicking a reply context jumps to its original message', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.route('**/timeline*', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          events: [
+            message('$target', 100, 'original message'),
+            {
+              ...message('$reply', 200, 'reply body'),
+              relates_to: { 'm.in_reply_to': { event_id: '$target' } },
+            },
+          ],
+          next_cursor: null,
+        },
+      },
+    }),
+  )
+  await page.goto(`/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}`)
+  await expect(page.getByText('reply body')).toBeVisible()
+
+  await page
+    .getByRole('link', { name: 'Jump to original message from @alice:hs' })
+    .click()
+
+  await expect(page).toHaveURL(/\?event=%24target$/)
+})
+
+test('a reply anchor jumps within its open thread', async ({ page }) => {
+  await signIn(page)
+  const root = message('$root', 50, 'thread root')
+  const earlier = {
+    ...message('$earlier', 100, 'earlier thread reply'),
+    relates_to: { rel_type: 'm.thread', event_id: '$root' },
+  }
+  const reply = {
+    ...message('$reply', 200, 'later thread reply'),
+    relates_to: {
+      rel_type: 'm.thread',
+      event_id: '$root',
+      'm.in_reply_to': { event_id: '$earlier' },
+    },
+  }
+  await page.route(/\/rooms\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
+    route.fulfill({ json: { data: { events: [root], next_cursor: null } } }),
+  )
+  await page.route(/\/threads\/[^/]+\/timeline(?:\?.*)?$/, (route) => {
+    const atTs = new URL(route.request().url()).searchParams.get('at_ts')
+    return route.fulfill({
+      json: {
+        data: {
+          events: atTs === null ? [reply] : [earlier],
+          next_cursor: null,
+        },
+      },
+    })
+  })
+  await page.route(/\/events\/[^/?]+$/, (route) => {
+    const eventId = decodeURIComponent(route.request().url().split('/').at(-1)!)
+    if (eventId === '$earlier') {
+      return route.fulfill({ json: { data: earlier } })
+    }
+    return route.fallback()
+  })
+  await page.goto(
+    `/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}?thread=%24root`,
+  )
+  await expect(page.getByText('later thread reply')).toBeVisible()
+
+  await page.locator('.thread-panel .reply-context-link').click()
+
+  await expect(page).toHaveURL(/\?thread=%24root&event=%24earlier$/)
+  await expect(
+    page.locator('.thread-panel .event-row.highlighted'),
+  ).toContainText('earlier thread reply')
+})
+
+test('a reply anchor to the thread root reveals it without reloading replies', async ({
+  page,
+}) => {
+  await signIn(page)
+  const root = message('$root', 50, 'thread root')
+  const reply = {
+    ...message('$reply', 200, 'reply to root'),
+    relates_to: {
+      rel_type: 'm.thread',
+      event_id: '$root',
+      'm.in_reply_to': { event_id: '$root' },
+    },
+  }
+  let threadLoads = 0
+  await page.route(/\/rooms\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
+    route.fulfill({ json: { data: { events: [root], next_cursor: null } } }),
+  )
+  await page.route(/\/threads\/[^/]+\/timeline(?:\?.*)?$/, (route) => {
+    threadLoads += 1
+    return route.fulfill({
+      json: { data: { events: [reply], next_cursor: null } },
+    })
+  })
+  await page.route(/\/events\/[^/?]+$/, (route) =>
+    route.fulfill({ json: { data: root } }),
+  )
+  await page.goto(
+    `/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}?thread=%24root`,
+  )
+  await expect(page.getByText('reply to root')).toBeVisible()
+
+  await page.locator('.thread-panel .reply-context-link').click()
+
+  await expect(page).toHaveURL(/\?thread=%24root&event=%24root$/)
+  expect(threadLoads).toBe(1)
+})
+
+test('a cold thread-root deep link loads the reply timeline', async ({ page }) => {
+  await signIn(page)
+  const root = message('$root', 50, 'thread root')
+  const reply = {
+    ...message('$reply', 200, 'reply to root'),
+    relates_to: {
+      rel_type: 'm.thread',
+      event_id: '$root',
+      'm.in_reply_to': { event_id: '$root' },
+    },
+  }
+  await page.route(/\/rooms\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
+    route.fulfill({ json: { data: { events: [root], next_cursor: null } } }),
+  )
+  await page.route(/\/threads\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
+    route.fulfill({
+      json: { data: { events: [reply], next_cursor: null } },
+    }),
+  )
+  await page.route(/\/events\/[^/?]+$/, (route) =>
+    route.fulfill({ json: { data: root } }),
+  )
+
+  await page.goto(
+    `/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}?thread=%24root&event=%24root`,
+  )
+
+  await expect(page.getByText('reply to root')).toBeVisible()
+  await expect(page.getByText('Loading thread…')).toHaveCount(0)
+})
+
+test('thread reply anchors preserve modified-click link behavior', async ({
+  page,
+}) => {
+  await signIn(page)
+  const root = message('$root', 50, 'thread root')
+  const earlier = {
+    ...message('$earlier', 100, 'earlier thread reply'),
+    relates_to: { rel_type: 'm.thread', event_id: '$root' },
+  }
+  const reply = {
+    ...message('$reply', 200, 'later thread reply'),
+    relates_to: {
+      rel_type: 'm.thread',
+      event_id: '$root',
+      'm.in_reply_to': { event_id: '$earlier' },
+    },
+  }
+  await page.route(/\/rooms\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
+    route.fulfill({ json: { data: { events: [root], next_cursor: null } } }),
+  )
+  await page.route(/\/threads\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
+    route.fulfill({
+      json: { data: { events: [reply], next_cursor: null } },
+    }),
+  )
+  await page.route(/\/events\/[^/?]+$/, (route) =>
+    route.fulfill({ json: { data: earlier } }),
+  )
+  await page.goto(
+    `/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}?thread=%24root`,
+  )
+  await expect(page.getByText('later thread reply')).toBeVisible()
+
+  const prevented = await page
+    .locator('.thread-panel .reply-context-link')
+    .evaluate((link) => {
+      const click = new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: true,
+      })
+      link.dispatchEvent(click)
+      return click.defaultPrevented
+    })
+
+  expect(prevented).toBe(false)
+})
+
+test('a long thread root pins without changing the reply scroll geometry', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  const root = message('$long-root', 50, 'Long root. '.repeat(80))
+  const replies = Array.from({ length: 12 }, (_, index) => ({
+    ...message(`$reply-${index}`, 100 + index, `reply ${index} `.repeat(12)),
+    relates_to: { rel_type: 'm.thread', event_id: '$long-root' },
+  }))
+  await page.route(/\/rooms\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
+    route.fulfill({ json: { data: { events: [root], next_cursor: null } } }),
+  )
+  await page.route(/\/threads\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
+    route.fulfill({ json: { data: { events: replies, next_cursor: null } } }),
+  )
+  await page.route(/\/events\/[^/?]+$/, (route) =>
+    route.fulfill({ json: { data: root } }),
+  )
+  await page.goto(
+    `/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}?thread=%24long-root`,
+  )
+  await expect(page.getByText('reply 11')).toBeVisible()
+
+  const timeline = page.locator('.thread-timeline')
+  const preview = page.locator('.thread-root-preview')
+  const scrollHeight = await timeline.evaluate(
+    (element) => element.scrollHeight,
+  )
+  await timeline.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+    element.dispatchEvent(new Event('scroll'))
+  })
+  await expect(preview).toHaveCount(1)
+  const [timelineBox, previewBox, fullRootBox] = await Promise.all([
+    timeline.boundingBox(),
+    preview.boundingBox(),
+    timeline.locator('.thread-root:not(.compact)').boundingBox(),
+  ])
+  expect(timelineBox).not.toBeNull()
+  expect(previewBox).not.toBeNull()
+  expect(fullRootBox).not.toBeNull()
+  expect(previewBox!.y).toBeCloseTo(timelineBox!.y, 0)
+  expect(fullRootBox!.y + fullRootBox!.height).toBeLessThanOrEqual(
+    timelineBox!.y,
+  )
+  await expect
+    .poll(() => timeline.evaluate((element) => element.scrollHeight))
+    .toBe(scrollHeight)
+
+  await timeline.evaluate((element) => {
+    const root = element.querySelector<HTMLElement>(
+      '.thread-root:not(.compact)',
+    )
+    element.scrollTop = Math.max(0, (root?.offsetHeight ?? 1) - 1)
+    element.dispatchEvent(new Event('scroll'))
+  })
+  await expect(preview).toHaveCount(0)
+  await expect(timeline.locator('.thread-root:not(.compact)')).toBeVisible()
+})
+
+for (const { name, width } of [
+  { name: 'mobile', width: 390 },
+  { name: 'desktop', width: 1400 },
+]) {
+  test(`a page-long ${name} thread root keeps its own scrollport`, async ({
+    page,
+  }) => {
+    await signIn(page)
+    await page.setViewportSize({ width, height: 900 })
+    const root = message(
+      `$${name}-long-root`,
+      50,
+      `${name} long root. `.repeat(600),
+    )
+    await page.route(/\/rooms\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
+      route.fulfill({ json: { data: { events: [root], next_cursor: null } } }),
+    )
+    await page.route(/\/threads\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
+      route.fulfill({ json: { data: { events: [], next_cursor: null } } }),
+    )
+    await page.route(/\/events\/[^/?]+$/, (route) =>
+      route.fulfill({ json: { data: root } }),
+    )
+    await page.goto(
+      `/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}?thread=%24${name}-long-root`,
+    )
+    await expect(page.locator('.thread-panel')).toContainText(
+      `${name} long root.`,
+    )
+
+    const timeline = page.locator('.thread-timeline')
+    const dimensions = await timeline.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    }))
+    expect(dimensions.clientHeight).toBeGreaterThan(0)
+    expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight)
+    const scrollTop = await timeline.evaluate((element) => {
+      element.scrollTop = element.scrollHeight
+      return element.scrollTop
+    })
+    expect(scrollTop).toBeGreaterThan(0)
+  })
+}
+
 test('reply-context links use the same no-underline style as message links', async ({
   page,
 }) => {

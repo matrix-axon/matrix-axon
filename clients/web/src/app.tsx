@@ -366,6 +366,29 @@ function ShellChrome() {
   const roomTitleButton = useRef<HTMLButtonElement>(null)
   const startupThreadScrubbed = useRef(false)
   const inboundMatrixHandled = useRef<string | null>(null)
+  const priorRoom = useRef(currentRoomFromPath(path))
+
+  useEffect(() => {
+     const current = currentRoomFromPath(path)
+     const previous = priorRoom.current
++    if (previous === null && current !== null) {
++      // A search result can be opened from settings, accounts, or the room
++      // list. Consume its one-shot preservation here so it cannot leak into a
++      // later unrelated room switch.
++      search.consumeResultJumpPreservation()
++    }
+     if (
+       previous !== null &&
+       (current === null ||
+         current.accountId !== previous.accountId ||
+         current.roomId !== previous.roomId)
+     ) {
+       if (!search.consumeResultJumpPreservation()) {
+         search.clear()
+       }
+    }
+    priorRoom.current = current
+  }, [path, search])
 
   const openHelp = (event: KeyboardEvent) => {
     event.preventDefault()

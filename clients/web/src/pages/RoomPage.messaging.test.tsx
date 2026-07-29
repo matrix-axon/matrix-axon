@@ -1582,8 +1582,9 @@ describe('threads', () => {
     )
 
     expect(await findByText('inside the thread')).toBeTruthy()
-    // The root body renders twice: the main-timeline row and the panel head.
-    expect(await findAllByText('body of $root')).toHaveLength(2)
+    // The root body renders in the main timeline, the desktop room stream, and
+    // the panel head. A thread deep link must not leave the room stream empty.
+    expect(await findAllByText('body of $root')).toHaveLength(3)
 
     const textarea = getByLabelText('Reply in thread') as HTMLTextAreaElement
     fireEvent.input(textarea, { target: { value: 'thread send' } })

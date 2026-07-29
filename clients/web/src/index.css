@@ -2452,6 +2452,7 @@ span.composer-attachment-thumb {
     flex: 0 0 min(28rem, 40%);
     width: auto;
     height: auto;
+    min-height: 0;
     box-shadow: none;
   }
 
@@ -2469,8 +2470,44 @@ span.composer-attachment-thumb {
   margin-bottom: 0.6rem;
 }
 
+/* The root is ordinary scroll content at the top, so a reader can inspect a
+   long original message. After it scrolls away, a separate compact preview
+   sticks in place; the full root remains laid out for an instant return. */
+.thread-root-preview {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  /* The compact root is a visual overlay. Reserving a normal-flow row here
+     shifts every reply when it appears, which is visible as a scroll jump. */
+  width: 100%;
+  height: 0;
+  overflow: visible;
+}
+
 .thread-root-copy {
   min-width: 0;
+}
+
+.thread-root.compact {
+  background: var(--bg);
+  padding-top: 0.35rem;
+}
+
+.thread-root.compact .thread-root-copy {
+  display: block;
+  max-block-size: 9rem;
+  overflow: hidden;
+  mask-image: linear-gradient(
+    to bottom,
+    #000 calc(100% - 1.25rem),
+    transparent
+  );
+}
+
+@media (max-width: 47.99rem) {
+  .thread-root.compact .thread-root-copy {
+    max-block-size: 5.5rem;
+  }
 }
 
 .thread-timeline {
@@ -2480,6 +2517,8 @@ span.composer-attachment-thumb {
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .thread-timeline .timeline-list-shell {
