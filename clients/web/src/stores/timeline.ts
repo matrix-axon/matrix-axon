@@ -62,7 +62,7 @@ const PAGE_LIMIT = 50
 /**
  * How many events a scroll-back keeps loaded before it starts dropping the
  * newest end. The timeline is not DOM-windowed — a row mounts per event and
- * lives until the room closes (issue #315) — so an unbounded scroll-back grows
+ * lives until the room closes (issue #26) — so an unbounded scroll-back grows
  * the DOM, the memory, and above all the teardown cost that ADR 0071 measured
  * on the phone "back to room list" transition. Twelve pages is well past a
  * screenful on any device, so the cap is invisible in normal reading.

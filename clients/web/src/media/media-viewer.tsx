@@ -18,7 +18,7 @@ import type { TimelineEvent } from '../stores/timeline'
 /**
  * How many history pages a single run of "older" presses may load. Mirrors
  * `AUTO_SCROLL_BACK_PAGES` in `RoomPage`, and matters because the timeline is
- * not windowed (#315): every page paged past stays in the DOM.
+ * not windowed (#26): every page paged past stays in the DOM.
  */
 export const AUTO_PAGE_LIMIT = 5
 

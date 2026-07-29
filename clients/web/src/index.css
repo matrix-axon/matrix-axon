@@ -1337,7 +1337,7 @@ p.timeline-edge {
      scrolling lurch. It was introduced against the ADR 0071 diagnosis that the
      phone "back to room list" cost scaled with timeline length; ADR 0075 then
      found the real cause (racing WebKit's own swipe-back) and fixed it, so
-     there is nothing left on the other side of the trade. Windowing (#315) is
+     there is nothing left on the other side of the trade. Windowing (#26) is
      the way back to a bounded row count. */
 }
 
