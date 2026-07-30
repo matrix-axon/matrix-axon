@@ -71,6 +71,44 @@ deletion cleaned these up; harmless — `list_rooms` already filters left
 rooms — but unbounded growth for a long-lived account that churns through
 many rooms).
 
+Live testing turned up two faults in that sweep, both of which fire on
+process start, and both now corrected. First, **pruning ran against a room
+list that had not loaded yet.** `client.joined_rooms()` is only authoritative
+once the SDK has hydrated the account's rooms; on the startup sweep it can
+return a handful or none, and `delete_stale_room_unread_counts` then deletes
+every row for a room absent from that list. On a 1755-room account the
+startup sweep left five rows standing and re-inserted 758 over the following
+second — so every restart destroyed the persisted counts this ADR exists to
+provide, and a fresh client load got nothing to read until the values were
+re-derived. Pruning is housekeeping with no urgency, so the startup sweep no
+longer prunes at all; only the periodic re-sweep does, five minutes in, and
+it skips pruning when the room list comes back empty rather than treating
+that as "the account has left every room".
+
+Second, **matrix-sdk's counters are not always trustworthy at the moment they
+are read.** `RoomReadReceipts` carries a `pending` ring buffer of receipts
+the SDK could not match to an event in the room's in-memory linked chunk;
+while one sits there, the counts beside it were computed from a *fallback*
+anchor, because `select_best_receipt` settles for the most recent event it
+can find in the chunk when the real receipt's target is missing, then counts
+everything after it. Restarting rehydrates the event cache and can lose the
+previous anchor, so a silent room reports fresh notifications: in one
+observed restart, eleven rooms went nonzero in the same second with newest
+events between 23 minutes and nearly two days old, one of them reporting 32
+notifications against four hours of silence. `capture_unread_counts` now
+declines to *raise* a count while `pending` is non-empty, while still
+accepting a decrease so a room already carrying a bad count self-corrects.
+The accepted cost is that a genuine new message arriving during that window
+has its count held back until `pending` drains and the next re-sweep runs.
+
+Rooms bridged by mautrix are hit disproportionately, which is what surfaced
+this: a bridge's portal creation backfills the pre-existing conversation with
+its real (older) timestamps *after* the room's own creation events and after
+the user's own first message, so the fallback anchor lands ahead of genuine
+unread messages rather than at the room's tail. In an unbridged room the
+fallback usually lands on the user's own last message or the true tail and
+the recount yields zero.
+
 The watcher reacts to **every** notable update regardless of its `reasons`
 bitflag. `RoomInfoNotableUpdateReasons` has no dedicated "notification count
 changed" bit — the closest candidates (`RECENCY_STAMP`, `LATEST_EVENT`,

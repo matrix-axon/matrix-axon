@@ -1134,9 +1134,23 @@ impl UnreadCountsSnapshot {
         }
     }
 
-    fn from_room(room: &Room) -> Self {
+    /// Read a room's current counts, alongside whether matrix-sdk considers its
+    /// read-receipt state *settled* — i.e. every receipt it knows about has been
+    /// matched to an event in the room's in-memory linked chunk.
+    ///
+    /// An unmatched receipt lands in `RoomReadReceipts::pending`, and while one
+    /// sits there the counts beside it were computed from a *fallback* anchor:
+    /// `select_best_receipt` walks the linked chunk for the most recent event it
+    /// can treat as a read position, and when the real receipt's target isn't in
+    /// the chunk it settles for an older one, then counts everything after it.
+    /// That is how a silent room reports fresh unread notifications (see
+    /// [`capture_unread_counts`]).
+    fn from_room(room: &Room) -> (Self, bool) {
         let read_receipts = room.read_receipts();
-        Self::new(read_receipts.num_notifications, read_receipts.num_mentions)
+        (
+            Self::new(read_receipts.num_notifications, read_receipts.num_mentions),
+            read_receipts.pending.is_empty(),
+        )
     }
 
     fn pair(self) -> (u64, u64) {
@@ -1151,12 +1165,18 @@ impl UnreadCountsSnapshot {
     }
 }
 
-fn cached_unread_counts_match(
-    last: &HashMap<OwnedRoomId, (u64, u64)>,
-    room_id: &RoomId,
-    snapshot: UnreadCountsSnapshot,
-) -> bool {
-    last.get(room_id) == Some(&snapshot.pair())
+fn cached_unread_counts_match(cached: Option<(u64, u64)>, snapshot: UnreadCountsSnapshot) -> bool {
+    cached == Some(snapshot.pair())
+}
+
+/// Whether `snapshot` raises either count above what was last captured. An
+/// absent cache entry counts as zero, so the very first capture of a nonzero
+/// value is an increase — that is the case the phantom-count guard in
+/// [`capture_unread_counts`] most needs to catch, since a restart that lost the
+/// persisted row arrives here with nothing cached.
+fn unread_counts_increased(cached: Option<(u64, u64)>, snapshot: UnreadCountsSnapshot) -> bool {
+    let (cached_notification, cached_highlight) = cached.unwrap_or((0, 0));
+    snapshot.notification > cached_notification || snapshot.highlight > cached_highlight
 }
 
 /// Cap on candidate invites auto-joined per [`VERIFICATION_POLL`]. A backlog of
@@ -1838,14 +1858,41 @@ async fn capture_unread_counts(
     if room.state() != RoomState::Joined {
         return;
     }
-    let snapshot = UnreadCountsSnapshot::from_room(room);
+    let (snapshot, receipts_settled) = UnreadCountsSnapshot::from_room(room);
     let value = snapshot.pair();
     let room_id = room.room_id();
-    if cached_unread_counts_match(
-        &last.lock().expect("unread-counts cache lock"),
-        room_id,
-        snapshot,
-    ) {
+    let cached = last
+        .lock()
+        .expect("unread-counts cache lock")
+        .get(room_id)
+        .copied();
+    if cached_unread_counts_match(cached, snapshot) {
+        return;
+    }
+    // Never let an unsettled room *raise* a count. While matrix-sdk holds an
+    // unmatched receipt for this room its counts come from a fallback anchor
+    // (see `UnreadCountsSnapshot::from_room`), so an increase here is an
+    // artifact of where that anchor landed rather than anything the user has
+    // not read — the phantom badge issue #313's watcher would otherwise
+    // persist and broadcast.
+    //
+    // A *decrease* is still written: it can only mean the SDK found a better
+    // anchor, so accepting it lets a room that already carries a phantom count
+    // self-correct instead of staying wrong until the receipt matches. The
+    // deliberate cost is that a genuine new message arriving while `pending` is
+    // non-empty has its count held back; `pending` drains as soon as a receipt
+    // matches an event, and `UNREAD_COUNTS_RESWEEP` re-evaluates every room
+    // afterwards, so the true value lands within one sweep. Suppressing an
+    // increase leaves both the cache and the row untouched, which is what makes
+    // that later re-evaluation see a diff and write it.
+    if !receipts_settled && unread_counts_increased(cached, snapshot) {
+        tracing::debug!(
+            %account_id,
+            %room_id,
+            notification_count = snapshot.notification,
+            highlight_count = snapshot.highlight,
+            "holding unread-count increase: matrix-sdk has unmatched read receipts for this room"
+        );
         return;
     }
     // matrix-sdk's counts are `u64`; Postgres has no unsigned type, so narrow
@@ -1882,37 +1929,59 @@ async fn capture_unread_counts(
 /// per room. Used both for the startup sweep and the periodic
 /// [`UNREAD_COUNTS_RESWEEP`] backstop.
 ///
-/// Also prunes stale state for rooms the account is no longer in, both the
-/// in-memory dedup cache and the persisted `room_unread_counts` row (PR
-/// review, issue #313) — without the latter, a left room's row would sit in
+/// With `prune`, also drops stale state for rooms the account is no longer in,
+/// both the in-memory dedup cache and the persisted `room_unread_counts` row
+/// (PR review, issue #313) — without the latter, a left room's row would sit in
 /// the table forever (invisible to `list_rooms`, which already filters left
 /// rooms, but growing unbounded for a long-lived account that churns through
 /// many rooms over time; previously only `ON DELETE CASCADE` on account
-/// deletion cleaned these up).
+/// deletion cleaned these up). Only the periodic re-sweep passes `true`; see the
+/// body for why the startup sweep must not prune.
 async fn sweep_unread_counts(
     client: &Client,
     store: &Store,
     account_id: Uuid,
     live_tx: &broadcast::Sender<LiveFrame>,
     last: &Mutex<HashMap<OwnedRoomId, (u64, u64)>>,
+    prune: bool,
 ) {
     use futures_util::stream::{self, StreamExt};
 
     let rooms = client.joined_rooms();
-    let joined: HashSet<OwnedRoomId> = rooms.iter().map(|room| room.room_id().to_owned()).collect();
-    last.lock()
-        .expect("unread-counts cache lock")
-        .retain(|room_id, _| joined.contains(room_id));
+    // `client.joined_rooms()` is only authoritative once the SDK has loaded this
+    // account's rooms. On the startup sweep it routinely is not — it can return a
+    // handful of rooms, or none, while the room list is still hydrating — and
+    // pruning against that list deletes rows for rooms the account is very much
+    // still in. Observed on a 1755-room account: the startup sweep left five rows
+    // standing and the following second re-inserted 758 of them.
+    //
+    // Pruning is housekeeping (ADR 0070: keep a left room's row from sitting in
+    // the table forever — `list_rooms` already filters left rooms, so a stale row
+    // is invisible, just unbounded), and it has no reason to run before the room
+    // list is trustworthy. So the startup sweep never prunes; only the periodic
+    // re-sweep does, five minutes in. The empty-list guard covers the same
+    // failure at any later sweep: `delete_stale_room_unread_counts` documents an
+    // empty `joined_room_ids` as deleting every row for the account, "correct
+    // when the account currently has no joined rooms at all" — but nothing here
+    // can tell that apart from a room list that has not loaded, and the two
+    // outcomes are wildly asymmetric.
+    if prune && !rooms.is_empty() {
+        let joined: HashSet<OwnedRoomId> =
+            rooms.iter().map(|room| room.room_id().to_owned()).collect();
+        last.lock()
+            .expect("unread-counts cache lock")
+            .retain(|room_id, _| joined.contains(room_id));
 
-    let joined_ids: Vec<String> = joined
-        .iter()
-        .map(|room_id| room_id.as_str().to_owned())
-        .collect();
-    if let Err(err) = store
-        .delete_stale_room_unread_counts(account_id, &joined_ids)
-        .await
-    {
-        tracing::warn!(%account_id, error = %err, "failed to prune stale unread-count rows");
+        let joined_ids: Vec<String> = joined
+            .iter()
+            .map(|room_id| room_id.as_str().to_owned())
+            .collect();
+        if let Err(err) = store
+            .delete_stale_room_unread_counts(account_id, &joined_ids)
+            .await
+        {
+            tracing::warn!(%account_id, error = %err, "failed to prune stale unread-count rows");
+        }
     }
 
     stream::iter(rooms)
@@ -1996,7 +2065,7 @@ async fn watch_unread_counts(
         Mutex::new(seed_unread_counts_cache(&store, account_id).await);
 
     let mut updates = client.room_info_notable_update_receiver();
-    sweep_unread_counts(&client, &store, account_id, &live_tx, &last).await;
+    sweep_unread_counts(&client, &store, account_id, &live_tx, &last, false).await;
 
     // The first tick of `interval` fires immediately; defer it by one period
     // so the resweep timer doesn't immediately re-run what the startup sweep
@@ -2011,7 +2080,7 @@ async fn watch_unread_counts(
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = resweep.tick() => {
-                sweep_unread_counts(&client, &store, account_id, &live_tx, &last).await;
+                sweep_unread_counts(&client, &store, account_id, &live_tx, &last, true).await;
             }
             update = updates.recv() => match update {
                 Ok(update) => {
@@ -2031,9 +2100,9 @@ async fn watch_unread_counts(
 
 #[cfg(test)]
 mod unread_counts_tests {
-    use super::{cached_unread_counts_match, saturating_i64, UnreadCountsSnapshot};
-    use matrix_sdk::ruma::room_id;
-    use std::collections::HashMap;
+    use super::{
+        cached_unread_counts_match, saturating_i64, unread_counts_increased, UnreadCountsSnapshot,
+    };
 
     #[test]
     fn unread_snapshot_keeps_notification_and_highlight_together() {
@@ -2065,24 +2134,80 @@ mod unread_counts_tests {
 
     #[test]
     fn cached_unread_counts_match_only_when_both_counts_match() {
-        let room = room_id!("!unread:localhost");
-        let mut last = HashMap::new();
-        last.insert(room.to_owned(), (3, 1));
+        let cached = Some((3, 1));
 
         assert!(cached_unread_counts_match(
-            &last,
-            room,
+            cached,
             UnreadCountsSnapshot::new(3, 1)
         ));
         assert!(!cached_unread_counts_match(
-            &last,
-            room,
+            cached,
             UnreadCountsSnapshot::new(4, 1)
         ));
         assert!(!cached_unread_counts_match(
-            &last,
-            room,
+            cached,
             UnreadCountsSnapshot::new(3, 2)
+        ));
+        assert!(!cached_unread_counts_match(
+            None,
+            UnreadCountsSnapshot::new(0, 0)
+        ));
+    }
+
+    #[test]
+    fn unread_counts_increased_when_either_count_rises() {
+        let cached = Some((3, 1));
+
+        assert!(unread_counts_increased(
+            cached,
+            UnreadCountsSnapshot::new(4, 1)
+        ));
+        assert!(unread_counts_increased(
+            cached,
+            UnreadCountsSnapshot::new(3, 2)
+        ));
+        assert!(!unread_counts_increased(
+            cached,
+            UnreadCountsSnapshot::new(3, 1)
+        ));
+    }
+
+    #[test]
+    fn unread_counts_decrease_is_not_an_increase() {
+        // The phantom guard must still let a room self-correct downwards while
+        // matrix-sdk holds an unmatched receipt, so a count that only falls is
+        // never treated as an increase — including all the way to zero.
+        let cached = Some((32, 4));
+
+        assert!(!unread_counts_increased(
+            cached,
+            UnreadCountsSnapshot::new(0, 0)
+        ));
+        assert!(!unread_counts_increased(
+            cached,
+            UnreadCountsSnapshot::new(5, 4)
+        ));
+        // A mixed move still counts as an increase: the risen count is the one
+        // that would surface a phantom badge.
+        assert!(unread_counts_increased(
+            cached,
+            UnreadCountsSnapshot::new(5, 9)
+        ));
+    }
+
+    #[test]
+    fn unread_counts_treat_a_missing_cache_entry_as_zero() {
+        // The restart case: the persisted row is gone (or was never written),
+        // so the first nonzero value the SDK reports must read as an increase —
+        // otherwise a fallback-anchor count of 32 in a silent room would be
+        // written as if it were the room's true state.
+        assert!(unread_counts_increased(
+            None,
+            UnreadCountsSnapshot::new(32, 0)
+        ));
+        assert!(!unread_counts_increased(
+            None,
+            UnreadCountsSnapshot::new(0, 0)
         ));
     }
 }
