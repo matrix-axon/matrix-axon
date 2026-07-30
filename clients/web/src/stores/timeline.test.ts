@@ -675,6 +675,83 @@ describe('createTimelineStore', () => {
       expect(store.atEnd.value).toBe(false)
     })
 
+    it('keeps a pending echo when a disjoint head replaces the slice', async () => {
+      let head = 0
+      server.use(
+        http.get(TIMELINE_PATH, () => {
+          head += 1
+          return HttpResponse.json({
+            data:
+              head === 1
+                ? { events: [event('$3', 300)], next_cursor: 'c1' }
+                : { events: [event('$9', 900)], next_cursor: 'c8' },
+          })
+        }),
+        http.post(SEND_PATH, () =>
+          HttpResponse.json(
+            { error: { code: 'bad_gateway', message: 'homeserver down' } },
+            { status: 502 },
+          ),
+        ),
+      )
+      const store = makeStore()
+      await store.loadLatest()
+      expect(await store.send('unsent work', { senderId: '@alice:hs' })).toBe(
+        false,
+      )
+
+      // The head shares nothing with the loaded slice, so the *history* is
+      // replaced — but an unsent send is not history, and no server page can
+      // speak to it. Dropping it here is how a re-entered room used to lose
+      // the user's failed message.
+      await store.loadLatest()
+
+      expect(store.events.value.map((e) => e.event_id)).toEqual([
+        '$9',
+        expect.stringMatching(/^local:/) as unknown as string,
+      ])
+      expect(store.events.value[1].localEcho?.status).toBe('failed')
+      expect(store.atEnd.value).toBe(true)
+    })
+
+    it('drops an echo the disjoint head turns out to confirm', async () => {
+      let head = 0
+      server.use(
+        http.get(TIMELINE_PATH, () => {
+          head += 1
+          return HttpResponse.json({
+            data:
+              head === 1
+                ? { events: [event('$3', 300)], next_cursor: 'c1' }
+                : {
+                    events: [
+                      event('$9', 900, {
+                        sender: '@alice:hs',
+                        body: 'landed after all',
+                      }),
+                    ],
+                    next_cursor: 'c8',
+                  },
+          })
+        }),
+        // The send reached the server and the response never came back, so
+        // the echo is still *pending* — the only status a confirming page may
+        // silently drop. A `failed` echo belongs to the user, to retry or
+        // discard, and the merge leaves it alone by the same rule.
+        http.post(SEND_PATH, () => new Promise<Response>(() => {})),
+      )
+      const store = makeStore()
+      await store.loadLatest()
+      const inFlight = store.send('landed after all', { senderId: '@alice:hs' })
+      expect(store.events.value.at(-1)?.localEcho?.status).toBe('pending')
+
+      await store.loadLatest()
+      void inFlight
+
+      // One row, the confirmed one — not the echo beside its own event.
+      expect(store.events.value.map((e) => e.event_id)).toEqual(['$9'])
+    })
+
     it('still gap-fills a slice that claimed to be at the tail', async () => {
       let head = 0
       server.use(

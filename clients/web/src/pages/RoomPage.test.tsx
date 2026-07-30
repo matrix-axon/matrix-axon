@@ -2893,4 +2893,196 @@ describe('RoomPage', () => {
       }),
     )
   })
+
+  // ADR 0085 phase 1: the store survives the room switch, so re-entry has
+  // something to paint and reconciles it in place.
+  describe('re-entering a room in one session (ADR 0085 phase 1)', () => {
+    const OTHER_ROOM = '!other:hs'
+
+    /**
+     * Render at room A, switch to B, come back — optionally through a
+     * deep link. `heads` are A's successive head responses.
+     */
+    async function roundTrip(
+      heads: (() => Response | Promise<Response>)[],
+      backQuery = '',
+      /**
+       * The page a `?event=` jump lands on. A single responder, not a
+       * sequence: late `at_ts` probes leaked by other tests (see below) would
+       * otherwise consume entries and make this depend on test order.
+       */
+      jump?: () => Response,
+    ) {
+      let head = 0
+      server.use(
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({ data: [] }),
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/timeline`,
+          ({ params, request }) => {
+            if (decodeURIComponent(String(params.roomId)) === OTHER_ROOM) {
+              return HttpResponse.json({
+                data: { events: [event('$b', T0)], next_cursor: null },
+              })
+            }
+            // Head fetches only. An `at_ts` probe here belongs to a
+            // `loadNewer` chain another test in this file left in flight —
+            // `server.resetHandlers()` sends its late requests to whichever
+            // handler is registered next — and counting those would make this
+            // test's response sequence depend on test order.
+            if (new URL(request.url).searchParams.has('at_ts')) {
+              return (
+                jump?.() ??
+                HttpResponse.json({
+                  data: { events: [], next_cursor: null },
+                })
+              )
+            }
+            const respond = heads[Math.min(head, heads.length - 1)]
+            head += 1
+            return respond()
+          },
+        ),
+      )
+      const go = (roomId: string, query = '') => {
+        window.history.pushState(
+          null,
+          '',
+          `/${ACCOUNT}/rooms/${encodeURIComponent(roomId)}${query}`,
+        )
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      }
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      const utils = render(routedRoomPage(testServices()))
+      await utils.findByText('body of $1')
+      go(OTHER_ROOM)
+      await utils.findByText('body of $b')
+      go(ROOM, backQuery)
+      return { ...utils, heads: () => head }
+    }
+
+    it('paints the warm slice first, then merges what arrived while away', async () => {
+      // The re-entry head fetch is held open, so whatever is on screen before
+      // it settles came from the warm store — before phase 1 this was
+      // "Loading timeline…" until the network answered.
+      let settle: (response: Response) => void = () => {}
+      const { findByText, queryByText, heads } = await roundTrip([
+        () =>
+          HttpResponse.json({
+            data: { events: [event('$1', T0)], next_cursor: 'c1' },
+          }),
+        () =>
+          new Promise<Response>((resolve) => {
+            settle = resolve
+          }),
+      ])
+
+      expect(await findByText('body of $1')).toBeTruthy()
+      expect(queryByText('Loading timeline…')).toBeNull()
+
+      // The held request is in flight by now, so releasing it is not a race.
+      await waitFor(() => expect(heads()).toBe(2))
+
+      // Live frames only reach the mounted room (ADR 0061), so the warm slice
+      // missed `$2`; the head fetch overlaps it and `refreshHead` merges.
+      settle(
+        HttpResponse.json({
+          data: {
+            events: [event('$2', T0 + 1000), event('$1', T0)],
+            next_cursor: 'c1',
+          },
+        }) as Response,
+      )
+
+      expect(await findByText('body of $2')).toBeTruthy()
+      // Merged, not replaced: the row already loaded survives the reconcile.
+      expect(await findByText('body of $1')).toBeTruthy()
+    })
+
+    it('gap-fills on re-entry through a ?event= link the slice already holds', async () => {
+      // The jump effect fetches nothing when its target is already loaded, so
+      // on this path the warm slice has no other route back to the present.
+      const { findByText, heads } = await roundTrip(
+        [
+          () =>
+            HttpResponse.json({
+              data: { events: [event('$1', T0)], next_cursor: 'c1' },
+            }),
+          () =>
+            HttpResponse.json({
+              data: {
+                events: [event('$3', T0 + 1000), event('$1', T0)],
+                next_cursor: 'c1',
+              },
+            }),
+        ],
+        '?event=%241',
+      )
+
+      expect(await findByText('body of $3')).toBeTruthy()
+      expect(heads()).toBe(2)
+    })
+
+    it('lets a jump off the warm slice win the race with the gap-fill', async () => {
+      // The contended case: the `?event=` target is *not* in the warm slice,
+      // so re-entry runs both the gap-fill (`loadLatest` over a populated
+      // slice is `refreshHead`) and the jump, against one store. The jump
+      // parks the slice in history; a gap-fill that landed afterwards would
+      // splice the present onto it and teleport the reader back to the
+      // present — the WCR-05 bug. `sliceGeneration`, bumped by the jump and
+      // rechecked by `refreshHead` after its fetch, is what stops it.
+      //
+      // The head deliberately *overlaps* the jump page. A disjoint one would
+      // be refused for a parked slice whatever the generation said, and the
+      // test would pass without exercising the guard at all.
+      const JUMP_TS = T0 - 60_000
+      let settle: (response: Response) => void = () => {}
+      server.use(
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+          () => HttpResponse.json({ data: event('$jump', JUMP_TS) }),
+        ),
+      )
+      const { findByText, queryByText } = await roundTrip(
+        [
+          () =>
+            HttpResponse.json({
+              data: { events: [event('$1', T0)], next_cursor: 'c1' },
+            }),
+          () =>
+            new Promise<Response>((resolve) => {
+              settle = resolve
+            }),
+        ],
+        '?event=%24jump',
+        () =>
+          HttpResponse.json({
+            data: { events: [event('$jump', JUMP_TS)], next_cursor: 'c0' },
+          }) as Response,
+      )
+
+      expect(await findByText('body of $jump')).toBeTruthy()
+
+      settle(
+        HttpResponse.json({
+          data: {
+            events: [event('$new', T0 + 1000), event('$jump', JUMP_TS)],
+            next_cursor: 'c1',
+          },
+        }) as Response,
+      )
+
+      // Settling is two microtask hops from being applied, so give the
+      // discarded response every chance to land before asserting it did not.
+      await waitFor(() => expect(queryByText('body of $new')).toBeNull())
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(queryByText('body of $new')).toBeNull()
+      expect(await findByText('body of $jump')).toBeTruthy()
+    })
+  })
 })

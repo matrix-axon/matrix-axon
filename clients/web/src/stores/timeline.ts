@@ -194,6 +194,36 @@ export interface TimelineStore {
    * thread, when this is a thread timeline) are ignored.
    */
   ingestLive(event: EventDto): void
+
+  /**
+   * Abandon a slice parked in history, keeping local echoes, so the next head
+   * load lands on the newest page (ADR 0085 phase 1).
+   *
+   * Re-entering a room must never show stale history with nothing since, and
+   * `refreshHead` deliberately refuses to move a parked slice (WCR-05) — so a
+   * warm store that is parked is normally discarded outright. It cannot be
+   * discarded when it holds an unsent send, and *that* is what this is for:
+   * the parked history and its cursor chain go, the echoes stay, and the head
+   * fetch that follows fills the slice.
+   *
+   * The result is cursor-*unknown*, not cursor-exhausted: `atStart` reports
+   * false until a settled load says otherwise, or scroll-back would be
+   * silently disabled.
+   */
+  resumeAtHead(): void
+
+  /**
+   * Release what this slice holds outside the garbage collector's reach — the
+   * object urls behind media echo previews (ADR 0065) — by dropping every
+   * local echo. A store that outlives its mount (`createTimelineStoreCache`,
+   * ADR 0085 phase 1) is dropped rather than unmounted, and an echo dropped
+   * without this leaks its preview.
+   *
+   * This *destroys unsent work*, so the only callers are ones where the work
+   * is already gone: signing out. Eviction deliberately refuses to touch a
+   * store holding echoes.
+   */
+  dispose(): void
 }
 
 /** The `m.in_reply_to` target id, if this event is a reply. */
@@ -503,6 +533,31 @@ export function createTimelineStore(
   }
 
   /**
+   * Drop any pending echo the fetched page confirms — matched on sender and
+   * body, the same rule `ingestLive` uses — so a send never shows twice. Both
+   * of `refreshHead`'s outcomes need it: an overlapping head and a disjoint one
+   * can each carry the confirmation of a send this client is still waiting on.
+   */
+  function dropConfirmedEchoes(
+    list: TimelineEvent[],
+    fetched: readonly EventDto[],
+  ): TimelineEvent[] {
+    let rest = list
+    for (const fresh of fetched) {
+      const echoIndex = rest.findIndex(
+        (e) =>
+          e.localEcho?.status === 'pending' &&
+          e.sender === fresh.sender &&
+          e.localEcho.body === (fresh.body ?? ''),
+      )
+      if (echoIndex !== -1) {
+        rest = dropEchoes(rest, (_, i) => i === echoIndex)
+      }
+    }
+    return rest
+  }
+
+  /**
    * The newest page, folded into an already-loaded slice (ADR 0061 gap-fill,
    * WCR-05). Replacing the slice wholesale teleported a scrolled-back user to
    * the newest page on every reconnect; instead, when the fresh head overlaps
@@ -532,7 +587,16 @@ export function createTimelineStore(
     }
     if (!overlaps) {
       sliceGeneration += 1
-      events.value = page.events
+      // The *history* is replaced; local echoes are not history. An unsent or
+      // failed send is in-flight local work that no server page can speak to,
+      // so it stays at the tail exactly as it does in the merge below —
+      // dropping any this page confirms. Before this, re-entering a room whose
+      // slice had moved on silently discarded the user's pending send.
+      const echoes = dropConfirmedEchoes(
+        events.value.filter((e) => e.localEcho !== undefined),
+        page.events,
+      )
+      events.value = [...page.events, ...echoes]
       nextCursor.value = page.next
       reachedStart.value = page.next === null
       // The slice *is* the head now, wherever it was parked before.
@@ -542,18 +606,10 @@ export function createTimelineStore(
     }
     // Overlap: merge. No generation bump — an in-flight `loadOlder` prepend
     // still applies, since the old history and cursor survive.
-    let rest = loaded.filter((e) => !headIds.has(e.event_id))
-    for (const fresh of page.events) {
-      const echoIndex = rest.findIndex(
-        (e) =>
-          e.localEcho?.status === 'pending' &&
-          e.sender === fresh.sender &&
-          e.localEcho.body === (fresh.body ?? ''),
-      )
-      if (echoIndex !== -1) {
-        rest = dropEchoes(rest, (_, i) => i === echoIndex)
-      }
-    }
+    const rest = dropConfirmedEchoes(
+      loaded.filter((e) => !headIds.has(e.event_id)),
+      page.events,
+    )
     const history = rest.filter((e) => e.localEcho === undefined)
     const echoes = rest.filter((e) => e.localEcho !== undefined)
     events.value = [...history, ...page.events, ...echoes]
@@ -1238,6 +1294,27 @@ export function createTimelineStore(
       events.value = dropEchoes(
         events.value,
         (event) => event.event_id === localId,
+      )
+    },
+
+    resumeAtHead() {
+      // Discard results from requests issued against the parked cursor.
+      sliceGeneration += 1
+      events.value = events.value.filter(
+        (event) => event.localEcho !== undefined,
+      )
+      nextCursor.value = null
+      // Cursor-unknown: only a settled load may claim the room's start.
+      reachedStart.value = false
+      // A slice of nothing but echoes ends at the tail by construction, which
+      // is what lets the following `refreshHead` replace rather than refuse.
+      reachedEnd.value = true
+    },
+
+    dispose() {
+      events.value = dropEchoes(
+        events.value,
+        (event) => event.localEcho !== undefined,
       )
     },
 

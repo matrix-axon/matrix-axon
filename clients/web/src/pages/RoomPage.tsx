@@ -91,7 +91,6 @@ import {
 } from '../stores/threads'
 import type { ThreadUnreadStore } from '../stores/thread-unread'
 import {
-  createTimelineStore,
   type EventDto,
   type TimelineEvent,
   type TimelineStore,
@@ -218,7 +217,6 @@ export function RoomPage() {
   })
   const {
     api,
-    media,
     rooms,
     activeRoom,
     activeThread,
@@ -230,10 +228,15 @@ export function RoomPage() {
     composerFocus,
     settings,
     search,
+    timelines,
   } = useServices()
+  // Warm across room switches rather than rebuilt per mount (ADR 0085 phase
+  // 1). The store may therefore arrive already populated — and stale, since
+  // live frames only reach the mounted room — so the load effect below
+  // gap-fills it instead of assuming a cold start.
   const timeline = useMemo(
-    () => createTimelineStore(api, media, accountId, roomId),
-    [api, media, accountId, roomId],
+    () => timelines.acquire(accountId, roomId),
+    [timelines, accountId, roomId],
   )
   const redecryptAttempted = useRef(false)
   // RoomPage does not remount on a route change (preact-iso reuses the
@@ -287,6 +290,11 @@ export function RoomPage() {
       accountId,
       roomId,
       highlighted: highlighted !== null,
+      // How often room entry finds a warm store (ADR 0085 phase 1) — the
+      // relative value of phase 1 against the persisted phases is the one
+      // input the ADR says differs sharply between phone and desktop, and it
+      // rides on the mark that is already here rather than a new one.
+      warm: timeline.events.peek().length > 0,
     })
     rooms.noteUnreadCounts(accountId, roomId, 0, 0)
     // The room list store also feeds this page's title; populate it on a
@@ -296,9 +304,19 @@ export function RoomPage() {
     }
     void threads.refresh()
     void members.refresh()
-    // A room-event jump owns its initial load, but a thread jump is resolved
-    // by ThreadPanel and must not leave the desktop room stream empty.
-    if (highlighted === null || openThread !== null) {
+    // With a deep-linked event the jump effect below owns the initial load,
+    // with two exceptions. A thread jump is resolved by ThreadPanel and must
+    // not leave the desktop room stream empty. And a warm store (ADR 0085
+    // phase 1) has nobody else to refresh it: the jump effect fetches nothing
+    // when its target is already in the loaded slice, and a warm slice stopped
+    // receiving live frames when the user left the room. `loadLatest` over a
+    // populated slice *is* `refreshHead`'s gap-fill merge, and a jump racing
+    // it wins by slice generation.
+    if (
+      highlighted === null ||
+      openThread !== null ||
+      timeline.events.peek().length > 0
+    ) {
       void timeline.loadLatest()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per room instance

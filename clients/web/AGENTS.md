@@ -55,6 +55,22 @@ before starting a milestone.
   (retryable via `retrySend`/discardable via `discardSend`) on error;
   edit/redact/react use the same re-fetch-and-patch shape against a real
   event id (scroll position survives throughout — no full reload).
+- **Timeline stores outlive their mount** (`src/stores/timeline-cache.ts`, ADR
+  0085 phase 1): `RoomPage` acquires from an account+room-keyed LRU instead of
+  building a store per mount, so a room re-entered in one session paints its
+  events at once and reconciles through `loadLatest()` — which over a populated
+  slice _is_ `refreshHead`'s gap-fill merge. Two rules the cache exists to
+  respect: a store holding a local echo is **never** evicted (eviction would
+  destroy an unsent message and leak its preview url), and a slice parked in
+  history (`!atEnd`) is **not** reused, because `refreshHead` deliberately
+  refuses to move one, so re-entry would show history with nothing since. Those
+  two rules collide when a parked store holds an echo — keep the store,
+  `resumeAtHead()` the slice: the parked history and cursor go, the echo stays,
+  and the head load lands on the newest page. `refreshHead`'s disjoint-replace
+  branch keeps pending echoes for the same reason (an unsent send is not
+  history, and no server page can speak to it). The
+  whole cache is wiped on sign-out (`connectTimelineCacheReset`) — the service
+  graph outlives the session and nothing reloads the document.
 - **Sanitizer** (`src/html/sanitize.ts`): DOMPurify + Matrix subset +
   transforms (data-mx-color/bg → inline style, spoilers → click-to-reveal,
   legacy `font color`, mx-reply dropped with contents, bare-URL

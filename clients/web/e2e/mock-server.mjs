@@ -212,6 +212,41 @@ timeline.push({
   latest_edit_ts: null,
   reactions: null,
 })
+/**
+ * A second room of this account with a history of its own, keyed by room id.
+ * Every other room falls back to `timeline`, which is what the rest of the
+ * specs assume — this exists so a room *switch* is observable at all: without
+ * distinct content, room A and room B render identically and a test cannot
+ * tell whether a re-entered room painted its own slice (ADR 0085 phase 1).
+ */
+const SECOND_ROOM_ID = '!long:hs'
+const roomHistories = new Map([
+  [
+    SECOND_ROOM_ID,
+    [
+      {
+        account_id: ACCOUNT_ID,
+        event_id: '$seed-second:hs',
+        room_id: SECOND_ROOM_ID,
+        sender: '@bob:hs',
+        state_key: null,
+        origin_ts: Date.now() - 7_200_000,
+        type: 'm.room.message',
+        content: { msgtype: 'm.text', body: 'only in the second room' },
+        body: 'only in the second room',
+        relates_to: null,
+        redacted: false,
+        redaction_event_id: null,
+        sender_trust: null,
+        edited: false,
+        edit_count: 0,
+        latest_edit_ts: null,
+        reactions: null,
+      },
+    ],
+  ],
+])
+
 /** Connected `/v1/ws` sockets. */
 const sockets = new Set()
 /**
@@ -229,6 +264,36 @@ let bulkRooms = 0
  * timeline whose teardown-on-back is the transition cost under study.
  */
 let bulkTimeline = 0
+/**
+ * How long the timeline GET sits on its answer, set via
+ * `/__e2e/timeline-delay?hold=<name>`. Zero by default. A spec that needs to
+ * prove content painted *before* the network answered has to be able to hold
+ * the answer open — with a fast mock there is no window to observe.
+ *
+ * The request names a hold; it never supplies a duration. Every value here is
+ * a literal, so nothing flows from a request parameter into a timer: an
+ * unbounded sleep driven by request input is a hang waiting to happen (a
+ * mistyped `ms=300000` would stall the lane until Playwright's timeout), and
+ * CodeQL flags the shape — `js/resource-exhaustion` — whether or not the
+ * caller is a test. Clamping the value was not enough for the query, and this
+ * reads better in a spec anyway.
+ */
+const timelineHoldMs = (name) => {
+  switch (name) {
+    case 'held':
+      return 3000
+    case 'slow':
+      return 1000
+    case 'typical':
+      return 300
+    case 'brief':
+      return 100
+    default:
+      return 0
+  }
+}
+let timelineDelayMs = 0
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
  * `n` text messages, oldest first, older than the seeded history, so the GET
@@ -436,14 +501,17 @@ async function handleApi(req, res, url) {
     return json(res, { data: [] })
   }
   if (method === 'GET' && /\/rooms\/[^/]+\/timeline$/.test(pathname)) {
+    if (timelineDelayMs > 0) {
+      await sleep(timelineDelayMs)
+    }
     // `at_ts` follows the real endpoint (the page at or before the timestamp,
     // newest-first, `limit`-sized) so jumps and forward paging are honest;
     // the un-jumped read keeps returning everything, as the other specs'
     // fixtures assume.
+    const roomId = decodeURIComponent(pathname.split('/').at(-2))
+    const seeded = roomHistories.get(roomId) ?? timeline
     const history =
-      bulkTimeline > 0
-        ? [...synthTimeline(bulkTimeline), ...timeline]
-        : timeline
+      bulkTimeline > 0 ? [...synthTimeline(bulkTimeline), ...seeded] : seeded
     const atTs = url.searchParams.get('at_ts')
     if (atTs !== null) {
       const limit = Number(url.searchParams.get('limit') ?? 50)
@@ -667,6 +735,13 @@ const server = createServer((req, res) => {
   if (req.method === 'POST' && url.pathname === '/__e2e/bulk-timeline') {
     bulkTimeline = Number(url.searchParams.get('count') ?? 0)
     return json(res, { data: { bulk_timeline: bulkTimeline } })
+  }
+  // How long the timeline GET holds its answer: `?hold=brief|typical|slow|held`,
+  // anything else meaning no hold. The spec that sets this must reset it, since
+  // the mock is one process shared by every spec.
+  if (req.method === 'POST' && url.pathname === '/__e2e/timeline-delay') {
+    timelineDelayMs = timelineHoldMs(url.searchParams.get('hold'))
+    return json(res, { data: { timeline_delay_ms: timelineDelayMs } })
   }
   // What the browser actually staged. The unit tests cannot assert the upload's
   // *bytes* — under jsdom a `File` is not undici's `Blob`, so the body never

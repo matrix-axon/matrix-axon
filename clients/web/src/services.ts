@@ -41,6 +41,10 @@ import {
   type ActiveThread,
   type ThreadUnreadStore,
 } from './stores/thread-unread'
+import {
+  createTimelineStoreCache,
+  type TimelineStoreCache,
+} from './stores/timeline-cache'
 
 /**
  * The app's service graph — auth seam, API client, and stores — built once at
@@ -61,6 +65,11 @@ export interface AppServices {
   /** Outbound read receipts + typing notices to the homeserver (ADR 0067/0068). */
   ephemeralSender: EphemeralSender
   media: MediaService
+  /**
+   * Warm per-room timeline stores across room switches (ADR 0085 phase 1).
+   * `RoomPage` acquires from here instead of building a store per mount.
+   */
+  timelines: TimelineStoreCache
   /**
    * The room the user is currently viewing (`accountId/roomId`), or `null`.
    * Set by `RoomPage`; `RoomList` reads it to mark the open row.
@@ -259,6 +268,36 @@ export function connectLiveRooms(
   }
 }
 
+/**
+ * Drop every warm timeline store when the session ends (ADR 0085 phase 1).
+ *
+ * The service graph outlives a sign-out — nothing reloads the document, the
+ * signed-in branch of `app.tsx` just unmounts — so before phase 1 a signed-out
+ * tab kept no messages at all: each `RoomPage` store died with its mount.
+ * Warming the stores changes that, and this restores it. It is the in-memory
+ * half of the rule ADR 0085 states for the persisted cache: wipe on *any*
+ * logout or token change, all accounts, not only the one that signed out.
+ *
+ * Returns the disposer; the app graph keeps the subscription for its life.
+ */
+export function connectTimelineCacheReset(
+  auth: CompositeAuthProvider,
+  timelines: TimelineStoreCache,
+): () => void {
+  return effect(() => {
+    if (auth.signedIn.value) {
+      return
+    }
+    // Deferred out of the reactive flush on purpose. `clear()` disposes each
+    // store, and disposing one that holds a local echo *writes a signal* —
+    // which @preact/signals rejects with "Cycle detected" when it happens
+    // synchronously inside an effect body. Signing out with a pending send is
+    // exactly the case that would have hit it, and no test had an echo staged
+    // at sign-out, so it stayed invisible.
+    queueMicrotask(() => timelines.clear())
+  })
+}
+
 /** Route raw Matrix ephemeral passthrough frames into the web overlay store. */
 export function connectEphemeralPassthrough(
   live: LiveConnection,
@@ -295,6 +334,7 @@ export function createServices(
   })
   const api = createApiClient(auth, apiBaseUrl())
   const media = createMediaService({ auth, baseUrl: apiBaseUrl() })
+  const timelines = createTimelineStoreCache(api, media)
   const settings = createSettingsStore(storage)
   const accounts = createAccountsStore(api)
   const rooms = createRoomsStore(api, storage)
@@ -327,10 +367,12 @@ export function createServices(
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
   connectThreadReadMarkers(live, threadUnread, deviceState)
+  connectTimelineCacheReset(auth, timelines)
   return {
     auth,
     api,
     media,
+    timelines,
     settings,
     accounts,
     rooms,

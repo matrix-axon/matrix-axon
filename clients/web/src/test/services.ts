@@ -8,6 +8,7 @@ import {
   connectEphemeralPassthrough,
   connectReadMarkers,
   connectThreadReadMarkers,
+  connectTimelineCacheReset,
   connectUnreadCounts,
   type AppServices,
 } from '../services'
@@ -24,6 +25,7 @@ import {
   createThreadUnreadStore,
   type ActiveThread,
 } from '../stores/thread-unread'
+import { createTimelineStoreCache } from '../stores/timeline-cache'
 import { FakeWebSocket } from './fake-socket'
 import { memoryStorage } from './memory-storage'
 
@@ -61,6 +63,7 @@ export function testServices(
   })
   const api = createApiClient(auth, TEST_BASE_URL)
   const media = createMediaService({ auth, baseUrl: TEST_BASE_URL })
+  const timelines = createTimelineStoreCache(api, media)
   const settings = createSettingsStore(storage)
   const accounts = createAccountsStore(api)
   const rooms = createRoomsStore(api, storage)
@@ -91,10 +94,12 @@ export function testServices(
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
   connectThreadReadMarkers(live, threadUnread, deviceState)
+  connectTimelineCacheReset(auth, timelines)
   return {
     auth,
     api,
     media,
+    timelines,
     settings,
     accounts,
     rooms,

@@ -5,6 +5,7 @@ import { TIMELINE_EVENT, UNREAD_COUNTS_CHANGED } from './api/frames'
 import {
   connectLiveRooms,
   connectReadMarkers,
+  connectTimelineCacheReset,
   connectUnreadCounts,
 } from './services'
 import { createDeviceStateStore } from './stores/device-state'
@@ -247,5 +248,52 @@ describe('connectLiveRooms', () => {
     sockets[1].emitOpen()
     expect(refreshCount()).toBe(1)
     vi.useRealTimers()
+  })
+})
+
+describe('connectTimelineCacheReset', () => {
+  /** Only the two members the connector touches; the rest of the graph is irrelevant. */
+  function harness(signedIn: boolean) {
+    const flag = signal(signedIn)
+    let clears = 0
+    const dispose = connectTimelineCacheReset(
+      { signedIn: computed(() => flag.value) } as Parameters<
+        typeof connectTimelineCacheReset
+      >[0],
+      {
+        acquire: () => {
+          throw new Error('unused')
+        },
+        clear: () => {
+          clears += 1
+        },
+        size: 0,
+      },
+    )
+    return { flag, clears: () => clears, dispose }
+  }
+
+  it('wipes the warm stores when the session ends', async () => {
+    const { flag, clears, dispose } = harness(true)
+    expect(clears()).toBe(0)
+
+    flag.value = false
+    // The wipe is a microtask later: a synchronous signal write inside an
+    // effect body is a "Cycle detected" throw, and disposing a store that
+    // holds an echo writes one.
+    await Promise.resolve()
+
+    // The service graph outlives a sign-out, so without this a signed-out tab
+    // keeps every warm room's messages in memory (ADR 0085 phase 1).
+    expect(clears()).toBe(1)
+    dispose()
+  })
+
+  it('starts from a clean cache when the app boots signed out', async () => {
+    const { clears, dispose } = harness(false)
+    await Promise.resolve()
+
+    expect(clears()).toBe(1)
+    dispose()
   })
 })

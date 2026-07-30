@@ -558,6 +558,32 @@ Four PRs, in order, each independently shippable:
    with a bounded, account+room-keyed store cache, gap-filling via
    `refreshHead` on re-entry (required regardless: live frames only reach the
    mounted room). Fixes room switching within a session; no storage involved.
+
+   **Measured as shipped** (desktop Chromium against the e2e mock, click to
+   painted rows; the timeline GET is held open to stand in for a server's
+   think-time, `/__e2e/timeline-delay`):
+
+   | Server hold | Extra events | Cold entry | Warm re-entry (median of 6) |
+   | --- | --- | --- | --- |
+   | 0 ms | 0 | 25.8 ms | 11.6 ms |
+   | 300 ms | 0 | 326.0 ms | 11.9 ms |
+   | 300 ms | 300 | 364.8 ms | 34.6 ms |
+
+   Two things fall out. **Cold entry tracks latency 1:1 while warm re-entry does
+   not move at all** (11.6 ms against 11.9 ms across a 300 ms swing), and the
+   placeholder appears on every cold entry and on no warm one — so the wait is
+   removed rather than relocated, the same conclusion the long-task capture
+   reached for the room list. And **what remains is render, which grows with row
+   count**: 11.9 ms at ~5 rows against 34.6 ms at ~305. That is this ADR's own
+   caveat arriving one phase early — a warm slice handed to an un-windowed list
+   is bounded by the list (issues #26, #32), not by the cache.
+
+   Two limits on these numbers. The mock is local, so its "cold" figure is a
+   floor: the real 1.3 s room-list TTFB has no timeline equivalent measured
+   here, and the 300 ms hold is a stand-in rather than a measurement. And this
+   is desktop — the phone number wants the ADR 0071 harness, whose single-pane
+   navigation goes through the room-list transition and so measures something
+   different.
 2. **`CacheStore` port + IDB adapter + room-list cache**, including the
    `stale` signal, `RoomList`'s stale affordance, a setting to disable it, and
    the logout wipe. Metadata only — no message bodies reach disk in this phase,
@@ -644,10 +670,12 @@ Four PRs, in order, each independently shippable:
   source of the 1,298 ms, which pagination alone would not fix) and **#86**
   (API responses are uncompressed). Both are out of scope here and neither is
   displaced by the cache.
-- **Still genuinely open — and only shipping code can answer it:** in-app marks
+- **Partly answered by phase 1, the rest still open:** in-app marks
   (`cache:read` → `cache:hydrate` → first painted row, in ADR 0077's
   vocabulary) plus a boot counter separating a fresh document load from a
-  resumed tab. The counter sets the relative value of phase 1 against phases
+  resumed tab. Phase 1 shipped the cheap half — `room-page:initial-load-effect`
+  now carries `warm`, so how often room entry finds a warm store is readable
+  from a recording — and the boot counter is still missing. The counter sets the relative value of phase 1 against phases
   2-3, and it is the one input that differs sharply between phone and desktop.
   Note also that `getEntriesByType('largest-contentful-paint')` is deprecated
   in Chrome and returns nothing; LCP needs a buffered `PerformanceObserver`.
