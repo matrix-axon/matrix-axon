@@ -45,6 +45,10 @@ import {
   createTimelineStoreCache,
   type TimelineStoreCache,
 } from './stores/timeline-cache'
+import {
+  createAttachmentStaging,
+  type AttachmentStaging,
+} from './media/attachment-staging'
 
 /**
  * The app's service graph — auth seam, API client, and stores — built once at
@@ -70,6 +74,12 @@ export interface AppServices {
    * `RoomPage` acquires from here instead of building a store per mount.
    */
   timelines: TimelineStoreCache
+  /**
+   * Files staged in a composer but not sent (issue #89). Out here rather than
+   * in the composer because `RoomPage` unmounts whenever the route leaves a
+   * room — on a phone, every room change.
+   */
+  attachments: AttachmentStaging
   /**
    * The room the user is currently viewing (`accountId/roomId`), or `null`.
    * Set by `RoomPage`; `RoomList` reads it to mark the open row.
@@ -300,6 +310,32 @@ export function connectTimelineCacheReset(
   })
 }
 
+/**
+ * Drop every staged file when the session ends (issue #89).
+ *
+ * Same reasoning as `connectTimelineCacheReset`, and a stronger form of it:
+ * these are the user's own files, held in memory with live object urls, and the
+ * graph outlives a sign-out. Before retention they died with the composer's
+ * unmount; now they need saying so.
+ */
+export function connectAttachmentReset(
+  auth: CompositeAuthProvider,
+  attachments: AttachmentStaging,
+): () => void {
+  return effect(() => {
+    if (auth.signedIn.value) {
+      return
+    }
+    // Idempotent for the same reason as the timeline wipe above, and this is
+    // where the rule was learned: `clearAll()` used to bump the staging
+    // revision unconditionally, so every pass of this effect within one flush
+    // wrote again, the flush never reached a fixed point, and @preact/signals
+    // aborted it after 100 iterations with "Cycle detected". It now bumps only
+    // when it actually dropped something.
+    attachments.clearAll()
+  })
+}
+
 /** Route raw Matrix ephemeral passthrough frames into the web overlay store. */
 export function connectEphemeralPassthrough(
   live: LiveConnection,
@@ -337,6 +373,7 @@ export function createServices(
   const api = createApiClient(auth, apiBaseUrl())
   const media = createMediaService({ auth, baseUrl: apiBaseUrl() })
   const timelines = createTimelineStoreCache(api, media)
+  const attachments = createAttachmentStaging()
   const settings = createSettingsStore(storage)
   const accounts = createAccountsStore(api)
   const rooms = createRoomsStore(api, storage)
@@ -370,11 +407,13 @@ export function createServices(
   connectReadMarkers(live, deviceState, rooms)
   connectThreadReadMarkers(live, threadUnread, deviceState)
   connectTimelineCacheReset(auth, timelines)
+  connectAttachmentReset(auth, attachments)
   return {
     auth,
     api,
     media,
     timelines,
+    attachments,
     settings,
     accounts,
     rooms,
