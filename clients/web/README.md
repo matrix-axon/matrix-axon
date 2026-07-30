@@ -44,7 +44,9 @@ surface with Join, DM, Create, and Find flows (M19-W3/W4: direct room
 ID/alias/Matrix-link entry, public room-directory search defaulting to the
 account homeserver, DM creation/opening, and room creation), Room Information
 actions for copying a room link, inviting users, canceling pending invites,
-leaving with confirmation, and opening member DMs, TUI-parity keyboard
+leaving with confirmation, opening member DMs, room-state details (access,
+encryption, pinned messages, space relationships, and upgrade links), and a
+browser-local Spaces picker that filters the room list, TUI-parity keyboard
 shortcuts with a `/shortcuts` help overlay (ADR 0078, web keyboard shortcuts),
 live WebSocket updates for timelines/room previews/unread state, and live
 ephemeral overlays for typing indicators plus public read receipts.

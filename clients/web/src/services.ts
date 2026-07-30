@@ -36,6 +36,7 @@ import { roomTitle } from './stores/room-list'
 import { createRoomsStore, type RoomsStore } from './stores/rooms'
 import { createSearchStore, type SearchStore } from './stores/search'
 import { createSettingsStore, type SettingsStore } from './stores/settings'
+import { createSpacesStore, type SpacesStore } from './stores/spaces'
 import {
   createThreadUnreadStore,
   type ActiveThread,
@@ -57,6 +58,7 @@ export interface AppServices {
   settings: SettingsStore
   accounts: AccountsStore
   rooms: RoomsStore
+  spaces: SpacesStore
   search: SearchStore
   threadUnread: ThreadUnreadStore
   live: LiveConnection
@@ -363,6 +365,7 @@ export function createServices(
   const activeThread = signal<ActiveThread | null>(null)
   const composerFocus = signal(0)
   const deviceState = createDeviceStateStore(api, live, storage)
+  const spaces = createSpacesStore(api, rooms, live)
   connectUnreadCounts(live, rooms)
   connectLiveRooms(live, rooms)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
@@ -378,6 +381,7 @@ export function createServices(
     settings,
     accounts,
     rooms,
+    spaces,
     search,
     threadUnread,
     live,

@@ -116,6 +116,7 @@ export function RoomList() {
     accounts: accountStore,
     rooms,
     settings,
+    spaces,
     activeRoom,
     composerFocus,
   } = useServices()
@@ -165,6 +166,13 @@ export function RoomList() {
   }, [])
 
   const allRooms = rooms.rooms.value
+  const selectedSpace = spaces.selected.value
+  const selectedChildren =
+    selectedSpace === null
+      ? null
+      : (spaces.children.value.get(selectedSpace) ?? null)
+  const selectedSpaceAccount =
+    selectedSpace === null ? null : selectedSpace.split('/', 1)[0]
   const accounts = accountStore.accounts.value
   const activeAccounts = useMemo(
     () => accounts.filter((account) => account.state === 'active'),
@@ -217,7 +225,7 @@ export function RoomList() {
       unreadRooms: unreadKeys.size,
     })
     const next = visibleRooms(scopedRooms, {
-      accountFilter,
+      accountFilter: selectedSpaceAccount ?? accountFilter,
       nameQuery,
       roomFilter,
       roomSort,
@@ -225,8 +233,19 @@ export function RoomList() {
       roomTitles,
       hasUnread: (room) => unreadKeys.has(roomKey(room)),
     })
+    if (selectedChildren === null) {
+      perfMark('room-list:visible-compute:end', { visible: next.length })
+      return next
+    }
+    const byId = new Map(next.map((room) => [room.room_id, room]))
+    const ordered = selectedChildren
+      .map((child) => byId.get(child.room_id))
+      .filter(
+        (room): room is RoomDto =>
+          room !== undefined && room.account_id === selectedSpaceAccount,
+      )
     perfMark('room-list:visible-compute:end', { visible: next.length })
-    return next
+    return ordered
   }, [
     scopedRooms,
     accountFilter,
@@ -236,6 +255,8 @@ export function RoomList() {
     pinnedRooms,
     roomTitles,
     unreadKeys,
+    selectedSpaceAccount,
+    selectedChildren,
   ])
   useEffect(() => {
     if (

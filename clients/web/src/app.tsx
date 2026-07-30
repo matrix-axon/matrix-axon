@@ -10,6 +10,7 @@ import {
 import { ConnectionIndicator } from './components/ConnectionIndicator'
 import { PerfOverlay } from './components/PerfOverlay'
 import { RoomList } from './components/RoomList'
+import { SpaceList } from './components/SpaceList'
 import { SearchOverlay } from './components/SearchOverlay'
 import { ShortcutsHelp } from './components/ShortcutsHelp'
 import { UnreadThreadsPanel } from './components/UnreadThreadsPanel'
@@ -815,7 +816,10 @@ function ShellChrome() {
           class={`shell-body mode-${mode}${collapsed ? ' sidebar-collapsed' : ''}`}
         >
           <nav id="room-sidebar" class="sidebar" aria-label="Rooms">
-            <RoomList />
+            <SpaceList />
+            <div class="room-list-pane">
+              <RoomList />
+            </div>
           </nav>
           <main>
             <Router>

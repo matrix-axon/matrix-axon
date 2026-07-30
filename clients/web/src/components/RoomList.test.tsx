@@ -16,6 +16,7 @@ import { ServicesContext } from '../services'
 import { roomKey } from '../stores/room-list'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { RoomList } from './RoomList'
+import { SpaceList } from './SpaceList'
 
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
 const OTHER_ACCOUNT = '6b53f7f0-0000-4000-8000-000000000002'
@@ -100,6 +101,8 @@ function renderPage(
   options: {
     activeAccounts?: unknown[]
     readMarkers?: Record<string, unknown>
+    spaceChildren?: Record<string, unknown[]>
+    withSpaces?: boolean
   } = {},
 ) {
   const activeAccounts = options.activeAccounts ?? activeAccountsForRooms(rooms)
@@ -110,6 +113,13 @@ function renderPage(
     ),
     http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
       HttpResponse.json({ data: rooms }),
+    ),
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/space/children`,
+      ({ params }) =>
+        HttpResponse.json({
+          data: options.spaceChildren?.[String(params.roomId)] ?? [],
+        }),
     ),
     http.get(
       `${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`,
@@ -146,12 +156,45 @@ function renderPage(
     <ServicesContext.Provider value={services}>
       {/* RoomList reads useLocation for Ctrl-K / Ctrl-arrow navigation. */}
       <LocationProvider>
+        {options.withSpaces === true && <SpaceList />}
         <RoomList />
       </LocationProvider>
     </ServicesContext.Provider>,
   )
   return { services, ...utils }
 }
+
+it('filters the room list to the selected space children in server order', async () => {
+  const space = makeRoom({
+    room_id: '!whatsapp:hs',
+    name: 'WhatsApp',
+    room_type: 'm.space',
+  })
+  const first = makeRoom({ room_id: '!family:hs', name: 'Family' })
+  const second = makeRoom({ room_id: '!friends:hs', name: 'Friends' })
+  const { findByRole, getByRole, queryByRole } = renderPage(
+    [OPS, space, first, second],
+    undefined,
+    {
+      withSpaces: true,
+      spaceChildren: {
+        '!whatsapp:hs': [
+          { room_id: '!friends:hs', via: ['hs'], suggested: false },
+          { room_id: '!family:hs', via: ['hs'], suggested: false },
+        ],
+      },
+    },
+  )
+  await findByRole('button', { name: 'WhatsApp' })
+  fireEvent.click(getByRole('button', { name: 'WhatsApp' }))
+  await waitFor(() => expect(queryByRole('link', { name: /Ops/ })).toBeNull())
+  expect(await findByRole('link', { name: /Friends/ })).toBeTruthy()
+  const links = [...document.querySelectorAll('.room-link')]
+  expect(links.map((link) => link.textContent)).toEqual([
+    expect.stringContaining('Friends'),
+    expect.stringContaining('Family'),
+  ])
+})
 
 function roomActionsDetails(container: ParentNode): HTMLDetailsElement {
   const details = container.querySelector('.room-actions-menu')

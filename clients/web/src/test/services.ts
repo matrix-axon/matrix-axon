@@ -21,6 +21,7 @@ import { createLiveConnection } from '../stores/live-connection'
 import { createRoomsStore } from '../stores/rooms'
 import { createSearchStore } from '../stores/search'
 import { createSettingsStore } from '../stores/settings'
+import { createSpacesStore } from '../stores/spaces'
 import {
   createThreadUnreadStore,
   type ActiveThread,
@@ -88,6 +89,7 @@ export function testServices(
   const activeThread = signal<ActiveThread | null>(null)
   const composerFocus = signal(0)
   const deviceState = createDeviceStateStore(api, live, storage)
+  const spaces = createSpacesStore(api, rooms, live)
   connectUnreadCounts(live, rooms)
   connectLiveRooms(live, rooms)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
@@ -103,6 +105,7 @@ export function testServices(
     settings,
     accounts,
     rooms,
+    spaces,
     search,
     threadUnread,
     live,

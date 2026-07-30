@@ -57,6 +57,8 @@ export interface SettingsV1 {
    * that no longer exist; the room list simply won't match them.
    */
   pinnedRooms: string[]
+  /** Personal ordering for the joined-space picker, keyed like pinned rooms. */
+  spaceOrder: string[]
   /** Persisted room-list sort mode (ADR 0042). */
   roomSort: RoomSort
   /** Persisted room-list filter category (ADR 0042). */
@@ -124,6 +126,7 @@ const DEFAULTS: SettingsV1 = {
   theme: 'system',
   activeAccountId: null,
   pinnedRooms: [],
+  spaceOrder: [],
   roomSort: 'recent',
   roomFilter: 'all',
   sidebarCollapsed: false,
@@ -212,6 +215,9 @@ function parse(raw: string | null): SettingsV1 {
     pinnedRooms: Array.isArray(v1.pinnedRooms)
       ? v1.pinnedRooms.filter((key): key is string => typeof key === 'string')
       : [],
+    spaceOrder: Array.isArray(v1.spaceOrder)
+      ? v1.spaceOrder.filter((key): key is string => typeof key === 'string')
+      : [],
     roomSort: oneOf(ROOM_SORTS, v1.roomSort, DEFAULTS.roomSort),
     roomFilter: oneOf(ROOM_FILTERS, v1.roomFilter, DEFAULTS.roomFilter),
     sidebarCollapsed:
@@ -273,6 +279,7 @@ export interface SettingsStore {
   theme: Signal<Theme>
   activeAccountId: Signal<string | null>
   pinnedRooms: Signal<string[]>
+  spaceOrder: Signal<string[]>
   roomSort: Signal<RoomSort>
   roomFilter: Signal<RoomFilter>
   sidebarCollapsed: Signal<boolean>
@@ -293,6 +300,8 @@ export interface SettingsStore {
   pinRoom(key: string): void
   /** Unpin a room key; a no-op when it isn't pinned. */
   unpinRoom(key: string): void
+  /** Move a space key to a new position in the browser-local picker. */
+  moveSpace(key: string, toIndex: number): void
   /** Record a reaction key as recently used, newest first. */
   recordRecentReaction(key: string): void
 }
@@ -308,6 +317,7 @@ export function createSettingsStore(
   const theme = signal<Theme>(initial.theme)
   const activeAccountId = signal<string | null>(initial.activeAccountId)
   const pinnedRooms = signal<string[]>(initial.pinnedRooms)
+  const spaceOrder = signal<string[]>(initial.spaceOrder)
   const roomSort = signal<RoomSort>(initial.roomSort)
   const roomFilter = signal<RoomFilter>(initial.roomFilter)
   const sidebarCollapsed = signal<boolean>(initial.sidebarCollapsed)
@@ -330,6 +340,7 @@ export function createSettingsStore(
       theme: theme.value,
       activeAccountId: activeAccountId.value,
       pinnedRooms: pinnedRooms.value,
+      spaceOrder: spaceOrder.value,
       roomSort: roomSort.value,
       roomFilter: roomFilter.value,
       sidebarCollapsed: sidebarCollapsed.value,
@@ -356,6 +367,7 @@ export function createSettingsStore(
     theme,
     activeAccountId,
     pinnedRooms,
+    spaceOrder,
     roomSort,
     roomFilter,
     sidebarCollapsed,
@@ -374,6 +386,12 @@ export function createSettingsStore(
     },
     unpinRoom(key: string) {
       pinnedRooms.value = pinnedRooms.value.filter((k) => k !== key)
+    },
+    moveSpace(key: string, toIndex: number) {
+      const current = spaceOrder.value.filter((candidate) => candidate !== key)
+      const index = Math.max(0, Math.min(toIndex, current.length))
+      current.splice(index, 0, key)
+      spaceOrder.value = current
     },
     recordRecentReaction(key: string) {
       const trimmed = key.trim()

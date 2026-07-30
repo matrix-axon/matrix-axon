@@ -14,6 +14,7 @@ describe('createSettingsStore', () => {
       timeFormat: '12h',
       activeAccountId: null,
       pinnedRooms: [],
+      spaceOrder: [],
       roomSort: 'recent',
       roomFilter: 'all',
       sidebarCollapsed: false,
@@ -78,9 +79,26 @@ describe('room-list settings (ADRs 0038/0042)', () => {
       }),
     )
     expect(store.pinnedRooms.value).toEqual([])
+    expect(store.spaceOrder.value).toEqual([])
     expect(store.roomSort.value).toBe('recent')
     expect(store.roomFilter.value).toBe('all')
     expect(store.theme.value).toBe('dark')
+  })
+
+  it('persists browser-local space ordering', () => {
+    const storage = memoryStorage()
+    const store = createSettingsStore(storage)
+    store.moveSpace('account/!one:hs', 0)
+    store.moveSpace('account/!two:hs', 1)
+    store.moveSpace('account/!two:hs', 0)
+    expect(store.spaceOrder.value).toEqual([
+      'account/!two:hs',
+      'account/!one:hs',
+    ])
+    expect(createSettingsStore(storage).spaceOrder.value).toEqual([
+      'account/!two:hs',
+      'account/!one:hs',
+    ])
   })
 
   it('an envelope without sidebarCollapsed defaults it to false (ADR 0062)', () => {

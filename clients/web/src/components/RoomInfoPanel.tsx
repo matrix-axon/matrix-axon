@@ -1,6 +1,8 @@
 import { useLocation } from 'preact-iso'
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { inBackground } from '../api/client'
+import { timelineEvent } from '../api/frames'
+import type { components } from '../api/schema'
 import {
   localRoomHref,
   matrixToRoomReferenceLink,
@@ -23,6 +25,12 @@ import { BodyPortal } from './BodyPortal'
 import { ErrorBanner } from './ErrorBanner'
 import { useModalFocus } from './use-modal-focus'
 import { UserAvatar } from './UserAvatar'
+
+type RoomInfoDto = components['schemas']['RoomInfoDto']
+type RoomUpgradeDto = components['schemas']['RoomUpgradeDto']
+type SpaceChildDto = components['schemas']['SpaceChildDto']
+type SpaceParentDto = components['schemas']['SpaceParentDto']
+type EventDto = components['schemas']['EventDto']
 
 const MEMBERSHIP_ORDER = new Map([
   ['join', 0],
@@ -47,7 +55,7 @@ export function RoomInfoPanel({
   onClose: () => void
 }) {
   const location = useLocation()
-  const { rooms, search } = useServices()
+  const { rooms, search, api, live } = useServices()
   const inviteInput = useRef<HTMLInputElement>(null)
   const clearCopyStatus = useRef<number | null>(null)
   const [filter, setFilter] = useState('')
@@ -69,6 +77,24 @@ export function RoomInfoPanel({
   const [leaveStatus, setLeaveStatus] = useState<string | null>(null)
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false)
   const [leaveBusy, setLeaveBusy] = useState(false)
+  const [roomState, setRoomState] = useState<{
+    info: RoomInfoDto | null
+    pinned: readonly EventDto[] | null
+    children: readonly SpaceChildDto[] | null
+    parents: readonly SpaceParentDto[] | null
+    upgrade: RoomUpgradeDto | null
+    errors: Partial<
+      Record<'info' | 'pinned' | 'children' | 'parents' | 'upgrade', string>
+    >
+  }>({
+    info: null,
+    pinned: null,
+    children: null,
+    parents: null,
+    upgrade: null,
+    errors: {},
+  })
+  const [roomStateVersion, setRoomStateVersion] = useState(0)
   const displayTitle = room !== undefined ? roomTitle(room, roomTitles) : roomId
   const ownUserId = room?.account_user_id ?? null
   const homeServerName = serverNameFromRoomReference(ownUserId ?? roomId ?? '')
@@ -96,6 +122,103 @@ export function RoomInfoPanel({
       }
     }
   }, [])
+  useEffect(() => {
+    let cancelled = false
+    const load = <T,>(
+      key: 'info' | 'pinned' | 'children' | 'parents' | 'upgrade',
+      request: Promise<{ data?: { data: T } }>,
+    ) => {
+      void request.then(
+        ({ data }) => {
+          if (cancelled) return
+          setRoomState((current) =>
+            data === undefined
+              ? {
+                  ...current,
+                  errors: {
+                    ...current.errors,
+                    [key]: 'Could not load this section.',
+                  },
+                }
+              : {
+                  ...current,
+                  [key]: data.data,
+                  errors: { ...current.errors, [key]: undefined },
+                },
+          )
+        },
+        () =>
+          !cancelled &&
+          setRoomState((current) => ({
+            ...current,
+            errors: {
+              ...current.errors,
+              [key]: 'Could not load this section.',
+            },
+          })),
+      )
+    }
+    const params = {
+      params: { path: { account_id: accountId, room_id: roomId } },
+    }
+    load(
+      'info',
+      api.GET('/v1/accounts/{account_id}/rooms/{room_id}/info', params),
+    )
+    load(
+      'pinned',
+      api.GET('/v1/accounts/{account_id}/rooms/{room_id}/pinned', params),
+    )
+    load(
+      'children',
+      api.GET(
+        '/v1/accounts/{account_id}/rooms/{room_id}/space/children',
+        params,
+      ),
+    )
+    load(
+      'parents',
+      api.GET(
+        '/v1/accounts/{account_id}/rooms/{room_id}/space/parents',
+        params,
+      ),
+    )
+    load(
+      'upgrade',
+      api.GET('/v1/accounts/{account_id}/rooms/{room_id}/upgrade', params),
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [api, accountId, roomId, roomStateVersion])
+  useEffect(() => {
+    return live.subscribe((frame) => {
+      const event = timelineEvent(frame)
+      if (
+        event !== null &&
+        event.account_id === accountId &&
+        event.room_id === roomId &&
+        [
+          'm.room.join_rules',
+          'm.room.history_visibility',
+          'm.room.guest_access',
+          'm.room.encryption',
+          'm.room.pinned_events',
+          'm.space.child',
+          'm.space.parent',
+          'm.room.tombstone',
+          'm.room.create',
+        ].includes(event.type)
+      ) {
+        setRoomStateVersion((version) => version + 1)
+      }
+    })
+  }, [live, accountId, roomId])
+  useEffect(() => {
+    if (live.reconnects.value > 0) {
+      setRoomStateVersion((version) => version + 1)
+    }
+  }, [live.reconnects.value])
 
   const copyRoomLink = async () => {
     if (clearCopyStatus.current !== null) {
@@ -269,13 +392,92 @@ export function RoomInfoPanel({
               room?.last_event_id !== undefined && room.last_event_id !== null
             }
           />
-          <DetailRow label="Encryption" value="Unavailable from current API" />
-          <DetailRow label="Access" value="Unavailable from current API" />
           <DetailRow
-            label="Room type/version"
-            value="Unavailable from current API"
+            label="Encryption"
+            value={
+              roomState.info === null
+                ? 'Loading…'
+                : (roomState.info.encryption_algorithm ?? 'Unencrypted')
+            }
           />
+          <DetailRow
+            label="Access"
+            value={
+              roomState.info === null
+                ? 'Loading…'
+                : (roomState.info.join_rule ?? 'Unavailable')
+            }
+          />
+          <DetailRow
+            label="History visibility"
+            value={
+              roomState.info === null
+                ? 'Loading…'
+                : (roomState.info.history_visibility ?? 'Unavailable')
+            }
+          />
+          <DetailRow
+            label="Guest access"
+            value={
+              roomState.info === null
+                ? 'Loading…'
+                : (roomState.info.guest_access ?? 'Unavailable')
+            }
+          />
+          <DetailRow label="Room type" value={room?.room_type ?? 'None'} />
         </dl>
+        {roomState.errors.info !== undefined && (
+          <p class="error" role="alert">
+            {roomState.errors.info}
+          </p>
+        )}
+      </section>
+
+      <RoomStateLinks
+        children={roomState.children}
+        parents={roomState.parents}
+        upgrade={roomState.upgrade}
+        errors={roomState.errors}
+        onOpen={async (target, via) => {
+          const known = rooms.rooms.value.find(
+            (candidate) =>
+              candidate.account_id === accountId &&
+              candidate.room_id === target,
+          )
+          if (known !== undefined) {
+            location.route(localRoomHref(accountId, target, null))
+            onClose()
+            return
+          }
+          const result = await rooms.joinRoom(accountId, target, via)
+          if (result.ok) {
+            location.route(localRoomHref(accountId, result.roomId, null))
+            onClose()
+          }
+        }}
+      />
+
+      <section class="room-info-section" aria-labelledby="room-info-pinned">
+        <h3 id="room-info-pinned">Pinned messages</h3>
+        {roomState.errors.pinned !== undefined ? (
+          <p class="error" role="alert">
+            {roomState.errors.pinned}
+          </p>
+        ) : roomState.pinned === null ? (
+          <p class="muted">Loading pinned messages…</p>
+        ) : roomState.pinned.length === 0 ? (
+          <p class="muted">No pinned messages.</p>
+        ) : (
+          <ol class="pinned-message-list">
+            {roomState.pinned.map((event) => (
+              <li key={event.event_id}>
+                <a href={localRoomHref(accountId, roomId, event.event_id)}>
+                  {event.sender}: {eventSummary(event)}
+                </a>
+              </li>
+            ))}
+          </ol>
+        )}
       </section>
 
       <section class="room-info-section" aria-labelledby="room-info-actions">
@@ -557,6 +759,98 @@ function CancelInviteDialog({
       </div>
     </BodyPortal>
   )
+}
+
+function RoomStateLinks({
+  children,
+  parents,
+  upgrade,
+  errors,
+  onOpen,
+}: {
+  children: readonly SpaceChildDto[] | null
+  parents: readonly SpaceParentDto[] | null
+  upgrade: RoomUpgradeDto | null
+  errors: Partial<
+    Record<'info' | 'pinned' | 'children' | 'parents' | 'upgrade', string>
+  >
+  onOpen: (roomId: string, via: readonly string[]) => void
+}) {
+  const links = [
+    ...(parents ?? []).map((parent) => ({
+      label: `Parent: ${parent.name ?? parent.room_id}`,
+      roomId: parent.room_id,
+      via: parent.via,
+    })),
+    ...(children ?? []).map((child) => ({
+      label: `Child: ${child.name ?? child.room_id}`,
+      roomId: child.room_id,
+      via: child.via,
+    })),
+    ...(upgrade?.upgraded_from === null || upgrade?.upgraded_from === undefined
+      ? []
+      : [{ label: 'Upgraded from', roomId: upgrade.upgraded_from, via: [] }]),
+    ...(upgrade?.tombstoned_to === null || upgrade?.tombstoned_to === undefined
+      ? []
+      : [
+          {
+            label: 'Open replacement room',
+            roomId: upgrade.tombstoned_to,
+            via: [],
+          },
+        ]),
+  ]
+  if (
+    links.length === 0 &&
+    children === null &&
+    parents === null &&
+    upgrade === null
+  ) {
+    return (
+      <section class="room-info-section">
+        <h3>Spaces and upgrades</h3>
+        <p class="muted">Loading room relationships…</p>
+      </section>
+    )
+  }
+  return (
+    <section class="room-info-section" aria-labelledby="room-info-links">
+      <h3 id="room-info-links">Spaces and upgrades</h3>
+      {(['children', 'parents', 'upgrade'] as const).map(
+        (key) =>
+          errors[key] !== undefined && (
+            <p class="error" role="alert" key={key}>
+              {errors[key]}
+            </p>
+          ),
+      )}
+      {links.length === 0 ? (
+        <p class="muted">No related spaces or upgrade links.</p>
+      ) : (
+        <ul class="room-state-links">
+          {links.map((link) => (
+            <li key={`${link.label}:${link.roomId}`}>
+              <button
+                type="button"
+                class="ghost"
+                onClick={() => onOpen(link.roomId, link.via)}
+              >
+                {link.label}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function eventSummary(event: EventDto): string {
+  if (typeof event.content === 'object' && event.content !== null) {
+    const body = (event.content as { body?: unknown }).body
+    if (typeof body === 'string' && body.trim() !== '') return body
+  }
+  return event.type
 }
 
 function LeaveRoomDialog({

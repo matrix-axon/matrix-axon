@@ -373,11 +373,58 @@ body {
 .sidebar {
   flex: 0 0 var(--sidebar-width);
   min-width: 0;
+  display: flex;
+  overflow: hidden;
+  padding: 0;
+  border-right: 1px solid var(--border);
+  box-sizing: border-box;
+}
+
+.room-list-pane {
+  min-width: 0;
+  flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 1rem;
-  border-right: 1px solid var(--border);
   box-sizing: border-box;
+}
+
+.space-picker {
+  flex: 0 0 9rem;
+  min-width: 0;
+  margin: 0;
+  padding: 1rem 0.45rem;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+}
+
+.space-picker h2 {
+  margin: 0 0 0.4rem;
+  font-size: 0.9rem;
+}
+
+.space-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+.space-picker-entry {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.space-picker-entry.active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.space-order-controls {
+  display: flex;
+}
+.space-order-controls button {
+  padding: 0.1rem 0.25rem;
 }
 
 .shell main {
@@ -433,6 +480,35 @@ body {
    the timeline — exactly the pre-0062 behavior, reached via the brand link or
    browser back. */
 @media (max-width: 47.99rem) {
+  .sidebar {
+    display: block;
+    overflow-y: auto;
+  }
+
+  .space-picker {
+    display: flex;
+    gap: 0.25rem;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.6rem 1rem;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .space-picker h2,
+  .space-order-controls {
+    display: none;
+  }
+
+  .space-picker-row,
+  .space-picker-entry {
+    flex: 0 0 auto;
+  }
+
+  .room-list-pane {
+    overflow: visible;
+  }
+
   .shell.mobile-room-shell main {
     padding-top: 0.4rem;
     padding-bottom: 0.35rem;
