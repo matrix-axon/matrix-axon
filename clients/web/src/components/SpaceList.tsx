@@ -1,4 +1,5 @@
 import { useMemo, useRef } from 'preact/hooks'
+import { useMediaBlob } from '../media/use-media-blob'
 import { useServices } from '../services'
 import { roomKey, roomTitle, type RoomDto } from '../stores/room-list'
 
@@ -18,7 +19,7 @@ export function SpaceList() {
   )
 
   return (
-    <section class="space-picker" aria-label="Spaces">
+    <section id="spaces-pane" class="space-picker" aria-label="Spaces">
       <h2>Spaces</h2>
       <button
         type="button"
@@ -27,8 +28,10 @@ export function SpaceList() {
         }
         aria-pressed={selected === null}
         onClick={() => (spaces.selected.value = null)}
+        title="All rooms"
+        aria-label="All rooms"
       >
-        All rooms
+        All
       </button>
       {entries.map((space, index) => {
         const key = roomKey(space)
@@ -59,31 +62,43 @@ export function SpaceList() {
               aria-pressed={selected === key}
               onClick={() => (spaces.selected.value = key)}
               title={title}
+              aria-label={title}
             >
-              {title}
+              <SpaceAvatar
+                accountId={space.account_id}
+                room={space}
+                title={title}
+              />
             </button>
-            <span class="space-order-controls" aria-label={`Reorder ${title}`}>
-              <button
-                type="button"
-                disabled={index === 0}
-                aria-label={`Move ${title} up`}
-                onClick={() => settings.moveSpace(key, index - 1)}
-              >
-                ↑
-              </button>
-              <button
-                type="button"
-                disabled={index === entries.length - 1}
-                aria-label={`Move ${title} down`}
-                onClick={() => settings.moveSpace(key, index + 1)}
-              >
-                ↓
-              </button>
-            </span>
           </div>
         )
       })}
     </section>
+  )
+}
+
+function SpaceAvatar({
+  accountId,
+  room,
+  title,
+}: {
+  accountId: string
+  room: RoomDto
+  title: string
+}) {
+  const { ref, state } = useMediaBlob<HTMLSpanElement>(
+    accountId,
+    room.avatar_url ?? null,
+  )
+  const initial = title.trim().slice(0, 1).toLocaleUpperCase() || '?'
+  return (
+    <span ref={ref} class="space-avatar" aria-hidden="true">
+      {state.status === 'ready' && state.url !== undefined ? (
+        <img src={state.url} alt="" />
+      ) : (
+        initial
+      )}
+    </span>
   )
 }
 

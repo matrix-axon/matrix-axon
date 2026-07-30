@@ -51,8 +51,8 @@ test('scrolling reveals later rooms and retires earlier ones', async ({
   await expect(rows(page).first()).toBeVisible()
   await expect(page.getByText('E2E Room')).toBeVisible()
 
-  const sidebar = page.locator('.sidebar')
-  await sidebar.evaluate((el) => {
+  const roomListPane = page.locator('.room-list-pane')
+  await roomListPane.evaluate((el) => {
     el.scrollTop = el.scrollHeight
   })
 

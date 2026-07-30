@@ -59,6 +59,8 @@ export interface SettingsV1 {
   pinnedRooms: string[]
   /** Personal ordering for the joined-space picker, keyed like pinned rooms. */
   spaceOrder: string[]
+  /** Whether the desktop sidebar hides the spaces avatar rail. */
+  spacesPaneCollapsed: boolean
   /** Persisted room-list sort mode (ADR 0042). */
   roomSort: RoomSort
   /** Persisted room-list filter category (ADR 0042). */
@@ -127,6 +129,7 @@ const DEFAULTS: SettingsV1 = {
   activeAccountId: null,
   pinnedRooms: [],
   spaceOrder: [],
+  spacesPaneCollapsed: false,
   roomSort: 'recent',
   roomFilter: 'all',
   sidebarCollapsed: false,
@@ -218,6 +221,10 @@ function parse(raw: string | null): SettingsV1 {
     spaceOrder: Array.isArray(v1.spaceOrder)
       ? v1.spaceOrder.filter((key): key is string => typeof key === 'string')
       : [],
+    spacesPaneCollapsed:
+      typeof v1.spacesPaneCollapsed === 'boolean'
+        ? v1.spacesPaneCollapsed
+        : DEFAULTS.spacesPaneCollapsed,
     roomSort: oneOf(ROOM_SORTS, v1.roomSort, DEFAULTS.roomSort),
     roomFilter: oneOf(ROOM_FILTERS, v1.roomFilter, DEFAULTS.roomFilter),
     sidebarCollapsed:
@@ -280,6 +287,7 @@ export interface SettingsStore {
   activeAccountId: Signal<string | null>
   pinnedRooms: Signal<string[]>
   spaceOrder: Signal<string[]>
+  spacesPaneCollapsed: Signal<boolean>
   roomSort: Signal<RoomSort>
   roomFilter: Signal<RoomFilter>
   sidebarCollapsed: Signal<boolean>
@@ -318,6 +326,7 @@ export function createSettingsStore(
   const activeAccountId = signal<string | null>(initial.activeAccountId)
   const pinnedRooms = signal<string[]>(initial.pinnedRooms)
   const spaceOrder = signal<string[]>(initial.spaceOrder)
+  const spacesPaneCollapsed = signal<boolean>(initial.spacesPaneCollapsed)
   const roomSort = signal<RoomSort>(initial.roomSort)
   const roomFilter = signal<RoomFilter>(initial.roomFilter)
   const sidebarCollapsed = signal<boolean>(initial.sidebarCollapsed)
@@ -341,6 +350,7 @@ export function createSettingsStore(
       activeAccountId: activeAccountId.value,
       pinnedRooms: pinnedRooms.value,
       spaceOrder: spaceOrder.value,
+      spacesPaneCollapsed: spacesPaneCollapsed.value,
       roomSort: roomSort.value,
       roomFilter: roomFilter.value,
       sidebarCollapsed: sidebarCollapsed.value,
@@ -368,6 +378,7 @@ export function createSettingsStore(
     activeAccountId,
     pinnedRooms,
     spaceOrder,
+    spacesPaneCollapsed,
     roomSort,
     roomFilter,
     sidebarCollapsed,

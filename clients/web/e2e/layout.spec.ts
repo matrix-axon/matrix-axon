@@ -36,6 +36,27 @@ test('wide: sidebar beside the room-entry pane and timeline', async ({
   expect(await shown(page, '.timeline')).toBe('visible')
 })
 
+test('wide: spaces use a compact rail that can be hidden independently', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.goto('/')
+
+  const roomList = page.locator('.room-list-pane')
+  const widthWithSpaces = await width(page, '.room-list-pane')
+  await expect(page.locator('.space-picker')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Hide spaces' }).click()
+  await expect(page.locator('.space-picker')).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Show spaces' })).toBeVisible()
+  expect(await width(page, '.room-list-pane')).toBeGreaterThan(widthWithSpaces!)
+
+  await page.getByRole('button', { name: 'Show spaces' }).click()
+  await expect(page.locator('.space-picker')).toBeVisible()
+  await expect(roomList).toBeVisible()
+})
+
 test('narrow: room-list topbar uses icons instead of wrapping labels', async ({
   page,
 }) => {
@@ -393,7 +414,7 @@ test('narrow: room information scrolls when the member list overflows', async ({
   expect(initial.scrollTop).toBe(0)
 
   await panel.hover()
-  await page.mouse.wheel(0, 1600)
+  await page.mouse.wheel(0, 5000)
   await expect
     .poll(() => panel.evaluate((element) => element.scrollTop))
     .toBeGreaterThan(0)

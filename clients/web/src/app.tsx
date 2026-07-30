@@ -345,6 +345,7 @@ function ShellChrome() {
   const mode = layoutMode(path)
   perfMark('shell:render', { path, mode })
   const collapsed = settings.sidebarCollapsed.value
+  const spacesPaneCollapsed = settings.spacesPaneCollapsed.value
   const [helpOpen, setHelpOpen] = useState(false)
   const [unreadThreadsOpen, setUnreadThreadsOpen] = useState(false)
   const [jumpAction, setJumpActionState] = useState<(() => void) | null>(null)
@@ -733,6 +734,20 @@ function ShellChrome() {
               {collapsed ? 'Show rooms' : 'Hide rooms'}
             </button>
           )}
+          {mode !== 'utility' && !singlePane && !collapsed && (
+            <button
+              type="button"
+              class="ghost"
+              aria-expanded={!spacesPaneCollapsed}
+              aria-controls="spaces-pane"
+              title={spacesPaneCollapsed ? 'Show spaces' : 'Hide spaces'}
+              onClick={() =>
+                (settings.spacesPaneCollapsed.value = !spacesPaneCollapsed)
+              }
+            >
+              {spacesPaneCollapsed ? 'Show spaces' : 'Hide spaces'}
+            </button>
+          )}
           {mode === 'room' && jumpAction !== null && !singlePane && (
             <button
               type="button"
@@ -813,7 +828,7 @@ function ShellChrome() {
         )}
 
         <div
-          class={`shell-body mode-${mode}${collapsed ? ' sidebar-collapsed' : ''}`}
+          class={`shell-body mode-${mode}${collapsed ? ' sidebar-collapsed' : ''}${spacesPaneCollapsed ? ' spaces-pane-collapsed' : ''}`}
         >
           <nav id="room-sidebar" class="sidebar" aria-label="Rooms">
             <SpaceList />
