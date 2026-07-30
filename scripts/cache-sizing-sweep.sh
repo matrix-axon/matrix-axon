@@ -44,11 +44,23 @@ trap 'rm -rf "$tmp"' EXIT
 
 echo "=== /v1/rooms — the unpaginated room list (one record, on the boot path) ==="
 # Time it: at thousands of rooms this response gates every load and refresh.
-read -r rooms_time rooms_bytes < <(
+# Every request is status- and shape-checked before its numbers are used: a 500,
+# a rate limit, or a timeout must never be silently folded into the statistics
+# this script exists to produce.
+read -r rooms_code rooms_time rooms_bytes < <(
   curl -s -m 300 "${auth[@]}" -o "$tmp/rooms.json" \
-    -w '%{time_total} %{size_download}' "$BASE/v1/rooms"
+    -w '%{http_code} %{time_total} %{size_download}' "$BASE/v1/rooms"
 )
-room_count=$(jq -r '(.data | if type=="array" then . else .rooms end) | length' "$tmp/rooms.json")
+if [ "$rooms_code" != "200" ]; then
+  echo "GET /v1/rooms returned $rooms_code — aborting; the sweep has nothing to measure." >&2
+  exit 1
+fi
+# `/v1/rooms` responds `{data: [...]}` — a plain array, per
+# `ApiResponse<Vec<RoomDto>>` in crates/axon-api/src/routes/rooms.rs.
+if ! room_count=$(jq -e -r '.data | arrays | length' "$tmp/rooms.json" 2>/dev/null); then
+  echo "GET /v1/rooms was a 200 but not the expected {data: [...]} envelope — aborting." >&2
+  exit 1
+fi
 awk -v b="$rooms_bytes" -v n="$room_count" -v t="$rooms_time" 'BEGIN {
   printf "  rooms:          %d\n", n
   printf "  payload:        %d bytes (%.2f MB)\n", b, b/1048576
@@ -59,7 +71,7 @@ awk -v b="$rooms_bytes" -v n="$room_count" -v t="$rooms_time" 'BEGIN {
 
 echo
 echo "=== timeline pages (limit=$LIMIT) — the per-room cache record ==="
-jq -r '(.data | if type=="array" then . else .rooms end)[] | "\(.account_id)\t\(.room_id)"' \
+jq -r '.data[] | "\(.account_id)\t\(.room_id)"' \
   "$tmp/rooms.json" > "$tmp/all-rooms.tsv"
 total_rooms=$(wc -l < "$tmp/all-rooms.tsv")
 # Stride-sample across the recency order rather than taking the head, so the
@@ -70,21 +82,42 @@ echo "  sampling $(wc -l < "$tmp/sample.tsv") of $total_rooms rooms"
 echo
 
 printf "  %-40s %7s %10s %8s\n" room events bytes seconds
+skipped=0
 while IFS=$'\t' read -r acct room; do
   enc=$(printf '%s' "$room" | jq -sRr @uri)
-  read -r t b < <(
+  read -r code t b < <(
     curl -s -m 60 "${auth[@]}" -o "$tmp/page.json" \
-      -w '%{time_total} %{size_download}' \
+      -w '%{http_code} %{time_total} %{size_download}' \
       "$BASE/v1/accounts/$acct/rooms/$enc/timeline?limit=$LIMIT"
   )
-  n=$(jq -r '.data.events | length' "$tmp/page.json" 2>/dev/null)
-  [ -z "$n" ] && n=0
+  # Skip rather than coerce. A failed room contributes no row and no sample:
+  # counting it as 0 bytes / 0 events would drag the median and p95 the ADR
+  # quotes as ground truth, and would do it invisibly.
+  if [ "$code" != "200" ]; then
+    printf "  %-40s %7s %10s %8s  <- HTTP %s, skipped\n" "${room:0:38}" "-" "-" "-" "$code" >&2
+    skipped=$((skipped + 1))
+    continue
+  fi
+  if ! n=$(jq -e -r '.data.events | arrays | length' "$tmp/page.json" 2>/dev/null); then
+    printf "  %-40s %7s %10s %8s  <- unexpected envelope, skipped\n" "${room:0:38}" "-" "-" "-" >&2
+    skipped=$((skipped + 1))
+    continue
+  fi
   printf "  %-40s %7s %10s %8s\n" "${room:0:38}" "$n" "$b" "$t"
   printf '%s\t%s\n' "$b" "$n" >> "$tmp/sizes.tsv"
 done < "$tmp/sample.tsv"
 
 echo
 echo "=== distribution ==="
+if [ "$skipped" -gt 0 ]; then
+  # Say it in the results, not only in the log above: a distribution drawn from
+  # a partial sample must not be quoted as if it were complete.
+  echo "  WARNING: $skipped of $(wc -l < "$tmp/sample.tsv") sampled rooms failed and are excluded."
+fi
+if [ ! -s "$tmp/sizes.tsv" ]; then
+  echo "  no rooms measured successfully — nothing to report"
+  exit 1
+fi
 sort -n "$tmp/sizes.tsv" | awk -F'\t' '
   { bytes[NR] = $1; events[NR] = $2; sum += $1; ev += $2; if ($2 >= '"$LIMIT"') full++ }
   END {

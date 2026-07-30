@@ -19,6 +19,11 @@ query recomputes every summary from the whole `events` table (#85), and API
 responses are uncompressed (#86). The cache paints over both and replaces
 neither.
 
+Defaults differ by phase, because the data does: the **room-list cache is on by
+default** (metadata, of a kind already persisted today) while the
+**timeline-body cache is opt-in** (the first message plaintext written to disk,
+and worth only tens of milliseconds). See [Privacy](#privacy).
+
 The Context below is long because every parameter here is measured rather than
 estimated. **Readers who want the design first should skip to
 [Decision](#decision)**; readers checking whether the numbers support it should
@@ -478,13 +483,45 @@ excluded above. Nothing about verification or crypto state is cached.
 
 Caching message bodies writes **plaintext to the browser profile on disk**,
 including bodies that arrived from E2EE rooms — axon decrypts server-side, so
-the client has never held ciphertext. On a shared machine this is a real new
-exposure, even though a bearer token already sits in `localStorage`. It is
-mitigated, not eliminated, by: wipe on logout and token change; a Settings
-toggle to disable content caching entirely (the cache is optional by
-construction, so the toggle is a no-op adapter); no attachment bytes; and
-graceful degradation in private-browsing contexts where IDB is unavailable.
-The toggle ships in the same phase as the first content cache, not later.
+the client has never held ciphertext. On a shared machine that is a real new
+exposure.
+
+An earlier draft offered the bearer token already in `localStorage` as
+precedent. That comparison does not hold and is withdrawn: **a token is
+revocable and a cached conversation is not.** Revoking a token ends the access
+it grants; deleting a cache does nothing about a copy already read off the
+disk. Different risk classes, and the existing one does not license the new one.
+
+### The default is split, and the measurements are why
+
+The two caches hold different data and buy different amounts, so they get
+different defaults:
+
+- **Room-list cache: on by default.** It holds room names, topics, avatars,
+  aliases, unread counts, and last-activity timestamps — metadata, not message
+  text. It adds no new *category* of data at rest: the client already persists
+  resolved room titles, DM titles among them, in `localStorage` under
+  `axon.room_titles.v1` (`stores/rooms.ts:113`). And it is where essentially
+  all of the measured benefit lives, because the 1,298 ms is the room list's.
+- **Timeline-body cache: off by default, opt-in.** This is the new category of
+  data at rest, and it buys the least — timeline pages fetch in 6-68 ms.
+  Trading plaintext-on-disk for tens of milliseconds is a bad deal to make on a
+  user's behalf; offered as a choice, particularly for offline use, it is a
+  reasonable one to accept.
+
+This split was not the original proposal. It came out of review, replacing a
+single disable-everything toggle with both caches defaulting on. The practical
+consequence is that **phase 2 ships without anyone having to accept
+plaintext-at-rest by default**, and the decision moves to phase 3 where it can
+be made deliberately.
+
+Mitigations that apply to both: whole-cache wipe on any logout or token change;
+no attachment bytes, ever; and graceful degradation wherever IDB is
+unavailable, including private browsing.
+
+**The timeline default still wants explicit sign-off rather than acceptance by
+inheritance** — it is the one decision here that trades privacy for latency,
+and it should be agreed to out loud.
 
 ## Alternatives considered
 
@@ -522,9 +559,12 @@ Four PRs, in order, each independently shippable:
    `refreshHead` on re-entry (required regardless: live frames only reach the
    mounted room). Fixes room switching within a session; no storage involved.
 2. **`CacheStore` port + IDB adapter + room-list cache**, including the
-   `stale` signal, `RoomList`'s stale affordance, the settings toggle, and the
-   logout wipe.
-3. **Timeline tail cache**, including the cursor-unknown state.
+   `stale` signal, `RoomList`'s stale affordance, a setting to disable it, and
+   the logout wipe. Metadata only — no message bodies reach disk in this phase,
+   so it carries none of the privacy decision.
+3. **Timeline tail cache**, including the cursor-unknown state, **and the
+   opt-in setting that gates it** (off by default — see Privacy). This is the
+   phase that needs explicit sign-off before it ships.
 4. **Media Cache API layer — only if issue #23 stays deferred** (section 5).
    Phases 1-3 are unaffected by that decision and need not wait on it.
 
@@ -559,6 +599,10 @@ Four PRs, in order, each independently shippable:
   longer lists*, with `live.reconnects` re-running the last three steps.
 - A restore bug can show content from the wrong account or room. Cache keying
   and the logout wipe are correctness requirements with dedicated tests.
+- **The two phases carry different privacy weight, and the phasing reflects it.**
+  Phase 2 puts only metadata on disk, of a kind already persisted today; phase 3
+  is the first time message plaintext is written, and it is opt-in. A future
+  change that flips phase 3's default is a privacy decision, not a UX tweak.
 - Storage grows to a bounded ceiling per origin; quota rejection is a
   no-op path, already exercised by the title cache's precedent.
 - A `Cache-Control` header on the media routes becomes worthwhile either way
@@ -624,3 +668,10 @@ Four PRs, in order, each independently shippable:
   latter loses script-writable storage after 7 idle days. Quota turned out not
   to constrain anything, but eviction policy still does, and this is unaffected
   by the 41 GB figure.
+- **Needs an explicit yes, not silence: the timeline-body cache's opt-in
+  default.** Review (PR #84) declined to accept a plaintext-at-rest default
+  inherited from an ADR, which was the right call — the ADR now splits the
+  defaults so phase 2 carries none of that weight, and phase 3 must be signed
+  off before it ships. Whether opt-in is *sufficient* (as against not caching
+  bodies at all, or encrypting the cache with a key held outside it) is the
+  open part.
