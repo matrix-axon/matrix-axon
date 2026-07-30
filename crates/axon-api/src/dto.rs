@@ -36,6 +36,8 @@ pub struct RoomDto {
     pub avatar_url: Option<String>,
     /// Canonical alias (`m.room.canonical_alias`), if set.
     pub canonical_alias: Option<String>,
+    /// The room's `m.room.create` `type`, if any (for example `m.space`).
+    pub room_type: Option<String>,
     /// `origin_server_ts` of the most recent event, in milliseconds — the sort key.
     pub last_activity_ts: i64,
     /// The most recent event's id, if the room has any events.
@@ -62,6 +64,7 @@ impl From<RoomSummary> for RoomDto {
             topic: r.topic,
             avatar_url: r.avatar_url,
             canonical_alias: r.canonical_alias,
+            room_type: r.room_type,
             last_activity_ts: r.last_activity_ts,
             last_event_id: r.last_event_id,
             notification_count: r.notification_count,

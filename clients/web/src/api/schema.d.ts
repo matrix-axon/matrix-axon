@@ -2106,6 +2106,8 @@ export interface components {
                 notification_count: number;
                 /** @description Matrix room ID. */
                 room_id: string;
+                /** @description The room's `m.room.create` `type`, if any (for example `m.space`). */
+                room_type?: string | null;
                 /** @description Room topic (`m.room.topic`), if set. */
                 topic?: string | null;
             }[];
@@ -2858,6 +2860,8 @@ export interface components {
             notification_count: number;
             /** @description Matrix room ID. */
             room_id: string;
+            /** @description The room's `m.room.create` `type`, if any (for example `m.space`). */
+            room_type?: string | null;
             /** @description Room topic (`m.room.topic`), if set. */
             topic?: string | null;
         };

@@ -793,6 +793,19 @@ async fn read_api_end_to_end() {
         .await
         .expect("name");
     store
+        .upsert_room_state(&RoomStateUpsert {
+            account_id,
+            room_id: &room_id,
+            event_type: "m.room.create",
+            state_key: "",
+            event_id: "$create:localhost",
+            sender: "@alice:localhost",
+            origin_ts: 1_600,
+            content: Some(json!({ "type": "m.space" })),
+        })
+        .await
+        .expect("create state");
+    store
         .upsert_room_unread_counts(account_id, &room_id, 3, 1)
         .await
         .expect("seed unread counts");
@@ -833,6 +846,7 @@ async fn read_api_end_to_end() {
     assert_eq!(room["last_event_id"], e2.as_str());
     assert_eq!(room["account_id"], account_id.to_string());
     assert_eq!(room["account_user_id"], account_user_id);
+    assert_eq!(room["room_type"], "m.space");
     assert_eq!(room["notification_count"], 3);
     assert_eq!(room["highlight_count"], 1);
 

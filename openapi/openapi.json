@@ -8024,6 +8024,13 @@
                   "type": "string",
                   "description": "Matrix room ID."
                 },
+                "room_type": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The room's `m.room.create` `type`, if any (for example `m.space`)."
+                },
                 "topic": {
                   "type": [
                     "string",
@@ -9433,6 +9440,13 @@
           "room_id": {
             "type": "string",
             "description": "Matrix room ID."
+          },
+          "room_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The room's `m.room.create` `type`, if any (for example `m.space`)."
           },
           "topic": {
             "type": [

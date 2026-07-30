@@ -33,6 +33,8 @@ pub struct RoomSummary {
     pub avatar_url: Option<String>,
     /// `m.room.canonical_alias` → `content.alias`, if set.
     pub canonical_alias: Option<String>,
+    /// `m.room.create` → `content.type`, if set (for example `m.space`).
+    pub room_type: Option<String>,
     /// `MAX(origin_ts)` over the room's events, in milliseconds — the sort key.
     pub last_activity_ts: i64,
     /// The `event_id` at `last_activity_ts` (latest by `(origin_ts, id)`).
@@ -58,6 +60,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomSummary {
             topic: row.try_get("topic")?,
             avatar_url: row.try_get("avatar_url")?,
             canonical_alias: row.try_get("canonical_alias")?,
+            room_type: row.try_get("room_type")?,
             last_activity_ts: row.try_get("last_activity_ts")?,
             last_event_id: row.try_get("last_event_id")?,
             notification_count: row.try_get("notification_count")?,
@@ -72,7 +75,7 @@ impl Store {
     /// (each tagged with its own `account_id`).
     ///
     /// One query: a per-`(account_id, room_id)` aggregate over `events` supplies
-    /// the activity timestamp and the latest event id, four correlated
+    /// the activity timestamp and the latest event id, five correlated
     /// sub-selects pull the display fields from the `room_state` projection by
     /// its primary key (so they are single-row index lookups, not scans), and
     /// two more correlated sub-selects into `room_unread_counts` (issue #313,
@@ -113,6 +116,9 @@ impl Store {
                        WHERE rs.account_id = a.account_id AND rs.room_id = a.room_id \
                          AND rs.event_type = 'm.room.canonical_alias' AND rs.state_key = '') \
                          AS canonical_alias, \
+                    (SELECT rs.content->>'type' FROM room_state rs \
+                       WHERE rs.account_id = a.account_id AND rs.room_id = a.room_id \
+                         AND rs.event_type = 'm.room.create' AND rs.state_key = '') AS room_type, \
                     COALESCE((SELECT ruc.notification_count FROM room_unread_counts ruc \
                        WHERE ruc.account_id = a.account_id AND ruc.room_id = a.room_id), 0) \
                        AS notification_count, \

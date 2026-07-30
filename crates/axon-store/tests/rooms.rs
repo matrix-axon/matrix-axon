@@ -115,6 +115,14 @@ async fn list_rooms_orders_by_activity_with_summary_fields() {
         json!({ "alias": "#alpha:localhost" }),
     )
     .await;
+    set_state(
+        &store,
+        account_id,
+        &room_a,
+        "m.room.create",
+        json!({ "type": "m.space" }),
+    )
+    .await;
 
     // Room B: a single, newer event (ts 3000) and no state — sorts first.
     let b_latest = insert_message(&store, account_id, &room_b, 3_000, "newest").await;
@@ -134,6 +142,7 @@ async fn list_rooms_orders_by_activity_with_summary_fields() {
     assert_eq!(rooms[0].last_activity_ts, 3_000);
     assert_eq!(rooms[0].last_event_id.as_deref(), Some(b_latest.as_str()));
     assert!(rooms[0].name.is_none(), "room B has no name state");
+    assert_eq!(rooms[0].room_type, None);
     assert_eq!(
         rooms[0].notification_count, 0,
         "room B has no unread-counts row yet — reads as 0, not NULL"
@@ -151,6 +160,7 @@ async fn list_rooms_orders_by_activity_with_summary_fields() {
         rooms[1].canonical_alias.as_deref(),
         Some("#alpha:localhost")
     );
+    assert_eq!(rooms[1].room_type.as_deref(), Some("m.space"));
     assert_eq!(rooms[1].notification_count, 4);
     assert_eq!(rooms[1].highlight_count, 1);
 
