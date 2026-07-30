@@ -331,8 +331,16 @@ export interface SettingsStore {
   pinRoom(key: string): void
   /** Unpin a room key; a no-op when it isn't pinned. */
   unpinRoom(key: string): void
-  /** Move a space key to a new position in the browser-local picker. */
-  moveSpace(key: string, toIndex: number): void
+  /**
+   * Move a space key to a new position in the browser-local picker.
+   *
+   * `visibleKeys` is the picker's full displayed order, which `toIndex` indexes
+   * into. The persisted order only holds keys the user has already moved, so it
+   * has to be materialized against the displayed order before splicing —
+   * clamping `toIndex` against the stored array alone silently turned every
+   * downward move into an insert near the top.
+   */
+  moveSpace(key: string, toIndex: number, visibleKeys: readonly string[]): void
   /** Record a reaction key as recently used, newest first. */
   recordRecentReaction(key: string): void
 }
@@ -427,11 +435,16 @@ export function createSettingsStore(
     unpinRoom(key: string) {
       pinnedRooms.value = pinnedRooms.value.filter((k) => k !== key)
     },
-    moveSpace(key: string, toIndex: number) {
-      const current = spaceOrder.value.filter((candidate) => candidate !== key)
+    moveSpace(key: string, toIndex: number, visibleKeys: readonly string[]) {
+      // Keys the picker no longer shows stay ranked, so a space that is briefly
+      // absent (an account still syncing) keeps its place.
+      const hidden = spaceOrder.value.filter(
+        (candidate) => candidate !== key && !visibleKeys.includes(candidate),
+      )
+      const current = visibleKeys.filter((candidate) => candidate !== key)
       const index = Math.max(0, Math.min(toIndex, current.length))
       current.splice(index, 0, key)
-      spaceOrder.value = current
+      spaceOrder.value = [...current, ...hidden]
     },
     recordRecentReaction(key: string) {
       const trimmed = key.trim()

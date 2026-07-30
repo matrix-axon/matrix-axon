@@ -8,6 +8,7 @@ import {
   useState,
 } from 'preact/hooks'
 import { layoutMode } from '../layout'
+import { localRoomHref } from '../matrix-to'
 import { useMediaBlob } from '../media/use-media-blob'
 import { useServices } from '../services'
 import { ErrorBanner } from './ErrorBanner'
@@ -171,8 +172,25 @@ export function RoomList() {
     selectedSpace === null
       ? null
       : (spaces.children.value.get(selectedSpace) ?? null)
+  // A space whose children have not loaded must not read as "this space
+  // contains everything": until the fetch resolves the scope is unknown, so the
+  // list shows why rather than silently falling back to the account filter.
+  const spaceScope: 'none' | 'ready' | 'loading' | 'failed' =
+    selectedSpace === null
+      ? 'none'
+      : selectedChildren !== null
+        ? 'ready'
+        : spaces.errors.value.has(selectedSpace)
+          ? 'failed'
+          : 'loading'
+  const spaceScopeError =
+    selectedSpace === null ? undefined : spaces.errors.value.get(selectedSpace)
   const selectedSpaceAccount =
     selectedSpace === null ? null : selectedSpace.split('/', 1)[0]
+  const selectedSpaceRoom =
+    selectedSpace === null
+      ? undefined
+      : allRooms.find((room) => roomKey(room) === selectedSpace)
   const accounts = accountStore.accounts.value
   const activeAccounts = useMemo(
     () => accounts.filter((account) => account.state === 'active'),
@@ -236,8 +254,9 @@ export function RoomList() {
       hasUnread: (room) => unreadKeys.has(roomKey(room)),
     })
     if (selectedChildren === null) {
-      perfMark('room-list:visible-compute:end', { visible: next.length })
-      return next
+      const visible = spaceScope === 'none' ? next : []
+      perfMark('room-list:visible-compute:end', { visible: visible.length })
+      return visible
     }
     const childIds = new Set(selectedChildren.map((child) => child.room_id))
     const scoped = next.filter(
@@ -257,6 +276,7 @@ export function RoomList() {
     unreadKeys,
     selectedSpaceAccount,
     selectedChildren,
+    spaceScope,
   ])
   useEffect(() => {
     if (
@@ -808,6 +828,63 @@ export function RoomList() {
         )}
       </div>
 
+      {selectedSpace !== null && (
+        <div class="space-scope">
+          <p class="space-scope-title">
+            {selectedSpaceRoom === undefined
+              ? 'Selected space'
+              : roomTitle(selectedSpaceRoom, roomTitles)}
+          </p>
+          <div class="space-scope-actions">
+            {/* Joined spaces are filtered out of the list below, so this is the
+                only way to reach a space's own timeline, topic or leave
+                action. */}
+            {selectedSpaceRoom !== undefined && (
+              <button
+                type="button"
+                class="ghost"
+                onClick={() =>
+                  navigateToRoom(
+                    selectedSpaceRoom,
+                    localRoomHref(
+                      selectedSpaceRoom.account_id,
+                      selectedSpaceRoom.room_id,
+                      null,
+                    ),
+                  )
+                }
+              >
+                Open space room
+              </button>
+            )}
+            <button
+              type="button"
+              class="ghost"
+              onClick={() => (spaces.selected.value = null)}
+            >
+              Show all rooms
+            </button>
+          </div>
+          {spaceScope === 'loading' && <p class="muted">Loading space rooms…</p>}
+          {spaceScope === 'failed' && (
+            <p class="error" role="alert">
+              {spaceScopeError ?? 'Could not load space.'}{' '}
+              <button
+                type="button"
+                class="ghost"
+                onClick={() =>
+                  selectedSpaceRoom !== undefined &&
+                  spaces.refresh(selectedSpaceRoom)
+                }
+                disabled={selectedSpaceRoom === undefined}
+              >
+                Retry
+              </button>
+            </p>
+          )}
+        </div>
+      )}
+
       {rooms.loading.value ? (
         <p>Loading rooms…</p>
       ) : allRooms.length === 0 ? (
@@ -816,7 +893,9 @@ export function RoomList() {
           stored events.
         </p>
       ) : visible.length === 0 ? (
-        <p>No rooms match the current filter.</p>
+        spaceScope === 'loading' || spaceScope === 'failed' ? null : (
+          <p>No rooms match the current filter.</p>
+        )
       ) : (
         <ul
           class="room-list"

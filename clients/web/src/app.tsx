@@ -485,9 +485,15 @@ function ShellChrome() {
     [roomEntries],
   )
   const hasSpaces = joinedSpaces.length > 0
+  // Auto-hiding a lone space is tracked separately from a deliberate collapse:
+  // single-pane widths have no toggle at all, so a persisted manual collapse
+  // would otherwise be unrecoverable there (see index.css).
+  const spacesPaneAutoHidden =
+    !settings.spacesPaneCollapsed.value &&
+    settings.spacesPaneAutoHide.value &&
+    joinedSpaces.length <= 1
   const spacesPaneCollapsed =
-    settings.spacesPaneCollapsed.value ||
-    (settings.spacesPaneAutoHide.value && joinedSpaces.length <= 1)
+    settings.spacesPaneCollapsed.value || spacesPaneAutoHidden
   const unreadThreadCount = threadUnread.count.value
   const roomTitleButton = useRef<HTMLButtonElement>(null)
   const startupThreadScrubbed = useRef(false)
@@ -812,6 +818,13 @@ function ShellChrome() {
         event.preventDefault()
         toggleSpacesPane()
       },
+      'mod+alt+r': (event) => {
+        // Unlike the other space chords this one is useful in single-pane mode,
+        // where the picker is a horizontal strip and drag-and-drop is absent.
+        if (mode === 'utility' || !hasSpaces) return
+        event.preventDefault()
+        spaces.reordering.value = !spaces.reordering.value
+      },
       'mod+alt+[': (event) => {
         if (mode === 'utility' || singlePane || !hasSpaces) return
         event.preventDefault()
@@ -956,7 +969,7 @@ function ShellChrome() {
         )}
 
         <div
-          class={`shell-body mode-${mode}${collapsed ? ' sidebar-collapsed' : ''}${spacesPaneCollapsed ? ' spaces-pane-collapsed' : ''}`}
+          class={`shell-body mode-${mode}${collapsed ? ' sidebar-collapsed' : ''}${spacesPaneCollapsed ? ' spaces-pane-collapsed' : ''}${spacesPaneAutoHidden ? ' spaces-pane-auto-hidden' : ''}`}
         >
           <nav
             id="room-sidebar"

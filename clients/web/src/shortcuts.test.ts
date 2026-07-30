@@ -98,6 +98,8 @@ describe('SHORTCUTS', () => {
     expect(spaces?.rows.map((row) => row.keys)).toEqual([
       KEYS.toggleSpaces,
       KEYS.spaceStep,
+      KEYS.reorderSpaces,
+      'Alt-↑ / Alt-↓',
     ])
   })
 })

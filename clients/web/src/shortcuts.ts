@@ -172,6 +172,18 @@ export const KEYS = {
     appleLabel: '⌘-Option-S',
     appleAria: 'Meta+Alt+S',
   },
+  /**
+   * Reordering controls are hidden by default: the rail is deliberately narrow
+   * and a per-space pair of arrows would cost every row vertical space for a
+   * rare action. This chord surfaces them for pointer and touch users; keyboard
+   * users can move a focused space with Alt-↑/↓ without leaving it on.
+   */
+  reorderSpaces: {
+    label: 'Ctrl-Alt-R',
+    aria: 'Control+Alt+R',
+    appleLabel: '⌘-Option-R',
+    appleAria: 'Meta+Alt+R',
+  },
   spaceStep: {
     label: 'Ctrl-Alt-[ / Ctrl-Alt-]',
     aria: 'Control+Alt+[ Control+Alt+]',
@@ -295,6 +307,14 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
     rows: [
       { keys: KEYS.toggleSpaces, description: 'Show or hide spaces' },
       { keys: KEYS.spaceStep, description: 'Previous / next space' },
+      {
+        keys: KEYS.reorderSpaces,
+        description: 'Show or hide the space reordering controls',
+      },
+      {
+        keys: 'Alt-↑ / Alt-↓',
+        description: 'Move the focused space up or down',
+      },
     ],
   },
   {

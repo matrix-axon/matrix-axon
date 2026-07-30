@@ -10,6 +10,7 @@ import {
   serverNameFromRoomReference,
 } from '../matrix-to'
 import { parseUserIdList } from '../matrix-user'
+import { joinRoomError } from '../room-entry'
 import { useServices } from '../services'
 import type { MembersStore } from '../stores/members'
 import {
@@ -31,6 +32,31 @@ type RoomUpgradeDto = components['schemas']['RoomUpgradeDto']
 type SpaceChildDto = components['schemas']['SpaceChildDto']
 type SpaceParentDto = components['schemas']['SpaceParentDto']
 type EventDto = components['schemas']['EventDto']
+
+type RoomStateKey = 'info' | 'pinned' | 'children' | 'parents' | 'upgrade'
+
+interface RoomStateSlice {
+  /** `accountId/roomId` the rest of this slice was loaded for. */
+  key: string
+  info: RoomInfoDto | null
+  pinned: readonly EventDto[] | null
+  children: readonly SpaceChildDto[] | null
+  parents: readonly SpaceParentDto[] | null
+  upgrade: RoomUpgradeDto | null
+  errors: Partial<Record<RoomStateKey, string>>
+}
+
+function emptyRoomState(key: string): RoomStateSlice {
+  return {
+    key,
+    info: null,
+    pinned: null,
+    children: null,
+    parents: null,
+    upgrade: null,
+    errors: {},
+  }
+}
 
 const MEMBERSHIP_ORDER = new Map([
   ['join', 0],
@@ -74,26 +100,32 @@ export function RoomInfoPanel({
   const [cancelInviteStatus, setCancelInviteStatus] = useState<string | null>(
     null,
   )
+  const [joinLink, setJoinLink] = useState<{
+    roomId: string
+    via: readonly string[]
+    label: string
+  } | null>(null)
+  const [joinLinkBusy, setJoinLinkBusy] = useState(false)
+  const [joinLinkStatus, setJoinLinkStatus] = useState<string | null>(null)
   const [leaveStatus, setLeaveStatus] = useState<string | null>(null)
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false)
   const [leaveBusy, setLeaveBusy] = useState(false)
-  const [roomState, setRoomState] = useState<{
-    info: RoomInfoDto | null
-    pinned: readonly EventDto[] | null
-    children: readonly SpaceChildDto[] | null
-    parents: readonly SpaceParentDto[] | null
-    upgrade: RoomUpgradeDto | null
-    errors: Partial<
-      Record<'info' | 'pinned' | 'children' | 'parents' | 'upgrade', string>
-    >
-  }>({
-    info: null,
-    pinned: null,
-    children: null,
-    parents: null,
-    upgrade: null,
-    errors: {},
-  })
+  // `RoomPage` deliberately keeps one panel instance across room navigation, so
+  // this state has to be keyed by room itself: without it, switching rooms with
+  // the drawer open leaves the previous room's encryption, access and pinned
+  // messages on screen until the new fetches land — and indefinitely if they
+  // fail. The key is compared during render so no stale frame is ever shown.
+  const roomStateKey = `${accountId}/${roomId}`
+  const [loadedState, setRoomState] = useState<RoomStateSlice>(() =>
+    emptyRoomState(roomStateKey),
+  )
+  const roomState =
+    loadedState.key === roomStateKey ? loadedState : emptyRoomState(roomStateKey)
+  /** Room-state details, with a failed `/info` reported rather than pending. */
+  const infoValue = (pick: (info: RoomInfoDto) => string) => {
+    if (roomState.info !== null) return pick(roomState.info)
+    return roomState.errors.info === undefined ? 'Loading…' : 'Unavailable'
+  }
   const [roomStateVersion, setRoomStateVersion] = useState(0)
   const displayTitle = room !== undefined ? roomTitle(room, roomTitles) : roomId
   const ownUserId = room?.account_user_id ?? null
@@ -143,39 +175,36 @@ export function RoomInfoPanel({
   }, [])
   useEffect(() => {
     let cancelled = false
+    const stateKey = `${accountId}/${roomId}`
+    // Writes always land on the slice for the room they were issued for, never
+    // on whatever room the panel has since moved to.
+    const forRoom = (current: RoomStateSlice) =>
+      current.key === stateKey ? current : emptyRoomState(stateKey)
     const load = <T,>(
-      key: 'info' | 'pinned' | 'children' | 'parents' | 'upgrade',
+      key: RoomStateKey,
       request: Promise<{ data?: { data: T } }>,
     ) => {
-      void request.then(
-        ({ data }) => {
-          if (cancelled) return
-          setRoomState((current) =>
-            data === undefined
-              ? {
-                  ...current,
-                  errors: {
-                    ...current.errors,
-                    [key]: 'Could not load this section.',
-                  },
-                }
-              : {
-                  ...current,
-                  [key]: data.data,
-                  errors: { ...current.errors, [key]: undefined },
-                },
-          )
-        },
-        () =>
-          !cancelled &&
-          setRoomState((current) => ({
-            ...current,
-            errors: {
-              ...current.errors,
-              [key]: 'Could not load this section.',
-            },
-          })),
-      )
+      const fail = () =>
+        !cancelled &&
+        setRoomState((current) => ({
+          ...forRoom(current),
+          errors: {
+            ...forRoom(current).errors,
+            [key]: 'Could not load this section.',
+          },
+        }))
+      void request.then(({ data }) => {
+        if (cancelled) return
+        if (data === undefined) {
+          fail()
+          return
+        }
+        setRoomState((current) => ({
+          ...forRoom(current),
+          [key]: data.data,
+          errors: { ...forRoom(current).errors, [key]: undefined },
+        }))
+      }, fail)
     }
     const params = {
       params: { path: { account_id: accountId, room_id: roomId } },
@@ -351,6 +380,23 @@ export function RoomInfoPanel({
     location.route('/', true)
   }
 
+  const joinLinkedRoom = async (target: {
+    roomId: string
+    via: readonly string[]
+    label: string
+  }) => {
+    setJoinLinkBusy(true)
+    const result = await rooms.joinRoom(accountId, target.roomId, target.via)
+    setJoinLinkBusy(false)
+    setJoinLink(null)
+    if (!result.ok) {
+      setJoinLinkStatus(joinRoomError(target.label, result))
+      return
+    }
+    location.route(localRoomHref(accountId, result.roomId, null))
+    onClose()
+  }
+
   return (
     <aside
       id="room-info-panel"
@@ -413,35 +459,23 @@ export function RoomInfoPanel({
           />
           <DetailRow
             label="Encryption"
-            value={
-              roomState.info === null
-                ? 'Loading…'
-                : (roomState.info.encryption_algorithm ?? 'Unencrypted')
-            }
+            value={infoValue(
+              (info) => info.encryption_algorithm ?? 'Unencrypted',
+            )}
           />
           <DetailRow
             label="Access"
-            value={
-              roomState.info === null
-                ? 'Loading…'
-                : (roomState.info.join_rule ?? 'Unavailable')
-            }
+            value={infoValue((info) => info.join_rule ?? 'Unavailable')}
           />
           <DetailRow
             label="History visibility"
-            value={
-              roomState.info === null
-                ? 'Loading…'
-                : (roomState.info.history_visibility ?? 'Unavailable')
-            }
+            value={infoValue(
+              (info) => info.history_visibility ?? 'Unavailable',
+            )}
           />
           <DetailRow
             label="Guest access"
-            value={
-              roomState.info === null
-                ? 'Loading…'
-                : (roomState.info.guest_access ?? 'Unavailable')
-            }
+            value={infoValue((info) => info.guest_access ?? 'Unavailable')}
           />
           <DetailRow label="Room type" value={room?.room_type ?? 'None'} />
         </dl>
@@ -457,7 +491,8 @@ export function RoomInfoPanel({
         parents={parents}
         upgrade={roomState.upgrade}
         errors={roomState.errors}
-        onOpen={async (target, via) => {
+        status={joinLinkStatus}
+        onOpen={(target, via, label) => {
           const known = rooms.rooms.value.find(
             (candidate) =>
               candidate.account_id === accountId &&
@@ -468,11 +503,10 @@ export function RoomInfoPanel({
             onClose()
             return
           }
-          const result = await rooms.joinRoom(accountId, target, via)
-          if (result.ok) {
-            location.route(localRoomHref(accountId, result.roomId, null))
-            onClose()
-          }
+          // Opening an unjoined relation means joining it — a membership
+          // change the button label does not imply, so it is confirmed first.
+          setJoinLinkStatus(null)
+          setJoinLink({ roomId: target, via, label })
         }}
       />
 
@@ -704,6 +738,17 @@ export function RoomInfoPanel({
           onConfirm={() => void leaveRoom()}
         />
       )}
+      {joinLink !== null && (
+        <JoinLinkedRoomDialog
+          label={joinLink.label}
+          roomId={joinLink.roomId}
+          busy={joinLinkBusy}
+          onCancel={() => {
+            if (!joinLinkBusy) setJoinLink(null)
+          }}
+          onConfirm={() => void joinLinkedRoom(joinLink)}
+        />
+      )}
       {cancelInviteMember !== null && (
         <CancelInviteDialog
           member={cancelInviteMember}
@@ -823,15 +868,15 @@ function RoomStateLinks({
   parents,
   upgrade,
   errors,
+  status,
   onOpen,
 }: {
   children: readonly SpaceChildDto[] | null
   parents: readonly SpaceParentDto[] | null
   upgrade: RoomUpgradeDto | null
-  errors: Partial<
-    Record<'info' | 'pinned' | 'children' | 'parents' | 'upgrade', string>
-  >
-  onOpen: (roomId: string, via: readonly string[]) => void
+  errors: Partial<Record<RoomStateKey, string>>
+  status: string | null
+  onOpen: (roomId: string, via: readonly string[], label: string) => void
 }) {
   const links = [
     ...(parents ?? []).map((parent) => ({
@@ -857,11 +902,18 @@ function RoomStateLinks({
           },
         ]),
   ]
+  const failed = (['children', 'parents', 'upgrade'] as const).filter(
+    (key) => errors[key] !== undefined,
+  )
+  // Nothing loaded *and* nothing failed is the only genuinely pending case. If
+  // every read failed — the offline case — this used to take the same branch
+  // and sit at "Loading…" forever with the errors suppressed.
   if (
     links.length === 0 &&
     children === null &&
     parents === null &&
-    upgrade === null
+    upgrade === null &&
+    failed.length === 0
   ) {
     return (
       <section class="room-info-section">
@@ -873,30 +925,32 @@ function RoomStateLinks({
   return (
     <section class="room-info-section" aria-labelledby="room-info-links">
       <h3 id="room-info-links">Spaces and upgrades</h3>
-      {(['children', 'parents', 'upgrade'] as const).map(
-        (key) =>
-          errors[key] !== undefined && (
-            <p class="error" role="alert" key={key}>
-              {errors[key]}
-            </p>
-          ),
-      )}
-      {links.length === 0 ? (
+      {failed.map((key) => (
+        <p class="error" role="alert" key={key}>
+          {errors[key]}
+        </p>
+      ))}
+      {links.length === 0 && failed.length === 0 ? (
         <p class="muted">No related spaces or upgrade links.</p>
-      ) : (
+      ) : links.length === 0 ? null : (
         <ul class="room-state-links">
           {links.map((link) => (
             <li key={`${link.label}:${link.roomId}`}>
               <button
                 type="button"
                 class="ghost"
-                onClick={() => onOpen(link.roomId, link.via)}
+                onClick={() => onOpen(link.roomId, link.via, link.label)}
               >
                 {link.label}
               </button>
             </li>
           ))}
         </ul>
+      )}
+      {status !== null && (
+        <p class="error" role="alert">
+          {status}
+        </p>
       )}
     </section>
   )
@@ -908,6 +962,68 @@ function eventSummary(event: EventDto): string {
     if (typeof body === 'string' && body.trim() !== '') return body
   }
   return event.type
+}
+
+/**
+ * A relationship link to a room this account has not joined can only be opened
+ * by joining it, which is a membership change the link's label does not imply.
+ */
+function JoinLinkedRoomDialog({
+  label,
+  roomId,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  label: string
+  roomId: string
+  busy: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const { containerRef } = useModalFocus<HTMLDivElement>()
+  useShortcuts(
+    {
+      Escape: (event) => {
+        event.preventDefault()
+        onCancel()
+      },
+    },
+    { whileTyping: true, capture: true },
+  )
+  return (
+    <BodyPortal>
+      <div
+        ref={containerRef}
+        class="overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Join ${label}`}
+      >
+        <div class="overlay-panel leave-room-dialog">
+          <h2>Join this room?</h2>
+          <p>
+            You have not joined <strong>{label}</strong> (<code>{roomId}</code>).
+            Opening it joins the room with this account, which other members can
+            see.
+          </p>
+          <div class="dialog-actions">
+            <button
+              type="button"
+              class="ghost"
+              disabled={busy}
+              onClick={onCancel}
+            >
+              Cancel
+            </button>
+            <button type="button" disabled={busy} onClick={onConfirm}>
+              {busy ? 'Joining…' : 'Join and open'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </BodyPortal>
+  )
 }
 
 function LeaveRoomDialog({

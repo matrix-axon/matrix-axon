@@ -1,12 +1,13 @@
 import {
   effect,
   signal,
+  untracked,
   type ReadonlySignal,
   type Signal,
 } from '@preact/signals'
 import type { components } from '../api/schema'
 import { timelineEvent } from '../api/frames'
-import type { ApiClient } from '../api/client'
+import { apiErrorMessage, type ApiClient } from '../api/client'
 import type { LiveConnection } from './live-connection'
 import { roomKey, roomTitle, type RoomDto } from './room-list'
 import type { RoomsStore } from './rooms'
@@ -18,6 +19,12 @@ export interface SpacesStore {
   children: ReadonlySignal<ReadonlyMap<string, readonly SpaceChildDto[]>>
   loading: ReadonlySignal<ReadonlySet<string>>
   errors: ReadonlySignal<ReadonlyMap<string, string>>
+  /**
+   * Whether the picker shows its per-space move controls. Session-only and off
+   * by default: the rail is kept as narrow and short as possible, so this
+   * chrome appears only when the user asks for it (`KEYS.reorderSpaces`).
+   */
+  reordering: Signal<boolean>
   refresh(space: Pick<RoomDto, 'account_id' | 'room_id'>): void
 }
 
@@ -50,6 +57,7 @@ export function createSpacesStore(
   live: LiveConnection,
 ): SpacesStore {
   const selected = signal<string | null>(null)
+  const reordering = signal(false)
   const children = signal<ReadonlyMap<string, readonly SpaceChildDto[]>>(
     new Map(),
   )
@@ -57,6 +65,7 @@ export function createSpacesStore(
   const errors = signal<ReadonlyMap<string, string>>(new Map())
   const requested = new Set<string>()
   const queued = new Set<string>()
+  const dirty = new Set<string>()
   const queue: Array<Pick<RoomDto, 'account_id' | 'room_id'>> = []
   let activeRequests = 0
 
@@ -78,12 +87,7 @@ export function createSpacesStore(
       .then(({ data, error }) => {
         const nextErrors = new Map(errors.value)
         if (data === undefined) {
-          nextErrors.set(
-            key,
-            error === undefined
-              ? 'Could not load space.'
-              : 'Could not load space.',
-          )
+          nextErrors.set(key, `Could not load space: ${apiErrorMessage(error)}`)
         } else {
           children.value = new Map(children.value).set(key, data.data)
           nextErrors.delete(key)
@@ -94,11 +98,19 @@ export function createSpacesStore(
         errors.value = new Map(errors.value).set(key, 'Could not load space.')
       })
       .finally(() => {
-        const next = new Set(loading.value)
-        next.delete(key)
-        loading.value = next
         queued.delete(key)
         activeRequests -= 1
+        // A refresh that arrived mid-flight (an `m.space.child` frame, say) was
+        // coalesced into this request, which had already been sent and cannot
+        // reflect it. Re-queue rather than drop it, or the child list stays
+        // stale until the next reconnect.
+        if (dirty.delete(key)) {
+          refresh(space)
+        } else {
+          const next = new Set(loading.value)
+          next.delete(key)
+          loading.value = next
+        }
         runNext()
       })
     runNext()
@@ -106,7 +118,12 @@ export function createSpacesStore(
 
   const refresh = (space: Pick<RoomDto, 'account_id' | 'room_id'>) => {
     const key = roomKey(space)
-    if (queued.has(key)) return
+    if (queued.has(key)) {
+      // Already queued: if it is still waiting in `queue` it will pick up the
+      // change anyway; if it is in flight, mark it for a follow-up fetch.
+      if (!queue.some((pending) => roomKey(pending) === key)) dirty.add(key)
+      return
+    }
     queued.add(key)
     queue.push(space)
     loading.value = new Set(loading.value).add(key)
@@ -137,10 +154,18 @@ export function createSpacesStore(
     )
     if (space !== undefined) refresh(space)
   })
+  // A reconnect means the socket missed frames, so every space is refetched.
+  // `joinedSpaces()` reads `rooms.rooms`, which changes on every incoming
+  // timeline event; reading it inside the effect body would subscribe this
+  // effect to it and turn each message into a refetch of every space. Track the
+  // reconnect count explicitly and read the room list untracked.
+  let lastReconnects = live.reconnects.peek()
   effect(() => {
-    if (live.reconnects.value === 0) return
-    for (const space of joinedSpaces()) refresh(space)
+    const reconnects = live.reconnects.value
+    if (reconnects === lastReconnects) return
+    lastReconnects = reconnects
+    for (const space of untracked(joinedSpaces)) refresh(space)
   })
 
-  return { selected, children, loading, errors, refresh }
+  return { selected, children, loading, errors, reordering, refresh }
 }

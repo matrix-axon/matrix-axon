@@ -579,6 +579,91 @@ test('collapsing the sidebar survives a reload', async ({ page }) => {
   expect(await shown(page, '.sidebar')).toBe('visible')
 })
 
+test('the collapsed rooms tab stays fully on screen', async ({ page }) => {
+  await openRoom(page)
+  await page.getByRole('button', { name: 'Hide rooms' }).click()
+
+  // Collapsed, this tab is the only pointer route back to the room list, and
+  // `.shell { overflow: hidden }` clips anything past the viewport edge.
+  const tab = page.getByRole('button', { name: 'Show rooms' })
+  const box = await tab.boundingBox()
+  expect(box).not.toBeNull()
+  expect(box!.x).toBeGreaterThanOrEqual(0)
+  const pill = await tab.locator('span').boundingBox()
+  expect(pill).not.toBeNull()
+  expect(pill!.x).toBeGreaterThanOrEqual(0)
+})
+
+test('the collapsed spaces tab stays fully on screen', async ({ page }) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Hide spaces' }).click()
+
+  // Collapsed, the picker is `display: none`, so this tab becomes the sidebar's
+  // first child — the same negative-margin trap as the rooms tab above, and the
+  // only pointer route back to the picker.
+  const tab = page.getByRole('button', { name: 'Show spaces' })
+  const box = await tab.boundingBox()
+  expect(box).not.toBeNull()
+  expect(box!.x).toBeGreaterThanOrEqual(0)
+  await tab.click()
+  await expect(page.locator('.space-picker')).toBeVisible()
+})
+
+test('narrow: a collapsed spaces pane is never stranded', async ({ page }) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.goto('/')
+  // Collapse on desktop, where the toggle exists, then narrow the window: the
+  // toggle is gone at this width and `mod+alt+s` is inert, so honoring the
+  // persisted collapse would leave no way back.
+  await page.getByRole('button', { name: 'Hide spaces' }).click()
+  await expect(page.locator('.space-picker')).toBeHidden()
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.locator('.space-picker')).toBeVisible()
+})
+
+test('narrow: spaces can be reordered without a keyboard', async ({ page }) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/')
+
+  // A phone has no Ctrl-Alt-R, and touch drag-and-drop is uneven across
+  // engines, so the toggle has to be reachable at this width.
+  const toggle = page.getByRole('button', { name: 'Reorder spaces' })
+  await expect(toggle).toBeVisible()
+  const box = await toggle.boundingBox()
+  expect(box).not.toBeNull()
+  expect(box!.x).toBeGreaterThanOrEqual(0)
+
+  const widthBefore = await page.evaluate(
+    () => document.querySelector<HTMLElement>('.space-picker')!.scrollWidth,
+  )
+  await toggle.click()
+  // The ◀ ▶ pair sits under its avatar, so turning the mode on must not make
+  // the strip any wider — only taller.
+  expect(
+    await page.evaluate(
+      () => document.querySelector<HTMLElement>('.space-picker')!.scrollWidth,
+    ),
+  ).toBeLessThanOrEqual(widthBefore)
+  // Horizontal strip: the axis is left/right here, not up/down.
+  const forward = page.getByRole('button', {
+    name: 'Move E2E Space One right',
+  })
+  await expect(forward).toBeVisible()
+  await forward.click()
+
+  const order = await page.evaluate(() =>
+    [...document.querySelectorAll<HTMLElement>('[data-space-key]')].map(
+      (button) => button.getAttribute('aria-label'),
+    ),
+  )
+  expect(order).toEqual(['E2E Space Two', 'E2E Space One'])
+})
+
 test('the rooms edge tab drags to resize without collapsing', async ({
   page,
 }) => {

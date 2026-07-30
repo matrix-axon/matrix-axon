@@ -8,6 +8,7 @@ import {
   serverNameFromRoomReference,
 } from '../matrix-to'
 import { normalizeUserId, parseUserIdList } from '../matrix-user'
+import { joinRoomError } from '../room-entry'
 import { useServices } from '../services'
 import type { Account } from '../stores/accounts'
 import type { RoomDto } from '../stores/room-list'
@@ -950,24 +951,6 @@ function dmProfileLookupError(userId: string, error: unknown): string {
     return `No Matrix profile was found for ${userId}. Check the user ID and homeserver, then try again.`
   }
   return `Could not look up ${userId}: ${message}`
-}
-
-function joinRoomError(
-  target: string,
-  result: Extract<RoomEntryResult, { ok: false }>,
-): string {
-  switch (result.code) {
-    case 'not_found':
-      return `Could not find ${target}. Check the room ID or alias. Room names are not join addresses; use a room ID, canonical alias, or Matrix link.`
-    case 'forbidden':
-      return `Could not join ${target}. This account is not allowed to join that room. You may need an invite, a knockable room, or a Matrix link from a member.`
-    case 'bad_request':
-      return `Could not join ${target}. Check that the room ID, alias, or Matrix link is valid.`
-    case 'service_unavailable':
-      return `Could not join ${target}. The selected account is not connected; try again after Axon reconnects.`
-    default:
-      return `Could not join ${target}: ${result.message}`
-  }
 }
 
 function createRoomError(

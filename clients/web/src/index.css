@@ -408,6 +408,15 @@ body {
   border-radius: 999px;
 }
 
+/* Same trap as `.sidebar-collapse-tab` below: collapsed, the picker is
+   `display: none`, so this tab becomes the sidebar's first child and the
+   negative start margin that straddles the pane edge hangs half of it past the
+   viewport, where `.shell { overflow: hidden }` clips it. It is the only
+   pointer route back to the picker, so it has to stay fully on screen. */
+.space-pane-collapse-tab[aria-expanded='false'] {
+  margin-inline-start: 0;
+}
+
 .sidebar-collapse-tab {
   flex: 0 0 1.5rem;
   margin-inline: -0.75rem;
@@ -422,6 +431,12 @@ body {
 
 .sidebar-collapse-tab[aria-expanded='false'] {
   cursor: pointer;
+  /* Collapsed, the sidebar is `display: none`, so this tab becomes the first
+     child of `.shell-body` and the negative start margin that straddles the
+     pane edge would push half of it past the viewport edge, where
+     `.shell { overflow: hidden }` clips it. It is the only pointer route back
+     to the sidebar, so it has to stay fully on screen. */
+  margin-inline-start: 0;
 }
 
 .sidebar-collapse-tab:hover:not(:disabled),
@@ -537,6 +552,99 @@ body {
   outline: 2px solid var(--accent-strong);
   outline-offset: 2px;
 }
+/* Reordering chrome is opt-in — the rail is deliberately narrow and short, so
+   nothing here costs a row until the user turns it on. */
+.space-picker-reorder-toggle {
+  display: grid;
+  width: 1.6rem;
+  height: 1.6rem;
+  margin: 0 auto 0.5rem;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.space-picker-reorder-toggle:hover:not(:disabled) {
+  background: var(--bg-raised);
+  color: var(--accent);
+}
+
+.space-picker-reorder-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.space-picker-reorder-toggle.active {
+  background: var(--bg-raised);
+  color: var(--accent-strong);
+}
+
+.space-picker-reorder {
+  display: flex;
+  justify-content: center;
+  gap: 0.15rem;
+  margin: -0.25rem 0 0.4rem;
+}
+
+.space-picker-move {
+  display: grid;
+  width: 1.2rem;
+  height: 1.2rem;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.6rem;
+  line-height: 1;
+}
+
+.space-picker-move:hover:not(:disabled) {
+  background: var(--bg-raised);
+  color: var(--accent);
+}
+
+.space-picker-move:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.space-picker-move:disabled {
+  opacity: 0.35;
+}
+
+/* Header for a space-scoped room list: names the scope, reports whether its
+   children actually loaded, and keeps the space's own room reachable. */
+.space-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.space-scope-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.space-scope-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.space-scope p {
+  margin: 0;
+}
+
 .space-avatar {
   display: grid;
   width: 2rem;
@@ -644,6 +752,45 @@ body {
   .space-picker-row,
   .space-picker-entry {
     flex: 0 0 auto;
+  }
+
+  /* The ◀ ▶ pair sits under its avatar rather than beside it: two 1.2rem
+     buttons plus the gap are narrower than the 2.8rem avatar above them, so
+     reordering costs the strip no width at all — only ~1.2rem of height, and
+     only while the mode is on. */
+  .space-picker-row {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
+  }
+
+  .space-picker-reorder {
+    margin: 0;
+  }
+
+  /* This width is exactly where the toggle matters most. A phone has no
+     Ctrl-Alt-R, and touch drag-and-drop is uneven: iOS Safari runs it off a
+     long press, Chrome for Android fires no drag events for touch at all. Even
+     where it works it is undiscoverable. It sits at the head of the strip and
+     does not scroll away with the spaces. */
+  .space-picker-reorder-toggle {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    flex: 0 0 auto;
+    align-self: center;
+    margin: 0;
+    background: var(--bg);
+  }
+
+  /* No collapse control exists at this width — `.pane-collapse-tab` is hidden
+     above and the shortcut is inert in single-pane mode — so honoring a
+     persisted collapse (or the lone-space auto-hide) would strand the picker
+     with no way to bring it back. */
+  .shell-body.spaces-pane-collapsed:not(.spaces-pane-auto-hidden)
+    .space-picker {
+    display: flex;
   }
 
   .room-list-pane {
