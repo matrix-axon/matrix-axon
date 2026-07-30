@@ -88,7 +88,7 @@
   color-scheme: light dark;
 
   /* Layout (ADR 0062). */
-  --sidebar-width: 22rem;
+  --sidebar-width: 26.25rem;
 }
 
 :root[data-theme='light'] {
@@ -378,6 +378,73 @@ body {
   padding: 0;
   border-right: 1px solid var(--border);
   box-sizing: border-box;
+  max-width: calc(100vw - 20rem);
+}
+
+.pane-collapse-tab {
+  z-index: 2;
+  display: grid;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.pane-collapse-tab:hover:not(:disabled),
+.pane-collapse-tab:focus-visible {
+  border-color: var(--accent);
+  background: var(--bg-raised);
+  color: var(--accent);
+}
+
+.space-pane-collapse-tab {
+  flex: 0 0 1.1rem;
+  align-self: center;
+  height: 2rem;
+  margin-inline: -0.55rem;
+  border-radius: 999px;
+}
+
+.sidebar-collapse-tab {
+  flex: 0 0 1.5rem;
+  margin-inline: -0.75rem;
+  align-self: stretch;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sidebar-collapse-tab[aria-expanded='false'] {
+  cursor: pointer;
+}
+
+.sidebar-collapse-tab:hover:not(:disabled),
+.sidebar-collapse-tab:focus-visible {
+  border: 0;
+  background: transparent;
+}
+
+.sidebar-collapse-tab > span {
+  display: grid;
+  width: 1.5rem;
+  height: 2.4rem;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+}
+
+.sidebar-collapse-tab:hover > span,
+.sidebar-collapse-tab:focus-visible > span {
+  border-color: var(--accent);
+  background: var(--bg-raised);
+  color: var(--accent);
 }
 
 .room-list-pane {
@@ -387,15 +454,53 @@ body {
   overflow-x: hidden;
   padding: 1rem;
   box-sizing: border-box;
+  /* Preserve the scrollbar gutter so rows do not jump, but draw the thumb
+     only while the pointer is over the scrollable pane. */
+  scrollbar-color: transparent transparent;
 }
 
 .space-picker {
-  flex: 0 0 3.7rem;
+  /* Its 2.8rem buttons plus horizontal padding and the divider need more
+     than 3.7rem once this box uses border-box. Leave a little paint room so
+     Chromium never clips the button's right edge at fractional scaling. */
+  flex: 0 0 4rem;
   min-width: 0;
   margin: 0;
   padding: 0.75rem 0.45rem;
   overflow-y: auto;
+  overflow-x: hidden;
   border-right: 1px solid var(--border);
+  box-sizing: border-box;
+  scrollbar-color: transparent transparent;
+}
+
+.room-list-pane::-webkit-scrollbar,
+.space-picker::-webkit-scrollbar {
+  width: 0.7rem;
+}
+
+.room-list-pane::-webkit-scrollbar-track,
+.room-list-pane::-webkit-scrollbar-thumb,
+.space-picker::-webkit-scrollbar-track,
+.space-picker::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
+.room-list-pane::-webkit-scrollbar-thumb,
+.space-picker::-webkit-scrollbar-thumb {
+  border: 0.2rem solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.room-list-pane:hover,
+.space-picker:hover {
+  scrollbar-color: var(--muted) transparent;
+}
+
+.room-list-pane:hover::-webkit-scrollbar-thumb,
+.space-picker:hover::-webkit-scrollbar-thumb {
+  background-color: var(--muted);
 }
 
 .space-picker h2 {
@@ -412,11 +517,25 @@ body {
   margin: 0 0 0.4rem;
   padding: 0;
   place-items: center;
+  border: 0;
   border-radius: 0.7rem;
+  background: transparent;
+  color: inherit;
+}
+.space-picker-entry:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+}
+.space-picker-entry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .space-picker-entry.active {
-  background: var(--accent-soft);
   color: var(--accent-strong);
+}
+.space-picker-entry.active .space-avatar {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
 }
 .space-avatar {
   display: grid;
@@ -456,6 +575,10 @@ body {
   display: none;
 }
 
+.shell-body.mode-utility .sidebar-collapse-tab {
+  display: none;
+}
+
 .shell-body.mode-utility main {
   max-width: 56rem;
   width: 100%;
@@ -487,6 +610,12 @@ body {
   .shell-body.sidebar-collapsed .sidebar {
     display: none;
   }
+
+  /* The scrollbar still owns its narrow gutter, but the room rows do not need
+     a second full padding column before the draggable pane edge. */
+  .room-list-pane {
+    padding-right: 0;
+  }
 }
 
 /* Single pane: the route picks which one. `/` is the room list, a room URL is
@@ -496,6 +625,10 @@ body {
   .sidebar {
     display: block;
     overflow-y: auto;
+  }
+
+  .pane-collapse-tab {
+    display: none;
   }
 
   .space-picker {
@@ -514,6 +647,7 @@ body {
   }
 
   .room-list-pane {
+    width: 100%;
     overflow: visible;
   }
 
@@ -539,7 +673,13 @@ body {
   }
 
   .shell-body.mode-rooms .sidebar {
-    flex: 1;
+    /* `ShellChrome` records the desktop resize as an inline flex-basis. In
+       the single-pane mobile route that basis must not limit the room list to
+       the old desktop width. */
+    flex: 1 1 100%;
+    flex-basis: 100% !important;
+    width: 100%;
+    max-width: none;
     border-right: none;
   }
 }

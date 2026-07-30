@@ -16,6 +16,8 @@ describe('createSettingsStore', () => {
       pinnedRooms: [],
       spaceOrder: [],
       spacesPaneCollapsed: false,
+      spacesPaneAutoHide: true,
+      sidebarWidth: 420,
       roomSort: 'recent',
       roomFilter: 'all',
       sidebarCollapsed: false,
@@ -82,6 +84,8 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     expect(store.pinnedRooms.value).toEqual([])
     expect(store.spaceOrder.value).toEqual([])
     expect(store.spacesPaneCollapsed.value).toBe(false)
+    expect(store.spacesPaneAutoHide.value).toBe(true)
+    expect(store.sidebarWidth.value).toBe(420)
     expect(store.roomSort.value).toBe('recent')
     expect(store.roomFilter.value).toBe('all')
     expect(store.theme.value).toBe('dark')
@@ -94,6 +98,8 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     store.moveSpace('account/!two:hs', 1)
     store.moveSpace('account/!two:hs', 0)
     store.spacesPaneCollapsed.value = true
+    store.spacesPaneAutoHide.value = false
+    store.sidebarWidth.value = 480
     expect(store.spaceOrder.value).toEqual([
       'account/!two:hs',
       'account/!one:hs',
@@ -103,6 +109,8 @@ describe('room-list settings (ADRs 0038/0042)', () => {
       'account/!one:hs',
     ])
     expect(createSettingsStore(storage).spacesPaneCollapsed.value).toBe(true)
+    expect(createSettingsStore(storage).spacesPaneAutoHide.value).toBe(false)
+    expect(createSettingsStore(storage).sidebarWidth.value).toBe(480)
   })
 
   it('an envelope without sidebarCollapsed defaults it to false (ADR 0062)', () => {

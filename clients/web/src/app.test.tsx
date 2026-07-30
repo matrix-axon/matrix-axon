@@ -877,6 +877,38 @@ describe('shell layout (ADR 0062)', () => {
     expect(services.settings.sidebarCollapsed.value).toBe(false)
   })
 
+  it('auto-hides a lone space until the user opens it', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({
+          data: [
+            {
+              account_id: ACCOUNT,
+              account_user_id: ACCOUNT_DTO.user_id,
+              room_id: '!only-space:example.org',
+              name: 'Only space',
+              room_type: 'm.space',
+              last_activity_ts: 0,
+            },
+          ],
+        }),
+      ),
+    )
+    const services = testServices()
+    const { container, getByRole } = render(<App services={services} />)
+
+    await waitFor(() =>
+      expect(getByRole('button', { name: 'Show spaces' })).toBeTruthy(),
+    )
+    expect(shellBody(container).className).toContain('spaces-pane-collapsed')
+
+    fireEvent.click(getByRole('button', { name: 'Show spaces' }))
+    expect(services.settings.spacesPaneAutoHide.value).toBe(false)
+    expect(shellBody(container).className).not.toContain(
+      'spaces-pane-collapsed',
+    )
+  })
+
   it('does not render or toggle the sidebar control in single-pane layout', async () => {
     vi.spyOn(window, 'matchMedia').mockImplementation(
       (query: string) =>
@@ -1128,7 +1160,9 @@ describe('shell keyboard shortcuts (ADR 0078)', () => {
   it('the sidebar toggle advertises its chord', () => {
     const { getByRole } = render(<App services={testServices()} />)
     const toggle = getByRole('button', { name: 'Hide rooms' })
-    expect(toggle.getAttribute('title')).toBe('Hide rooms (Ctrl-B)')
+    expect(toggle.getAttribute('title')).toBe(
+      'Hide rooms (Ctrl-B); drag or use arrow keys to resize',
+    )
     expect(toggle.getAttribute('aria-keyshortcuts')).toBe('Control+B')
   })
 })

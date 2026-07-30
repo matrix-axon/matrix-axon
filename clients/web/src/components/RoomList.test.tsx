@@ -164,14 +164,22 @@ function renderPage(
   return { services, ...utils }
 }
 
-it('filters the room list to the selected space children in server order', async () => {
+it('filters the room list to selected space children without overriding its sort', async () => {
   const space = makeRoom({
     room_id: '!whatsapp:hs',
     name: 'WhatsApp',
     room_type: 'm.space',
   })
-  const first = makeRoom({ room_id: '!family:hs', name: 'Family' })
-  const second = makeRoom({ room_id: '!friends:hs', name: 'Friends' })
+  const first = makeRoom({
+    room_id: '!family:hs',
+    name: 'Family',
+    last_activity_ts: 100,
+  })
+  const second = makeRoom({
+    room_id: '!friends:hs',
+    name: 'Friends',
+    last_activity_ts: 200,
+  })
   const { findByRole, getByRole, queryByRole } = renderPage(
     [OPS, space, first, second],
     undefined,
@@ -179,8 +187,8 @@ it('filters the room list to the selected space children in server order', async
       withSpaces: true,
       spaceChildren: {
         '!whatsapp:hs': [
-          { room_id: '!friends:hs', via: ['hs'], suggested: false },
           { room_id: '!family:hs', via: ['hs'], suggested: false },
+          { room_id: '!friends:hs', via: ['hs'], suggested: false },
         ],
       },
     },

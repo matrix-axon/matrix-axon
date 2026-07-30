@@ -237,15 +237,13 @@ export function RoomList() {
       perfMark('room-list:visible-compute:end', { visible: next.length })
       return next
     }
-    const byId = new Map(next.map((room) => [room.room_id, room]))
-    const ordered = selectedChildren
-      .map((child) => byId.get(child.room_id))
-      .filter(
-        (room): room is RoomDto =>
-          room !== undefined && room.account_id === selectedSpaceAccount,
-      )
-    perfMark('room-list:visible-compute:end', { visible: next.length })
-    return ordered
+    const childIds = new Set(selectedChildren.map((child) => child.room_id))
+    const scoped = next.filter(
+      (room) =>
+        room.account_id === selectedSpaceAccount && childIds.has(room.room_id),
+    )
+    perfMark('room-list:visible-compute:end', { visible: scoped.length })
+    return scoped
   }, [
     scopedRooms,
     accountFilter,

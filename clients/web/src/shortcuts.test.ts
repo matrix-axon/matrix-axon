@@ -82,6 +82,8 @@ describe('SHORTCUTS', () => {
     expect(keys).toContain(KEYS.roomActions.label)
     expect(keys).toContain(KEYS.filterRooms.label)
     expect(keys).toContain(KEYS.cycleFilter.label)
+    expect(keys).toContain(KEYS.toggleSpaces.label)
+    expect(keys).toContain(KEYS.spaceStep.label)
     expect(keys).toContain(KEYS.showHelp.label)
     // Every row is documented; an empty description is a drift bug.
     for (const group of SHORTCUTS) {
@@ -89,6 +91,14 @@ describe('SHORTCUTS', () => {
         expect(row.description.length).toBeGreaterThan(0)
       }
     }
+  })
+
+  it('groups all space actions under Spaces', () => {
+    const spaces = SHORTCUTS.find((group) => group.group === 'Spaces')
+    expect(spaces?.rows.map((row) => row.keys)).toEqual([
+      KEYS.toggleSpaces,
+      KEYS.spaceStep,
+    ])
   })
 })
 
@@ -122,6 +132,7 @@ describe('hint', () => {
     expect(keyLabel(KEYS.showHelp, 'iPhone')).toBe('? or ⌘-/')
     expect(keyLabel(KEYS.search, 'MacIntel')).toBe('/ or ⌘-G')
     expect(keyLabel(KEYS.roomStep, 'MacIntel')).toBe('⌘-Option-↑ / ⌘-Option-↓')
+    expect(keyLabel(KEYS.spaceStep, 'MacIntel')).toBe('⌘-Option-[ / ⌘-Option-]')
     expect(shortcutLabel(KEYS.toggleSidebar.label, 'Win32')).toBe('Ctrl-B')
     expect(keyLabel(KEYS.roomStep, 'Win32')).toBe('Ctrl-↑ / Ctrl-↓')
   })

@@ -2,6 +2,7 @@ import { useMemo, useRef } from 'preact/hooks'
 import { useMediaBlob } from '../media/use-media-blob'
 import { useServices } from '../services'
 import { roomKey, roomTitle, type RoomDto } from '../stores/room-list'
+import { orderedSpaces } from '../stores/spaces'
 
 /** The space picker scopes the neighboring RoomList; it never changes Matrix state. */
 export function SpaceList() {
@@ -10,7 +11,7 @@ export function SpaceList() {
   const selected = spaces.selected.value
   const entries = useMemo(
     () =>
-      orderSpaces(
+      orderedSpaces(
         rooms.rooms.value.filter((room) => room.room_type === 'm.space'),
         settings.spaceOrder.value,
         rooms.titles.value,
@@ -100,22 +101,4 @@ function SpaceAvatar({
       )}
     </span>
   )
-}
-
-function orderSpaces(
-  spaces: readonly RoomDto[],
-  order: readonly string[],
-  titles: ReadonlyMap<string, string>,
-): RoomDto[] {
-  const rank = new Map(order.map((key, index) => [key, index]))
-  return [...spaces].sort((left, right) => {
-    const leftRank = rank.get(roomKey(left))
-    const rightRank = rank.get(roomKey(right))
-    if (leftRank !== undefined || rightRank !== undefined) {
-      if (leftRank === undefined) return 1
-      if (rightRank === undefined) return -1
-      return leftRank - rightRank
-    }
-    return roomTitle(left, titles).localeCompare(roomTitle(right, titles))
-  })
 }

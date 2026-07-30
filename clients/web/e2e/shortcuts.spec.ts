@@ -34,6 +34,31 @@ test('Ctrl-K un-collapses the sidebar before focusing it', async ({ page }) => {
   await expect.poll(() => active(page)).toContain('Filter by name')
 })
 
+test('space shortcuts toggle the rail and cycle the visible space order', async ({
+  page,
+}) => {
+  await openRoom(page)
+  const rail = page.locator('.space-picker')
+
+  await page.keyboard.press('Control+Alt+S')
+  await expect(rail).toBeHidden()
+  await page.keyboard.press('Control+Alt+S')
+  await expect(rail).toBeVisible()
+
+  await page.keyboard.press('Control+Alt+]')
+  await expect(
+    page.getByRole('button', { name: 'E2E Space One' }),
+  ).toHaveAttribute('aria-pressed', 'true')
+  await page.keyboard.press('Control+Alt+]')
+  await expect(
+    page.getByRole('button', { name: 'E2E Space Two' }),
+  ).toHaveAttribute('aria-pressed', 'true')
+  await page.keyboard.press('Control+Alt+[')
+  await expect(
+    page.getByRole('button', { name: 'E2E Space One' }),
+  ).toHaveAttribute('aria-pressed', 'true')
+})
+
 test('arrows rove the room list; Enter opens; Escape returns to the composer', async ({
   page,
 }) => {

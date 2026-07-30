@@ -166,6 +166,18 @@ export const KEYS = {
     appleAria: 'Meta+Alt+M',
   },
   toggleSidebar: { label: 'Ctrl-B', aria: 'Control+B' },
+  toggleSpaces: {
+    label: 'Ctrl-Alt-S',
+    aria: 'Control+Alt+S',
+    appleLabel: '⌘-Option-S',
+    appleAria: 'Meta+Alt+S',
+  },
+  spaceStep: {
+    label: 'Ctrl-Alt-[ / Ctrl-Alt-]',
+    aria: 'Control+Alt+[ Control+Alt+]',
+    appleLabel: '⌘-Option-[ / ⌘-Option-]',
+    appleAria: 'Meta+Alt+[ Meta+Alt+]',
+  },
   /**
    * `?` cannot fire while typing — it has to reach the composer as a character
    * — and the composer is where focus usually is. So help also answers to
@@ -276,6 +288,13 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
         keys: KEYS.toggleSidebar,
         description: 'Show or hide the room list',
       },
+    ],
+  },
+  {
+    group: 'Spaces',
+    rows: [
+      { keys: KEYS.toggleSpaces, description: 'Show or hide spaces' },
+      { keys: KEYS.spaceStep, description: 'Previous / next space' },
     ],
   },
   {

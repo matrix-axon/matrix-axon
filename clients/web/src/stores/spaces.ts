@@ -8,7 +8,7 @@ import type { components } from '../api/schema'
 import { timelineEvent } from '../api/frames'
 import type { ApiClient } from '../api/client'
 import type { LiveConnection } from './live-connection'
-import { roomKey, type RoomDto } from './room-list'
+import { roomKey, roomTitle, type RoomDto } from './room-list'
 import type { RoomsStore } from './rooms'
 
 export type SpaceChildDto = components['schemas']['SpaceChildDto']
@@ -19,6 +19,25 @@ export interface SpacesStore {
   loading: ReadonlySignal<ReadonlySet<string>>
   errors: ReadonlySignal<ReadonlyMap<string, string>>
   refresh(space: Pick<RoomDto, 'account_id' | 'room_id'>): void
+}
+
+/** Order the picker exactly as the user sees it: saved ranks, then title. */
+export function orderedSpaces(
+  spaces: readonly RoomDto[],
+  order: readonly string[],
+  titles: ReadonlyMap<string, string>,
+): RoomDto[] {
+  const rank = new Map(order.map((key, index) => [key, index]))
+  return [...spaces].sort((left, right) => {
+    const leftRank = rank.get(roomKey(left))
+    const rightRank = rank.get(roomKey(right))
+    if (leftRank !== undefined || rightRank !== undefined) {
+      if (leftRank === undefined) return 1
+      if (rightRank === undefined) return -1
+      return leftRank - rightRank
+    }
+    return roomTitle(left, titles).localeCompare(roomTitle(right, titles))
+  })
 }
 
 /**

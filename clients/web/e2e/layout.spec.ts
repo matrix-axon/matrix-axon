@@ -44,8 +44,8 @@ test('wide: spaces use a compact rail that can be hidden independently', async (
   await page.goto('/')
 
   const roomList = page.locator('.room-list-pane')
-  const widthWithSpaces = await width(page, '.room-list-pane')
   await expect(page.locator('.space-picker')).toBeVisible()
+  const widthWithSpaces = await width(page, '.room-list-pane')
 
   await page.getByRole('button', { name: 'Hide spaces' }).click()
   await expect(page.locator('.space-picker')).toBeHidden()
@@ -55,6 +55,96 @@ test('wide: spaces use a compact rail that can be hidden independently', async (
   await page.getByRole('button', { name: 'Show spaces' }).click()
   await expect(page.locator('.space-picker')).toBeVisible()
   await expect(roomList).toBeVisible()
+})
+
+test('wide: space icons stay fully inside their rail at Windows scaling', async ({
+  page,
+}) => {
+  // 1536 CSS pixels is a 1920px-wide display at 125% Windows scaling.
+  await signIn(page)
+  await page.setViewportSize({ width: 1536, height: 864 })
+  await page.goto('/')
+  await expect(
+    page.getByRole('button', { name: 'E2E Space One' }),
+  ).toBeVisible()
+
+  const geometry = await page.evaluate(() => {
+    const rail = document.querySelector<HTMLElement>('.space-picker')!
+    const railBox = rail.getBoundingClientRect()
+    return [...rail.querySelectorAll<HTMLElement>('.space-picker-entry')].map(
+      (entry) => {
+        const box = entry.getBoundingClientRect()
+        return {
+          left: box.left - railBox.left,
+          right: railBox.right - box.right,
+          railOverflow: rail.scrollWidth - rail.clientWidth,
+        }
+      },
+    )
+  })
+
+  expect(geometry.length).toBeGreaterThan(2)
+  for (const entry of geometry) {
+    expect(entry.left).toBeGreaterThanOrEqual(0)
+    expect(entry.right).toBeGreaterThanOrEqual(0)
+    expect(entry.railOverflow).toBeLessThanOrEqual(0)
+  }
+})
+
+test('wide: space scrollbar appears only while the pane is active', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 1536, height: 864 })
+  await page.goto('/')
+  const rail = page.locator('.space-picker')
+
+  await expect(rail).toHaveCSS(
+    'scrollbar-color',
+    'rgba(0, 0, 0, 0) rgba(0, 0, 0, 0)',
+  )
+  await rail.hover()
+  await expect(rail).toHaveCSS(
+    'scrollbar-color',
+    'rgb(106, 106, 116) rgba(0, 0, 0, 0)',
+  )
+})
+
+test('wide: room-list scrollbar appears only while the pane is active', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 1536, height: 864 })
+  await page.goto('/')
+  const list = page.locator('.room-list-pane')
+
+  await expect(list).toHaveCSS(
+    'scrollbar-color',
+    'rgba(0, 0, 0, 0) rgba(0, 0, 0, 0)',
+  )
+  await list.hover()
+  await expect(list).toHaveCSS(
+    'scrollbar-color',
+    'rgb(106, 106, 116) rgba(0, 0, 0, 0)',
+  )
+})
+
+test('space avatars retain an accessible button without button chrome', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 1536, height: 864 })
+  await page.goto('/')
+  const space = page.getByRole('button', { name: 'E2E Space One' })
+
+  await expect(space).toHaveCSS('border-top-width', '0px')
+  await expect(space).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+  await space.focus()
+  await expect(space).toHaveCSS('outline-style', 'solid')
+  await expect(page.locator('.space-picker')).toHaveCSS(
+    'scrollbar-color',
+    'rgba(0, 0, 0, 0) rgba(0, 0, 0, 0)',
+  )
 })
 
 test('narrow: room-list topbar uses icons instead of wrapping labels', async ({
@@ -86,6 +176,31 @@ test('narrow: room-list topbar uses icons instead of wrapping labels', async ({
     return element.getBoundingClientRect().height
   })
   expect(height).toBeLessThanOrEqual(64)
+})
+
+test('narrow: the room list fills the single-pane viewport', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/')
+
+  const geometry = await page.evaluate(() => {
+    const sidebar = document.querySelector<HTMLElement>('.sidebar')!
+    const roomList = document.querySelector<HTMLElement>('.room-list-pane')!
+    return {
+      viewportWidth: window.innerWidth,
+      sidebarRight: sidebar.getBoundingClientRect().right,
+      roomListRight: roomList.getBoundingClientRect().right,
+    }
+  })
+
+  expect(geometry.sidebarRight).toBeGreaterThanOrEqual(
+    geometry.viewportWidth - 1,
+  )
+  expect(geometry.roomListRight).toBeGreaterThanOrEqual(
+    geometry.viewportWidth - 1,
+  )
 })
 
 test('the room list survives a room switch, filter and all', async ({
@@ -450,6 +565,46 @@ test('collapsing the sidebar survives a reload', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Show rooms' }).click()
   expect(await shown(page, '.sidebar')).toBe('visible')
+})
+
+test('the rooms edge tab drags to resize without collapsing', async ({
+  page,
+}) => {
+  await openRoom(page)
+  const sidebar = page.locator('.sidebar')
+  const before = await width(page, '.sidebar')
+  const tab = page.getByRole('button', { name: 'Hide rooms' })
+  const box = await tab.boundingBox()
+  expect(box).not.toBeNull()
+
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(box!.x + box!.width / 2 + 80, box!.y + box!.height / 2)
+  await page.mouse.up()
+
+  await expect.poll(() => width(page, '.sidebar')).toBeGreaterThan(before!)
+  await expect(sidebar).toBeVisible()
+  await expect(tab).toHaveAttribute('aria-expanded', 'true')
+})
+
+test('the rooms edge tab sits close to the favorite controls', async ({
+  page,
+}) => {
+  await openRoom(page)
+  const favorite = page.locator('.room-row').first().getByRole('button', {
+    name: '☆',
+  })
+  const tab = page.getByRole('button', { name: 'Hide rooms' }).locator('span')
+
+  const [favoriteBox, tabBox] = await Promise.all([
+    favorite.boundingBox(),
+    tab.boundingBox(),
+  ])
+  expect(tabBox).not.toBeNull()
+  expect(favoriteBox).not.toBeNull()
+  expect(tabBox!.x - (favoriteBox!.x + favoriteBox!.width)).toBeLessThanOrEqual(
+    16,
+  )
 })
 
 test('topbar stays pinned when the composer is focused', async ({ page }) => {

@@ -53,7 +53,13 @@ import {
   SHOW_HELP_EVENT,
   useShortcuts,
 } from './shortcuts'
-import { applyTheme } from './stores/settings'
+import {
+  applyTheme,
+  SIDEBAR_WIDTH_MAX,
+  SIDEBAR_WIDTH_MIN,
+} from './stores/settings'
+import { roomKey } from './stores/room-list'
+import { orderedSpaces } from './stores/spaces'
 import type { Account } from './stores/accounts'
 import type { RoomEntryResult, RoomsStore } from './stores/rooms'
 
@@ -328,6 +334,111 @@ function Shell() {
   )
 }
 
+const MIN_TIMELINE_WIDTH = 320
+
+function availableSidebarWidthMaximum(): number {
+  return Math.max(
+    SIDEBAR_WIDTH_MIN,
+    Math.min(SIDEBAR_WIDTH_MAX, window.innerWidth - MIN_TIMELINE_WIDTH),
+  )
+}
+
+function clampSidebarWidth(width: number): number {
+  return Math.round(
+    Math.max(
+      SIDEBAR_WIDTH_MIN,
+      Math.min(availableSidebarWidthMaximum(), width),
+    ),
+  )
+}
+
+/** One pane-edge control: click to collapse, drag or arrow-key to resize. */
+function SidebarPaneHandle({
+  width,
+  onResize,
+  collapsed,
+  onToggle,
+}: {
+  width: number
+  onResize: (width: number) => void
+  collapsed: boolean
+  onToggle: () => void
+}) {
+  const drag = useRef<{
+    startX: number
+    startWidth: number
+    moved: boolean
+  } | null>(null)
+  const suppressClick = useRef(false)
+  const maximum = availableSidebarWidthMaximum()
+
+  return (
+    <button
+      type="button"
+      class="pane-collapse-tab sidebar-collapse-tab"
+      aria-expanded={!collapsed}
+      aria-controls="room-sidebar"
+      aria-label={collapsed ? 'Show rooms' : 'Hide rooms'}
+      title={`${hint(
+        collapsed ? 'Show rooms' : 'Hide rooms',
+        KEYS.toggleSidebar,
+      )}${collapsed ? '' : '; drag or use arrow keys to resize'}`}
+      aria-keyshortcuts={keyAria(KEYS.toggleSidebar)}
+      onPointerDown={(event) => {
+        if (event.button !== 0 || collapsed) return
+        drag.current = {
+          startX: event.clientX,
+          startWidth: width,
+          moved: false,
+        }
+        event.currentTarget.setPointerCapture(event.pointerId)
+      }}
+      onPointerMove={(event) => {
+        const start = drag.current
+        if (start === null) return
+        const distance = event.clientX - start.startX
+        if (Math.abs(distance) > 2) start.moved = true
+        onResize(clampSidebarWidth(start.startWidth + distance))
+      }}
+      onPointerUp={(event) => {
+        const activeDrag = drag.current
+        suppressClick.current = activeDrag?.moved ?? false
+        drag.current = null
+        if (activeDrag !== null) {
+          event.currentTarget.releasePointerCapture(event.pointerId)
+        }
+      }}
+      onPointerCancel={(event) => {
+        const activeDrag = drag.current
+        drag.current = null
+        if (activeDrag !== null) {
+          event.currentTarget.releasePointerCapture(event.pointerId)
+        }
+      }}
+      onKeyDown={(event) => {
+        if (collapsed) return
+        let next: number | null = null
+        if (event.key === 'ArrowLeft') next = width - 16
+        if (event.key === 'ArrowRight') next = width + 16
+        if (event.key === 'Home') next = SIDEBAR_WIDTH_MIN
+        if (event.key === 'End') next = maximum
+        if (next === null) return
+        event.preventDefault()
+        onResize(clampSidebarWidth(next))
+      }}
+      onClick={() => {
+        if (suppressClick.current) {
+          suppressClick.current = false
+          return
+        }
+        onToggle()
+      }}
+    >
+      <span aria-hidden="true">{collapsed ? '›' : '‹'}</span>
+    </button>
+  )
+}
+
 /**
  * Header plus the two panes (ADR 0062). Separate from `Shell` because
  * `useLocation` reads the context `Shell` itself only *renders* — a hook call
@@ -341,11 +452,12 @@ function Shell() {
 function ShellChrome() {
   const location = useLocation()
   const { path, query } = location
-  const { accounts, rooms, search, settings, threadUnread } = useServices()
+  const { accounts, rooms, search, settings, spaces, threadUnread } =
+    useServices()
   const mode = layoutMode(path)
   perfMark('shell:render', { path, mode })
   const collapsed = settings.sidebarCollapsed.value
-  const spacesPaneCollapsed = settings.spacesPaneCollapsed.value
+  const sidebarWidth = settings.sidebarWidth.value
   const [helpOpen, setHelpOpen] = useState(false)
   const [unreadThreadsOpen, setUnreadThreadsOpen] = useState(false)
   const [jumpAction, setJumpActionState] = useState<(() => void) | null>(null)
@@ -368,6 +480,14 @@ function ShellChrome() {
   const roomListLoading = rooms.loading.value
   const roomEntries = rooms.rooms.value
   const roomTitles = rooms.titles.value
+  const joinedSpaces = useMemo(
+    () => roomEntries.filter((room) => room.room_type === 'm.space'),
+    [roomEntries],
+  )
+  const hasSpaces = joinedSpaces.length > 0
+  const spacesPaneCollapsed =
+    settings.spacesPaneCollapsed.value ||
+    (settings.spacesPaneAutoHide.value && joinedSpaces.length <= 1)
   const unreadThreadCount = threadUnread.count.value
   const roomTitleButton = useRef<HTMLButtonElement>(null)
   const startupThreadScrubbed = useRef(false)
@@ -413,6 +533,32 @@ function ShellChrome() {
       )
     }
   }
+  const toggleSpacesPane = useCallback(() => {
+    settings.spacesPaneAutoHide.value = false
+    settings.spacesPaneCollapsed.value = !spacesPaneCollapsed
+  }, [settings, spacesPaneCollapsed])
+  const stepSpace = useCallback(
+    (direction: -1 | 1) => {
+      const ordered = orderedSpaces(
+        rooms.rooms.value.filter((room) => room.room_type === 'm.space'),
+        settings.spaceOrder.value,
+        rooms.titles.value,
+      )
+      if (ordered.length === 0) return
+      const current = spaces.selected.value
+      const index = ordered.findIndex((room) => roomKey(room) === current)
+      const next =
+        index === -1
+          ? direction === 1
+            ? 0
+            : ordered.length - 1
+          : (index + direction + ordered.length) % ordered.length
+      settings.spacesPaneAutoHide.value = false
+      settings.spacesPaneCollapsed.value = false
+      spaces.selected.value = roomKey(ordered[next])
+    },
+    [rooms, settings, spaces],
+  )
   const setJumpAction = useCallback((action: (() => void) | null) => {
     setJumpActionState(() => action)
   }, [])
@@ -661,6 +807,21 @@ function ShellChrome() {
         event.preventDefault()
         settings.sidebarCollapsed.value = !collapsed
       },
+      'mod+alt+s': (event) => {
+        if (mode === 'utility' || singlePane || !hasSpaces) return
+        event.preventDefault()
+        toggleSpacesPane()
+      },
+      'mod+alt+[': (event) => {
+        if (mode === 'utility' || singlePane || !hasSpaces) return
+        event.preventDefault()
+        stepSpace(-1)
+      },
+      'mod+alt+]': (event) => {
+        if (mode === 'utility' || singlePane || !hasSpaces) return
+        event.preventDefault()
+        stepSpace(1)
+      },
       'mod+alt+m': (event) => {
         event.preventDefault()
         location.route('/rooms/dm')
@@ -713,39 +874,6 @@ function ShellChrome() {
               onClick={() => roomChrome.action?.()}
             >
               <span>{roomChrome.title ?? 'Room'}</span>
-            </button>
-          )}
-          {/* Utility pages have no sidebar to collapse. The toggle lives up here
-              rather than in the sidebar because a collapsed sidebar is
-              `display: none` and could never render its own way back. */}
-          {mode !== 'utility' && !singlePane && (
-            <button
-              type="button"
-              class="ghost"
-              aria-expanded={!collapsed}
-              aria-controls="room-sidebar"
-              title={hint(
-                collapsed ? 'Show rooms' : 'Hide rooms',
-                KEYS.toggleSidebar,
-              )}
-              aria-keyshortcuts={keyAria(KEYS.toggleSidebar)}
-              onClick={() => (settings.sidebarCollapsed.value = !collapsed)}
-            >
-              {collapsed ? 'Show rooms' : 'Hide rooms'}
-            </button>
-          )}
-          {mode !== 'utility' && !singlePane && !collapsed && (
-            <button
-              type="button"
-              class="ghost"
-              aria-expanded={!spacesPaneCollapsed}
-              aria-controls="spaces-pane"
-              title={spacesPaneCollapsed ? 'Show spaces' : 'Hide spaces'}
-              onClick={() =>
-                (settings.spacesPaneCollapsed.value = !spacesPaneCollapsed)
-              }
-            >
-              {spacesPaneCollapsed ? 'Show spaces' : 'Hide spaces'}
             </button>
           )}
           {mode === 'room' && jumpAction !== null && !singlePane && (
@@ -830,12 +958,48 @@ function ShellChrome() {
         <div
           class={`shell-body mode-${mode}${collapsed ? ' sidebar-collapsed' : ''}${spacesPaneCollapsed ? ' spaces-pane-collapsed' : ''}`}
         >
-          <nav id="room-sidebar" class="sidebar" aria-label="Rooms">
-            <SpaceList />
+          <nav
+            id="room-sidebar"
+            class="sidebar"
+            aria-label="Rooms"
+            style={{ flexBasis: `${sidebarWidth}px` }}
+          >
+            {hasSpaces && (
+              <>
+                <SpaceList />
+                <button
+                  type="button"
+                  class="pane-collapse-tab space-pane-collapse-tab"
+                  aria-expanded={!spacesPaneCollapsed}
+                  aria-controls="spaces-pane"
+                  aria-label={
+                    spacesPaneCollapsed ? 'Show spaces' : 'Hide spaces'
+                  }
+                  title={hint(
+                    spacesPaneCollapsed ? 'Show spaces' : 'Hide spaces',
+                    KEYS.toggleSpaces,
+                  )}
+                  aria-keyshortcuts={keyAria(KEYS.toggleSpaces)}
+                  onClick={toggleSpacesPane}
+                >
+                  <span aria-hidden="true">
+                    {spacesPaneCollapsed ? '›' : '‹'}
+                  </span>
+                </button>
+              </>
+            )}
             <div class="room-list-pane">
               <RoomList />
             </div>
           </nav>
+          {mode !== 'utility' && !singlePane && (
+            <SidebarPaneHandle
+              width={sidebarWidth}
+              collapsed={collapsed}
+              onToggle={() => (settings.sidebarCollapsed.value = !collapsed)}
+              onResize={(width) => (settings.sidebarWidth.value = width)}
+            />
+          )}
           <main>
             <Router>
               <Route path="/" component={RoomsIndex} />

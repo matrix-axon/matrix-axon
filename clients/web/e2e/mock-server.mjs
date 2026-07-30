@@ -476,6 +476,22 @@ async function handleApi(req, res, url) {
         {
           account_id: ACCOUNT_ID,
           account_user_id: USER_ID,
+          room_id: '!space-one:hs',
+          name: 'E2E Space One',
+          room_type: 'm.space',
+          last_activity_ts: now - 1_000,
+        },
+        {
+          account_id: ACCOUNT_ID,
+          account_user_id: USER_ID,
+          room_id: '!space-two:hs',
+          name: 'E2E Space Two',
+          room_type: 'm.space',
+          last_activity_ts: now - 2_000,
+        },
+        {
+          account_id: ACCOUNT_ID,
+          account_user_id: USER_ID,
           room_id: '!long:hs',
           name: 'A Room With A Name Far Too Long For The Sidebar',
           last_activity_ts: now - 3_600_000,
@@ -494,6 +510,9 @@ async function handleApi(req, res, url) {
   }
   // Unnamed rooms ask for members to derive a DM title; none here, so the
   // room-id fallback stands.
+  if (method === 'GET' && /\/space\/children$/.test(pathname)) {
+    return json(res, { data: [] })
+  }
   if (method === 'GET' && /\/rooms\/[^/]+\/members$/.test(pathname)) {
     return json(res, { data: [] })
   }
