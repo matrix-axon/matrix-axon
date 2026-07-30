@@ -104,7 +104,7 @@ describe('parseSearchTokens', () => {
     expect(query.scope.kind).toBe('room')
   })
 
-  it('maps room:* to the current account and account:* / all:true to everywhere', () => {
+  it('maps room:* to the current account and account:* / all:true / * to everywhere', () => {
     expect(parseSearchTokens('room:* x', ctx).query.scope).toEqual({
       kind: 'account',
       accountId: ACCOUNT_A,
@@ -114,6 +114,13 @@ describe('parseSearchTokens', () => {
     })
     expect(parseSearchTokens('all:true x', ctx).query.scope).toEqual({
       kind: 'all',
+    })
+    expect(parseSearchTokens('* x', ctx).query.scope).toEqual({
+      kind: 'all',
+    })
+    expect(parseSearchTokens('"*" x', ctx).query).toMatchObject({
+      text: '* x',
+      scope: { kind: 'room', accountId: ACCOUNT_A, roomId: '!ops:hs' },
     })
   })
 

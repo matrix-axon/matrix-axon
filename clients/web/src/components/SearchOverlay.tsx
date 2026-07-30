@@ -17,6 +17,8 @@ import { useServices } from '../services'
 import { useShortcuts } from '../shortcuts'
 import type { SearchResult } from '../stores/search'
 import { accountLabels, localpart, roomTitle } from '../stores/room-list'
+import { threadRootId } from '../stores/threads'
+import { localRoomHref, localThreadEventHref } from '../matrix-to'
 import { useModalFocus } from './use-modal-focus'
 
 type ResultSort = 'relevance' | 'newest' | 'oldest'
@@ -94,6 +96,14 @@ export function SearchOverlay() {
     }
     const canonical = serializeSearchTokens(parsed.query)
     if (lastRan.current === canonical) {
+      return
+    }
+    if (
+      search.lastQuery.value !== null &&
+      search.total.value !== null &&
+      serializeSearchTokens(search.lastQuery.value) === canonical
+    ) {
+      lastRan.current = canonical
       return
     }
     lastRan.current = canonical
@@ -300,7 +310,8 @@ export function SearchOverlay() {
             Type to search{ctx.current !== null ? ' this room' : ''}. Narrow
             with <code>room:</code>, <code>account:</code>, <code>sender:</code>
             , <code>after:</code>, <code>before:</code>, <code>date:</code>, or
-            quote a phrase; <code>all:true</code> searches everywhere.
+            quote a phrase; <code>*</code> or <code>all:true</code> searches
+            everywhere.
           </p>
         ) : search.loading.value ? (
           <p class="search-status">Searching…</p>
@@ -452,6 +463,7 @@ function SearchHit({
   titles: ReadonlyMap<string, string>
   accountLabel: string | null
 }) {
+  const { search } = useServices()
   const { event } = result
   const room = ctx.rooms.find(
     (candidate) =>
@@ -461,11 +473,35 @@ function SearchHit({
   const segments = event.redacted
     ? [{ text: 'message deleted', hit: false }]
     : highlightSnippet(event.body ?? '', terms)
+  const rootId = threadRootId(event)
+  const href =
+    rootId === null
+      ? localRoomHref(event.account_id, event.room_id, event.event_id)
+      : localThreadEventHref(
+          event.account_id,
+          event.room_id,
+          rootId,
+          event.event_id,
+        )
   return (
     <li>
       <a
         class="search-hit"
-        href={`/${event.account_id}/rooms/${encodeURIComponent(event.room_id)}?event=${encodeURIComponent(event.event_id)}`}
+        href={href}
+        onClick={(click) => {
+          if (
+            click.button === 0 &&
+            !click.metaKey &&
+            !click.ctrlKey &&
+            !click.altKey &&
+            !click.shiftKey &&
+            (ctx.current === null ||
+              ctx.current.accountId !== event.account_id ||
+              ctx.current.roomId !== event.room_id)
+          ) {
+            search.preserveForResultJump()
+          }
+        }}
       >
         <span class="search-hit-meta">
           <span class="search-hit-room">

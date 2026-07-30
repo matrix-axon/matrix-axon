@@ -65,7 +65,16 @@ test('open with /, search, jump to the hit, and Back reopens the search', async 
     'the deploy failed on main',
   )
 
-  // Back pops to the search URL and the overlay restores with its results.
+  // The topbar button restores the cached query and hits, rather than opening
+  // an empty search overlay.
+  await page.getByRole('button', { name: 'Search messages' }).click()
+  await expect(dialog(page)).toBeVisible()
+  await expect(page.locator('a.search-hit')).toHaveCount(1)
+
+  // First Back closes the restored overlay; the next one pops to the original
+  // search URL, which also restores its results.
+  await page.goBack()
+  await expect(dialog(page)).toHaveCount(0)
   await page.goBack()
   await expect(dialog(page)).toBeVisible()
   await expect(page.locator('a.search-hit')).toHaveCount(1)

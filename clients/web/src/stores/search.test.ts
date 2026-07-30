@@ -78,6 +78,12 @@ describe('createSearchStore', () => {
     ])
     expect(store.total.value).toBe(7)
     expect(store.exhausted.value).toBe(false)
+    expect(store.lastQuery.value).toEqual(query('deploy'))
+    store.clear()
+    expect(store.lastQuery.value).toBeNull()
+    store.preserveForResultJump()
+    expect(store.consumeResultJumpPreservation()).toBe(true)
+    expect(store.consumeResultJumpPreservation()).toBe(false)
     expect(store.loading.value).toBe(false)
   })
 

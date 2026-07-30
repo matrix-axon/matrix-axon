@@ -312,7 +312,9 @@ test('a reply anchor to the thread root reveals it without reloading replies', a
   expect(threadLoads).toBe(1)
 })
 
-test('a cold thread-root deep link loads the reply timeline', async ({ page }) => {
+test('a cold thread-root deep link loads the reply timeline', async ({
+  page,
+}) => {
   await signIn(page)
   const root = message('$root', 50, 'thread root')
   const reply = {

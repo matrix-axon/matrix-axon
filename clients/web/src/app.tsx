@@ -21,7 +21,11 @@ import {
   resolveMatrixToRoomLink,
   type MatrixRoomReference,
 } from './matrix-to'
-import { withSearchParam } from './search-tokens'
+import {
+  currentRoomFromPath,
+  serializeSearchTokens,
+  withSearchParam,
+} from './search-tokens'
 import { ShellActionsContext } from './shell-actions'
 import { AccountsPage } from './pages/AccountsPage'
 import { LicensesPage } from './pages/LicensesPage'
@@ -336,7 +340,7 @@ function Shell() {
 function ShellChrome() {
   const location = useLocation()
   const { path, query } = location
-  const { accounts, rooms, settings, threadUnread } = useServices()
+  const { accounts, rooms, search, settings, threadUnread } = useServices()
   const mode = layoutMode(path)
   perfMark('shell:render', { path, mode })
   const collapsed = settings.sidebarCollapsed.value
@@ -369,23 +373,23 @@ function ShellChrome() {
   const priorRoom = useRef(currentRoomFromPath(path))
 
   useEffect(() => {
-     const current = currentRoomFromPath(path)
-     const previous = priorRoom.current
-+    if (previous === null && current !== null) {
-+      // A search result can be opened from settings, accounts, or the room
-+      // list. Consume its one-shot preservation here so it cannot leak into a
-+      // later unrelated room switch.
-+      search.consumeResultJumpPreservation()
-+    }
-     if (
-       previous !== null &&
-       (current === null ||
-         current.accountId !== previous.accountId ||
-         current.roomId !== previous.roomId)
-     ) {
-       if (!search.consumeResultJumpPreservation()) {
-         search.clear()
-       }
+    const current = currentRoomFromPath(path)
+    const previous = priorRoom.current
+    if (previous === null && current !== null) {
+      // A search result can be opened from settings, accounts, or the room
+      // list. Consume its one-shot preservation here so it cannot leak into a
+      // later unrelated room switch.
+      search.consumeResultJumpPreservation()
+    }
+    if (
+      previous !== null &&
+      (current === null ||
+        current.accountId !== previous.accountId ||
+        current.roomId !== previous.roomId)
+    ) {
+      if (!search.consumeResultJumpPreservation()) {
+        search.clear()
+      }
     }
     priorRoom.current = current
   }, [path, search])
@@ -398,7 +402,13 @@ function ShellChrome() {
   const openSearch = (event?: KeyboardEvent) => {
     event?.preventDefault()
     if (!searchOpen) {
-      location.route(withSearchParam(location.url, ''))
+      const lastQuery = search.lastQuery.value
+      location.route(
+        withSearchParam(
+          location.url,
+          lastQuery === null ? '' : serializeSearchTokens(lastQuery),
+        ),
+      )
     }
   }
   const setJumpAction = useCallback((action: (() => void) | null) => {

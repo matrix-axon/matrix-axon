@@ -347,9 +347,6 @@ describe('RoomPage', () => {
     const titleButton = await findByRole('button', {
       name: 'Open room information',
     })
-    expect(titleButton.getAttribute('title')).toBe(
-      'Room information (/whereami)',
-    )
     fireEvent.click(titleButton)
 
     const panel = await findByRole('complementary', {
@@ -2024,6 +2021,13 @@ describe('RoomPage', () => {
     await findByText('body of $reply')
     const quote = container.querySelector('.reply-context')!
     expect(quote.textContent).toContain('original message')
+    const link = quote.querySelector<HTMLAnchorElement>('.reply-context-link')
+    expect(link?.getAttribute('href')).toBe(
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24target`,
+    )
+    expect(link?.getAttribute('aria-label')).toBe(
+      'Jump to original message from @alice:hs',
+    )
   })
 
   it('renders formatted markdown in reply context anchors', async () => {

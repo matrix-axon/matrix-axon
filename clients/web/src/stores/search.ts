@@ -29,6 +29,8 @@ export interface SearchStore {
   /** The server answered 503: search is disabled there (ADR 0066), a state
    *  the overlay renders as "unavailable", not as an error. */
   unavailable: ReadonlySignal<boolean>
+  /** The query that produced the currently cached result set, if any. */
+  lastQuery: ReadonlySignal<SearchQuery | null>
 
   /** Run a query, replacing any loaded results with its first page. */
   run(query: SearchQuery): Promise<void>
@@ -36,6 +38,10 @@ export interface SearchStore {
   loadMore(): Promise<void>
   /** Back to the never-searched state. */
   clear(): void
+  /** Keep the cache through the next cross-room navigation from a result. */
+  preserveForResultJump(): void
+  /** Consume the one-shot preservation requested by a result jump. */
+  consumeResultJumpPreservation(): boolean
 }
 
 /**
@@ -54,7 +60,8 @@ export function createSearchStore(api: ApiClient): SearchStore {
   const error = signal<string | null>(null)
   const unavailable = signal(false)
   let generation = 0
-  let lastQuery: SearchQuery | null = null
+  let preserveForResultJump = false
+  const lastQuery = signal<SearchQuery | null>(null)
 
   async function fetchPage(
     query: SearchQuery,
@@ -103,7 +110,7 @@ export function createSearchStore(api: ApiClient): SearchStore {
   async function run(query: SearchQuery): Promise<void> {
     generation += 1
     const started = generation
-    lastQuery = query
+    lastQuery.value = query
     loading.value = true
     // A superseded in-flight `loadMore` discards its page but cannot clean
     // up after itself (its generation check comes after the await).
@@ -127,12 +134,12 @@ export function createSearchStore(api: ApiClient): SearchStore {
 
   async function loadMore(): Promise<void> {
     const cursor = nextCursor.value
-    if (cursor === null || loadingMore.value || lastQuery === null) {
+    if (cursor === null || loadingMore.value || lastQuery.value === null) {
       return
     }
     const started = generation
     loadingMore.value = true
-    const page = await fetchPage(lastQuery, cursor)
+    const page = await fetchPage(lastQuery.value, cursor)
     if (generation !== started) {
       return
     }
@@ -147,7 +154,8 @@ export function createSearchStore(api: ApiClient): SearchStore {
 
   function clear(): void {
     generation += 1
-    lastQuery = null
+    preserveForResultJump = false
+    lastQuery.value = null
     results.value = []
     total.value = null
     loading.value = false
@@ -155,6 +163,12 @@ export function createSearchStore(api: ApiClient): SearchStore {
     nextCursor.value = null
     error.value = null
     unavailable.value = false
+  }
+
+  function consumeResultJumpPreservation(): boolean {
+    const preserved = preserveForResultJump
+    preserveForResultJump = false
+    return preserved
   }
 
   return {
@@ -165,8 +179,13 @@ export function createSearchStore(api: ApiClient): SearchStore {
     exhausted: computed(() => nextCursor.value === null),
     error,
     unavailable: computed(() => unavailable.value),
+    lastQuery: computed(() => lastQuery.value),
     run,
     loadMore,
     clear,
+    preserveForResultJump: () => {
+      preserveForResultJump = true
+    },
+    consumeResultJumpPreservation,
   }
 }

@@ -403,6 +403,17 @@ export function localRoomHref(
     : `${roomHref}?event=${encodeURIComponent(eventId)}`
 }
 
+/** A local deep link that keeps a thread open while revealing one of its replies. */
+export function localThreadEventHref(
+  accountId: string,
+  roomId: string,
+  threadRootId: string,
+  eventId: string,
+): string {
+  const roomHref = `/${encodeURIComponent(accountId)}/rooms/${encodeURIComponent(roomId)}`
+  return `${roomHref}?thread=${encodeURIComponent(threadRootId)}&event=${encodeURIComponent(eventId)}`
+}
+
 function linkLabel(label: string, href: string, roomName: string): string {
   const trimmed = label.trim()
   return trimmed === '' || trimmed === href ? roomName : label

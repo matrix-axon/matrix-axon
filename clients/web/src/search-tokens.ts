@@ -191,6 +191,13 @@ export function parseSearchTokens(
       literal = true
       continue
     }
+    // A bare `*` is the compact spelling for searching every account. It is
+    // deliberately recognized only as an unquoted token before `--`, so a
+    // user can still search for an asterisk literally.
+    if (!literal && !quotedStart && token === '*') {
+      all = true
+      continue
+    }
     const match = literal || quotedStart ? null : FIELD_PATTERN.exec(token)
     const field = match?.[1].toLowerCase()
     if (match === null || field === undefined || match[2] === '') {

@@ -47,7 +47,7 @@ export function RoomInfoPanel({
   onClose: () => void
 }) {
   const location = useLocation()
-  const { rooms } = useServices()
+  const { rooms, search } = useServices()
   const inviteInput = useRef<HTMLInputElement>(null)
   const clearCopyStatus = useRef<number | null>(null)
   const [filter, setFilter] = useState('')
@@ -157,6 +157,7 @@ export function RoomInfoPanel({
       return
     }
     setInviteValue('')
+    search.clear()
     setInviteStatus(`Invited ${formatInviteeList(invite.userIds)}.`)
   }
 

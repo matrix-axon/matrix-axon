@@ -154,6 +154,40 @@ describe('SearchOverlay', () => {
     expect(link?.textContent).toContain('@bob')
   })
 
+  it('routes a thread hit to its thread-local event deep link', async () => {
+    server.use(
+      searchHandler({
+        '': {
+          results: [
+            {
+              ...hit('$reply', 'the threaded deploy failed'),
+              event: {
+                ...hit('$reply', 'the threaded deploy failed').event,
+                relates_to: { rel_type: 'm.thread', event_id: '$root' },
+              },
+            },
+          ],
+          total: 1,
+          next_cursor: null,
+        },
+      }),
+    )
+    history.replaceState(null, '', `/?search=${encodeURIComponent('deploy')}`)
+    const { container, getByRole } = render(<App services={testServices()} />)
+
+    await waitFor(() => {
+      expect(getByRole('dialog').textContent).toContain('1 result')
+    })
+
+    expect(
+      container
+        .querySelector<HTMLAnchorElement>('a.search-hit')
+        ?.getAttribute('href'),
+    ).toBe(
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root&event=%24reply`,
+    )
+  })
+
   it('submits the typed input merged over the URL chips', async () => {
     const seen: URLSearchParams[] = []
     server.use(

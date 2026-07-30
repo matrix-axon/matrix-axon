@@ -37,6 +37,8 @@ export interface MessageComposerOptions {
    * would send it from the wrong place.
    */
   attachmentScope: string
+  /** Called after a message, edit, or media batch successfully mutates room state. */
+  onMutation?: () => void
 }
 
 /**
@@ -67,7 +69,15 @@ export function useMessageComposer(options: MessageComposerOptions): {
   /** The Composer `onSubmit`: media, edit, reply, or plain send. */
   submitMessage: (body: string) => Promise<boolean>
 } {
-  const { timeline, accountId, members, rooms, roomTitles, ownUserId } = options
+  const {
+    timeline,
+    accountId,
+    members,
+    rooms,
+    roomTitles,
+    ownUserId,
+    onMutation,
+  } = options
   const [action, setAction] = useState<ComposerAction | null>(null)
   const [emojiEntries, setEmojiEntries] = useState(() => currentEmojiEntries())
   const attachable = action?.kind !== 'edit'
@@ -139,7 +149,13 @@ export function useMessageComposer(options: MessageComposerOptions): {
       // uses each filename as the body (ADR 0065, ADR 0081).
       const caption =
         body === '' ? undefined : (await formatComposerBody(body)).body
-      return timeline.sendMediaBatch(staged, { caption, replyTo, senderId })
+      const ok = await timeline.sendMediaBatch(staged, {
+        caption,
+        replyTo,
+        senderId,
+      })
+      if (ok) onMutation?.()
+      return ok
     }
     const formatted = await formatComposerBody(body)
     if (current?.kind === 'edit') {
@@ -152,13 +168,16 @@ export function useMessageComposer(options: MessageComposerOptions): {
         // would silently discard it (WCR-10).
         setAction({ ...current, draft: body })
       }
+      if (ok) onMutation?.()
       return ok
     }
-    return timeline.send(formatted.body, {
+    const ok = await timeline.send(formatted.body, {
       replyTo,
       senderId,
       formattedBody: formatted.formatted_body ?? null,
     })
+    if (ok) onMutation?.()
+    return ok
   }
 
   return {
