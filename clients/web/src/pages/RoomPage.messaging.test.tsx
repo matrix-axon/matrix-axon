@@ -228,7 +228,10 @@ describe('sending', () => {
         }),
       ),
     )
-    const { findByLabelText, queryByText } = renderRoom([event('$1', 100)])
+    const { services, findByLabelText, queryByText } = renderRoom([
+      event('$1', 100),
+    ])
+    const clearSearch = vi.spyOn(services.search, 'clear')
 
     const textarea = (await findByLabelText(
       'Message Ops',
@@ -242,6 +245,7 @@ describe('sending', () => {
     expect(textarea.value).toBe('')
     await waitFor(() => expect(sendBody.body).toBe('hello there'))
     expect(sendBody.thread_root).toBeNull()
+    expect(clearSearch).toHaveBeenCalledOnce()
     await waitFor(() => expect(queryByText('Sending…')).toBeNull())
   })
 
@@ -682,15 +686,17 @@ describe('editing and redacting', () => {
         }),
       ),
     )
-    const { findAllByRole, findByRole, findByText } = renderRoom([
+    const { services, findAllByRole, findByRole, findByText } = renderRoom([
       event('$mine', 100, { sender: OWN_USER }),
     ])
+    const clearSearch = vi.spyOn(services.search, 'clear')
 
     fireEvent.click((await findAllByRole('button', { name: 'Delete' }))[0])
     expect(deleted).toBeNull()
     fireEvent.click(await findByRole('button', { name: 'Confirm delete' }))
 
     await waitFor(() => expect(deleted).toBe('$mine'))
+    expect(clearSearch).toHaveBeenCalledOnce()
     expect(await findByText('message deleted')).toBeTruthy()
   })
 })
@@ -729,13 +735,15 @@ describe('reactions', () => {
         }),
       ),
     )
-    const { findAllByRole, findByRole, findByText } = renderRoom([
+    const { services, findAllByRole, findByRole, findByText } = renderRoom([
       event('$msg', 100),
     ])
+    const clearSearch = vi.spyOn(services.search, 'clear')
 
     fireEvent.click((await findAllByRole('button', { name: 'React' }))[0])
     fireEvent.click(await findByRole('button', { name: '👍' }))
     await waitFor(() => expect(posted).toEqual({ key: '👍' }))
+    expect(clearSearch).toHaveBeenCalledOnce()
 
     // The refreshed row now shows my chip; clicking it redacts my reaction.
     fireEvent.click(await findByText('👍 1'))
