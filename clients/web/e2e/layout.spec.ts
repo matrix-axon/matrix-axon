@@ -464,10 +464,7 @@ test('narrow: starting a DM from room information uncovers the new timeline', as
 
   await page.goto(ROOM_URL)
   await expect(page.locator('.timeline')).toBeVisible()
-  await page
-    .getByRole('banner')
-    .getByRole('button', { name: 'Open room information' })
-    .click()
+  await page.getByRole('button', { name: 'Open room information' }).click()
   const panel = page.getByRole('complementary', { name: 'Room information' })
   await expect(panel).toBeVisible()
 
@@ -481,6 +478,21 @@ test('narrow: starting a DM from room information uncovers the new timeline', as
   await expect(panel).toHaveCount(0)
   await expect(page.locator('.timeline')).toBeVisible()
   await expectPaneCenterUncovered(page, '.timeline')
+})
+
+test('room information derives a parent space from its child relationship', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.goto(ROOM_URL)
+
+  await page.getByRole('button', { name: 'Open room information' }).click()
+
+  const panel = page.getByRole('complementary', { name: 'Room information' })
+  await expect(
+    panel.getByRole('button', { name: 'Parent: E2E Space One' }),
+  ).toBeVisible()
 })
 
 test('narrow: room information scrolls when the member list overflows', async ({

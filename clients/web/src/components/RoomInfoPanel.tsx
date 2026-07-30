@@ -55,7 +55,7 @@ export function RoomInfoPanel({
   onClose: () => void
 }) {
   const location = useLocation()
-  const { rooms, search, api, live } = useServices()
+  const { rooms, search, spaces, api, live } = useServices()
   const inviteInput = useRef<HTMLInputElement>(null)
   const clearCopyStatus = useRef<number | null>(null)
   const [filter, setFilter] = useState('')
@@ -109,6 +109,25 @@ export function RoomInfoPanel({
   const onlyJoinedMember =
     ownUserId !== null &&
     isOnlyJoinedMember(members.members.value.values(), ownUserId)
+  const parents = useMemo(
+    () =>
+      relatedSpaceParents(
+        roomState.parents,
+        spaces.children.value,
+        rooms.rooms.value,
+        accountId,
+        roomId,
+        roomTitles,
+      ),
+    [
+      roomState.parents,
+      spaces.children.value,
+      rooms.rooms.value,
+      accountId,
+      roomId,
+      roomTitles,
+    ],
+  )
 
   useEffect(() => {
     if (inviteOpen) {
@@ -435,7 +454,7 @@ export function RoomInfoPanel({
 
       <RoomStateLinks
         children={roomState.children}
-        parents={roomState.parents}
+        parents={parents}
         upgrade={roomState.upgrade}
         errors={roomState.errors}
         onOpen={async (target, via) => {
@@ -759,6 +778,44 @@ function CancelInviteDialog({
       </div>
     </BodyPortal>
   )
+}
+
+/**
+ * Matrix spaces normally establish membership with an `m.space.child` event
+ * in the parent space. `m.space.parent` in the child is optional, so augment
+ * the endpoint's direct projection with the joined spaces already loaded for
+ * the picker.
+ */
+function relatedSpaceParents(
+  directParents: readonly SpaceParentDto[] | null,
+  childrenBySpace: ReadonlyMap<string, readonly SpaceChildDto[]>,
+  rooms: readonly RoomDto[],
+  accountId: string,
+  roomId: string,
+  roomTitles: ReadonlyMap<string, string>,
+): readonly SpaceParentDto[] | null {
+  const parents = new Map(
+    (directParents ?? []).map((parent) => [parent.room_id, parent]),
+  )
+  for (const space of rooms) {
+    if (space.account_id !== accountId || space.room_type !== 'm.space')
+      continue
+    const child = childrenBySpace
+      .get(roomKey(space))
+      ?.find((candidate) => candidate.room_id === roomId)
+    if (child !== undefined && !parents.has(space.room_id)) {
+      parents.set(space.room_id, {
+        room_id: space.room_id,
+        room_type: space.room_type,
+        name: roomTitle(space, roomTitles),
+        canonical: false,
+        via: child.via,
+      })
+    }
+  }
+  return directParents === null && parents.size === 0
+    ? null
+    : [...parents.values()]
 }
 
 function RoomStateLinks({

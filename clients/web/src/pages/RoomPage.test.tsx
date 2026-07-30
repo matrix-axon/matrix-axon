@@ -360,6 +360,66 @@ describe('RoomPage', () => {
     expect(within(panel).getByText('Alice')).toBeTruthy()
   })
 
+  it('shows joined parent spaces from their child relationships', async () => {
+    const parentSpace = '!engineering:hs'
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/space/children`,
+        ({ params }) =>
+          HttpResponse.json({
+            data:
+              params.roomId === parentSpace
+                ? [
+                    {
+                      room_id: ROOM,
+                      name: 'Ops',
+                      room_type: null,
+                      suggested: false,
+                      via: ['hs'],
+                    },
+                  ]
+                : [],
+          }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/space/parents`,
+        () => HttpResponse.json({ data: [] }),
+      ),
+    )
+    const { findByLabelText, findByRole } = renderRoom([event('$1', T0)], {
+      rooms: [
+        {
+          account_id: ACCOUNT,
+          account_user_id: '@me:hs',
+          room_id: ROOM,
+          name: 'Ops',
+          last_activity_ts: T0,
+          highlight_count: 0,
+          notification_count: 0,
+        },
+        {
+          account_id: ACCOUNT,
+          account_user_id: '@me:hs',
+          room_id: parentSpace,
+          name: 'Engineering',
+          room_type: 'm.space',
+          last_activity_ts: T0 - 1,
+          highlight_count: 0,
+          notification_count: 0,
+        },
+      ],
+    })
+
+    await findByLabelText('Message Ops')
+    fireEvent.click(
+      await findByRole('button', { name: 'Open room information' }),
+    )
+
+    expect(
+      await findByRole('button', { name: 'Parent: Engineering' }),
+    ).toBeTruthy()
+  })
+
   it('sorts and filters the room information member roster', async () => {
     const { container, findByLabelText, findByRole } = renderRoom(
       [event('$1', T0)],

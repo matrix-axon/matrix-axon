@@ -191,9 +191,11 @@ export function RoomList() {
   )
   const activeAccountsKnown =
     !accountStore.loading.value && accountStore.error.value === null
-  const scopedRooms = activeAccountsKnown
-    ? allRooms.filter((room) => activeAccountIds.has(room.account_id))
-    : allRooms
+  const scopedRooms = allRooms.filter(
+    (room) =>
+      room.room_type !== 'm.space' &&
+      (!activeAccountsKnown || activeAccountIds.has(room.account_id)),
+  )
   const showAccountFilter = activeAccountEntries.length > 1
   const labels = useMemo(
     () => accountLabels(activeAccountEntries),

@@ -204,6 +204,21 @@ it('filters the room list to selected space children without overriding its sort
   ])
 })
 
+it('keeps joined spaces in the picker rather than the all-rooms list', async () => {
+  const space = makeRoom({
+    room_id: '!whatsapp:hs',
+    name: 'WhatsApp',
+    room_type: 'm.space',
+  })
+  const { findByRole, queryByRole } = renderPage([OPS, space], undefined, {
+    withSpaces: true,
+  })
+
+  expect(await findByRole('button', { name: 'WhatsApp' })).toBeTruthy()
+  expect(queryByRole('link', { name: /WhatsApp/ })).toBeNull()
+  expect(await findByRole('link', { name: /Ops/ })).toBeTruthy()
+})
+
 function roomActionsDetails(container: ParentNode): HTMLDetailsElement {
   const details = container.querySelector('.room-actions-menu')
   if (!(details instanceof HTMLDetailsElement)) {
