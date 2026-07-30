@@ -453,7 +453,7 @@ removal are announced through the same polite-status pattern.
   so treat any number here as provisional until it has met real photos.
 - **Lightbox paging silently grows the retained timeline.** `trimRetainedTail`
   only trims the newest end, so paging back through 30 images can load five
-  pages that stay in the DOM (#315 — the timeline is not windowed), raising the
+  pages that stay in the DOM (#26 — the timeline is not windowed), raising the
   ADR 0071 teardown cost from what the user experienced as looking at photos.
   `AUTO_PAGE_LIMIT = 5` is the mitigation.
 - **The iOS edge-swipe ambiguity is inherited, not solved.** Swipe-right-to-

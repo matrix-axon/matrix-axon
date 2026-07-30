@@ -70,7 +70,7 @@ before starting a milestone.
   re-capture the anchor per scroll event: reading geometry forces the layout
   that renders incoming rows, so the capture triggers the growth it means to
   measure. `.event-row` deliberately carries **no** `content-visibility`; its
-  size guesses were the shifts. Windowing (#315) is the way back to a bounded
+  size guesses were the shifts. Windowing (#26) is the way back to a bounded
   row count.
 - **Media** (`src/media/`, ADR 0064): a browser cannot put a bearer token on
   `<img src>`, so `MediaService` fetches every `mxc://` through the proxy and

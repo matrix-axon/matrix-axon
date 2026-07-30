@@ -107,7 +107,7 @@ engine.
   600-event retained-slice bound (same change set) caps that, which it did not
   when ADR 0071 was written. `pnpm test:e2e:perf` re-runs the lane if the trade
   needs re-checking.
-- **Windowing (#315) is still the way back to a bounded row count**, and is now
+- **Windowing (#26) is still the way back to a bounded row count**, and is now
   the only outstanding lever. A windowed timeline with measured heights makes
   position deterministic rather than corrected, and would supersede the
   anchoring here rather than sit beside it.
