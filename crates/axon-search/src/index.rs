@@ -310,11 +310,6 @@ fn regex_escape(value: &str) -> String {
     escaped
 }
 
-/// Whether the index directory must be (re)seeded from scratch: it is missing the
-/// [`SCHEMA_VERSION_FILE`] seed-completion marker (new, empty, a pre-marker index,
-/// or an interrupted earlier seed) or the marker records a different
-/// [`SCHEMA_VERSION`]. A read error on the marker is treated as "rebuild" — the safe
-/// direction.
 /// Number of attempts [`remove_index_dir`] makes before giving up.
 const WIPE_ATTEMPTS: u32 = 5;
 
@@ -366,6 +361,11 @@ fn is_transient_wipe_error(err: &std::io::Error) -> bool {
     )
 }
 
+/// Whether the index directory must be (re)seeded from scratch: it is missing the
+/// [`SCHEMA_VERSION_FILE`] seed-completion marker (new, empty, a pre-marker index,
+/// or an interrupted earlier seed) or the marker records a different
+/// [`SCHEMA_VERSION`]. A read error on the marker is treated as "rebuild" — the safe
+/// direction.
 fn needs_rebuild(dir: &Path) -> Result<bool, SearchError> {
     let sidecar = dir.join(SCHEMA_VERSION_FILE);
     match std::fs::read_to_string(&sidecar) {
