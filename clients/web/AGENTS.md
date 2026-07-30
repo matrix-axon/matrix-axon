@@ -55,6 +55,27 @@ before starting a milestone.
   (retryable via `retrySend`/discardable via `discardSend`) on error;
   edit/redact/react use the same re-fetch-and-patch shape against a real
   event id (scroll position survives throughout — no full reload).
+- **Staged attachments outlive the room switch too**
+  (`src/media/attachment-staging.ts`, issue #89): staging is retained per scope
+  (`accountId\0roomId`, plus the thread root in `ThreadPanel`) with an LRU cap of
+  3 — real file bytes, unlike the ~1 KB events the timeline cache holds. Three
+  rules, each of which a plausible refactor undoes:
+  - **It lives in the service graph, never in the component.** `RoomPage`
+    unmounts whenever the route leaves a room, and on a phone that is _every_
+    room change (back to `/`, then into the next room). A first version kept the
+    buckets in `useAttachments`; it passed every desktop test, survived
+    room-to-room switching, and did nothing at all on a phone.
+  - The active batch is resolved **during render** from `scope`, never swapped in
+    by an effect — an effect runs after the new room paints, leaving one frame in
+    which the composer shows, and `Enter` sends, the previous room's files.
+  - `shrink()`'s downscale resolves its item **by id across every scope**,
+    because a decode outlives the room it started in; resolving against the
+    active scope drops the result and leaks the full-size object url.
+
+  Unmount is therefore _not_ a release point. The release paths are remove,
+  send, LRU eviction, and `clearAll()` on sign-out
+  (`connectAttachmentReset`).
+
 - **Timeline stores outlive their mount** (`src/stores/timeline-cache.ts`, ADR
   0085 phase 1): `RoomPage` acquires from an account+room-keyed LRU instead of
   building a store per mount, so a room re-entered in one session paints its

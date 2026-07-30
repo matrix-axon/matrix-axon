@@ -242,6 +242,7 @@ export function RoomPage() {
     settings,
     search,
     timelines,
+    attachments: staging,
   } = useServices()
   // Warm across room switches rather than rebuilt per mount (ADR 0085 phase
   // 1). The store may therefore arrive already populated — and stale, since
@@ -879,10 +880,14 @@ export function RoomPage() {
     roomTitles: rooms.titles.value,
     ownUserId,
     // Account *and* room: a room joined by two accounts is two rows
-    // (`roomKey`), and a staged file must not survive switching between
-    // them — it would send from the wrong account.
-    attachmentScope: `${accountId} ${roomId}`,
+    // (`roomKey`), and a file staged under one must never be sent from the
+    // other. Staging is now retained per scope (issue #89), so this key
+    // decides what the composer shows as well as what a send picks up —
+    // joined on `'\0'` like every other composite key, since a printable
+    // separator is a collision waiting to happen.
+    attachmentScope: `${accountId}\0${roomId}`,
     onMutation: search.clear,
+    staging,
   })
   void ephemeral.revision.value
   const typingText = formatTypingIndicator(

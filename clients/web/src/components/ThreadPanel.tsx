@@ -117,7 +117,15 @@ export function ThreadPanel({
   /** An event in this thread to fetch, reveal, and highlight. */
   highlightedEventId?: string | null
 }) {
-  const { api, deviceState, live, media, search, settings } = useServices()
+  const {
+    api,
+    deviceState,
+    live,
+    media,
+    search,
+    settings,
+    attachments: staging,
+  } = useServices()
   const location = useLocation()
   const hideRedacted = settings.hideRedactedEvents.value
   const thread = useMemo(
@@ -197,8 +205,9 @@ export function ThreadPanel({
     rooms,
     roomTitles,
     ownUserId,
-    attachmentScope: `${accountId} ${roomId} ${rootId}`,
+    attachmentScope: `${accountId}\0${roomId}\0${rootId}`,
     onMutation: search.clear,
+    staging,
   })
 
   // The room page's `?event=` jump owns the main timeline. A thread needs the
