@@ -2,11 +2,36 @@ name: Web e2e
 
 # The M-W6 Playwright lane (ADR 0061): headless Chromium drives the built app
 # against the dependency-free mock backend in `clients/web/e2e/mock-server.mjs`.
-# Manual dispatch only — it needs a browser runner, so it does not gate every
-# push (the M-W1 workflow convention). `pnpm test:e2e` runs the same thing.
+# `pnpm test:e2e` runs the same thing locally.
+#
+# This lane gates web PRs. It was dispatch-only on the grounds that it needs a
+# browser runner, but `ubuntu-latest` provides one and `playwright install
+# --with-deps chromium` is the whole cost; the suite is ~40 s of test time. The
+# price of not running it is what issue #96 documents: three real failures sat
+# on `main` from the PR that introduced them, because nothing ever ran them.
+#
+# Paths mirror `web-lint-and-test.yml`, minus its `openapi/openapi.json` entry —
+# that is there for the schema-drift gate, which this lane does not run. A
+# server-silo PR cannot break these tests without touching `clients/web`.
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "clients/web/**"
+      - ".github/workflows/web-e2e.yml"
+  pull_request:
+    paths:
+      - "clients/web/**"
+      - ".github/workflows/web-e2e.yml"
+
+# A browser lane is the most expensive thing here, and only the newest commit
+# on a branch is worth a runner.
+concurrency:
+  group: web-e2e-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
