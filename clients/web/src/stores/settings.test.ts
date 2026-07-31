@@ -141,7 +141,10 @@ describe('room-list settings (ADRs 0038/0042)', () => {
       }),
     })
     const store = createSettingsStore(storage)
-    store.moveSpace('account/!two:hs', 0, ['account/!one:hs', 'account/!two:hs'])
+    store.moveSpace('account/!two:hs', 0, [
+      'account/!one:hs',
+      'account/!two:hs',
+    ])
     expect(store.spaceOrder.value).toContain('account/!gone:hs')
     expect(store.spaceOrder.value.slice(0, 2)).toEqual([
       'account/!two:hs',

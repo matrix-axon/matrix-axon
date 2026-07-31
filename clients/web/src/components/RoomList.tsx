@@ -865,7 +865,9 @@ export function RoomList() {
               Show all rooms
             </button>
           </div>
-          {spaceScope === 'loading' && <p class="muted">Loading space rooms…</p>}
+          {spaceScope === 'loading' && (
+            <p class="muted">Loading space rooms…</p>
+          )}
           {spaceScope === 'failed' && (
             <p class="error" role="alert">
               {spaceScopeError ?? 'Could not load space.'}{' '}

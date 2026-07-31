@@ -120,7 +120,9 @@ export function RoomInfoPanel({
     emptyRoomState(roomStateKey),
   )
   const roomState =
-    loadedState.key === roomStateKey ? loadedState : emptyRoomState(roomStateKey)
+    loadedState.key === roomStateKey
+      ? loadedState
+      : emptyRoomState(roomStateKey)
   /** Room-state details, with a failed `/info` reported rather than pending. */
   const infoValue = (pick: (info: RoomInfoDto) => string) => {
     if (roomState.info !== null) return pick(roomState.info)
@@ -1003,9 +1005,9 @@ function JoinLinkedRoomDialog({
         <div class="overlay-panel leave-room-dialog">
           <h2>Join this room?</h2>
           <p>
-            You have not joined <strong>{label}</strong> (<code>{roomId}</code>).
-            Opening it joins the room with this account, which other members can
-            see.
+            You have not joined <strong>{label}</strong> (<code>{roomId}</code>
+            ). Opening it joins the room with this account, which other members
+            can see.
           </p>
           <div class="dialog-actions">
             <button

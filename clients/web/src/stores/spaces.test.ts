@@ -56,11 +56,7 @@ function harness() {
       return () => listeners.delete(listener)
     },
   } as unknown as LiveConnection
-  const store = createSpacesStore(
-    api,
-    { rooms } as unknown as RoomsStore,
-    live,
-  )
+  const store = createSpacesStore(api, { rooms } as unknown as RoomsStore, live)
   return {
     store,
     rooms,

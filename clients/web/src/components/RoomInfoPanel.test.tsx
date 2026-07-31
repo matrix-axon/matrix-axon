@@ -110,9 +110,7 @@ const detail = (label: string): string => {
 it('never shows the previous room’s state after a room switch', async () => {
   server.use(...handlers())
   const { showRoom } = renderPanel(FIRST)
-  await waitFor(() =>
-    expect(detail('Encryption')).toBe('m.megolm.v1.aes-sha2'),
-  )
+  await waitFor(() => expect(detail('Encryption')).toBe('m.megolm.v1.aes-sha2'))
 
   // The panel is not remounted across room navigation, so a stale slice would
   // survive here — and encryption is exactly the field that must not lie.
@@ -125,9 +123,7 @@ it('never shows the previous room’s state after a room switch', async () => {
 it('reports a failed room-state read instead of pending forever', async () => {
   server.use(...handlers({ failSecond: true }))
   const { showRoom, findByText } = renderPanel(FIRST)
-  await waitFor(() =>
-    expect(detail('Encryption')).toBe('m.megolm.v1.aes-sha2'),
-  )
+  await waitFor(() => expect(detail('Encryption')).toBe('m.megolm.v1.aes-sha2'))
 
   showRoom(SECOND)
   await waitFor(() => expect(detail('Encryption')).toBe('Unavailable'))
