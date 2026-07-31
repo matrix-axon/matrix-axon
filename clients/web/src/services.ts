@@ -288,13 +288,15 @@ export function connectTimelineCacheReset(
     if (auth.signedIn.value) {
       return
     }
-    // Deferred out of the reactive flush on purpose. `clear()` disposes each
-    // store, and disposing one that holds a local echo *writes a signal* —
-    // which @preact/signals rejects with "Cycle detected" when it happens
-    // synchronously inside an effect body. Signing out with a pending send is
-    // exactly the case that would have hit it, and no test had an echo staged
-    // at sign-out, so it stayed invisible.
-    queueMicrotask(() => timelines.clear())
+    // Runs inside the reactive flush, which is safe only because `clear()` is
+    // *idempotent*: disposing a store that holds a local echo does write a
+    // signal, but the map is emptied, so a re-run of this effect within the
+    // same flush writes nothing and the flush settles. An unconditional write
+    // here would not settle — @preact/signals gives up after 100 flush
+    // iterations with "Cycle detected" — which is exactly what an unguarded
+    // wipe did in `connectAttachmentReset`. Keep any wipe reached from here
+    // a no-op once it has nothing left to do.
+    timelines.clear()
   })
 }
 

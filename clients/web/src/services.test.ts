@@ -1,6 +1,7 @@
 import { computed, signal } from '@preact/signals'
 import { describe, expect, it, vi } from 'vitest'
 import { createApiClient } from './api/client'
+import { createMediaService } from './media/media-service'
 import { TIMELINE_EVENT, UNREAD_COUNTS_CHANGED } from './api/frames'
 import {
   connectLiveRooms,
@@ -10,6 +11,7 @@ import {
 } from './services'
 import { createDeviceStateStore } from './stores/device-state'
 import { createLiveConnection } from './stores/live-connection'
+import { createTimelineStoreCache } from './stores/timeline-cache'
 import { FakeWebSocket } from './test/fake-socket'
 import { memoryStorage } from './test/memory-storage'
 
@@ -273,15 +275,11 @@ describe('connectTimelineCacheReset', () => {
     return { flag, clears: () => clears, dispose }
   }
 
-  it('wipes the warm stores when the session ends', async () => {
+  it('wipes the warm stores when the session ends', () => {
     const { flag, clears, dispose } = harness(true)
     expect(clears()).toBe(0)
 
     flag.value = false
-    // The wipe is a microtask later: a synchronous signal write inside an
-    // effect body is a "Cycle detected" throw, and disposing a store that
-    // holds an echo writes one.
-    await Promise.resolve()
 
     // The service graph outlives a sign-out, so without this a signed-out tab
     // keeps every warm room's messages in memory (ADR 0085 phase 1).
@@ -289,11 +287,51 @@ describe('connectTimelineCacheReset', () => {
     dispose()
   })
 
-  it('starts from a clean cache when the app boots signed out', async () => {
+  it('starts from a clean cache when the app boots signed out', () => {
     const { clears, dispose } = harness(false)
-    await Promise.resolve()
 
     expect(clears()).toBe(1)
+    dispose()
+  })
+
+  it('settles the flush when signing out with an unsent send staged', async () => {
+    // The wipe runs *inside* the reactive flush, and disposing a store that
+    // holds a local echo writes a signal. That is only safe while the wipe is
+    // idempotent: `clear()` empties the map, so the effect's next pass in the
+    // same flush writes nothing. Make it write every pass and @preact/signals
+    // gives up after 100 iterations with "Cycle detected" — the flush never
+    // reaches a fixed point. Nothing else in this suite has an echo staged at
+    // sign-out, which is the only case where the wipe writes at all.
+    const auth = {
+      getToken: () => 'tok-test',
+      onAuthFailure: () => {},
+      LoginBootstrap: () => null,
+    }
+    const api = createApiClient(auth, 'http://axon.test')
+    const timelines = createTimelineStoreCache(
+      api,
+      createMediaService({ auth, baseUrl: 'http://axon.test' }),
+    )
+    const store = timelines.acquire(ACCT, ROOM)
+    const send = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('', { status: 502 }))
+    expect(await store.send('unsent draft')).toBe(false)
+    expect(store.events.peek()).toHaveLength(1)
+    send.mockRestore()
+
+    const flag = signal(true)
+    const dispose = connectTimelineCacheReset(
+      { signedIn: computed(() => flag.value) } as Parameters<
+        typeof connectTimelineCacheReset
+      >[0],
+      timelines,
+    )
+
+    expect(() => {
+      flag.value = false
+    }).not.toThrow()
+    expect(timelines.size).toBe(0)
     dispose()
   })
 })
