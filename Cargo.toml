@@ -114,7 +114,7 @@ rand = { version = "0.9" }
 # hand-rolled over `reqwest` (see axon-api/src/oauth/generic.rs) rather than
 # pulling a heavier OIDC-client crate — see ADR 0054. `governor` provides the
 # per-IP/per-state rate limiter over `/v1/oauth/*`.
-jsonwebtoken = { version = "10" }
+jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 governor = { version = "0.7" }
 
 # Smoke harnesses (smoke/*). Cross-platform PTY + a terminal screen model so the
