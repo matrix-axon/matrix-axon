@@ -2,7 +2,11 @@ import { signal } from '@preact/signals'
 import { createApiClient } from '../api/client'
 import { createCompositeAuthProvider } from '../auth/composite'
 import type { OAuthProviderConfig } from '../auth/oauth'
+import type { CacheStore } from '../stores/cache-store'
 import {
+  connectCacheReset,
+  connectCacheSetting,
+  connectRoomsSessionReset,
   connectLiveRooms,
   connectLiveThreadUnread,
   connectEphemeralPassthrough,
@@ -12,12 +16,15 @@ import {
   connectUnreadCounts,
   type AppServices,
 } from '../services'
+import { setPerfEnabled } from '../perf'
 import { createAccountsStore } from '../stores/accounts'
 import { createDeviceStateStore } from '../stores/device-state'
 import { createEphemeralStore } from '../stores/ephemeral'
 import { createEphemeralSender } from '../stores/ephemeral-sender'
 import { createMediaService } from '../media/media-service'
 import { createLiveConnection } from '../stores/live-connection'
+import { cacheNamespace, createMemoryCacheStore } from '../stores/cache-store'
+import { createRoomListCache } from '../stores/room-list-cache'
 import { createRoomsStore } from '../stores/rooms'
 import { createSearchStore } from '../stores/search'
 import { createSettingsStore } from '../stores/settings'
@@ -43,6 +50,12 @@ export function testServices(
     oauthProviders?: readonly OAuthProviderConfig[]
     pendingStorage?: Storage
     storage?: Storage
+    /**
+     * A pre-seeded durable cache (ADR 0085 phase 2). Defaults to an empty
+     * in-memory adapter, so every graph exercises the real cache path with no
+     * `fake-indexeddb` and no jsdom IDB quirks.
+     */
+    cache?: CacheStore
   } = {},
 ): AppServices & { sockets: FakeWebSocket[] } {
   const storage =
@@ -66,8 +79,25 @@ export function testServices(
   const media = createMediaService({ auth, baseUrl: TEST_BASE_URL })
   const timelines = createTimelineStoreCache(api, media)
   const settings = createSettingsStore(storage)
+  // Mirrors `createServices`: instrumentation on before the stores that mark.
+  if (settings.perfMarks.peek()) {
+    setPerfEnabled(true)
+  }
   const accounts = createAccountsStore(api)
-  const rooms = createRoomsStore(api, storage)
+  const cache = options.cache ?? createMemoryCacheStore()
+  const rooms = createRoomsStore(
+    api,
+    storage,
+    createRoomListCache({
+      cache,
+      namespace: () =>
+        Promise.resolve(auth.getToken()).then(
+          (token) => cacheNamespace(TEST_BASE_URL, token),
+          () => null,
+        ),
+      enabled: () => settings.cacheRoomList.peek(),
+    }),
+  )
   const search = createSearchStore(api)
   const threadUnread = createThreadUnreadStore()
   const ephemeral = createEphemeralStore()
@@ -97,11 +127,15 @@ export function testServices(
   connectReadMarkers(live, deviceState, rooms)
   connectThreadReadMarkers(live, threadUnread, deviceState)
   connectTimelineCacheReset(auth, timelines)
+  connectCacheReset(auth, cache)
+  connectRoomsSessionReset(auth, rooms)
+  connectCacheSetting(settings, cache)
   return {
     auth,
     api,
     media,
     timelines,
+    cache,
     settings,
     accounts,
     rooms,

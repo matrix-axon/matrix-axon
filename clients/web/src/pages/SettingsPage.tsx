@@ -51,10 +51,11 @@ export function SettingsPage() {
     setMarkingRead(true)
     let current = rooms.rooms.value
     try {
-      if (current.length === 0) {
-        await rooms.refresh()
-        current = rooms.rooms.value
-      }
+      // Marking every room read off a *cached* list would silently skip rooms
+      // joined since it was written, so this waits for a confirmed list rather
+      // than settling for whatever is on screen.
+      await rooms.ensureLoaded()
+      current = rooms.rooms.value
       const accounts = new Set(current.map((room) => room.account_id))
       await Promise.all(
         [...accounts].map((accountId) =>
@@ -208,6 +209,22 @@ export function SettingsPage() {
         </label>
         <p class="muted">
           Show the latest message excerpt under each room name.
+        </p>
+        <label class="setting-row">
+          <input
+            type="checkbox"
+            checked={settings.cacheRoomList.value}
+            onChange={(event) =>
+              (settings.cacheRoomList.value = event.currentTarget.checked)
+            }
+          />
+          Keep the room list on this device
+        </label>
+        <p class="muted">
+          Shows your rooms straight away instead of waiting for the server, and
+          keeps them visible when you're offline. Stores room names, topics and
+          unread counts on this device — no messages. Turning this off erases
+          what has been stored.
         </p>
         <button type="button" onClick={() => void markAllRead()}>
           {markingRead ? 'Marking…' : 'Mark all as read'}

@@ -1348,6 +1348,15 @@ select {
   color: var(--fg);
 }
 
+/* The room list is showing cached rows that no refresh has confirmed yet
+   (ADR 0085 phase 2). Deliberately small and static: it must not shift the
+   rows below it when it appears or goes, so it reserves its own line height
+   rather than collapsing the layout around it. */
+.room-list-stale {
+  margin: 0 0 0.35rem;
+  font-size: 0.8rem;
+}
+
 /* Only the rows overlapping the viewport are rendered; the rest are stood in
    for by the list's own top/bottom padding, set inline. `position: relative`
    anchors the pinned separator, which is taken out of flow so that every row
@@ -4533,7 +4542,13 @@ audio.media-player {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10px;
   line-height: 1.35;
-  white-space: pre;
+  /* Wrap rather than clip. `pre` cost us the tail of the one line that
+     mattered: on a phone the box is 92vw and a summary mark runs past it, so
+     the last fields simply were not on screen — and a readout whose purpose is
+     to be read off a screen recording must never lose data at the right edge.
+     The cost is that a long mark can take two of the ten lines. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   pointer-events: none;
 }
 

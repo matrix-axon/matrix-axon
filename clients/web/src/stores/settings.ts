@@ -129,6 +129,16 @@ export interface SettingsV1 {
    * carry over.
    */
   appBadgeEnabled: boolean
+  /**
+   * Whether the room list is kept in a durable on-device cache so it paints
+   * before the network answers (ADR 0085 phase 2). On by default: it holds
+   * room *metadata* — names, topics, aliases, avatars, unread counts — of the
+   * same kind already persisted under `axon.room_titles.v1`, and it is where
+   * essentially all of the measured benefit lives (a 1,298 ms server-side wait
+   * on the account ADR 0085 measured). Message bodies are a separate,
+   * opt-in decision in phase 3; nothing here writes them.
+   */
+  cacheRoomList: boolean
 }
 
 const DEFAULTS: SettingsV1 = {
@@ -153,6 +163,7 @@ const DEFAULTS: SettingsV1 = {
   developerMode: false,
   perfMarks: false,
   appBadgeEnabled: true,
+  cacheRoomList: true,
 }
 
 const MAX_RECENT_REACTIONS = 3
@@ -300,6 +311,10 @@ function parse(raw: string | null): SettingsV1 {
       typeof v1.appBadgeEnabled === 'boolean'
         ? v1.appBadgeEnabled
         : DEFAULTS.appBadgeEnabled,
+    cacheRoomList:
+      typeof v1.cacheRoomList === 'boolean'
+        ? v1.cacheRoomList
+        : DEFAULTS.cacheRoomList,
   }
 }
 
@@ -324,6 +339,7 @@ export interface SettingsStore {
   developerMode: Signal<boolean>
   perfMarks: Signal<boolean>
   appBadgeEnabled: Signal<boolean>
+  cacheRoomList: Signal<boolean>
   /**
    * Pin a room key, or re-pin an already-pinned one to the top — most
    * recently pinned first (ADR 0038).
@@ -375,6 +391,7 @@ export function createSettingsStore(
   const developerMode = signal<boolean>(initial.developerMode)
   const perfMarks = signal<boolean>(initial.perfMarks)
   const appBadgeEnabled = signal<boolean>(initial.appBadgeEnabled)
+  const cacheRoomList = signal<boolean>(initial.cacheRoomList)
 
   effect(() => {
     const envelope: SettingsV1 = {
@@ -399,6 +416,7 @@ export function createSettingsStore(
       developerMode: developerMode.value,
       perfMarks: perfMarks.value,
       appBadgeEnabled: appBadgeEnabled.value,
+      cacheRoomList: cacheRoomList.value,
     }
     try {
       storage.setItem(STORAGE_KEY, JSON.stringify(envelope))
@@ -429,6 +447,7 @@ export function createSettingsStore(
     developerMode,
     perfMarks,
     appBadgeEnabled,
+    cacheRoomList,
     pinRoom(key: string) {
       pinnedRooms.value = [key, ...pinnedRooms.value.filter((k) => k !== key)]
     },

@@ -71,6 +71,44 @@ before starting a milestone.
   history, and no server page can speak to it). The
   whole cache is wiped on sign-out (`connectTimelineCacheReset`) — the service
   graph outlives the session and nothing reloads the document.
+- **Durable content cache** (`src/stores/cache-store.ts`, ADR 0085 phase 2):
+  IndexedDB behind a `CacheStore` port, with an in-memory adapter for tests —
+  no `fake-indexeddb` anywhere. **Every operation is best-effort**: a refused
+  open, a quota rejection, or a malformed record resolves to "no cache" and
+  never rejects into a caller. Records are keyed by
+  `(apiBaseUrl, token fingerprint)`, _not_ by account id — `GET /v1/rooms` is
+  cross-account, and the token is what identifies the reader; a token swapped
+  without a sign-out therefore misses the cache instead of showing the previous
+  reader's rooms. What reaches disk is an explicit **allow-list projection**
+  (`room-list-cache.ts`), so a future DTO field cannot carry message text onto
+  disk ahead of phase 3's opt-in; the room-list _preview_ is message body text
+  and is deliberately not cached. Two rules with teeth: the whole cache is
+  wiped on any sign-out and whenever the setting is turned off, and a restore
+  must never land on top of a settled refresh (`hydrate`'s guard). Any "load it
+  if nobody else has" call site goes through `rooms.ensureLoaded()` — a restore
+  makes both `loading` and `rooms.length` say "loaded" while the rows are still
+  unconfirmed, which silently turned four guards into "never refresh" (#101).
+  The corollary is stronger than it looks: cached content is fine to _render_,
+  but a **mutation computed from a list must not run off an unconfirmed copy of
+  it** — a stale render is corrected by the next refresh, a stale bulk write is
+  not (#102).
+
+  Two rules the cache needs that a wipe alone cannot give it, both found in
+  review:
+
+  1. **A response belongs to the session that asked for it.** A `/v1/rooms`
+     request issued under one token can complete after a sign-out and the next
+     paste; applying it then writes the previous reader's rooms under the new
+     reader's cache key, which lands _after_ the sign-out wipe and so survives
+     it. `resetSession()` bumps a generation, and completions that do not match
+     are discarded — the WCR-03 request-generation guard applied to identity
+     rather than ordering.
+  2. **A wipe is a barrier, not an event.** `clear()` bumps `CacheStore.generation`
+     **synchronously**, and writers capture it before their first await and
+     re-check before committing. Otherwise a write already in flight lands on
+     top of the wipe that a sign-out or a disabled setting just requested, and
+     "turning this off erases what was stored" is not true.
+
 - **Sanitizer** (`src/html/sanitize.ts`): DOMPurify + Matrix subset +
   transforms (data-mx-color/bg → inline style, spoilers → click-to-reveal,
   legacy `font color`, mx-reply dropped with contents, bare-URL
@@ -174,6 +212,23 @@ the most time in the ADR 0076 investigation:
   as a number. Keep the device loop for what only a device can show: CPU-bound
   behaviour, real momentum scrolling, and confirming a fix in the reporter's
   hands.
+- **Instrumentation must be live before the thing it measures.** `App` applies
+  the stored `perfMarks` preference in an effect, which is far too late for
+  anything marked while the service graph is built — those marks are dropped
+  silently. `createServices` therefore applies it up front. Two things hid this
+  for a while: `?perf=1` latches inside `perfEnabled()` before any store exists
+  (so the e2e lane never saw it), and `setPerfEnabled` mirrors the flag into
+  `sessionStorage`, which survives navigations within a tab — so only a genuine
+  **relaunch**, which clears it, reproduces. A spec must clear `sessionStorage`
+  immediately before the load it measures; any intervening load re-arms it.
+- **The room-list boot has a one-line summary** (`boot:room-list`, ADR 0085
+  phase 2): `hydrate`, `rows`, `net`, `saved = net - rows` — milliseconds since
+  navigation, so they read against each other directly. Turn on Settings →
+  Performance instrumentation, load twice, and read the second load's line off
+  the recording; `saved` is the blank time the cache removed, and a **negative
+  `saved` means the network won and the cache bought nothing on that load**.
+  Its absence is data too: a resumed tab runs no new document, so only cold
+  opens emit one.
 - **Instrument for the device that has the problem.** iOS Safari has no
   on-device console, so a mark only a desktop console can reach does not help
   with the reports that most need help. `PerfOverlay` draws the tail of selected
@@ -248,6 +303,13 @@ no service workers, `document.cookie`, or `window.open` anywhere, ever).
   `Record<string, never>`, and `--noEmit` waves through assignments to it that
   the build rejects — which is why local echoes cast (`as unknown as
 TimelineEvent`).
+- **The e2e lane serves `dist/`, not your source** — deliberately, so the specs
+  and the ADR 0071 perf numbers describe the artifact that actually ships
+  (minified, bundled, `import.meta.env.PROD`), which a dev server would not.
+  The cost is that a source change is invisible to Playwright until the build
+  runs again, and a stale bundle reports a fix as broken or a break as fixed,
+  silently. `test:e2e` therefore builds first; if you invoke `playwright test`
+  directly, build first yourself.
 - **The e2e mock server outlives a single spec file** (`reuseExistingServer`).
   A spec that appends to its seeded `timeline` array pollutes every later spec;
   `send-media` deliberately only broadcasts and records for `/events/:id`.

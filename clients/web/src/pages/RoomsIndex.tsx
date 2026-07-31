@@ -107,9 +107,7 @@ export function RoomsIndex() {
     if (accounts.loading.value) {
       void accounts.refresh()
     }
-    if (rooms.loading.value) {
-      void rooms.refresh()
-    }
+    void rooms.ensureLoaded()
   }, [accounts, rooms])
   useEffect(() => {
     switch (roomActionTarget(location.path, window.location.hash)) {

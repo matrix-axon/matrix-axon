@@ -887,6 +887,17 @@ export function RoomList() {
         </div>
       )}
 
+      {/* Restored rows are honest about being unconfirmed without behaving
+          like a loading state: nothing is dimmed, disabled, or moved, because
+          a cached list that flinches on every load is worse than the 1.3 s
+          wait it replaces (ADR 0085 phase 2). `aria-live="polite"` lets a
+          screen reader hear the update settle without interrupting. */}
+      {rooms.stale.value && (
+        <p class="room-list-stale muted" aria-live="polite">
+          Updating…
+        </p>
+      )}
+
       {rooms.loading.value ? (
         <p>Loading rooms…</p>
       ) : allRooms.length === 0 ? (

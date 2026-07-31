@@ -48,8 +48,14 @@ leaving with confirmation, opening member DMs, room-state details (access,
 encryption, pinned messages, space relationships, and upgrade links), and a
 browser-local Spaces picker that filters the room list, TUI-parity keyboard
 shortcuts with a `/shortcuts` help overlay (ADR 0078, web keyboard shortcuts),
-live WebSocket updates for timelines/room previews/unread state, and live
-ephemeral overlays for typing indicators plus public read receipts.
+live WebSocket updates for timelines/room previews/unread state, live
+ephemeral overlays for typing indicators plus public read receipts, and an
+offline-first content cache (ADR 0085: warm per-room timeline stores across
+room switches in one session, plus a durable IndexedDB copy of the room list
+that paints before `/v1/rooms` answers and reconciles in place, marked
+"Updating…" until it does — room metadata only, no message bodies; on by
+default and switchable off under Settings → Room list, which also erases what
+was stored).
 
 Note for deployment: history routing means the host must rewrite unknown
 paths to `index.html` (the Vite dev server already does). ADR 0030's

@@ -73,9 +73,7 @@ export function SearchOverlay() {
   // Cold-loaded (a shared link): the resolvers need the lists nobody else on
   // a utility page has fetched yet.
   useEffect(() => {
-    if (rooms.rooms.value.length === 0) {
-      void rooms.refresh()
-    }
+    void rooms.ensureLoaded()
     if (accounts.accounts.value.length === 0) {
       void accounts.refresh()
     }

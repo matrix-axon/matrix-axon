@@ -1,19 +1,25 @@
 import { computed, signal } from '@preact/signals'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApiClient } from './api/client'
 import { createMediaService } from './media/media-service'
 import { TIMELINE_EVENT, UNREAD_COUNTS_CHANGED } from './api/frames'
 import {
+  connectCacheReset,
+  connectCacheSetting,
+  connectRoomsSessionReset,
   connectLiveRooms,
   connectReadMarkers,
   connectTimelineCacheReset,
   connectUnreadCounts,
 } from './services'
+import { setPerfEnabled } from './perf'
+import { createMemoryCacheStore } from './stores/cache-store'
 import { createDeviceStateStore } from './stores/device-state'
 import { createLiveConnection } from './stores/live-connection'
 import { createTimelineStoreCache } from './stores/timeline-cache'
 import { FakeWebSocket } from './test/fake-socket'
 import { memoryStorage } from './test/memory-storage'
+import { testServices } from './test/services'
 
 const ACCT = '11111111-1111-1111-1111-111111111111'
 const ROOM = '!room:server'
@@ -101,12 +107,18 @@ function roomsStub() {
     unreadKeys: computed(() => new Set<string>()),
     unreadTotal: computed(() => 0),
     loading: computed(() => false),
+    stale: computed(() => false),
     error: signal<string | null>(null),
     titles: computed(() => new Map<string, string>()),
     refresh: () => {
       refreshes += 1
       return Promise.resolve()
     },
+    ensureLoaded: () => {
+      refreshes += 1
+      return Promise.resolve()
+    },
+    resetSession: () => {},
     leaveRoom: () => Promise.resolve({ ok: true as const }),
     forgetRoom: () => Promise.resolve({ ok: true as const }),
     joinRoom: () => Promise.resolve({ ok: true as const, roomId: ROOM }),
@@ -332,6 +344,154 @@ describe('connectTimelineCacheReset', () => {
       flag.value = false
     }).not.toThrow()
     expect(timelines.size).toBe(0)
+    dispose()
+  })
+})
+
+describe('connectCacheReset', () => {
+  function harness(signedIn: boolean) {
+    const flag = signal(signedIn)
+    const cache = createMemoryCacheStore()
+    const dispose = connectCacheReset(
+      { signedIn: computed(() => flag.value) } as Parameters<
+        typeof connectCacheReset
+      >[0],
+      cache,
+    )
+    return { flag, cache, dispose }
+  }
+
+  it('wipes every area on sign-out, not only the account that left', async () => {
+    const { flag, cache, dispose } = harness(true)
+    await cache.write('rooms', 'reader-one', ['a'])
+    await cache.write('rooms', 'reader-two', ['b'])
+    await cache.write('timelines', 'reader-one', ['c'])
+
+    flag.value = false
+    await Promise.resolve()
+
+    expect(await cache.keys('rooms')).toEqual([])
+    expect(await cache.keys('timelines')).toEqual([])
+    dispose()
+  })
+
+  it('drops a cache left behind by an evicted session on a signed-out boot', async () => {
+    const cache = createMemoryCacheStore()
+    await cache.write('rooms', 'leftover', ['a'])
+    const dispose = connectCacheReset(
+      { signedIn: computed(() => false) } as Parameters<
+        typeof connectCacheReset
+      >[0],
+      cache,
+    )
+    await Promise.resolve()
+
+    expect(await cache.keys('rooms')).toEqual([])
+    dispose()
+  })
+})
+
+describe('connectCacheSetting', () => {
+  it('erases what is on disk when the setting is turned off', async () => {
+    const cacheRoomList = signal(true)
+    const cache = createMemoryCacheStore()
+    await cache.write('rooms', 'reader', ['a'])
+    const dispose = connectCacheSetting(
+      { cacheRoomList } as Parameters<typeof connectCacheSetting>[0],
+      cache,
+    )
+    expect(await cache.keys('rooms')).toEqual(['reader'])
+
+    cacheRoomList.value = false
+    await Promise.resolve()
+
+    expect(await cache.keys('rooms')).toEqual([])
+    dispose()
+  })
+})
+
+describe('instrumentation at graph construction (ADR 0085 boot summary)', () => {
+  afterEach(() => {
+    setPerfEnabled(false)
+    performance.clearMarks()
+  })
+
+  it('records the cache-read marks when perf is on from Settings', () => {
+    // The failure this pins is invisible: `App` applies the stored preference
+    // in an effect, which runs long after `createServices` has built the rooms
+    // store and marked its cache read, so those marks were dropped and the
+    // boot summary reported `read=null`. `?perf=1` masked it entirely — it
+    // latches inside `perfEnabled()` before any store exists, which is exactly
+    // the configuration the e2e lane uses.
+    performance.clearMarks()
+    testServices({
+      storage: memoryStorage({
+        'axon.token': 'tok-test',
+        'axon.settings': JSON.stringify({ version: 1, perfMarks: true }),
+      }),
+    })
+
+    const names = performance.getEntriesByType('mark').map((mark) => mark.name)
+    expect(names).toContain('axon:rooms:cache:read:start')
+  })
+
+  it('stays silent when the preference is off', () => {
+    performance.clearMarks()
+    testServices({
+      storage: memoryStorage({
+        'axon.token': 'tok-test',
+        'axon.settings': JSON.stringify({ version: 1, perfMarks: false }),
+      }),
+    })
+
+    const names = performance.getEntriesByType('mark').map((mark) => mark.name)
+    expect(names).not.toContain('axon:rooms:cache:read:start')
+  })
+})
+
+describe('connectRoomsSessionReset', () => {
+  function harness(signedIn: boolean) {
+    const flag = signal(signedIn)
+    let resets = 0
+    const { stub } = roomsStub()
+    const dispose = connectRoomsSessionReset(
+      { signedIn: computed(() => flag.value) } as Parameters<
+        typeof connectRoomsSessionReset
+      >[0],
+      { ...stub, resetSession: () => (resets += 1) },
+    )
+    return { flag, resets: () => resets, dispose }
+  }
+
+  it('abandons the room list when the session ends', () => {
+    const { flag, resets, dispose } = harness(true)
+    expect(resets()).toBe(0)
+
+    flag.value = false
+
+    // Without this the next reader inherits the previous one's rows, and a
+    // request still in flight under the old token is applied — and cached —
+    // under the new reader's identity.
+    expect(resets()).toBe(1)
+    dispose()
+  })
+
+  it('does not throw when it runs against an already-clean store', () => {
+    // Driven from an effect, so it must be idempotent: an unconditional signal
+    // write here would not settle the flush ("Cycle detected").
+    const flag = signal(true)
+    const services = testServices()
+    const dispose = connectRoomsSessionReset(
+      { signedIn: computed(() => flag.value) } as Parameters<
+        typeof connectRoomsSessionReset
+      >[0],
+      services.rooms,
+    )
+
+    expect(() => {
+      flag.value = false
+    }).not.toThrow()
+    expect(services.rooms.rooms.value).toEqual([])
     dispose()
   })
 })

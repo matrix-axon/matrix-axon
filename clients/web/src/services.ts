@@ -9,6 +9,7 @@ import {
   unreadCountsChange,
 } from './api/frames'
 import { openLiveSocket } from './api/ws'
+import { setPerfEnabled } from './perf'
 import {
   createCompositeAuthProvider,
   type CompositeAuthProvider,
@@ -32,7 +33,14 @@ import {
   createLiveConnection,
   type LiveConnection,
 } from './stores/live-connection'
+import {
+  cacheNamespace,
+  createIndexedDbCacheStore,
+  requestPersistentStorage,
+  type CacheStore,
+} from './stores/cache-store'
 import { roomTitle } from './stores/room-list'
+import { createRoomListCache } from './stores/room-list-cache'
 import { createRoomsStore, type RoomsStore } from './stores/rooms'
 import { createSearchStore, type SearchStore } from './stores/search'
 import { createSettingsStore, type SettingsStore } from './stores/settings'
@@ -72,6 +80,12 @@ export interface AppServices {
    * `RoomPage` acquires from here instead of building a store per mount.
    */
   timelines: TimelineStoreCache
+  /**
+   * The durable on-device content cache (ADR 0085 phase 2). Stores reach it
+   * through narrow ports (`RoomListCache`); it is exposed here for the
+   * lifecycle wiring — the sign-out wipe and the setting — and for phase 3.
+   */
+  cache: CacheStore
   /**
    * The room the user is currently viewing (`accountId/roomId`), or `null`.
    * Set by `RoomPage`; `RoomList` reads it to mark the open row.
@@ -302,6 +316,76 @@ export function connectTimelineCacheReset(
   })
 }
 
+/**
+ * Wipe the **whole** durable cache when the session ends (ADR 0085 phase 2).
+ *
+ * Not just the records belonging to the account that signed out: the keys are
+ * per-reader and a surgical drop would work, but whole-cache is the
+ * conservative choice and the cache rebuilds itself from the next refresh at
+ * the cost of one cold start. A wipe that is too broad is invisible to the
+ * user; a wipe that misses something is a privacy failure.
+ *
+ * Unlike `connectTimelineCacheReset` this writes no signals — `clear()` is an
+ * IndexedDB round trip — so it cannot re-enter the reactive flush, and needs
+ * no idempotence guard for that reason. It still runs for a visitor who was
+ * never signed in, which is deliberate: a cache outliving an evicted session
+ * is exactly what should be dropped on sight.
+ */
+export function connectCacheReset(
+  auth: CompositeAuthProvider,
+  cache: CacheStore,
+): () => void {
+  return effect(() => {
+    if (!auth.signedIn.value) {
+      void cache.clear()
+    }
+  })
+}
+
+/**
+ * Abandon the room list when the session ends (ADR 0085 phase 2).
+ *
+ * The service graph outlives a sign-out, so the rooms store would otherwise
+ * carry one reader's rows into the next reader's session — and a `/v1/rooms`
+ * request still in flight under the old token would land *after* the wipe and
+ * be persisted under the new reader's cache key, which no amount of wiping at
+ * sign-out can catch. `resetSession` bumps a generation those completions are
+ * checked against, so they are discarded instead.
+ *
+ * Safe inside the reactive flush for the same reason `connectTimelineCacheReset`
+ * is: `resetSession` is idempotent, so a re-run within one flush writes no
+ * signals and the flush settles.
+ *
+ * This assumes a token change always passes through signed-out — true today,
+ * since the paste form only renders when there is no usable token.
+ */
+export function connectRoomsSessionReset(
+  auth: CompositeAuthProvider,
+  rooms: RoomsStore,
+): () => void {
+  return effect(() => {
+    if (!auth.signedIn.value) {
+      rooms.resetSession()
+    }
+  })
+}
+
+/**
+ * Honor the room-list cache setting: turning it off must remove what is
+ * already on disk, not merely stop adding to it. Turning it back on rebuilds
+ * from the next refresh.
+ */
+export function connectCacheSetting(
+  settings: SettingsStore,
+  cache: CacheStore,
+): () => void {
+  return effect(() => {
+    if (!settings.cacheRoomList.value) {
+      void cache.clear()
+    }
+  })
+}
+
 /** Route raw Matrix ephemeral passthrough frames into the web overlay store. */
 export function connectEphemeralPassthrough(
   live: LiveConnection,
@@ -340,8 +424,39 @@ export function createServices(
   const media = createMediaService({ auth, baseUrl: apiBaseUrl() })
   const timelines = createTimelineStoreCache(api, media)
   const settings = createSettingsStore(storage)
+  // Instrumentation has to be live *before* anything worth measuring happens.
+  // The room-list cache marks its read during this function, and `App`'s
+  // effect — the other place the stored preference is applied — runs after
+  // mount, far too late: those marks were silently dropped, and the ADR 0085
+  // boot summary reported `read=null` on every device that enabled perf from
+  // Settings rather than `?perf=1` (which latches inside `perfEnabled`).
+  //
+  // Only ever turns it *on*: `?perf=1` may already have latched, and passing
+  // `false` here would clobber it.
+  if (settings.perfMarks.peek()) {
+    setPerfEnabled(true)
+  }
   const accounts = createAccountsStore(api)
-  const rooms = createRoomsStore(api, storage)
+  const cache = createIndexedDbCacheStore()
+  requestPersistentStorage()
+  // Resolved per operation rather than once: token-paste sign-in does not
+  // reload the document, so a graph built while signed out would hold `null`
+  // for the whole session and never write a thing — leaving the *next* launch
+  // cold too, which on a phone is a launch the user sees.
+  const namespace = () =>
+    Promise.resolve(auth.getToken()).then(
+      (token) => cacheNamespace(apiBaseUrl(), token),
+      () => null,
+    )
+  const rooms = createRoomsStore(
+    api,
+    storage,
+    createRoomListCache({
+      cache,
+      namespace,
+      enabled: () => settings.cacheRoomList.peek(),
+    }),
+  )
   const search = createSearchStore(api)
   const threadUnread = createThreadUnreadStore()
   const ephemeral = createEphemeralStore()
@@ -373,11 +488,15 @@ export function createServices(
   connectReadMarkers(live, deviceState, rooms)
   connectThreadReadMarkers(live, threadUnread, deviceState)
   connectTimelineCacheReset(auth, timelines)
+  connectCacheReset(auth, cache)
+  connectRoomsSessionReset(auth, rooms)
+  connectCacheSetting(settings, cache)
   return {
     auth,
     api,
     media,
     timelines,
+    cache,
     settings,
     accounts,
     rooms,

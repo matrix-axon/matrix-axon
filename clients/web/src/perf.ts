@@ -42,6 +42,7 @@ const OVERLAY_PREFIXES = [
   'timeline:auto-page:fetched',
   'timeline:auto-page:stop',
   'transition:',
+  'boot:',
 ]
 
 /**
@@ -228,6 +229,86 @@ function summariseTransition(startedAt: number): void {
       marks.find((mark) => mark.name === 'room-list:visible-compute:start'),
       'rooms',
     ),
+  })
+}
+
+/**
+ * Reduce this document's room-list boot to the handful of numbers that settle
+ * ADR 0085 phase 2 on a real device, and emit them as one overlay mark.
+ *
+ * Called once per document load, when the first refresh settles — the moment
+ * the race the cache exists to win is over. Every figure is milliseconds since
+ * navigation start, which is what `performance.now()` already measures, so
+ * these read directly against each other with no arithmetic on the phone:
+ *
+ * - `nav` — `navigate`, `reload`, or `back_forward`. **The cold-start
+ *   counter the ADR asks for is the existence of this mark at all**: a tab
+ *   resumed from the app switcher without teardown runs no new document and so
+ *   emits nothing. Opens that produce a `boot:room-list` are the cold ones.
+ * - `hydrate` — when cached rows reached the store; `null` for a cold cache.
+ * - `rows` — when the list first rendered rows. The user-visible number.
+ * - `net` — when the room-list response settled. The wait being replaced.
+ * - `saved` — `net - rows`, the blank time removed. **This is the result.**
+ *
+ * A negative `saved` is the honest failure signal: the network beat the cache,
+ * and the phase bought nothing on that load.
+ */
+export function perfMarkBootRoomList(): void {
+  if (!perfEnabled()) {
+    return
+  }
+  // Two frames after the caller, because the number that matters — when rows
+  // were *painted* — is laid down by a render Preact has not run yet when a
+  // refresh settles. Summarising inline reported `rows: null` for every cold
+  // load, which is exactly the arm the cached one has to be compared against.
+  requestAnimationFrame(() => requestAnimationFrame(() => summariseBoot()))
+}
+
+function summariseBoot(): void {
+  const at = (name: string): number | null => {
+    const mark = recentMarks.find((entry) => entry.name === name)
+    return mark === undefined ? null : Math.round(mark.t)
+  }
+  const hydrate = at('rooms:hydrate')
+  const net = at('rooms:refresh:end')
+  // The first render that actually put rows on screen — an empty list renders
+  // too, and reporting that as "painted" would flatter every cold load.
+  const rows = recentMarks.find(
+    (entry) =>
+      entry.name === 'room-list:render' &&
+      (entry.detail as { hasRows?: unknown } | undefined)?.hasRows === true,
+  )
+  const rowsAt = rows === undefined ? null : Math.round(rows.t)
+  let nav: string | null = null
+  try {
+    const [entry] = performance.getEntriesByType('navigation')
+    nav = (entry as PerformanceNavigationTiming | undefined)?.type ?? null
+  } catch {
+    // Not every engine exposes navigation timing; the rest still reads.
+  }
+  // Ordered by what a reader needs first, because the overlay is a fixed box on
+  // a phone screen and the tail of a long line goes off the edge. `saved` was
+  // last in the first version and was the field that got clipped — the one
+  // number the whole summary exists to report.
+  // How long the IndexedDB read itself took, as distinct from when its result
+  // landed. `hydrate` is a *timestamp* — it carries the whole bundle boot with
+  // it — so on its own it cannot say whether a slow hydrate is slow storage or
+  // slow startup. This is the decomposition, and it is the one figure ADR 0085
+  // lists as never having been measured on a cold start.
+  const readStart = at('rooms:cache:read:start')
+  const readEnd = at('rooms:cache:read:end')
+  perfMark('boot:room-list', {
+    saved: net === null || rowsAt === null ? null : net - rowsAt,
+    hydrate,
+    read: readStart === null || readEnd === null ? null : readEnd - readStart,
+    boot: readStart,
+    rows: rowsAt,
+    net,
+    rooms: detailNumber(
+      recentMarks.find((entry) => entry.name === 'rooms:refresh:end'),
+      'rooms',
+    ),
+    nav,
   })
 }
 

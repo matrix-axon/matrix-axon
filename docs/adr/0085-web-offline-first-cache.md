@@ -9,8 +9,10 @@ already implements for ADR 0061's reconnect gap-fill. Ship it in four phases,
 
 The measured case, on a 1,752-room production account: `/v1/rooms` costs
 **1,298 ms of server-side TTFB**, so the room list is blank for ~1.5 s on a
-*fast desktop connection*; hydrating the same list from IndexedDB on an iPhone
-costs **~1 ms**. Storage constrains nothing (41.2 GB of quota on the phone),
+*fast desktop connection*; reading the same list back from IndexedDB on an
+iPhone costs **31-44 ms** as shipped (a synthetic warm harness said ~1 ms; the
+real cold read is slower and still three orders of magnitude inside the wait it
+replaces). Storage constrains nothing (41.2 GB of quota on the phone),
 and no long task appears at the 1,752-row render, so the delay is removed
 rather than relocated.
 
@@ -228,6 +230,69 @@ the harness does not model. The synthetic room list also came out at 870 KB
 against the 660 KB measured in production, so the test was run against a record
 about 30% larger than the real one.
 
+### What the shipped phase 2 measures on the device (iPhone, 2,204 rooms)
+
+The figures above are synthetic — a harness writing records of the right shape.
+These are the built feature on a real account, read off the `boot:room-list`
+overlay after two app relaunches (`nav=navigate`, so a genuinely fresh document
+each time, which is what iOS gives you).
+
+
+
+Against the **production bundle** (`pnpm preview`), on a 2,234-room account:
+
+| | Cold | Warm | Warm |
+| --- | --- | --- | --- |
+| Startup before the read (`boot`) | 148 ms | 82 ms | 169 ms |
+| The IndexedDB read itself (`read`) | 4 ms (empty) | **31 ms** | **44 ms** |
+| Cached rows in the store (`hydrate`) | — | 115 ms | 216 ms |
+| First painted rows (`rows`) | 14,088 ms | **119 ms** | **219 ms** |
+| Room list settled (`net`) | 14,084 ms | 1,758 ms | 1,474 ms |
+| Blank time removed (`saved`) | −4 ms | **1,639 ms** | **1,255 ms** |
+
+**Time-to-content is 119-219 ms against a 1.5-1.8 s network arm.** The cold
+column is the control — rows land 4 ms *after* the network, because there is
+nothing to paint until it answers — and it also caught `/v1/rooms` taking
+**14 seconds**, which is issue #85 on a bad day and the strongest single
+argument in this document for painting over it.
+
+Earlier readings against the Vite dev server put `saved` at 1,190-1,353 ms.
+Dev inflates startup (hundreds of unbundled modules) and so delays `rows`
+while leaving `net` alone, which makes every dev figure a floor.
+
+Two things this settles, and one it does not:
+
+- **The bottleneck does not move.** Rows paint **7 ms** after hydrate (226 −
+  219), and 6 ms after the response on the cold arm — two independent readings
+  of the same render, at 2,204 rooms, on the phone. The worry that a 1 ms
+  hydrate would simply hand the delay to an unwindowed list does not survive
+  contact with the device, and the reason is that the room list **is** already
+  windowed (`components/virtual-window.ts`): only rows overlapping the viewport
+  render, so the count barely enters into it. That worry was written as though
+  it were not, and is withdrawn for the room list. It stands for the timeline,
+  which is genuinely unwindowed (#26, #32).
+- **The phone's network arm is worse than the desktop's**, as expected: ~1.4 s
+  against the 1,298 ms measured from desktop Chrome, on a server-side cost that
+  the client cannot touch (issue #85).
+- **The hydrate is mostly startup, and the read is 30-45 ms, not ~1 ms.**
+  `boot + read ≈ hydrate` in both warm runs (82+31≈115, 169+44≈216), so the
+  split is clean. Two corrections fall out of it, both against this ADR's own
+  earlier figures:
+
+  The **synthetic ~1 ms hydrate was optimistic by ~30x.** That harness measured
+  a *warm* read moments after its own write; a real cold start pays disk. The
+  cold column decomposes even that: a read against an **empty** store costs
+  4 ms, so the database open is cheap and the remaining ~27-40 ms is genuinely
+  reading and deserialising the ~800 KB record. Nothing about the decision
+  changes — 44 ms against a 1,474 ms network arm is still a 33x margin, and
+  against the 14 s outlier it is 300x — but "hydrating costs about a
+  millisecond" was not true of the shipped feature and should not be repeated.
+
+  **This is the number phase 3 should budget from.** A timeline page is ~22 KB
+  against the room list's ~800 KB, so a per-room read should land in single-digit
+  milliseconds; but it is paid *per room entry* rather than once per boot, so the
+  4 ms floor for opening the database is the part to watch, not the record size.
+
 ### The room list has a server-side problem this ADR cannot fix
 
 `RoomsQuery` (`crates/axon-api/src/routes/rooms.rs:30-34`) accepts only
@@ -342,9 +407,27 @@ error banner over a successful load.
 
 ### 2. Cache identity, scoping, and eviction
 
-- Every record is keyed by `(apiBaseUrl, account_id, …)`. A client pointed at a
-  different axon server, or a different account on the same server, must never
+- Every record is keyed by `(apiBaseUrl, reader, …)`. A client pointed at a
+  different axon server, or at the same server as somebody else, must never
   read the other's rows.
+
+  **The "reader" is a fingerprint of the bearer token, not an `account_id`** —
+  a correction to an earlier draft, which specified `account_id` and could not
+  have worked. `GET /v1/rooms` is *cross-account*: one list spanning every
+  account on the server, with no account id to key on (`RoomsQuery` takes one,
+  the client calls it bare). The token is what actually identifies the reader,
+  and keying on it closes a hole the logout wipe leaves open: a token replaced
+  **without** a sign-out — a re-paste, a shared machine — would otherwise
+  hydrate the previous reader's room list and display it for the ~1.3 s until
+  the refresh replaced it. A different token simply misses the cache, which is
+  a cold start and so is exactly today's behavior.
+
+  The digest is a **discriminator, not a secret**, and should not be mistaken
+  for one: it protects nothing the disk does not already give up, since the
+  token itself sits in `localStorage` beside the database. That is what makes a
+  non-cryptographic fallback acceptable where `crypto.subtle` is unavailable
+  (insecure origins, so plain-http development), and a cache that silently
+  stopped working there would be the worse outcome.
 - `meta` holds a schema version. A version mismatch drops the database rather
   than migrating it; the cache is an optimization and re-fetching is always
   correct.
@@ -387,8 +470,25 @@ message only for a genuinely cold cache.
 
 The refresh result **replaces** the cached set wholesale rather than merging
 into it, so a room left or forgotten on another client disappears — guardrail
-5's prune-on-reconcile. Unread counts and previews ride along inside the cached
-room DTOs and are corrected by the same refresh.
+5's prune-on-reconcile. Unread counts ride along inside the cached room DTOs
+and are corrected by the same refresh.
+
+**Previews do not, and must not.** An earlier draft of this section said
+"unread counts and previews ride along inside the cached room DTOs"; the second
+half was wrong on both facts. A preview is not a `RoomDto` field at all — the
+DTO carries only `last_event_id`, and `fetchPreview` resolves the body
+separately, per room — and its content **is message body text**. Caching it
+would put message plaintext on disk in the phase whose whole premise is that it
+does not, which is the phase-3 decision arriving a phase early and without the
+sign-off [Privacy](#privacy) requires. So a restored row paints without its
+preview until the refresh fills one in, which is already what a cold row does.
+
+To keep that true as the DTO grows, what reaches disk is an **explicit
+allow-list projection** of `RoomDto` rather than the object whole. A field
+added to the DTO later is therefore uncached until someone lists it — a row
+missing one field until the refresh lands, which is the correction every cached
+row already takes, and a far better failure than message content reaching disk
+because nobody re-read this paragraph.
 
 ### 4. Timeline: cache the newest page only
 
@@ -588,6 +688,28 @@ Four PRs, in order, each independently shippable:
    `stale` signal, `RoomList`'s stale affordance, a setting to disable it, and
    the logout wipe. Metadata only — no message bodies reach disk in this phase,
    so it carries none of the privacy decision.
+
+   **As built**, with three departures from this ADR as first written, each
+   noted where it belongs above: the key is a **token fingerprint** rather than
+   an `account_id` (section 2 — the room list is cross-account, so the ADR's
+   key could not be constructed); **previews are excluded** and only an
+   allow-list projection of `RoomDto` is persisted (section 3 — previews are
+   message body text, so the ADR's own "metadata only" claim required it); and
+   the phase turned up **two latent bugs that the cache exposes rather than
+   causes** (#101, #102). Both are the same shape and worth stating as a rule:
+   *once a list can be restored, "has rows" stops meaning "has been fetched"* —
+   every guard that conflated them silently became "never refresh", and a bulk
+   mutation computed from the list would have written to a stale copy of it and
+   reported success. A phase-3 timeline restore will meet the same distinction.
+
+   **Measured as shipped** on a 2,204-room account (iPhone, two app
+   relaunches): time-to-content falls from **1,371 ms to 226 ms**, `saved =
+   1,190 ms`, with the render costing 7 ms at that room count — see "What the
+   shipped phase 2 measures on the device" above. The open worry that the
+   bottleneck would merely move is answered there and withdrawn for the room
+   list. One number remains undecomposed: `hydrate` is a timestamp carrying the
+   whole bundle boot, so how much of its 219 ms is storage rather than startup
+   is still unread.
 3. **Timeline tail cache**, including the cursor-unknown state, **and the
    opt-in setting that gates it** (off by default — see Privacy). This is the
    phase that needs explicit sign-off before it ships.
@@ -670,19 +792,34 @@ Four PRs, in order, each independently shippable:
   source of the 1,298 ms, which pagination alone would not fix) and **#86**
   (API responses are uncompressed). Both are out of scope here and neither is
   displaced by the cache.
-- **Partly answered by phase 1, the rest still open:** in-app marks
-  (`cache:read` → `cache:hydrate` → first painted row, in ADR 0077's
-  vocabulary) plus a boot counter separating a fresh document load from a
-  resumed tab. Phase 1 shipped the cheap half — `room-page:initial-load-effect`
-  now carries `warm`, so how often room entry finds a warm store is readable
-  from a recording — and the boot counter is still missing. The counter sets the relative value of phase 1 against phases
-  2-3, and it is the one input that differs sharply between phone and desktop.
+- ~~In-app marks and a boot counter.~~ **Shipped in phase 2.** The chain the
+  earlier draft asked for exists — `rooms:cache:read:start/end` →
+  `rooms:hydrate` → `room-list:render` → `rooms:refresh:end` — reduced to one
+  overlay line, `boot:room-list`, carrying `hydrate`, `rows`, `net`, and
+  `saved = net - rows`: the blank time actually removed on that load, readable
+  off a screen recording without arithmetic. **A negative `saved` is the
+  honest failure signal** — the network beat the cache and the phase bought
+  nothing — which is the reading this ADR must not make hard to obtain.
+
+  The boot counter is the mark's *existence*, which is cheaper than the
+  counter the earlier draft imagined and answers the same question: a tab
+  resumed from the app switcher runs no new document and emits nothing, so
+  opens that produce a `boot:room-list` are exactly the cold ones, and the
+  ratio of those to app opens is what sets phase 1's value against phases 2-3.
+  Two traps found while building it: the summary must outlast its caller by a
+  frame (Preact has not painted the rows when the refresh settles, so an inline
+  summary reports `rows: null` for every *cold* load — the arm the cached one
+  is compared against), and it must ignore a render with no rows, or the empty
+  first render of a cold load counts as a paint and flatters the comparison.
   Note also that `getEntriesByType('largest-contentful-paint')` is deprecated
   in Chrome and returns nothing; LCP needs a buffered `PerformanceObserver`.
-- **Cold-start hydrate is unmeasured.** Every device figure above was taken
-  warm, moments after the write. A real cold start adds a disk read the harness
-  does not model. With a 1,000x margin this is very unlikely to matter, but it
-  is the one number that could still surprise us.
+- ~~Cold-start hydrate is unmeasured.~~ **Measured, and the synthetic figure
+  was optimistic.** A real cold read of the room list is **31-44 ms**, not the
+  ~1 ms a warm synthetic harness reported — of which ~4 ms is opening the
+  database and the rest is the record itself. It changes no decision here (the
+  margin is still 33x on a good day and 300x on a bad one), but it is the
+  number phase 3 should size against, and it is a standing reminder that a warm
+  synthetic read is not a cold real one.
 - **Re-running the harness on a slower phone would not change anything here.**
   The margin is ~1,000x and the network arm it beats is server-side and
   therefore device-independent; a device would have to be three orders of

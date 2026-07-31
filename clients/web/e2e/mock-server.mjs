@@ -293,6 +293,23 @@ const timelineHoldMs = (name) => {
   }
 }
 let timelineDelayMs = 0
+/**
+ * How long the room-list GET sits on its answer, set via
+ * `/__e2e/rooms-delay?hold=<name>`. Same literal-only holds as the timeline's,
+ * and for the same two reasons: a spec that proves the *cached* room list
+ * painted before the network answered (ADR 0085 phase 2) needs a window in
+ * which to observe it, and a duration taken from request input is the
+ * `js/resource-exhaustion` shape CodeQL rejects.
+ */
+let roomsDelayMs = 0
+/**
+ * Whether the room-list GET fails outright, set via `/__e2e/rooms-fail`. The
+ * app shell is still served — which is exactly the shape of "offline" that a
+ * client with no service worker can be tested against: the bundle is loaded,
+ * the API is not reachable. A radios-off reload cannot reach the document at
+ * all, so it tests nothing about the cache.
+ */
+let roomsFail = false
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
@@ -452,6 +469,16 @@ async function handleApi(req, res, url) {
     })
   }
   if (method === 'GET' && pathname === '/v1/rooms') {
+    if (roomsDelayMs > 0) {
+      await sleep(roomsDelayMs)
+    }
+    if (roomsFail) {
+      return json(
+        res,
+        { error: { code: 'unavailable', message: 'room list unavailable' } },
+        503,
+      )
+    }
     const now = Date.now()
     // Synthetic filler for the windowing lane: enough rooms that only a slice
     // of them can be in the DOM. Appended with older activity than the three
@@ -775,6 +802,17 @@ const server = createServer((req, res) => {
   // How long the timeline GET holds its answer: `?hold=brief|typical|slow|held`,
   // anything else meaning no hold. The spec that sets this must reset it, since
   // the mock is one process shared by every spec.
+  // Whether the room-list GET fails, so a spec can prove cached rows survive a
+  // refresh that does not land. The spec that sets this must reset it.
+  if (req.method === 'POST' && url.pathname === '/__e2e/rooms-fail') {
+    roomsFail = url.searchParams.get('fail') === 'true'
+    return json(res, { data: { rooms_fail: roomsFail } })
+  }
+  // How long the room-list GET holds its answer; see `/__e2e/timeline-delay`.
+  if (req.method === 'POST' && url.pathname === '/__e2e/rooms-delay') {
+    roomsDelayMs = timelineHoldMs(url.searchParams.get('hold'))
+    return json(res, { data: { rooms_delay_ms: roomsDelayMs } })
+  }
   if (req.method === 'POST' && url.pathname === '/__e2e/timeline-delay') {
     timelineDelayMs = timelineHoldMs(url.searchParams.get('hold'))
     return json(res, { data: { timeline_delay_ms: timelineDelayMs } })

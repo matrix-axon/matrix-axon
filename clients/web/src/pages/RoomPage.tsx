@@ -298,10 +298,10 @@ export function RoomPage() {
     })
     rooms.noteUnreadCounts(accountId, roomId, 0, 0)
     // The room list store also feeds this page's title; populate it on a
-    // hard load straight into the room URL.
-    if (rooms.rooms.value.length === 0) {
-      void rooms.refresh()
-    }
+    // hard load straight into the room URL. `ensureLoaded` rather than a
+    // length test: cached rows (ADR 0085 phase 2) make the list non-empty
+    // while still unconfirmed, and a deep link may be the only thing asking.
+    void rooms.ensureLoaded()
     void threads.refresh()
     void members.refresh()
     // With a deep-linked event the jump effect below owns the initial load,

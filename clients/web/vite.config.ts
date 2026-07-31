@@ -142,6 +142,12 @@ export default defineConfig({
     allowedHosts,
     proxy: axonProxy,
   },
+  // Besides the demo lane the proxy above was written for, `preview` is how
+  // startup is *measured*: `pnpm dev` serves hundreds of unbundled ES modules,
+  // which over a LAN to a phone inflates startup far beyond anything a user
+  // would see, so any number covering bundle boot — ADR 0085's
+  // `boot:room-list` summary especially — is meaningless taken in dev. Measure
+  // against `pnpm build && pnpm preview --host`.
   preview: {
     allowedHosts,
     proxy: axonProxy,

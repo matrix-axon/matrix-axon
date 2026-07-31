@@ -4,6 +4,7 @@ import {
   type ReadonlySignal,
   type Signal,
 } from '@preact/signals'
+import { perfMark, perfMarkBootRoomList } from '../perf'
 import type { components } from '../api/schema'
 import { apiErrorCode, apiErrorMessage, type ApiClient } from '../api/client'
 import { markdownToPlainText } from '../markdown/markdown'
@@ -16,6 +17,7 @@ import {
   type MemberDto,
   type RoomDto,
 } from './room-list'
+import type { RoomListCache } from './room-list-cache'
 import type { EventDto } from './timeline'
 
 export interface RoomPreview {
@@ -46,8 +48,19 @@ export interface RoomsStore {
    * broken.
    */
   unreadTotal: ReadonlySignal<number>
-  /** True until the first load settles. */
+  /**
+   * True while there is *nothing to show* — not "a request is in flight".
+   * Restoring the cache clears it before the network answers (ADR 0085
+   * phase 2), which is the whole point: cached rows are something to show.
+   */
   loading: ReadonlySignal<boolean>
+  /**
+   * True while the rows on screen came from the cache and no refresh has
+   * confirmed them yet. Set by a restore, cleared by the first successful
+   * refresh, and deliberately *not* cleared by a failed one — cached content
+   * survives a failed refresh, still marked stale.
+   */
+  stale: ReadonlySignal<boolean>
   error: Signal<string | null>
   /**
    * Member-derived titles for unnamed rooms, keyed by room key. Read through
@@ -57,6 +70,34 @@ export interface RoomsStore {
 
   /** Fetch the room list (server-side membership filtering per ADR 0037). */
   refresh(): Promise<void>
+  /**
+   * Abandon everything belonging to the session that just ended.
+   *
+   * The service graph outlives a sign-out — nothing reloads the document — so
+   * without this the next reader inherits the previous one's rows, and, worse,
+   * a `/v1/rooms` request still in flight under the *old* token would land in
+   * the new session and be persisted under the new reader's cache key. Bumps a
+   * generation that in-flight completions are checked against, so those
+   * responses are discarded rather than applied.
+   *
+   * Idempotent: calling it on an already-clean store writes no signals, which
+   * is what lets it be driven from an effect (ADR 0085 phase 1's lesson —
+   * an unconditional write there does not settle).
+   */
+  resetSession(): void
+  /**
+   * Refresh unless one has already settled this session, and resolve when the
+   * list is as current as this store can make it.
+   *
+   * Every "load it if nobody else has" call site must go through this rather
+   * than testing `loading` or `rooms.length`: a cache restore (ADR 0085 phase
+   * 2) makes both of those say "loaded" while the rows are still unconfirmed,
+   * so a guard written against them would leave the cached list to stand
+   * forever on any route that is the only thing asking (issue #101) — and a
+   * bulk mutation computed from it would write to a stale copy and report
+   * success (issue #102).
+   */
+  ensureLoaded(): Promise<void>
   /** Leave one room through M19b, then refresh authoritative room state. */
   leaveRoom(accountId: string, roomId: string): Promise<RoomMembershipResult>
   /** Forget one left/banned room through M19b, then refresh room state. */
@@ -122,12 +163,14 @@ const ROOM_TITLE_CACHE_KEY = 'axon.room_titles.v1'
 export function createRoomsStore(
   api: ApiClient,
   storage: Storage = window.localStorage,
+  cache: RoomListCache | null = null,
 ): RoomsStore {
   const rooms = signal<RoomDto[]>([])
   const unreadKeys = signal<ReadonlySet<string>>(new Set())
   /** Sum of every room's `notificationCount` (ADR 0080's app-icon badge). */
   const unreadTotal = signal(0)
   const loading = signal(true)
+  const stale = signal(false)
   const error = signal<string | null>(null)
   const titles = signal<ReadonlyMap<string, string>>(loadTitleCache(storage))
   /** Keys with a fetch in flight or already settled (including "no title"). */
@@ -478,29 +521,149 @@ export function createRoomsStore(
   }
 
   async function doRefresh(): Promise<void> {
+    perfMark('rooms:refresh:start')
+    // The auth session this request belongs to. Anything that comes back after
+    // it has ended belongs to a reader who is no longer here (WCR-03's
+    // request-generation guard, applied to identity rather than to ordering).
+    const generation = sessionGeneration
     try {
       const { data, error: apiError } = await api.GET('/v1/rooms')
-      if (apiError !== undefined) {
+      if (generation !== sessionGeneration) {
+        return
+      }
+      // `data === undefined` is not redundant with the error check. A non-2xx
+      // response whose body openapi-fetch cannot parse — an empty one, or a
+      // proxy's error page — yields **neither** envelope: `{ data: undefined,
+      // error: undefined }`. Testing only `apiError` then falls through to
+      // `data.data` and throws `undefined is not an object`, which is what a
+      // phone sees when the API is unreachable behind a dev proxy: the raw
+      // TypeError lands in the error banner in place of a usable message.
+      // `apiErrorMessage(undefined)` is already the right words for it.
+      if (apiError !== undefined || data === undefined) {
         error.value = apiErrorMessage(apiError)
         return
       }
       const visibleRooms = applyLocalRoomMetadata(
         data.data.filter((room) => !locallyHiddenRooms.has(roomKey(room))),
       )
+      // Wholesale replacement, not a merge into the cached set: a room left or
+      // forgotten on another client has to disappear (guardrail 5's
+      // prune-on-reconcile), and a restored list is exactly the case where
+      // merging would keep one alive forever.
       rooms.value = visibleRooms
       syncUnreadCounts(visibleRooms)
       cacheRoomListTitles(visibleRooms)
       recomputeNewest(visibleRooms)
       error.value = null
+      settled = true
+      stale.value = false
+      cache?.write(visibleRooms)
       // Fire-and-forget: titles arrive incrementally; the list re-renders as
       // the titles signal updates.
       void resolveUnnamedTitles(visibleRooms)
     } catch (cause) {
-      error.value = cause instanceof Error ? cause.message : String(cause)
+      if (generation === sessionGeneration) {
+        error.value = cause instanceof Error ? cause.message : String(cause)
+      }
     } finally {
-      loading.value = false
+      // Guarded rather than returned early: a `return` here would swallow an
+      // exception still propagating out of the `try` (`no-unsafe-finally`).
+      // A discarded completion must not clear the *new* session's loading
+      // state, which would show an empty list as though it had loaded.
+      if (generation === sessionGeneration) {
+        loading.value = false
+        perfMark('rooms:refresh:end', {
+          ok: error.value === null,
+          rooms: rooms.value.length,
+        })
+        // The race this phase exists to win is decided the first time the
+        // network answers, so the boot summary is emitted here — once per
+        // document, on failure as well, since a refresh that failed over
+        // restored rows is itself a result worth reading (ADR 0085 phase 2).
+        if (!summarised) {
+          summarised = true
+          perfMarkBootRoomList()
+        }
+      }
     }
   }
+
+  /** Whether a refresh has ever completed successfully in this session. */
+  let settled = false
+  /** Bumped by `resetSession`; see `doRefresh`'s generation check. */
+  let sessionGeneration = 0
+
+  function resetSession(): void {
+    // Always bumped, even when there is nothing to clear: a sign-out during
+    // the very first refresh leaves the store empty but still has a response
+    // in flight, and that response must not be applied to the next reader.
+    sessionGeneration += 1
+    if (
+      rooms.value.length === 0 &&
+      !settled &&
+      !stale.value &&
+      error.value === null &&
+      loading.value
+    ) {
+      return
+    }
+    rooms.value = []
+    syncUnreadCounts([])
+    recomputeNewest([])
+    requested.clear()
+    requestedPreviews.clear()
+    previewSlots.clear()
+    members.clear()
+    locallyHiddenRooms.clear()
+    locallyCreatedRoomMetadata.clear()
+    settled = false
+    stale.value = false
+    error.value = null
+    loading.value = true
+  }
+  /** Whether this document's one-shot boot summary has been emitted. */
+  let summarised = false
+
+  /**
+   * Paint the cached room list, if there is one and the network has not
+   * already answered.
+   *
+   * Kicked off at construction rather than from a component, so the read is
+   * already in flight before anything mounts — it is racing a ~1.3 s
+   * server-side wait (ADR 0085's measurement) with a ~1 ms IndexedDB read, and
+   * the only way to lose that race is to start late.
+   */
+  async function hydrate(): Promise<void> {
+    perfMark('rooms:cache:read:start')
+    const cached = await cache?.read()
+    perfMark('rooms:cache:read:end', {
+      hit: cached !== undefined,
+      rooms: cached?.length ?? 0,
+    })
+    if (cached === undefined || cached.length === 0) {
+      return
+    }
+    // The network won the race, or a mutation already populated the list.
+    // Cached rows are strictly older than either, so they must not land on top.
+    if (settled || rooms.value.length > 0) {
+      return
+    }
+    const visible = cached.filter(
+      (room) => !locallyHiddenRooms.has(roomKey(room)),
+    )
+    rooms.value = visible
+    syncUnreadCounts(visible)
+    recomputeNewest(visible)
+    // Deliberately *not* `resolveUnnamedTitles`: that is a `/members` fetch per
+    // unnamed room, and firing a burst of them at boot would spend exactly the
+    // network the cache exists to avoid waiting on. DM titles paint from the
+    // `axon.room_titles.v1` cache meanwhile, and the refresh resolves the rest.
+    stale.value = true
+    loading.value = false
+    perfMark('rooms:hydrate', { rooms: visible.length })
+  }
+
+  void hydrate()
 
   /** In-flight refresh, shared: concurrent callers (mount + a burst of
    *  unknown-room frames) coalesce onto one request. */
@@ -511,6 +674,10 @@ export function createRoomsStore(
       refreshing = null
     })
     return refreshing
+  }
+
+  function ensureLoaded(): Promise<void> {
+    return settled ? Promise.resolve() : refresh()
   }
 
   async function membershipMutation(
@@ -796,9 +963,12 @@ export function createRoomsStore(
     unreadKeys: computed(() => unreadKeys.value),
     unreadTotal: computed(() => unreadTotal.value),
     loading: computed(() => loading.value),
+    stale: computed(() => stale.value),
     error,
     titles: computed(() => titles.value),
     refresh,
+    ensureLoaded,
+    resetSession,
     leaveRoom,
     forgetRoom,
     joinRoom,

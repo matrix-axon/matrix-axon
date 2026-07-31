@@ -30,6 +30,7 @@ describe('createSettingsStore', () => {
       developerMode: false,
       perfMarks: false,
       appBadgeEnabled: true,
+      cacheRoomList: true,
     })
   })
 
