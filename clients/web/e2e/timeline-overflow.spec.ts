@@ -499,7 +499,7 @@ for (const { name, width } of [
   })
 }
 
-test('reply-context links use the same no-underline style as message links', async ({
+test('reply-context links preserve quoted links and their style', async ({
   page,
 }) => {
   await signIn(page)
@@ -540,4 +540,12 @@ test('reply-context links use the same no-underline style as message links', asy
 
   expect(styles.textDecorationLine).toBe('none')
   expect(Number(styles.fontWeight)).toBeGreaterThanOrEqual(500)
+
+  const quotedLink = page.locator(
+    '.reply-context a[href="https://example.org/docs"]',
+  )
+  await expect(quotedLink).toBeVisible()
+  const popup = page.waitForEvent('popup')
+  await quotedLink.click()
+  await expect(await popup).toHaveURL('https://example.org/docs')
 })
