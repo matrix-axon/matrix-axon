@@ -14,6 +14,8 @@ import { useMediaBlob } from './use-media-blob'
 import { downloadMedia, isDownloadable } from './download-media'
 import { useServices } from '../services'
 import type { TimelineEvent } from '../stores/timeline'
+import { EventActionIcon } from '../components/EventActionIcon'
+import { isMessageActionable } from '../components/event-action-eligibility'
 
 /**
  * How many history pages a single run of "older" presses may load. Mirrors
@@ -36,6 +38,15 @@ interface Cursor {
 interface MediaViewer {
   /** Open the viewer at this event; a no-op if it carries no viewable image. */
   open: (eventId: string) => void
+}
+
+/** Existing surface-owned message actions exposed for the open image. */
+export interface MediaViewerActions {
+  ownUserId: string | null
+  onReply: (event: TimelineEvent) => void
+  onReact: (event: TimelineEvent) => void
+  onOpenThread?: (event: TimelineEvent) => void
+  onDelete: (event: TimelineEvent) => Promise<boolean>
 }
 
 const MediaViewerContext = createContext<MediaViewer | null>(null)
@@ -108,6 +119,7 @@ export function MediaViewerProvider({
   atStart,
   findRow,
   runOf,
+  actions,
   children,
 }: {
   accountId: string
@@ -126,6 +138,7 @@ export function MediaViewerProvider({
    * a five-image post, so the counter names both.
    */
   runOf?: (eventId: string) => { index: number; total: number } | null
+  actions?: MediaViewerActions
   children: ComponentChildren
 }) {
   const { media: mediaService } = useServices()
@@ -133,6 +146,9 @@ export function MediaViewerProvider({
   /** Which way the reader last moved, for aiming the preloads. 0 until a step. */
   const [direction, setDirection] = useState<-1 | 0 | 1>(0)
   const [saving, setSaving] = useState(false)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   /**
    * Why a failed save must say so: `downloadMedia` resolves `'failed'` on a
    * fetch error, and the button simply reverting to idle is indistinguishable
@@ -185,6 +201,12 @@ export function MediaViewerProvider({
   // happened on does not resurrect a failure from minutes ago.
   useEffect(() => {
     setSaveError(null)
+  }, [item?.eventId])
+
+  useEffect(() => {
+    setConfirmingDelete(false)
+    setDeleting(false)
+    setDeleteError(null)
   }, [item?.eventId])
 
   // The cursor's event vanished and we landed on a neighbour — re-anchor, so
@@ -250,6 +272,35 @@ export function MediaViewerProvider({
     },
     [mediaService, accountId],
   )
+
+  const closeThen = useCallback(
+    (callback: (event: TimelineEvent) => void) => {
+      if (item === null) {
+        return
+      }
+      close()
+      callback(item.event)
+    },
+    [close, item],
+  )
+
+  const deleteCurrent = useCallback(async () => {
+    if (item === null || actions === undefined || deleting) {
+      return
+    }
+    setDeleting(true)
+    setDeleteError(null)
+    const deleted = await actions.onDelete(item.event)
+    if (!mounted.current) {
+      return
+    }
+    setDeleting(false)
+    if (deleted) {
+      close()
+    } else {
+      setDeleteError('Delete failed')
+    }
+  }, [actions, close, deleting, item])
 
   const step = useCallback(
     (delta: -1 | 1) => {
@@ -419,6 +470,85 @@ export function MediaViewerProvider({
             neighbour !== undefined && neighbour.media.url !== null,
         )
 
+  const contextualActions =
+    item !== null &&
+    actions !== undefined &&
+    isMessageActionable(item.event) ? (
+      <span class="lightbox-actions">
+        {confirmingDelete ? (
+          <>
+            <button
+              type="button"
+              class="ghost lightbox-action"
+              aria-label="Cancel delete"
+              title="Cancel delete"
+              disabled={deleting}
+              onClick={() => {
+                setConfirmingDelete(false)
+                setDeleteError(null)
+              }}
+            >
+              <EventActionIcon name="cancel" />
+            </button>
+            <button
+              type="button"
+              class="ghost danger lightbox-action"
+              aria-label="Confirm delete"
+              title="Confirm delete"
+              disabled={deleting}
+              onClick={() => void deleteCurrent()}
+            >
+              <EventActionIcon name="confirm" />
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              class="ghost lightbox-action"
+              aria-label="Reply"
+              title="Reply"
+              onClick={() => closeThen(actions.onReply)}
+            >
+              <EventActionIcon name="reply" />
+            </button>
+            {actions.onOpenThread !== undefined && (
+              <button
+                type="button"
+                class="ghost lightbox-action"
+                aria-label="Thread"
+                title="Thread"
+                onClick={() => closeThen(actions.onOpenThread!)}
+              >
+                <EventActionIcon name="thread" />
+              </button>
+            )}
+            <button
+              type="button"
+              class="ghost lightbox-action"
+              aria-label="React"
+              title="React"
+              onClick={() => closeThen(actions.onReact)}
+            >
+              <EventActionIcon name="react" />
+            </button>
+            {actions.ownUserId !== null &&
+              item.event.sender === actions.ownUserId && (
+                <button
+                  type="button"
+                  class="ghost danger lightbox-action"
+                  aria-label="Delete"
+                  title="Delete"
+                  onClick={() => setConfirmingDelete(true)}
+                >
+                  <EventActionIcon name="delete" />
+                </button>
+              )}
+          </>
+        )}
+      </span>
+    ) : undefined
+
   return (
     <MediaViewerContext.Provider value={viewer}>
       {children}
@@ -439,8 +569,10 @@ export function MediaViewerProvider({
             onNext: () => step(1),
           }}
           onClose={close}
+          actions={contextualActions}
           saving={saving}
           saveError={shownSaveError}
+          actionError={deleteError}
           onSave={
             decoded && isDownloadable(item.media)
               ? () => void save(item)

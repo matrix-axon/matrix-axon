@@ -25,22 +25,24 @@ import { EventTime, FailedSend } from './EventStatus'
 import { UserAvatar } from './UserAvatar'
 import { useModalFocus } from './use-modal-focus'
 import type { MembersStore } from '../stores/members'
+import { EventActionIcon } from './EventActionIcon'
+import {
+  isEditable,
+  isMessageActionable,
+  isStateEvent,
+} from './event-action-eligibility'
+
+export {
+  isEditable,
+  isReactable,
+  isStateEvent,
+} from './event-action-eligibility'
 
 /** The quick-react palette (a full picker is available behind `+`). */
 export const QUICK_REACTIONS = ['👍', '❤️', '😂', '🎉', '😮', '😢']
 const REACTION_TOOLTIP_NAME_LIMIT = 10
 const REACTION_TOUCH_HOLD_MS = 450
 const EVENT_ACTION_TOUCH_HOLD_MS = 550
-
-type EventActionIconName =
-  | 'reply'
-  | 'thread'
-  | 'react'
-  | 'edit'
-  | 'delete'
-  | 'confirm'
-  | 'cancel'
-  | 'inspect'
 
 type EmojiPickerClickDetail = {
   unicode?: string
@@ -96,34 +98,6 @@ export function fullReactionPickerPosition({
  * a state event, a local echo still in flight, and a failed send all have no
  * remote event to replace.
  */
-export function isEditable(
-  event: TimelineEvent,
-  ownUserId: string | null,
-): boolean {
-  return (
-    ownUserId !== null &&
-    event.sender === ownUserId &&
-    !event.redacted &&
-    !isStateEvent(event) &&
-    event.localEcho?.status !== 'pending' &&
-    event.localEcho?.status !== 'failed' &&
-    event.type === 'm.room.message'
-  )
-}
-
-export function isStateEvent(event: EventDto): boolean {
-  return event.state_key !== null && event.state_key !== undefined
-}
-
-export function isReactable(event: TimelineEvent): boolean {
-  return (
-    !isStateEvent(event) &&
-    !event.redacted &&
-    event.localEcho?.status !== 'pending' &&
-    event.localEcho?.status !== 'failed'
-  )
-}
-
 export function isUnsupportedBodylessEvent(event: TimelineEvent): boolean {
   return (
     !isStateEvent(event) &&
@@ -132,19 +106,6 @@ export function isUnsupportedBodylessEvent(event: TimelineEvent): boolean {
     event.content !== undefined &&
     !hasVisibleBody(event) &&
     parseMedia(event) === null
-  )
-}
-
-function EventActionIcon({ name }: { name: EventActionIconName }) {
-  return (
-    <svg
-      class="event-action-icon"
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      focusable="false"
-    >
-      {eventActionIconPath(name)}
-    </svg>
   )
 }
 
@@ -233,117 +194,6 @@ function EventActionButton({
   )
 }
 
-function eventActionIconPath(name: EventActionIconName) {
-  switch (name) {
-    case 'reply':
-      return (
-        <path
-          d="M9 10 4 15l5 5m-5-5h9a7 7 0 0 0 7-7V5"
-          fill="none"
-          stroke="currentColor"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          stroke-width="2"
-        />
-      )
-    case 'thread':
-      return (
-        <>
-          <path
-            d="M21 12a8 8 0 0 1-8 8H7l-4 3v-7a8 8 0 1 1 18-4Z"
-            fill="none"
-            stroke="currentColor"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            stroke-width="2"
-          />
-          <path
-            d="M8 11h8M8 15h5"
-            fill="none"
-            stroke="currentColor"
-            stroke-linecap="round"
-            stroke-width="2"
-          />
-        </>
-      )
-    case 'react':
-      return (
-        <>
-          <circle
-            cx="12"
-            cy="12"
-            r="8"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          />
-          <path
-            d="M9 10h.01M15 10h.01M9 14a4 4 0 0 0 6 0M19 5v4M17 7h4"
-            fill="none"
-            stroke="currentColor"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            stroke-width="2"
-          />
-        </>
-      )
-    case 'edit':
-      return (
-        <path
-          d="m4 20 4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Zm12-13 3 3"
-          fill="none"
-          stroke="currentColor"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          stroke-width="2"
-        />
-      )
-    case 'delete':
-      return (
-        <path
-          d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"
-          fill="none"
-          stroke="currentColor"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          stroke-width="2"
-        />
-      )
-    case 'confirm':
-      return (
-        <path
-          d="m5 12 4 4L19 6"
-          fill="none"
-          stroke="currentColor"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          stroke-width="2"
-        />
-      )
-    case 'cancel':
-      return (
-        <path
-          d="M6 6l12 12M18 6 6 18"
-          fill="none"
-          stroke="currentColor"
-          stroke-linecap="round"
-          stroke-width="2"
-        />
-      )
-    case 'inspect':
-      return (
-        <path
-          d="m8 9-4 3 4 3m8-6 4 3-4 3m-2-9-4 12"
-          fill="none"
-          stroke="currentColor"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          stroke-width="2"
-        />
-      )
-  }
-}
-
 function hasVisibleBody(event: EventDto): boolean {
   return (
     event.body !== null && event.body !== undefined && event.body.trim() !== ''
@@ -415,7 +265,7 @@ export function MessageEventRow({
   const failed = event.localEcho?.status === 'failed'
   const editable = isEditable(event, ownUserId)
   const developerMode = settings.developerMode.value
-  const hasMessageActions = !isState && !event.redacted && !pending && !failed
+  const hasMessageActions = isMessageActionable(event)
   const senderDisplay = members.displayName(event.sender)
   const canOpenThread = showThreadAction && onOpenThread !== undefined
   const visibleReadReceipts = readReceipts.filter(

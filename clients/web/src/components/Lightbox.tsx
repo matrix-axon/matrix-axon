@@ -67,6 +67,8 @@ export function Lightbox({
   onSave,
   saving,
   saveError,
+  actionError,
+  actions,
   restoreTo,
   children,
 }: {
@@ -85,6 +87,10 @@ export function Lightbox({
   saving?: boolean
   /** Message from a save that failed, announced assertively. */
   saveError?: string | null
+  /** Message from a contextual event action that failed. */
+  actionError?: string | null
+  /** Contextual controls for the event currently shown in the viewer. */
+  actions?: ComponentChildren
   /** See `useModalFocus`; the viewer points this at the current image's row. */
   restoreTo?: () => HTMLElement | null
   children: ComponentChildren
@@ -223,31 +229,39 @@ export function Lightbox({
           }
         }}
       >
-        <button
-          type="button"
-          class="ghost lightbox-close"
-          aria-label="Close"
-          onClick={onClose}
-        >
-          ✕
-        </button>
-        {onSave !== undefined && (
+        <div class="lightbox-toolbar">
+          {actions}
+          {onSave !== undefined && (
+            <button
+              type="button"
+              class="ghost lightbox-save"
+              aria-label="Save image to device"
+              disabled={saving === true}
+              onClick={onSave}
+            >
+              {saving === true ? '…' : '⤓'}
+            </button>
+          )}
           <button
             type="button"
-            class="ghost lightbox-save"
-            aria-label="Save image to device"
-            disabled={saving === true}
-            onClick={onSave}
+            class="ghost lightbox-close"
+            aria-label="Close"
+            onClick={onClose}
           >
-            {saving === true ? '…' : '⤓'}
+            ✕
           </button>
-        )}
+        </div>
         {saveError !== null && saveError !== undefined && (
           // `alert`, not the polite paging status: this is the outcome of
           // something the reader just did, and it must not wait its turn
           // behind a position announcement.
           <p class="lightbox-save-error" role="alert">
             {saveError}
+          </p>
+        )}
+        {actionError !== null && actionError !== undefined && (
+          <p class="lightbox-action-error" role="alert">
+            {actionError}
           </p>
         )}
         {paging !== undefined && (

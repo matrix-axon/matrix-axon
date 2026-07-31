@@ -452,6 +452,16 @@ export function ThreadPanel({
                 ].find((el) => el.getAttribute('data-event-id') === eventId) ??
                 null
               }
+              actions={{
+                ownUserId,
+                onReply: (event) => setAction({ kind: 'reply', event }),
+                onReact: (event) => setReactionPickerEventId(event.event_id),
+                onDelete: async (event) => {
+                  const deleted = await thread.redact(event.event_id)
+                  if (deleted) search.clear()
+                  return deleted
+                },
+              }}
             >
               <div class="timeline-list-shell">
                 <ol ref={threadListRef} class="event-list thread-list">

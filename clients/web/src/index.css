@@ -4005,11 +4005,25 @@ audio.media-player {
   background: rgba(0, 0, 0, 0.82);
 }
 
-.lightbox button.lightbox-close {
+.lightbox-toolbar {
   position: absolute;
   top: 1rem;
   right: 1rem;
   z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.lightbox-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.lightbox button.lightbox-close,
+.lightbox button.lightbox-save,
+.lightbox button.lightbox-action {
   /* 44px: the smallest reliable touch target, and this is the control you
      reach for when the tap-outside gesture is not obvious. */
   width: 2.75rem;
@@ -4028,28 +4042,24 @@ audio.media-player {
   backdrop-filter: blur(2px);
 }
 
-.lightbox button.lightbox-save {
-  position: absolute;
-  top: 1rem;
-  /* Left of the ✕, which owns the corner. */
-  right: 4.25rem;
-  z-index: 1;
-  width: 2.75rem;
-  height: 2.75rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.lightbox button.lightbox-save,
+.lightbox button.lightbox-action {
   font-size: 1.3rem;
-  line-height: 1;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.45);
-  border-radius: 999px;
-  backdrop-filter: blur(2px);
+}
+
+/* Timeline-row action icons are text-label replacements only on mobile.
+   Lightbox actions are icon-only on every viewport, so override that desktop
+   default here rather than duplicating the SVGs. */
+.lightbox-action .event-action-icon {
+  display: block;
+  width: 1.25rem;
+  height: 1.25rem;
 }
 
 .lightbox button.lightbox-save:hover:not(:disabled),
-.lightbox button.lightbox-save:focus-visible {
+.lightbox button.lightbox-save:focus-visible,
+.lightbox button.lightbox-action:hover:not(:disabled),
+.lightbox button.lightbox-action:focus-visible {
   background: #000;
   border-color: #fff;
 }
@@ -4057,6 +4067,10 @@ audio.media-player {
 .lightbox button.lightbox-save:disabled {
   color: rgba(255, 255, 255, 0.45);
   cursor: default;
+}
+
+.lightbox button.lightbox-action.danger {
+  color: var(--danger);
 }
 
 .lightbox button.lightbox-close:hover,
@@ -4127,9 +4141,11 @@ audio.media-player {
    restores it the moment anything is tabbed to. */
 .lightbox-immersive button.lightbox-close,
 .lightbox-immersive button.lightbox-save,
+.lightbox-immersive button.lightbox-action,
 .lightbox-immersive button.lightbox-page,
 .lightbox-immersive .lightbox-status,
 .lightbox-immersive .lightbox-save-error,
+.lightbox-immersive .lightbox-action-error,
 .lightbox-immersive .lightbox-caption {
   opacity: 0;
   pointer-events: none;
@@ -4137,9 +4153,11 @@ audio.media-player {
 
 .lightbox-close,
 .lightbox-save,
+.lightbox-action,
 .lightbox-page,
 .lightbox-status,
 .lightbox-save-error,
+.lightbox-action-error,
 .lightbox-caption {
   transition: opacity 120ms ease;
 }
@@ -4147,9 +4165,11 @@ audio.media-player {
 @media (prefers-reduced-motion: reduce) {
   .lightbox-close,
   .lightbox-save,
+  .lightbox-action,
   .lightbox-page,
   .lightbox-status,
   .lightbox-save-error,
+  .lightbox-action-error,
   .lightbox-caption {
     transition: none;
   }
@@ -4183,7 +4203,8 @@ audio.media-player {
 /* Shaped like the status pill it sits beside, coloured like a failure. The
    pill treatment matters here: the message lands over an arbitrary photo, and
    plain text on a bright image is unreadable. */
-.lightbox-save-error {
+.lightbox-save-error,
+.lightbox-action-error {
   margin: 0;
   z-index: 1;
   color: #fff;

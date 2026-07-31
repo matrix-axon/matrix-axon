@@ -1383,6 +1383,17 @@ export function RoomPage() {
               atStart={timeline.atStart.value}
               findRow={(eventId) => findEventRow(roomStream.current, eventId)}
               runOf={(eventId) => runPosition(rows, eventId)}
+              actions={{
+                ownUserId,
+                onReply: (event) => setAction({ kind: 'reply', event }),
+                onReact: (event) => setReactionPickerEventId(event.event_id),
+                onOpenThread: (event) => setThreadParam(event.event_id),
+                onDelete: async (event) => {
+                  const deleted = await timeline.redact(event.event_id)
+                  if (deleted) search.clear()
+                  return deleted
+                },
+              }}
             >
               <Timeline
                 rows={rows}

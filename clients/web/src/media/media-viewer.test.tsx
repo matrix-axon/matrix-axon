@@ -14,7 +14,11 @@ import { ServicesContext } from '../services'
 import type { TimelineEvent } from '../stores/timeline'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { EventBody } from '../components/EventBody'
-import { AUTO_PAGE_LIMIT, MediaViewerProvider } from './media-viewer'
+import {
+  AUTO_PAGE_LIMIT,
+  MediaViewerProvider,
+  type MediaViewerActions,
+} from './media-viewer'
 
 const ACCOUNT = '11111111-1111-4111-8111-111111111111'
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
@@ -91,11 +95,13 @@ function Surface({
   onLoadOlder,
   atStart,
   runOf,
+  actions,
 }: {
   events: readonly TimelineEvent[]
   onLoadOlder?: () => Promise<boolean>
   atStart?: boolean
   runOf?: (eventId: string) => { index: number; total: number } | null
+  actions?: MediaViewerActions
 }) {
   return (
     <ServicesContext.Provider value={testServices()}>
@@ -105,6 +111,7 @@ function Surface({
         onLoadOlder={onLoadOlder}
         atStart={atStart}
         runOf={runOf}
+        actions={actions}
         findRow={(eventId) =>
           [...document.querySelectorAll<HTMLElement>('[data-event-id]')].find(
             (el) => el.getAttribute('data-event-id') === eventId,
@@ -172,6 +179,126 @@ describe('MediaViewerProvider', () => {
     await openAt(container, '$2')
     await waitFor(() => expect(dialog()).not.toBeNull())
     expect(shownImage()).toBe('$2.png')
+  })
+
+  it('delegates contextual actions for the displayed image after closing', async () => {
+    serveBytes()
+    const onReply = vi.fn()
+    const onReact = vi.fn()
+    const onOpenThread = vi.fn()
+    const onDelete = vi.fn(async () => true)
+    const { container } = render(
+      <Surface
+        events={[image('$1', 10), image('$2', 20)]}
+        atStart
+        actions={{
+          ownUserId: '@alice:hs',
+          onReply,
+          onReact,
+          onOpenThread,
+          onDelete,
+        }}
+      />,
+    )
+
+    await openAt(container, '$2')
+    const controls = [...document.querySelectorAll('.lightbox-toolbar button')]
+    expect(
+      controls.map((control) => control.getAttribute('aria-label')),
+    ).toEqual(['Reply', 'Thread', 'React', 'Delete', 'Close'])
+
+    fireEvent.click(
+      document.querySelector<HTMLButtonElement>('[aria-label="Reply"]')!,
+    )
+    await waitFor(() => expect(dialog()).toBeNull())
+    expect(onReply).toHaveBeenCalledWith(
+      expect.objectContaining({ event_id: '$2' }),
+    )
+
+    await openAt(container, '$2')
+    fireEvent.click(
+      document.querySelector<HTMLButtonElement>('[aria-label="React"]')!,
+    )
+    await waitFor(() => expect(dialog()).toBeNull())
+    expect(onReact).toHaveBeenCalledWith(
+      expect.objectContaining({ event_id: '$2' }),
+    )
+
+    await openAt(container, '$2')
+    fireEvent.click(
+      document.querySelector<HTMLButtonElement>('[aria-label="Thread"]')!,
+    )
+    await waitFor(() => expect(dialog()).toBeNull())
+    expect(onOpenThread).toHaveBeenCalledWith(
+      expect.objectContaining({ event_id: '$2' }),
+    )
+  })
+
+  it('confirms deletion of an own image and keeps a failed delete open', async () => {
+    serveBytes()
+    const onDelete = vi
+      .fn<MediaViewerActions['onDelete']>()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+    const { container } = render(
+      <Surface
+        events={[image('$1', 10)]}
+        atStart
+        actions={{
+          ownUserId: '@alice:hs',
+          onReply: vi.fn(),
+          onReact: vi.fn(),
+          onDelete,
+        }}
+      />,
+    )
+
+    await openAt(container, '$1')
+    fireEvent.click(
+      document.querySelector<HTMLButtonElement>('[aria-label="Delete"]')!,
+    )
+    expect(document.querySelector('[aria-label="Reply"]')).toBeNull()
+    expect(
+      document.querySelector('[aria-label="Cancel delete"]'),
+    ).not.toBeNull()
+
+    fireEvent.click(
+      document.querySelector<HTMLButtonElement>(
+        '[aria-label="Confirm delete"]',
+      )!,
+    )
+    await waitFor(() =>
+      expect(document.body.textContent).toContain('Delete failed'),
+    )
+    expect(dialog()).not.toBeNull()
+
+    fireEvent.click(
+      document.querySelector<HTMLButtonElement>(
+        '[aria-label="Confirm delete"]',
+      )!,
+    )
+    await waitFor(() => expect(dialog()).toBeNull())
+    expect(onDelete).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not offer deletion for another sender’s image', async () => {
+    serveBytes()
+    const otherImage = { ...image('$1', 10), sender: '@bob:hs' }
+    const { container } = render(
+      <Surface
+        events={[otherImage]}
+        atStart
+        actions={{
+          ownUserId: '@alice:hs',
+          onReply: vi.fn(),
+          onReact: vi.fn(),
+          onDelete: vi.fn(async () => true),
+        }}
+      />,
+    )
+
+    await openAt(container, '$1')
+    expect(document.querySelector('[aria-label="Delete"]')).toBeNull()
   })
 
   it('pages with arrow keys and stops inert at the newest end', async () => {

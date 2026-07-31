@@ -81,6 +81,20 @@ test('pages across the timeline images and announces position', async ({
   await expect.poll(shown).toBe(first)
 })
 
+test('renders contextual action icons on desktop', async ({ page }) => {
+  await openRoom(page)
+  const ids = await imageRowIds(page)
+  await openImage(page, ids[0])
+
+  const icons = page.locator('.lightbox-action .event-action-icon')
+  await expect(icons).toHaveCount(3)
+  expect(
+    await icons.evaluateAll((elements) =>
+      elements.map((element) => getComputedStyle(element).display),
+    ),
+  ).toEqual(['block', 'block', 'block'])
+})
+
 test('returns focus to the image it was left on, not the one it opened from', async ({
   page,
 }) => {
@@ -176,6 +190,63 @@ test('tabbing reveals hidden chrome instead of stranding focus', async ({
       false,
   )
   expect(inside).toBe(true)
+})
+
+test.describe('message actions on a phone', () => {
+  test.use({ viewport: { width: 320, height: 640 }, hasTouch: true })
+
+  test('keeps the contextual action toolbar within the viewport', async ({
+    page,
+  }) => {
+    await openRoom(page)
+    const ids = await imageRowIds(page)
+    await openImage(page, ids[0])
+
+    const toolbar = page.locator('.lightbox-toolbar')
+    await expect(toolbar.getByRole('button', { name: 'Reply' })).toBeVisible()
+    await expect(toolbar.getByRole('button', { name: 'Thread' })).toBeVisible()
+    await expect(toolbar.getByRole('button', { name: 'React' })).toBeVisible()
+    await expect(
+      toolbar.getByRole('button', { name: 'Save image to device' }),
+    ).toBeVisible()
+    const labels = await toolbar
+      .locator('button')
+      .evaluateAll((buttons) =>
+        buttons.map((button) => button.getAttribute('aria-label')),
+      )
+    expect(labels).toEqual([
+      'Reply',
+      'Thread',
+      'React',
+      'Save image to device',
+      'Close',
+    ])
+
+    const layout = await toolbar.evaluate((element) => {
+      const toolbarBox = element.getBoundingClientRect()
+      const buttons = [...element.querySelectorAll('button')].map((button) =>
+        button.getBoundingClientRect(),
+      )
+      return {
+        toolbarBox,
+        viewportWidth: window.innerWidth,
+        buttons,
+      }
+    })
+    expect(layout.toolbarBox.left).toBeGreaterThanOrEqual(0)
+    expect(layout.toolbarBox.right).toBeLessThanOrEqual(layout.viewportWidth)
+    for (const button of layout.buttons) {
+      expect(button.width).toBeGreaterThanOrEqual(44)
+      expect(button.height).toBeGreaterThanOrEqual(44)
+    }
+
+    // The real browser hit-test closes the viewer and leaves the target row's
+    // established reaction picker usable, rather than leaving a fixed overlay
+    // above it.
+    await toolbar.getByRole('button', { name: 'React' }).click()
+    await expect(page.getByRole('dialog')).toBeHidden()
+    await expect(page.locator('.reaction-picker-shell')).toBeVisible()
+  })
 })
 
 /*

@@ -8,6 +8,8 @@ import type { TimelineEvent } from '../stores/timeline'
  */
 export interface LightboxItem {
   eventId: string
+  /** The source event, used by contextual viewer actions. */
+  event: TimelineEvent
   /** `origin_ts`, kept so a cursor whose event disappears can find its
    *  nearest surviving neighbour rather than closing. */
   ts: number
@@ -43,6 +45,7 @@ export function imageSequence(
     }
     items.push({
       eventId: event.event_id,
+      event,
       ts: event.origin_ts,
       accountId: event.account_id,
       media,
