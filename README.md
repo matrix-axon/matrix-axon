@@ -8,9 +8,15 @@ What sets Axon apart from other Matrix clients is where the hard work happens. S
 
 ## See it
 
-[![axon-tui rendering a seeded demo world: a room list, a photo timeline with inline terminal graphics, and a search across rooms](docs/img/tui-demo-poster.png)](https://matrix-axon.github.io/matrix-axon/demo.html)
+[![axon-tui rendering a seeded demo world: a room list, a photo timeline with inline terminal graphics, and a search across rooms](docs/img/tui-demo-poster.png)](https://matrix-axon.github.io/matrix-axon/demo.html#tui)
 
-**[Watch the axon-tui demo](https://matrix-axon.github.io/matrix-axon/demo.html)** (65s) — the room list, threads, inline photographs drawn as real terminal graphics, full-text search, and jump-to-date, all against a reproducible seeded world. The recording lives on the project site rather than inline here: GitHub renders repo-relative GIFs in a README but not MP4, and a GIF of a terminal is both enormous and worse to look at.
+**[Watch the axon-tui demo](https://matrix-axon.github.io/matrix-axon/demo.html#tui)** (65s) — the room list, threads, inline photographs drawn as real terminal graphics, full-text search, and jump-to-date, all against a reproducible seeded world.
+
+[![axon-web on a desktop window: the room list, a timeline with reactions and an edited message, and an open thread panel](docs/img/web-demo-desktop-poster.png)](https://matrix-axon.github.io/matrix-axon/demo.html#web-desktop)
+
+**[Watch the axon-web demos](https://matrix-axon.github.io/matrix-axon/demo.html#web-desktop)** — [desktop](https://matrix-axon.github.io/matrix-axon/demo.html#web-desktop) (101s): spaces, threads, image galleries with a lightbox, and search scoped, widened and narrowed again; [mobile](https://matrix-axon.github.io/matrix-axon/demo.html#web-mobile) (62s) on an iPhone profile, where the single-pane layout makes the transitions the story.
+
+Both clients read the same seeded world over the same `/v1/` API from the same live Axon. The recordings live on the project site rather than inline here: GitHub renders repo-relative GIFs in a README but not MP4, and a GIF of any of these is both enormous and worse to look at.
 
 Join our public discussion room [#axon-developer:bostoncoop.net](https://matrix.to/#/%23axon-developer%3Abostoncoop.net).
 

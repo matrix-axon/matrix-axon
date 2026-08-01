@@ -111,6 +111,8 @@ jobs:
           test -s _site/api.html   || { echo "::error::_site/api.html missing — the API reference was not generated"; exit 1; }
           test -s _site/demo.html  || { echo "::error::_site/demo.html missing — Jekyll swallowed it instead of copying it"; exit 1; }
           test -s _site/demo/tui-demo.mp4 || { echo "::error::_site/demo/tui-demo.mp4 missing — the release asset was not downloaded, so the demo page would show a broken player"; exit 1; }
+          test -s _site/demo/web-demo-desktop.mp4 || { echo "::error::_site/demo/web-demo-desktop.mp4 missing — the release asset was not downloaded, so the demo page would show a broken player"; exit 1; }
+          test -s _site/demo/web-demo-mobile.mp4 || { echo "::error::_site/demo/web-demo-mobile.mp4 missing — the release asset was not downloaded, so the demo page would show a broken player"; exit 1; }
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5

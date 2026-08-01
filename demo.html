@@ -7,19 +7,21 @@
   exactly what we want here — this page owns its own markup rather than
   inheriting the (theme-less) rendering the homepage gets from README.md.
 
-  The video itself is NOT in the repository. It is attached to the `demo-2026-08`
+  The videos are NOT in the repository. They are attached to the `demo-2026-08`
   release and copied into the site by .github/workflows/api-docs.yml at build
-  time, so a 9 MB recording never enters a 3.8 MB git history with no LFS. Only
-  the poster still is committed. See ADR 0086.
+  time, so tens of megabytes of recording never enter a 3.8 MB git history with
+  no LFS. Only the poster stills are committed. The download step globs `*.mp4`,
+  so adding a recording to the same release needs a player here and a guard line
+  in the workflow, but no change to the download itself. See ADR 0086.
 -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Axon — axon-tui demo</title>
+    <title>Axon — client demos</title>
     <meta
       name="description"
-      content="A recording of axon-tui, the keyboard-first terminal client for Axon, rendering a seeded demo world."
+      content="Recordings of the Axon clients — the axon-tui terminal client and the axon-web browser client on desktop and mobile — rendering a seeded demo world."
     />
     <style>
       :root {
@@ -47,6 +49,31 @@
         border-radius: 6px;
         background: #000;
       }
+      /* The phone recording is portrait; full-width would be a tower. */
+      .portrait {
+        max-width: 24rem;
+        display: block;
+        margin-inline: auto;
+      }
+      section {
+        margin-top: 3rem;
+      }
+      h2 {
+        margin-bottom: 0.25rem;
+      }
+      .sub {
+        margin-top: 0;
+        opacity: 0.75;
+      }
+      nav.toc {
+        margin: 1.5rem 0 0;
+        padding: 0;
+        list-style: none;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
+        font-size: 0.95rem;
+      }
       ul {
         padding-left: 1.25rem;
       }
@@ -58,50 +85,142 @@
     </style>
   </head>
   <body>
-    <h1>axon-tui</h1>
+    <h1>Axon client demos</h1>
     <p class="lede">
-      The keyboard-first terminal client for
-      <a href="https://github.com/matrix-axon/matrix-axon">Axon</a>, driven
-      through a scripted tour of a seeded demo world.
+      Two clients for
+      <a href="https://github.com/matrix-axon/matrix-axon">Axon</a>, each driven
+      through a scripted tour of the same seeded demo world.
     </p>
 
-    <video controls preload="metadata" poster="docs/img/tui-demo-poster.png">
-      <source src="demo/tui-demo.mp4" type="video/mp4" />
-      Your browser cannot play this video.
-      <a href="demo/tui-demo.mp4">Download the recording</a> instead.
-    </video>
+    <nav class="toc">
+      <a href="#tui">Terminal (axon-tui)</a>
+      <a href="#web-desktop">Web — desktop</a>
+      <a href="#web-mobile">Web — mobile</a>
+      <a href="#what">What you are looking at</a>
+    </nav>
 
-    <h2>What you are looking at</h2>
-    <p>
-      Everything on screen is fictional and reproducible: personas, rooms and
-      messages come from a declarative corpus that a throwaway Synapse + Axon
-      stack renders on demand, so the same recording can be re-shot after a UI
-      change. The images really are drawn in the terminal — Sixel, Kitty or
-      iTerm2 graphics, depending on what the terminal supports — not
-      approximated with block characters.
-    </p>
-    <p>The tour covers, in order:</p>
-    <ul>
-      <li>the room list, with sort, filters and a live name filter</li>
-      <li>a timeline with formatted messages, replies and reactions</li>
-      <li>adding a reaction, then withdrawing it</li>
-      <li>threads, edits and redactions</li>
-      <li>inline photographs and a full-size preview</li>
-      <li>full-text search across rooms, narrowed by a room filter</li>
-      <li>jumping to a date in history</li>
-      <li>sending a message</li>
-      <li>the keyboard-shortcut and help popups</li>
-    </ul>
+    <section id="tui">
+      <h2>axon-tui — terminal</h2>
+      <p class="sub">The keyboard-first terminal client.</p>
+
+      <video controls preload="metadata" poster="docs/img/tui-demo-poster.png">
+        <source src="demo/tui-demo.mp4" type="video/mp4" />
+        Your browser cannot play this video.
+        <a href="demo/tui-demo.mp4">Download the recording</a> instead.
+      </video>
+
+      <p>The tour covers, in order:</p>
+      <ul>
+        <li>the room list, with sort, filters and a live name filter</li>
+        <li>a timeline with formatted messages, replies and reactions</li>
+        <li>adding a reaction, then withdrawing it</li>
+        <li>threads, edits and redactions</li>
+        <li>inline photographs and a full-size preview</li>
+        <li>full-text search across rooms, narrowed by a room filter</li>
+        <li>jumping to a date in history</li>
+        <li>sending a message</li>
+        <li>the keyboard-shortcut and help popups</li>
+      </ul>
+
+      <p>
+        The images really are drawn in the terminal — Sixel, Kitty or iTerm2
+        graphics, depending on what the terminal supports — not approximated
+        with block characters.
+      </p>
+    </section>
+
+    <section id="web-desktop">
+      <h2>axon-web — desktop</h2>
+      <p class="sub">The browser client at a desktop window size.</p>
+
+      <video
+        controls
+        preload="metadata"
+        poster="docs/img/web-demo-desktop-poster.png"
+      >
+        <source src="demo/web-demo-desktop.mp4" type="video/mp4" />
+        Your browser cannot play this video.
+        <a href="demo/web-demo-desktop.mp4">Download the recording</a> instead.
+      </video>
+
+      <p>The tour covers, in order:</p>
+      <ul>
+        <li>the room list — sort, filters, a live name filter, DM titles</li>
+        <li>the spaces rail filtering the room list by hierarchy</li>
+        <li>
+          a timeline with formatted messages, replies, reactions and day
+          separators
+        </li>
+        <li>an edit applied in place, a redaction, and the thread panel</li>
+        <li>an image gallery and the lightbox paging through it</li>
+        <li>
+          full-text search — scoped to the open room, widened across all rooms,
+          narrowed again by room, then followed as a deep link
+        </li>
+        <li>sending a message and a reaction, then undoing both</li>
+        <li>the keyboard-shortcut map</li>
+      </ul>
+    </section>
+
+    <section id="web-mobile">
+      <h2>axon-web — mobile</h2>
+      <p class="sub">
+        The same client on an iPhone 13 profile: real touch, a phone-shaped
+        viewport, and the single-pane layout that comes with it.
+      </p>
+
+      <video
+        class="portrait"
+        controls
+        preload="metadata"
+        poster="docs/img/web-demo-mobile-poster.png"
+      >
+        <source src="demo/web-demo-mobile.mp4" type="video/mp4" />
+        Your browser cannot play this video.
+        <a href="demo/web-demo-mobile.mp4">Download the recording</a> instead.
+      </video>
+
+      <p>
+        Not the desktop take in a narrower window. Below the two-pane
+        breakpoint the room list and the spaces rail move behind navigation, so
+        the tour leads with the transitions instead:
+      </p>
+      <ul>
+        <li>one pane at a time, chosen by the route, and Back</li>
+        <li>reading a room, and the room-information panel</li>
+        <li>the thread drawer stacked over the room</li>
+        <li>a gallery and the lightbox, by tap</li>
+        <li>search, and a hit followed into a room it was not in</li>
+        <li>sending a message and deleting it, with touch-sized actions</li>
+      </ul>
+    </section>
+
+    <section id="what">
+      <h2>What you are looking at</h2>
+      <p>
+        Everything on screen is fictional and reproducible: personas, rooms and
+        messages come from a declarative corpus that a throwaway Synapse + Axon
+        stack renders on demand, so the same recording can be re-shot after a UI
+        change. Both clients read that world over the same <code>/v1/</code> API
+        from the same live Axon — the search results come from a real Tantivy
+        index and the photographs really do travel through the media proxy.
+      </p>
+    </section>
 
     <footer>
       <p>
         Reproduce it yourself with
         <code>scripts/demo-stack.sh up</code> then
-        <code>scripts/demo-stack.sh record</code> —
-        see
+        <code>scripts/demo-stack.sh record</code> for the terminal tour, or
+        <code>DEMO_MANIFEST=… pnpm demo</code> in <code>clients/web</code> for
+        the web ones — see
         <a
           href="https://github.com/matrix-axon/matrix-axon/blob/main/smoke/tui/README.md"
           >smoke/tui/README.md</a
+        >,
+        <a
+          href="https://github.com/matrix-axon/matrix-axon/blob/main/clients/web/README.md"
+          >clients/web/README.md</a
         >
         and
         <a
