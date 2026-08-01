@@ -1,0 +1,182 @@
+# ADR 0086 — Demo corpus and client recording
+
+## Context
+
+Axon has no visual documentation. `README.md` describes an architecture and
+lists two active clients, but shows neither. Capabilities that took whole
+milestones to build — Tantivy full-text search (M9), threads (ADR 0032), the
+Spaces picker (ADR 0084), adjacency-inferred image galleries with lightbox
+paging (ADR 0081) — are invisible to anyone evaluating the project.
+
+The only content anyone has ever seen a client render is the **Axon Testing**
+room (`!SScJmZuEkBUnuydXdf:bostoncoop.net`): a real room on a real remote
+homeserver, full of manually typed dummy messages, that nothing in this repo
+creates or controls. It exists because `clients/web/AGENTS.md` confines live
+mutations to it. It is the right tool for that job and the wrong one for a
+screenshot — its contents are arbitrary, unreproducible, and shaped by whoever
+last tested something.
+
+Separately, the project's fake-data story is split three ways and none of the
+three can produce a realistic world:
+
+- `clients/web/e2e/mock-server.mjs` has the richest *shapes* (spaces, gallery
+  runs, search, a real WebSocket) but is JavaScript fixtures serving one client,
+  never a homeserver.
+- `smoke/local-stack` boots a real Synapse + Postgres + axon and can already
+  backdate events through an application service, but every message body is a
+  literal like `"jump fixture 2026-01-03 message 07"`, and it can create no
+  media, no spaces, and no DMs.
+- `crates/axon-itest` seeds one encrypted room to prove one re-decryption path.
+
+So the gap that blocks a demo video is the same gap that blocks several classes
+of smoke test. `smoke/tui/README.md` already records the consequence: media
+rendering "is not covered; the stack needs uploaded media fixtures."
+
+## Decision
+
+### One corpus, rendered into the real stack
+
+A single declarative corpus is the source of truth for demo content, and
+`smoke/local-stack` is its interpreter. Both clients then read that content
+through a live axon over `/v1/`.
+
+The rejected alternative was to also teach `mock-server.mjs` the same corpus so
+the web client could be recorded without Docker. That would put one data file in
+service of two silos, and the root `AGENTS.md` one-silo-per-PR rule makes a
+shared fixture straddling `smoke/` and `clients/` a recurring source of
+awkward PRs. Going through the real stack costs a Docker dependency and buys
+correctness for free: search results come from a real Tantivy index rather than
+a mock's substring match, media really traverses the proxy and its LRU cache,
+and the WebSocket is the real one. `mock-server.mjs` is left exactly as it is,
+serving the PR-gating e2e lane it was built for.
+
+### The corpus is data; the seeder is code
+
+`smoke/local-stack/corpus/demo.toml` declares personas, spaces, rooms, and a
+flat list of messages carrying relations, reactions, and image references.
+Timestamps are **relative** (`at = "-6d 09:12"`) so a recording made at any time
+shows a timeline that reads as current, and `/jump`, day separators, and search
+date filters all have real spread to work against.
+
+Keeping it declarative — rather than another `seed_*` function — is what lets
+the corpus grow without a Rust change each time, and lets a scenario author
+encode an awkward case (a gallery run 61 seconds apart, a day boundary crossed)
+as three lines of data.
+
+### Backdating keeps using the application-service route
+
+`seed_long_timeline` already backdates via `?user_id=&ts=` through a registered
+appservice. That mechanism is kept and generalized: `send_appservice_message`
+hardcodes `m.text` and a bare body today, so it splits into a
+`send_appservice_event(..., event_type, content, ts)` that can backdate *any*
+event — which is what makes historical images, threads, and formatted messages
+possible at all. The narrow wrapper stays so `seed_long_timeline` is unchanged.
+
+The appservice registration declares a **non-exclusive wildcard user
+namespace**, so personas get clean IDs (`@maya:localhost`) instead of
+namespace-prefixed ones. This is a deliberate test-only choice: the registration
+file is generated per run into a temp dir for a disposable local homeserver, and
+a demo where every participant is `@rtc_maya:localhost` undercuts the point of
+the exercise.
+
+### The demo corpus is opt-in
+
+`up` gains `--corpus <path>`, defaulting to unset. Every existing smoke scenario
+and every existing manifest field behaves exactly as before. The demo world is
+additive, so the smoke gate remains the regression check for this ADR's changes.
+
+### The TUI pilot is a PTY passthrough, and declares its image protocol
+
+axon-tui renders real Sixel/Kitty/iTerm2 graphics, which is genuinely
+distinctive and which no headless recorder reproduces: `agg` does not render
+Sixel, and xterm.js-based recorders like VHS do not either. The recording
+therefore happens in a real terminal on a developer's machine, with a human
+running the screen recorder.
+
+To drive it without owning the screen, `axon-demo-tui` opens a PTY, spawns
+`axon-tui`, and pumps PTY output to stdout **verbatim** — graphics escape
+sequences are just bytes and survive the copy. It reuses `PtyDriver` from
+`smoke/tui/src/pty.rs`, which requires adding a `lib.rs` to that package so the
+type is importable rather than duplicated.
+
+Critically, the pilot **sets `AXON_IMAGE_PROTOCOL` and `AXON_FONT_SIZE`
+explicitly and does not set `AXON_NO_IMAGE_QUERY=1`.** A pilot-owned PTY will
+not answer the TUI's DA1 capability probe (`main.rs:205`), so the protocol must
+be declared rather than detected. The smoke harness sets `AXON_NO_IMAGE_QUERY=1`
+for the opposite reason — it wants determinism and does not care about images.
+
+Steps wait on screen predicates via the existing `vt100` model rather than
+sleeping, so a recording does not desync on a slow machine, and the script ends
+by typing `/quit` so the alt screen unwinds cleanly — `smoke/tui/src/runner.rs`
+kills the child instead, which would end a recording on a corrupted terminal.
+
+### The web recording is automated
+
+Playwright captures video natively, deterministically, and at a fixed size, and
+`clients/web/` has no screenshot or video configuration today to conflict with.
+A separate `demo` project is added rather than reusing the `chromium` project,
+so `pnpm test:e2e` and the PR gate are untouched.
+
+Two presentation details are load-bearing and easy to miss: Playwright renders
+no mouse cursor into video, so the demo injects a cursor overlay or the UI
+appears to operate itself; and `axon.settings` defaults `spacesPaneAutoHide` to
+`true`, which will hide the spaces rail mid-scene unless the demo seeds it
+`false`.
+
+### Videos are published, not committed
+
+`.git` is 3.8 MB with no LFS. Video is attached to a GitHub release and pulled
+into the Pages artifact by `.github/workflows/api-docs.yml` at build time; only
+small poster stills are committed. GitHub renders repo-relative GIFs inline in a
+README but not repo-relative MP4/WebM, so the README carries posters linking to
+the Pages-hosted video rather than inline motion.
+
+### Demo coverage is tracked like client parity
+
+`docs/demo-coverage.md` records, per visually significant capability, which TUI
+and web demo scene covers it — maintained under the same same-PR rule as
+`docs/client-parity.md`, which exists because exactly this kind of cross-silo
+status silently drifted before. A feature that never reaches a demo script is
+invisible twice: absent from the videos, and unexercised by the driver.
+
+## Consequences
+
+- The demo and seeding lane is **Unix-only**. `smoke/local-stack` guards its
+  `setsid()` process-group detachment behind `#[cfg(unix)]`, and `smoke.yml` and
+  `integration.yml` run `ubuntu-latest` only. Windows contributors keep
+  `cross-build.yml`, axon-tui, and axon-web; they cannot run this lane. This is
+  inherited scope, not a new restriction.
+- Recording requires Docker and a real terminal, so it cannot run on a
+  GitHub-hosted runner end to end and is not a CI gate.
+- Videos are regenerated by hand, so they can go stale. `docs/demo-coverage.md`
+  plus definition-of-done entries in both client `AGENTS.md` files are the
+  mitigation; it is review discipline, not an enforced check. A CI check that a
+  PR touching client render paths also touches the coverage table is the
+  cheapest escalation if that proves leaky.
+- Per-room corpus depth must stay under `AXON_SYNC__TIMELINE_LIMIT=200` until
+  true historical backfill (issue 164) lands.
+- `smoke/` crates still may not depend on any `axon-*` crate
+  (`scripts/check-smoke-isolation.sh`); `axon-demo-tui` inherits that rule.
+
+## Alternatives considered
+
+**Record against the Axon Testing room.** Zero new infrastructure, and the
+content is genuinely real. Rejected: it is a shared mutable room on someone
+else's homeserver, so recordings are unreproducible, may capture real
+account data, and cannot be re-shot identically after a UI change.
+
+**Extend `mock-server.mjs` instead of the real stack.** Fastest path to a web
+video and needs no Docker. Rejected: it yields no TUI story, adds nothing to
+smoke testing, and demonstrates a mock rather than the product — search in
+particular would be a substring match standing in for the Tantivy index.
+
+**Headless TUI recording (VHS, or asciinema + `agg`).** Fully automated and
+CI-able. Rejected as the primary path because neither renders Sixel or Kitty
+graphics, so the TUI's most distinctive rendering would be reduced to halfblock
+approximations. A human running a screen recorder is a small cost for showing
+what the client actually does.
+
+**Screenshot/visual-regression baselines gating PRs.** Would mechanically
+prevent demo drift. Deferred: baseline maintenance is a well-known source of CI
+flake, and the project has no visual-regression infrastructure to build on.
+Revisit if the coverage-table convention proves insufficient.

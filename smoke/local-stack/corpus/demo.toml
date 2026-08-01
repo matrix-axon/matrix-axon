@@ -1,0 +1,538 @@
+# Axon demo corpus — Ridgeline Trail Collective
+#
+# The single source of truth for demo content (ADR 0086). Rendered into a real
+# Synapse + axon stack by `axon-smoke-local-stack up --corpus <this file>`;
+# both axon-web and axon-tui then read it over /v1/.
+#
+# Everything here is fictional. Personas, prose, and place names were written
+# for this file — no real people, no scraped content.
+#
+# Conventions
+# -----------
+# `at`  Relative timestamps, always in the past: "-6d 09:12" means six days
+#       before the seeding run, at 09:12 UTC. Relative offsets keep a recording
+#       made at any time reading as current, and give /jump, day separators,
+#       and search date filters real spread to work against.
+# `id`  Optional stable handle so later messages can reference this one via
+#       `reply_to` or `thread`. Not a Matrix event ID; the seeder maps it to
+#       the real one and publishes the mapping in the run manifest.
+#
+# Budgets
+# -------
+# Keep each room under AXON_SYNC__TIMELINE_LIMIT (200) until true historical
+# backfill lands (issue 164). Current max is #trail-work at well under half.
+
+[meta]
+name = "Ridgeline Trail Collective"
+description = "A volunteer trail-maintenance collective and the watershed council it shares members with."
+# The account the demo is recorded "as" — whose client we are looking at.
+viewer = "alex"
+
+# ---------------------------------------------------------------------------
+# Personas
+# ---------------------------------------------------------------------------
+# Registered as real Synapse users with display names and avatars set. The
+# generated appservice registration declares a non-exclusive wildcard user
+# namespace (ADR 0086) so these keep clean IDs rather than a namespace prefix.
+
+[[persona]]
+id = "alex"
+localpart = "alex"
+display_name = "Alex Chen"
+avatar = "media/avatars/alex.png"
+
+[[persona]]
+id = "maya"
+localpart = "maya"
+display_name = "Maya Okonkwo"
+avatar = "media/avatars/maya.png"
+
+[[persona]]
+id = "dev"
+localpart = "devin"
+display_name = "Devin Ruiz"
+avatar = "media/avatars/devin.png"
+
+[[persona]]
+id = "sam"
+localpart = "sam"
+display_name = "Sam Lindqvist"
+avatar = "media/avatars/sam.png"
+
+[[persona]]
+id = "priya"
+localpart = "priya"
+display_name = "Priya Raman"
+avatar = "media/avatars/priya.png"
+
+[[persona]]
+id = "tomas"
+localpart = "tomas"
+display_name = "Tomás Herrera"
+avatar = "media/avatars/tomas.png"
+
+# ---------------------------------------------------------------------------
+# Spaces
+# ---------------------------------------------------------------------------
+# Two spaces so the web Spaces picker has a real choice to filter by, and so
+# "All rooms" is meaningfully different from either one. axon-tui has no space
+# support (docs/client-parity.md), so these are web-only in the demo.
+
+[[space]]
+id = "ridgeline"
+name = "Ridgeline Trail Collective"
+topic = "Volunteer trail maintenance on the Ridgeline system."
+avatar = "media/avatars/space-ridgeline.png"
+children = ["general", "trail-work", "trip-photos", "gear-swap"]
+
+[[space]]
+id = "watershed"
+name = "Cascadia Watershed Council"
+topic = "Monitoring and restoration across the Cascadia watershed."
+avatar = "media/avatars/space-watershed.png"
+children = ["water-quality", "field-notes"]
+
+# ---------------------------------------------------------------------------
+# Rooms
+# ---------------------------------------------------------------------------
+
+[[room]]
+id = "general"
+name = "general"
+topic = "Announcements, scheduling, and everything that doesn't fit elsewhere."
+members = ["alex", "maya", "dev", "sam", "tomas"]
+
+[[room]]
+id = "trail-work"
+name = "trail-work"
+topic = "Work party planning, trip reports, and tread condition."
+members = ["alex", "maya", "dev", "sam", "tomas"]
+
+[[room]]
+id = "trip-photos"
+name = "trip-photos"
+topic = "Photos from the field. Caption them so search can find them."
+members = ["alex", "maya", "dev", "sam"]
+
+[[room]]
+id = "gear-swap"
+name = "gear-swap"
+topic = "Tools and gear moving between members. Claimed items get struck out."
+members = ["alex", "dev", "sam", "tomas"]
+
+[[room]]
+id = "water-quality"
+name = "water-quality"
+topic = "Sampling schedule, results, and anything the turbidity meter does."
+members = ["alex", "priya", "maya"]
+
+[[room]]
+id = "field-notes"
+name = "field-notes"
+topic = "Raw observations. Tidy them into water-quality when they're confirmed."
+members = ["alex", "priya"]
+
+# A DM: no name, no topic. Exercises the DM-title derivation both clients share
+# (web ported it from clients/tui/src/app/rooms.rs), an explicit gap in
+# smoke/tui/README.md.
+[[room]]
+id = "dm-maya"
+direct = true
+members = ["alex", "maya"]
+
+# ---------------------------------------------------------------------------
+# Messages
+# ---------------------------------------------------------------------------
+# Ordered oldest to newest for readability; the seeder sorts by `at` regardless.
+#
+# The search demo hinges on "switchback" — it appears across three rooms, five
+# senders, and five weeks, so `room:`, `sender:`, `after:` and `before:` filters
+# each visibly narrow the result set rather than returning the same list.
+
+# --- #general -------------------------------------------------------------
+
+[[message]]
+room = "general"
+from = "maya"
+at = "-34d 08:41"
+body = "Season kickoff: the district finally signed off on our 2026 work plan. Four scheduled parties, plus whatever storm damage decides to hand us."
+
+[[message]]
+room = "general"
+from = "dev"
+at = "-34d 08:58"
+body = "Did they fund the culvert replacement or is that still \"pending\"?"
+
+[[message]]
+room = "general"
+from = "maya"
+at = "-34d 09:03"
+body = "Still pending. I've stopped holding my breath and started pricing it ourselves."
+reactions = [{ from = "dev", key = "😩" }, { from = "tomas", key = "😩" }]
+
+[[message]]
+room = "general"
+from = "alex"
+at = "-33d 19:22"
+body = "I can put together a materials estimate this weekend if that helps. I did the one for the Beckett Creek crossing two years ago and still have the spreadsheet."
+
+[[message]]
+room = "general"
+from = "maya"
+at = "-33d 19:40"
+body = "That would help enormously, thank you."
+
+[[message]]
+room = "general"
+id = "intro-tomas"
+from = "tomas"
+at = "-28d 12:10"
+body = "Introducing myself properly since I've mostly lurked: Tomás, I'm two seasons in, I own a rock bar and I am not afraid to use it."
+reactions = [{ from = "maya", key = "👋" }, { from = "dev", key = "👋" }, { from = "sam", key = "🪨" }]
+
+[[message]]
+room = "general"
+from = "sam"
+at = "-28d 12:31"
+body = "A rock bar owner among us. We're saved."
+reply_to = "intro-tomas"
+
+[[message]]
+room = "general"
+from = "maya"
+at = "-21d 07:15"
+body = "Reminder that the Ridgeline switchback project is the big one this year. If you only make one party, make it that one."
+
+[[message]]
+room = "general"
+from = "maya"
+at = "-9d 16:02"
+format = "html"
+body = "Parking note: the upper lot is closed for resurfacing through the 30th. Use the Ferndale trailhead and add 20 minutes."
+html = "<strong>Parking note:</strong> the upper lot is closed for resurfacing through the 30th. Use the <a href=\"https://example.invalid/ferndale\">Ferndale trailhead</a> and add 20 minutes."
+
+[[message]]
+room = "general"
+from = "dev"
+at = "-9d 16:44"
+body = "Twenty optimistic minutes."
+reactions = [{ from = "alex", key = "😂" }, { from = "sam", key = "😂" }, { from = "maya", key = "😂" }]
+
+[[message]]
+room = "general"
+from = "tomas"
+at = "-3d 20:05"
+body = "Is anyone driving up from the south side Saturday? Happy to chip in for gas."
+
+[[message]]
+room = "general"
+from = "alex"
+at = "-3d 20:19"
+body = "I am. I'll be leaving around 6:30, there's room for two and a lot of room for tools."
+
+# --- #trail-work ----------------------------------------------------------
+
+[[message]]
+room = "trail-work"
+from = "dev"
+at = "-32d 10:04"
+body = "Walked the upper mile yesterday. The tread is holding up better than I expected after that wet spring."
+
+[[message]]
+room = "trail-work"
+from = "dev"
+at = "-32d 10:06"
+body = "The switchbacks above the talus are another story. Three of them have lost their outside edge entirely and hikers are just cutting the corner now."
+
+[[message]]
+room = "trail-work"
+from = "maya"
+at = "-32d 10:52"
+body = "That's what I was afraid of. Cutting compounds fast once it starts."
+
+[[message]]
+room = "trail-work"
+from = "sam"
+at = "-32d 11:30"
+body = "I have photos from last October for comparison if that's useful. The difference is grim."
+
+# The planning thread — the hero thread for both demos. Deliberately branchy
+# enough that the thread panel is worth opening, and with an unread tail so the
+# TUI's Alt-T unread-thread picker has something to surface.
+[[message]]
+room = "trail-work"
+id = "party-plan"
+from = "maya"
+at = "-14d 09:12"
+body = "Planning thread: Saturday work party on the Ridgeline switchbacks. Replies in here so #general stays readable."
+reactions = [{ from = "dev", key = "👍" }, { from = "alex", key = "👍" }, { from = "tomas", key = "🙌" }]
+
+[[message]]
+room = "trail-work"
+thread = "party-plan"
+from = "dev"
+at = "-14d 09:30"
+body = "Crew lead here. I'd rather rebuild three switchbacks properly than patch six badly. Proposing we take 14 through 16 and leave the rest for the fall party."
+
+[[message]]
+room = "trail-work"
+thread = "party-plan"
+from = "alex"
+at = "-14d 10:02"
+body = "Agreed. 14 is the one everyone cuts anyway, fixing it well probably fixes the social trail below it for free."
+
+[[message]]
+room = "trail-work"
+thread = "party-plan"
+from = "maya"
+at = "-14d 10:15"
+body = "Tools: we need at least four rock bars, two Pulaskis, and the rock net. Devin, do we still have the net or did it go back to the district?"
+
+[[message]]
+room = "trail-work"
+thread = "party-plan"
+from = "dev"
+at = "-14d 10:41"
+body = "We have it. It's in my garage under approximately one canoe."
+
+[[message]]
+room = "trail-work"
+thread = "party-plan"
+from = "tomas"
+at = "-13d 07:55"
+body = "I'll bring my bar and I can haul the net if someone helps me get the canoe off it."
+
+[[message]]
+room = "trail-work"
+thread = "party-plan"
+from = "sam"
+at = "-13d 08:20"
+body = "I'll shoot before-and-afters. Last year's set was genuinely useful for the grant application."
+
+[[message]]
+room = "trail-work"
+thread = "party-plan"
+from = "maya"
+at = "-2d 18:40"
+body = "Final headcount is nine. Meet at Ferndale at 8, we walk in at 8:15 sharp because the forecast turns after three."
+
+# A message that gets edited — exercises the m.replace path and the "edited"
+# marker both clients render.
+[[message]]
+room = "trail-work"
+from = "dev"
+at = "-6d 09:12"
+body = "Bringing 6 rock bars Saturday."
+edited_to = "Bringing 4 rock bars Saturday — two of them have loose heads and I don't trust them."
+
+# A redacted message, so the timeline has a real removal in it and
+# hideRedactedEvents has something to hide.
+[[message]]
+room = "trail-work"
+from = "tomas"
+at = "-6d 09:40"
+body = "wrong room, sorry"
+redacted = true
+
+[[message]]
+room = "trail-work"
+from = "alex"
+at = "-1d 17:33"
+body = "Switchback 14 is done and it looks like a different trail. 15 is roughed in, 16 is staked but we ran out of daylight."
+
+[[message]]
+room = "trail-work"
+from = "maya"
+at = "-1d 17:58"
+body = "Nine people, two and a half switchbacks, no injuries. I'll take it."
+reactions = [{ from = "alex", key = "🎉" }, { from = "dev", key = "🎉" }, { from = "sam", key = "🎉" }, { from = "tomas", key = "💪" }]
+
+# --- #trip-photos ---------------------------------------------------------
+
+[[message]]
+room = "trip-photos"
+from = "sam"
+at = "-21d 14:02"
+body = "October comparison shots, for the record. This is switchback 14 before the winter."
+
+[[message]]
+room = "trip-photos"
+from = "sam"
+at = "-21d 14:03"
+image = "media/photos/switchback-14-october.jpg"
+caption = "Switchback 14, last October — outside edge still intact."
+
+# The gallery run: four images from one sender, seconds apart, same day, with
+# nothing between. This is the case ADR 0081's adjacency heuristic groups into
+# a single grid, and the hero shot for the web gallery + lightbox demo.
+[[message]]
+room = "trip-photos"
+from = "sam"
+at = "-1d 16:20"
+image = "media/photos/party-crew.jpg"
+caption = "The Saturday crew, before anyone was tired."
+
+[[message]]
+room = "trip-photos"
+from = "sam"
+at = "-1d 16:20:14"
+image = "media/photos/switchback-14-before.jpg"
+caption = "Switchback 14 before — you can see where the corner got cut."
+
+[[message]]
+room = "trip-photos"
+from = "sam"
+at = "-1d 16:20:31"
+image = "media/photos/switchback-14-crib.jpg"
+caption = "Cribbing going in. Tomás's rock bar earning its keep."
+
+[[message]]
+room = "trip-photos"
+from = "sam"
+at = "-1d 16:20:49"
+image = "media/photos/switchback-14-after.jpg"
+caption = "Switchback 14 after. Full tread width, drainage actually drains."
+
+[[message]]
+room = "trip-photos"
+from = "maya"
+at = "-1d 16:35"
+body = "That last one is going straight into the grant application."
+reactions = [{ from = "sam", key = "😊" }, { from = "dev", key = "👏" }]
+
+# Deliberate near-miss for the adjacency heuristic: same sender, same day, but
+# 4 minutes apart with a text message between them. Must NOT group into the run
+# above. Kept as a standing regression case for the gallery smoke scenario
+# (plan phase 5a) rather than as demo scenery.
+[[message]]
+room = "trip-photos"
+from = "sam"
+at = "-1d 16:39"
+image = "media/photos/talus-light.jpg"
+caption = "Unrelated, but the light on the talus on the walk out was absurd."
+
+# --- #gear-swap -----------------------------------------------------------
+
+[[message]]
+room = "gear-swap"
+id = "gear-pulaski"
+from = "tomas"
+at = "-28d 21:14"
+body = "Spare Pulaski head, no handle, free to whoever wants to hang a handle on it."
+
+[[message]]
+room = "gear-swap"
+from = "dev"
+at = "-27d 08:02"
+body = "Claimed, if nobody beat me to it."
+reply_to = "gear-pulaski"
+
+[[message]]
+room = "gear-swap"
+from = "alex"
+at = "-12d 13:45"
+body = "Selling a pair of size 11 boots, worn two seasons, resoled once. $40 or a favour on a work party."
+
+[[message]]
+room = "gear-swap"
+from = "sam"
+at = "-4d 19:30"
+body = "Does anyone have a spare dry bag I can borrow for Saturday? Camera body plus two lenses."
+
+[[message]]
+room = "gear-swap"
+from = "alex"
+at = "-4d 19:52"
+body = "I'll bring one. It's bright orange and it has a duck on it, you'll find me."
+reactions = [{ from = "sam", key = "🦆" }]
+
+# --- #water-quality -------------------------------------------------------
+
+[[message]]
+room = "water-quality"
+from = "priya"
+at = "-30d 11:00"
+body = "Spring sampling round is complete. Six sites, all within range except Beckett Creek downstream of the culvert."
+
+[[message]]
+room = "water-quality"
+from = "priya"
+at = "-30d 11:04"
+body = "Turbidity there was 42 NTU against a 12 NTU baseline. That is not a rounding error."
+
+[[message]]
+room = "water-quality"
+from = "alex"
+at = "-30d 12:20"
+body = "That's the same culvert the trail collective has been trying to get replaced for two years. The switchback cutting upslope is almost certainly feeding it."
+
+[[message]]
+room = "water-quality"
+from = "maya"
+at = "-30d 13:11"
+body = "Now that is a useful correlation. If the sediment load traces to trail erosion, that's a much stronger case than either of us makes alone."
+
+[[message]]
+room = "water-quality"
+from = "priya"
+at = "-20d 09:25"
+body = "Re-sampled Beckett after the dry stretch: 19 NTU. Still elevated but it responds to rainfall, which points at surface runoff rather than something structural."
+
+[[message]]
+room = "water-quality"
+from = "priya"
+at = "-5d 15:40"
+body = "The meter is doing the thing again where it reads negative on the first sample of the day. I've started throwing out the first reading and nobody can stop me."
+reactions = [{ from = "alex", key = "😂" }]
+
+# --- #field-notes ---------------------------------------------------------
+
+[[message]]
+room = "field-notes"
+from = "priya"
+at = "-20d 08:02"
+body = "Beckett Creek, 08:00, overcast, 11°C. Flow noticeably lower than the spring round. Bank vegetation recovering on the north side."
+
+[[message]]
+room = "field-notes"
+from = "priya"
+at = "-20d 08:06"
+body = "Fresh sediment fan below the culvert outlet, roughly 2m across. Photographed for the file."
+
+[[message]]
+room = "field-notes"
+from = "alex"
+at = "-19d 18:30"
+body = "Cross-referencing: that fan wasn't there in the October photos Sam posted. So it's this winter's."
+
+[[message]]
+room = "field-notes"
+from = "priya"
+at = "-2d 07:44"
+body = "Post-work-party baseline set. If the switchback rebuild does what we think, the next wet round should show it."
+
+# --- DM with Maya ---------------------------------------------------------
+
+[[message]]
+room = "dm-maya"
+from = "maya"
+at = "-11d 20:15"
+body = "Do you have a minute for the grant narrative? I keep writing three pages where one would do."
+
+[[message]]
+room = "dm-maya"
+from = "alex"
+at = "-11d 20:31"
+body = "Send it over. My honest advice is going to be \"lead with Priya's turbidity numbers\" though."
+
+[[message]]
+room = "dm-maya"
+from = "maya"
+at = "-11d 20:33"
+body = "That is exactly what I was avoiding hearing, so it's probably right."
+
+[[message]]
+room = "dm-maya"
+from = "maya"
+at = "-1d 19:02"
+body = "Thank you for driving Tomás up, by the way. He told me he'd have skipped it otherwise."
