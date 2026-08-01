@@ -6,6 +6,12 @@ Matrix's encrypted and decentralized architecture can make full client usability
 
 What sets Axon apart from other Matrix clients is where the hard work happens. Sync, E2EE decryption, and a full-history search index all live in Axon itself, not duplicated in every client — so a client can be wiped and reinstalled and be back to full functionality in seconds, with no history to re-sync and no on-device index to rebuild. That one persistent brain also covers multiple Matrix accounts (personal and work, even on different homeservers) under a single search index and API, and resolves edits, reactions, and threads server-side so a late reaction to an old message is never silently dropped just because a client's timeline window has moved on. Two reference clients already consume that same open, versioned `/v1/` API today — [`axon-tui`](clients/tui/README.md), a keyboard-first terminal client, and [`axon-web`](clients/web/README.md), a browser and Tauri desktop client — proof that building a third is a client-only project, not a fork. And because Axon can be self-hosted on your own hardware or cloud instance rather than a SaaS holding your decrypted history, it's working toward a single-command setup that works painlessly on Linux, MacOS, or Windows: a Docker Compose stack that brings up Postgres, Axon, and the web client behind one front door, with Caddy handling TLS and a Tailscale profile for private remote access already built in.
 
+## See it
+
+[![axon-tui rendering a seeded demo world: a room list, a photo timeline with inline terminal graphics, and a search across rooms](docs/img/tui-demo-poster.png)](https://matrix-axon.github.io/matrix-axon/demo.html)
+
+**[Watch the axon-tui demo](https://matrix-axon.github.io/matrix-axon/demo.html)** (65s) — the room list, threads, inline photographs drawn as real terminal graphics, full-text search, and jump-to-date, all against a reproducible seeded world. The recording lives on the project site rather than inline here: GitHub renders repo-relative GIFs in a README but not MP4, and a GIF of a terminal is both enormous and worse to look at.
+
 Join our public discussion room [#axon-developer:bostoncoop.net](https://matrix.to/#/%23axon-developer%3Abostoncoop.net).
 
 See [`docs/mvp/prd.md`](docs/mvp/prd.md) for a more complete product description, [`docs/mvp/tech-spec.md`](docs/mvp/tech-spec.md) for the architecture, and [https://matrix-axon.github.io/matrix-axon/api.html](https://matrix-axon.github.io/matrix-axon/api.html) for the latest OpenAPI specification.

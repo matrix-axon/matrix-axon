@@ -33,8 +33,15 @@ on:
     paths:
       - 'openapi/openapi.json'
       - 'README.md'
+      - 'demo.html'
+      - 'docs/img/**'
       - '.github/workflows/api-docs.yml'
   workflow_dispatch:
+
+# The release the demo recordings hang off. Bump this when a new recording is
+# published under a new tag; the workflow has to be run by hand afterwards.
+env:
+  DEMO_RELEASE_TAG: demo-2026-08
 
 permissions:
   contents: read
@@ -76,6 +83,25 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" _site
           npx --yes @redocly/cli build-docs openapi/openapi.json --output=_site/api.html
 
+      - name: Pull the demo recordings into the site
+        # The recordings are release assets, not repository files: a 9 MB video
+        # does not belong in a 3.8 MB history with no LFS (ADR 0086). They are
+        # fetched on every build because Actions-based Pages replaces the whole
+        # site each deploy — there is no incremental upload to add them to.
+        #
+        # Publishing a *new* recording therefore means uploading it to the
+        # release and running this workflow by hand: re-uploading an asset
+        # changes no path in the `paths:` filter above, so nothing triggers on
+        # its own.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p _site/demo
+          gh release download "$DEMO_RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern '*.mp4' \
+            --dir _site/demo
+
       - name: Check the site has both pages
         # Cheap guard against the silent-success failure mode this workflow has
         # already hit twice: a deploy step that "succeeds" while publishing the
@@ -83,6 +109,8 @@ jobs:
         run: |
           test -s _site/index.html || { echo "::error::_site/index.html missing — the homepage would 404"; exit 1; }
           test -s _site/api.html   || { echo "::error::_site/api.html missing — the API reference was not generated"; exit 1; }
+          test -s _site/demo.html  || { echo "::error::_site/demo.html missing — Jekyll swallowed it instead of copying it"; exit 1; }
+          test -s _site/demo/tui-demo.mp4 || { echo "::error::_site/demo/tui-demo.mp4 missing — the release asset was not downloaded, so the demo page would show a broken player"; exit 1; }
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5

@@ -1,0 +1,119 @@
+<!doctype html>
+<!--
+  The demo page for the GitHub Pages site: https://matrix-axon.github.io/matrix-axon/demo.html
+
+  Plain HTML with no Jekyll front matter on purpose. Jekyll only *converts*
+  files that carry front matter; everything else it copies verbatim, which is
+  exactly what we want here — this page owns its own markup rather than
+  inheriting the (theme-less) rendering the homepage gets from README.md.
+
+  The video itself is NOT in the repository. It is attached to the `demo-2026-08`
+  release and copied into the site by .github/workflows/api-docs.yml at build
+  time, so a 9 MB recording never enters a 3.8 MB git history with no LFS. Only
+  the poster still is committed. See ADR 0086.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Axon — axon-tui demo</title>
+    <meta
+      name="description"
+      content="A recording of axon-tui, the keyboard-first terminal client for Axon, rendering a seeded demo world."
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0 auto;
+        padding: 2rem 1rem 4rem;
+        max-width: 62rem;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
+          sans-serif;
+        line-height: 1.6;
+      }
+      h1 {
+        margin-bottom: 0.25rem;
+      }
+      .lede {
+        margin-top: 0;
+        opacity: 0.75;
+      }
+      video {
+        width: 100%;
+        height: auto;
+        border-radius: 6px;
+        background: #000;
+      }
+      ul {
+        padding-left: 1.25rem;
+      }
+      footer {
+        margin-top: 2.5rem;
+        font-size: 0.9rem;
+        opacity: 0.75;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>axon-tui</h1>
+    <p class="lede">
+      The keyboard-first terminal client for
+      <a href="https://github.com/matrix-axon/matrix-axon">Axon</a>, driven
+      through a scripted tour of a seeded demo world.
+    </p>
+
+    <video controls preload="metadata" poster="docs/img/tui-demo-poster.png">
+      <source src="demo/tui-demo.mp4" type="video/mp4" />
+      Your browser cannot play this video.
+      <a href="demo/tui-demo.mp4">Download the recording</a> instead.
+    </video>
+
+    <h2>What you are looking at</h2>
+    <p>
+      Everything on screen is fictional and reproducible: personas, rooms and
+      messages come from a declarative corpus that a throwaway Synapse + Axon
+      stack renders on demand, so the same recording can be re-shot after a UI
+      change. The images really are drawn in the terminal — Sixel, Kitty or
+      iTerm2 graphics, depending on what the terminal supports — not
+      approximated with block characters.
+    </p>
+    <p>The tour covers, in order:</p>
+    <ul>
+      <li>the room list, with sort, filters and a live name filter</li>
+      <li>a timeline with formatted messages, replies and reactions</li>
+      <li>adding a reaction, then withdrawing it</li>
+      <li>threads, edits and redactions</li>
+      <li>inline photographs and a full-size preview</li>
+      <li>full-text search across rooms, narrowed by a room filter</li>
+      <li>jumping to a date in history</li>
+      <li>sending a message</li>
+      <li>the keyboard-shortcut and help popups</li>
+    </ul>
+
+    <footer>
+      <p>
+        Reproduce it yourself with
+        <code>scripts/demo-stack.sh up</code> then
+        <code>scripts/demo-stack.sh record</code> —
+        see
+        <a
+          href="https://github.com/matrix-axon/matrix-axon/blob/main/smoke/tui/README.md"
+          >smoke/tui/README.md</a
+        >
+        and
+        <a
+          href="https://github.com/matrix-axon/matrix-axon/blob/main/docs/demo-coverage.md"
+          >docs/demo-coverage.md</a
+        >, which tracks what each scene is meant to show.
+      </p>
+      <p>
+        <a href="./">Axon homepage</a> ·
+        <a href="api.html">API reference</a> ·
+        <a href="https://github.com/matrix-axon/matrix-axon">Source</a>
+      </p>
+    </footer>
+  </body>
+</html>
