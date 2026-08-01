@@ -31,12 +31,38 @@ cargo run -p axon-smoke-tui -- --profile stub [--filter NAME]
 
 | File | Role |
 |---|---|
-| `main.rs` | arg parsing, profile dispatch, exit code |
+| `lib.rs` | what the two binaries share: `pty`, `env`, `local_stack` |
+| `pty.rs` | `PtyDriver` — spawn under `portable-pty`, model the screen with `vt100`, optional verbatim output tee |
+| `env.rs` | binary resolution; `base_child_env` (shared) and `child_env` (smoke-only pins) |
+| `local_stack.rs` | `axon-smoke-local-stack` manifest, including its `demo` section |
+| `main.rs` | `axon-smoke-tui`: arg parsing, profile dispatch, exit code |
 | `runner.rs` | sequential runner: run ID, per-scenario isolation, artifacts |
-| `pty.rs` | `PtyDriver` — spawn under `portable-pty`, model the screen with `vt100` |
 | `stub.rs` | in-process Axum stub + request journal + WS echo broadcast |
 | `scenarios.rs` | the S1 scenarios |
 | `wire.rs` | handwritten `/v1/` wire types |
+| `demo/main.rs` | `axon-demo-tui`: arg parsing, terminal defaults (ADR 0086) |
+| `demo/pilot.rs` | spawn with the tee, walk a scene, quit cleanly, failure artifacts |
+| `demo/scenes.rs` | the demo scenes |
+| `demo/term.rs` | the developer's real terminal: geometry, raw mode, repair |
+
+## The demo pilot is not a test
+
+`axon-demo-tui` shares this package but not its purpose: it drives the TUI so a
+human can *record* it, needs Docker and a real terminal, and is not in any CI
+gate. Do not add it to `scripts/smoke-gate.sh`. Two invariants it must keep,
+both from ADR 0086 and both easy to break by "tidying":
+
+- It declares `AXON_IMAGE_PROTOCOL` and `AXON_FONT_SIZE` and must never set
+  `AXON_NO_IMAGE_QUERY=1` — that variable is a smoke-harness determinism choice
+  and would switch off the graphics the TUI demo exists to show. This is why
+  `env.rs` splits `base_child_env` from `child_env`.
+- Nothing may write to stdout or stderr while the child owns the screen. The
+  run log is buffered and printed after the terminal is restored.
+
+Every scene is walked by screen predicates, never sleeps, and every state change
+needs a wait that only the *new* state satisfies — see the README's "Writing a
+scene". A scene added or changed here updates its row in `docs/demo-coverage.md`
+in the same PR.
 
 ## Conventions
 

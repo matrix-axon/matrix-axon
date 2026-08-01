@@ -99,6 +99,13 @@ sequences are just bytes and survive the copy. It reuses `PtyDriver` from
 `smoke/tui/src/pty.rs`, which requires adding a `lib.rs` to that package so the
 type is importable rather than duplicated.
 
+`axon-demo-tui` ships as a **second binary of the `axon-smoke-tui` package**
+rather than as its own crate. A `smoke/demo-tui` package could only reach
+`PtyDriver` through a path dependency on `axon-smoke-tui`, and
+`scripts/check-smoke-isolation.sh` rejects every `axon-*` edge but the package's
+own — so the alternative was weakening the isolation check to land a demo tool.
+The binary keeps the name; only its package differs.
+
 Critically, the pilot **sets `AXON_IMAGE_PROTOCOL` and `AXON_FONT_SIZE`
 explicitly and does not set `AXON_NO_IMAGE_QUERY=1`.** A pilot-owned PTY will
 not answer the TUI's DA1 capability probe (`main.rs:205`), so the protocol must
@@ -132,6 +139,23 @@ Nothing about the corpus or the seeder is viewport-aware — both recordings rea
 the same seeded world through the same axon — so the form factors are purely a
 recording-side concern.
 
+Two things the TUI pilot learned the hard way, which apply to any driver and are
+worth not re-learning:
+
+- **A step that changes state needs an assertion only the new state satisfies.**
+  Four of the TUI scenes first "passed" against the *previous* frame, which let
+  the script run ahead of the client so the next input landed somewhere
+  unintended. Playwright's auto-waiting removes the sleep problem but not this
+  one: prefer state-unique chrome over content that is on screen either way, and
+  assert on what *left* (`toBeHidden`) to prove a narrowing step narrowed.
+- **A scene that mutates should script the undo**, so it leaves the world as it
+  found it. Otherwise its own second run is satisfied by what its first run left
+  behind, and the assertion quietly stops meaning anything.
+
+Both are written up with examples in `smoke/tui/README.md` ("Writing a scene"),
+and `docs/demo-coverage.md` ships with its web columns empty and its rows
+already listed, so the phase-3 gap is visible rather than discovered later.
+
 Two presentation details are load-bearing and easy to miss: Playwright renders
 no mouse cursor into video, so the demo injects a cursor overlay or the UI
 appears to operate itself; and `axon.settings` defaults `spacesPaneAutoHide` to
@@ -145,6 +169,36 @@ into the Pages artifact by `.github/workflows/api-docs.yml` at build time; only
 small poster stills are committed. GitHub renders repo-relative GIFs inline in a
 README but not repo-relative MP4/WebM, so the README carries posters linking to
 the Pages-hosted video rather than inline motion.
+
+**As built** (the TUI recording, PR #109). The shape below is what a second
+recording — the web ones from the phase below — should slot into rather than
+reinvent:
+
+- Assets hang off one **pre-release**, `demo-2026-08`, named by a single
+  `DEMO_RELEASE_TAG` env var in the workflow. Pre-release is deliberate:
+  `--latest=false` cannot demote it while the only other release (`v0.0.1`) is
+  itself a pre-release, and a video labelled "Latest" reads as the project's
+  current version.
+- The download step pulls **`*.mp4`**, so **more recordings added to the same
+  release need no workflow change** — only a `test -s` guard line and a player
+  on the page. A *new* release tag would mean bumping `DEMO_RELEASE_TAG`.
+- `demo.html` at the repo root is the player page, served at `/demo.html`. It
+  carries **no Jekyll front matter on purpose**: Jekyll converts files that have
+  it and copies everything else verbatim, so the page keeps its own markup
+  instead of inheriting the theme-less rendering the homepage gets from
+  `README.md`.
+- A `<video>` tag **cannot** live in a README. GitHub sanitises HTML in markdown
+  and strips it; Jekyll, rendering that same README into the Pages homepage,
+  does not. The tag would therefore appear to work on the site while silently
+  showing nothing on github.com. Posters linked to `/demo.html` render
+  identically in both.
+- Poster stills are palette-reduced PNG, ~126 KB at 1200px wide. PNG rather than
+  JPEG because JPEG rings around terminal text; this is the only piece that
+  enters git history, so it gets the same scrutiny as the corpus photographs.
+- The workflow guards that `_site/demo.html` survived the Jekyll build and that
+  the video was actually downloaded, joining the two guards already there. A
+  demo page with a broken player is the same silent-success failure that
+  workflow's comments already record twice.
 
 ### Demo coverage is tracked like client parity
 
@@ -225,6 +279,12 @@ Deferred, tracked in #111.
   and uploads) under its own run directory; the defaults are shared platform
   directories, and Tantivy's exclusive index lock turns that sharing into a
   second stack that will not boot.
+- **Publishing a new take is a manual workflow run.** Re-uploading an asset to
+  the release changes no path in the repository, so nothing in the `paths:`
+  trigger fires; `api-docs.yml` has to be dispatched by hand afterwards or the
+  site keeps serving the previous recording. Actions-based Pages also replaces
+  the entire site per deploy, which is why the download runs on every build
+  rather than incrementally.
 - Videos are regenerated by hand, so they can go stale. `docs/demo-coverage.md`
   plus definition-of-done entries in both client `AGENTS.md` files are the
   mitigation; it is review discipline, not an enforced check. A CI check that a

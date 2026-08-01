@@ -74,26 +74,42 @@ fn workspace_root() -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow!("cannot derive workspace root from {}", manifest.display()))
 }
 
-/// The controlled environment variables for a TUI child process.
+/// The environment every TUI child gets, whoever spawns it: an isolated config
+/// directory, a shielded `HOME`, a pinned locale, and no ambient logging.
 ///
 /// `config_home` isolates the config the TUI writes on first run; `home`
-/// shields the developer's real home directory; `TERM`/locale are pinned so the
-/// rendered screen is deterministic across machines.
-pub fn child_env(config_home: &Path, home: &Path) -> Vec<(String, String)> {
+/// shields the developer's real home directory.
+///
+/// Deliberately says nothing about `TERM` or the image protocol. Those are the
+/// two settings the smoke harness and the demo pilot must disagree about: the
+/// harness pins a synthetic terminal for determinism, while the pilot must
+/// describe the *real* terminal its output is being pumped to.
+pub fn base_child_env(config_home: &Path, home: &Path) -> Vec<(String, String)> {
     vec![
         (
             "XDG_CONFIG_HOME".to_owned(),
             config_home.to_string_lossy().into_owned(),
         ),
         ("HOME".to_owned(), home.to_string_lossy().into_owned()),
-        ("TERM".to_owned(), "xterm-256color".to_owned()),
         ("LANG".to_owned(), "C.UTF-8".to_owned()),
         ("LC_ALL".to_owned(), "C.UTF-8".to_owned()),
         // Keep the binary from picking up a developer .env at the working dir.
         ("RUST_LOG".to_owned(), "off".to_owned()),
-        // Disable the terminal image-protocol query: from_query_stdio() leaves a
-        // background thread blocked on stdin when no response arrives, causing it
-        // to race crossterm for injected keystrokes and swallow them silently.
-        ("AXON_NO_IMAGE_QUERY".to_owned(), "1".to_owned()),
     ]
+}
+
+/// The controlled environment for a *smoke* TUI child process: the shared base
+/// plus a pinned `TERM` so the rendered screen is deterministic across
+/// machines, and no image-protocol query at all.
+pub fn child_env(config_home: &Path, home: &Path) -> Vec<(String, String)> {
+    let mut env = base_child_env(config_home, home);
+    env.push(("TERM".to_owned(), "xterm-256color".to_owned()));
+    // Disable the terminal image-protocol query: from_query_stdio() leaves a
+    // background thread blocked on stdin when no response arrives, causing it
+    // to race crossterm for injected keystrokes and swallow them silently.
+    //
+    // The demo pilot must *not* set this (ADR 0086): it wants real graphics, so
+    // it declares the protocol and cell size explicitly instead.
+    env.push(("AXON_NO_IMAGE_QUERY".to_owned(), "1".to_owned()));
+    env
 }

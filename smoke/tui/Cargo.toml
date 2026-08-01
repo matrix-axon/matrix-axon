@@ -6,15 +6,33 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
+# Two binaries live here, so a bare `cargo run -p axon-smoke-tui` would be
+# ambiguous. The smoke harness is what that means everywhere it is already
+# written — scripts/smoke-gate.sh, AGENTS.md, this crate's README — and the demo
+# pilot is opted into with `--bin axon-demo-tui`.
+default-run = "axon-smoke-tui"
 
 # This crate is a black-box smoke harness: it spawns the shipped `axon-tui`
 # binary and drives it over a PTY against an in-process Axum stub of the Axon
 # API. It must NEVER depend on any `axon-*` product crate (CI enforces this); all
 # wire types are handwritten from the checked-in `openapi/` contract.
 
+[lib]
+name = "axon_smoke_tui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "axon-smoke-tui"
 path = "src/main.rs"
+
+# The ADR 0086 demo pilot. It ships as a second binary of this package rather
+# than its own crate because it must reuse `PtyDriver`, and a `smoke/demo-tui`
+# package could only get at it through a path dependency on `axon-smoke-tui` —
+# which `scripts/check-smoke-isolation.sh` rejects, since it forbids every
+# `axon-*` edge but the package's own.
+[[bin]]
+name = "axon-demo-tui"
+path = "src/demo/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
@@ -23,5 +41,15 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
+# `axon-demo-tui` only: the corpus backdates messages relative to the seeding
+# run, so a `/jump <date>` scene has to do the same arithmetic to aim at one.
+chrono = { workspace = true, features = ["clock"] }
 portable-pty = { workspace = true }
 vt100 = { workspace = true }
+# `axon-demo-tui` only: raw mode on the developer's real terminal, and the cell
+# grid + pixel size it reports, which become the child PTY's geometry and the
+# `AXON_FONT_SIZE` graphics protocols are scaled by.
+crossterm = { workspace = true }
+# `axon-demo-tui` only: poll(2) + isatty for the bounded XTWINOPS cell-size probe
+# against the developer's real terminal (Unix-only, like the whole demo lane).
+libc = { workspace = true }

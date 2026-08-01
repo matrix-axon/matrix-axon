@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
 
-use crate::pty::PtyDriver;
 use crate::runner::{Ctx, ScenarioOutcome};
 use crate::stub::{JournalEntry, Stub, StubState};
+use axon_smoke_tui::pty::PtyDriver;
 
 /// `launch_and_quit`: first paint renders the room, message, and input panes,
 /// then `/quit` exits cleanly with the terminal restored.

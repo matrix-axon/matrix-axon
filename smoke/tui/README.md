@@ -7,6 +7,14 @@ terminal, and asserts on the rendered screen.
 The package and executable are named `axon-smoke-tui`. All new smoke-test
 packages and executables should use the `axon-smoke-*` naming pattern.
 
+The package ships a **second binary**, `axon-demo-tui` — the ADR 0086 demo
+pilot. It is not a test; see [Recording a demo](#recording-a-demo-axon-demo-tui)
+below. It lives here because it drives the TUI through the same `PtyDriver`, and
+a separate `smoke/demo-tui` package could only reach that type through a path
+dependency on `axon-smoke-tui`, which `scripts/check-smoke-isolation.sh` rejects
+(it forbids every `axon-*` edge but the package's own). `src/lib.rs` is what the
+two binaries share: `pty`, `env`, and `local_stack`.
+
 ## Running
 
 Fast stub profile:
@@ -154,10 +162,11 @@ cargo run -p axon-smoke-local-stack -- up --manifest /tmp/axon-demo.json \
 cargo run -p axon-smoke-local-stack -- info --manifest /tmp/axon-demo.json
 ```
 
-The photographs the corpus references are not committed; generate stand-ins
-first with `corpus/media/generate-placeholder-photos.mjs` (see that directory's
-README). The seeder fails with the missing path rather than seeding a room with
-no images.
+The photographs the corpus references are committed (Unsplash License,
+provenance per file in `corpus/media/README.md`), so a fresh checkout seeds
+images without any extra step. `corpus/media/generate-placeholder-photos.mjs`
+still exists for working without them; it overwrites the real files in place, so
+run it deliberately, not by habit.
 
 One artifact is worth knowing about: `/createRoom` ignores the appservice `ts`
 parameter, so each room's creation events carry the current time even though
@@ -166,6 +175,109 @@ backdated. Only the creator's own join is visible at the default
 `stateEvents: important` tier, as a single "joined" line dated today at the end
 of each room. A demo driver that wants it gone can set the client's state-event
 visibility to `none`.
+
+## Recording a demo (`axon-demo-tui`)
+
+The pilot spawns the real `axon-tui` under a PTY and copies that PTY to its own
+stdout **verbatim**, so the terminal you are sitting at draws real
+Sixel/Kitty/iTerm2 graphics and a screen recorder captures what the client
+actually renders. That is the whole reason it exists: `agg` and xterm.js-based
+recorders (VHS) render none of those protocols, and would reduce the TUI's most
+distinctive output to halfblock approximations (ADR 0086).
+
+It is **not a test and not a CI gate** — it needs Docker and a real terminal.
+`scripts/smoke-gate.sh` does not run it.
+
+```sh
+scripts/demo-stack.sh up        # placeholder photos if needed, then boot + seed
+# start your screen recorder, then:
+scripts/demo-stack.sh record    # -- --scene media --pace 1.5 to pass flags through
+scripts/demo-stack.sh down
+```
+
+`scripts/demo-stack.sh` is a thin wrapper; the underlying commands are worth
+knowing when something goes wrong:
+
+```sh
+# 1. bring a demo world up and leave it running
+cargo run -p axon-smoke-local-stack -- up --manifest /tmp/axon-demo.json \
+  --corpus smoke/local-stack/corpus/demo.toml --keep-up
+
+# 2. start your screen recorder, then drive the TUI through it
+cargo run -p axon-smoke-tui --bin axon-demo-tui -- --manifest /tmp/axon-demo.json
+
+# 3. when you are done recording
+cargo run -p axon-smoke-local-stack -- down --manifest /tmp/axon-demo.json
+```
+
+On a fresh checkout the corpus photographs are missing — they are gitignored
+until the licensing decision lands (ADR 0086), and the seeder fails on the
+missing path rather than seeding a room with no images. `demo-stack.sh up`
+generates stand-ins when the directory is empty and **never** regenerates over
+existing files, so it cannot become the thing that quietly overwrites the real
+photographs later; `demo-stack.sh photos` replaces them on purpose. Generating
+them needs Node, and installs `sharp` into a temp directory.
+
+`--manifest` must point at a stack brought up with `--corpus`; the pilot
+attaches to it and neither starts nor stops anything. Options:
+
+- `--scene NAME` — one scene instead of the whole `tour`. `--list-scenes` prints
+  them. Scenes are listed against the capabilities they cover in
+  `docs/demo-coverage.md`.
+- `--pace FACTOR` — multiplies every scripted dwell (default 1.0; `0` removes
+  them). Waits are unaffected: they are correctness gates, not pacing, so a low
+  pace runs the script faster but never skips ahead of the client.
+- `--image-protocol sixel|kitty|iterm2|halfblocks` — defaults to what this
+  terminal's environment implies, else Sixel. Use `halfblocks` if graphics come
+  out as garbage.
+- `--font-size WxH` — cell size in pixels. By default the pilot **asks the
+  terminal** with XTWINOPS (`CSI 16 t`) and falls back to `TIOCGWINSZ`, in that
+  order, because plenty of terminals answer the query accurately while leaving
+  the ioctl's pixel fields zero. Graphics protocols encode an image at
+  `cells × cell size` and ask the terminal to draw it at exactly those pixels,
+  so an under-guessed cell size renders the picture **smaller than the frame
+  drawn around it** — most visible in the full-size preview. The run log always
+  says which source was used, and warns when it had to guess.
+- `--timeout SECONDS` (default 30), `--keep-dirs`.
+
+Two ADR 0086 details are load-bearing and easy to undo by accident:
+
+- The pilot **declares** `AXON_IMAGE_PROTOCOL` and `AXON_FONT_SIZE`, because a
+  pilot-owned PTY has nobody on the far end to answer the TUI's capability
+  probes. Which is also why the pilot runs those probes itself, against the real
+  terminal, and hands the answers over — run by hand, `axon-tui` asks the
+  terminal directly and gets the truth, so a pilot that only guessed would
+  render differently from a manual session.
+- It must **not** set `AXON_NO_IMAGE_QUERY=1`. The smoke harness does, for the
+  opposite reason — it wants determinism and does not care about images — which
+  is why `env::child_env` and `env::base_child_env` are separate.
+
+`TERM` and the tmux variables are passed through rather than pinned: the child's
+bytes end up on your real terminal, so it has to be described truthfully.
+
+The pilot holds the terminal in raw mode and forwards your keystrokes to the
+child, so Ctrl-C reaches `axon-tui` and quits it cleanly rather than killing the
+pilot and leaving you in the alternate screen. Nothing is printed while the
+child owns the screen — the run log is held and printed after the terminal is
+restored. A failing scene writes the rendered screen and the raw transcript to
+`smoke-artifacts/demo-tui/<scene>/`.
+
+### Writing a scene
+
+Scenes live in `src/demo/scenes.rs`. Two rules, both learned the hard way:
+
+- **Address content by corpus name, never by Matrix id** — `manifest.demo` maps
+  the stable names onto the per-run ids.
+- **Every step that changes state must be followed by a wait that only the new
+  state satisfies.** A needle the *previous* frame already satisfies is not a
+  wait at all: the script runs ahead of the client and the next keystroke lands
+  somewhere unintended. Prefer state-unique chrome (a popup title, the
+  `[in thread]` marker, `result 1 of`) over message text that is on screen
+  either way, and use `WaitGone` to prove a narrowing step actually narrowed.
+
+Scenes are coupled to the corpus prose on purpose: rewording a message in
+`demo.toml` fails the scene loudly, with the screen attached, rather than
+quietly demonstrating nothing.
 
 ## Not Yet Covered
 
@@ -179,9 +291,11 @@ partial areas:
   second trusted device.
 - Sender-trust `/bundle` is not covered beyond the lower-level TUI tests; a
   stable fixture should be added once trust data is available in the local stack.
-- Media rendering is not covered. The media fixtures now exist — the demo
-  corpus uploads real images (`--corpus`, above) — but terminal-protocol
-  assertions do not, so nothing asserts on them yet.
+- Media rendering is not *asserted*. The demo pilot renders it for real
+  (`axon-demo-tui --scene media`, above), which proves the path end to end by
+  eye, but no smoke scenario asserts on terminal graphics: the `vt100` screen
+  model the harness reads discards them by design, so an assertion would have to
+  work on the raw transcript instead.
 - `/unreact` withdrawal is not asserted end to end yet. The suite covers the
   `/react` command path and rendering seeded own reactions.
 - Config editor launching (`/editconfig`) is not covered because it would spawn

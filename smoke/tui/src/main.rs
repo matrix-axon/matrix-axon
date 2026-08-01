@@ -10,9 +10,6 @@
 //! terminal screen and the stub's request journal. It depends on no `axon-*`
 //! crate; all wire types are handwritten from the `openapi/` contract.
 
-mod env;
-mod local_stack;
-mod pty;
 mod runner;
 mod scenarios;
 mod stub;

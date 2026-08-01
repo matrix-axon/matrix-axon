@@ -12,6 +12,8 @@ Axon is a self-hosted personal agent for Matrix: a persistent state layer (sync,
 | `docs/adr/` | Architecture decision records — decisions made during implementation |
 | `docs/integration-testing.md` | Running axon against a local Synapse (sync + M3c re-decryption) by hand |
 | `docs/client-parity.md` | Human-maintained cross-silo matrix of which `/v1/` capabilities each client (TUI, web, future iOS) actually exposes — update it in the same PR that changes a tracked row's status, from any silo |
+| `docs/demo-coverage.md` | Human-maintained record of which demo scene shows each visually significant capability (ADR 0086) — update it in the same PR that changes what a client renders, from any silo |
+| `scripts/demo-stack.sh` | Brings the ADR 0086 demo world up (`up`/`record`/`down`) for recording client videos by hand. Not a test and not a gate — the stack it starts is meant to stay up while a human records against it. |
 | `scripts/integration-test.sh` | One-command end-to-end re-decryption test: seeds an encrypted room + key backup via `axon-itest`, runs axon as a fresh device, and asserts UTDs back-fill. Runnable in CI on demand via `.github/workflows/integration.yml` (manual `workflow_dispatch`). |
 
 ## Directory layout
@@ -36,6 +38,7 @@ matrix-axon/
     web/                     # axon-web (Vite + Preact + TS, ADR 0046) — alpha client
   smoke/                     # black-box smoke harnesses (depend on no axon-* crate; ADR 0025)
     tui/                     # axon-smoke-tui — PTY-drives the real axon-tui against an in-process API stub
+                             # also ships axon-demo-tui — the ADR 0086 demo pilot (not a test, not a gate)
     server/                  # axon-smoke-server — black-box API/WS smoke against a real stack
     local-stack/             # axon-smoke-local-stack — boots Synapse + Postgres + axon; writes a JSON manifest
       corpus/                # declarative demo content (ADR 0086); rendered by `up --corpus`

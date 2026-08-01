@@ -16,14 +16,16 @@
 //
 // Dimensions and file names match what corpus/media/README.md specifies, so the
 // gallery grid, lightbox paging, and thumbnail proxy all see realistic geometry
-// (1600px long edge, 3:2 landscape) rather than square test cards.
+// (1200px long edge, 3:2 landscape) rather than square test cards. Keep these
+// in step with the real photographs' geometry in README.md — a placeholder that
+// is a different size from what it stands in for hides layout problems.
 
 import { mkdir, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import sharp from 'sharp'
 
-const WIDTH = 1600
-const HEIGHT = 1067 // 3:2, the aspect most cameras produce
+const WIDTH = 1200
+const HEIGHT = 800 // 3:2, the aspect most cameras produce
 
 // Distinct hues so the four gallery-run images are individually recognisable in
 // a grid and while paging the lightbox — a run of identical placeholders would

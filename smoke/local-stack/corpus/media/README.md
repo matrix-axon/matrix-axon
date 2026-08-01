@@ -14,8 +14,8 @@ to change or add a persona; see the usage block in the script header.
 
 | File | For | Style |
 |---|---|---|
-| `alex.png` | Alex Chen (the viewer account) | Open Peeps |
-| `maya.png` | Maya Okonkwo | Open Peeps |
+| `alex.png` | Alex Marx (the viewer account) | Open Peeps |
+| `maya.png` | Maya Harrison | Open Peeps |
 | `devin.png` | Devin Ruiz | Open Peeps |
 | `sam.png` | Sam Lindqvist | Open Peeps |
 | `priya.png` | Priya Raman | Open Peeps |
@@ -57,7 +57,7 @@ MIT. Read `style.meta.license` before adopting another one.
 
 ## `photos/` — 6 files, still needed ❌
 
-Landscape, 1600px on the long edge, JPEG. These carry the gallery and lightbox
+Landscape, 1200px on the long edge, JPEG. These carry the gallery and lightbox
 demos, so they are the files whose realism actually matters.
 
 | File | Subject | Role in the demo |
@@ -84,8 +84,17 @@ modification and **requires no attribution** — we credit anyway, in the
 provenance table below, because the photographers deserve it and because a
 reader should never have to re-derive where a file came from.
 
-Budget: **≤120 KB per file after downscaling**, so all six add under 1 MB to a
-repo whose history is 3.8 MB with no LFS.
+Budget: **1200px long edge, ≤300 KB per file**, so all six add ~1.4 MB to a repo
+whose history is 3.8 MB with no LFS.
+
+This replaces an earlier "1600px, ≤120 KB" budget, which was set before any real
+photograph existed and was calibrated, unintentionally, on the flat
+`PLACEHOLDER` cards — those are large areas of one colour and compress to ~33 KB
+without trying. Detailed nature photographs do not behave that way: at 1600px,
+fitting 120 KB drove five of these six to JPEG quality **≤26**, and the densest
+(autumn foliage, a wall of high-frequency edges) to **quality 10**. 1200px at
+quality ~75 is the point where they look right in a lightbox and in terminal
+graphics while the set still costs well under 2 MB.
 
 Note the Unsplash License is *not* CC0. It forbids compiling photos to build a
 competing or replicating service, and it does not place the work in the public
@@ -126,11 +135,12 @@ files so the seeder can be built and run end-to-end before any photo is chosen.
 They are **deliberately not committed** and are stamped `PLACEHOLDER` so one can
 never quietly reach a published recording.
 
-`photos/` is listed in the root `.gitignore` for exactly this reason — under
-`jj`, an untracked file in the working copy is snapshotted into the next commit
-unless it is ignored, so "just don't add them" is not a safeguard. **Delete that
-rule in the PR that lands the real photographs**, and note that until then a
-real photo dropped into this directory will also be ignored.
+The real photographs have since landed, so the `.gitignore` rule that used to
+cover `photos/` **has been removed** — the directory is tracked now. Running the
+generator overwrites the real files in place, which is why
+`scripts/demo-stack.sh` only generates when the directory is empty and never on
+top of existing files. If you do overwrite them by accident, restore with
+`jj restore smoke/local-stack/corpus/media/photos`.
 
 ## Provenance
 
@@ -143,12 +153,32 @@ later reader never has to re-derive the licence status.
 | `avatars/*.png` (6 people) | [Open Peeps](https://www.openpeeps.com/) by Pablo Stanley, via [DiceBear](https://www.dicebear.com/styles/open-peeps/) | CC0 1.0 | Licence read from the style's own `meta`, not from documentation. DiceBear's code is MIT; the artwork is CC0. |
 | `avatars/space-*.png` | DiceBear "Shapes" | CC0 1.0 | Same check. |
 | `avatars/room-*.png` (6 rooms) | DiceBear "Rings" | CC0 1.0 | Same check. |
-| `photos/switchback-14-october.jpg` | _pending_ | Unsplash License | |
-| `photos/party-crew.jpg` | _pending_ | Unsplash License | Prefer a framing without identifiable faces — see the caution above |
-| `photos/switchback-14-before.jpg` | _pending_ | Unsplash License | |
-| `photos/switchback-14-crib.jpg` | _pending_ | Unsplash License | |
-| `photos/switchback-14-after.jpg` | _pending_ | Unsplash License | |
-| `photos/talus-light.jpg` | _pending_ | Unsplash License | |
+| `photos/switchback-14-october.jpg` | [Hoai Nam Mai](https://unsplash.com/@hoainamish), [photo](https://unsplash.com/photos/autumn-path-through-colorful-trees-with-mountains-SWfZ10izjdY) | Unsplash License | 1200x800, 296 KB. Autumn trail above a lake, Gosausee AT — the caption says "last October" |
+| `photos/party-crew.jpg` | [Dmytro Matsiuk](https://unsplash.com/@dmat), [photo](https://unsplash.com/photos/group-of-people-carrying-hiking-bags-walking-on-hilltop-during-daytime-z-BXGZbLdS0) | Unsplash License | 1200x795, 109 KB. Backpacked group walking away from camera — every person from behind, no face visible, per the caution above |
+| `photos/switchback-14-before.jpg` | [Yevhenii Dubrovskyi](https://unsplash.com/@dbr0vskyi), [photo](https://unsplash.com/photos/a-rocky-path-with-grass-and-fog-5px2ZOqysn4) | Unsplash License | 1200x800, 154 KB. Rough rocky tread traversing a slope, Tatry NP, PL. **Centre-cropped to 3:2** from a portrait original |
+| `photos/switchback-14-crib.jpg` | [sd wang](https://unsplash.com/@wangsd), [photo](https://unsplash.com/photos/m2xaDNSdxC4) | Unsplash License | 1200x800, 243 KB. Timber-and-gravel step construction — built trail structure standing in for cribbing |
+| `photos/switchback-14-after.jpg` | [Paolo Boaretto](https://unsplash.com/@paolo1971), [photo](https://unsplash.com/photos/autumn-forest-path-leading-to-snow-capped-mountains--47WuTvjne8) | Unsplash License | 1200x900, 290 KB. Clear, full-width tread running toward mountains — the finished "after" |
+| `photos/talus-light.jpg` | [Lech Naumovich](https://unsplash.com/@greaterthanimage), [photo](https://unsplash.com/photos/person-walking-on-rocky-road-near-mountains-during-daytime--FfOV51Ig8k) | Unsplash License | 1200x900, 292 KB. Talus field below Paintbrush Pass, Tetons; one distant figure, no identifiable face |
+
+All six are committed. Every row was checked on its own photo page, not taken
+from a search listing — which matters, because Unsplash search results
+interleave two different licences. Two otherwise good candidates were rejected
+for being **Unsplash+ License** (the paid tier), which is not what this
+directory's policy grants:
+[Kb53YZ99VYU](https://unsplash.com/photos/a-dirt-path-in-the-middle-of-a-forest-Kb53YZ99VYU)
+(Josh Hild) and
+[RSVCVEdyGoo](https://unsplash.com/photos/a-dirt-path-in-the-middle-of-a-forest-RSVCVEdyGoo)
+(Ales Krivec). **Confirm the licence on the photo page for any substitution** —
+the search page will not tell you.
+
+Two known compromises in the set, both acceptable at demo scale:
+
+- The before/crib/after trio are three *different* places, while the captions
+  present them as one switchback photographed three times. Stock cannot do
+  better, and nothing in the demo invites the comparison at thumbnail size.
+- `talus-light.jpg` contains a person, distant and facing away, and
+  `party-crew.jpg` is a group seen entirely from behind. Neither has an
+  identifiable face.
 
 For each photo record: **photographer name**, **photographer profile URL**, and
 the **photo page URL**. Unsplash's own suggested credit format is

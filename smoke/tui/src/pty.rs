@@ -6,6 +6,11 @@
 //! transcript also lets us assert on terminal control sequences the screen model
 //! hides — notably the alternate-screen enter/leave pair, so a clean process
 //! exit cannot mask a terminal-restoration regression.
+//!
+//! An optional `tee` receives every byte **verbatim** on its way to the screen
+//! model. That is what makes `axon-demo-tui` possible (ADR 0086): graphics
+//! escape sequences the `vt100` model discards — Sixel, Kitty, iTerm2 — are
+//! just bytes, and survive being copied to a real terminal.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -25,8 +30,28 @@ const ALT_SCREEN_LEAVE_SEQS: &[&[u8]] = &[b"\x1b[?1049l", b"\x1b[?1047l"];
 /// How long to nap between screen polls while waiting for a predicate.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// A cloneable handle onto the child's keyboard.
+///
+/// Exists so a second thread can type: `axon-demo-tui` forwards the developer's
+/// own stdin to the child while the script runs, which is what keeps Ctrl-C
+/// working (the pilot holds the real terminal in raw mode, so Ctrl-C is a byte,
+/// not a signal — the child has to receive it and quit).
+#[derive(Clone)]
+pub struct PtyInput {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+}
+
+impl PtyInput {
+    pub fn send_bytes(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        let mut writer = self.writer.lock().expect("writer lock");
+        writer.write_all(bytes).context("write to pty")?;
+        writer.flush().context("flush pty")?;
+        Ok(())
+    }
+}
+
 pub struct PtyDriver {
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn Child + Send + Sync>,
     // Held so the PTY stays open for the lifetime of the driver; the writer and
     // reader were derived from it. Never read directly after construction.
@@ -40,6 +65,58 @@ pub struct PtyDriver {
     reader: Option<JoinHandle<()>>,
 }
 
+/// Everything needed to spawn a child under a PTY.
+///
+/// A struct rather than more positional arguments because `tee` is the odd one
+/// out: only the demo pilot sets it, and a bare `None` at a call site would say
+/// nothing about what it is.
+pub struct PtySpawn<'a> {
+    pub bin: &'a Path,
+    pub args: &'a [String],
+    pub envs: &'a [(String, String)],
+    pub cwd: &'a Path,
+    pub rows: u16,
+    pub cols: u16,
+    /// Pixel size of the whole grid, when the caller knows it.
+    ///
+    /// Zero means "unknown", which is what a terminal that declines to report
+    /// pixels also reports — the smoke harness always passes zero, since its
+    /// child is not drawing to any real screen. The demo pilot passes the real
+    /// numbers so anything in the child reading `TIOCGWINSZ` sees the truth
+    /// rather than a PTY that claims to have no pixels.
+    pub pixels: Option<(u16, u16)>,
+    /// Verbatim sink for every byte the child writes, flushed per chunk.
+    ///
+    /// Written from the reader thread before the bytes reach the screen model,
+    /// and never filtered: a graphics protocol the `vt100` parser drops still
+    /// reaches this sink intact. A write error here is reported once on stderr
+    /// and then ignored — a broken pipe must not take the child down.
+    pub tee: Option<Box<dyn Write + Send>>,
+}
+
+impl<'a> PtySpawn<'a> {
+    /// A spawn with no tee: the smoke harness's usual case.
+    pub fn new(
+        bin: &'a Path,
+        args: &'a [String],
+        envs: &'a [(String, String)],
+        cwd: &'a Path,
+        rows: u16,
+        cols: u16,
+    ) -> Self {
+        Self {
+            bin,
+            args,
+            envs,
+            cwd,
+            rows,
+            cols,
+            pixels: None,
+            tee: None,
+        }
+    }
+}
+
 impl PtyDriver {
     /// Spawn `bin` with `args`, `envs`, and working directory `cwd` under a
     /// fixed-size PTY.
@@ -51,13 +128,28 @@ impl PtyDriver {
         rows: u16,
         cols: u16,
     ) -> anyhow::Result<Self> {
+        Self::spawn_with(PtySpawn::new(bin, args, envs, cwd, rows, cols))
+    }
+
+    /// Spawn with full control, including an optional verbatim output tee.
+    pub fn spawn_with(spec: PtySpawn<'_>) -> anyhow::Result<Self> {
+        let PtySpawn {
+            bin,
+            args,
+            envs,
+            cwd,
+            rows,
+            cols,
+            pixels,
+            mut tee,
+        } = spec;
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
                 rows,
                 cols,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width: pixels.map_or(0, |(w, _)| w),
+                pixel_height: pixels.map_or(0, |(_, h)| h),
             })
             .context("open pty")?;
 
@@ -79,7 +171,9 @@ impl PtyDriver {
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader().context("clone pty reader")?;
-        let writer = pair.master.take_writer().context("take pty writer")?;
+        let writer = Arc::new(Mutex::new(
+            pair.master.take_writer().context("take pty writer")?,
+        ));
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let raw = Arc::new(Mutex::new(Vec::new()));
@@ -115,6 +209,15 @@ impl PtyDriver {
                     }
                     Ok(n) => {
                         let chunk = &buf[..n];
+                        // Verbatim, and first: a recording should show the frame
+                        // as soon as the child produced it, not after the screen
+                        // model has finished parsing it.
+                        if let Some(sink) = tee.as_mut() {
+                            if let Err(e) = sink.write_all(chunk).and_then(|()| sink.flush()) {
+                                eprintln!("smoke(pty): tee write failed, dropping tee: {e}");
+                                tee = None;
+                            }
+                        }
                         reader_parser.lock().expect("parser lock").process(chunk);
                         reader_raw
                             .lock()
@@ -157,9 +260,14 @@ impl PtyDriver {
 
     /// Write raw bytes to the terminal (keystrokes as the program would see them).
     pub fn send_bytes(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
-        self.writer.write_all(bytes).context("write to pty")?;
-        self.writer.flush().context("flush pty")?;
-        Ok(())
+        self.input().send_bytes(bytes)
+    }
+
+    /// A handle another thread can type through. See [`PtyInput`].
+    pub fn input(&self) -> PtyInput {
+        PtyInput {
+            writer: Arc::clone(&self.writer),
+        }
     }
 
     /// Type a line of text (no trailing newline).

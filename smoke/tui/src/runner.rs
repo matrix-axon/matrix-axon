@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 
-use crate::env::{child_env, resolve_tui_bin};
-use crate::local_stack::{LocalStack, Manifest as LocalStackManifest};
-use crate::pty::PtyDriver;
+use axon_smoke_tui::env::{child_env, resolve_tui_bin};
+use axon_smoke_tui::local_stack::{LocalStack, Manifest as LocalStackManifest};
+use axon_smoke_tui::pty::PtyDriver;
 
 /// Fixed terminal geometry for the suite.
 pub const ROWS: u16 = 30;
