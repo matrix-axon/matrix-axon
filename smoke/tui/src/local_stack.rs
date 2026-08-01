@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -13,6 +14,65 @@ pub struct Manifest {
     pub axon_bearer_token: String,
     pub rooms: Rooms,
     pub fixtures: Fixtures,
+    /// Present only when the stack was brought up with `--corpus` (ADR 0086).
+    /// No scenario passes it yet; the field is here so one can address demo
+    /// fixtures by corpus name — `demo.rooms["trip-photos"]` — instead of
+    /// re-deriving room ids from the screen.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub demo: Option<Demo>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct Demo {
+    pub name: String,
+    pub viewer: DemoViewer,
+    pub personas: BTreeMap<String, DemoPersona>,
+    pub spaces: BTreeMap<String, DemoSpace>,
+    pub rooms: BTreeMap<String, DemoRoom>,
+    /// Corpus message `id` → Matrix event ID.
+    pub events: BTreeMap<String, String>,
+    /// Corpus media path → `mxc://` URI.
+    pub media: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct DemoViewer {
+    pub persona: String,
+    pub account: MatrixAccount,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct MatrixAccount {
+    pub user_id: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct DemoPersona {
+    pub user_id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct DemoSpace {
+    pub room_id: String,
+    pub name: String,
+    pub children: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct DemoRoom {
+    pub room_id: String,
+    pub name: Option<String>,
+    pub direct: bool,
+    pub members: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

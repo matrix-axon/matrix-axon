@@ -119,6 +119,54 @@ The true-local profile assumes `axon-smoke-local-stack` provides:
 The local stack publishes fixture event IDs in its JSON manifest so scenarios can
 test event-specific commands without depending on generated Matrix IDs.
 
+### The demo corpus (opt-in)
+
+`axon-smoke-local-stack up --corpus <path>` additionally renders a declarative
+corpus — `smoke/local-stack/corpus/demo.toml` — into the same stack: personas
+with display names and avatars, two spaces, six rooms and a DM, images, a
+thread, an edit, a redaction and reactions, all backdated over the preceding
+five weeks (ADR 0086).
+
+No scenario passes `--corpus` today and the flag defaults to unset, so every
+profile above gets exactly the stack it always got. What it unblocks is the
+"Not Yet Covered" list below: the corpus is the first fixture in `smoke/` with
+uploaded media and with a DM.
+
+Two things to know before writing a scenario against it:
+
+- **The viewer changes.** With `--corpus`, axon logs in as the corpus viewer
+  (`@alex:localhost`) rather than `accounts.target`, so the `Smoke *` rooms
+  exist on the homeserver but are not in the room list. That is deliberate —
+  a demo recording must not have smoke fixtures in shot.
+- **The TUI shows the two spaces as ordinary rooms**, because it has no space
+  support (`docs/client-parity.md`, "Room-state reads"). Expected, not a
+  seeding bug: a space is a room, and nothing filters it out client-side yet.
+  A TUI scenario asserting on the room list has to account for the two extra
+  entries until that lands.
+- **Addresses come from the manifest.** `manifest.demo` maps corpus names to
+  real ids: `demo.rooms["trip-photos"].room_id`, `demo.events["party-plan"]`,
+  `demo.media["media/photos/party-crew.jpg"]`. Never scrape them off the
+  screen, and never hard-code a Matrix id.
+
+```sh
+cargo run -p axon-smoke-local-stack -- up --manifest /tmp/axon-demo.json \
+  --corpus smoke/local-stack/corpus/demo.toml --keep-up
+cargo run -p axon-smoke-local-stack -- info --manifest /tmp/axon-demo.json
+```
+
+The photographs the corpus references are not committed; generate stand-ins
+first with `corpus/media/generate-placeholder-photos.mjs` (see that directory's
+README). The seeder fails with the missing path rather than seeding a room with
+no images.
+
+One artifact is worth knowing about: `/createRoom` ignores the appservice `ts`
+parameter, so each room's creation events carry the current time even though
+everything after them — membership, name, topic, avatar, and every message — is
+backdated. Only the creator's own join is visible at the default
+`stateEvents: important` tier, as a single "joined" line dated today at the end
+of each room. A demo driver that wants it gone can set the client's state-event
+visibility to `none`.
+
 ## Not Yet Covered
 
 The suite does not yet exercise every TUI capability end to end. Omitted or
@@ -131,8 +179,9 @@ partial areas:
   second trusted device.
 - Sender-trust `/bundle` is not covered beyond the lower-level TUI tests; a
   stable fixture should be added once trust data is available in the local stack.
-- Media rendering is not covered; the stack needs uploaded media fixtures and
-  terminal-protocol assertions before this can be reliable.
+- Media rendering is not covered. The media fixtures now exist — the demo
+  corpus uploads real images (`--corpus`, above) — but terminal-protocol
+  assertions do not, so nothing asserts on them yet.
 - `/unreact` withdrawal is not asserted end to end yet. The suite covers the
   `/react` command path and rendering seeded own reactions.
 - Config editor launching (`/editconfig`) is not covered because it would spawn
@@ -141,6 +190,7 @@ partial areas:
   Sliding Sync window large enough for its current timeline fixture, not a true
   "ingest all history" mode.
 - Room-list DM filtering is covered only negatively (named group rooms drop out
-  of the DMs filter); the stack has no unnamed/DM fixture, so the positive case
-  for the interim `is_likely_dm` heuristic (ADR 0042) is exercised by unit tests
-  only. Add a DM fixture once the curated `is_direct` from ADR 0043 lands.
+  of the DMs filter). The demo corpus now seeds an unnamed DM with `m.direct`
+  account data, so the positive case for the interim `is_likely_dm` heuristic
+  (ADR 0042) is finally fixturable; no scenario claims it yet because no
+  scenario runs with `--corpus`.

@@ -24,14 +24,18 @@
 // Licensing (verified from each style's own `meta`, not from documentation):
 //   - Open Peeps — Pablo Stanley, CC0 1.0 — https://www.openpeeps.com/
 //   - Shapes     — DiceBear,      CC0 1.0
+//   - Rings      — DiceBear,      CC0 1.0
 //   - DiceBear itself is MIT.
+// Check `style.meta.license` before adopting another style: the collection is
+// not uniformly CC0 — `icons` is Bootstrap Icons under MIT, which would drag an
+// attribution notice into a directory that currently needs none.
 // CC0 requires no attribution, but corpus/media/README.md records provenance
 // anyway so a later reader never has to re-derive it.
 
 import { mkdir, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { createAvatar } from '@dicebear/core'
-import { openPeeps, shapes } from '@dicebear/collection'
+import { openPeeps, rings, shapes } from '@dicebear/collection'
 import sharp from 'sharp'
 
 const SIZE = 256
@@ -65,6 +69,26 @@ const PEOPLE = ['alex', 'maya', 'devin', 'sam', 'priya', 'tomas']
 // Spaces. Open Peeps is people; a group needs an abstract mark instead.
 const SPACES = ['space-ridgeline', 'space-watershed']
 
+// Rooms. A different abstract style from the spaces, because the two appear
+// side by side in axon-web — spaces in the left rail, rooms in the list — and
+// one style for both would make a space read as just another room.
+//
+// `rings` rather than `glass`: at the ~24px a room list actually renders, glass
+// resolves to six near-identical pale circles, which is worse than the letter
+// tile it replaces. Rings stay distinguishable from each other when small.
+// Seeds are the filename stems; the `room-` prefix matches each room's `id` in
+// demo.toml. The DM is deliberately absent — a direct chat shows the other
+// person's avatar, and giving it a room avatar would hide exactly the
+// derivation the fixture exists to exercise.
+const ROOMS = [
+  'room-general',
+  'room-trail-work',
+  'room-trip-photos',
+  'room-gear-swap',
+  'room-water-quality',
+  'room-field-notes',
+]
+
 async function render(style, seed, outDir, extra = {}) {
   const svg = createAvatar(style, {
     seed,
@@ -93,6 +117,7 @@ await mkdir(outDir, { recursive: true })
 const written = [
   ...(await Promise.all(PEOPLE.map((s) => render(openPeeps, s, outDir, { face: FACES })))),
   ...(await Promise.all(SPACES.map((s) => render(shapes, s, outDir)))),
+  ...(await Promise.all(ROOMS.map((s) => render(rings, s, outDir)))),
 ]
 
 let total = 0

@@ -36,6 +36,11 @@ matrix-axon/
     web/                     # axon-web (Vite + Preact + TS, ADR 0046) — alpha client
   smoke/                     # black-box smoke harnesses (depend on no axon-* crate; ADR 0025)
     tui/                     # axon-smoke-tui — PTY-drives the real axon-tui against an in-process API stub
+    server/                  # axon-smoke-server — black-box API/WS smoke against a real stack
+    local-stack/             # axon-smoke-local-stack — boots Synapse + Postgres + axon; writes a JSON manifest
+      corpus/                # declarative demo content (ADR 0086); rendered by `up --corpus`
+        demo.toml            # personas, spaces, rooms, messages — relative timestamps
+        media/               # CC0 avatars (committed) + photos (generated placeholders, not committed)
   openapi/                   # OpenAPI 3.1 spec (source of truth)
   docs/
     mvp/                     # PRD, tech spec, implementation spec (frozen at MVP ship)

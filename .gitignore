@@ -40,6 +40,10 @@ axon.toml
 # Node / web client
 clients/web/node_modules/
 clients/web/dist/
+# Vite's dependency cache. It lands at the repo root when the dev server is
+# started with the root as its working directory — which is how the web client
+# gets pointed at a demo stack (smoke/tui/README.md), so this is easy to hit.
+.vite/
 
 # sqlx offline query cache (checked in only when intentional)
 .sqlx/
@@ -49,3 +53,10 @@ axon-data/
 
 # Smoke harness failure artifacts (PTY transcripts, screens, logs, journals)
 smoke-artifacts/
+
+# Demo-corpus photographs (smoke/local-stack/corpus/media/photos). Only
+# generated PLACEHOLDER stand-ins exist today — generate-placeholder-photos.mjs
+# writes them here so the seeder can run end to end, and they must never reach a
+# published recording. Delete this rule in the PR that lands the real, licensed
+# photographs; see corpus/media/README.md.
+smoke/local-stack/corpus/media/photos/

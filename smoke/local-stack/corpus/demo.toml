@@ -38,13 +38,13 @@ viewer = "alex"
 [[persona]]
 id = "alex"
 localpart = "alex"
-display_name = "Alex Chen"
+display_name = "Alex Marx"
 avatar = "media/avatars/alex.png"
 
 [[persona]]
 id = "maya"
 localpart = "maya"
-display_name = "Maya Okonkwo"
+display_name = "Maya Harrison"
 avatar = "media/avatars/maya.png"
 
 [[persona]]
@@ -100,36 +100,42 @@ children = ["water-quality", "field-notes"]
 id = "general"
 name = "general"
 topic = "Announcements, scheduling, and everything that doesn't fit elsewhere."
+avatar = "media/avatars/room-general.png"
 members = ["alex", "maya", "dev", "sam", "tomas"]
 
 [[room]]
 id = "trail-work"
 name = "trail-work"
 topic = "Work party planning, trip reports, and tread condition."
+avatar = "media/avatars/room-trail-work.png"
 members = ["alex", "maya", "dev", "sam", "tomas"]
 
 [[room]]
 id = "trip-photos"
 name = "trip-photos"
 topic = "Photos from the field. Caption them so search can find them."
+avatar = "media/avatars/room-trip-photos.png"
 members = ["alex", "maya", "dev", "sam"]
 
 [[room]]
 id = "gear-swap"
 name = "gear-swap"
 topic = "Tools and gear moving between members. Claimed items get struck out."
+avatar = "media/avatars/room-gear-swap.png"
 members = ["alex", "dev", "sam", "tomas"]
 
 [[room]]
 id = "water-quality"
 name = "water-quality"
 topic = "Sampling schedule, results, and anything the turbidity meter does."
+avatar = "media/avatars/room-water-quality.png"
 members = ["alex", "priya", "maya"]
 
 [[room]]
 id = "field-notes"
 name = "field-notes"
 topic = "Raw observations. Tidy them into water-quality when they're confirmed."
+avatar = "media/avatars/room-field-notes.png"
 members = ["alex", "priya"]
 
 # A DM: no name, no topic. Exercises the DM-title derivation both clients share
@@ -154,8 +160,14 @@ members = ["alex", "maya"]
 [[message]]
 room = "general"
 from = "maya"
+at = "-35d 09:30"
+body = "Hey all--I just created a bunch of matrix rooms for planning this work. Take a look around and let me know if you have nay questions."
+
+[[message]]
+room = "general"
+from = "maya"
 at = "-34d 08:41"
-body = "Season kickoff: the district finally signed off on our 2026 work plan. Four scheduled parties, plus whatever storm damage decides to hand us."
+body = "OK, season kickoff: the district finally signed off on our 2026 work plan. Four scheduled parties, plus whatever storm damage decides to hand us."
 
 [[message]]
 room = "general"

@@ -10,6 +10,10 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod corpus;
+
+use corpus::DemoManifest;
+
 #[cfg(unix)]
 unsafe extern "C" {
     fn setsid() -> i32;
@@ -19,6 +23,7 @@ const AS_TOKEN: &str = "axon-smoke-appservice-token";
 const AXON_TIMELINE_LIMIT: &str = "200";
 const LONG_TIMELINE_MESSAGES_PER_DATE: i64 = 15;
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(180);
 const SERVER_NAME: &str = "localhost";
 
 #[derive(Parser)]
@@ -39,6 +44,11 @@ enum CommandKind {
         keep_up: bool,
         #[arg(long)]
         quiet: bool,
+        /// Additionally render a demo corpus (ADR 0086) into the stack, and log
+        /// axon in as its viewer. Unset by default: every existing smoke
+        /// scenario gets exactly the stack it always got.
+        #[arg(long)]
+        corpus: Option<PathBuf>,
     },
     Down {
         #[arg(long)]
@@ -61,6 +71,10 @@ struct Manifest {
     accounts: Accounts,
     rooms: Rooms,
     fixtures: Fixtures,
+    /// Present only for a `--corpus` run. Absent keeps the manifest byte-for-byte
+    /// what every existing scenario already reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    demo: Option<DemoManifest>,
     paths: Paths,
     keep_up: bool,
 }
@@ -233,20 +247,27 @@ async fn main() -> anyhow::Result<()> {
             run_id,
             keep_up,
             quiet,
-        } => up(&manifest, run_id, keep_up, quiet).await,
+            corpus,
+        } => up(&manifest, run_id, keep_up, quiet, corpus.as_deref()).await,
         CommandKind::Down { manifest } => down(&manifest).await,
         CommandKind::Info { manifest } => info(&manifest),
     }
 }
 
-async fn up(path: &Path, run_id: Option<String>, keep_up: bool, quiet: bool) -> anyhow::Result<()> {
+async fn up(
+    path: &Path,
+    run_id: Option<String>,
+    keep_up: bool,
+    quiet: bool,
+    corpus_path: Option<&Path>,
+) -> anyhow::Result<()> {
     let run_id = run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let overrides = PortOverrides::read()?;
     let attempts = if overrides.has_explicit_port() { 1 } else { 3 };
     let mut last_error = None;
     for attempt in 1..=attempts {
         let ports = overrides.choose()?;
-        match up_attempt(path, &run_id, keep_up, quiet, ports).await {
+        match up_attempt(path, &run_id, keep_up, quiet, ports, corpus_path).await {
             Ok(()) => return Ok(()),
             Err(err) if attempt < attempts && is_port_collision(&err) => {
                 eprintln!(
@@ -266,6 +287,7 @@ async fn up_attempt(
     keep_up: bool,
     quiet: bool,
     ports: PortSet,
+    corpus_path: Option<&Path>,
 ) -> anyhow::Result<()> {
     let short = run_id
         .chars()
@@ -371,6 +393,23 @@ async fn up_attempt(
     )
     .await?;
 
+    // The demo corpus is additive: the smoke fixtures above are seeded exactly
+    // as always, and only the account axon logs in as changes — a demo is
+    // recorded through the corpus viewer's eyes, and it must not have the
+    // `Smoke *` rooms in its room list.
+    let demo = match corpus_path {
+        Some(path) => Some(
+            corpus::seed(&client, &hs_url, &compose_project, path, &short)
+                .await
+                .with_context(|| format!("seed corpus {}", path.display()))?,
+        ),
+        None => None,
+    };
+    let (axon_account, sync_probe_room) = match &demo {
+        Some(demo) => (demo.viewer.clone(), demo.sync_probe_room.clone()),
+        None => (accounts.target.clone(), long_timeline.room_id.clone()),
+    };
+
     let axon_bin = resolve_axon_bin()?;
     let database_url = format!("postgres://axon:axon@127.0.0.1:{postgres_port}/{database_name}");
     let axon_pid = start_axon(&axon_bin, &run_dir, &axon_log, &database_url, axon_port)?;
@@ -378,8 +417,8 @@ async fn up_attempt(
     let axon_base_url = format!("http://127.0.0.1:{axon_port}");
     wait_for_axon(&client, &axon_base_url).await?;
     let token = issue_axon_token(&axon_bin, &run_dir, &database_url)?;
-    let account_id = login_axon(&client, &axon_base_url, &token, &accounts.target, &hs_url).await?;
-    wait_for_axon_room(&client, &axon_base_url, &token, &long_timeline.room_id).await?;
+    let account_id = login_axon(&client, &axon_base_url, &token, &axon_account, &hs_url).await?;
+    wait_for_axon_room(&client, &axon_base_url, &token, &sync_probe_room).await?;
 
     let manifest = Manifest {
         run_id: run_id.to_owned(),
@@ -406,6 +445,7 @@ async fn up_attempt(
         fixtures: Fixtures {
             relations: relation_fixtures,
         },
+        demo: demo.map(|demo| demo.manifest),
         paths: cleanup.paths.clone(),
         keep_up,
     };
@@ -480,6 +520,30 @@ fn print_info(manifest: &Manifest) {
         "  relations: {} ({})",
         manifest.rooms.relations.name, manifest.rooms.relations.room_id
     );
+    if let Some(demo) = &manifest.demo {
+        println!(
+            "Demo corpus: {} ({})",
+            demo.name,
+            demo.corpus_path.display()
+        );
+        println!(
+            "  viewer: {} ({})",
+            demo.viewer.account.user_id, demo.viewer.persona
+        );
+        for (id, space) in &demo.spaces {
+            println!(
+                "  space {id}: {} ({}) children: {}",
+                space.name,
+                space.room_id,
+                space.children.join(", ")
+            );
+        }
+        for (id, room) in &demo.rooms {
+            let kind = if room.direct { " [dm]" } else { "" };
+            println!("  room {id}{kind}: {}", room.room_id);
+        }
+        println!("  media uploaded: {}", demo.media.len());
+    }
     println!("Cleanup: cargo run -p axon-smoke-local-stack -- down --manifest <manifest>");
 }
 
@@ -531,6 +595,33 @@ app_service_config_files:
 "#,
         );
     }
+    if !homeserver.contains("rc_invites:") {
+        // The base config opens up messages, registration and login, but not
+        // invites or joins — which default to a fraction of one per second and
+        // so 429 a corpus that stands up seven rooms of members in a row.
+        homeserver.push_str(
+            r#"
+# Smoke-only: seeding invites and joins a whole fictional membership at once.
+rc_invites:
+  per_room:
+    per_second: 1000
+    burst_count: 1000
+  per_user:
+    per_second: 1000
+    burst_count: 1000
+  per_issuer:
+    per_second: 1000
+    burst_count: 1000
+rc_joins:
+  local:
+    per_second: 1000
+    burst_count: 1000
+  remote:
+    per_second: 1000
+    burst_count: 1000
+"#,
+        );
+    }
 
     let homeserver_path = run_dir.join("homeserver.yaml");
     let appservice_path = run_dir.join("appservice-smoke.yaml");
@@ -549,6 +640,14 @@ namespaces:
   users:
     - exclusive: true
       regex: "@smokeas_.*:localhost"
+    # Non-exclusive wildcard: `?user_id=` impersonation is only permitted for
+    # users the appservice is "interested in", and the demo corpus wants clean
+    # persona IDs (@maya:localhost) rather than namespace-prefixed ones. Staying
+    # non-exclusive is what lets register_new_matrix_user still create those
+    # same users with passwords. Test-only, on a disposable homeserver whose
+    # registration file is generated per run — see ADR 0086.
+    - exclusive: false
+      regex: "@.*:localhost"
   aliases: []
   rooms: []
 "#,
@@ -1099,16 +1198,50 @@ async fn send_appservice_message(
     body: &str,
     ts: i64,
 ) -> anyhow::Result<String> {
+    send_appservice_event(
+        client,
+        hs,
+        room,
+        user_id,
+        txn,
+        "m.room.message",
+        serde_json::json!({ "msgtype": "m.text", "body": body }),
+        ts,
+    )
+    .await
+}
+
+/// Send any event as any local user, backdated.
+///
+/// The `?user_id=&ts=` appservice route is the only way to write an event with
+/// a historical `origin_server_ts`, so every fixture that needs to look like it
+/// happened last week goes through here — images, threads, reactions,
+/// formatted bodies, redactions. `send_appservice_message` is the narrow
+/// `m.text` wrapper `seed_long_timeline` has always used.
+// The arguments are exactly the send route's own parameters; bundling them into
+// a struct would only move the same list to the call sites.
+#[allow(clippy::too_many_arguments)]
+async fn send_appservice_event(
+    client: &Client,
+    hs: &str,
+    room: &str,
+    user_id: &str,
+    txn: &str,
+    event_type: &str,
+    content: serde_json::Value,
+    ts: i64,
+) -> anyhow::Result<String> {
     let ts = ts.to_string();
     let resp: serde_json::Value = client
         .put(format!(
-            "{hs}/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
+            "{hs}/_matrix/client/v3/rooms/{}/send/{}/{}",
             url_path(room),
+            url_path(event_type),
             txn
         ))
         .bearer_auth(AS_TOKEN)
         .query(&[("user_id", user_id), ("ts", ts.as_str())])
-        .json(&serde_json::json!({ "msgtype": "m.text", "body": body }))
+        .json(&content)
         .send()
         .await?
         .error_for_status()?
@@ -1118,6 +1251,322 @@ async fn send_appservice_message(
         .and_then(|v| v.as_str())
         .map(str::to_owned)
         .ok_or_else(|| anyhow!("appservice send response missing event_id"))
+}
+
+/// Redact an event as any local user, backdated.
+async fn redact_appservice_event(
+    client: &Client,
+    hs: &str,
+    room: &str,
+    user_id: &str,
+    event_id: &str,
+    txn: &str,
+    ts: i64,
+) -> anyhow::Result<String> {
+    let ts = ts.to_string();
+    let resp: serde_json::Value = client
+        .put(format!(
+            "{hs}/_matrix/client/v3/rooms/{}/redact/{}/{}",
+            url_path(room),
+            url_path(event_id),
+            txn
+        ))
+        .bearer_auth(AS_TOKEN)
+        .query(&[("user_id", user_id), ("ts", ts.as_str())])
+        .json(&serde_json::json!({ "reason": "corpus redaction" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    resp.get("event_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("appservice redact response missing event_id"))
+}
+
+/// Upload bytes to the homeserver's media repository, returning the `mxc://`
+/// URI. Nothing else in `smoke/` creates media, so image fixtures — and the
+/// avatars that make a member list read as people — start here.
+async fn upload_media(
+    client: &Client,
+    hs: &str,
+    token: &str,
+    filename: &str,
+    content_type: &str,
+    bytes: Vec<u8>,
+) -> anyhow::Result<String> {
+    let resp: serde_json::Value = client
+        .post(format!("{hs}/_matrix/media/v3/upload"))
+        .bearer_auth(token)
+        .query(&[("filename", filename)])
+        .header(reqwest::header::CONTENT_TYPE, content_type)
+        .body(bytes)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    resp.get("content_uri")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("media upload response missing content_uri"))
+}
+
+/// Create a space — a room whose `m.room.create` carries `type: m.space`.
+///
+/// Name, topic and avatar are set afterwards through the timestamped state
+/// route rather than here: room creation cannot be backdated (no `ts` on
+/// `/createRoom`), and everything that *can* be should be, so a demo room's
+/// history does not end in a block of today-dated setup.
+async fn create_space(client: &Client, hs: &str, token: &str) -> anyhow::Result<String> {
+    let resp: RoomResponse = client
+        .post(format!("{hs}/_matrix/client/v3/createRoom"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "preset": "private_chat",
+            "visibility": "private",
+            "creation_content": { "type": "m.space" }
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(resp.room_id)
+}
+
+/// Link a room into a space, from both ends: `m.space.child` in the space and
+/// `m.space.parent` in the child. Clients read the child list, but the parent
+/// edge is what lets a room name the space it belongs to.
+async fn add_space_child(
+    client: &Client,
+    hs: &str,
+    actor: &str,
+    space_id: &str,
+    child_id: &str,
+    ts: i64,
+) -> anyhow::Result<()> {
+    send_appservice_state(
+        client,
+        hs,
+        space_id,
+        actor,
+        "m.space.child",
+        child_id,
+        serde_json::json!({ "via": [SERVER_NAME], "suggested": true }),
+        ts,
+    )
+    .await?;
+    send_appservice_state(
+        client,
+        hs,
+        child_id,
+        actor,
+        "m.space.parent",
+        space_id,
+        serde_json::json!({ "via": [SERVER_NAME], "canonical": true }),
+        ts,
+    )
+    .await
+}
+
+async fn set_room_name(
+    client: &Client,
+    hs: &str,
+    room: &str,
+    actor: &str,
+    name: &str,
+    ts: i64,
+) -> anyhow::Result<()> {
+    send_appservice_state(
+        client,
+        hs,
+        room,
+        actor,
+        "m.room.name",
+        "",
+        serde_json::json!({ "name": name }),
+        ts,
+    )
+    .await
+}
+
+async fn set_room_topic(
+    client: &Client,
+    hs: &str,
+    room: &str,
+    actor: &str,
+    topic: &str,
+    ts: i64,
+) -> anyhow::Result<()> {
+    send_appservice_state(
+        client,
+        hs,
+        room,
+        actor,
+        "m.room.topic",
+        "",
+        serde_json::json!({ "topic": topic }),
+        ts,
+    )
+    .await
+}
+
+async fn set_room_avatar(
+    client: &Client,
+    hs: &str,
+    room: &str,
+    actor: &str,
+    mxc: &str,
+    ts: i64,
+) -> anyhow::Result<()> {
+    send_appservice_state(
+        client,
+        hs,
+        room,
+        actor,
+        "m.room.avatar",
+        "",
+        serde_json::json!({ "url": mxc }),
+        ts,
+    )
+    .await
+}
+
+/// Write a membership as any local user, backdated.
+///
+/// Synapse routes `m.room.member` through its membership handler, which honours
+/// the appservice `ts` (MSC3316) — verified against the stack, not assumed. It
+/// matters: joins written at the current time would pile up a block of "joined"
+/// rows at the *end* of every seeded room, after the story the room is telling.
+async fn set_membership(
+    client: &Client,
+    hs: &str,
+    room: &str,
+    actor: &str,
+    target: &str,
+    content: serde_json::Value,
+    ts: i64,
+) -> anyhow::Result<()> {
+    send_appservice_state(
+        client,
+        hs,
+        room,
+        actor,
+        "m.room.member",
+        target,
+        content,
+        ts,
+    )
+    .await
+}
+
+// Same shape as the send route it wraps; see `send_appservice_event`.
+#[allow(clippy::too_many_arguments)]
+async fn send_appservice_state(
+    client: &Client,
+    hs: &str,
+    room: &str,
+    actor: &str,
+    event_type: &str,
+    state_key: &str,
+    content: serde_json::Value,
+    ts: i64,
+) -> anyhow::Result<()> {
+    let ts = ts.to_string();
+    client
+        .put(format!(
+            "{hs}/_matrix/client/v3/rooms/{}/state/{}/{}",
+            url_path(room),
+            url_path(event_type),
+            url_path(state_key)
+        ))
+        .bearer_auth(AS_TOKEN)
+        .query(&[("user_id", actor), ("ts", ts.as_str())])
+        .json(&content)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+/// Create a direct chat: no name, no topic, and `is_direct` on the room. The
+/// invite is written separately (backdated, carrying `is_direct` itself), and
+/// the creator's `m.direct` account data is what finally makes it a DM — the
+/// title both clients derive comes from the membership, but the room only
+/// counts as direct because the account data says so.
+async fn create_dm(client: &Client, hs: &str, creator_token: &str) -> anyhow::Result<String> {
+    let resp: RoomResponse = client
+        .post(format!("{hs}/_matrix/client/v3/createRoom"))
+        .bearer_auth(creator_token)
+        .json(&serde_json::json!({
+            "preset": "trusted_private_chat",
+            "visibility": "private",
+            "is_direct": true
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(resp.room_id)
+}
+
+async fn set_direct_account_data(
+    client: &Client,
+    hs: &str,
+    token: &str,
+    user_id: &str,
+    direct: &serde_json::Value,
+) -> anyhow::Result<()> {
+    client
+        .put(format!(
+            "{hs}/_matrix/client/v3/user/{}/account_data/m.direct",
+            url_path(user_id)
+        ))
+        .bearer_auth(token)
+        .json(direct)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+/// Set a user's global profile through the appservice, so their display name
+/// and avatar are already right on the `m.room.member` event that joins them.
+async fn set_profile(
+    client: &Client,
+    hs: &str,
+    user_id: &str,
+    display_name: &str,
+    avatar_mxc: Option<&str>,
+) -> anyhow::Result<()> {
+    client
+        .put(format!(
+            "{hs}/_matrix/client/v3/profile/{}/displayname",
+            url_path(user_id)
+        ))
+        .bearer_auth(AS_TOKEN)
+        .query(&[("user_id", user_id)])
+        .json(&serde_json::json!({ "displayname": display_name }))
+        .send()
+        .await?
+        .error_for_status()?;
+    if let Some(mxc) = avatar_mxc {
+        client
+            .put(format!(
+                "{hs}/_matrix/client/v3/profile/{}/avatar_url",
+                url_path(user_id)
+            ))
+            .bearer_auth(AS_TOKEN)
+            .query(&[("user_id", user_id)])
+            .json(&serde_json::json!({ "avatar_url": mxc }))
+            .send()
+            .await?
+            .error_for_status()?;
+    }
+    Ok(())
 }
 
 fn resolve_axon_bin() -> anyhow::Result<PathBuf> {
@@ -1153,6 +1602,16 @@ fn start_axon(
         .env("AXON_SERVER__PORT", port.to_string())
         .env("AXON_SYNC__STORE_KEY", "smoke-local-stack-key")
         .env("AXON_SYNC__TIMELINE_LIMIT", AXON_TIMELINE_LIMIT)
+        // Everything on disk goes under this run's directory. The defaults are
+        // platform data/cache dirs shared by every axon on the machine, and
+        // Tantivy takes an exclusive lock on its index — so a second stack
+        // would fail to boot with "Failed to acquire index lock" rather than
+        // with anything that names the real problem. That is easy to hit now
+        // that a `--corpus` demo stack is meant to stay up for a while.
+        .env("AXON_SYNC__DATA_DIR", run_dir.join("sync"))
+        .env("AXON_SEARCH__INDEX_PATH", run_dir.join("search"))
+        .env("AXON_MEDIA__CACHE_DIR", run_dir.join("media"))
+        .env("AXON_MEDIA__UPLOADS_DIR", run_dir.join("uploads"))
         .env("RUST_LOG", "info,axon_sync=debug")
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
@@ -1227,6 +1686,10 @@ async fn login_axon(
 ) -> anyhow::Result<Uuid> {
     let env: AxonEnvelope<AxonAccount> = client
         .post(format!("{base}/v1/accounts/login"))
+        // Login blocks on the account's first sync, which grows with the world
+        // being synced — a demo corpus of seven rooms and their media is well
+        // past the client-wide 10s timeout.
+        .timeout(LOGIN_TIMEOUT)
         .bearer_auth(token)
         .json(&serde_json::json!({
             "username": account.user_id,
