@@ -154,6 +154,62 @@ and web demo scene covers it — maintained under the same same-PR rule as
 status silently drifted before. A feature that never reaches a demo script is
 invisible twice: absent from the videos, and unexercised by the driver.
 
+### Bug-catching capability is harvested, not assumed
+
+A fixture is scenery until something asserts it. The corpus is written so that
+its awkward cases are *assertable*, and turning them into assertions is the
+point of the exercise rather than a by-product of it — the recordings are what
+this work is visible as, but the tests are what it is worth.
+
+The clearest case is already in `demo.toml`: a four-image run seconds apart from
+one sender, then a fifth image four minutes later with a text message between
+it and the run. That pair exists to pin ADR 0081's adjacency heuristic, which
+`docs/client-parity.md` flags as a heuristic a bridge stamping identical
+timestamps could defeat. The corpus supplies both the positive and the negative
+case; nothing yet checks either.
+
+This is a different axis from `docs/demo-coverage.md`. That table tracks whether
+a **scene shows** a capability; this tracks whether a **test asserts** it. A row
+can name a scene and still be asserted by nothing — `smoke/tui/README.md`
+records exactly that for media rendering, which the pilot renders for real while
+only a human eye confirms it.
+
+Four harvests follow directly from what the seeder now makes possible: gallery
+adjacency including the near-miss (`clients/web`), TUI media rendering
+(`smoke/`), DM title derivation (both, since web ported the rule from
+`clients/tui/src/app/rooms.rs` and the two can drift), and backdated history and
+jump-to-date against the corpus's multi-week span (`smoke/`). The silos differ,
+so this is necessarily more than one PR.
+
+The standing question for any PR that extends the corpus: *what can we now
+assert that we could not before?* Answer it in the PR body.
+
+Deferred, tracked in #111.
+
+### The demo stack is reachable from local development
+
+The corpus is also the most realistic environment a developer can get without
+touching the real Axon Testing room, so it should be reachable from ordinary
+development rather than only from a recording session. Three tiers, cheapest
+first:
+
+1. **Agent-run, every change.** The per-silo commands stay the fast path and are
+   unchanged.
+2. **Pre-push, opt-in.** A `demo` target in `scripts/smoke-gate.sh`, so the
+   corpus lane is reached through the `RUN_SMOKE=<lane>` hook `.githooks/pre-push`
+   already has rather than a second mechanism. Opt-in because it needs Docker
+   and takes minutes.
+3. **Human-confirmed.** Real Sixel/Kitty rendering, gallery layout, and lightbox
+   paging have no honest headless substitute, so an agent changing visual
+   behaviour offers the one-command check and asks for an eyeball. This is the
+   role `clients/web/AGENTS.md`'s "human pass against the live server" plays
+   today, moved onto a disposable stack.
+
+`scripts/demo-stack.sh` stays what its header says it is — not a test and not a
+gate. What is missing is the gate-side target, not a second entry point.
+
+Deferred, tracked in #111.
+
 ## Consequences
 
 - The demo and seeding lane is **Unix-only**. `smoke/local-stack` guards its
@@ -178,6 +234,12 @@ invisible twice: absent from the videos, and unexercised by the driver.
   true historical backfill (issue 164) lands.
 - `smoke/` crates still may not depend on any `axon-*` crate
   (`scripts/check-smoke-isolation.sh`); `axon-demo-tui` inherits that rule.
+- **The two sections above are decided but not built**, and are tracked in #111
+  rather than left implicit. They were omitted from the first draft of this ADR
+  and consequently went unbuilt and unnoticed through four PRs — recording them
+  here, even unbuilt, is what stops that recurring. Until they land, the demo
+  corpus illustrates the product without testing it, and the only thing checking
+  a recording is a human watching one.
 
 ## Alternatives considered
 

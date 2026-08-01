@@ -181,7 +181,8 @@ partial areas:
   stable fixture should be added once trust data is available in the local stack.
 - Media rendering is not covered. The media fixtures now exist — the demo
   corpus uploads real images (`--corpus`, above) — but terminal-protocol
-  assertions do not, so nothing asserts on them yet.
+  assertions do not, so nothing asserts on them yet. Tracked in #111, with the
+  rest of the assertions the corpus made possible.
 - `/unreact` withdrawal is not asserted end to end yet. The suite covers the
   `/react` command path and rendering seeded own reactions.
 - Config editor launching (`/editconfig`) is not covered because it would spawn
