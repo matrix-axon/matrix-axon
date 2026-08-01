@@ -6,6 +6,10 @@
 # while a human records a video against it. `scripts/smoke-gate.sh` is what CI
 # and the pre-push hook run; this is not part of either.
 #
+# There is no gate-side counterpart yet — no `demo` target in smoke-gate.sh, so
+# the corpus is not reachable from `RUN_SMOKE=<lane> git push`. That is ADR 0086
+# phase 5b, tracked in #111, and deliberate rather than forgotten.
+#
 # Usage:
 #   scripts/demo-stack.sh up       # generate placeholders if needed, then boot
 #   scripts/demo-stack.sh info     # reprint the connection summary

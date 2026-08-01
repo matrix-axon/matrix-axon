@@ -295,7 +295,8 @@ partial areas:
   (`axon-demo-tui --scene media`, above), which proves the path end to end by
   eye, but no smoke scenario asserts on terminal graphics: the `vt100` screen
   model the harness reads discards them by design, so an assertion would have to
-  work on the raw transcript instead.
+  work on the raw transcript instead. Tracked in #111, with the rest of the
+  assertions the demo corpus made possible (ADR 0086 phase 5a).
 - `/unreact` withdrawal is not asserted end to end yet. The suite covers the
   `/react` command path and rendering seeded own reactions.
 - Config editor launching (`/editconfig`) is not covered because it would spawn
