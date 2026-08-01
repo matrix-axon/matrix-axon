@@ -58,25 +58,55 @@ them into a single grid, and the web demo pages through them in the lightbox.
 between, so it must **not** join that grid; it is the standing regression case
 for the grouping heuristic.
 
-### Sourcing: still open
+### Sourcing: Unsplash License, with voluntary attribution
 
-The avatar half of this decision is settled — generated, CC0, committed. The
-photos are the half where realism is the entire point, so the same answer does
-not carry over.
+Decided: photographs under the [Unsplash
+License](https://unsplash.com/license). It permits commercial use and
+modification and **requires no attribution** — we credit anyway, in the
+provenance table below, because the photographers deserve it and because a
+reader should never have to re-derive where a file came from.
 
-**CC0 photographs** look genuinely real in a gallery. Cost: fixed weight in a
-repo whose history is 3.8 MB with no LFS, and each file needs a provenance row
-below. Budget: **≤120 KB per file after downscaling**, so all six add under
-1 MB.
+Budget: **≤120 KB per file after downscaling**, so all six add under 1 MB to a
+repo whose history is 3.8 MB with no LFS.
 
-**Procedurally generated images** are tiny, deterministic, and regenerable by a
-script rather than stored — but they look synthetic, which undercuts a gallery
-demo whose purpose is to look like a real one.
+Note the Unsplash License is *not* CC0. It forbids compiling photos to build a
+competing or replicating service, and it does not place the work in the public
+domain. Neither constrains this use, but it means these files travel under
+different terms from the CC0 avatars, which is why the provenance table tracks
+the licence per row rather than declaring one for the directory.
 
-Recommended: CC0 photographs, because the gallery and lightbox scenes are the
-ones a viewer judges the product by. Suggested sources are Unsplash (check the
-per-photo licence — the Unsplash Licence is not CC0), Pexels, or Wikimedia
-Commons filtered to CC0/public domain.
+#### Substituting your own photos later
+
+Supported by design, at any time. `demo.toml` references **paths**, not content
+— it names `media/photos/party-crew.jpg` and nothing else in the corpus, the
+seeder, or either client knows what is inside it. To swap one:
+
+1. Drop the replacement at the same path, within the size budget.
+2. Update its provenance row below (own photos: source "own work", and say who
+   holds copyright).
+3. Re-seed. No corpus edit, no code change.
+
+Renaming a file is the only change that needs a `demo.toml` edit.
+
+#### One caution on photos of people
+
+`party-crew.jpg` is the only shot that calls for identifiable people, and it is
+the one to be careful with. Unsplash grants a **licence to the photograph, not a
+model release** — the platform says as much, and using a recognisable person to
+depict a member of a fictional organisation in promotional material is exactly
+where that gap bites.
+
+Prefer a framing without identifiable faces: backs turned, a middle-distance
+group, or hands-and-tools. It costs nothing here — the shot's job is "a work
+party happened", not "here is Tomás" — and it keeps a real person from appearing
+to endorse a fictional collective.
+
+#### Developing before the photos exist
+
+`generate-placeholder-photos.mjs` writes correctly sized, obviously-fake stand-in
+files so the seeder can be built and run end-to-end before any photo is chosen.
+They are **deliberately not committed** and are stamped `PLACEHOLDER` so one can
+never quietly reach a published recording.
 
 ## Provenance
 
@@ -88,4 +118,13 @@ later reader never has to re-derive the licence status.
 |---|---|---|---|
 | `avatars/*.png` (6 people) | [Open Peeps](https://www.openpeeps.com/) by Pablo Stanley, via [DiceBear](https://www.dicebear.com/styles/open-peeps/) | CC0 1.0 | Licence read from the style's own `meta`, not from documentation. DiceBear's code is MIT; the artwork is CC0. |
 | `avatars/space-*.png` | DiceBear "Shapes" | CC0 1.0 | Same check. |
-| `photos/*.jpg` | _pending_ | | |
+| `photos/switchback-14-october.jpg` | _pending_ | Unsplash License | |
+| `photos/party-crew.jpg` | _pending_ | Unsplash License | Prefer a framing without identifiable faces — see the caution above |
+| `photos/switchback-14-before.jpg` | _pending_ | Unsplash License | |
+| `photos/switchback-14-crib.jpg` | _pending_ | Unsplash License | |
+| `photos/switchback-14-after.jpg` | _pending_ | Unsplash License | |
+| `photos/talus-light.jpg` | _pending_ | Unsplash License | |
+
+For each photo record: **photographer name**, **photographer profile URL**, and
+the **photo page URL**. Unsplash's own suggested credit format is
+`Photo by <name> on Unsplash`, both parts linked.
