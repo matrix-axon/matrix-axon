@@ -19,6 +19,10 @@ const BASE_URL = `http://127.0.0.1:${PORT}`
  */
 export default defineConfig({
   testDir: './e2e',
+  // `e2e/demo/` is the ADR 0086 recording lane, not a test lane: it needs a
+  // real seeded axon and a manifest path, so collecting it here would fail the
+  // PR gate on every run. It has its own config (`playwright.demo.config.ts`).
+  testIgnore: '**/demo/**',
   workers: 1,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,

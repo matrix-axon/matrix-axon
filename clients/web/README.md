@@ -235,6 +235,7 @@ can still slot in later behind the same seam.
 | `pnpm test:watch`                   | Vitest, watch mode                                                                                                                           |
 | `pnpm test:e2e`                     | Playwright e2e suite (Chromium)                                                                                                              |
 | `pnpm test:e2e:perf`                | The ADR 0071 timeline→room-list perf spec, also under WebKit (sets `PERF=1`, which gates the extra WebKit project in `playwright.config.ts`) |
+| `pnpm demo`                         | Record the ADR 0086 demo videos against a seeded local stack (needs `DEMO_MANIFEST`; see § Demo recording)                                   |
 | `pnpm lint`                         | ESLint + Prettier check                                                                                                                      |
 | `pnpm format` / `pnpm format:check` | Prettier write / check                                                                                                                       |
 
@@ -248,3 +249,67 @@ manual `workflow_dispatch`). The repo-root `.pre-commit-config.yaml` can run the
 same web checks at pre-push time for both git and jj users. Those hooks use the
 normal web dependencies, so run `pnpm install --frozen-lockfile` here before
 relying on them locally.
+
+## Demo recording
+
+The web demo videos (ADR 0086 phase 3) are recorded by Playwright against a
+**real** axon: a throwaway Synapse + Postgres + axon stack seeded from
+`smoke/local-stack/corpus/demo.toml`. Search results therefore come from a real
+Tantivy index, media really traverses the media proxy, and the WebSocket is the
+real one. `e2e/mock-server.mjs` is not involved and `pnpm test:e2e` is
+untouched — the lane has its own config, `playwright.demo.config.ts`.
+
+Needs Docker with Compose v2, so it is Unix-only and is not a CI gate.
+
+```sh
+# 1. seed a demo world and leave it running (from the repo root)
+cargo run -p axon-smoke-local-stack -- up \
+    --manifest /tmp/demo.json \
+    --corpus smoke/local-stack/corpus/demo.toml --keep-up
+
+# 2. record (from here)
+DEMO_MANIFEST=/tmp/demo.json pnpm demo
+
+# 3. tear the world down (from the repo root)
+cargo run -p axon-smoke-local-stack -- down --manifest /tmp/demo.json
+```
+
+Output lands in `demo-artifacts/<test>/video.webm`, one clip per scene, at
+1440×900 for `demo-desktop` and 780×1688 for `demo-mobile` (an iPhone 13
+descriptor, so WebKit, real touch, and a device pixel ratio of 3).
+
+**Record a real take against a freshly seeded stack.** The mutating scenes undo
+themselves by redacting what they sent, and a redaction leaves a permanent
+"message deleted" row that nothing can remove. Reruns while authoring are fine —
+the driver clears leftovers over the API and warns when it finds any — but those
+tombstones accumulate in the take.
+
+Useful while authoring:
+
+| Variable        | Effect                                                    |
+| --------------- | --------------------------------------------------------- |
+| `DEMO_PACE=0`   | Strip every dwell — a full dry run in well under a minute |
+| `DEMO_PACE=1.5` | Slow the whole take down for a narrated cut               |
+| `DEMO_PORT`     | Move the preview server off 4600                          |
+
+`pnpm demo --grep rooms` plays a single scene; `--project demo-mobile` a single
+form factor.
+
+Playwright writes **WebM**. The release assets and `demo.html` are MP4 (ADR
+0086), so convert before uploading:
+
+```sh
+ffmpeg -i video.webm -c:v libx264 -pix_fmt yuv420p -movflags +faststart out.mp4
+```
+
+Then attach the MP4s to the `demo-2026-08` release and re-run the `api-docs`
+workflow by hand — re-uploading a release asset changes no path in the
+repository, so nothing in the workflow's `paths:` trigger fires and the site
+keeps serving the previous recording.
+
+Adding or changing a scene means updating `docs/demo-coverage.md` in the same
+PR. Two rules the scenes are built on, both learned the hard way (ADR 0086):
+a step that changes state needs an assertion **only the new state satisfies**
+(assert on what _left_, not on what stayed), and a scene that mutates
+**scripts its own undo**, or its second run passes vacuously on what its first
+run left behind.

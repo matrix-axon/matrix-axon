@@ -4,3 +4,5 @@ pnpm-lock.yaml
 src/api/schema.d.ts
 # Bundled third-party emoji data; formatting would create a noisy generated diff.
 public/emoji-picker-data-en.json
+# Demo recording output (ADR 0086); Playwright writes it, nobody reads the JSON.
+demo-artifacts/

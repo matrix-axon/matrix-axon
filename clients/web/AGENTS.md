@@ -256,10 +256,27 @@ TimelineEvent`).
   fetch is issued. It reproduces on unmodified code — don't chase it as a
   regression in your diff.
 
+## The demo recording lane
+
+`e2e/demo/` drives the ADR 0086 demo videos against a **real** seeded axon
+(`smoke/local-stack --corpus`), not `mock-server.mjs`. It has its own config
+(`playwright.demo.config.ts`) and its own `testIgnore` line in
+`playwright.config.ts`, so `pnpm test:e2e` and the PR gate never collect it.
+Procedure, env vars and the WebM→MP4 step are in [README.md](README.md)
+§ Demo recording; what each scene covers is `docs/demo-coverage.md`.
+
+It is not a test lane and is not a CI gate — it needs Docker and several
+minutes — but its scenes are the only thing that walks these render paths
+against a real backend, so a scene that stops passing is a real finding.
+
 ## Definition of done for a milestone
 
 `pnpm test && pnpm lint && pnpm format:check && pnpm build` all green; new
 logic has unit tests (stores) and interaction tests (pages, msw-backed);
 README status paragraph updated; a human pass against the live server
-(read-only outside the test room); one commit on a jj bookmark stacked on
-the previous milestone, described but not pushed unless asked.
+(read-only outside the test room); **`docs/demo-coverage.md` updated in the same
+PR if the change touches anything a demo scene renders** — a capability that
+never reaches a demo is invisible twice, absent from the videos and unexercised
+by the driver that would notice it breaking (ADR 0086); one commit on a jj
+bookmark stacked on the previous milestone, described but not pushed unless
+asked.

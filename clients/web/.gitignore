@@ -15,6 +15,9 @@ dist-ssr
 # Playwright
 /test-results/
 /playwright-report/
+# ADR 0086 demo recordings: videos, megabytes each, regenerated on demand.
+# Published to a GitHub release, never committed — `.git` has no LFS.
+/demo-artifacts/
 
 # Editor directories and files
 .vscode/*

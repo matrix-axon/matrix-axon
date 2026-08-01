@@ -21,8 +21,9 @@ in parity and **not covered** here.
   `AGENTS.md`'s `docs/` cross-silo exception, this file can land alongside a
   change in any one silo.
 - A cell names the **scene** that covers it, so the claim is checkable:
-  `axon-demo-tui --scene <name>` for the TUI, a Playwright `demo-desktop` /
-  `demo-mobile` spec name for web.
+  `axon-demo-tui --scene <name>` for the TUI, and for web the leading word of a
+  test title in `clients/web/e2e/demo/{desktop,mobile}.spec.ts`
+  (`pnpm demo --grep rooms`).
 - "Not covered" with a reason is worth more than a scene name that does not
   really exercise the thing. Several rows below are deliberately not covered,
   and say why.
@@ -33,41 +34,44 @@ shows it.
 
 ## Coverage
 
-Web columns are empty because the web recording is ADR 0086 phase 3 and has not
-landed. They are listed now so the gap is visible rather than discovered later.
-
 | Capability | TUI (`axon-demo-tui`) | Web desktop | Web mobile |
 |---|---|---|---|
-| Room list, with names and topics | `rooms` | — | — |
-| Room list sort (ADR 0042) | `rooms` | — | — |
-| Room list filter: all / DMs / groups | `rooms` | — | — |
-| Live room-name filter (Alt-/) | `rooms` | — | — |
-| DM title derived from the other member | `rooms` | — | — |
-| Timeline text, sender names, day separators | `timeline` | — | — |
-| Formatted (HTML) messages with links | `timeline` | — | — |
-| Reactions (seeded badges render) | `timeline` | — | — |
-| React to a message, then withdraw it | `react` | — | — |
-| Replies | `timeline` | — | — |
-| Edits (`m.replace`, applied in place) | `threads` | — | — |
-| Redactions (`[redacted]` tombstone) | `threads` | — | — |
-| In-timeline find (Ctrl-F, n/N) | `threads` | — | — |
-| Threads: open panel, read replies | `threads` | — | — |
-| Inline images (Sixel / Kitty / iTerm2) | `media` | — | — |
-| Full-size image preview | `media` | — | — |
-| Image galleries (adjacency grouping, ADR 0081) | **n/a** | — | — |
-| Full-text search across rooms (Tantivy) | `search` | — | — |
-| Search field filters (`room:`) | `search` | — | — |
-| Jump to a date in history | `jump` | — | — |
-| Sending a message | `send` | — | — |
-| Shortcuts and help popups | `shortcuts` | — | — |
-| Spaces: picker, filtering, hierarchy (ADR 0084) | **n/a** | — | — |
-| Unread thread picker (Alt-T) | **not covered** | — | — |
-| Search result sort / group / edit toggles | **not covered** | — | — |
-| Sending media | **not covered** | — | — |
-| Message actions: edit, redact, reply | **not covered** | — | — |
-| Room actions: invite, leave, pin (M19) | **not covered** | — | — |
-| Device verification (SAS) | **not covered** | — | — |
-| Typing indicators and read receipts (M18) | **not covered** | — | — |
+| Room list, with names and topics | `rooms` | `rooms` | `rooms` |
+| Room list sort (ADR 0042) | `rooms` | `rooms` | **not covered** |
+| Room list filter: all / DMs / groups | `rooms` | `rooms` | **not covered** |
+| Live room-name filter (Alt-/) | `rooms` | `rooms` | **not covered** |
+| DM title derived from the other member | `rooms` | `rooms` | `rooms` |
+| Timeline text, sender names, day separators | `timeline` | `timeline` | `timeline` |
+| Formatted (HTML) messages with links | `timeline` | `timeline` | `timeline` |
+| Reactions (seeded badges render) | `timeline` | `timeline` | `send` |
+| React to a message, then withdraw it | `react` | `send` | **not covered** |
+| Replies | `timeline` | `timeline` | `send` |
+| Edits (`m.replace`, applied in place) | `threads` | `threads` | **not covered** |
+| Redactions (`[redacted]` tombstone) | `threads` | `threads` | **not covered** |
+| In-timeline find (Ctrl-F, n/N) | `threads` | **n/a** | **n/a** |
+| Threads: open panel, read replies | `threads` | `threads` | `threads` |
+| Inline images (Sixel / Kitty / iTerm2) | `media` | **n/a** | **n/a** |
+| Full-size image preview | `media` | `media` | `media` |
+| Image galleries (adjacency grouping, ADR 0081) | **n/a** | `media` | `media` |
+| Lightbox paging across a gallery run | **n/a** | `media` | `media` |
+| Full-text search across rooms (Tantivy) | `search` | `search` | `search` |
+| Search field filters (`room:`, `all:true`) | `search` | `search` | `search` |
+| Search hit as a deep link into a room | **not covered** | `search` | `search` |
+| Jump to a date in history | `jump` | **not covered** | **not covered** |
+| Sending a message | `send` | `send` | `send` |
+| Deleting one's own message | **not covered** | `send` | `send` |
+| Shortcuts and help popups | `shortcuts` | `shortcuts` | **n/a** |
+| Spaces: picker, filtering, hierarchy (ADR 0084) | **n/a** | `spaces` | `rooms` |
+| Single-pane navigation and Back (ADR 0062) | **n/a** | **n/a** | `rooms` |
+| Room information panel | **not covered** | **not covered** | `timeline` |
+| Unread thread picker (Alt-T) | **not covered** | **not covered** | **not covered** |
+| Search result sort / group / edit toggles | **not covered** | **not covered** | **not covered** |
+| Sending media | **not covered** | **not covered** | **not covered** |
+| Message actions: edit, redact, reply | **not covered** | **not covered** | **not covered** |
+| Room actions: invite, leave, pin (M19) | **not covered** | **not covered** | **not covered** |
+| Device verification (SAS) | **not covered** | **not covered** | **not covered** |
+| Typing indicators and read receipts (M18) | **not covered** | **not covered** | **not covered** |
+| State-event notices (ADR 0083) | **not covered** | **not covered** | **not covered** |
 
 ## Why the uncovered rows are uncovered
 
@@ -93,11 +97,32 @@ landed. They are listed now so the gap is visible rather than discovered later.
 - **Spaces and galleries in the TUI.** The TUI has neither (see
   `docs/client-parity.md`); spaces appear in its room list as ordinary rooms.
   These are `n/a` rather than gaps in the demo.
+- **Sort, filter, and the name filter on web mobile.** The controls are all
+  there and all work; they are simply the same demonstration as the desktop
+  take, on a third of the screen. The mobile scenes spend their budget on what
+  only mobile has — the single-pane transition, Back, the room-information
+  panel, and touch-sized message actions. Worth revisiting if the mobile room
+  list ever diverges from the desktop one.
+- **Edits and redactions on web mobile.** Same reasoning: the rendering is
+  identical to the desktop take, which covers it.
+- **Jump to a date on web.** The client has no date-jump entry point of its own
+  — the TUI's `/jump` has no web counterpart yet — so this is closer to a
+  parity gap than a demo gap; see `docs/client-parity.md`.
+- **State-event notices (ADR 0083).** Deliberately switched *off* for both web
+  recordings. `/createRoom` does not honour a backdated `ts`, so the newest
+  event in every corpus room is the viewer's own join; at the shipped default
+  every timeline would end on "Alex Marx joined the room", which reads as a
+  broken client. Covering this honestly needs a corpus that ends each room on a
+  message, not a longer scene.
+- **In-timeline find on web.** The web client has no Ctrl-F of its own; search
+  is the answer there, which the `search` scenes cover.
 
 ## Findings the demo scenes pinned
 
 Things that are true of the clients, discovered by scripting them, and which a
 scene now depends on:
+
+### TUI
 
 - `/room` resolves a room id, a canonical alias, or a room **name**. A DM has no
   name — its "Maya Harrison" title is derived per render from the other member —
@@ -119,3 +144,30 @@ scene now depends on:
 - Sending a reaction returns the input to compose mode, so the Shift-U withdraw
   chord is typed as a bare `U` into the buffer rather than acting on the
   message. The `react` scene uses `/unreact`, which acts on the selection.
+
+### Web
+
+- **Search scope is the point of invocation** (ADR 0066). Opened from inside a
+  room, an unqualified query searches *that room* — so a scene that means to
+  show cross-room search has to say `all:true`, and one that searches for a word
+  living in another room finds nothing at all. Both web `search` scenes are
+  built around this rather than around it.
+- **A room-list row's rendered text contains a ticking relative timestamp**
+  (`1m` → `2m`). Comparing whole-row text across a scene reports a reorder that
+  never happened; the sort step compares `href` instead.
+- **The overlay's result count is the server's total; `a.search-hit` is not.**
+  The list auto-pages on scroll, so counting rendered hits measures where the
+  list happens to be scrolled to.
+- **A redaction leaves a permanent tombstone row.** "Script the undo" keeps the
+  *content* out of the next run but cannot remove the row, so two mutating
+  scenes must not share a room — whichever runs second opens on the other's
+  "message deleted" — and a real take is recorded against a freshly seeded
+  stack.
+- **A touch tap still emits compatibility mouse events.** The demo's pointer
+  overlay gates on `pointerType`, or the phone recording grows a desktop arrow
+  cursor hovering beside the finger.
+- **Mobile WebKit has no mouse wheel**, which is the correct answer — a phone
+  has none either. The mobile timeline scene scrolls with a smooth-behaviour
+  `scrollBy` rather than pretending to a gesture it is not.
+- **Message actions are hidden until the row is tapped** at phone widths, and
+  Enter is not the send affordance a touch-only user has — the Send button is.

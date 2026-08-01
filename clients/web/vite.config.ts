@@ -16,6 +16,19 @@ import {
 // Override the target with AXON_SERVER_URL if your server is not on :8080.
 const axonServer = process.env.AXON_SERVER_URL ?? 'http://localhost:8080'
 
+// The same proxy is given to `vite preview`, so the *built* bundle can be
+// pointed at a real axon without standing up a reverse proxy of its own. The
+// demo recording lane (ADR 0086 phase 3) is why that matters: a demo should
+// show the production bundle, and the axon it reads is a throwaway `--corpus`
+// local stack that lands on a different port every run.
+const axonProxy = {
+  '/v1': {
+    target: axonServer,
+    changeOrigin: true,
+    ws: true,
+  },
+}
+
 // Vite blocks dev-server requests whose Host header isn't localhost. To reach
 // the dev server through another hostname (a tunnel, a LAN name, a reverse
 // proxy), list the extra hostnames — comma-separated — without editing this
@@ -127,13 +140,11 @@ export default defineConfig({
   },
   server: {
     allowedHosts,
-    proxy: {
-      '/v1': {
-        target: axonServer,
-        changeOrigin: true,
-        ws: true,
-      },
-    },
+    proxy: axonProxy,
+  },
+  preview: {
+    allowedHosts,
+    proxy: axonProxy,
   },
   test: {
     environment: 'jsdom',

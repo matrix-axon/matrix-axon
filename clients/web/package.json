@@ -16,7 +16,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "test:e2e:perf": "PERF=1 playwright test timeline-back-perf"
+    "test:e2e:perf": "PERF=1 playwright test timeline-back-perf",
+    "demo": "playwright test --config playwright.demo.config.ts"
   },
   "dependencies": {
     "@preact/signals": "^2.9.2",
