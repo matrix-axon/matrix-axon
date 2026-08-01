@@ -275,8 +275,14 @@ cargo run -p axon-smoke-local-stack -- down --manifest /tmp/demo.json
 ```
 
 Output lands in `demo-artifacts/<test>/video.webm`, one clip per scene, at
-1440×900 for `demo-desktop` and 780×1688 for `demo-mobile` (an iPhone 13
-descriptor, so WebKit, real touch, and a device pixel ratio of 3).
+1440×900 for `demo-desktop` and 780×1328 for `demo-mobile` (an iPhone 13
+descriptor, so WebKit, real touch, and a device pixel ratio of 3; its viewport
+is 390×664, the screen less the browser chrome).
+
+Both recordings are pinned to the **light** theme, and to a light emulated
+`prefers-color-scheme` to match. The shipped default follows the system
+preference, which would otherwise make a take's appearance depend on the
+machine that made it.
 
 **Record a real take against a freshly seeded stack.** The mutating scenes undo
 themselves by redacting what they sent, and a redaction leaves a permanent

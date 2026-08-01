@@ -89,6 +89,12 @@ export default defineConfig({
     baseURL: BASE_URL,
     trace: 'off',
     screenshot: 'off',
+    // The app's own `theme` setting is what actually decides (seeded in
+    // `stage`), but pin the emulated media query to match so anything reading
+    // `prefers-color-scheme` directly — form controls, scrollbars, the UA
+    // `color-scheme` — agrees with it. A recording must not depend on the
+    // preferences of the machine it was made on.
+    colorScheme: 'light',
   },
   projects: [
     {

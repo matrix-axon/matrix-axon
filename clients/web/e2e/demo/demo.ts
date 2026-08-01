@@ -245,7 +245,10 @@ export async function dwell(page: Page, ms: number): Promise<void> {
  */
 const DEMO_SETTINGS = {
   version: 1,
-  theme: 'dark',
+  // Pinned, not `system`. The shipped default follows `prefers-color-scheme`,
+  // so on the default the recording's appearance would depend on the machine
+  // it was made on — two takes of the same scene could disagree.
+  theme: 'light',
   spacesPaneAutoHide: false,
   spacesPaneCollapsed: false,
   sidebarCollapsed: false,
