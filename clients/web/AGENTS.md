@@ -91,7 +91,11 @@ before starting a milestone.
   The corollary is stronger than it looks: cached content is fine to _render_,
   but a **mutation computed from a list must not run off an unconfirmed copy of
   it** — a stale render is corrected by the next refresh, a stale bulk write is
-  not (#102).
+  not (#102). One record per reader is enforced by pruning every foreign key
+  in the `rooms` area on each successful write, which assumes **one token per
+  origin** — true while the token lives in `localStorage`. Per-tab tokens
+  would make two tabs delete each other's record on every write, so neither
+  reader ever gets a hit and the cache degrades to "off" without erroring.
 
   Two rules the cache needs that a wipe alone cannot give it, both found in
   review:
@@ -102,7 +106,11 @@ before starting a milestone.
      reader's cache key, which lands _after_ the sign-out wipe and so survives
      it. `resetSession()` bumps a generation, and completions that do not match
      are discarded — the WCR-03 request-generation guard applied to identity
-     rather than ordering.
+     rather than ordering. It binds the **cache read** as well as the network
+     one: a sign-out leaves precisely the pristine store (no rows, unsettled)
+     that `hydrate()`'s freshness guard treats as safe to write into, so
+     without the generation check a boot read still in flight would repaint
+     the just-cleared list with the previous reader's rows.
   2. **A wipe is a barrier, not an event.** `clear()` bumps `CacheStore.generation`
      **synchronously**, and writers capture it before their first await and
      re-check before committing. Otherwise a write already in flight lands on

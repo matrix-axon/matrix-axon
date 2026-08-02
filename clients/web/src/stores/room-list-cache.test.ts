@@ -77,6 +77,21 @@ const settle = async () => {
   }
 }
 
+/**
+ * Wait for a restore to actually land, rather than for a fixed number of
+ * ticks. `settle()` is fine for "let a fire-and-forget write finish", but a
+ * test that goes on to assert *about* restored rows must not race the read:
+ * three tasks is enough on an idle machine and not enough on a loaded one, so
+ * a `settle()` there fails roughly one run in five under a full suite.
+ */
+const waitForRows = async (store: { rooms: { value: unknown[] } }) => {
+  for (let i = 0; i < 200; i += 1) {
+    if (store.rooms.value.length > 0) return
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  throw new Error('timed out waiting for the cache restore')
+}
+
 describe('room-list cache', () => {
   it('persists the rows a settled refresh returned', async () => {
     server.use(
@@ -115,7 +130,7 @@ describe('room-list cache', () => {
       harness({ cache }).roomList,
     )
     const refreshing = store.refresh()
-    await settle()
+    await waitForRows(store)
 
     // The whole point: rows are on screen while the request is still open.
     expect(store.loading.value).toBe(false)
@@ -142,7 +157,7 @@ describe('room-list cache', () => {
       memoryStorage(),
       harness({ cache }).roomList,
     )
-    await settle()
+    await waitForRows(store)
     await store.refresh()
     expect(store.rooms.value.map((room) => room.room_id)).toEqual(['!ops:hs'])
     expect(store.stale.value).toBe(true)
@@ -176,7 +191,7 @@ describe('room-list cache', () => {
       memoryStorage(),
       harness({ cache }).roomList,
     )
-    await settle()
+    await waitForRows(store)
     await store.refresh()
 
     expect(store.rooms.value.map((room) => room.room_id)).toEqual(['!ops:hs'])
@@ -348,6 +363,41 @@ describe('room-list cache', () => {
     expect(store.stale.value).toBe(false)
   })
 
+  it('does not let a late restore land on top of a sign-out', async () => {
+    const { cache } = harness()
+    await cache.write('rooms', (await cacheNamespace(BASE_URL, 'tok-test'))!, {
+      version: 1,
+      savedAt: 0,
+      rooms: [LOUNGE],
+    })
+    // Waiting on the read itself, not on a tick count: asserting "the rows did
+    // not appear" is vacuously true while the read is still in flight, so a
+    // fixed `settle()` here would pass against the unguarded `hydrate()` on
+    // any machine slow enough.
+    const inner = harness({ cache }).roomList
+    let readSettled = () => {}
+    const read = new Promise<void>((resolve) => (readSettled = resolve))
+    const store = createRoomsStore(api(), memoryStorage(), {
+      read: async () => {
+        try {
+          return await inner.read()
+        } finally {
+          readSettled()
+        }
+      },
+      write: (rooms) => inner.write(rooms),
+    })
+    // Sign-out lands while the boot read is still in flight. It leaves exactly
+    // the pristine state the hydrate guard treats as safe to write into —
+    // no rows, unsettled — so only the session check can stop the previous
+    // reader's rows from repainting the just-cleared list.
+    store.resetSession()
+    await read
+    await settle()
+    expect(store.rooms.value).toEqual([])
+    expect(store.stale.value).toBe(false)
+  })
+
   it('isolates readers: another token cannot read these rows', async () => {
     const { cache } = harness()
     harness({ cache, token: 'token-one' }).roomList.write([OPS])
@@ -475,7 +525,7 @@ describe('ensureLoaded', () => {
       memoryStorage(),
       harness({ cache }).roomList,
     )
-    await settle()
+    await waitForRows(store)
     // Restored: `loading` is false and the list is non-empty, so the guards
     // this replaced would both have decided the list was already loaded.
     expect(store.loading.value).toBe(false)

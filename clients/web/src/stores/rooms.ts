@@ -634,6 +634,11 @@ export function createRoomsStore(
    * the only way to lose that race is to start late.
    */
   async function hydrate(): Promise<void> {
+    // Same rule as `doRefresh`: rows belong to the session that asked for
+    // them. A sign-out landing mid-read leaves exactly the pristine state
+    // the guard below treats as safe to write into, so without this the
+    // previous reader's cached rows would repaint the just-cleared list.
+    const generation = sessionGeneration
     perfMark('rooms:cache:read:start')
     const cached = await cache?.read()
     perfMark('rooms:cache:read:end', {
@@ -643,9 +648,10 @@ export function createRoomsStore(
     if (cached === undefined || cached.length === 0) {
       return
     }
-    // The network won the race, or a mutation already populated the list.
-    // Cached rows are strictly older than either, so they must not land on top.
-    if (settled || rooms.value.length > 0) {
+    // The network won the race, a mutation already populated the list, or the
+    // session these rows belong to has ended. Cached rows are strictly older
+    // than any of those, so they must not land on top.
+    if (generation !== sessionGeneration || settled || rooms.value.length > 0) {
       return
     }
     const visible = cached.filter(
