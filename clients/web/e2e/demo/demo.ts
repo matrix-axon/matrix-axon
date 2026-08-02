@@ -44,6 +44,17 @@ interface DemoSpace {
   children: string[]
 }
 
+/**
+ * Only the parts of the manifest this driver actually reads.
+ *
+ * Not a mirror of the Rust `DemoManifest`: a mirror would have to be kept in
+ * step by hand, and nothing here would fail if it drifted — the manifest is
+ * plain JSON read at runtime, so an unused declared field is a claim TypeScript
+ * never checks. (`seeded_at` is in the real manifest and absent here for
+ * exactly that reason: no web scene names a date.) Add a field when a scene
+ * needs it; `demo.events` and `demo.media` map corpus ids to Matrix ids and
+ * `mxc://` URIs when one does.
+ */
 interface Manifest {
   axon_base_url: string
   axon_bearer_token: string
@@ -52,8 +63,6 @@ interface Manifest {
     personas: Record<string, DemoPersona>
     spaces: Record<string, DemoSpace>
     rooms: Record<string, DemoRoom>
-    events: Record<string, string>
-    media: Record<string, string>
   }
 }
 
@@ -171,6 +180,13 @@ export async function resetRoom(room: string, needle: string): Promise<number> {
   const encoded = encodeURIComponent(roomId(room))
   const headers = { authorization: `Bearer ${token}` }
 
+  // One page, deliberately: the timeline reads newest-first and a cursorless
+  // request is the newest page, while debris is by definition the newest thing
+  // in the room — a scene sends at wall-clock now, and every corpus message is
+  // backdated. So leftovers cannot fall off the end of this page unless a
+  // single failed run left more than 100 of them behind, which would mean a
+  // scene sending in a loop. Growing `demo.toml` does not erode it; the
+  // guarantee is about ordering, not about corpus size.
   const page = await fetch(
     `${base}/v1/accounts/${account}/rooms/${encoded}/timeline?limit=100`,
     { headers },

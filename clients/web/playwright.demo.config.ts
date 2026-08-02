@@ -68,9 +68,17 @@ function axonBaseUrl(): string {
 
 /**
  * Videos are captured at CSS-pixel size, so a phone viewport would otherwise
- * yield a 390px-wide recording. Doubling it resamples from the real
+ * yield a 390px-wide recording. Scaling up resamples from the real
  * device-scale-factor-3 raster the page is already painted at, rather than
- * upscaling something small.
+ * upscaling something small — every factor up to 3x is downsampling from a
+ * sharper source, not interpolation.
+ *
+ * 2x rather than the full 3x because the ceiling here is file size, not
+ * sharpness. 3x is 1170x2532, which is both larger than any browser will show
+ * a portrait video inline on the docs page and roughly double the bytes; at 2x
+ * the take is ~6 MB and still reads as crisp, since it is a downsample of a 3x
+ * raster rather than a native 2x one. Revisit if the video ever needs to be
+ * legible full-screen on a hidpi display.
  */
 const iPhone = devices['iPhone 13']
 

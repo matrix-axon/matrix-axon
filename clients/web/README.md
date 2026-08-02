@@ -318,4 +318,5 @@ PR. Two rules the scenes are built on, both learned the hard way (ADR 0086):
 a step that changes state needs an assertion **only the new state satisfies**
 (assert on what _left_, not on what stayed), and a scene that mutates
 **scripts its own undo**, or its second run passes vacuously on what its first
-run left behind.
+run left behind. Both are stated in full, with the Playwright specifics, in the
+`e2e/demo/demo.ts` module docstring — change them there first.
