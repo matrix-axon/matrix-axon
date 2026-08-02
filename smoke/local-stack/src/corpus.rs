@@ -242,9 +242,11 @@ pub async fn seed(
         .parent()
         .ok_or_else(|| anyhow!("corpus path has no parent directory"))?
         .to_path_buf();
-    validate(&corpus)?;
-
+    // One instant for both, so validation and seeding resolve every relative
+    // offset against the same "now".
     let now = Utc::now();
+    validate(&corpus, now)?;
+
     let personas: HashMap<&str, &Persona> = corpus
         .persona
         .iter()
@@ -301,8 +303,8 @@ pub async fn seed(
         let mxc = persona
             .avatar
             .as_ref()
-            .map(|rel| media[rel].mxc.as_str())
-            .map(str::to_owned);
+            .map(|rel| uploaded_mxc(&media, rel))
+            .transpose()?;
         set_profile(
             client,
             hs,
@@ -315,12 +317,7 @@ pub async fn seed(
 
     // Messages, oldest first — which is also the order relations depend on, and
     // which tells each room when its setup should claim to have happened.
-    let mut ordered: Vec<(i64, &Message)> = corpus
-        .message
-        .iter()
-        .map(|m| Ok((parse_at(&m.at, now)?, m)))
-        .collect::<anyhow::Result<_>>()?;
-    ordered.sort_by_key(|(ts, _)| *ts);
+    let ordered = ordered_messages(&corpus, now)?;
     let mut setup_ts: HashMap<&str, i64> = HashMap::new();
     for (ts, message) in &ordered {
         setup_ts
@@ -400,7 +397,7 @@ pub async fn seed(
                 hs,
                 &room_id,
                 &viewer.user_id,
-                &media[avatar].mxc,
+                &uploaded_mxc(&media, avatar)?,
                 ts + 4_000,
             )
             .await?;
@@ -442,7 +439,7 @@ pub async fn seed(
                 hs,
                 &space_id,
                 &viewer.user_id,
-                &media[avatar].mxc,
+                &uploaded_mxc(&media, avatar)?,
                 now_ms,
             )
             .await?;
@@ -563,6 +560,11 @@ pub async fn seed(
         })
         .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
 
+    // Any joined room proves axon's sync has caught up with the seeding, so this
+    // is deliberately *a* room and not *the* room — nothing downstream should
+    // read significance into which one. `rooms` is a BTreeMap, so this is the
+    // alphabetically first corpus room id: arbitrary, but stable across runs,
+    // which is what a probe wants.
     let sync_probe_room = rooms
         .values()
         .map(|r| r.room_id.clone())
@@ -595,7 +597,7 @@ pub async fn seed(
 /// Catch the corpus mistakes that would otherwise surface as a confusing HTTP
 /// error halfway through seeding, or — worse — as a demo that runs and is
 /// quietly missing its point.
-fn validate(corpus: &Corpus) -> anyhow::Result<()> {
+fn validate(corpus: &Corpus, now: chrono::DateTime<Utc>) -> anyhow::Result<()> {
     let mut seen = HashSet::new();
     for persona in &corpus.persona {
         if !seen.insert(persona.id.as_str()) {
@@ -632,13 +634,7 @@ fn validate(corpus: &Corpus) -> anyhow::Result<()> {
     // strictly older than the message naming it — checked here rather than
     // discovered as an unresolvable handle mid-run.
     let mut defined: HashMap<&str, i64> = HashMap::new();
-    let now = Utc::now();
-    let mut ordered: Vec<(i64, &Message)> = corpus
-        .message
-        .iter()
-        .map(|m| Ok((parse_at(&m.at, now)?, m)))
-        .collect::<anyhow::Result<_>>()?;
-    ordered.sort_by_key(|(ts, _)| *ts);
+    let ordered = ordered_messages(corpus, now)?;
     for (ts, message) in &ordered {
         if !room_ids.contains(message.room.as_str()) {
             bail!(
@@ -675,6 +671,17 @@ fn validate(corpus: &Corpus) -> anyhow::Result<()> {
                 message.room
             );
         }
+        if message.edited_to.is_some() && message.redacted {
+            // The redaction removes the content the edit produced, so the edit
+            // is invisible in every client and the author silently did not get
+            // what they wrote. `seed` applies the two independently and would
+            // not notice.
+            bail!(
+                "message at {} in {} sets both `edited_to` and `redacted`; the redaction erases the edit",
+                message.at,
+                message.room
+            );
+        }
         for target in [&message.reply_to, &message.thread].into_iter().flatten() {
             match defined.get(target.as_str()) {
                 Some(target_ts) if target_ts < ts => {}
@@ -707,6 +714,26 @@ fn validate(corpus: &Corpus) -> anyhow::Result<()> {
 ///
 /// Seconds are optional but significant when present: the gallery run's spacing
 /// is the whole point of that fixture.
+/// Corpus messages paired with their resolved timestamps, oldest first.
+///
+/// Both `validate` and `seed` need exactly this, and both need it in the same
+/// order: relations resolve against messages already sent, so "older" has to
+/// mean the same thing in the check and in the run. Sharing `now` is part of
+/// that — resolving the same relative offset against two different instants
+/// could in principle have `parse_at`'s future check disagree between them.
+fn ordered_messages(
+    corpus: &Corpus,
+    now: chrono::DateTime<Utc>,
+) -> anyhow::Result<Vec<(i64, &Message)>> {
+    let mut ordered: Vec<(i64, &Message)> = corpus
+        .message
+        .iter()
+        .map(|m| Ok((parse_at(&m.at, now)?, m)))
+        .collect::<anyhow::Result<_>>()?;
+    ordered.sort_by_key(|(ts, _)| *ts);
+    Ok(ordered)
+}
+
 fn parse_at(at: &str, now: chrono::DateTime<Utc>) -> anyhow::Result<i64> {
     let mut parts = at.split_whitespace();
     let (offset, time) = match (parts.next(), parts.next(), parts.next()) {
@@ -800,6 +827,19 @@ fn message_content(
             serde_json::json!({ "m.in_reply_to": { "event_id": resolve(reply_to)? } });
     }
     Ok(content)
+}
+
+/// The `mxc://` for a corpus media path, or an error naming the path.
+///
+/// Every referenced path is uploaded up front, so a miss is unreachable today —
+/// but indexing the map directly would panic rather than say which path is
+/// missing, and the rest of this module reports that kind of gap as an error
+/// (see `message_content`'s image lookup).
+fn uploaded_mxc(media: &HashMap<String, Media>, rel: &str) -> anyhow::Result<String> {
+    media
+        .get(rel)
+        .map(|uploaded| uploaded.mxc.clone())
+        .ok_or_else(|| anyhow!("avatar {rel} was never uploaded"))
 }
 
 async fn upload_corpus_media(
@@ -926,7 +966,27 @@ mod tests {
 
     #[test]
     fn committed_corpus_is_valid() {
-        validate(&corpus()).expect("committed corpus validates");
+        validate(&corpus(), Utc::now()).expect("committed corpus validates");
+    }
+
+    #[test]
+    fn an_edited_message_may_not_also_be_redacted() {
+        // Seeding both is always a mistake: the redaction erases the content the
+        // edit produced, so the edit renders nowhere and the corpus author gets
+        // something other than what they wrote.
+        let mut corpus = corpus();
+        let message = corpus
+            .message
+            .iter_mut()
+            .find(|m| m.edited_to.is_some())
+            .expect("committed corpus has an edited message");
+        message.redacted = true;
+
+        let err = validate(&corpus, Utc::now()).expect_err("must be rejected");
+        assert!(
+            err.to_string().contains("erases the edit"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
