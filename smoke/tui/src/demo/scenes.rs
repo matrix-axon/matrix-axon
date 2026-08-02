@@ -336,10 +336,13 @@ fn search(demo: &Demo) -> anyhow::Result<Vec<Step>> {
 /// there is real distance to travel.
 fn jump(demo: &Demo) -> anyhow::Result<Vec<Step>> {
     let trail = room_name(demo, "trail-work")?;
-    // The corpus dates everything relative to the seeding run, so the target is
-    // computed the same way: fourteen days back is the day the planning thread
-    // opened.
-    let target = (chrono::Utc::now() - chrono::Duration::days(14))
+    // Counted back from the manifest's `seeded_at`, not from this process's
+    // `now`: fourteen days before the *seeding* run is the day the planning
+    // thread opened, and a stack brought up by `demo-stack.sh up` is meant to
+    // stay up for a recording that may happen on a later calendar day. Using
+    // `now` here made the scene fail whenever `up` and `record` straddled
+    // midnight — it jumped to a date the corpus never wrote to.
+    let target = (demo.seeded_at - chrono::Duration::days(14))
         .format("%Y-%m-%d")
         .to_string();
     Ok(vec![
@@ -494,4 +497,79 @@ fn missing<'a>(kind: &str, id: &str, known: impl Iterator<Item = &'a String>) ->
         "corpus has no {kind} {id:?}; the manifest lists: {}",
         known.join(", ")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A manifest with one room, seeded at a fixed instant well in the past.
+    fn demo_seeded_at(seeded_at: &str) -> Demo {
+        serde_json::from_value(serde_json::json!({
+            "name": "test",
+            "seeded_at": seeded_at,
+            "viewer": {
+                "persona": "alex",
+                "account": { "user_id": "@alex:localhost", "password": "pw" },
+            },
+            "personas": {},
+            "spaces": {},
+            "rooms": {
+                "trail-work": {
+                    "room_id": "!trail:localhost",
+                    "name": "Trail Work",
+                    "direct": false,
+                    "members": [],
+                },
+            },
+            "events": {},
+            "media": {},
+        }))
+        .expect("fixture matches the manifest shape")
+    }
+
+    /// The `jump` scene must date its target from the manifest, not from the
+    /// clock: `demo-stack.sh up` is designed to leave a stack running for a
+    /// recording made later, possibly on another calendar day. Computed from
+    /// `Utc::now()` this asserted a date the corpus never wrote to, and the
+    /// scene timed out waiting for a status line that never appeared.
+    #[test]
+    fn jump_targets_fourteen_days_before_seeding() {
+        let demo = demo_seeded_at("2026-01-20T09:00:00Z");
+        let steps = Scene::build("jump", &demo).expect("build jump scene");
+        let commands: Vec<&str> = steps
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Command(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            commands.contains(&"/jump 2026-01-06"),
+            "jump scene should target 2026-01-06, got {commands:?}"
+        );
+    }
+
+    /// The same manifest read twice must produce the same date, whatever the
+    /// clock says — the property the scene actually depends on.
+    #[test]
+    fn jump_target_does_not_move_with_the_clock() {
+        let early = Scene::build("jump", &demo_seeded_at("2026-01-20T00:00:01Z"))
+            .expect("build jump scene");
+        let late = Scene::build("jump", &demo_seeded_at("2026-01-20T23:59:59Z"))
+            .expect("build jump scene");
+        let dates = |scene: &Scene| -> Vec<String> {
+            scene
+                .steps
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Command(text) => text.strip_prefix("/jump ").map(str::to_owned),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(dates(&early), vec!["2026-01-06".to_owned()]);
+        assert_eq!(dates(&early), dates(&late));
+    }
 }

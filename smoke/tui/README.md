@@ -264,7 +264,7 @@ restored. A failing scene writes the rendered screen and the raw transcript to
 
 ### Writing a scene
 
-Scenes live in `src/demo/scenes.rs`. Two rules, both learned the hard way:
+Scenes live in `src/demo/scenes.rs`. Three rules, all learned the hard way:
 
 - **Address content by corpus name, never by Matrix id** — `manifest.demo` maps
   the stable names onto the per-run ids.
@@ -274,6 +274,12 @@ Scenes live in `src/demo/scenes.rs`. Two rules, both learned the hard way:
   somewhere unintended. Prefer state-unique chrome (a popup title, the
   `[in thread]` marker, `result 1 of`) over message text that is on screen
   either way, and use `WaitGone` to prove a narrowing step actually narrowed.
+- **Date anything from `demo.seeded_at`, never from the clock.** The corpus
+  resolves its relative `at = "-6d 09:12"` offsets against the instant it was
+  seeded, and `demo-stack.sh up` is designed to leave a stack running for a
+  recording made later — so `up` and `record` can straddle midnight. A scene
+  that computed its own `Utc::now() - 14d` jumped to a date the corpus never
+  wrote to, and hung waiting for a status line that never came.
 
 Scenes are coupled to the corpus prose on purpose: rewording a message in
 `demo.toml` fails the scene loudly, with the screen attached, rather than

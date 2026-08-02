@@ -95,13 +95,20 @@ pub fn query_cell_size_via_xtwinops() -> Option<(u16, u16)> {
     // ICANON still on this descriptor `poll` never reports it readable and the
     // probe times out while the terminal echoes the answer into the output
     // instead. Restored below however this returns.
+    //
+    // ISIG goes too, for the restore's sake rather than the read's: this runs
+    // before `RawGuard` exists and the `tcsetattr` below is a plain statement,
+    // not a `Drop` guard, so a Ctrl-C inside the ~300ms window would raise
+    // SIGINT, kill the process, and leave the terminal half-raw. Cleared, that
+    // Ctrl-C arrives as a `0x03` byte instead — which `drain_pending_input`
+    // discards on the way to the first forwarded keystroke.
     let saved = unsafe {
         let mut termios: libc::termios = std::mem::zeroed();
         if libc::tcgetattr(libc::STDIN_FILENO, &mut termios) != 0 {
             return None;
         }
         let mut raw = termios;
-        raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+        raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
         raw.c_cc[libc::VMIN] = 0;
         raw.c_cc[libc::VTIME] = 0;
         if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) != 0 {

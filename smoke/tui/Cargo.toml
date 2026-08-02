@@ -43,7 +43,7 @@ serde_json = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 # `axon-demo-tui` only: the corpus backdates messages relative to the seeding
 # run, so a `/jump <date>` scene has to do the same arithmetic to aim at one.
-chrono = { workspace = true, features = ["clock"] }
+chrono = { workspace = true, features = ["clock", "serde"] }
 portable-pty = { workspace = true }
 vt100 = { workspace = true }
 # `axon-demo-tui` only: raw mode on the developer's real terminal, and the cell

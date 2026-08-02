@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context};
-use chrono::{Duration, NaiveTime, Utc};
+use chrono::{DateTime, Duration, NaiveTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -165,6 +165,14 @@ pub struct DemoManifest {
     pub corpus_path: PathBuf,
     pub name: String,
     pub description: String,
+    /// The instant every relative `at = "-6d 09:12"` was resolved against.
+    ///
+    /// Published because the corpus's dates are only meaningful relative to it,
+    /// and a stack is designed to outlive the run that seeded it: `demo-stack.sh
+    /// up` can leave it running for a recording made on a later calendar day. A
+    /// driver that wants the date of some seeded message has to count back from
+    /// *this*, not from its own `now`.
+    pub seeded_at: DateTime<Utc>,
     /// The account axon is logged in as — the demo's point of view.
     pub viewer: DemoViewer,
     pub personas: BTreeMap<String, DemoPersona>,
@@ -578,6 +586,7 @@ pub async fn seed(
             corpus_path: path,
             name: corpus.meta.name,
             description: corpus.meta.description,
+            seeded_at: now,
             viewer: DemoViewer {
                 persona: viewer_persona.id.clone(),
                 account: viewer,

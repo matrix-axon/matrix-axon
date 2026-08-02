@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::env::{env_cargo, resolve_workspace_bin};
@@ -25,6 +26,10 @@ pub struct Manifest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Demo {
     pub name: String,
+    /// The instant the corpus resolved its relative dates against. Scenes that
+    /// name a date must count back from this, not from their own `now`: the
+    /// stack is meant to outlive the run that seeded it.
+    pub seeded_at: DateTime<Utc>,
     pub viewer: DemoViewer,
     pub personas: BTreeMap<String, DemoPersona>,
     pub spaces: BTreeMap<String, DemoSpace>,
