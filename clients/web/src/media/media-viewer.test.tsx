@@ -181,6 +181,29 @@ describe('MediaViewerProvider', () => {
     expect(shownImage()).toBe('$2.png')
   })
 
+  it('keeps Close as the initial focus with contextual actions', async () => {
+    serveBytes()
+    const { container } = render(
+      <Surface
+        events={[image('$1', 10)]}
+        atStart
+        actions={{
+          ownUserId: '@alice:hs',
+          onReply: vi.fn(),
+          onReact: vi.fn(),
+          onOpenThread: vi.fn(),
+          onDelete: vi.fn(async () => true),
+        }}
+      />,
+    )
+
+    await openAt(container, '$1')
+    const close = document.querySelector<HTMLButtonElement>(
+      '[aria-label="Close"]',
+    )
+    await waitFor(() => expect(document.activeElement).toBe(close))
+  })
+
   it('delegates contextual actions for the displayed image after closing', async () => {
     serveBytes()
     const onReply = vi.fn()
@@ -205,7 +228,7 @@ describe('MediaViewerProvider', () => {
     const controls = [...document.querySelectorAll('.lightbox-toolbar button')]
     expect(
       controls.map((control) => control.getAttribute('aria-label')),
-    ).toEqual(['Reply', 'Thread', 'React', 'Delete', 'Close'])
+    ).toEqual(['Close', 'Reply', 'Thread', 'React', 'Delete'])
 
     fireEvent.click(
       document.querySelector<HTMLButtonElement>('[aria-label="Reply"]')!,

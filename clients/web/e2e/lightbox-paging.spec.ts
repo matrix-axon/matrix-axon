@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { openRoom } from './helpers'
+import { openRoom, ROOM_URL, signIn } from './helpers'
 
 /**
  * Lightbox paging across the loaded timeline (ADR 0081). The seed room carries
@@ -198,7 +198,11 @@ test.describe('message actions on a phone', () => {
   test('keeps the contextual action toolbar within the viewport', async ({
     page,
   }) => {
-    await openRoom(page)
+    // `openRoom` intentionally sets a desktop viewport for its callers; this
+    // phone-layout test must keep the viewport declared above.
+    await signIn(page)
+    await page.goto(ROOM_URL)
+    await expect(page.getByRole('status')).toHaveText('Live')
     const ids = await imageRowIds(page)
     await openImage(page, ids[0])
 
@@ -209,12 +213,18 @@ test.describe('message actions on a phone', () => {
     await expect(
       toolbar.getByRole('button', { name: 'Save image to device' }),
     ).toBeVisible()
-    const labels = await toolbar
+    const visualLabels = await toolbar
       .locator('button')
       .evaluateAll((buttons) =>
-        buttons.map((button) => button.getAttribute('aria-label')),
+        buttons
+          .map((button) => ({
+            label: button.getAttribute('aria-label'),
+            left: button.getBoundingClientRect().left,
+          }))
+          .sort((a, b) => a.left - b.left)
+          .map(({ label }) => label),
       )
-    expect(labels).toEqual([
+    expect(visualLabels).toEqual([
       'Reply',
       'Thread',
       'React',
@@ -246,6 +256,58 @@ test.describe('message actions on a phone', () => {
     await toolbar.getByRole('button', { name: 'React' }).click()
     await expect(page.getByRole('dialog')).toBeHidden()
     await expect(page.locator('.reaction-picker-shell')).toBeVisible()
+  })
+
+  test('keeps the six-control own-image toolbar within the viewport', async ({
+    page,
+  }) => {
+    await page.request.post('/__e2e/lightbox-own-image?enabled=true')
+    try {
+      await signIn(page)
+      await page.goto(ROOM_URL)
+      await expect(page.getByRole('status')).toHaveText('Live')
+      await openImage(page, '$seed-image-own:hs')
+
+      const toolbar = page.locator('.lightbox-toolbar')
+      await expect(
+        toolbar.getByRole('button', { name: 'Delete' }),
+      ).toBeVisible()
+      const visualLabels = await toolbar
+        .locator('button')
+        .evaluateAll((buttons) =>
+          buttons
+            .map((button) => ({
+              label: button.getAttribute('aria-label'),
+              left: button.getBoundingClientRect().left,
+            }))
+            .sort((a, b) => a.left - b.left)
+            .map(({ label }) => label),
+        )
+      expect(visualLabels).toEqual([
+        'Reply',
+        'Thread',
+        'React',
+        'Delete',
+        'Save image to device',
+        'Close',
+      ])
+
+      const layout = await toolbar.evaluate((element) => {
+        const toolbarBox = element.getBoundingClientRect()
+        const buttons = [...element.querySelectorAll('button')].map((button) =>
+          button.getBoundingClientRect(),
+        )
+        return { toolbarBox, viewportWidth: window.innerWidth, buttons }
+      })
+      expect(layout.toolbarBox.left).toBeGreaterThanOrEqual(0)
+      expect(layout.toolbarBox.right).toBeLessThanOrEqual(layout.viewportWidth)
+      for (const button of layout.buttons) {
+        expect(button.width).toBeGreaterThanOrEqual(44)
+        expect(button.height).toBeGreaterThanOrEqual(44)
+      }
+    } finally {
+      await page.request.post('/__e2e/lightbox-own-image?enabled=false')
+    }
   })
 })
 

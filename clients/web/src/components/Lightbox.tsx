@@ -230,6 +230,20 @@ export function Lightbox({
         }}
       >
         <div class="lightbox-toolbar">
+          {/*
+            Keep Close first in DOM/tab order: `useModalFocus` intentionally
+            starts a dialog on its first focusable control, and a safe dismiss
+            is the established lightbox default. CSS places it at the right
+            edge after the contextual controls and Save.
+          */}
+          <button
+            type="button"
+            class="ghost lightbox-close"
+            aria-label="Close"
+            onClick={onClose}
+          >
+            ✕
+          </button>
           {actions}
           {onSave !== undefined && (
             <button
@@ -242,14 +256,6 @@ export function Lightbox({
               {saving === true ? '…' : '⤓'}
             </button>
           )}
-          <button
-            type="button"
-            class="ghost lightbox-close"
-            aria-label="Close"
-            onClick={onClose}
-          >
-            ✕
-          </button>
         </div>
         {saveError !== null && saveError !== undefined && (
           // `alert`, not the polite paging status: this is the outcome of

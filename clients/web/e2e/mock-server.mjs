@@ -212,6 +212,33 @@ timeline.push({
   latest_edit_ts: null,
   reactions: null,
 })
+
+/** Opt-in own image for the narrow lightbox-toolbar layout regression. */
+const LIGHTBOX_OWN_IMAGE = {
+  account_id: ACCOUNT_ID,
+  event_id: '$seed-image-own:hs',
+  room_id: ROOM_ID,
+  sender: USER_ID,
+  state_key: null,
+  origin_ts: Date.now() - 2_400_000,
+  type: 'm.room.message',
+  content: {
+    msgtype: 'm.image',
+    body: 'own-image.png',
+    url: 'mxc://hs/e2eimg-own',
+    info: { mimetype: 'image/png', w: 640, h: 480, size: PNG_1PX.length },
+  },
+  body: 'own-image.png',
+  relates_to: null,
+  redacted: false,
+  redaction_event_id: null,
+  sender_trust: null,
+  edited: false,
+  edit_count: 0,
+  latest_edit_ts: null,
+  reactions: null,
+}
+let lightboxOwnImage = false
 /**
  * A second room of this account with a history of its own, keyed by room id.
  * Every other room falls back to `timeline`, which is what the rest of the
@@ -546,8 +573,14 @@ async function handleApi(req, res, url) {
     // fixtures assume.
     const roomId = decodeURIComponent(pathname.split('/').at(-2))
     const seeded = roomHistories.get(roomId) ?? timeline
+    const withOwnImage =
+      roomId === ROOM_ID && lightboxOwnImage
+        ? [...seeded, LIGHTBOX_OWN_IMAGE]
+        : seeded
     const history =
-      bulkTimeline > 0 ? [...synthTimeline(bulkTimeline), ...seeded] : seeded
+      bulkTimeline > 0
+        ? [...synthTimeline(bulkTimeline), ...withOwnImage]
+        : withOwnImage
     const atTs = url.searchParams.get('at_ts')
     if (atTs !== null) {
       const limit = Number(url.searchParams.get('limit') ?? 50)
@@ -778,6 +811,12 @@ const server = createServer((req, res) => {
   if (req.method === 'POST' && url.pathname === '/__e2e/timeline-delay') {
     timelineDelayMs = timelineHoldMs(url.searchParams.get('hold'))
     return json(res, { data: { timeline_delay_ms: timelineDelayMs } })
+  }
+  // Adds one current-user image only for the narrow-toolbar regression. The
+  // reset keeps this shared mock from perturbing unrelated specs.
+  if (req.method === 'POST' && url.pathname === '/__e2e/lightbox-own-image') {
+    lightboxOwnImage = url.searchParams.get('enabled') === 'true'
+    return json(res, { data: { lightbox_own_image: lightboxOwnImage } })
   }
   // What the browser actually staged. The unit tests cannot assert the upload's
   // *bytes* — under jsdom a `File` is not undici's `Blob`, so the body never

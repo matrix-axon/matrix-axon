@@ -4070,7 +4070,15 @@ audio.media-player {
 }
 
 .lightbox button.lightbox-action.danger {
-  color: var(--danger);
+  /* The lightbox backdrop is always dark, unlike a timeline row. Keep this
+     red light enough to meet the toolbar's fixed-contrast treatment. */
+  color: #ff8a80;
+}
+
+/* Close stays first in DOM order so modal focus lands on the safe dismiss
+   control; display it after contextual actions and Save. */
+.lightbox button.lightbox-close {
+  order: 1;
 }
 
 .lightbox button.lightbox-close:hover,
