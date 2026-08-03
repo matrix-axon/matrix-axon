@@ -6,7 +6,7 @@ import type { MembersStore } from '../stores/members'
 import type { TimelineEvent } from '../stores/timeline'
 import { useGalleryExpansion } from '../timeline/gallery-expansion'
 import { GALLERY_EAGER_BYTES, MediaGalleryCell } from './MediaGalleryCell'
-import { formatReadReceipts } from './MessageEventRow'
+import { ReadReceiptsSummary } from './MessageEventRow'
 import type { ReadReceipt } from '../stores/ephemeral'
 import { UserAvatar } from './UserAvatar'
 
@@ -304,9 +304,11 @@ export function MediaGalleryRow({
           </ul>
         )}
         {readReceipts.length > 0 && (
-          <p class="read-receipts">
-            {formatReadReceipts(readReceipts, members)}
-          </p>
+          <ReadReceiptsSummary
+            receipts={readReceipts}
+            members={members}
+            accountId={accountId}
+          />
         )}
       </div>
     </li>

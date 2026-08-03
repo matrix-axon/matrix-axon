@@ -581,4 +581,36 @@ describe('MediaGalleryRow', () => {
     expect(receipts).toHaveLength(1)
     expect(receipts[0].textContent).toContain('bob')
   })
+
+  it('expands the truncated summary to every viewer, even in a large room', async () => {
+    serveBytes()
+    const viewers = Array.from({ length: 12 }, (_, i) => ({
+      userId: `@user${i}:hs`,
+      ts: i,
+    }))
+    const { container } = render(
+      <ServicesContext.Provider value={testServices()}>
+        <ol>
+          <MediaGalleryRow
+            events={[image('$1'), image('$2')]}
+            accountId={ACCOUNT}
+            members={members}
+            readReceipts={viewers}
+            renderEvent={() => null}
+          />
+        </ol>
+      </ServicesContext.Provider>,
+    )
+    expect(
+      container.querySelector('.read-receipts')?.textContent,
+    ).toContain('10 more')
+    expect(container.querySelector('.read-receipts-popover')).toBeNull()
+
+    fireEvent.click(container.querySelector('.read-receipts')!)
+
+    const popover = container.querySelector('.read-receipts-popover')
+    expect(popover).not.toBeNull()
+    expect(popover!.querySelectorAll('.read-receipts-row')).toHaveLength(12)
+    expect(popover!.textContent).toContain('user11')
+  })
 })

@@ -433,9 +433,11 @@ export function MessageEventRow({
           </div>
         )}
         {visibleReadReceipts.length > 0 && (
-          <p class="read-receipts">
-            {formatReadReceipts(visibleReadReceipts, members)}
-          </p>
+          <ReadReceiptsSummary
+            receipts={visibleReadReceipts}
+            members={members}
+            accountId={accountId}
+          />
         )}
         {reactionPickerOpen && (
           <ReactionPicker
@@ -496,6 +498,85 @@ export function formatReadReceipts(
     return `Seen by ${names[0]} and ${names[1]}`
   }
   return `Seen by ${names[0]}, ${names[1]}, and ${names.length - 2} more`
+}
+
+/**
+ * The "Seen by …" line, expandable to the full list of viewers. Exported so
+ * the media gallery row can render the same control beneath its grid rather
+ * than growing a second implementation.
+ */
+export function ReadReceiptsSummary({
+  receipts,
+  members,
+  accountId,
+}: {
+  receipts: readonly ReadReceipt[]
+  members: MembersStore
+  accountId: string
+}) {
+  const [open, setOpen] = useState(false)
+  const root = useRef<HTMLSpanElement>(null)
+
+  useEffect(() => {
+    if (!open) {
+      return
+    }
+    const onDismiss = (event: Event) => {
+      if (
+        event.target instanceof Node &&
+        root.current?.contains(event.target)
+      ) {
+        return
+      }
+      setOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDismiss)
+    document.addEventListener('touchstart', onDismiss)
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('scroll', onDismiss, true)
+    return () => {
+      document.removeEventListener('mousedown', onDismiss)
+      document.removeEventListener('touchstart', onDismiss)
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('scroll', onDismiss, true)
+    }
+  }, [open])
+
+  return (
+    <span class="read-receipts-wrap" ref={root}>
+      <button
+        type="button"
+        class="read-receipts"
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        onClick={() => setOpen((was) => !was)}
+      >
+        {formatReadReceipts(receipts, members)}
+      </button>
+      {open && (
+        <ul class="read-receipts-popover" role="listbox">
+          {receipts.map((receipt) => (
+            <li key={receipt.userId} class="read-receipts-row">
+              <UserAvatar
+                accountId={accountId}
+                userId={receipt.userId}
+                displayName={members.displayName(receipt.userId)}
+                member={members.members.value.get(receipt.userId)}
+              />
+              <span class="read-receipts-name">
+                {members.displayName(receipt.userId)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </span>
+  )
 }
 
 function eventDiagnostics(event: TimelineEvent) {
