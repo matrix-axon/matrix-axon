@@ -311,6 +311,70 @@ describe('createOAuthAuthProvider', () => {
       expect(auth.signedIn.value).toBe(true)
     })
 
+    /**
+     * `/v1/oauth/token` sits behind the OAuth rate limiter (30/min per IP), and
+     * a deploy is exactly when it trips: every tab's socket drops at once and
+     * every reconnect asks for a token. Classifying by status class read this
+     * 4xx as a refusal and discarded a valid refresh token — the same
+     * deploy-time sign-out the transport/rejection split exists to prevent,
+     * through a narrower door. Note the body is Axon's envelope, not an OAuth
+     * error body, so `error` is an object rather than a code.
+     */
+    it('keeps it on a 429 from the oauth rate limiter', async () => {
+      const storage = expiredSession()
+      server.use(
+        http.post(TOKEN_URL, () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: 'too_many_requests',
+                message: 'rate limit exceeded',
+              },
+            },
+            { status: 429 },
+          ),
+        ),
+      )
+      const auth = providerOver(storage)
+
+      await expect(auth.getToken()).resolves.toBeNull()
+      expect(auth.signedIn.value).toBe(true)
+      const saved = JSON.parse(storage.getItem('axon.oauth.session')!)
+      expect(saved.refreshToken).toBe('old-refresh')
+    })
+
+    // A 4xx whose body names no OAuth error code says nothing about the grant.
+    it.each([
+      ['a 400 with no error code', 400, {}],
+      ['a 401 with an Axon envelope', 401, { error: { code: 'unauthorized' } }],
+      ['a 403', 403, { error: 'access_denied' }],
+      ['a 404 (oauth disabled)', 404, { error: { code: 'not_found' } }],
+    ])('keeps it on %s', async (_label, status, body) => {
+      const storage = expiredSession()
+      server.use(
+        http.post(TOKEN_URL, () => HttpResponse.json(body, { status })),
+      )
+      const auth = providerOver(storage)
+
+      await expect(auth.getToken()).resolves.toBeNull()
+      expect(auth.signedIn.value).toBe(true)
+    })
+
+    // …but the one code that does mean the grant is dead still ends it.
+    it('still ends the session on invalid_grant', async () => {
+      const storage = expiredSession()
+      server.use(
+        http.post(TOKEN_URL, () =>
+          HttpResponse.json({ error: 'invalid_grant' }, { status: 400 }),
+        ),
+      )
+      const auth = providerOver(storage)
+
+      await expect(auth.getToken()).resolves.toBeNull()
+      expect(auth.signedIn.value).toBe(false)
+      expect(storage.getItem('axon.oauth.session')).toBeNull()
+    })
+
     it('recovers on the next attempt once the server is back', async () => {
       const storage = expiredSession()
       let attempts = 0

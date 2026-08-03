@@ -43,9 +43,54 @@ export class OAuthTransportError extends Error {
   readonly name = 'OAuthTransportError'
 }
 
-/** Whether a token-endpoint status is the server refusing the grant. */
-function isRejection(status: number): boolean {
-  return status >= 400 && status < 500
+/**
+ * The one OAuth error code that means *this refresh token is no good* (RFC 6749
+ * §5.2: bad, expired, revoked, or issued to another client).
+ *
+ * Classification is by error code and not by status class, because 4xx is far
+ * too broad to mean "credential refused". `/v1/oauth/token` sits behind the
+ * OAuth rate limiter (`crates/axon-api/src/oauth/rate_limit.rs`, 30/min per IP),
+ * and a deploy is exactly when that trips: every tab's socket drops at once and
+ * every reconnect asks for a token. Reading that 429 as a refusal would discard
+ * a valid 30-day refresh token — the same deploy-time sign-out this whole split
+ * exists to prevent, reintroduced through a narrower door.
+ */
+const GRANT_REJECTED = 'invalid_grant'
+
+/** The OAuth error code from a token-endpoint error body, if it has one. */
+function oauthErrorCode(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null) {
+    return null
+  }
+  const { error } = body as { error?: unknown }
+  return typeof error === 'string' ? error : null
+}
+
+/**
+ * A human-readable message from a token-endpoint error body. Handles both
+ * shapes this endpoint can produce: the OAuth one (`{error, error_description}`)
+ * from the handler, and Axon's own envelope (`{error: {code, message}}`) from a
+ * layer in front of it, such as the rate limiter. Falling through to
+ * `String(error)` on the latter is what previously rendered `[object Object]`.
+ */
+function tokenErrorMessage(body: unknown, status: number): string {
+  if (typeof body === 'object' && body !== null) {
+    const record = body as Record<string, unknown>
+    if (typeof record.error_description === 'string') {
+      return record.error_description
+    }
+    if (typeof record.error === 'string') {
+      return record.error
+    }
+    const nested = record.error
+    if (typeof nested === 'object' && nested !== null) {
+      const message = (nested as Record<string, unknown>).message
+      if (typeof message === 'string') {
+        return message
+      }
+    }
+  }
+  return `OAuth token exchange failed (HTTP ${status})`
 }
 
 export interface OAuthProviderConfig {
@@ -74,11 +119,6 @@ interface TokenSuccessBody {
   token_type: string
   expires_in: number
   refresh_token: string
-}
-
-interface OAuthErrorBody {
-  error?: string
-  error_description?: string
 }
 
 export interface OAuthAuthProvider extends AuthProvider {
@@ -179,16 +219,11 @@ export function createOAuthAuthProvider({
     }
     const body = (await response.json().catch(() => ({}))) as unknown
     if (!response.ok) {
-      const oauthError = body as OAuthErrorBody
-      const message =
-        oauthError.error_description ??
-        oauthError.error ??
-        'OAuth token exchange failed'
-      // RFC 6749 §5.2: the token endpoint reports a bad, expired, or revoked
-      // grant as a 4xx with an `error` body. A 5xx is the server failing, which
-      // says nothing about our credentials — and a proxy mid-restart answers
-      // 502/503 exactly like that.
-      throw isRejection(response.status)
+      const message = tokenErrorMessage(body, response.status)
+      // Only an explicit `invalid_grant` ends a session. Everything else — a
+      // 429 from the rate limiter, a 5xx, a proxy mid-restart, an error body we
+      // cannot read — is "no verdict", and the credentials stay.
+      throw oauthErrorCode(body) === GRANT_REJECTED
         ? new OAuthRejectedError(message)
         : new OAuthTransportError(message)
     }
