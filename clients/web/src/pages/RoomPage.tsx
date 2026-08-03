@@ -1599,6 +1599,18 @@ function Timeline({
   const eventList = useRef<HTMLOListElement>(null)
   const lastOwnEventId = useRef<string | null>(null)
   const stickToBottom = useRef(true)
+  /**
+   * Whether the reader was at the live end the instant they focused the
+   * composer — captured before the keyboard moves anything, so it survives
+   * the race below. Bringing up the keyboard forces a scroll (the composer's
+   * own focus handler re-pins immediately, and iOS may nudge the scroller
+   * trying to keep the focused control in view); if either lands while the
+   * keyboard's own resize is still settling, `onScroll` reads a transient
+   * `clientHeight` and can flip `stickToBottom` false for a container that
+   * never actually left the bottom. This ref is the fix: the keyboard-resize
+   * observer below trusts it over a `stickToBottom` that just got clobbered.
+   */
+  const keyboardPin = useRef(false)
   const resizePinFrame = useRef<number | null>(null)
   const highlightedCentering = useRef<{
     eventId: string | null
@@ -1968,6 +1980,30 @@ function Timeline({
     return () => observer.disconnect()
   }, [highlighted, atEnd, scheduleResizePin])
 
+  // Snapshot "was the reader at the live end" the instant the composer takes
+  // focus — before the keyboard's own resize (and the composer's separate
+  // focus-triggered pin) have a chance to fire an in-between scroll event
+  // that miscomputes `stickToBottom` (see `keyboardPin` above).
+  useEffect(() => {
+    const onFocusIn = (event: FocusEvent) => {
+      if (
+        event.target instanceof HTMLElement &&
+        event.target.matches('textarea, input, [contenteditable="true"]')
+      ) {
+        keyboardPin.current = stickToBottom.current
+      }
+    }
+    const onFocusOut = () => {
+      keyboardPin.current = false
+    }
+    document.addEventListener('focusin', onFocusIn)
+    document.addEventListener('focusout', onFocusOut)
+    return () => {
+      document.removeEventListener('focusin', onFocusIn)
+      document.removeEventListener('focusout', onFocusOut)
+    }
+  }, [])
+
   // The soft keyboard shrinks the scroller's *own* box — its flex parent
   // loses height to the shrunk visual viewport — without touching its
   // content, so the content-resize observer above never fires for it. Left
@@ -1991,6 +2027,17 @@ function Timeline({
       return
     }
     const observer = new ResizeObserver(() => {
+      perfMark('timeline:keyboard:scroller-resize', {
+        clientHeight: el.clientHeight,
+        scrollHeight: el.scrollHeight,
+        scrollTop: el.scrollTop,
+        stickToBottom: stickToBottom.current,
+        keyboardPin: keyboardPin.current,
+      })
+      if (keyboardPin.current) {
+        keyboardPin.current = false
+        stickToBottom.current = true
+      }
       if (stickToBottom.current) {
         scheduleResizePin()
       }

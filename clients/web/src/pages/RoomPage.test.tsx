@@ -2049,6 +2049,86 @@ describe('RoomPage', () => {
     }
   })
 
+  it('re-pins to bottom even when a scroll event mid-keyboard-animation clobbers stickToBottom (issue found live on iOS)', async () => {
+    // The observed failure on a real phone: focusing the composer forces an
+    // immediate scroll to the (pre-keyboard) bottom, and that scroll's own
+    // `scroll` event can land *after* the keyboard has already started
+    // shrinking the scroller but *before* its resize has settled. `onScroll`
+    // then computes "not at bottom" from a transient `clientHeight` and
+    // clobbers `stickToBottom` to false — so when the keyboard's resize does
+    // settle, the plain `stickToBottom` guard alone would wrongly skip the
+    // pin. `keyboardPin`, captured at focus time before any of this noise,
+    // is what recovers it.
+    const byTarget = new Map<Element, ResizeObserverCallback>()
+    class TargetedResizeObserver {
+      #callback: ResizeObserverCallback
+      constructor(callback: ResizeObserverCallback) {
+        this.#callback = callback
+      }
+      observe(target: Element) {
+        byTarget.set(target, this.#callback)
+      }
+      unobserve(target: Element) {
+        byTarget.delete(target)
+      }
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      TargetedResizeObserver as unknown as typeof ResizeObserver
+    // A queueing (not auto-running) fake: `pinLiveTimelineAfterComposerFocus`
+    // schedules its own double-rAF on focus, and it must not fire before this
+    // test is ready for it — `flushRaf` runs whatever is pending, on demand.
+    const originalRaf = globalThis.requestAnimationFrame
+    let rafQueue: FrameRequestCallback[] = []
+    globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      rafQueue.push(callback)
+      return rafQueue.length
+    }) as typeof requestAnimationFrame
+    const flushRaf = () => {
+      const queued = rafQueue
+      rafQueue = []
+      queued.forEach((callback) => callback(0))
+    }
+
+    try {
+      const { findByText, container } = renderRoom([event('$latest', T0)])
+      await findByText('body of $latest')
+      const timeline = container.querySelector<HTMLElement>('.timeline')!
+      const textarea = container.querySelector('textarea')!
+      let clientHeight = 750
+      Object.defineProperty(timeline, 'clientHeight', {
+        configurable: true,
+        get: () => clientHeight,
+      })
+      Object.defineProperty(timeline, 'scrollHeight', {
+        configurable: true,
+        value: 7110,
+      })
+      timeline.scrollTop = 6360 // exactly at bottom: 7110 - 6360 - 750 = 0
+
+      // Tapping the composer — captures `keyboardPin` while genuinely at
+      // the live end. (Its own focus-triggered pin is queued, not run yet.)
+      textarea.focus()
+
+      // The keyboard starts shrinking the box; a scroll event lands
+      // mid-animation, at an intermediate clientHeight, before the resize
+      // settles. This is what flips `stickToBottom` false on the real
+      // device.
+      clientHeight = 460
+      fireEvent.scroll(timeline)
+      expect(timeline.scrollTop).toBe(6360) // unmoved by the stray scroll
+
+      // The keyboard's resize settles at its final height.
+      clientHeight = 331
+      byTarget.get(timeline)?.([], null as unknown as ResizeObserver)
+      flushRaf()
+
+      expect(timeline.scrollTop).toBe(7110)
+    } finally {
+      globalThis.requestAnimationFrame = originalRaf
+    }
+  })
+
   it('does not repin resized room content after the user scrolls back', async () => {
     installResizeObserver()
     let scrollHeight = 100

@@ -150,9 +150,20 @@ function useVisualViewportShell(): void {
       // background below, so fall back to the CSS `100dvh` sizing and let the
       // next real event take over.
       if (isViewportHeightStale(viewport)) {
+        perfMark('timeline:keyboard:viewport-stale', {
+          height: viewport.height,
+          innerHeight: window.innerHeight,
+          editableFocused: isEditableFocused(),
+        })
         clear()
         return
       }
+      perfMark('timeline:keyboard:viewport-update', {
+        height: Math.round(viewport.height),
+        offsetTop: Math.round(viewport.offsetTop),
+        innerHeight: window.innerHeight,
+        editableFocused: isEditableFocused(),
+      })
       root.style.setProperty('--app-viewport-top', `${viewport.offsetTop}px`)
       root.style.setProperty('--app-viewport-left', `${viewport.offsetLeft}px`)
       root.style.setProperty('--app-viewport-width', `${viewport.width}px`)

@@ -41,6 +41,7 @@ const OVERLAY_PREFIXES = [
   'timeline:anchor',
   'timeline:auto-page:fetched',
   'timeline:auto-page:stop',
+  'timeline:keyboard',
   'transition:',
   'boot:',
 ]
