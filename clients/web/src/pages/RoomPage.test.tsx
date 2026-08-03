@@ -1989,6 +1989,66 @@ describe('RoomPage', () => {
     expect(timeline.scrollTop).toBe(130)
   })
 
+  it('keeps the newest message visible when the soft keyboard shrinks the scroller', async () => {
+    // The keyboard shrinks the scroller's *own* box (its flex parent loses
+    // height to the shrunk visual viewport) — the content element inside it
+    // never resizes. A fake that fired every observer regardless of its
+    // target (like `installResizeObserver` above) couldn't tell this case
+    // apart from ordinary content growth, so this one dispatches only to
+    // whichever observer is watching a given target, the way a real
+    // `ResizeObserver` would.
+    const byTarget = new Map<Element, ResizeObserverCallback>()
+    class TargetedResizeObserver {
+      #callback: ResizeObserverCallback
+      constructor(callback: ResizeObserverCallback) {
+        this.#callback = callback
+      }
+      observe(target: Element) {
+        byTarget.set(target, this.#callback)
+      }
+      unobserve(target: Element) {
+        byTarget.delete(target)
+      }
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      TargetedResizeObserver as unknown as typeof ResizeObserver
+    // Fire the scheduled pin frame synchronously: the assertion needs no real
+    // await this way, so nothing else gets a turn to run in between and
+    // mask (or fake) the effect under test.
+    const originalRaf = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      callback(0)
+      return 0
+    }) as typeof requestAnimationFrame
+
+    try {
+      const { findByText, container } = renderRoom([event('$latest', T0)])
+      await findByText('body of $latest')
+      const timeline = container.querySelector<HTMLElement>('.timeline')!
+      const eventList = container.querySelector<HTMLElement>('.event-list')!
+      setTimelineScrollGeometry(timeline, {
+        clientHeight: 50,
+        scrollHeight: () => 100,
+      })
+      timeline.scrollTop = 50
+
+      // Only the scroller's own box shrinks; the content observer (on
+      // `.event-list`) is left untouched, so this isolates the fix under
+      // test.
+      setTimelineScrollGeometry(timeline, {
+        clientHeight: 30,
+        scrollHeight: () => 100,
+      })
+      expect(byTarget.has(eventList)).toBe(true)
+      byTarget.get(timeline)?.([], null as unknown as ResizeObserver)
+
+      expect(timeline.scrollTop).toBe(100)
+    } finally {
+      globalThis.requestAnimationFrame = originalRaf
+    }
+  })
+
   it('does not repin resized room content after the user scrolls back', async () => {
     installResizeObserver()
     let scrollHeight = 100

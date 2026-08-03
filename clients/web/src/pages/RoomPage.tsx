@@ -1968,6 +1968,37 @@ function Timeline({
     return () => observer.disconnect()
   }, [highlighted, atEnd, scheduleResizePin])
 
+  // The soft keyboard shrinks the scroller's *own* box — its flex parent
+  // loses height to the shrunk visual viewport — without touching its
+  // content, so the content-resize observer above never fires for it. Left
+  // alone, a reader already pinned to the newest message has their scrollTop
+  // unchanged while the box's bottom edge moves up to meet the keyboard,
+  // burying exactly the row they were reading. Re-pin on the scroller's own
+  // resize too, both for the keyboard's appearance and its dismissal (which
+  // grows the box back and would otherwise leave a gap of blank space below
+  // the last row). A mid-scroll reader is untouched, same as every other pin
+  // here: the `stickToBottom` guard only fires this while already at bottom.
+  useLayoutEffect(() => {
+    if (
+      highlighted !== null ||
+      !atEnd ||
+      typeof ResizeObserver === 'undefined'
+    ) {
+      return
+    }
+    const el = scroller.current
+    if (el === null) {
+      return
+    }
+    const observer = new ResizeObserver(() => {
+      if (stickToBottom.current) {
+        scheduleResizePin()
+      }
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [highlighted, atEnd, scheduleResizePin])
+
   // Scroll anchoring, done by hand (`overflow-anchor: none` in index.css).
   //
   // A row's real height is only known once it has been rendered — the timeline
