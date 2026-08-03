@@ -880,6 +880,12 @@ export function createRoomsStore(
     return key
   }
 
+  function findRoomIndex(accountId: string, roomId: string): number {
+    return rooms.value.findIndex(
+      (room) => room.account_id === accountId && room.room_id === roomId,
+    )
+  }
+
   function noteActivityRoom(
     accountId: string,
     roomId: string,
@@ -888,9 +894,7 @@ export function createRoomsStore(
   ): RoomDto | null {
     const key = roomKey({ account_id: accountId, room_id: roomId })
     const current = rooms.value
-    const index = current.findIndex(
-      (room) => room.account_id === accountId && room.room_id === roomId,
-    )
+    const index = findRoomIndex(accountId, roomId)
     if (index === -1) {
       // A room we don't know: freshly joined (or the list predates it).
       // Re-read the list; the in-flight guard coalesces frame bursts.
@@ -933,6 +937,19 @@ export function createRoomsStore(
   }
 
   function noteTimelineEvent(event: EventDto): void {
+    if (!isPreviewEvent(event)) {
+      // Membership changes, redactions, state events, reactions, etc. must
+      // not bump last_activity_ts/last_event_id — only real message content
+      // counts as "recent activity" (mirrors the server-side filter in
+      // `list_rooms`, #119). A room we don't know about yet still
+      // needs discovering even from a non-content event (e.g. the join that
+      // first tells us about a freshly joined, message-less room), so that
+      // path runs regardless of event type.
+      if (findRoomIndex(event.account_id, event.room_id) === -1) {
+        void refresh()
+      }
+      return
+    }
     const room = noteActivityRoom(
       event.account_id,
       event.room_id,
@@ -1084,10 +1101,13 @@ function emptyToNull(value: string | null | undefined): string | null {
 }
 
 /**
- * A message the preview can actually show. A redacted or bodiless row (a
- * removed message, an image) is *skipped*, not previewed as blank: `body` is
- * null there, and `body?.trim() !== ''` would wave it through as the newest
- * message and leave the room with no preview at all.
+ * A message the preview can actually show — and, per `noteTimelineEvent`,
+ * the same gate for what counts as "recent activity" in the room list. A
+ * redacted or bodiless row (a removed message, an image) is *skipped*, not
+ * previewed as blank: `body` is null there, and `body?.trim() !== ''` would
+ * wave it through as the newest message and leave the room with no preview
+ * at all. Membership/state/redaction/reaction events fail the `type`
+ * check and so never count as either a preview or activity.
  */
 function isPreviewEvent(event: EventDto): boolean {
   return (

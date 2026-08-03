@@ -352,6 +352,93 @@ describe('createRoomsStore', () => {
     stopUnnamed()
   })
 
+  it('a non-content live event does not bump last_activity_ts or the preview', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [NAMED] }),
+      ),
+      http.get(`${BASE_URL}/v1/accounts/:accountId/rooms/:roomId/members`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    )
+    const store = makeStore()
+    await store.refresh()
+
+    // A redaction newer than the room's recorded activity must not become
+    // the activity marker or the preview (mirrors the server-side filter in
+    // `list_rooms`, #119).
+    store.noteTimelineEvent({
+      account_id: ACCOUNT,
+      room_id: NAMED.room_id,
+      event_id: '$redaction',
+      origin_ts: NAMED.last_activity_ts + 1000,
+      sender: '@adam:example.org',
+      type: 'm.room.redaction',
+      state_key: null,
+      body: null,
+      content: {} as never,
+      redacted: false,
+      edited: false,
+      edit_count: 0,
+    })
+
+    const room = store.rooms.value.find((r) => r.room_id === NAMED.room_id)
+    expect(room?.last_activity_ts).toBe(NAMED.last_activity_ts)
+    expect(store.preview(roomKey(NAMED))).toBeUndefined()
+
+    // Same for a membership change (join/leave/profile update).
+    store.noteTimelineEvent({
+      account_id: ACCOUNT,
+      room_id: NAMED.room_id,
+      event_id: '$member',
+      origin_ts: NAMED.last_activity_ts + 2000,
+      sender: '@adam:example.org',
+      type: 'm.room.member',
+      state_key: '@adam:example.org',
+      body: null,
+      content: { membership: 'join' } as never,
+      redacted: false,
+      edited: false,
+      edit_count: 0,
+    })
+
+    const roomAfter = store.rooms.value.find((r) => r.room_id === NAMED.room_id)
+    expect(roomAfter?.last_activity_ts).toBe(NAMED.last_activity_ts)
+  })
+
+  it('a non-content event for an unknown room still triggers discovery', async () => {
+    let listCalls = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () => {
+        listCalls += 1
+        return HttpResponse.json({ data: [NAMED] })
+      }),
+    )
+    const store = makeStore()
+    await store.refresh()
+    expect(listCalls).toBe(1)
+
+    // A bare join into a freshly joined, message-less room is our first
+    // signal it exists — it must still trigger a re-read of the list even
+    // though it doesn't count as "activity" once the room is known.
+    store.noteTimelineEvent({
+      account_id: ACCOUNT,
+      room_id: '!new:hs',
+      event_id: '$join',
+      origin_ts: 900,
+      sender: '@me:example.org',
+      type: 'm.room.member',
+      state_key: '@me:example.org',
+      body: null,
+      content: { membership: 'join' } as never,
+      redacted: false,
+      edited: false,
+      edit_count: 0,
+    })
+
+    await vi.waitFor(() => expect(listCalls).toBe(2))
+  })
+
   it('an unknown room triggers one coalesced refresh (WCR-08)', async () => {
     let listCalls = 0
     server.use(
