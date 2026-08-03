@@ -124,6 +124,10 @@ const SWIPE_RIGHT_AXIS_RATIO = SWIPE_AXIS_RATIO
 // How far above the scroller a page starts loading, so it arrives during the
 // scroll rather than after the reader has stopped at the top edge.
 const SCROLL_BACK_PREFETCH_PX = 400
+// How long a composer focus holds `keyboardPin` open. The keyboard's own show
+// animation is under half this on every platform tested; the margin is for
+// slow devices, not correctness at the edge.
+const KEYBOARD_PIN_MS = 600
 // Pages one arrival at the top may pull automatically. The chain exists to
 // cross runs of filtered-out events, not to walk history unattended.
 const AUTO_SCROLL_BACK_PAGES = 5
@@ -1609,8 +1613,17 @@ function Timeline({
    * `clientHeight` and can flip `stickToBottom` false for a container that
    * never actually left the bottom. This ref is the fix: the keyboard-resize
    * observer below trusts it over a `stickToBottom` that just got clobbered.
+   *
+   * Left set (not consumed by the first resize) for `KEYBOARD_PIN_MS` after
+   * focus, not cleared by the next `scroller-resize` callback: the keyboard's
+   * show animation fires that observer more than once — an unrelated content
+   * reflow, then the real shrink — and clearing on the first occurrence burned
+   * the override before the real one arrived (caught live on a phone: a
+   * `keyboardPin=true` mark followed by a `keyboardPin=false` one on the very
+   * next resize, before the keyboard had actually finished shrinking anything).
    */
   const keyboardPin = useRef(false)
+  const keyboardPinTimer = useRef<number | null>(null)
   const resizePinFrame = useRef<number | null>(null)
   const highlightedCentering = useRef<{
     eventId: string | null
@@ -1985,22 +1998,34 @@ function Timeline({
   // focus-triggered pin) have a chance to fire an in-between scroll event
   // that miscomputes `stickToBottom` (see `keyboardPin` above).
   useEffect(() => {
+    const clearPinTimer = () => {
+      if (keyboardPinTimer.current !== null) {
+        window.clearTimeout(keyboardPinTimer.current)
+        keyboardPinTimer.current = null
+      }
+    }
     const onFocusIn = (event: FocusEvent) => {
       if (
         event.target instanceof HTMLElement &&
         event.target.matches('textarea, input, [contenteditable="true"]')
       ) {
         keyboardPin.current = stickToBottom.current
+        clearPinTimer()
+        keyboardPinTimer.current = window.setTimeout(() => {
+          keyboardPin.current = false
+        }, KEYBOARD_PIN_MS)
       }
     }
     const onFocusOut = () => {
       keyboardPin.current = false
+      clearPinTimer()
     }
     document.addEventListener('focusin', onFocusIn)
     document.addEventListener('focusout', onFocusOut)
     return () => {
       document.removeEventListener('focusin', onFocusIn)
       document.removeEventListener('focusout', onFocusOut)
+      clearPinTimer()
     }
   }, [])
 
@@ -2035,7 +2060,6 @@ function Timeline({
         keyboardPin: keyboardPin.current,
       })
       if (keyboardPin.current) {
-        keyboardPin.current = false
         stickToBottom.current = true
       }
       if (stickToBottom.current) {
