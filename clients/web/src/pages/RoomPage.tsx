@@ -37,6 +37,7 @@ import {
 } from '../components/use-message-composer'
 import {
   localRoomHref,
+  localThreadEventHref,
   parseMatrixRoomReference,
   serverNameFromRoomReference,
 } from '../matrix-to'
@@ -340,13 +341,28 @@ export function RoomPage() {
         params: { path: { account_id: accountId, event_id: highlighted } },
       })
       .then(
-        ({ data }) =>
-          data !== undefined
-            ? timeline.jumpTo(data.data.origin_ts)
-            : timeline.loadLatest(),
+        ({ data }) => {
+          if (data === undefined) {
+            return timeline.loadLatest()
+          }
+          const rootId = threadRootId(data.data)
+          // A thread reply has no row in the main room stream to jump to —
+          // it only ever renders inside its thread's own panel. Route
+          // straight there instead of jumping the main timeline toward the
+          // reply's timestamp, which would land near the thread root but
+          // never open the thread (or reveal the reply itself).
+          if (rootId !== null && rootId !== openThread) {
+            location.route(
+              localThreadEventHref(accountId, roomId, rootId, highlighted),
+              true,
+            )
+            return
+          }
+          return timeline.jumpTo(data.data.origin_ts)
+        },
         () => timeline.loadLatest(),
       )
-  }, [api, accountId, timeline, highlighted])
+  }, [api, accountId, roomId, timeline, highlighted, openThread, location])
 
   // Mark this room active while it is open so shared chrome can mark the row.
   useEffect(() => {

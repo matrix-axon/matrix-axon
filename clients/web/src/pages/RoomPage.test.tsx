@@ -2744,6 +2744,35 @@ describe('RoomPage', () => {
     }
   })
 
+  it('a ?event= deep link into a thread reply opens the thread instead of jumping the room stream', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`, () =>
+        HttpResponse.json({
+          data: event('$reply', T0, {
+            relates_to: { rel_type: 'm.thread', event_id: '$root' },
+          }),
+        }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({ data: { events: [], next_cursor: null } }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24reply`,
+    )
+    const services = testServices()
+    render(routedRoomPage(services))
+
+    await waitFor(() =>
+      expect(window.location.search).toBe('?thread=%24root&event=%24reply'),
+    )
+  })
+
   it('keeps a search/deep-link target centered when timeline rows resize', async () => {
     installResizeObserver()
     const scrolled: string[] = []
