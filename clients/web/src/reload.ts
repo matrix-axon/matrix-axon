@@ -10,28 +10,44 @@
  * for a reason a reload cannot fix. Both look identical from here: we reload,
  * and come back running the build we left.
  *
- * So a reload attempt is recorded as the pair *(build we left, thing we were
- * reloading toward)*, and the same pair is never attempted twice. On the next
- * boot the record is either stale — we came back on a different build, so it
- * worked — or still current, in which case that particular attempt is spent.
+ * Two independent limits, because there are two distinct loops to stop:
  *
- * Keying on the pair rather than on the departed build alone is what keeps one
- * bad manifest from disabling automatic refresh for the rest of the session: a
- * later, genuinely new build is a different target and gets its own attempt.
- * `MAX_ATTEMPTS` then bounds the pathological case — an origin flapping between
- * many distinct versions, where every target is new.
+ * 1. **Per attempt.** A reload is recorded as the pair *(build we left, thing
+ *    we were reloading toward)* and the same pair is never retried. On the next
+ *    boot the pair record is either stale — we came back on a different build,
+ *    so it worked — or still current, in which case that attempt is spent.
+ *    Keying on the pair rather than the departed build alone is what keeps one
+ *    bad manifest from disabling refresh for the rest of the session: a later,
+ *    genuinely new build is a different target and gets its own attempt.
+ *
+ * 2. **Per window.** `spent` counts reloads across *every* build this tab has
+ *    been through and deliberately survives settling a pair. Without it the
+ *    budget would reset on each boot that reached a new bundle, and an
+ *    inconsistent deployment — A naming C, C naming E, E naming A — would
+ *    reload forever while never repeating a pair.
+ *
+ * `spent` decays rather than accumulating for the life of the tab, because an
+ * installed PWA's session can outlast many legitimate deploys; a hard lifetime
+ * cap would silently stop updating a long-lived tab. The window bounds the
+ * *rate* instead, which is what distinguishes thrash from ordinary use.
  */
 
 /** sessionStorage, not localStorage: the block is per-tab and per-session. */
 const GUARD_KEY = 'axon:update-reload'
 
 /**
- * Ceiling on automatic reloads per tab session, across all targets. The
- * per-pair rule already stops a repeating loop; this bounds a server that keeps
- * naming *new* versions it does not serve. Reaching it is not silent — the
- * banner takes over, so the user still has a way to apply the update.
+ * Ceiling on automatic reloads per window, across all builds and targets.
+ * Reaching it is not silent — the banner takes over, so the user still has a
+ * way to apply the update.
  */
 export const MAX_ATTEMPTS = 3
+
+/**
+ * How long the budget window runs. Long enough that a thrashing origin is held
+ * to three reloads rather than hundreds; short enough that a tab left open for
+ * days still picks up genuine deploys on its own.
+ */
+export const BUDGET_WINDOW_MS = 10 * 60_000
 
 /** Target for a reload that has no version to name — a failed chunk load. */
 export const CHUNK_TARGET = 'chunk'
@@ -40,13 +56,19 @@ export interface ReloadEnvironment {
   /** `null` when sessionStorage is unreachable (disabled, quota, sandboxed). */
   storage: Storage | null
   reload: () => void
+  /** Injected so tests can drive the budget window. */
+  now?: () => number
 }
 
 interface GuardState {
-  /** The build that was running when these attempts were made. */
+  /** The build that was running when `targets` were attempted. */
   from: string
-  /** What each attempt was reloading toward. */
+  /** What each attempt *from this build* was reloading toward. */
   targets: string[]
+  /** Automatic reloads spent in the current window, across every build. */
+  spent: number
+  /** When the current budget window opened, as epoch ms. */
+  windowStartedAt: number
 }
 
 function browserStorage(): Storage | null {
@@ -63,7 +85,12 @@ export function browserReloadEnvironment(): ReloadEnvironment {
     reload: () => {
       window.location.reload()
     },
+    now: () => Date.now(),
   }
+}
+
+function clock(env: ReloadEnvironment): number {
+  return (env.now ?? (() => Date.now()))()
 }
 
 function read(storage: Storage | null): GuardState | null {
@@ -91,6 +118,11 @@ function read(storage: Storage | null): GuardState | null {
     return {
       from: state.from,
       targets: state.targets.filter((t): t is string => typeof t === 'string'),
+      // A record written before these fields existed reads as a fresh budget
+      // rather than as a corrupt state that blocks every reload.
+      spent: typeof state.spent === 'number' ? state.spent : 0,
+      windowStartedAt:
+        typeof state.windowStartedAt === 'number' ? state.windowStartedAt : 0,
     }
   } catch {
     // Unreadable guard state is treated as absent. It fails *open* — one
@@ -113,34 +145,32 @@ function write(storage: Storage | null, state: GuardState): boolean {
   }
 }
 
-function remove(storage: Storage | null): void {
-  try {
-    storage?.removeItem(GUARD_KEY)
-  } catch {
-    // A guard we cannot clear only ever fails closed (no auto-reload).
-  }
-}
-
 /**
  * Settle the previous boot's guard. Call once at startup, before anything can
  * ask to reload: if we came back on a different build than the one those
- * attempts were made from, they worked and the record is spent.
+ * attempts were made from, they worked, so the *pair* record is spent.
+ *
+ * The budget is deliberately **not** cleared here. Landing on a new bundle
+ * proves the last reload did something, not that the deployment is consistent —
+ * a manifest chain that names a different build every time would otherwise
+ * refill the budget on every boot and reload without end.
  */
 export function initReloadGuard(
   currentVersion: string,
   env: ReloadEnvironment,
 ): void {
   const state = read(env.storage)
-  if (state !== null && state.from !== currentVersion) {
-    remove(env.storage)
+  if (state === null || state.from === currentVersion) {
+    return
   }
+  write(env.storage, { ...state, from: currentVersion, targets: [] })
 }
 
 /**
  * Reload to pick up `target`, unless this exact attempt has already been made
- * from this build or the session has spent its budget. Returns whether it
- * reloaded; `false` means the caller should fall back to asking the user, which
- * is always allowed to reload — see `reloadNow`.
+ * from this build or the window's budget is spent. Returns whether it reloaded;
+ * `false` means the caller should fall back to asking the user, which is always
+ * allowed to reload — see `reloadNow`.
  *
  * A missing or unwritable sessionStorage blocks the reload rather than
  * proceeding unguarded. An automatic action we cannot bound is exactly what
@@ -152,16 +182,33 @@ export function reloadOnce(
   target: string,
   env: ReloadEnvironment,
 ): boolean {
+  const now = clock(env)
   const previous = read(env.storage)
-  const state: GuardState =
-    previous !== null && previous.from === currentVersion
-      ? previous
-      : { from: currentVersion, targets: [] }
+  const expired =
+    previous !== null && now - previous.windowStartedAt >= BUDGET_WINDOW_MS
+  const base: GuardState =
+    previous === null
+      ? { from: currentVersion, targets: [], spent: 0, windowStartedAt: now }
+      : {
+          ...previous,
+          // A record from another build keeps its budget but not its pairs;
+          // `initReloadGuard` normally does this, but a caller that skipped it
+          // must not get a free attempt out of the omission.
+          ...(previous.from === currentVersion
+            ? {}
+            : { from: currentVersion, targets: [] }),
+          ...(expired ? { spent: 0, windowStartedAt: now } : {}),
+        }
 
-  if (state.targets.includes(target) || state.targets.length >= MAX_ATTEMPTS) {
+  if (base.targets.includes(target) || base.spent >= MAX_ATTEMPTS) {
     return false
   }
-  if (!write(env.storage, { ...state, targets: [...state.targets, target] })) {
+  const next: GuardState = {
+    ...base,
+    targets: [...base.targets, target],
+    spent: base.spent + 1,
+  }
+  if (!write(env.storage, next)) {
     return false
   }
   env.reload()

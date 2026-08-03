@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  BUDGET_WINDOW_MS,
   CHUNK_TARGET,
   initReloadGuard,
   MAX_ATTEMPTS,
@@ -9,15 +10,17 @@ import {
 } from './reload'
 import { memoryStorage } from './test/memory-storage'
 
-function env(storage: Storage | null = memoryStorage()): ReloadEnvironment & {
-  reloads: () => number
-} {
+function env(
+  storage: Storage | null = memoryStorage(),
+  clock: { now: number } = { now: 1_000_000 },
+): ReloadEnvironment & { reloads: () => number } {
   let reloads = 0
   return {
     storage,
     reload: () => {
       reloads += 1
     },
+    now: () => clock.now,
     reloads: () => reloads,
   }
 }
@@ -27,10 +30,13 @@ describe('reloadOnce', () => {
     const e = env()
     expect(reloadOnce('build-a', 'build-b', e)).toBe(true)
     expect(e.reloads()).toBe(1)
-    expect(JSON.parse(e.storage!.getItem('axon:update-reload')!)).toEqual({
-      from: 'build-a',
-      targets: ['build-b'],
-    })
+    expect(JSON.parse(e.storage!.getItem('axon:update-reload')!)).toMatchObject(
+      {
+        from: 'build-a',
+        targets: ['build-b'],
+        spent: 1,
+      },
+    )
   })
 
   // The loop this module exists to prevent: we reload, and come back running
@@ -69,13 +75,18 @@ describe('reloadOnce', () => {
     expect(e.reloads()).toBe(2)
   })
 
-  it('starts fresh once a boot on a new build clears the guard', () => {
+  it('settles the pair once a boot lands on a new build', () => {
     const storage = memoryStorage()
     reloadOnce('build-a', 'build-b', env(storage))
 
-    // Next boot, on build-b: the reload worked, so the record is spent.
+    // Next boot, on build-b: the reload worked, so the *pair* record is spent
+    // — but the budget it consumed is not refunded.
     initReloadGuard('build-b', env(storage))
-    expect(storage.getItem('axon:update-reload')).toBeNull()
+    expect(JSON.parse(storage.getItem('axon:update-reload')!)).toMatchObject({
+      from: 'build-b',
+      targets: [],
+      spent: 1,
+    })
 
     const e = env(storage)
     expect(reloadOnce('build-b', 'build-c', e)).toBe(true)
@@ -87,7 +98,7 @@ describe('reloadOnce', () => {
     reloadOnce('build-a', 'never-ships', env(storage))
 
     initReloadGuard('build-a', env(storage))
-    expect(JSON.parse(storage.getItem('axon:update-reload')!)).toEqual({
+    expect(JSON.parse(storage.getItem('axon:update-reload')!)).toMatchObject({
       from: 'build-a',
       targets: ['never-ships'],
     })
@@ -108,15 +119,59 @@ describe('reloadOnce', () => {
     expect(e.reloads()).toBe(1)
   })
 
+  /**
+   * The budget has to be cumulative across boots, not per build. An
+   * inconsistent deployment can hand out a different build every time — A names
+   * C, C names E, E names A — so no pair ever repeats and the per-pair rule
+   * alone never fires. Clearing the record on a successful reload refilled the
+   * budget on every boot, and the tab reloaded without end.
+   */
+  it('bounds a chain of distinct builds that never repeats a pair', () => {
+    const storage = memoryStorage()
+    const chain = ['build-b', 'build-c', 'build-d', 'build-e', 'build-f']
+    let current = 'build-a'
+    let reloads = 0
+
+    for (const target of chain) {
+      // Each boot: settle the previous pair, then try to move to a new build.
+      initReloadGuard(current, env(storage))
+      const e = env(storage)
+      if (reloadOnce(current, target, e)) {
+        reloads += e.reloads()
+        current = target // the reload genuinely landed on the new bundle
+      }
+    }
+
+    expect(reloads).toBe(MAX_ATTEMPTS)
+  })
+
+  it('refills the budget once the window has passed', () => {
+    const storage = memoryStorage()
+    const clock = { now: 1_000_000 }
+    for (let i = 0; i < MAX_ATTEMPTS + 2; i += 1) {
+      reloadOnce('build-a', `phantom-${i}`, env(storage, clock))
+    }
+    const spent = env(storage, clock)
+    expect(reloadOnce('build-a', 'another', spent)).toBe(false)
+
+    // A tab open for days must still pick up genuine deploys, so the cap bounds
+    // the *rate* rather than the lifetime.
+    clock.now += BUDGET_WINDOW_MS
+    const later = env(storage, clock)
+    expect(reloadOnce('build-a', 'after-the-window', later)).toBe(true)
+    expect(later.reloads()).toBe(1)
+  })
+
   it('treats unreadable guard state as absent', () => {
     const storage = memoryStorage()
     storage.setItem('axon:update-reload', 'not json at all')
     const e = env(storage)
     expect(reloadOnce('build-a', 'build-b', e)).toBe(true)
     // …and rewrites it readable, so failing open cannot repeat.
-    expect(JSON.parse(storage.getItem('axon:update-reload')!)).toEqual({
+    expect(JSON.parse(storage.getItem('axon:update-reload')!)).toMatchObject({
       from: 'build-a',
       targets: ['build-b'],
+      spent: 1,
     })
   })
 
