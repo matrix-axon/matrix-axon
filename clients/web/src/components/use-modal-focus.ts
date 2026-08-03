@@ -58,7 +58,8 @@ function isAttached(element: HTMLElement | null): element is HTMLElement {
 /**
  * The modal focus contract (ADR 0078 pattern; WCR-14), shared by every
  * overlay: on mount, remember the focused element and move focus to the
- * first focusable inside the container; while mounted, trap Tab inside it
+ * first focusable inside the container (or `initialFocus` when provided);
+ * while mounted, trap Tab inside it
  * (wrapping at both ends, and pulling focus back in if it ever ends up
  * outside); on unmount, restore focus to where it was.
  *
@@ -66,6 +67,7 @@ function isAttached(element: HTMLElement | null): element is HTMLElement {
  * the staged-Escape ordering is unchanged. Attach the returned ref to the
  * modal's outermost element.
  *
+ * `initialFocus` overrides the initial target without changing DOM/Tab order.
  * `restoreTo` overrides where focus lands on close, and is resolved **at
  * unmount** rather than captured at mount. A modal whose content pages —
  * the media viewer of ADR 0081 — cannot know its restore target when it
@@ -75,7 +77,10 @@ function isAttached(element: HTMLElement | null): element is HTMLElement {
  * detached node is a silent no-op that would drop the user on `<body>`.
  */
 export function useModalFocus<T extends HTMLElement = HTMLElement>(
-  options: { restoreTo?: () => HTMLElement | null } = {},
+  options: {
+    initialFocus?: () => HTMLElement | null
+    restoreTo?: () => HTMLElement | null
+  } = {},
 ): {
   containerRef: RefObject<T>
 } {
@@ -84,14 +89,21 @@ export function useModalFocus<T extends HTMLElement = HTMLElement>(
   // remounting the trap effect — and so the resolver sees current state.
   // Written in an effect, never during render.
   const restoreToRef = useRef(options.restoreTo)
+  const initialFocusRef = useRef(options.initialFocus)
   useEffect(() => {
     restoreToRef.current = options.restoreTo
+    initialFocusRef.current = options.initialFocus
   })
 
   useEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null
     const container = containerRef.current
-    collectFocusable(container ?? document.createElement('div'))[0]?.focus()
+    const initial = initialFocusRef.current?.() ?? null
+    if (isAttached(initial)) {
+      initial.focus()
+    } else {
+      collectFocusable(container ?? document.createElement('div'))[0]?.focus()
+    }
 
     // Document-level and capture-phase, so the trap holds no matter where
     // inside (or outside) the modal the keydown lands.

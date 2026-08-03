@@ -202,6 +202,18 @@ describe('MediaViewerProvider', () => {
       '[aria-label="Close"]',
     )
     await waitFor(() => expect(document.activeElement).toBe(close))
+
+    // The safe initial target is deliberately independent of the DOM/Tab
+    // sequence: moving left from Close must follow the toolbar to Delete, then
+    // React, rather than jumping around visually reordered controls.
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(
+      document.querySelector('[aria-label="Delete"]'),
+    )
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(
+      document.querySelector('[aria-label="React"]'),
+    )
   })
 
   it('delegates contextual actions for the displayed image after closing', async () => {
@@ -228,7 +240,7 @@ describe('MediaViewerProvider', () => {
     const controls = [...document.querySelectorAll('.lightbox-toolbar button')]
     expect(
       controls.map((control) => control.getAttribute('aria-label')),
-    ).toEqual(['Close', 'Reply', 'Thread', 'React', 'Delete'])
+    ).toEqual(['Reply', 'Thread', 'React', 'Delete', 'Close'])
 
     fireEvent.click(
       document.querySelector<HTMLButtonElement>('[aria-label="Reply"]')!,

@@ -4075,12 +4075,6 @@ audio.media-player {
   color: #ff8a80;
 }
 
-/* Close stays first in DOM order so modal focus lands on the safe dismiss
-   control; display it after contextual actions and Save. */
-.lightbox button.lightbox-close {
-  order: 1;
-}
-
 .lightbox button.lightbox-close:hover,
 .lightbox button.lightbox-close:focus-visible {
   background: rgba(0, 0, 0, 0.88);

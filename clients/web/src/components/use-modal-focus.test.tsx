@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render } from '@testing-library/preact'
 import { afterEach, describe, expect, it } from 'vitest'
+import { useRef } from 'preact/hooks'
 import { useModalFocus } from './use-modal-focus'
 
 afterEach(cleanup)
@@ -11,16 +12,26 @@ afterEach(cleanup)
  */
 function Modal({
   restoreTo,
+  initialFocusButton,
   buttons = ['first', 'second'],
 }: {
   restoreTo?: () => HTMLElement | null
+  initialFocusButton?: string
   buttons?: string[]
 }) {
-  const { containerRef } = useModalFocus<HTMLDivElement>({ restoreTo })
+  const initialFocusRef = useRef<HTMLButtonElement>(null)
+  const { containerRef } = useModalFocus<HTMLDivElement>({
+    initialFocus: () => initialFocusRef.current,
+    restoreTo,
+  })
   return (
     <div ref={containerRef} role="dialog">
       {buttons.map((name) => (
-        <button key={name} type="button">
+        <button
+          key={name}
+          ref={name === initialFocusButton ? initialFocusRef : undefined}
+          type="button"
+        >
           {name}
         </button>
       ))}
@@ -39,6 +50,19 @@ describe('useModalFocus', () => {
   it('moves focus to the first focusable on mount', () => {
     const { getByText } = render(<Modal />)
     expect(document.activeElement).toBe(getByText('first'))
+  })
+
+  it('uses an explicit initial focus target without changing Tab order', () => {
+    const { getByText } = render(
+      <Modal
+        initialFocusButton="second"
+        buttons={['first', 'second', 'third']}
+      />,
+    )
+    expect(document.activeElement).toBe(getByText('second'))
+
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(document.activeElement).toBe(getByText('third'))
   })
 
   it('restores focus to the previously focused element on unmount', () => {
