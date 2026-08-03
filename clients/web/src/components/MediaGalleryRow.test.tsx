@@ -601,9 +601,9 @@ describe('MediaGalleryRow', () => {
         </ol>
       </ServicesContext.Provider>,
     )
-    expect(
-      container.querySelector('.read-receipts')?.textContent,
-    ).toContain('10 more')
+    expect(container.querySelector('.read-receipts')?.textContent).toContain(
+      '10 more',
+    )
     expect(container.querySelector('.read-receipts-popover')).toBeNull()
 
     fireEvent.click(container.querySelector('.read-receipts')!)

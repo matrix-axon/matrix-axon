@@ -107,6 +107,20 @@ body,
 }
 
 body {
+  /* `overflow: hidden` alone does not stop iOS Safari: its own
+     "keep the focused control visible" heuristic can still nudge the
+     *document's* scroll position while a fixed/sticky composer holds focus
+     and the reader drags inside `.timeline` — visibly dragging everything
+     positioned off `--app-viewport-top` (composer included) away from the
+     keyboard before the app.tsx `window.scroll` listener reactively snaps it
+     back, which was the flash the reactive fix alone still showed. Pinning
+     `body` itself with `position: fixed` is the standard, stronger fix: it
+     removes the document's ability to develop a scroll offset at all, so
+     there is nothing left to snap back from. `app.tsx`'s reset stays as a
+     defense-in-depth fallback for iOS versions where even this isn't
+     absolute. */
+  position: fixed;
+  inset: 0;
   margin: 0;
   background: var(--bg);
   color: var(--fg);
