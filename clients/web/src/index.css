@@ -1017,6 +1017,19 @@ h2 {
   color: var(--accent);
 }
 
+/* New-build notice (ADR 0087). Only shown when reloading is *not* free, so it
+   has to survive being ignored: it sits under the topbar and never traps focus,
+   because the update applies itself the next time the app goes idle. */
+.update-banner {
+  flex-wrap: wrap;
+}
+
+.update-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 /* Inline validation hint under a form field (e.g. the recovery-key form). */
 .field-hint {
   margin: 0.35rem 0 0;

@@ -54,6 +54,13 @@ import {
   createTimelineStoreCache,
   type TimelineStoreCache,
 } from './stores/timeline-cache'
+import {
+  createUpdateChecker,
+  fetchVersionManifest,
+  VERSION_MANIFEST_PATH,
+  type UpdateChecker,
+} from './stores/update-check'
+import { BUILD_INFO } from './build-info'
 
 /**
  * The app's service graph — auth seam, API client, and stores — built once at
@@ -75,6 +82,11 @@ export interface AppServices {
   /** Outbound read receipts + typing notices to the homeserver (ADR 0067/0068). */
   ephemeralSender: EphemeralSender
   media: MediaService
+  /**
+   * Watches the origin for a newer web build (ADR 0087). Detection only — the
+   * reload policy lives in `startAutoRefresh` (`src/update-refresh.ts`).
+   */
+  updates: UpdateChecker
   /**
    * Warm per-room timeline stores across room switches (ADR 0085 phase 1).
    * `RoomPage` acquires from here instead of building a store per mount.
@@ -285,6 +297,30 @@ export function connectLiveRooms(
 }
 
 /**
+ * Re-check the origin's build whenever the live socket comes back (ADR 0087).
+ *
+ * This is the fast path, and it is nearly free. The web bundle and the `/v1`
+ * API are served through one front door, so pushing a new build restarts the
+ * process the socket runs through and every client's socket drops. A reconnect
+ * is therefore the earliest evidence a deploy happened — seconds, with no
+ * polling — and on the far more common case of an ordinary network blip the
+ * check costs one conditional request that answers "same build".
+ *
+ * Returns the unsubscribe; the app graph keeps it for its life.
+ */
+export function connectUpdateChecks(
+  live: LiveConnection,
+  updates: UpdateChecker,
+): () => void {
+  return effect(() => {
+    if (live.reconnects.value === 0) {
+      return
+    }
+    void updates.check()
+  })
+}
+
+/**
  * Drop every warm timeline store when the session ends (ADR 0085 phase 1).
  *
  * The service graph outlives a sign-out — nothing reloads the document, the
@@ -422,6 +458,14 @@ export function createServices(
   })
   const api = createApiClient(auth, apiBaseUrl())
   const media = createMediaService({ auth, baseUrl: apiBaseUrl() })
+  // Deliberately *not* `apiBaseUrl()`: the manifest describes the web bundle,
+  // which is served by the document's own origin even in a cross-origin
+  // deployment where the API lives elsewhere (`VITE_AXON_SERVER_URL`).
+  const updates = createUpdateChecker({
+    currentVersion: BUILD_INFO.version,
+    fetchManifest: () => fetchVersionManifest(VERSION_MANIFEST_PATH),
+    isVisible: () => !document.hidden,
+  })
   const timelines = createTimelineStoreCache(api, media)
   const settings = createSettingsStore(storage)
   // Instrumentation has to be live *before* anything worth measuring happens.
@@ -491,10 +535,12 @@ export function createServices(
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
   connectCacheSetting(settings, cache)
+  connectUpdateChecks(live, updates)
   return {
     auth,
     api,
     media,
+    updates,
     timelines,
     cache,
     settings,

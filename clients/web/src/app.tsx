@@ -14,6 +14,7 @@ import { SpaceList } from './components/SpaceList'
 import { SearchOverlay } from './components/SearchOverlay'
 import { ShortcutsHelp } from './components/ShortcutsHelp'
 import { UnreadThreadsPanel } from './components/UnreadThreadsPanel'
+import { UpdateBanner } from './components/UpdateBanner'
 import { useModalFocus } from './components/use-modal-focus'
 import { layoutMode, SINGLE_PANE_QUERY, useMediaQuery } from './layout'
 import {
@@ -35,6 +36,8 @@ import { RoomPage } from './pages/RoomPage'
 import { RoomsIndex } from './pages/RoomsIndex'
 import { SettingsPage } from './pages/SettingsPage'
 import { applyAppBadge } from './app-badge'
+import { BUILD_INFO } from './build-info'
+import { startAutoRefresh } from './update-refresh'
 import { perfEnabled, perfMark, perfMarkFrames, setPerfEnabled } from './perf'
 import { setupInstallPromptCapture } from './install-prompt'
 import { SLASH_COMMAND } from './slash-commands'
@@ -96,6 +99,20 @@ export function App({ services }: { services?: AppServices }) {
   useVisualViewportShell()
   useStandaloneKeyboardAccessoryInset()
   useInstallPromptCapture()
+
+  // Notice a new build and, when it costs the user nothing, apply it (ADR
+  // 0087). Runs signed out too: the sign-in screen is as capable of being a
+  // stale bundle as any other, and the manifest needs no auth.
+  useEffect(
+    () =>
+      startAutoRefresh({
+        updates: svc.updates,
+        currentVersion: BUILD_INFO.version,
+        flush: () => svc.deviceState.flushPending(),
+        hasUnsentWork: () => svc.timelines.hasUnsentWork,
+      }),
+    [svc],
+  )
 
   // Hold the live socket open only while signed in; sign-out tears it down
   // (M-W6, ADR 0061). Reconnect/backoff on unexpected drops arrives in step 3.
@@ -954,6 +971,8 @@ function ShellChrome() {
             </button>
           </div>
         </header>
+
+        <UpdateBanner />
 
         {roomLinkJoinError !== null && (
           <div class="banner error shell-banner" role="alert">

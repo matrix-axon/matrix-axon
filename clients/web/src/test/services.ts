@@ -14,6 +14,7 @@ import {
   connectThreadReadMarkers,
   connectTimelineCacheReset,
   connectUnreadCounts,
+  connectUpdateChecks,
   type AppServices,
 } from '../services'
 import { setPerfEnabled } from '../perf'
@@ -34,6 +35,10 @@ import {
   type ActiveThread,
 } from '../stores/thread-unread'
 import { createTimelineStoreCache } from '../stores/timeline-cache'
+import {
+  createUpdateChecker,
+  type VersionManifest,
+} from '../stores/update-check'
 import { FakeWebSocket } from './fake-socket'
 import { memoryStorage } from './memory-storage'
 
@@ -56,6 +61,13 @@ export function testServices(
      * `fake-indexeddb` and no jsdom IDB quirks.
      */
     cache?: CacheStore
+    /**
+     * What the origin reports as its build. Defaults to learning nothing, so
+     * no test sees an update — or a reload — it did not ask for.
+     */
+    versionManifest?: () => Promise<VersionManifest | null>
+    /** The build the bundle claims to be, for update comparisons. */
+    currentVersion?: string
   } = {},
 ): AppServices & { sockets: FakeWebSocket[] } {
   const storage =
@@ -120,6 +132,10 @@ export function testServices(
   const composerFocus = signal(0)
   const deviceState = createDeviceStateStore(api, live, storage)
   const spaces = createSpacesStore(api, rooms, live)
+  const updates = createUpdateChecker({
+    currentVersion: options.currentVersion ?? 'test-build',
+    fetchManifest: options.versionManifest ?? (() => Promise.resolve(null)),
+  })
   connectUnreadCounts(live, rooms)
   connectLiveRooms(live, rooms)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
@@ -130,10 +146,12 @@ export function testServices(
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
   connectCacheSetting(settings, cache)
+  connectUpdateChecks(live, updates)
   return {
     auth,
     api,
     media,
+    updates,
     timelines,
     cache,
     settings,

@@ -1,6 +1,6 @@
 /// <reference types="vitest/config" />
 import { execFileSync } from 'node:child_process'
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig, type Plugin } from 'vite'
@@ -60,6 +60,107 @@ function webClientVersion(): string {
   const hash = git(['rev-parse', '--short=12', 'HEAD']) ?? 'unknown'
   const dirty = git(['status', '--short', '--', '.']) !== ''
   return dirty ? `${hash}-dirty` : hash
+}
+
+/**
+ * The human-readable release, from this package's `version`. The git hash below
+ * is the exact build id and the only thing the update check compares; this is
+ * the number a bug report can name. Read with `readFileSync` rather than a JSON
+ * import so the config keeps working under every loader that runs it (build,
+ * dev, preview, vitest), and because `deploy/web/Dockerfile` already copies
+ * `package.json` into its build stage — no new build arg.
+ */
+const RELEASE = String(
+  JSON.parse(readFileSync(join(webClientDir, 'package.json'), 'utf8')).version,
+)
+
+/**
+ * Stamped once, at module scope, so `define` below and the emitted
+ * `version.json` can never disagree. They must be byte-identical: the running
+ * client compares its baked-in `__AXON_WEB_VERSION__` against the fetched
+ * manifest, and any difference reads as "a new build is available".
+ */
+const VERSION = webClientVersion()
+const BUILT_AT = new Date().toISOString()
+
+/** The `version.json` body — the origin's answer to "what build do you serve?" */
+function versionManifest(): string {
+  return `${JSON.stringify({ release: RELEASE, version: VERSION, builtAt: BUILT_AT }, null, 2)}\n`
+}
+
+/**
+ * Build identity as a fetchable file, plus the preview server's missing-asset
+ * guard. Together these are what let a running client notice a new deploy and
+ * reload itself instead of hanging (ADR 0087).
+ *
+ * The manifest is emitted by `generateBundle` — i.e. only by a real build — and
+ * in preview it is served out of `dist/` like any other asset. That is
+ * deliberate: `vite preview` re-evaluates this config, so synthesizing the
+ * manifest at preview time would stamp a *fresh* `BUILT_AT` (and, on a dirty
+ * tree, a different hash) that disagrees with the values already baked into the
+ * built bundle. The client would see a permanent mismatch and reload forever.
+ * Only the dev server, which has no `dist/` to serve, may synthesize it.
+ */
+function versionManifestPlugin(): Plugin {
+  let distDir = join(webClientDir, 'dist')
+  return {
+    name: 'axon-version-manifest',
+    configResolved(config) {
+      distDir = config.build.outDir.startsWith('/')
+        ? config.build.outDir
+        : join(config.root, config.build.outDir)
+    },
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'version.json',
+        source: versionManifest(),
+      })
+    },
+    configureServer(server) {
+      server.middlewares.use('/version.json', (_req, res) => {
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Cache-Control', 'no-store')
+        res.end(versionManifest())
+      })
+    },
+    configurePreviewServer(server) {
+      // Registered in the hook *body*, not in the returned post-hook: vite
+      // awaits `configurePreviewServer` before it installs its own static and
+      // HTML-fallback middleware, whereas the returned function runs after
+      // both. Only the former can intercept a request ahead of the fallback.
+      //
+      // Why intercept at all: vite's `htmlFallbackMiddleware` rewrites any
+      // unmatched GET whose `Accept` includes `*/*` to `/index.html` — and
+      // `*/*` is exactly what a `<script type="module">` and a dynamic
+      // `import()` send. So a hashed chunk that a redeploy has deleted comes
+      // back as `200 text/html` instead of `404`, the module fails to parse,
+      // and a client still running the previous build hangs. Assets are
+      // content-hashed, so a miss under /assets/ is never a route — 404 it.
+      server.middlewares.use((req, res, next) => {
+        const url = req.url ?? '/'
+        if (!url.startsWith('/assets/')) {
+          return next()
+        }
+        let pathname: string
+        try {
+          pathname = decodeURIComponent(
+            new URL(url, 'http://localhost').pathname,
+          )
+        } catch {
+          return next()
+        }
+        // `join` normalizes `..`; confirm we stayed inside dist before answering.
+        const file = join(distDir, pathname)
+        if (file.startsWith(join(distDir, 'assets')) && existsSync(file)) {
+          return next()
+        }
+        res.statusCode = 404
+        res.setHeader('Content-Type', 'text/plain')
+        res.end('not found\n')
+      })
+    },
+  }
 }
 
 // Third-party open-source disclosure, generated at build time from the pnpm
@@ -133,10 +234,11 @@ function thirdPartyLicenses(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [preact(), thirdPartyLicenses()],
+  plugins: [preact(), thirdPartyLicenses(), versionManifestPlugin()],
   define: {
-    __AXON_WEB_VERSION__: JSON.stringify(webClientVersion()),
-    __AXON_WEB_BUILT_AT__: JSON.stringify(new Date().toISOString()),
+    __AXON_WEB_RELEASE__: JSON.stringify(RELEASE),
+    __AXON_WEB_VERSION__: JSON.stringify(VERSION),
+    __AXON_WEB_BUILT_AT__: JSON.stringify(BUILT_AT),
   },
   server: {
     allowedHosts,

@@ -32,10 +32,41 @@
 		reverse_proxy axon-server:8080
 	}
 
+	# Content-hashed bundle assets (ADR 0087). Deliberately NOT under the SPA
+	# fallback below: a miss here is a chunk that a redeploy deleted, and it has
+	# to 404. Falling through to try_files answers it with index.html and a 200,
+	# the browser tries to parse HTML as a module or a stylesheet, and a client
+	# still running the previous build hangs with no useful error — the exact
+	# failure ADR 0087 exists to fix. `file_server` alone 404s a missing file.
+	#
+	# The filename carries a content hash, so a given URL's bytes never change
+	# and a new build means new URLs: cacheable forever, and the one place in
+	# this config where that is true.
+	#
+	# The header is conditional on the file existing, because `immutable` on the
+	# 404 would be a year-long instruction to keep not-finding it: a browser (or
+	# an intermediary) that asked one moment too early during a rollout would
+	# cache the miss and never retry. A miss is explicitly uncacheable instead.
+	handle /assets/* {
+		root * /srv
+		@exists file {path}
+		header @exists Cache-Control "public, max-age=31536000, immutable"
+		@missing not file {path}
+		header @missing Cache-Control "no-store"
+		file_server
+	}
+
 	# Everything else is the SPA. try_files rewrites unknown paths to
 	# index.html so client-side routes (deep links, /oauth/callback) resolve.
+	#
+	# These paths are all mutable under a fixed name — index.html, version.json,
+	# the manifest, icons — so they must be revalidated rather than served from
+	# cache, or a client can boot an old index.html naming assets that are gone.
+	# `no-cache` still allows a conditional request, and Caddy answers with a 304
+	# off the ETag it already sends, so the cost is headers, not bytes.
 	handle {
 		root * /srv
+		header Cache-Control "no-cache"
 		try_files {path} /index.html
 		file_server
 	}

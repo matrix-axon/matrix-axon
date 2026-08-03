@@ -344,4 +344,36 @@ describe('createTimelineStoreCache', () => {
     expect(cache.size).toBe(0)
     expect(sameStore(cache.acquire(ACCOUNT, ROOM), store)).toBe(false)
   })
+
+  // Read by the auto-refresh policy (ADR 0087): an unsent echo lives only in
+  // memory, so reloading to pick up a new build would destroy it.
+  describe('hasUnsentWork', () => {
+    it('is false for an empty cache and for stores with nothing unsent', () => {
+      const cache = makeCache()
+      expect(cache.hasUnsentWork).toBe(false)
+      cache.acquire(ACCOUNT, ROOM)
+      expect(cache.hasUnsentWork).toBe(false)
+    })
+
+    it('is true while any warm store holds an unsent send', async () => {
+      const cache = makeCache()
+      const store = cache.acquire(ACCOUNT, ROOM)
+      await withFailedEcho(store)
+      expect(cache.hasUnsentWork).toBe(true)
+    })
+
+    it('sees unsent work in a room other than the open one', async () => {
+      const cache = makeCache()
+      await withFailedEcho(cache.acquire(ACCOUNT, ROOM))
+      cache.acquire(ACCOUNT, '!other:hs')
+      expect(cache.hasUnsentWork).toBe(true)
+    })
+
+    it('goes false again once the cache is cleared', async () => {
+      const cache = makeCache()
+      await withFailedEcho(cache.acquire(ACCOUNT, ROOM))
+      cache.clear()
+      expect(cache.hasUnsentWork).toBe(false)
+    })
+  })
 })

@@ -36,6 +36,14 @@ export interface DeviceStateStore {
   set(accountId: string, namespace: string, key: string, value: unknown): void
   /** Fetch a `(accountId, namespace)` merged view once (idempotent). */
   hydrate(accountId: string, namespace: string): void
+  /**
+   * Send every debounced write now and resolve once the server has answered.
+   * Called before an automatic reload (ADR 0087): drafts are durable, but only
+   * once the `PUT` behind the 800 ms debounce has actually gone out, so without
+   * this a reload lands inside the debounce window and drops the last thing the
+   * user typed. Failures re-queue exactly as a debounced flush would.
+   */
+  flushPending(): Promise<void>
   /** Whether a `(accountId, namespace)` merged view has successfully loaded. */
   hydrated(accountId: string, namespace: string): boolean
 
@@ -461,6 +469,27 @@ export function createDeviceStateStore(
     void fetchScope(accountId, namespace)
   }
 
+  async function flushPending(): Promise<void> {
+    const puts: Promise<void>[] = []
+    for (const scope of [...pending.keys()]) {
+      const timer = timers.get(scope)
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        timers.delete(scope)
+      }
+      const batch = pending.get(scope)
+      pending.delete(scope)
+      if (batch === undefined || batch.size === 0) {
+        continue
+      }
+      const [accountId, namespace] = scope.split(SEP)
+      puts.push(putBatch(accountId, namespace, batch))
+    }
+    // `allSettled`: a scope whose PUT fails has already re-queued itself in
+    // `putBatch`, and one failure must not hide the writes that did land.
+    await Promise.allSettled(puts)
+  }
+
   function draftText(value: unknown): string {
     return typeof value === 'object' &&
       value !== null &&
@@ -479,6 +508,7 @@ export function createDeviceStateStore(
       schedulePut(accountId, namespace, key, value)
     },
     hydrate,
+    flushPending,
     hydrated(accountId, namespace) {
       return hydratedScopes.value.has(scopeKey(accountId, namespace))
     },

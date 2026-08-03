@@ -201,6 +201,49 @@ api.GET(...)`, a background `.then`) must attach a rejection handler: wrap
   in `device-state.ts` and rendered invisibly, making the code look like it
   joined on a space; it fooled the 2026-07 review into reporting exactly
   that (WCR-11's premise was this artifact, not a real space).
+- **Never let "could not reach the server" discard a credential.** Only a
+  server that _answered_ and refused may end a session — `OAuthRejectedError`
+  vs `OAuthTransportError` in `src/auth/oauth.tsx`. Collapsing the two signed
+  every OAuth client out on each deploy: the restart drops the socket, the
+  reconnect refreshes an hour-old access token, and the refresh hits the
+  process still restarting, so a 30-day refresh token died of a connection
+  refused (ADR 0087). The same rule holds for any future credential path —
+  a 5xx and a rejected `fetch` are "unknown", not "no".
+- **Whatever serves `dist/` must 404 a missing `/assets/*`, not fall back to
+  `index.html`.** The SPA history fallback is for routes; a content-hashed
+  chunk is not one. Vite's own preview server rewrites _any_ unmatched GET
+  whose `Accept` includes the wildcard — which is what `<script type="module">`
+  and `import()` send — so a chunk deleted by a redeploy returns `200
+text/html`, the browser cannot parse it as a module, and the app hangs with
+  no useful error. Both servers that serve `dist/` are guarded:
+  `vite.config.ts` via `configurePreviewServer`, and `deploy/web/Caddyfile` via
+  a `handle /assets/*` block ahead of its `try_files`. Any new one needs the
+  same. Verify with `curl -sI <origin>/assets/nope-abc123.js` — a `200` there
+  is the bug.
+
+## Freshness: the client's own build
+
+Guardrail 8 in the root `AGENTS.md` ("every view of server state declares its
+freshness story") applies to the bundle itself, not just to data. The story, per
+ADR 0087:
+
+- `src/stores/update-check.ts` polls `/version.json` — on live-socket reconnect
+  (a deploy restarts the server, so this is the fast path), on
+  `visibilitychange` to visible, on `online`, and every 15 minutes as a
+  backstop. Every failure means "learned nothing", never "the build changed".
+- `src/update-refresh.ts` owns the policy: reload silently only when the user is
+  away and has no unsent echo, otherwise show `UpdateBanner`.
+- `src/reload.ts` is the loop guard, and it is load-bearing. **Any new code path
+  that reloads the document automatically must go through `reloadOnce`, with a
+  target that names what it is reloading toward.** An origin whose
+  `version.json` disagrees with the bundle it serves would otherwise reload
+  forever, which is a far worse failure than the staleness being fixed. The
+  guard keys on _(build we left, target)_ so one bad manifest does not disable
+  refresh for the session, and caps total automatic reloads at `MAX_ATTEMPTS`
+  per tab. `reloadNow` is for user-initiated reloads only.
+- Adding a check trigger is cheap; adding an _automatic reload_ trigger means
+  re-answering "what would this destroy?" — `timelines.hasUnsentWork` and
+  `deviceState.flushPending()` are the two existing answers.
 
 ## Diagnosing reports that only reproduce on someone else's device
 

@@ -11,12 +11,14 @@ import {
   connectReadMarkers,
   connectTimelineCacheReset,
   connectUnreadCounts,
+  connectUpdateChecks,
 } from './services'
 import { setPerfEnabled } from './perf'
 import { createMemoryCacheStore } from './stores/cache-store'
 import { createDeviceStateStore } from './stores/device-state'
 import { createLiveConnection } from './stores/live-connection'
 import { createTimelineStoreCache } from './stores/timeline-cache'
+import { createUpdateChecker } from './stores/update-check'
 import { FakeWebSocket } from './test/fake-socket'
 import { memoryStorage } from './test/memory-storage'
 import { testServices } from './test/services'
@@ -265,6 +267,45 @@ describe('connectLiveRooms', () => {
   })
 })
 
+describe('connectUpdateChecks', () => {
+  // A deploy restarts the process the socket runs through, so a reconnect is
+  // the earliest evidence that the build may have changed — seconds, without
+  // polling. The first connect is not evidence of anything.
+  it('checks for a new build on reconnect, not on the first connect', () => {
+    vi.useFakeTimers()
+    try {
+      const sockets: FakeWebSocket[] = []
+      const live = createLiveConnection({
+        socketFactory: () => {
+          const s = new FakeWebSocket()
+          sockets.push(s)
+          return s.asWebSocket()
+        },
+      })
+      let checks = 0
+      const updates = createUpdateChecker({
+        currentVersion: 'build-a',
+        fetchManifest: () => {
+          checks += 1
+          return Promise.resolve(null)
+        },
+      })
+      connectUpdateChecks(live, updates)
+      live.start()
+
+      sockets[0].emitOpen()
+      expect(checks).toBe(0)
+
+      sockets[0].emitClose()
+      vi.advanceTimersByTime(1000) // initial backoff
+      sockets[1].emitOpen()
+      expect(checks).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('connectTimelineCacheReset', () => {
   /** Only the two members the connector touches; the rest of the graph is irrelevant. */
   function harness(signedIn: boolean) {
@@ -281,6 +322,7 @@ describe('connectTimelineCacheReset', () => {
         clear: () => {
           clears += 1
         },
+        hasUnsentWork: false,
         size: 0,
       },
     )

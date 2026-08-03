@@ -116,6 +116,93 @@ describe('createDeviceStateStore', () => {
     vi.useRealTimers()
   })
 
+  // Called before an automatic reload (ADR 0087). Drafts are durable, but only
+  // once the PUT behind the 800 ms debounce has actually gone out — reloading
+  // inside that window would drop the last thing the user typed.
+  it('flushPending sends debounced writes at once and resolves after the PUT', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.put(STATE_PATH, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({
+          data: { updated_at: '2026-01-01T00:00:00Z' },
+        })
+      }),
+    )
+    const { store } = setup()
+    store.setDraft(ACCT, ROOM, 'half-typed')
+    expect(bodies).toEqual([])
+
+    await store.flushPending()
+
+    // Resolved means sent *and* answered — no timer advance needed.
+    expect(bodies).toEqual([{ entries: { [ROOM]: { text: 'half-typed' } } }])
+  })
+
+  it('flushPending covers every namespace with pending writes', async () => {
+    const namespaces: string[] = []
+    server.use(
+      http.put(STATE_PATH, ({ params }) => {
+        namespaces.push(String(params.namespace))
+        return HttpResponse.json({
+          data: { updated_at: '2026-01-01T00:00:00Z' },
+        })
+      }),
+    )
+    const { store } = setup()
+    store.setDraft(ACCT, ROOM, 'text')
+    store.advanceReadMarker(ACCT, ROOM, '$e', 1000)
+
+    await store.flushPending()
+    expect(namespaces.sort()).toEqual(['drafts', 'read_markers'])
+  })
+
+  it('flushPending on an idle store resolves without a request', async () => {
+    let puts = 0
+    server.use(
+      http.put(STATE_PATH, () => {
+        puts += 1
+        return HttpResponse.json({
+          data: { updated_at: '2026-01-01T00:00:00Z' },
+        })
+      }),
+    )
+    const { store } = setup()
+    await expect(store.flushPending()).resolves.toBeUndefined()
+    expect(puts).toBe(0)
+  })
+
+  // A flush that fails must behave exactly like a debounced one that fails:
+  // the batch is re-queued, not lost, and the caller is not left hanging.
+  it('flushPending resolves even when the PUT fails, and re-queues the write', async () => {
+    vi.useFakeTimers()
+    try {
+      let attempts = 0
+      server.use(
+        http.put(STATE_PATH, () => {
+          attempts += 1
+          return attempts === 1
+            ? HttpResponse.error()
+            : HttpResponse.json({
+                data: { updated_at: '2026-01-01T00:00:00Z' },
+              })
+        }),
+      )
+      const { store } = setup()
+      store.setDraft(ACCT, ROOM, 'text')
+
+      await store.flushPending()
+      expect(attempts).toBe(1)
+      expect(store.draft(ACCT, ROOM)).toBe('text')
+
+      // The re-queue rescheduled a debounced flush, which then succeeds.
+      await vi.advanceTimersByTimeAsync(800)
+      expect(attempts).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('clearing a draft writes a null tombstone', async () => {
     vi.useFakeTimers()
     let body: unknown

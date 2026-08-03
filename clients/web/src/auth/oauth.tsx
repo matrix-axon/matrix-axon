@@ -12,6 +12,42 @@ const PENDING_KEY = 'axon.oauth.pending'
 const REFRESH_SKEW_MS = 60_000
 const DEFAULT_CLIENT_ID = 'axon-web'
 
+/**
+ * Least time between two refreshes provoked by a `401`. `getToken` already
+ * refreshes ahead of expiry, so a `401` means something unexpected; if the
+ * server were to answer `401` to everything while still honoring refreshes,
+ * this bounds the retry rate to something harmless.
+ */
+const AUTH_FAILURE_REFRESH_COOLDOWN_MS = 5_000
+
+/**
+ * The server answered and refused the grant — it is bad, expired, or revoked.
+ * The only error that may end a session.
+ */
+export class OAuthRejectedError extends Error {
+  readonly name = 'OAuthRejectedError'
+}
+
+/**
+ * We never got a verdict: the request failed, or the server failed to serve it.
+ * Says nothing about the credentials, so it must never discard them.
+ *
+ * This distinction is the whole point. Collapsing it — treating any thrown
+ * error as a dead session — meant a deploy could sign every client out: the
+ * restart drops the live socket, the reconnect calls `getToken`, a token stale
+ * for longer than the hour it lives triggers a refresh, and that refresh lands
+ * on the same process that is still restarting. A 30-day refresh token was then
+ * thrown away over a connection refused.
+ */
+export class OAuthTransportError extends Error {
+  readonly name = 'OAuthTransportError'
+}
+
+/** Whether a token-endpoint status is the server refusing the grant. */
+function isRejection(status: number): boolean {
+  return status >= 400 && status < 500
+}
+
 export interface OAuthProviderConfig {
   provider: string
   label: string
@@ -115,6 +151,7 @@ export function createOAuthAuthProvider({
     session.value === null ? null : (storedSession?.mode ?? 'persistent'),
   )
   let refreshInFlight: Promise<string | null> | null = null
+  let lastAuthFailureRefreshAt = 0
 
   function persist(next: OAuthSession | null, mode = sessionMode.value): void {
     if (next === null) {
@@ -130,19 +167,30 @@ export function createOAuthAuthProvider({
   }
 
   async function redeem(form: URLSearchParams): Promise<OAuthSession> {
-    const response = await fetch(apiUrl('/v1/oauth/token', baseUrl), {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: form,
-    })
+    let response: Response
+    try {
+      response = await fetch(apiUrl('/v1/oauth/token', baseUrl), {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: form,
+      })
+    } catch (cause) {
+      throw new OAuthTransportError('could not reach the server', { cause })
+    }
     const body = (await response.json().catch(() => ({}))) as unknown
     if (!response.ok) {
       const oauthError = body as OAuthErrorBody
-      throw new Error(
+      const message =
         oauthError.error_description ??
-          oauthError.error ??
-          'OAuth token exchange failed',
-      )
+        oauthError.error ??
+        'OAuth token exchange failed'
+      // RFC 6749 §5.2: the token endpoint reports a bad, expired, or revoked
+      // grant as a 4xx with an `error` body. A 5xx is the server failing, which
+      // says nothing about our credentials — and a proxy mid-restart answers
+      // 502/503 exactly like that.
+      throw isRejection(response.status)
+        ? new OAuthRejectedError(message)
+        : new OAuthTransportError(message)
     }
     return sessionFromTokenBody(
       body,
@@ -168,8 +216,14 @@ export function createOAuthAuthProvider({
         )
         persist({ ...next, provider: current.provider })
         return next.accessToken
-      } catch {
-        persist(null)
+      } catch (error) {
+        // Only a refusal ends the session. Not knowing is not a reason to throw
+        // away a refresh token that is good for thirty days — the caller gets
+        // `null` and no token, the request it wanted fails, and the next
+        // attempt (a retry, a reconnect, the user acting again) tries afresh.
+        if (error instanceof OAuthRejectedError) {
+          persist(null)
+        }
         return null
       } finally {
         refreshInFlight = null
@@ -191,7 +245,24 @@ export function createOAuthAuthProvider({
       return refreshAccessToken()
     },
     onAuthFailure() {
-      persist(null)
+      // A `401` says this access token was not accepted; it does not say the
+      // session is over, and we hold a refresh token that outlives the access
+      // token thirty times over. So try to refresh — `refreshAccessToken` signs
+      // out if and only if the server refuses the grant. Signing out here
+      // instead (the previous behavior) turned every unexpected `401` into a
+      // full re-authentication, including ones a refresh would have fixed.
+      //
+      // Fire-and-forget: the interface is synchronous and the request that
+      // failed is already lost. What this buys is the *next* request.
+      if (session.value === null) {
+        return
+      }
+      const now = Date.now()
+      if (now - lastAuthFailureRefreshAt < AUTH_FAILURE_REFRESH_COOLDOWN_MS) {
+        return
+      }
+      lastAuthFailureRefreshAt = now
+      void refreshAccessToken()
     },
     clearToken() {
       persist(null)

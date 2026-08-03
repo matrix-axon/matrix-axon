@@ -370,6 +370,10 @@ function synthTimeline(n) {
  *  toggled via `/__e2e/search-503` and reset by the spec that sets it. */
 let searchDisabled = false
 
+/** Manifest `/version.json` reports instead of `dist/`'s; `null` = the real one.
+ *  Set via `/__e2e/version` to stage a deploy without rebuilding (ADR 0087). */
+let versionOverride = null
+
 const MIME = {
   '.html': 'text/html',
   '.js': 'text/javascript',
@@ -875,6 +879,33 @@ const server = createServer((req, res) => {
   if (req.method === 'POST' && url.pathname === '/__e2e/search-503') {
     searchDisabled = url.searchParams.get('disabled') === 'true'
     return json(res, { data: { search_disabled: searchDisabled } })
+  }
+  // What build the origin claims to serve. Unset (the default), `/version.json`
+  // comes from `dist/` like any other file, so every other spec sees the build
+  // it is actually running and no spec is surprised by a reload. Setting it is
+  // how a spec stages a deploy without rebuilding (ADR 0087). The spec that
+  // sets it must reset it — the mock is one process shared by every spec.
+  if (req.method === 'POST' && url.pathname === '/__e2e/version') {
+    const version = url.searchParams.get('version')
+    versionOverride =
+      version === null || version === ''
+        ? null
+        : {
+            release: url.searchParams.get('release') ?? '0.0.0-e2e',
+            version,
+            builtAt: new Date(0).toISOString(),
+          }
+    return json(res, { data: { version: versionOverride } })
+  }
+  if (req.method === 'GET' && url.pathname === '/version.json') {
+    if (versionOverride === null) {
+      return void serveStatic(res, url.pathname)
+    }
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'cache-control': 'no-store',
+    })
+    return res.end(JSON.stringify(versionOverride))
   }
   if (req.method === 'POST' && url.pathname === '/__e2e/drop-sockets') {
     const blockMs = Number(url.searchParams.get('block_ms') ?? 0)

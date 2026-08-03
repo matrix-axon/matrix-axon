@@ -39,6 +39,14 @@ export interface TimelineStoreCache {
   acquire(accountId: string, roomId: string): TimelineStore
   /** Drop every store, unsent echoes included. Sign-out only. */
   clear(): void
+  /**
+   * True while any warm store holds a send this client has not placed —
+   * pending, or failed and retryable. A media upload in flight is one of these
+   * (its echo carries the `File`), so this covers attachments too. The
+   * auto-refresh policy reads it to decide whether reloading would destroy
+   * work: an unsent echo lives only in memory, so a reload would take it.
+   */
+  readonly hasUnsentWork: boolean
   /** Warm room count, for tests and diagnostics. */
   readonly size: number
 }
@@ -147,6 +155,10 @@ export function createTimelineStoreCache(
         store.dispose()
       }
       stores.clear()
+    },
+
+    get hasUnsentWork() {
+      return [...stores.values()].some(holdsUnsentWork)
     },
 
     get size() {

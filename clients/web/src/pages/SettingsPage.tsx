@@ -15,6 +15,7 @@ import {
   matrixProtocolHandlerAvailable,
   registerMatrixProtocolHandler,
 } from '../matrix-protocol'
+import { browserReloadEnvironment, reloadNow } from '../reload'
 import { useServices } from '../services'
 import { currentPlatform, isApplePlatform } from '../shortcuts'
 import type {
@@ -274,12 +275,60 @@ export function SettingsPage() {
         the server.
       </p>
       <footer class="settings-version muted">
-        Web client <code>{BUILD_INFO.version}</code> · built{' '}
+        Web client <code>{BUILD_INFO.displayVersion}</code> · built{' '}
         <time dateTime={BUILD_INFO.builtAt}>{BUILD_INFO.builtAtLabel}</time>
         {' · '}
         <a href="/licenses">Open-source licenses</a>
+        <br />
+        <UpdateCheckControl />
       </footer>
     </div>
+  )
+}
+
+/**
+ * Manual "is there a new build?" (ADR 0087). The automatic path is silent by
+ * design, which leaves nowhere to confirm that a client *is* current — the
+ * question a bug report starts with. This is that place, and it doubles as the
+ * escape hatch when the user wants the update now rather than on next idle.
+ */
+function UpdateCheckControl() {
+  const { updates } = useServices()
+  const status = updates.status.value
+  const message =
+    status === 'checking'
+      ? 'Checking…'
+      : status === 'available'
+        ? 'A new version is available.'
+        : status === 'current'
+          ? 'This is the latest version.'
+          : status === 'error'
+            ? "Couldn't reach the server."
+            : null
+
+  return (
+    <>
+      <button
+        type="button"
+        class="ghost settings-update-check"
+        disabled={status === 'checking'}
+        onClick={() => void updates.check()}
+      >
+        Check for updates
+      </button>
+      {message !== null && <span> {message}</span>}
+      {status === 'available' && (
+        <>
+          {' '}
+          <button
+            type="button"
+            onClick={() => reloadNow(browserReloadEnvironment())}
+          >
+            Reload
+          </button>
+        </>
+      )}
+    </>
   )
 }
 

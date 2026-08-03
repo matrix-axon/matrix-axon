@@ -1,6 +1,14 @@
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { memoryStorage } from '../test/memory-storage'
 import { createOAuthAuthProvider, parseOAuthProviders } from './oauth'
 
@@ -253,5 +261,191 @@ describe('createOAuthAuthProvider', () => {
     await expect(auth.getToken()).resolves.toBeNull()
     expect(auth.signedIn.value).toBe(false)
     expect(storage.getItem('axon.oauth.session')).toBeNull()
+  })
+
+  /**
+   * A refresh that never got an answer must not end the session. This is the
+   * deploy-time sign-out: restarting the server drops the live socket, the
+   * reconnect asks for a token, the hour-old access token needs refreshing, and
+   * that refresh lands on the process still coming back up. Discarding a
+   * 30-day refresh token over a connection refused is what forced testers to
+   * sign in again after every push.
+   */
+  describe('a refresh that gets no verdict keeps the session', () => {
+    const expiredSession = () =>
+      memoryStorage({
+        'axon.oauth.session': JSON.stringify({
+          accessToken: 'old-access',
+          refreshToken: 'old-refresh',
+          expiresAt: Date.now() - 1000,
+          provider: 'google',
+        }),
+      })
+
+    const providerOver = (storage: Storage) =>
+      createOAuthAuthProvider({
+        providers: [{ provider: 'google', label: 'Google' }],
+        baseUrl: BASE_URL,
+        storage,
+        pendingStorage: memoryStorage(),
+      })
+
+    it('keeps it when the server cannot be reached', async () => {
+      const storage = expiredSession()
+      server.use(http.post(TOKEN_URL, () => HttpResponse.error()))
+      const auth = providerOver(storage)
+
+      await expect(auth.getToken()).resolves.toBeNull()
+
+      expect(auth.signedIn.value).toBe(true)
+      const saved = JSON.parse(storage.getItem('axon.oauth.session')!)
+      expect(saved.refreshToken).toBe('old-refresh')
+    })
+
+    it.each([500, 502, 503, 504])('keeps it on a %i', async (status) => {
+      const storage = expiredSession()
+      server.use(http.post(TOKEN_URL, () => new HttpResponse(null, { status })))
+      const auth = providerOver(storage)
+
+      await expect(auth.getToken()).resolves.toBeNull()
+      expect(auth.signedIn.value).toBe(true)
+    })
+
+    it('recovers on the next attempt once the server is back', async () => {
+      const storage = expiredSession()
+      let attempts = 0
+      server.use(
+        http.post(TOKEN_URL, () => {
+          attempts += 1
+          return attempts === 1
+            ? HttpResponse.error()
+            : HttpResponse.json({
+                access_token: 'new-access',
+                token_type: 'Bearer',
+                expires_in: 3600,
+                refresh_token: 'new-refresh',
+              })
+        }),
+      )
+      const auth = providerOver(storage)
+
+      await expect(auth.getToken()).resolves.toBeNull()
+      // The refresh token survived the outage, so the retry just works.
+      await expect(auth.getToken()).resolves.toBe('new-access')
+      expect(auth.signedIn.value).toBe(true)
+    })
+  })
+
+  describe('onAuthFailure', () => {
+    const liveSession = () =>
+      memoryStorage({
+        'axon.oauth.session': JSON.stringify({
+          accessToken: 'old-access',
+          refreshToken: 'old-refresh',
+          // Not expired: `getToken` would hand this back without refreshing,
+          // so a 401 here is the unexpected kind.
+          expiresAt: Date.now() + 3_600_000,
+          provider: 'google',
+        }),
+      })
+
+    const providerOver = (storage: Storage) =>
+      createOAuthAuthProvider({
+        providers: [{ provider: 'google', label: 'Google' }],
+        baseUrl: BASE_URL,
+        storage,
+        pendingStorage: memoryStorage(),
+      })
+
+    it('refreshes instead of signing out', async () => {
+      const storage = liveSession()
+      let attempts = 0
+      server.use(
+        http.post(TOKEN_URL, () => {
+          attempts += 1
+          return HttpResponse.json({
+            access_token: 'new-access',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            refresh_token: 'new-refresh',
+          })
+        }),
+      )
+      const auth = providerOver(storage)
+
+      auth.onAuthFailure()
+
+      await vi.waitFor(() => expect(attempts).toBe(1))
+      expect(auth.signedIn.value).toBe(true)
+      // Synchronous: the freshly minted token is nowhere near expiry, so the
+      // next request carries it without another round trip.
+      expect(auth.getToken()).toBe('new-access')
+    })
+
+    it('signs out when the server refuses the refresh', async () => {
+      const storage = liveSession()
+      server.use(
+        http.post(TOKEN_URL, () =>
+          HttpResponse.json({ error: 'invalid_grant' }, { status: 400 }),
+        ),
+      )
+      const auth = providerOver(storage)
+
+      auth.onAuthFailure()
+
+      await vi.waitFor(() => expect(auth.signedIn.value).toBe(false))
+      expect(storage.getItem('axon.oauth.session')).toBeNull()
+    })
+
+    it('keeps the session when the refresh cannot reach the server', async () => {
+      const storage = liveSession()
+      let attempts = 0
+      server.use(
+        http.post(TOKEN_URL, () => {
+          attempts += 1
+          return HttpResponse.error()
+        }),
+      )
+      const auth = providerOver(storage)
+
+      auth.onAuthFailure()
+
+      await vi.waitFor(() => expect(attempts).toBe(1))
+      expect(auth.signedIn.value).toBe(true)
+    })
+
+    // A server answering 401 to everything while still honoring refreshes
+    // would otherwise mint a token per failed request.
+    it('rate-limits repeated failures', async () => {
+      const storage = liveSession()
+      let attempts = 0
+      server.use(
+        http.post(TOKEN_URL, () => {
+          attempts += 1
+          return HttpResponse.json({
+            access_token: `access-${attempts}`,
+            token_type: 'Bearer',
+            expires_in: 3600,
+            refresh_token: 'new-refresh',
+          })
+        }),
+      )
+      const auth = providerOver(storage)
+
+      for (let i = 0; i < 5; i += 1) {
+        auth.onAuthFailure()
+      }
+
+      await vi.waitFor(() => expect(attempts).toBe(1))
+      expect(attempts).toBe(1)
+    })
+
+    it('does nothing when there is no session to refresh', async () => {
+      const auth = providerOver(memoryStorage())
+      // No handler registered: msw is set to error on unhandled requests, so a
+      // request here would fail the test outright.
+      auth.onAuthFailure()
+      expect(auth.signedIn.value).toBe(false)
+    })
   })
 })
