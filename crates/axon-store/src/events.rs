@@ -1054,12 +1054,14 @@ impl Store {
     }
 
     /// The threads in a room (M8): one summary per distinct `m.thread` root, most
-    /// recently active first. `reply_count` counts thread members including
-    /// redacted ones (structure is preserved so a redacted root doesn't make its
-    /// thread vanish); the latest reply is resolved deterministically by
-    /// `(origin_ts, id)`. The root event itself is not a member — fetch it with
+    /// recently active first. `reply_count` only counts actual messages — a state
+    /// event can't legitimately carry an `m.thread` relation, but a hostile or
+    /// buggy client could send one, and redacted members are excluded since their
+    /// content is gone; the latest reply is likewise resolved only over that
+    /// surviving set. The root event itself is not a member — fetch it with
     /// [`get_event`](Self::get_event) or page the thread with
-    /// [`thread_timeline`](Self::thread_timeline).
+    /// [`thread_timeline`](Self::thread_timeline), which still surfaces redacted
+    /// members (masked) for structural continuity.
     pub async fn room_threads(
         &self,
         account_id: Uuid,
@@ -1074,9 +1076,16 @@ impl Store {
                         (array_agg(event_id ORDER BY origin_ts DESC, id DESC))[1] \
                             AS latest_reply_event_id, \
                         MAX(origin_ts)            AS latest_reply_ts \
-                 FROM events \
+                 FROM events m \
                  WHERE account_id = $1 AND room_id = $2 \
                    AND relates_to->>'rel_type' = 'm.thread' \
+                   AND raw_event->>'state_key' IS NULL \
+                   AND NOT EXISTS ( \
+                       SELECT 1 FROM events rr \
+                       WHERE rr.account_id = m.account_id \
+                         AND rr.event_type = 'm.room.redaction' \
+                         AND rr.redacts = m.event_id \
+                   ) \
                  GROUP BY relates_to->>'event_id' \
              ) th \
              ORDER BY th.latest_reply_ts DESC, th.root_event_id \
@@ -1212,7 +1221,8 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for ReactionTally {
 pub struct ThreadSummary {
     /// The `event_id` of the thread root (the event the members relate to).
     pub root_event_id: String,
-    /// Number of thread members, counting redacted ones for structure.
+    /// Number of actual-message thread members: redacted members and any
+    /// (illegitimate) state-event members are excluded.
     pub reply_count: i64,
     /// The `event_id` of the most recent thread member, if any.
     pub latest_reply_event_id: Option<String>,

@@ -1566,7 +1566,8 @@ impl From<ReactionTally> for ReactionDto {
 pub struct ThreadSummaryDto {
     /// The `event_id` of the thread root (the event the members relate to).
     pub root_event_id: String,
-    /// Number of thread members, counting redacted ones for structure.
+    /// Number of actual-message thread members: redacted members and any
+    /// (illegitimate) state-event members are excluded.
     pub reply_count: i64,
     /// The `event_id` of the most recent thread member, or `null` if none.
     pub latest_reply_event_id: Option<String>,

@@ -517,9 +517,9 @@ async fn replies_resolve_and_exclude_threads() {
     common::cleanup_account(&pool, account_id).await;
 }
 
-/// Thread summaries and the thread-scoped timeline: reply count includes a
-/// redacted member (structure preserved, content masked), the latest reply is
-/// resolved, and the scoped timeline returns only that thread's members.
+/// Thread summaries and the thread-scoped timeline: `reply_count` excludes a
+/// redacted member, but the scoped timeline still surfaces it (masked) for
+/// structural continuity — pagination walks the full member list.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn threads_summarize_and_paginate() {
@@ -533,7 +533,7 @@ async fn threads_summarize_and_paginate() {
     let m1 = insert_thread_reply(&store, account_id, &room_id, base + 1, &root, "reply 1").await;
     let m2 = insert_thread_reply(&store, account_id, &room_id, base + 2, &root, "reply 2").await;
     let m3 = insert_thread_reply(&store, account_id, &room_id, base + 3, &root, "reply 3").await;
-    // Redact the latest member: still counted for structure, content masked.
+    // Redact the latest member: no longer a real message, so it drops out of the count.
     redact(&store, account_id, &room_id, base + 4, &m3).await;
 
     // A second, unrelated thread so we know `room_threads` groups by root.
@@ -560,11 +560,11 @@ async fn threads_summarize_and_paginate() {
         .find(|t| t.root_event_id == root)
         .expect("root thread");
     assert_eq!(
-        first.reply_count, 3,
-        "redacted member still counts for structure"
+        first.reply_count, 2,
+        "the redacted member no longer counts as a reply"
     );
-    assert_eq!(first.latest_reply_event_id.as_deref(), Some(m3.as_str()));
-    assert_eq!(first.latest_reply_ts, Some(base + 3));
+    assert_eq!(first.latest_reply_event_id.as_deref(), Some(m2.as_str()));
+    assert_eq!(first.latest_reply_ts, Some(base + 2));
 
     // The thread-scoped timeline returns only this thread's members, newest first.
     let page = store
@@ -601,6 +601,59 @@ async fn threads_summarize_and_paginate() {
         .expect("page 2");
     assert_eq!(p2.len(), 1);
     assert_eq!(p2[0].event_id, m1, "oldest member last, no overlap/skip");
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// A state event can't legitimately carry an `m.thread` relation, but a hostile
+/// or buggy client could send one; `room_threads` must not let it inflate the
+/// reply count.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_reply_count_excludes_state_events() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "agg-thread-state").await;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+    let base = 1_700_000_000_000;
+
+    let root = insert_message(&store, account_id, &room_id, base, "thread root").await;
+    let m1 = insert_thread_reply(&store, account_id, &room_id, base + 1, &root, "reply 1").await;
+
+    let state_member = format!("$state-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_event(&NewEvent {
+            event_id: &state_member,
+            room_id: &room_id,
+            account_id,
+            sender: SENDER,
+            origin_ts: base + 2,
+            event_type: "m.room.topic",
+            content: Some(json!({ "topic": "not a reply" })),
+            raw_event: json!({
+                "type": "m.room.topic",
+                "state_key": "",
+                "content": { "topic": "not a reply" },
+            }),
+            megolm_session_id: None,
+            redacts: None,
+            relates_to: Some(json!({ "rel_type": "m.thread", "event_id": root })),
+            decrypted_body_text: None,
+        })
+        .await
+        .expect("insert state-event thread member");
+
+    let threads = store
+        .room_threads(account_id, &room_id)
+        .await
+        .expect("threads");
+    assert_eq!(threads.len(), 1);
+    assert_eq!(
+        threads[0].reply_count, 1,
+        "the state-event member doesn't count as a reply"
+    );
+    assert_eq!(threads[0].latest_reply_event_id.as_deref(), Some(m1.as_str()));
+    assert_eq!(threads[0].latest_reply_ts, Some(base + 1));
 
     common::cleanup_account(&pool, account_id).await;
 }
