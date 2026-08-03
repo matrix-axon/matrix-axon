@@ -207,6 +207,24 @@ export function createDeviceStateStore(
   const pending = new Map<string, Map<string, unknown>>()
   const timers = new Map<string, ReturnType<typeof setTimeout>>()
   /**
+   * Tail of the in-flight `PUT` chain per scope, so two writes to one scope are
+   * never in flight at once.
+   *
+   * The server merge is last-write-wins by arrival
+   * (`ON CONFLICT … DO UPDATE SET value = EXCLUDED.value`, no ordering guard),
+   * so overlapping PUTs are a lost update whenever the network reorders them:
+   * the user types "hel", that PUT goes out, they type "hello", the second PUT
+   * overtakes the first, and the first lands last and restores "hel".
+   *
+   * That race predates the auto-reload, but the reload is what makes it
+   * unrecoverable — `flushPending` used to await only the batches it started
+   * itself, so a stale PUT still in flight could land *after* the reload had
+   * already destroyed the tab holding the newer text. Serializing per scope
+   * removes the reordering, and `flushPending` awaits these tails rather than
+   * just its own work.
+   */
+  const writes = new Map<string, Promise<void>>()
+  /**
    * Monotonic tick, bumped on every local write and every server ack of one.
    * It orders a `GET` response against the local writes that response may not
    * reflect — see `settled`.
@@ -339,7 +357,36 @@ export function createDeviceStateStore(
       }
       pending.delete(sk)
     }
-    await putBatch(accountId, namespace, batch)
+    await enqueuePut(accountId, namespace, batch)
+  }
+
+  /**
+   * Queue a `PUT` behind whatever is already in flight for its scope, and
+   * return a promise for *this* write. The single entry point for writing a
+   * batch — nothing calls `putBatch` directly, or the ordering guarantee has a
+   * hole in it.
+   */
+  function enqueuePut(
+    accountId: string,
+    namespace: string,
+    batch: Map<string, unknown>,
+  ): Promise<void> {
+    const sk = scopeKey(accountId, namespace)
+    const next = (writes.get(sk) ?? Promise.resolve())
+      // A predecessor that failed must not cancel this write: `putBatch` has
+      // already re-queued its batch, and this one is the newer text.
+      .catch(() => {})
+      .then(() => putBatch(accountId, namespace, batch))
+    writes.set(sk, next)
+    void next
+      .catch(() => {})
+      .then(() => {
+        // Only the current tail clears the slot; a later write has replaced it.
+        if (writes.get(sk) === next) {
+          writes.delete(sk)
+        }
+      })
+    return next
   }
 
   function flush(accountId: string, namespace: string): void {
@@ -350,7 +397,7 @@ export function createDeviceStateStore(
     if (batch === undefined || batch.size === 0) {
       return
     }
-    void putBatch(accountId, namespace, batch)
+    void enqueuePut(accountId, namespace, batch)
   }
 
   async function putBatch(
@@ -470,7 +517,6 @@ export function createDeviceStateStore(
   }
 
   async function flushPending(): Promise<void> {
-    const puts: Promise<void>[] = []
     for (const scope of [...pending.keys()]) {
       const timer = timers.get(scope)
       if (timer !== undefined) {
@@ -483,11 +529,15 @@ export function createDeviceStateStore(
         continue
       }
       const [accountId, namespace] = scope.split(SEP)
-      puts.push(putBatch(accountId, namespace, batch))
+      void enqueuePut(accountId, namespace, batch)
     }
-    // `allSettled`: a scope whose PUT fails has already re-queued itself in
-    // `putBatch`, and one failure must not hide the writes that did land.
-    await Promise.allSettled(puts)
+    // Await the *chain tails*, not just the batches queued above: a write
+    // already in flight when this was called has to land before the caller
+    // reloads, or it lands afterwards against a tab that no longer exists.
+    // Queueing first and awaiting after means each tail is this scope's last
+    // write. `allSettled` because a scope whose PUT failed has re-queued itself
+    // in `putBatch`, and one failure must not hide the writes that did land.
+    await Promise.allSettled([...writes.values()])
   }
 
   function draftText(value: unknown): string {
