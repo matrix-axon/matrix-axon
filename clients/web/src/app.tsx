@@ -182,6 +182,25 @@ function useVisualViewportShell(): void {
     window.addEventListener('pageshow', update)
     document.addEventListener('focusin', update)
     document.addEventListener('focusout', updateAfterBlur)
+    // `html`/`body`/`#app` are `height: 100%; overflow: hidden` — the page
+    // itself is never meant to scroll; `.timeline` is the one scrollable
+    // region. iOS Safari's own "keep the focused control visible" heuristic
+    // does not know that: focusing the composer (fixed/sticky, not in normal
+    // flow) while the keyboard is up, then dragging inside `.timeline`, can
+    // make Safari nudge the *document's* scroll position regardless — moving
+    // everything positioned off `--app-viewport-top` (composer included) away
+    // from the keyboard it's meant to sit on, with a gap of plain page
+    // background left behind. Snap it back the instant it happens.
+    const resetPageScroll = () => {
+      if (window.scrollX !== 0 || window.scrollY !== 0) {
+        perfMark('timeline:keyboard:page-scroll-reset', {
+          scrollX: window.scrollX,
+          scrollY: window.scrollY,
+        })
+        window.scrollTo(0, 0)
+      }
+    }
+    window.addEventListener('scroll', resetPageScroll)
     return () => {
       viewport.removeEventListener('resize', update)
       viewport.removeEventListener('scroll', update)
@@ -190,6 +209,7 @@ function useVisualViewportShell(): void {
       window.removeEventListener('pageshow', update)
       document.removeEventListener('focusin', update)
       document.removeEventListener('focusout', updateAfterBlur)
+      window.removeEventListener('scroll', resetPageScroll)
       clear()
     }
   }, [])

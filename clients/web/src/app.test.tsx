@@ -629,6 +629,50 @@ describe('App', () => {
     ).toBe('30px')
   })
 
+  it('snaps a spurious page scroll back to the origin (iOS fixed-composer quirk)', async () => {
+    // `html`/`body`/`#app` declare the page itself never scrolls — `.timeline`
+    // is the one scrollable region. iOS Safari's own focused-element-visible
+    // heuristic does not know that: it can nudge the *document's* scroll
+    // position while a fixed/sticky composer holds focus and the reader drags
+    // inside the timeline, dragging everything positioned off
+    // `--app-viewport-top` (the composer included) away from the keyboard.
+    const viewport = {
+      offsetTop: 0,
+      offsetLeft: 0,
+      width: 390,
+      height: 460,
+      scale: 1,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as VisualViewport
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: viewport,
+    })
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+
+    render(<App services={testServices()} />)
+    await waitFor(() =>
+      expect(
+        document.documentElement.style.getPropertyValue(
+          '--app-viewport-height',
+        ),
+      ).toBe('460px'),
+    )
+
+    Object.defineProperty(window, 'scrollX', {
+      configurable: true,
+      value: 48,
+    })
+    Object.defineProperty(window, 'scrollY', {
+      configurable: true,
+      value: 120,
+    })
+    window.dispatchEvent(new Event('scroll'))
+
+    expect(scrollTo).toHaveBeenCalledWith(0, 0)
+  })
+
   it('reserves the standalone iOS keyboard accessory strip while editing', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
       'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
