@@ -4,7 +4,9 @@ Axon is a self-hosted personal agent for [Matrix](https://matrix.org). It sits b
 
 Matrix's encrypted and decentralized architecture can make full client usability challenging. This "middle" layer aims to solve that challenge. It is similar to the [back-end for front-end](https://philcalcado.com/2015/09/18/the_back_end_for_front_end_pattern_bff.html) concept, with the added wrinkle that it is intended to run as a separate instance per user. Old-timers may find a familiar with analogy with [ZNC Bouncer](https://en.wikipedia.org/wiki/ZNC), an agent that sits between an IRC client and an IRC server.
 
-What sets Axon apart from other Matrix clients is where the hard work happens. Sync, E2EE decryption, and a full-history search index all live in Axon itself, not duplicated in every client — so a client can be wiped and reinstalled and be back to full functionality in seconds, with no history to re-sync and no on-device index to rebuild. That one persistent brain also covers multiple Matrix accounts (personal and work, even on different homeservers) under a single search index and API, and resolves edits, reactions, and threads server-side so a late reaction to an old message is never silently dropped just because a client's timeline window has moved on. Two reference clients already consume that same open, versioned `/v1/` API today — [`axon-tui`](clients/tui/README.md), a keyboard-first terminal client, and [`axon-web`](clients/web/README.md), a browser and Tauri desktop client — proof that building a third is a client-only project, not a fork. And because Axon can be self-hosted on your own hardware or cloud instance rather than a SaaS holding your decrypted history, it's working toward a single-command setup that works painlessly on Linux, MacOS, or Windows: a Docker Compose stack that brings up Postgres, Axon, and the web client behind one front door, with Caddy handling TLS and a Tailscale profile for private remote access already built in.
+What sets Axon apart is where the hard work happens. Sync, E2EE decryption, and a full-history search index all live in Axon itself, not duplicated in every client — so a client can be wiped and reinstalled and be back to full functionality in seconds, with no history to re-sync and no on-device index to rebuild. That one persistent brain also covers multiple Matrix accounts (personal and work, even on different homeservers) under a single search index and API, and resolves edits, reactions, and threads server-side so a late reaction to an old message is never silently dropped just because a client's timeline window has moved on.
+
+Two reference clients already consume that same open, versioned `/v1/` API today — [`axon-tui`](clients/tui/README.md), a keyboard-first terminal client, and [`axon-web`](clients/web/README.md), a browser and (soon to be released) Tauri desktop client — proof that building a third is a client-only project, not a fork. Check out our [client parity](docs/client-parity.md) document for the current implementation status of these clients and future roadmap. And because Axon can be self-hosted on your own hardware or cloud instance rather than a SaaS holding your decrypted history, it's working toward a single-command setup that works painlessly on Linux, MacOS, or Windows: a Docker Compose stack that brings up Postgres, Axon, and the web client behind one front door, with Caddy handling TLS and a Tailscale profile for private remote access already built in.
 
 ## See it
 
@@ -235,7 +237,7 @@ docker compose up -d postgres
 
 ### 6. Troubleshooting
 
-During very early development, there may be some breaking updates. If you get an error like `Error: connecting to database` after `cargo run -p axon-server`, try starting a fresh postgres docker instance per the instructions directly above.
+While we are still "pre-release," there may be some breaking updates. If you get an error like `Error: connecting to database` after `cargo run -p axon-server`, try starting a fresh postgres docker instance per the instructions directly above.
 
 If startup fails because `sqlx` says an already-applied migration "has been modified", you can repair the local metadata without dropping your database:
 
@@ -250,40 +252,6 @@ does not touch your application tables or Matrix history. This is intended for
 local developer databases after rebases or edited historical migration files, not
 for production remediation, so it is only compiled into `axon-server` when the
 `dev-tools` Cargo feature is enabled.
-
-#### Reclaiming an oversized SDK event cache
-
-Axon versions before the fix for issue #287 let history backfill write a second
-copy of every backfilled event into the Matrix SDK's own event cache, at
-`<sync.data_dir>/<account_id>/matrix-sdk-event-cache.sqlite3`. Axon never reads
-that store — Postgres holds the authoritative copy — but on an instance that has
-backfilled deep history it can reach several GB per account.
-
-Current versions no longer write those rows, but they do not remove ones already
-written: nothing in the SDK trims them. To check whether an account is affected,
-compare the file against the account's history:
-
-```bash
-ls -lh <sync.data_dir>/<account_id>/matrix-sdk-event-cache.sqlite3
-sqlite3 "file:<sync.data_dir>/<account_id>/matrix-sdk-event-cache.sqlite3?mode=ro" \
-  "select count(*) from events e
-     where not exists (select 1 from event_chunks c where c.event_id = e.event_id);"
-```
-
-A large orphaned count is the stale backfill duplicate. To reclaim it, **stop
-axon**, delete the store, and restart:
-
-```bash
-rm <sync.data_dir>/<account_id>/matrix-sdk-event-cache.sqlite3*
-```
-
-The SDK recreates the store on the next run and live sync repopulates what it
-actually needs. No Matrix history is lost: your events, search index, and read
-state live in Postgres and the search index, not in this cache.
-
-Delete the file rather than clearing rows from it. SQLite does not return freed
-pages to the filesystem without a `VACUUM`, so a `DELETE` leaves the file at its
-original size.
 
 ## Docs
 
@@ -382,7 +350,7 @@ AXON_TOKEN=<token> AXON_BASE_URL=<axon-server-url> axon utd redecrypt --account-
 
 ### TLS
 
-Axon serves plain HTTP. For any non-local deployment, place a TLS-terminating reverse proxy (Caddy, nginx, etc.) in front of it and keep Axon bound to loopback (the default). Axon refuses to start on a non-loopback address over plain HTTP unless `AXON_SERVER__ALLOW_INSECURE_BIND=true` is explicitly set.
+Axon serves plain HTTP. For any non-local deployment, place a TLS-terminating reverse proxy (Caddy, nginx, etc.) in front of it and keep Axon bound to loopback (the default). Axon refuses to start on a non-loopback address over plain HTTP unless `AXON_SERVER__ALLOW_INSECURE_BIND=true` is explicitly set. Our pre-built docker stack handles this all for you, if you prefer.
 
 ### Third-Party Open Source Components
 
