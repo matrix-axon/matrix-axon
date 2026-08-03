@@ -126,6 +126,15 @@ particular the fetch **requires a JSON content type**: an SPA server answering a
 missing `/version.json` with `index.html` and a `200` is the normal case before
 this ADR ships, and must not be mistaken for a new build.
 
+The read is bounded, and the bound covers the **body** as well as the
+connection. A hang here is not one lost check: `check()` de-duplicates every
+trigger behind a single promise, so work that never settles pins that slot and
+turns every later check into the same stuck promise — update detection off for
+the life of the tab. Review of this PR caught it. Two layers now: the shipped
+`fetchVersionManifest` aborts itself, and `check()` additionally releases its
+slot on a watchdog, so the invariant does not depend on the manners of an
+injected `fetchManifest`.
+
 `available` latches. A poll that straddles a deploy restart can easily read the
 old manifest again, and retracting a banner the user has already seen would
 flicker it for no reason.
@@ -148,6 +157,17 @@ debounce has gone out, so the automatic path calls a new
 the page we are fixing is already broken, and a server that never answers must
 not be what prevents the fix.
 
+"Flushed" has to mean *every* write for the scope has landed, not just the ones
+this call started. Device state merges last-write-wins by arrival
+(`ON CONFLICT … DO UPDATE SET value = EXCLUDED.value`, no ordering guard), so
+two PUTs in flight at once are a lost update whenever the network reorders them.
+Review of this PR caught that the first cut awaited only its own batches: a
+stale PUT could still be in flight, and land *after* the reload had destroyed
+the tab holding the newer text. Writes are therefore serialized per scope —
+never two in flight for one scope — and `flushPending` awaits the chain tails.
+The reordering window predates this ADR; the reload is what made it
+unrecoverable.
+
 ### 5. Loop guard
 
 A reload attempt is recorded in `sessionStorage` as the pair *(build we left,
@@ -167,10 +187,23 @@ build it names), so a later, genuinely new build is refused too. Since tabs and
 installed PWAs stay open for days, that quietly defeats the feature. With the
 pair, a new target is a new attempt.
 
-That leaves one pathological case: an origin flapping between many *distinct*
-versions it does not serve, where every target is new. `MAX_ATTEMPTS = 3` per
-tab session bounds it. Hitting the cap is not silent — the banner takes over, so
-the update is still applicable by hand.
+That leaves the pathological case the pair rule cannot see: an origin handing
+out a *different* build every time, so no pair ever repeats. Review of this PR
+caught that the first cut of the budget did not bound it either — settling a
+pair removed the whole record, refunding the budget on every boot that reached
+a new bundle, so a manifest chain A→C→E→A reloaded without end.
+
+So the two limits are now independent. The pair record settles on a successful
+reload; `spent` does not, and counts reloads across every build the tab has been
+through. Landing on a new bundle proves the last reload did *something*, not
+that the deployment is consistent.
+
+`spent` decays over a ten-minute window rather than accumulating for the tab's
+lifetime. An installed PWA's session can outlast many legitimate deploys, and a
+hard lifetime cap would silently stop updating a long-lived tab — the same
+failure mode as the departed-build-only key, arrived at from the other side.
+Bounding the *rate* is what separates thrash from ordinary use. Hitting the cap
+is not silent: the banner takes over, so the update is still applicable by hand.
 
 The chunk-failure path has no version to name and uses a `'chunk'` sentinel as
 its target, so it is tracked separately from version updates and neither
@@ -206,11 +239,27 @@ refresh, connection refused, sign-in screen.
 
 The fix is to make the distinction the code was missing:
 
-- `OAuthRejectedError` — the server answered and refused (4xx with an OAuth
-  error body, per RFC 6749 §5.2). The only error that ends a session.
-- `OAuthTransportError` — no verdict: the request failed, or the server failed
-  to serve it (5xx, which is what a restarting proxy returns). Never discards
-  credentials; the caller gets no token and the next attempt tries again.
+- `OAuthRejectedError` — the server answered and named `invalid_grant`
+  (RFC 6749 §5.2): this refresh token is bad, expired, or revoked. The only
+  error that ends a session.
+- `OAuthTransportError` — no verdict: the request failed, the server failed to
+  serve it, or it refused for a reason that says nothing about the grant. Never
+  discards credentials; the caller gets no token and the next attempt tries
+  again.
+
+Classification is by **error code, not status class**. Review of this PR caught
+that reading any 4xx as a refusal reintroduced the very bug through a narrower
+door: `/v1/oauth/token` sits behind the OAuth rate limiter (30/min per IP,
+`crates/axon-api/src/oauth/rate_limit.rs`), and a deploy is exactly when that
+trips — every tab's socket drops at once and every reconnect asks for a token.
+A 429 would have discarded a valid 30-day refresh token. A 429, a 5xx, an
+unreadable body, and a 4xx naming no OAuth code are all "no verdict" now.
+
+The cost of that choice is a session that is dead for some reason the server
+never names as `invalid_grant`: the client keeps credentials it cannot use and
+looks signed in while every request fails. That is the better failure — it is
+visible, and it is recoverable by signing out — where the reverse loses a
+working session to a transient blip.
 
 A `401` on an ordinary request now attempts a refresh rather than signing out.
 It only ever meant "this access token was not accepted", and we hold a refresh

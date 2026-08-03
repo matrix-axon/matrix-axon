@@ -1,4 +1,5 @@
 import { signal, type ReadonlySignal } from '@preact/signals'
+import { settleWithin } from '../settle-within'
 
 /**
  * The origin's answer to "what build do you serve right now?" — `version.json`,
@@ -66,6 +67,20 @@ export interface UpdateCheckerOptions {
 export const DEFAULT_INTERVAL_MS = 15 * 60 * 1000
 
 /**
+ * How long a manifest read may take before it counts as having learned nothing.
+ * Generous — this is a hang cutoff, not a latency target — but finite, because
+ * an unbounded read wedges `check()` permanently (see `createUpdateChecker`).
+ */
+export const MANIFEST_TIMEOUT_MS = 10_000
+
+/**
+ * Backstop on a whole check, above `MANIFEST_TIMEOUT_MS` so it only fires for a
+ * `fetchManifest` that does not bound itself. Frees the de-duplication slot; it
+ * does not cancel the work, which settles into a `status` write later or never.
+ */
+const WATCHDOG_MS = MANIFEST_TIMEOUT_MS * 3
+
+/**
  * A version string that identifies nothing. A build made without git reports
  * `unknown`, and every such build reports it identically — treating that as a
  * version would make two anonymous builds look equal and one anonymous build
@@ -103,31 +118,40 @@ export function parseVersionManifest(value: unknown): VersionManifest | null {
  * ask for JSON explicitly, which sidesteps that fallback, and then refuse
  * anything that did not come back as JSON, which covers the servers that
  * ignore `Accept` and fall back regardless.
+ *
+ * Bounded by `timeoutMs`, and the bound covers the **body read** as well as the
+ * connection: a socket that opens and then stalls mid-body hangs
+ * `response.json()` exactly as effectively as one that never answers. An
+ * unbounded read here does not merely lose one check — it wedges the caller's
+ * de-duplication forever, which is the whole of update detection.
  */
 export async function fetchVersionManifest(
   path: string = VERSION_MANIFEST_PATH,
   fetchImpl: typeof fetch = fetch,
+  timeoutMs: number = MANIFEST_TIMEOUT_MS,
 ): Promise<VersionManifest | null> {
-  let response: Response
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    response = await fetchImpl(path, {
+    const response = await fetchImpl(path, {
       cache: 'no-store',
       headers: { accept: 'application/json' },
+      signal: controller.signal,
     })
-  } catch {
-    return null
-  }
-  if (!response.ok) {
-    return null
-  }
-  const contentType = response.headers.get('content-type') ?? ''
-  if (!contentType.toLowerCase().includes('application/json')) {
-    return null
-  }
-  try {
+    if (!response.ok) {
+      return null
+    }
+    const contentType = response.headers.get('content-type') ?? ''
+    if (!contentType.toLowerCase().includes('application/json')) {
+      return null
+    }
     return parseVersionManifest(await response.json())
   } catch {
+    // The abort lands here too: a timed-out check learned nothing, which is the
+    // same answer as offline.
     return null
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -183,7 +207,14 @@ export function createUpdateChecker(
     status,
 
     check() {
-      inFlight ??= run().finally(() => {
+      // `settleWithin`, not a bare `.finally`: this slot is what de-duplicates
+      // every trigger, so a `fetchManifest` that never settles would not lose
+      // one check — it would pin `inFlight` forever and every later
+      // visibility/reconnect/interval/manual check would return the same stuck
+      // promise, disabling update detection for the life of the tab. The
+      // shipped `fetchVersionManifest` bounds itself, but `fetchManifest` is an
+      // injection point and the slot should not depend on its manners.
+      inFlight ??= settleWithin(run(), WATCHDOG_MS).finally(() => {
         inFlight = null
       })
       return inFlight

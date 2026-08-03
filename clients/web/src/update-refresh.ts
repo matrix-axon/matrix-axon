@@ -4,6 +4,7 @@ import {
   reloadOnce,
   type ReloadEnvironment,
 } from './reload'
+import { settleWithin } from './settle-within'
 import type { UpdateChecker } from './stores/update-check'
 
 /**
@@ -40,16 +41,6 @@ export interface AutoRefreshOptions {
   win?: Window
   env?: ReloadEnvironment
   now?: () => number
-}
-
-function withTimeout(work: Promise<void>, ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms)
-    void work.finally(() => {
-      clearTimeout(timer)
-      resolve()
-    })
-  })
 }
 
 /**
@@ -100,7 +91,7 @@ export function startAutoRefresh(options: AutoRefreshOptions): () => void {
       return
     }
     reloading = true
-    await withTimeout(flush(), FLUSH_TIMEOUT_MS)
+    await settleWithin(flush(), FLUSH_TIMEOUT_MS)
     if (!reloadOnce(currentVersion, target, env)) {
       // Guard refused (this exact attempt was already made from this build, the
       // session is out of budget, or sessionStorage is unusable). Leave the

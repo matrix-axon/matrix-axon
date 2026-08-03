@@ -56,6 +56,7 @@ describe('fetchVersionManifest', () => {
     expect(fetchImpl).toHaveBeenCalledWith('/version.json', {
       cache: 'no-store',
       headers: { accept: 'application/json' },
+      signal: expect.any(AbortSignal),
     })
   })
 
@@ -88,6 +89,64 @@ describe('fetchVersionManifest', () => {
     await expect(
       fetchVersionManifest('/version.json', fetchImpl),
     ).resolves.toBeNull()
+  })
+
+  /**
+   * A hung read is worse than a failed one: it never resolves, so the caller's
+   * de-duplication slot never clears and update detection stops for the life of
+   * the tab. The bound has to cover the body, not just the connection — a
+   * socket that opens and then stalls mid-body hangs `response.json()` exactly
+   * as effectively as one that never answers.
+   */
+  it('gives up on a connection that never answers', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchImpl = vi.fn(
+        (_path: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            )
+          }),
+      )
+      const read = fetchVersionManifest('/version.json', fetchImpl, 5000)
+      let settled = false
+      void read.then(() => {
+        settled = true
+      })
+
+      await vi.advanceTimersByTimeAsync(4999)
+      expect(settled).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(2)
+      await expect(read).resolves.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('gives up on a body that stalls after the headers', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchImpl = vi.fn(
+        (_path: RequestInfo | URL, init?: RequestInit) =>
+          Promise.resolve({
+            ok: true,
+            headers: new Headers({ 'content-type': 'application/json' }),
+            json: () =>
+              new Promise((_resolve, reject) => {
+                init?.signal?.addEventListener('abort', () =>
+                  reject(new DOMException('aborted', 'AbortError')),
+                )
+              }),
+          }) as unknown as Promise<Response>,
+      )
+      const read = fetchVersionManifest('/version.json', fetchImpl, 5000)
+      await vi.advanceTimersByTimeAsync(5001)
+      await expect(read).resolves.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('swallows a JSON content type carrying a broken body', async () => {
@@ -165,6 +224,39 @@ describe('createUpdateChecker', () => {
     // …but a later check is a new request, not a cached answer.
     await checker.check()
     expect(fetchManifest).toHaveBeenCalledTimes(2)
+  })
+
+  /**
+   * The slot that de-duplicates every trigger must always clear. A
+   * `fetchManifest` that never settles would otherwise pin it and turn every
+   * later check into the same stuck promise — detection off for the tab's life.
+   */
+  it('does not wedge when fetchManifest never settles', async () => {
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      const checker = createUpdateChecker({
+        currentVersion: 'build-a',
+        fetchManifest: () => {
+          calls += 1
+          return calls === 1
+            ? new Promise<VersionManifest | null>(() => {})
+            : Promise.resolve(MANIFEST)
+        },
+      })
+
+      const stuck = checker.check()
+      await vi.advanceTimersByTimeAsync(60_000)
+      await expect(stuck).resolves.toBeUndefined()
+
+      // The slot is free, so a later check runs for real rather than handing
+      // back the abandoned one.
+      await checker.check()
+      expect(calls).toBe(2)
+      expect(checker.available.value).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('polls on an interval once started, and stops on stop()', async () => {
