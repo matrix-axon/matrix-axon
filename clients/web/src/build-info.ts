@@ -27,7 +27,11 @@ function formatBuiltAt(iso: string): string {
  * degrades to the bare release rather than printing `0.1.0+unknown`.
  */
 export function formatVersion(release: string, version: string): string {
-  if (version === '' || version === 'unknown') {
+  // `-dirty` is appended to whatever the hash lookup produced, so a gitless
+  // build in a dirty tree reports `unknown-dirty` — as anonymous as `unknown`,
+  // and worth no more room in the footer.
+  const hash = version.replace(/-dirty$/, '')
+  if (hash === '' || hash === 'unknown') {
     return release
   }
   return `${release}+${version}`

@@ -24,6 +24,12 @@ describe('parseVersionManifest', () => {
     expect(parseVersionManifest(MANIFEST)).toEqual(MANIFEST)
   })
 
+  it('keeps a real hash that happens to be dirty', () => {
+    expect(
+      parseVersionManifest({ version: 'ab12cd34ef56-dirty' })?.version,
+    ).toBe('ab12cd34ef56-dirty')
+  })
+
   it('defaults the display-only fields when they are missing', () => {
     expect(parseVersionManifest({ version: 'abc' })).toEqual({
       release: '',
@@ -42,6 +48,10 @@ describe('parseVersionManifest', () => {
     // nothing — treating it as a version would make two anonymous builds look
     // identical and an anonymous build look newer than a hashed one.
     ['the `unknown` placeholder', { version: 'unknown' }],
+    // `-dirty` is appended to whatever the hash lookup produced, so a gitless
+    // build in a dirty tree says this. Just as anonymous, and it was slipping
+    // through as a real id.
+    ['the `unknown-dirty` placeholder', { version: 'unknown-dirty' }],
   ])('rejects %s', (_label, value) => {
     expect(parseVersionManifest(value)).toBeNull()
   })

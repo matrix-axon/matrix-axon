@@ -199,6 +199,30 @@ tab — if the origin's `version.json` disagrees with the bundle it actually
 serves, the client reloads once and then falls back to the banner rather than
 looping. **Settings → Check for updates** asks on demand.
 
+**None of this runs under `pnpm dev`.** HMR already owns reloading there, and
+the dev stamp is not a deployment identity: it is a git hash plus a `-dirty`
+flag, read once when the dev server starts, so it moves whenever your working
+tree does. Without the guard, restarting the dev server after a commit or an
+edit would make every open tab decide a "new build" had shipped and reload
+itself. If a dev tab is refreshing on its own, it is Vite — an HMR full reload,
+or the "optimized dependencies changed" reload after a dep re-optimize — not
+this.
+
+Every automatic reload announces itself first, so a refresh is never a mystery:
+
+```
+[axon:update] reloading to pick up a new build: ab12cd34ef56 → ef78ab90cd12 (attempt 1/3 this window)
+[axon:update] declining to reload ab12cd34ef56 → ef78ab90cd12: already attempted from this build. The banner is the remaining path.
+```
+
+Filter the console on `[axon:update]`. Nothing there means the reload came from
+somewhere else. The guard's state is readable directly, too:
+
+```js
+JSON.parse(sessionStorage.getItem('axon:update-reload'))
+// { from, targets: [...], spent, windowStartedAt }
+```
+
 Note for anyone serving the built bundle: the SPA history fallback must not
 apply to `/assets/*`. A missing hashed chunk has to return `404`, not
 `index.html` with a `200`, or the browser tries to parse HTML as a module and

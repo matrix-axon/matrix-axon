@@ -244,6 +244,13 @@ ADR 0087:
 - Adding a check trigger is cheap; adding an _automatic reload_ trigger means
   re-answering "what would this destroy?" — `timelines.hasUnsentWork` and
   `deviceState.flushPending()` are the two existing answers.
+- **The whole mechanism is off under `vite dev`** (guarded in `app.tsx`). A dev
+  stamp is a git hash plus `-dirty`, read once at server start, so it moves with
+  your working tree; without the guard, restarting the dev server after a commit
+  would make every open tab decide a new build had shipped. A self-refreshing
+  dev tab is Vite — an HMR full reload, or the "optimized dependencies changed"
+  reload after a dep re-optimize — not this. Every reload this code performs
+  logs under `[axon:update]` first; filter on that before suspecting it.
 
 ## Diagnosing reports that only reproduce on someone else's device
 

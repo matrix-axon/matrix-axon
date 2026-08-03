@@ -13,15 +13,18 @@ import { memoryStorage } from './test/memory-storage'
 function env(
   storage: Storage | null = memoryStorage(),
   clock: { now: number } = { now: 1_000_000 },
-): ReloadEnvironment & { reloads: () => number } {
+): ReloadEnvironment & { reloads: () => number; logs: () => string[] } {
   let reloads = 0
+  const lines: string[] = []
   return {
     storage,
     reload: () => {
       reloads += 1
     },
     now: () => clock.now,
+    log: (message) => lines.push(message),
     reloads: () => reloads,
+    logs: () => lines,
   }
 }
 
@@ -191,6 +194,47 @@ describe('reloadOnce', () => {
     const e = env(storage)
     expect(reloadOnce('build-a', 'build-b', e)).toBe(false)
     expect(e.reloads()).toBe(0)
+  })
+})
+
+/**
+ * A page that reloads itself with no trace is close to undebuggable: the reload
+ * wipes the console, so by the time anyone looks there is nothing to say it was
+ * deliberate. This came directly out of "why is my dev tab refreshing?", which
+ * could not be answered from the console at all.
+ */
+describe('logging', () => {
+  it('says so when it reloads, naming both builds', () => {
+    const e = env()
+    reloadOnce('build-a', 'build-b', e)
+    expect(e.logs()).toHaveLength(1)
+    expect(e.logs()[0]).toContain('[axon:update]')
+    expect(e.logs()[0]).toContain('build-a → build-b')
+  })
+
+  it('says so when it declines a repeat attempt', () => {
+    const e = env()
+    reloadOnce('build-a', 'build-b', e)
+    reloadOnce('build-a', 'build-b', e)
+    expect(e.logs()[1]).toContain('already attempted')
+  })
+
+  it('says so when the budget is spent', () => {
+    const e = env()
+    for (let i = 0; i < MAX_ATTEMPTS + 1; i += 1) {
+      reloadOnce('build-a', `phantom-${i}`, e)
+    }
+    expect(e.logs().at(-1)).toContain('budget spent')
+  })
+
+  it('says so when the guard cannot be written', () => {
+    const storage = memoryStorage()
+    vi.spyOn(storage, 'setItem').mockImplementation(() => {
+      throw new DOMException('QuotaExceededError')
+    })
+    const e = env(storage)
+    reloadOnce('build-a', 'build-b', e)
+    expect(e.logs()[0]).toContain('unwritable')
   })
 })
 

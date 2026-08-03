@@ -58,6 +58,16 @@ export interface ReloadEnvironment {
   reload: () => void
   /** Injected so tests can drive the budget window. */
   now?: () => number
+  /**
+   * Where the decision is recorded. Defaults to `console.info`; tests pass a
+   * collector, and passing a no-op silences it.
+   *
+   * A page that reloads itself with no trace is close to undebuggable — the
+   * reload wipes the console, so by the time anyone looks, the only evidence
+   * that it was deliberate is gone. Every decision this module makes, to reload
+   * or to decline, says so.
+   */
+  log?: (message: string) => void
 }
 
 interface GuardState {
@@ -86,11 +96,19 @@ export function browserReloadEnvironment(): ReloadEnvironment {
       window.location.reload()
     },
     now: () => Date.now(),
+    log: (message) => console.info(message),
   }
 }
 
 function clock(env: ReloadEnvironment): number {
   return (env.now ?? (() => Date.now()))()
+}
+
+/** Prefixed so it is greppable in a console full of extension noise. */
+function log(env: ReloadEnvironment, message: string): void {
+  ;(env.log ?? ((line: string) => console.info(line)))(
+    `[axon:update] ${message}`,
+  )
 }
 
 function read(storage: Storage | null): GuardState | null {
@@ -201,6 +219,14 @@ export function reloadOnce(
         }
 
   if (base.targets.includes(target) || base.spent >= MAX_ATTEMPTS) {
+    log(
+      env,
+      `declining to reload ${currentVersion} → ${target}: ` +
+        (base.targets.includes(target)
+          ? 'already attempted from this build'
+          : `budget spent (${base.spent}/${MAX_ATTEMPTS} this window)`) +
+        '. The banner is the remaining path.',
+    )
     return false
   }
   const next: GuardState = {
@@ -209,8 +235,18 @@ export function reloadOnce(
     spent: base.spent + 1,
   }
   if (!write(env.storage, next)) {
+    log(
+      env,
+      'declining to reload: sessionStorage is unwritable, so the loop guard ' +
+        'cannot bound an automatic reload. The banner is the remaining path.',
+    )
     return false
   }
+  log(
+    env,
+    `reloading to pick up a new build: ${currentVersion} → ${target} ` +
+      `(attempt ${next.spent}/${MAX_ATTEMPTS} this window)`,
+  )
   env.reload()
   return true
 }

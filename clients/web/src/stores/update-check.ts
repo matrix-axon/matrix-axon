@@ -85,9 +85,18 @@ const WATCHDOG_MS = MANIFEST_TIMEOUT_MS * 3
  * `unknown`, and every such build reports it identically — treating that as a
  * version would make two anonymous builds look equal and one anonymous build
  * look different from a hashed one, both wrongly.
+ *
+ * The `-dirty` suffix has to come off first. `webClientVersion()` appends it to
+ * whatever the hash lookup produced, so a gitless build in a dirty tree reports
+ * `unknown-dirty`, which is just as anonymous as `unknown` but was slipping
+ * through as a real id — precisely the comparison this guards against.
  */
 function identifiesABuild(version: unknown): version is string {
-  return typeof version === 'string' && version !== '' && version !== 'unknown'
+  if (typeof version !== 'string') {
+    return false
+  }
+  const hash = version.replace(/-dirty$/, '')
+  return hash !== '' && hash !== 'unknown'
 }
 
 /** Narrow a parsed body to a manifest, or `null` if it is not one. */

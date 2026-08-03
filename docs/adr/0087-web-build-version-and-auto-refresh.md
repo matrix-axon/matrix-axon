@@ -121,6 +121,15 @@ order of how much work they do:
 | 15-minute interval, visible only | Backstop for a focused desktop tab whose socket stays up. |
 | `online` | Cheap; covers a laptop lid opening. |
 
+**Production builds only.** The whole mechanism is gated off under `vite dev`,
+because a dev stamp is not a deployment identity: `webClientVersion()` reads the
+git hash and the `-dirty` flag once at dev-server start, so it moves whenever
+the working tree does. Restarting the dev server after a commit or an edit would
+otherwise make every open tab decide a new build had shipped and reload itself —
+indistinguishable from a bug, and racing the HMR update arriving at the same
+moment. HMR already owns reloading in dev. This was found by a developer asking
+why their `pnpm dev` tab kept refreshing.
+
 Every failure reads as "learned nothing", never as "the build changed". In
 particular the fetch **requires a JSON content type**: an SPA server answering a
 missing `/version.json` with `index.html` and a `200` is the normal case before
@@ -211,6 +220,13 @@ consumes the other's attempt.
 
 Automatic reloads fail closed — an unwritable or unreadable `sessionStorage`
 blocks them — while a user clicking Reload is never guarded.
+
+Every decision, to reload or to decline, is logged under `[axon:update]`. A page
+that reloads itself leaves no evidence that it meant to: the reload wipes the
+console, so by the time anyone looks there is nothing to distinguish a
+deliberate refresh from a crash. The first question asked of this feature was
+"why is my tab refreshing?", and it could not be answered from the console at
+all.
 
 ### 6. Chunk-failure recovery
 
