@@ -652,7 +652,10 @@ async fn thread_reply_count_excludes_state_events() {
         threads[0].reply_count, 1,
         "the state-event member doesn't count as a reply"
     );
-    assert_eq!(threads[0].latest_reply_event_id.as_deref(), Some(m1.as_str()));
+    assert_eq!(
+        threads[0].latest_reply_event_id.as_deref(),
+        Some(m1.as_str())
+    );
     assert_eq!(threads[0].latest_reply_ts, Some(base + 1));
 
     common::cleanup_account(&pool, account_id).await;
