@@ -35,9 +35,12 @@ pub struct RoomSummary {
     pub canonical_alias: Option<String>,
     /// `m.room.create` → `content.type`, if set (for example `m.space`).
     pub room_type: Option<String>,
-    /// `MAX(origin_ts)` over the room's events, in milliseconds — the sort key.
+    /// `MAX(origin_ts)` over the room's content-bearing events (a non-null
+    /// `decrypted_body_text` — see [`Store::list_rooms`]), in milliseconds —
+    /// the sort key.
     pub last_activity_ts: i64,
-    /// The `event_id` at `last_activity_ts` (latest by `(origin_ts, id)`).
+    /// The `event_id` at `last_activity_ts` (latest by `(origin_ts, id)`),
+    /// among the same content-bearing events.
     pub last_event_id: Option<String>,
     /// SDK-derived unread notification count (issue #313, ADR 0070) — a
     /// cached read of matrix-sdk's client-side
@@ -85,6 +88,20 @@ impl Store {
     /// (between account creation and the sync engine's first sweep), so the
     /// fields read as `0` rather than `NULL`.
     ///
+    /// The activity timestamp and latest event id each prefer content-bearing
+    /// events — `decrypted_body_text IS NOT NULL`, the same "does this event
+    /// have a displayable body" signal `axon-search` indexing and
+    /// `room_timeline` already key off of — via a `FILTER` clause, falling
+    /// back to the plain (unfiltered) `MAX`/latest-event only when a room has
+    /// no content-bearing event at all. That keeps membership changes,
+    /// profile/avatar/name/topic state, redactions, bare reactions, and
+    /// still-undecrypted `m.room.encrypted` rows from bumping a room's
+    /// position once it has real messages, while a just-joined or
+    /// message-less room still appears in the list (sorted by whatever
+    /// non-content event it does have) instead of vanishing. A decrypted
+    /// message keeps the cleartext event type once matrix-rust-sdk decrypts
+    /// it, so E2EE rooms are unaffected in the normal case.
+    ///
     /// Rooms the local user has left or been banned from are excluded: a
     /// correlated `NOT EXISTS` drops any room whose current `m.room.member`
     /// membership for `ac.user_id` is `leave` or `ban` (ADR 0037). The leave
@@ -127,8 +144,15 @@ impl Store {
                        AS highlight_count \
              FROM ( \
                  SELECT account_id, room_id, \
-                        MAX(origin_ts) AS last_activity_ts, \
-                        (array_agg(event_id ORDER BY origin_ts DESC, id DESC))[1] AS last_event_id \
+                        COALESCE( \
+                            MAX(origin_ts) FILTER (WHERE decrypted_body_text IS NOT NULL), \
+                            MAX(origin_ts) \
+                        ) AS last_activity_ts, \
+                        COALESCE( \
+                            (array_agg(event_id ORDER BY origin_ts DESC, id DESC) \
+                                FILTER (WHERE decrypted_body_text IS NOT NULL))[1], \
+                            (array_agg(event_id ORDER BY origin_ts DESC, id DESC))[1] \
+                        ) AS last_event_id \
                  FROM events \
                  WHERE ($1::uuid IS NULL OR account_id = $1) \
                  GROUP BY account_id, room_id \

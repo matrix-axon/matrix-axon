@@ -7999,14 +7999,14 @@
                 "last_activity_ts": {
                   "type": "integer",
                   "format": "int64",
-                  "description": "`origin_server_ts` of the most recent event, in milliseconds — the sort key."
+                  "description": "`origin_server_ts` of the most recent content-bearing event (a real\nmessage, not a membership/state/redaction/reaction event), in\nmilliseconds — the sort key. Falls back to the room's most recent\nevent of any type when it has no content-bearing event yet."
                 },
                 "last_event_id": {
                   "type": [
                     "string",
                     "null"
                   ],
-                  "description": "The most recent event's id, if the room has any events."
+                  "description": "The most recent content-bearing event's id, if the room has any\nevents (with the same any-type fallback as `last_activity_ts`)."
                 },
                 "name": {
                   "type": [
@@ -9416,14 +9416,14 @@
           "last_activity_ts": {
             "type": "integer",
             "format": "int64",
-            "description": "`origin_server_ts` of the most recent event, in milliseconds — the sort key."
+            "description": "`origin_server_ts` of the most recent content-bearing event (a real\nmessage, not a membership/state/redaction/reaction event), in\nmilliseconds — the sort key. Falls back to the room's most recent\nevent of any type when it has no content-bearing event yet."
           },
           "last_event_id": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The most recent event's id, if the room has any events."
+            "description": "The most recent content-bearing event's id, if the room has any\nevents (with the same any-type fallback as `last_activity_ts`)."
           },
           "name": {
             "type": [

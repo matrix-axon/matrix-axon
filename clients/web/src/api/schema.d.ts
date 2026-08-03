@@ -2087,10 +2087,16 @@ export interface components {
                 highlight_count: number;
                 /**
                  * Format: int64
-                 * @description `origin_server_ts` of the most recent event, in milliseconds — the sort key.
+                 * @description `origin_server_ts` of the most recent content-bearing event (a real
+                 *     message, not a membership/state/redaction/reaction event), in
+                 *     milliseconds — the sort key. Falls back to the room's most recent
+                 *     event of any type when it has no content-bearing event yet.
                  */
                 last_activity_ts: number;
-                /** @description The most recent event's id, if the room has any events. */
+                /**
+                 * @description The most recent content-bearing event's id, if the room has any
+                 *     events (with the same any-type fallback as `last_activity_ts`).
+                 */
                 last_event_id?: string | null;
                 /** @description Room name (`m.room.name`), if set. */
                 name?: string | null;
@@ -2841,10 +2847,16 @@ export interface components {
             highlight_count: number;
             /**
              * Format: int64
-             * @description `origin_server_ts` of the most recent event, in milliseconds — the sort key.
+             * @description `origin_server_ts` of the most recent content-bearing event (a real
+             *     message, not a membership/state/redaction/reaction event), in
+             *     milliseconds — the sort key. Falls back to the room's most recent
+             *     event of any type when it has no content-bearing event yet.
              */
             last_activity_ts: number;
-            /** @description The most recent event's id, if the room has any events. */
+            /**
+             * @description The most recent content-bearing event's id, if the room has any
+             *     events (with the same any-type fallback as `last_activity_ts`).
+             */
             last_event_id?: string | null;
             /** @description Room name (`m.room.name`), if set. */
             name?: string | null;

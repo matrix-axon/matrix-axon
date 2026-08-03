@@ -167,6 +167,55 @@ async fn list_rooms_orders_by_activity_with_summary_fields() {
     common::cleanup_account(&pool, account_id).await;
 }
 
+/// `list_rooms` activity/`last_event_id` only advance on content-bearing
+/// events: a redaction landing after the last message must not
+/// bump the room's sort position or point `last_event_id` at itself. A room
+/// with no content-bearing event at all (only a redaction, in this case)
+/// still appears in the list rather than vanishing, falling back to the
+/// unfiltered latest event.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn list_rooms_activity_ignores_non_content_events() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "activity").await;
+
+    // Room A: a message, then a later redaction of some other event — the
+    // redaction is newer (ts 5000) but must not become the activity marker.
+    let room_a = format!("!act-a-{}:localhost", Uuid::new_v4());
+    let a_msg = insert_message(&store, account_id, &room_a, 1_000, "hi").await;
+    insert_redaction(&store, account_id, &room_a, 5_000, &a_msg).await;
+
+    // Room B: no messages at all, just a redaction (of an id that doesn't even
+    // need to exist for this test) — must still appear, sorted by that event.
+    let room_b = format!("!act-b-{}:localhost", Uuid::new_v4());
+    let b_redaction =
+        insert_redaction(&store, account_id, &room_b, 2_000, "$nonexistent:localhost").await;
+
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    let a = rooms
+        .iter()
+        .find(|r| r.room_id == room_a)
+        .expect("room a present");
+    assert_eq!(
+        a.last_activity_ts, 1_000,
+        "the redaction (ts 5000) must not count as activity"
+    );
+    assert_eq!(a.last_event_id.as_deref(), Some(a_msg.as_str()));
+
+    let b = rooms
+        .iter()
+        .find(|r| r.room_id == room_b)
+        .expect("message-less room still appears, not hidden");
+    assert_eq!(
+        b.last_activity_ts, 2_000,
+        "falls back to the unfiltered latest event when there's no content-bearing one"
+    );
+    assert_eq!(b.last_event_id.as_deref(), Some(b_redaction.as_str()));
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
 /// `upsert_room_unread_counts` inserts on first write and overwrites (rather
 /// than accumulating) on a later write for the same `(account_id, room_id)` —
 /// the watcher always supplies the full current value, never a delta.

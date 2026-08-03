@@ -38,9 +38,13 @@ pub struct RoomDto {
     pub canonical_alias: Option<String>,
     /// The room's `m.room.create` `type`, if any (for example `m.space`).
     pub room_type: Option<String>,
-    /// `origin_server_ts` of the most recent event, in milliseconds — the sort key.
+    /// `origin_server_ts` of the most recent content-bearing event (a real
+    /// message, not a membership/state/redaction/reaction event), in
+    /// milliseconds — the sort key. Falls back to the room's most recent
+    /// event of any type when it has no content-bearing event yet.
     pub last_activity_ts: i64,
-    /// The most recent event's id, if the room has any events.
+    /// The most recent content-bearing event's id, if the room has any
+    /// events (with the same any-type fallback as `last_activity_ts`).
     pub last_event_id: Option<String>,
     /// SDK-derived unread notification count (issue #313, ADR 0070). This is
     /// matrix-sdk's client-side read-receipt-derived
