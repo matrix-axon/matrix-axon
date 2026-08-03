@@ -196,7 +196,7 @@ export function createRoomsStore(
     { name: string | null; topic: string | null }
   >()
 
-  async function fetchTitle(room: RoomDto): Promise<void> {
+  async function fetchTitle(room: RoomDto, generation: number): Promise<void> {
     let data
     try {
       ;({ data } = await api.GET(
@@ -217,6 +217,15 @@ export function createRoomsStore(
       // Error envelope. Leave `requested` set: a failing room is not retried
       // this session (matching the TUI's per-room rate limiting in spirit);
       // the room id remains the fallback title.
+      return
+    }
+    // Same identity guard as `doRefresh`, and here it is the whole point of
+    // the wipe in `resetSession`: this is a `/members` response for a room the
+    // previous reader was in, and `setCachedTitle` *persists*. Without the
+    // check a burst of these landing just after sign-out re-creates
+    // `ROOM_TITLE_CACHE_KEY` on disk with that reader's DM correspondents in
+    // it (#115), which is exactly the record sign-out just removed.
+    if (generation !== sessionGeneration) {
       return
     }
     const title = dmTitleFromMembers(room.account_user_id, data.data)
@@ -272,7 +281,10 @@ export function createRoomsStore(
     return changed ? next : current
   }
 
-  async function resolveUnnamedTitles(current: RoomDto[]): Promise<void> {
+  async function resolveUnnamedTitles(
+    current: RoomDto[],
+    generation: number,
+  ): Promise<void> {
     const queue = current.filter(
       (room) => isLikelyDm(room) && !requested.has(roomKey(room)),
     )
@@ -285,7 +297,7 @@ export function createRoomsStore(
       while (next < queue.length) {
         const room = queue[next]
         next += 1
-        await fetchTitle(room)
+        await fetchTitle(room, generation)
       }
     }
     await Promise.all(
@@ -560,7 +572,7 @@ export function createRoomsStore(
       cache?.write(visibleRooms)
       // Fire-and-forget: titles arrive incrementally; the list re-renders as
       // the titles signal updates.
-      void resolveUnnamedTitles(visibleRooms)
+      void resolveUnnamedTitles(visibleRooms, generation)
     } catch (cause) {
       if (generation === sessionGeneration) {
         error.value = cause instanceof Error ? cause.message : String(cause)
@@ -598,6 +610,18 @@ export function createRoomsStore(
     // the very first refresh leaves the store empty but still has a response
     // in flight, and that response must not be applied to the next reader.
     sessionGeneration += 1
+    // Above the pristine-store guard on purpose. A sign-out during the very
+    // first refresh is exactly the shared-browser case: the store is empty,
+    // but `titles` was populated from `ROOM_TITLE_CACHE_KEY` at construction
+    // and the guard below would return before clearing it. For DMs these
+    // titles are the correspondent's display name, so they must not outlive
+    // the session in memory or on disk (#115). The size check keeps this
+    // idempotent: `resetSession` runs inside an effect, and an unconditional
+    // write of a fresh Map would keep dirtying the signal on a re-run.
+    if (titles.value.size > 0) {
+      titles.value = new Map()
+    }
+    clearTitleCache(storage)
     if (
       rooms.value.length === 0 &&
       !settled &&
@@ -613,6 +637,10 @@ export function createRoomsStore(
     requested.clear()
     requestedPreviews.clear()
     previewSlots.clear()
+    // Must stay *below* `syncUnreadCounts([])`: that call walks `unreadSlots`
+    // to zero each slot and decrement `unreadTotal`. Dropping the entries first
+    // would skip the walk and strand the app-icon badge (ADR 0080) non-zero.
+    unreadSlots.clear()
     members.clear()
     locallyHiddenRooms.clear()
     locallyCreatedRoomMetadata.clear()
@@ -1068,6 +1096,16 @@ function saveTitleCache(
     // Quota or storage-denied: the cache is an optimization — losing a write
     // must not reject the background title resolution (WCR-02) or paint an
     // error banner over a successfully loaded room list.
+  }
+}
+
+function clearTitleCache(storage: Storage): void {
+  try {
+    storage.removeItem(ROOM_TITLE_CACHE_KEY)
+  } catch {
+    // Storage-denied: same policy as `saveTitleCache` — a failure here must not
+    // reject sign-out. The in-memory wipe still happens; only an already-broken
+    // storage can leave the record behind.
   }
 }
 

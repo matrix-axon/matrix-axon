@@ -494,4 +494,27 @@ describe('connectRoomsSessionReset', () => {
     expect(services.rooms.rooms.value).toEqual([])
     dispose()
   })
+
+  it('clears the persisted room-title cache on sign-out', () => {
+    // The whole user-visible path: Sign out -> `clearToken` -> `signedIn` ->
+    // this effect -> `resetSession`. For a DM the cached title is the other
+    // person's display name, and it must not survive the session (#115).
+    const storage = memoryStorage({
+      'axon.token': 'tok-test',
+      'axon.room_titles.v1': JSON.stringify({
+        version: 1,
+        titles: [['acct/!dm:hs', 'Bob']],
+      }),
+    })
+    const services = testServices({ storage })
+    expect(services.auth.signedIn.value).toBe(true)
+    expect(storage.getItem('axon.room_titles.v1')).not.toBeNull()
+
+    services.auth.clearToken()
+
+    expect(services.auth.signedIn.value).toBe(false)
+    expect(storage.getItem('axon.room_titles.v1')).toBeNull()
+    // Sign-out is targeted: unrelated device-local state survives.
+    expect(storage.getItem('axon.device_id')).not.toBeNull()
+  })
 })

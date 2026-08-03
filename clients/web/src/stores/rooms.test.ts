@@ -53,6 +53,36 @@ function makeStore(storage = memoryStorage()) {
   return createRoomsStore(api, storage)
 }
 
+/** Mirrors `ROOM_TITLE_CACHE_KEY`, which the store keeps private. */
+const TITLE_CACHE_KEY = 'axon.room_titles.v1'
+
+/** One named room plus a DM whose title resolves to `Bob` from its members. */
+function useTitleHandlers(): void {
+  server.use(
+    http.get(`${BASE_URL}/v1/rooms`, () =>
+      HttpResponse.json({ data: [NAMED, UNNAMED] }),
+    ),
+    http.get(
+      `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
+      () =>
+        HttpResponse.json({
+          data: [
+            {
+              user_id: '@me:example.org',
+              membership: 'join',
+              display_name: 'Me',
+            },
+            {
+              user_id: '@bob:example.org',
+              membership: 'join',
+              display_name: 'Bob',
+            },
+          ],
+        }),
+    ),
+  )
+}
+
 describe('createRoomsStore', () => {
   it('loads rooms and resolves member-derived titles for unnamed rooms', async () => {
     let memberCalls = 0
@@ -133,6 +163,100 @@ describe('createRoomsStore', () => {
     const second = makeStore(storage)
     expect(second.titles.value.get(roomKey(NAMED))).toBe('Ops')
     expect(second.titles.value.get(roomKey(UNNAMED))).toBe('Bob')
+  })
+
+  it('drops the persisted title cache when the session ends', async () => {
+    useTitleHandlers()
+    const storage = memoryStorage()
+    const store = makeStore(storage)
+    await store.refresh()
+    await vi.waitFor(() =>
+      expect(store.titles.value.get(roomKey(UNNAMED))).toBe('Bob'),
+    )
+    expect(storage.getItem(TITLE_CACHE_KEY)).not.toBeNull()
+
+    store.resetSession()
+
+    // For a DM this is the correspondent's display name. Leaving it readable in
+    // localStorage lets the next user of a shared browser see who the previous
+    // one was talking to, with no session left to expire it (#115).
+    expect(storage.getItem(TITLE_CACHE_KEY)).toBeNull()
+    expect(store.titles.value.size).toBe(0)
+
+    // The cache is only an optimization: a new session re-resolves from
+    // `/members` without it (WCR-02).
+    const next = makeStore(storage)
+    expect(next.titles.value.size).toBe(0)
+    await next.refresh()
+    await vi.waitFor(() =>
+      expect(next.titles.value.get(roomKey(UNNAMED))).toBe('Bob'),
+    )
+  })
+
+  it('does not re-persist a title from a members fetch that lands after sign-out', async () => {
+    let release: (() => void) | undefined
+    const inFlight = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [UNNAMED] }),
+      ),
+      http.get(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
+        async () => {
+          await inFlight
+          return HttpResponse.json({
+            data: [
+              {
+                user_id: '@me:example.org',
+                membership: 'join',
+                display_name: 'Me',
+              },
+              {
+                user_id: '@bob:example.org',
+                membership: 'join',
+                display_name: 'Bob',
+              },
+            ],
+          })
+        },
+      ),
+    )
+    const storage = memoryStorage()
+    const store = makeStore(storage)
+    await store.refresh()
+
+    // Sign out with the `/members` burst still in flight.
+    store.resetSession()
+    expect(storage.getItem(TITLE_CACHE_KEY)).toBeNull()
+
+    release?.()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // `setCachedTitle` persists, so an unguarded completion here re-creates the
+    // record sign-out just removed — with the previous reader's DM name in it.
+    expect(storage.getItem(TITLE_CACHE_KEY)).toBeNull()
+    expect(store.titles.value.size).toBe(0)
+  })
+
+  it('drops the persisted title cache even before the first refresh lands', () => {
+    // The pristine-store early return in `resetSession` skips the rest of the
+    // wipe, but `titles` was already loaded from storage at construction — so
+    // signing out mid-first-refresh must still clear it.
+    const storage = memoryStorage({
+      [TITLE_CACHE_KEY]: JSON.stringify({
+        version: 1,
+        titles: [[roomKey(UNNAMED), 'Bob']],
+      }),
+    })
+    const store = makeStore(storage)
+    expect(store.titles.value.get(roomKey(UNNAMED))).toBe('Bob')
+
+    store.resetSession()
+
+    expect(storage.getItem(TITLE_CACHE_KEY)).toBeNull()
+    expect(store.titles.value.size).toBe(0)
   })
 
   it('keeps the room-id fallback when the members fetch fails', async () => {

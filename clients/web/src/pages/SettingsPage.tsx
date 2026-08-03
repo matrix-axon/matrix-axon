@@ -266,7 +266,10 @@ export function SettingsPage() {
           Sign out
         </button>
         <p class="muted">
-          Sign out clears this browser's Axon access and refresh tokens.
+          Sign out clears this browser's Axon access and refresh tokens, along
+          with everything cached for the session: the room list, message
+          history, and the names shown for direct messages. Your settings on
+          this page are kept.
         </p>
       </section>
       <p class="muted">
