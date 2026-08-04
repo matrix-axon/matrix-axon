@@ -327,6 +327,16 @@ export function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per room instance
   }, [timeline])
 
+  // Remembers the deep-link target already resolved. Routing into a thread
+  // changes `openThread`, which re-runs the effect below with the same
+  // `highlighted`; without this it fetches the same event a second time and
+  // then jumps the main stream toward a reply that has no row in it. Once the
+  // thread panel is open it owns the reveal.
+  const resolvedDeepLink = useRef<{
+    eventId: string
+    rootId: string | null
+  } | null>(null)
+
   // Jump to the `?event=` target — on a cold deep link *and* whenever the
   // query changes while the room is already open (WCR-09; M-W10's search
   // results navigate this way). An event already in the loaded slice needs
@@ -340,6 +350,15 @@ export function RoomPage() {
     if (timeline.events.value.some((event) => event.event_id === highlighted)) {
       return
     }
+    const resolved = resolvedDeepLink.current
+    if (
+      resolved !== null &&
+      resolved.eventId === highlighted &&
+      resolved.rootId !== null &&
+      resolved.rootId === openThread
+    ) {
+      return
+    }
     void api
       .GET('/v1/accounts/{account_id}/events/{event_id}', {
         params: { path: { account_id: accountId, event_id: highlighted } },
@@ -350,6 +369,7 @@ export function RoomPage() {
             return timeline.loadLatest()
           }
           const rootId = threadRootId(data.data)
+          resolvedDeepLink.current = { eventId: highlighted, rootId }
           // A thread reply has no row in the main room stream to jump to —
           // it only ever renders inside its thread's own panel. Route
           // straight there instead of jumping the main timeline toward the
@@ -2005,16 +2025,38 @@ function Timeline({
       }
     }
     const onFocusIn = (event: FocusEvent) => {
-      if (
-        event.target instanceof HTMLElement &&
-        event.target.matches('textarea, input, [contenteditable="true"]')
-      ) {
-        keyboardPin.current = stickToBottom.current
-        clearPinTimer()
-        keyboardPinTimer.current = window.setTimeout(() => {
-          keyboardPin.current = false
-        }, KEYBOARD_PIN_MS)
+      // Only the *room* composer arms the pin. The listener has to sit on
+      // `document` (focus lands before the composer's own handlers run), but
+      // `RoomPage` does not remount on in-room navigation, so matching any text
+      // control would let unrelated overlays arm it. `JumpDialog`'s date inputs
+      // are the damaging case: a resize inside the pin window then force-pins
+      // to the live end, which is the exact opposite of what "jump to date" is
+      // for.
+      const target = event.target
+      if (!(target instanceof HTMLElement)) {
+        return
       }
+      const composer = target.closest('.composer')
+      if (composer === null) {
+        return
+      }
+      // ...and only the composer belonging to *this* timeline's pane, so the
+      // room timeline is never re-pinned by focus in the thread panel's
+      // composer, or vice versa. `ThreadPanel` doesn't render its own
+      // `Timeline`/keyboardPin instance today, so `.thread-panel` has no live
+      // counterpart to guard against yet — this is forward-looking, for
+      // whenever it does.
+      const pane = (node: Element | null | undefined) =>
+        node?.closest('.room-stream, .thread-panel') ?? null
+      const ownPane = pane(scroller.current)
+      if (ownPane === null || pane(composer) !== ownPane) {
+        return
+      }
+      keyboardPin.current = stickToBottom.current
+      clearPinTimer()
+      keyboardPinTimer.current = window.setTimeout(() => {
+        keyboardPin.current = false
+      }, KEYBOARD_PIN_MS)
     }
     const onFocusOut = () => {
       keyboardPin.current = false
