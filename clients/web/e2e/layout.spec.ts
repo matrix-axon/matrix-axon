@@ -761,6 +761,7 @@ test('topbar stays pinned when the composer is focused', async ({ page }) => {
         shell.getBoundingClientRect().bottom -
         composer.getBoundingClientRect().bottom,
       bodyOverflow: getComputedStyle(document.body).overflow,
+      bodyPosition: getComputedStyle(document.body).position,
     }
   })
 
@@ -772,6 +773,11 @@ test('topbar stays pinned when the composer is focused', async ({ page }) => {
   expect(geometry.shellTop).toBe(0)
   expect(geometry.bottomGap).toBeLessThanOrEqual(8)
   expect(geometry.bodyOverflow).toBe('hidden')
+  // `overflow: hidden` alone leaves iOS Safari free to nudge the document's
+  // scroll position while the composer holds focus; `position: fixed` on body
+  // is what actually removes that ability. A headless engine can't reproduce
+  // the heuristic, so this pins the CSS itself against a silent regression.
+  expect(geometry.bodyPosition).toBe('fixed')
 })
 
 test('standalone iOS focus inset leaves only a small composer gap', async ({
