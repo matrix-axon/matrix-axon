@@ -2143,6 +2143,82 @@ describe('RoomPage', () => {
     }
   })
 
+  it('does not arm keyboardPin from an input outside the composer', async () => {
+    // The focus listener sits on `document` and `RoomPage` does not remount on
+    // in-room navigation, so before scoping, any text control in the page armed
+    // the pin. `JumpDialog`'s date inputs are the damaging case: a resize
+    // inside the pin window would force the reader back to the live end —
+    // exactly what jumping to a date is meant to get away from.
+    const byTarget = new Map<Element, ResizeObserverCallback>()
+    class TargetedResizeObserver {
+      #callback: ResizeObserverCallback
+      constructor(callback: ResizeObserverCallback) {
+        this.#callback = callback
+      }
+      observe(target: Element) {
+        byTarget.set(target, this.#callback)
+      }
+      unobserve(target: Element) {
+        byTarget.delete(target)
+      }
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      TargetedResizeObserver as unknown as typeof ResizeObserver
+    const originalRaf = globalThis.requestAnimationFrame
+    let rafQueue: FrameRequestCallback[] = []
+    globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      rafQueue.push(callback)
+      return rafQueue.length
+    }) as typeof requestAnimationFrame
+    const flushRaf = () => {
+      const queued = rafQueue
+      rafQueue = []
+      queued.forEach((callback) => callback(0))
+    }
+
+    try {
+      const { findByText, container } = renderRoom([event('$latest', T0)])
+      await findByText('body of $latest')
+      const timeline = container.querySelector<HTMLElement>('.timeline')!
+      let clientHeight = 750
+      Object.defineProperty(timeline, 'clientHeight', {
+        configurable: true,
+        get: () => clientHeight,
+      })
+      Object.defineProperty(timeline, 'scrollHeight', {
+        configurable: true,
+        value: 7110,
+      })
+
+      // The reader is at the live end when they reach for "jump to date".
+      timeline.scrollTop = 6360 // 7110 - 6360 - 750 = 0
+      fireEvent.scroll(timeline)
+
+      // Focusing a text control that is in the page but not in the composer.
+      // This is the moment that used to capture `stickToBottom` — true, right
+      // now — and hold it for the whole pin window.
+      const stream = container.querySelector<HTMLElement>('.room-stream')!
+      const outsider = document.createElement('input')
+      stream.appendChild(outsider)
+      outsider.focus()
+
+      // They jump back into history, which is the entire point of the feature.
+      timeline.scrollTop = 1000
+      fireEvent.scroll(timeline)
+
+      // A resize lands inside what would have been the pin window.
+      clientHeight = 331
+      byTarget.get(timeline)?.([], null as unknown as ResizeObserver)
+      flushRaf()
+
+      // No pin was armed, so the reader is not yanked to the live end.
+      expect(timeline.scrollTop).not.toBe(7110)
+    } finally {
+      globalThis.requestAnimationFrame = originalRaf
+    }
+  })
+
   it('lets keyboardPin expire, so a reader who scrolled away stays there', async () => {
     // `keyboardPin` is a bounded window (`KEYBOARD_PIN_MS`), not a flag that
     // rides along with focus forever — once it expires, a resize is judged

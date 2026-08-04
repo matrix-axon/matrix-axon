@@ -553,13 +553,15 @@ export function ReadReceiptsSummary({
         type="button"
         class="read-receipts"
         aria-expanded={open}
-        aria-haspopup="listbox"
         onClick={() => setOpen((was) => !was)}
       >
         {formatReadReceipts(receipts, members)}
       </button>
       {open && (
-        <ul class="read-receipts-popover" role="listbox">
+        // A static, non-selectable list of names: native `ul`/`li` with a
+        // label, not `role="listbox"`, which would promise `option` roles,
+        // `aria-selected` and arrow-key navigation that none of this has.
+        <ul class="read-receipts-popover" aria-label="Seen by">
           {receipts.map((receipt) => (
             <li key={receipt.userId} class="read-receipts-row">
               <UserAvatar
