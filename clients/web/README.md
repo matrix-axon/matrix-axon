@@ -109,11 +109,27 @@ see the note in `src/stores/accounts.ts`.
    Vite prints a local URL (default `http://localhost:5173`) — open it in a
    browser.
 
+On older MacOS Intel-based devices, you may see this error executing pnpm:
+
+```
+[ERROR] Cannot verify the identity of the @pnpm/exe.darwin-x64 native binary: it is missing from pnpm-lock.yaml.
+```
+
+This is an upstream bug. If that occurs, switch to `corepack` to install pnpm:
+
+```sh
+cd clients/web
+npm install -g corepack@latest
+corepack enable
+corepack use pnpm@11
+```
+
 ## Development
 
 ```sh
 pnpm install
 pnpm dev
+pnpm exec playwright install  # if you want to run playwright (browser simulation) tests
 ```
 
 The axon server serves no CORS headers, so the browser cannot call it
