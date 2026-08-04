@@ -629,7 +629,7 @@ describe('App', () => {
     ).toBe('30px')
   })
 
-  it('snaps a spurious page scroll back to the origin (iOS fixed-composer quirk)', async () => {
+  it('leaves a spurious page scroll alone by default, and snaps it back only when the correction is enabled', async () => {
     // `html`/`body`/`#app` declare the page itself never scrolls — `.timeline`
     // is the one scrollable region. iOS Safari's own focused-element-visible
     // heuristic does not know that: it can nudge the *document's* scroll
@@ -651,7 +651,8 @@ describe('App', () => {
     })
     const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
 
-    render(<App services={testServices()} />)
+    const services = testServices()
+    render(<App services={services} />)
     await waitFor(() =>
       expect(
         document.documentElement.style.getPropertyValue(
@@ -670,6 +671,14 @@ describe('App', () => {
     })
     window.dispatchEvent(new Event('scroll'))
 
+    // Off by default (ADR-less experiment result, recorded in AGENTS.md): the
+    // correction moves `visualViewport.offsetTop`, which is what the shell is
+    // positioned from, so it fought Safari every frame and *was* the jitter.
+    expect(scrollTo).not.toHaveBeenCalled()
+
+    // Still reachable, and still corrects, for anyone comparing the two.
+    services.settings.pageScrollReset.value = true
+    window.dispatchEvent(new Event('scroll'))
     expect(scrollTo).toHaveBeenCalledWith(0, 0)
   })
 

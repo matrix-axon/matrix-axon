@@ -107,20 +107,13 @@ body,
 }
 
 body {
-  /* `overflow: hidden` alone does not stop iOS Safari: its own
-     "keep the focused control visible" heuristic can still nudge the
-     *document's* scroll position while a fixed/sticky composer holds focus
-     and the reader drags inside `.timeline` — visibly dragging everything
-     positioned off `--app-viewport-top` (composer included) away from the
-     keyboard before the app.tsx `window.scroll` listener reactively snaps it
-     back, which was the flash the reactive fix alone still showed. Pinning
-     `body` itself with `position: fixed` is the standard, stronger fix: it
-     removes the document's ability to develop a scroll offset at all, so
-     there is nothing left to snap back from. `app.tsx`'s reset stays as a
-     defense-in-depth fallback for iOS versions where even this isn't
-     absolute. */
-  position: fixed;
-  inset: 0;
+  /* No `position: fixed` here. It was tried (and reverted) as a way to stop
+     iOS Safari's focused-control-visibility heuristic from scrolling the
+     document behind the fixed shell; measured on a real iOS 26.5 simulator it
+     did not prevent the scroll at all — `window.scrollY` still reached 150,
+     202, 237 while dragging `.timeline` with the keyboard up. The `app.tsx`
+     `window.scroll` reset is what actually holds the layout. See
+     "iOS soft-keyboard drift" in `clients/web/AGENTS.md`. */
   margin: 0;
   background: var(--bg);
   color: var(--fg);
@@ -4633,7 +4626,21 @@ audio.media-player {
 .perf-overlay {
   position: fixed;
   right: 0.25rem;
-  bottom: 4.5rem;
+  /* Top, not bottom: the soft keyboard covers the bottom of the viewport, and
+     the keyboard-up case is exactly when these marks matter — reading them used
+     to mean dismissing the keyboard first, which emits its own marks and can
+     evict the ten-line buffer before it can be read. `top` also keeps the
+     composer tappable. It must clear the topbar (<= 64px, asserted in
+     `layout.spec.ts`): the gap that opens *above* the topbar is the visible
+     symptom of a shell drift, and an opaque box there would hide the very thing
+     a recording is meant to capture.
+
+     Offset by `--app-viewport-top` like `.shell` is. A bare `position: fixed`
+     resolves against the layout viewport, so when iOS offsets the *visual*
+     viewport the shell compensates and this box does not — it slides off the
+     top of the screen exactly when the drift it is reporting on is happening,
+     which is the one moment it has to stay readable. */
+  top: calc(var(--app-viewport-top, 0px) + 4.5rem);
   z-index: 200;
   max-width: 92vw;
   padding: 0.3rem 0.4rem;

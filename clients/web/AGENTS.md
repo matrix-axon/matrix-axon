@@ -261,6 +261,111 @@ the most time in the ADR 0076 investigation:
 - **The overlay is a ten-line buffer.** A chatty mark crowds out everything
   else; a chain that re-armed on every scroll frame once hid the very marks
   under investigation. Curate `OVERLAY_PREFIXES` (`src/perf.ts`) when adding.
+- **`body { position: fixed; inset: 0 }` does not stop iOS Safari scrolling the
+  document.** It is widely recommended for exactly that, and it was committed
+  here on that reasoning, but measured on a real iOS 26.5 simulator it prevents
+  nothing: dragging `.timeline` with the soft keyboard up still drove
+  `window.scrollY` to 150, then 202, then 237. What actually holds the layout is
+  the reactive `window.scroll` reset in `app.tsx`. The rule was reverted; do not
+  re-add it on the theory that it prevents the scroll without measuring first.
+- **`keyboard:page-scroll-reset` is the oracle for that whole class of bug.** It
+  only fires when the reactive reset found a non-zero `window.scroll*`, so _any_
+  occurrence means something still scrolled the document. A preventive fix is
+  proven by that mark's **absence** under a real keyboard-up drag — not by a
+  screenshot looking right, which only shows the post-correction frame (the
+  reset lands within ~2ms, so stills essentially never catch the bad frame).
+- **The reactive reset cannot make the artifact invisible, and a 60fps recording
+  shows why.** On a real iPhone, raising the keyboard displaced the whole shell
+  by ~211 CSS px (the mark recorded `offsetTop=245`), leaving a band of page
+  background above the topbar. The reset fired and `offsetTop` was back to 0
+  within 9ms — but the _screen_ kept showing the displacement for another
+  **167ms**, decaying smoothly frame by frame (211 → 188 → 166 → 139 → 114 → 85
+  → 60 → 39 → 22 → 10). Nothing on our side animates that: no
+  `scroll-behavior: smooth` anywhere, and `.shell` has no `transition` on `top`
+  despite being positioned off `--app-viewport-top`. The decay is therefore
+  engine-side — Safari easing its own viewport adjustment while the keyboard
+  animates in, which means
+  writing `window.scrollTo(0, 0)` retargets a value the compositor is already
+  animating and does not cancel the animation. Correcting after the fact is
+  therefore structurally incapable of removing this; only stopping the scroll
+  from being initiated will. Untried lever: the seven programmatic
+  `textarea.focus()` calls in `Composer.tsx` could pass `{ preventScroll: true }`
+  — but note that only affects _programmatic_ focus, so it does nothing for a
+  plain tap into the composer.
+- **The correction _was_ the jitter.** Settled by a mark-proven A/B on a real
+  iPhone (Settings → "Correct iOS keyboard page drift", which renames the mark
+  to `page-scroll-observed` when off, so a recording proves which arm ran).
+  Correcting: `offsetTop` oscillates 26 → 2 → 7 → 12 → 21 → 4 → 6 → 9 every
+  frame, 15 measurable shell excursions in one capture, keyboard-raise transient
+  366 CSS px over 183 ms. Not correcting: `offsetTop` settles to 414–417 and
+  stays, 3 excursions, raise transient 130 CSS px over 83 ms. The mechanism is a
+  feedback loop — `scrollTo(0, 0)` moves `visualViewport.offsetTop`, which is
+  what `--app-viewport-top` positions `.shell` from, so each correction shoved
+  the shell and Safari pushed back. `.shell` already compensates for the offset
+  correctly on its own; the reset was fighting a fix that worked. Default is now
+  off. The lesson generalises: before adding a correction, check whether
+  something downstream already compensates, or the two will fight at frame rate.
+- **What is still unsolved there, and the one untested lever.** With the
+  correction off, a keyboard _raise_ still displaces the shell ~130 CSS px for
+  ~83 ms, plus occasional single-frame blips of <= 15 CSS px that sit at the
+  perceptual floor. That residual is a different failure from the feedback loop
+  above: it is observation lag. Safari animates the viewport, the app learns
+  about it from `visualViewport` events and writes `--app-viewport-top` from JS,
+  so a JS-positioned shell can never be frame-perfect against a
+  compositor-driven animation. The only lever that removes the observation step
+  is making the _layout_ viewport track the keyboard —
+  `interactive-widget=resizes-content` in the viewport meta of `index.html`.
+  It was tried once and backed out, but **treat that as untested, not
+  disproven**: the capture it was judged on had no perf marks, so the blank
+  screen it correlated with was never tied to the meta, and the reasoning that
+  it "worked" (`innerHeight` collapsing to the visual height) was wrong —
+  `innerHeight` moves with `offsetTop`, so it said nothing either way. If it is
+  retried, A/B it with the Settings checkbox and read the marks; a blank app is
+  the specific risk to watch for. Weigh it against the fact that the residual is
+  motion _during_ the keyboard animation, when motion is expected — unlike the
+  jitter while scrolling, which is what actually read as broken.
+- **A long-lived `e2e/mock-server.mjs` will fail the suite.** `reuseExistingServer`
+  hands Playwright whatever is already on 4599, and that process accumulates
+  state — a mock left running for device testing collected four copies of one
+  message and broke a strict-mode locator in `shortcuts.spec.ts`, twice, looking
+  exactly like a real regression. Kill it before running the suite.
+
+## Driving a real iOS Simulator by hand
+
+For the bugs the WebKit e2e profile cannot reach — anything involving the real
+soft keyboard, which is what resizes the visual viewport. The recipe:
+
+```bash
+pnpm build                       # the mock serves dist/, so build first
+node e2e/mock-server.mjs         # dist/ + a real /v1/ws on 127.0.0.1:4599
+xcrun simctl boot "iPhone 17 Pro"
+xcrun simctl openurl booted "http://127.0.0.1:4599/<ACCOUNT_ID>/rooms/%21room%3Ahs?perf=1"
+```
+
+The simulator shares the host network stack, so `127.0.0.1` reaches the Mac's
+server directly — no LAN address and no rebinding needed. Sign in by pasting
+`e2e-token` (what `signIn` in `e2e/helpers.ts` puts in `localStorage`);
+`ACCOUNT_ID` and the room id are exported from the same file. `?perf=1` turns on
+the overlay, which is the only readable instrumentation on iOS.
+
+- **The soft keyboard needs two things, and silently no-ops with one.** Set
+  `defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool false`
+  **and** have `Simulator.app` actually running — the preference is read by that
+  app, so a headless/panel-only attachment keeps the hardware keyboard connected
+  and no soft keyboard ever appears. The failure is quiet and misleading: the
+  composer focuses, an accessory bar appears, the viewport shrinks by ~2px, and
+  it all looks plausible while the keyboard-resize path never runs at all. Check
+  for a keyboard-sized `keyboard:viewport-update` (714 → 377 on an iPhone 17
+  Pro) before trusting any keyboard result.
+- **A fast synthetic swipe often is not a scroll.** Single-vector swipes left
+  `.timeline` untouched while looking like they worked; only a multi-point drag
+  with real inter-point delays scrolled it. Verify the content actually moved
+  between screenshots before concluding anything from a gesture test.
+- **The Simulator needs a Metal-capable GPU.** Under virtualised macOS with an
+  emulated adapter (Bochs/QEMU, ~7 MB VRAM) SpringBoard composites fine but
+  WebKit paints pure black and `simctl openurl` times out — which reads as a
+  hang or a wedged device and is neither. Check `system_profiler
+SPDisplaysDataType` before debugging the simulator itself.
 
 ## Test environment gotchas (all discovered the hard way)
 

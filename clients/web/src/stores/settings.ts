@@ -119,6 +119,19 @@ export interface SettingsV1 {
    */
   perfMarks: boolean
   /**
+   * Whether the reactive `window.scroll` reset in `app.tsx` corrects the iOS
+   * soft-keyboard document drift. **Off by default**: a mark-proven A/B on a
+   * real iPhone showed the correction was itself driving the jitter it was
+   * added to fix — `scrollTo(0, 0)` moves `visualViewport.offsetTop`, which is
+   * what `--app-viewport-top` positions the shell from, so each correction
+   * shoved the shell and Safari pushed back, every frame. Left alone, the
+   * offset settles (414–417 across a whole capture, versus oscillating 2–26)
+   * and `.shell` compensates for it correctly on its own. Kept as a checkbox,
+   * rather than deleted, so the old behaviour is one tap away if the gap
+   * symptom `f60173d` was written against ever comes back.
+   */
+  pageScrollReset: boolean
+  /**
    * Whether the installed app's icon shows a badge with the number of unread
    * messages (ADR 0080, Badging API). On by default, matching how other
    * messaging apps badge without asking: the API needs no permission prompt
@@ -162,6 +175,7 @@ const DEFAULTS: SettingsV1 = {
   recentReactions: [],
   developerMode: false,
   perfMarks: false,
+  pageScrollReset: false,
   appBadgeEnabled: true,
   cacheRoomList: true,
 }
@@ -307,6 +321,10 @@ function parse(raw: string | null): SettingsV1 {
         : DEFAULTS.developerMode,
     perfMarks:
       typeof v1.perfMarks === 'boolean' ? v1.perfMarks : DEFAULTS.perfMarks,
+    pageScrollReset:
+      typeof v1.pageScrollReset === 'boolean'
+        ? v1.pageScrollReset
+        : DEFAULTS.pageScrollReset,
     appBadgeEnabled:
       typeof v1.appBadgeEnabled === 'boolean'
         ? v1.appBadgeEnabled
@@ -338,6 +356,7 @@ export interface SettingsStore {
   recentReactions: Signal<string[]>
   developerMode: Signal<boolean>
   perfMarks: Signal<boolean>
+  pageScrollReset: Signal<boolean>
   appBadgeEnabled: Signal<boolean>
   cacheRoomList: Signal<boolean>
   /**
@@ -390,6 +409,7 @@ export function createSettingsStore(
   const recentReactions = signal<string[]>(initial.recentReactions)
   const developerMode = signal<boolean>(initial.developerMode)
   const perfMarks = signal<boolean>(initial.perfMarks)
+  const pageScrollReset = signal<boolean>(initial.pageScrollReset)
   const appBadgeEnabled = signal<boolean>(initial.appBadgeEnabled)
   const cacheRoomList = signal<boolean>(initial.cacheRoomList)
 
@@ -415,6 +435,7 @@ export function createSettingsStore(
       recentReactions: recentReactions.value,
       developerMode: developerMode.value,
       perfMarks: perfMarks.value,
+      pageScrollReset: pageScrollReset.value,
       appBadgeEnabled: appBadgeEnabled.value,
       cacheRoomList: cacheRoomList.value,
     }
@@ -446,6 +467,7 @@ export function createSettingsStore(
     recentReactions,
     developerMode,
     perfMarks,
+    pageScrollReset,
     appBadgeEnabled,
     cacheRoomList,
     pinRoom(key: string) {

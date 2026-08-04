@@ -194,6 +194,22 @@ export function SettingsPage() {
           the app — the numbers a screen recording needs on a phone, where there
           is no console to read marks from.
         </p>
+        <label class="setting-row">
+          <input
+            type="checkbox"
+            checked={settings.pageScrollReset.value}
+            onChange={(event) =>
+              (settings.pageScrollReset.value = event.currentTarget.checked)
+            }
+          />
+          Correct iOS keyboard page drift
+        </label>
+        <p class="muted">
+          Off by default. On, the app snaps the page back when iOS Safari
+          scrolls it behind the keyboard — which measurably causes the shell to
+          jitter while scrolling, because the snap and Safari fight each frame.
+          The layout is already correct without it. Turn it on only to compare.
+        </p>
       </section>
       <section class="panel">
         <h2>Room list</h2>
