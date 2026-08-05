@@ -8,8 +8,16 @@
 //! user-facing error. Server-side, failures still map to real HTTP statuses
 //! like any other mutation; it's the client's choice not to await or surface
 //! them that makes the feature best-effort, not the server hiding them.
+//!
+//! Precisely *because* no client surfaces these failures, both handlers log a
+//! structured success/failure line — the same shape ADR 0068's M19b+ routes
+//! use. A read receipt that never reaches the homeserver is otherwise
+//! completely silent, and it presents as a room that will not stop showing
+//! unread: the count is derived from receipt state (ADR 0070), so a failed send
+//! and a successful one are indistinguishable from the outside.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::State;
 use uuid::Uuid;
@@ -49,10 +57,36 @@ pub async fn send_read_receipt(
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Json(req): Json<ReadReceiptRequest>,
 ) -> Result<ApiResponse<serde_json::Value>, ApiError> {
-    ephemeral
+    let started_at = Instant::now();
+    match ephemeral
         .send_read_receipt(account_id, &room_id, &req.event_id)
-        .await?;
-    Ok(ApiResponse::new(serde_json::json!({})))
+        .await
+    {
+        Ok(()) => {
+            tracing::debug!(
+                account_id = %account_id,
+                room_id = %room_id,
+                event_id = %req.event_id,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                "ephemeral: read receipt sent"
+            );
+            Ok(ApiResponse::new(serde_json::json!({})))
+        }
+        Err(err) => {
+            // `warn`, not `debug`: this is the failure that reads to a user as
+            // "this room will not stop showing unread", and no client will ever
+            // report it.
+            tracing::warn!(
+                account_id = %account_id,
+                room_id = %room_id,
+                event_id = %req.event_id,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                error = ?err,
+                "ephemeral: read receipt failed"
+            );
+            Err(err.into())
+        }
+    }
 }
 
 /// Set (or clear) this account's typing indicator in a room.
@@ -78,8 +112,33 @@ pub async fn send_typing_notice(
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Json(req): Json<TypingRequest>,
 ) -> Result<ApiResponse<serde_json::Value>, ApiError> {
-    ephemeral
+    let started_at = Instant::now();
+    match ephemeral
         .send_typing_notice(account_id, &room_id, req.typing)
-        .await?;
-    Ok(ApiResponse::new(serde_json::json!({})))
+        .await
+    {
+        Ok(()) => {
+            tracing::debug!(
+                account_id = %account_id,
+                room_id = %room_id,
+                typing = req.typing,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                "ephemeral: typing notice sent"
+            );
+            Ok(ApiResponse::new(serde_json::json!({})))
+        }
+        Err(err) => {
+            // Only `debug`: unlike a read receipt, a dropped typing notice
+            // leaves no durable wrong state behind — it expires on its own.
+            tracing::debug!(
+                account_id = %account_id,
+                room_id = %room_id,
+                typing = req.typing,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                error = ?err,
+                "ephemeral: typing notice failed"
+            );
+            Err(err.into())
+        }
+    }
 }
