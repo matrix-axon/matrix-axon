@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { openRoom, ROOM_URL } from './helpers'
+import { openRoom, ROOM_URL, shortcutForProject } from './helpers'
 
 /**
  * Message search (ADR 0066, M-W10). A real browser earns its keep here: the
@@ -80,13 +80,15 @@ test('open with /, search, jump to the hit, and Back reopens the search', async 
   await expect(page.locator('a.search-hit')).toHaveCount(1)
 })
 
-test('Ctrl-Shift-F opens search from the composer; Escape closes it', async ({
+test('the modifier search shortcut opens search from the composer; Escape closes it', async ({
   page,
-}) => {
+}, testInfo) => {
   await openRoom(page)
   const composer = page.getByRole('textbox', { name: /^Message/ })
   await composer.focus()
-  await page.keyboard.press('Control+Shift+F')
+  await page.keyboard.press(
+    shortcutForProject(testInfo.project.name, 'Control+Shift+F', 'Meta+G'),
+  )
   await expect(dialog(page)).toBeVisible()
 
   // Visible ≠ listening: Preact binds the overlay's Escape after paint, so

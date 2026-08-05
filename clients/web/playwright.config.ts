@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test'
 
 const PORT = 4599
 const BASE_URL = `http://127.0.0.1:${PORT}`
+const IPHONE = devices['iPhone 13']
 
 /**
  * The web e2e lanes: a headless Chromium drives the built app against the
@@ -33,6 +34,8 @@ export default defineConfig({
   },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+    { name: 'webkit-desktop', use: { ...devices['Desktop Safari'] } },
     // The perf lane (ADR 0071) also runs under WebKit — Apple's engine, what
     // iOS Safari uses — to catch engine-specific costs a Chromium run cannot,
     // like a constant transition cost that reproduces regardless of data size.
@@ -47,9 +50,23 @@ export default defineConfig({
             testMatch: /timeline-back-perf\.spec\.ts/,
             use: {
               browserName: 'webkit' as const,
-              viewport: devices['iPhone 13'].viewport,
-              userAgent: devices['iPhone 13'].userAgent,
-              deviceScaleFactor: devices['iPhone 13'].deviceScaleFactor,
+              viewport: IPHONE.viewport,
+              userAgent: IPHONE.userAgent,
+              deviceScaleFactor: IPHONE.deviceScaleFactor,
+              hasTouch: true,
+            },
+          },
+        ]
+      : []),
+    ...(process.env.MOBILE_E2E
+      ? [
+          {
+            name: 'webkit-iphone' as const,
+            use: {
+              browserName: 'webkit' as const,
+              viewport: IPHONE.viewport,
+              userAgent: IPHONE.userAgent,
+              deviceScaleFactor: IPHONE.deviceScaleFactor,
               hasTouch: true,
             },
           },

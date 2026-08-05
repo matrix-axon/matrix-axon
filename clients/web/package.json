@@ -15,7 +15,7 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "pnpm build && playwright test",
+    "test:e2e": "pnpm build && playwright test --project=chromium",
     "test:e2e:perf": "pnpm build && PERF=1 playwright test timeline-back-perf",
     "demo": "playwright test --config playwright.demo.config.ts"
   },
