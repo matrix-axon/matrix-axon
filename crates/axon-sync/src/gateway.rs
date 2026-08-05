@@ -8,6 +8,11 @@
 //! concrete capability `axon-server` adapts onto the API layer's `MessageSender`
 //! port — `axon-api` never sees this type or any SDK type.
 //!
+//! The one read it makes outside the SDK is
+//! [`SdkGateway::receipt_target`]'s: a read receipt has to name an event in
+//! *stream* order, and the only place an event's ingest order is recorded is the
+//! event store (ADR 0089). Nothing here writes to the store.
+//!
 //! Each method returns the resulting Matrix event id as a `String`. Errors are
 //! [`GatewayError`], chosen so the composition-root adapter can map them onto
 //! HTTP status without this crate knowing about HTTP.
@@ -48,6 +53,8 @@ use matrix_sdk::{Room, RoomState};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
+
+use axon_store::{Store, TimelineCursor};
 
 use crate::error::GatewayError;
 use crate::manager::ClientManager;
@@ -205,6 +212,64 @@ fn check_self_demotion_guardrail(
 /// redact, react, and the read-receipt send.
 fn parse_event_id(event_id: &str) -> Result<OwnedEventId, GatewayError> {
     EventId::parse(event_id).map_err(|e| GatewayError::Invalid(format!("event id: {e}")))
+}
+
+/// The id of the last event in `room`'s matrix-sdk event-cache chunk — the
+/// newest event this account holds in *stream* order, and the anchor the SDK's
+/// unread counter measures a read receipt from (ADR 0089).
+///
+/// `None` when the room's chunk is empty or unavailable: the event cache is
+/// subscribed for us by `matrix-sdk-ui`'s room-list service, but a room that
+/// has not synced yet in this process has nothing in memory to read, and
+/// [`SdkGateway::receipt_target`] treats that as "no better target known".
+/// Iterating from the end skips a trailing entry with no event id rather than
+/// giving up on the chunk.
+async fn chunk_latest_event_id(
+    room: &Room,
+    account_id: Uuid,
+    room_id: &str,
+) -> Option<OwnedEventId> {
+    let (event_cache, _drop_handles) = match room.event_cache().await {
+        Ok(handles) => handles,
+        Err(err) => {
+            tracing::debug!(
+                %account_id, %room_id, error = %err,
+                "read receipt: no event cache for this room; receipting the requested event"
+            );
+            return None;
+        }
+    };
+    let events = match event_cache.events().await {
+        Ok(events) => events,
+        Err(err) => {
+            tracing::debug!(
+                %account_id, %room_id, error = %err,
+                "read receipt: could not read the room's event cache; receipting the requested event"
+            );
+            return None;
+        }
+    };
+    events.iter().rev().find_map(|event| event.event_id())
+}
+
+/// Whether the room's stream-latest event should carry the read receipt in
+/// place of the event the client asked for — the decision
+/// [`SdkGateway::receipt_target`] exists to make, kept pure so both orderings
+/// are visible in one place (ADR 0089).
+///
+/// Both conditions are required, and each rules out a distinct way of getting
+/// this wrong:
+///
+/// - `latest.id > requested.id` — the latest event reached *this account* after
+///   the requested one, so naming it moves the read position forward. Without
+///   this, an event fetched by M10 backfill (older event, newer row id) or an
+///   already-current receipt could drag the position backwards.
+/// - `latest.origin_ts <= requested.origin_ts` — the latest event sorts at or
+///   before the requested one in the order clients actually display, so it was
+///   on screen. Without this, a client reading history mid-scroll would have the
+///   room marked read past the newest event it showed.
+fn supersedes_requested_receipt(requested: TimelineCursor, latest: TimelineCursor) -> bool {
+    latest.id > requested.id && latest.origin_ts <= requested.origin_ts
 }
 
 /// Parse a Matrix user id targeted by a membership mutation (invite/kick/
@@ -608,15 +673,21 @@ type PowerLevelLocks = Arc<Mutex<HashMap<(Uuid, String), PowerLevelLock>>>;
 #[derive(Clone)]
 pub struct SdkGateway {
     manager: ClientManager,
+    /// Read-only handle to the event store, used by
+    /// [`SdkGateway::receipt_target`] to compare two events' *ingest* order —
+    /// the one ordering neither the SDK nor the API request carries. Nothing
+    /// else in this type touches the store, and nothing here writes to it.
+    store: Store,
     power_level_locks: PowerLevelLocks,
 }
 
 impl SdkGateway {
     /// Build a gateway over a client manager. Constructed by the sync engine and
     /// exposed via [`SyncEngine::gateway`](crate::SyncEngine::gateway).
-    pub(crate) fn new(manager: ClientManager) -> Self {
+    pub(crate) fn new(manager: ClientManager, store: Store) -> Self {
         Self {
             manager,
+            store,
             power_level_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -834,6 +905,10 @@ impl SdkGateway {
     /// private fully-read marker to the same event in a single
     /// `POST /rooms/{roomId}/read_markers` call, so third-party Matrix clients
     /// reading standard receipt state see the room as read (ADR 0067).
+    ///
+    /// The event actually named on the wire is [`Self::receipt_target`]'s, not
+    /// necessarily the caller's — see there for why, and for the one case where
+    /// they differ.
     pub async fn send_read_receipt(
         &self,
         account_id: Uuid,
@@ -841,13 +916,106 @@ impl SdkGateway {
         event_id: &str,
     ) -> Result<(), GatewayError> {
         let room = self.room(account_id, room_id).await?;
-        let event_id = parse_event_id(event_id)?;
+        let requested = parse_event_id(event_id)?;
+        let target = self
+            .receipt_target(account_id, room_id, &room, &requested)
+            .await;
         let receipts = Receipts::new()
-            .fully_read_marker(event_id.clone())
-            .public_read_receipt(event_id);
+            .fully_read_marker(target.clone())
+            .public_read_receipt(target);
         room.send_multiple_receipts(receipts)
             .await
             .map_err(map_sdk_err)
+    }
+
+    /// Which event a "the room is read up to here" request should actually name
+    /// on the wire (ADR 0089).
+    ///
+    /// A client marks a room read at the newest event it has *displayed*, and
+    /// every Axon read surface sorts by `origin_ts` — so that is an
+    /// `origin_ts`-newest event. A Matrix read receipt, though, is interpreted
+    /// in *stream* order: it clears exactly the events that precede its target
+    /// in the room's DAG. The two orderings agree almost always, and disagree
+    /// precisely when a homeserver hands us an event whose `origin_server_ts`
+    /// predates events we already have — which is what a mautrix bridge does on
+    /// every portal creation, backfilling the pre-existing conversation with its
+    /// real (older) timestamps *after* the portal's own state events. The
+    /// client's `origin_ts`-newest event is then a portal state event that the
+    /// homeserver considers *older* than the message, the receipt leaves the
+    /// message uncleared, and — because the client's read position only ever
+    /// advances in `origin_ts` order — no later read can ever name it. The room
+    /// stays unread forever, in Axon and in every other Matrix client.
+    ///
+    /// So: prefer the last event of the room's matrix-sdk event-cache chunk.
+    /// That chunk *is* the stream ordering — sync appends to its end,
+    /// back-pagination prepends to its front — and it is the same structure the
+    /// SDK's own unread counter anchors a receipt against, so naming its last
+    /// event is what actually drives the room's notification count to zero.
+    ///
+    /// Substitute it only when both orderings agree that it belongs: it arrived
+    /// *after* the requested event (`id`, this account's ingest order) and
+    /// displays at or *before* it (`origin_ts`, so the user has actually seen
+    /// it). Anything else keeps the caller's event — a client reading history
+    /// mid-scroll, or after a search jump, must not have the room marked read
+    /// past what it showed.
+    ///
+    /// Best-effort by design: an event neither side knows, an event cache that
+    /// hasn't hydrated this room yet, or a store failure all fall back to the
+    /// requested event, which is what this route sent unconditionally before.
+    async fn receipt_target(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        room: &Room,
+        requested: &EventId,
+    ) -> OwnedEventId {
+        let Some(latest) = chunk_latest_event_id(room, account_id, room_id).await else {
+            return requested.to_owned();
+        };
+        if latest == *requested {
+            return requested.to_owned();
+        }
+        let positions = match self
+            .store
+            .event_positions(
+                account_id,
+                room_id,
+                &[requested.to_string(), latest.to_string()],
+            )
+            .await
+        {
+            Ok(positions) => positions,
+            Err(err) => {
+                tracing::warn!(
+                    %account_id, %room_id, %requested, %latest, error = %err,
+                    "read receipt: could not read event positions; receipting the requested event"
+                );
+                return requested.to_owned();
+            }
+        };
+        // Either event can be absent: a client may name an event this account
+        // never ingested, and the chunk's last event can briefly sit ahead of
+        // our own persist path. Without both positions there is nothing to
+        // compare.
+        let (Some(&requested_pos), Some(&latest_pos)) = (
+            positions.get(requested.as_str()),
+            positions.get(latest.as_str()),
+        ) else {
+            return requested.to_owned();
+        };
+        if !supersedes_requested_receipt(requested_pos, latest_pos) {
+            return requested.to_owned();
+        }
+        tracing::debug!(
+            %account_id,
+            %room_id,
+            %requested,
+            %latest,
+            requested_origin_ts = requested_pos.origin_ts,
+            latest_origin_ts = latest_pos.origin_ts,
+            "read receipt: receipting the room's stream-latest event instead of the requested one"
+        );
+        latest
     }
 
     /// Set (or clear) this account's typing indicator in a room (ADR 0068,
@@ -2097,5 +2265,65 @@ mod tests {
 
         check_self_demotion_guardrail(&before, &merged, &own_user_id, false)
             .expect("caller's own level (100) stays at/above state_default (50)");
+    }
+}
+
+#[cfg(test)]
+mod receipt_target_tests {
+    use super::supersedes_requested_receipt;
+    use axon_store::TimelineCursor;
+
+    fn at(origin_ts: i64, id: i64) -> TimelineCursor {
+        TimelineCursor { origin_ts, id }
+    }
+
+    /// The bug this exists for, with the real numbers from the LinkedIn portal
+    /// that surfaced it: the bridge's backfilled message arrived after the
+    /// portal's `uk.half-shot.bridge` state event (higher row id) but carries a
+    /// timestamp 4.5s older, so the client marks the room read at the state
+    /// event and the message would never be receipted.
+    #[test]
+    fn bridge_backfill_message_supersedes_the_displayed_newest_state_event() {
+        let requested = at(1_785_928_309_453, 1_871_424);
+        let latest = at(1_785_928_304_987, 1_871_426);
+        assert!(supersedes_requested_receipt(requested, latest));
+    }
+
+    /// The ordinary case: the newest event by display order is also the newest
+    /// by arrival, so there is nothing ahead of it to substitute.
+    #[test]
+    fn latest_that_arrived_earlier_never_supersedes() {
+        let requested = at(2_000, 20);
+        let latest = at(1_000, 10);
+        assert!(!supersedes_requested_receipt(requested, latest));
+    }
+
+    /// A client reading history — scrolled back, or landed mid-timeline from a
+    /// search hit — must not have the room marked read past what it displayed,
+    /// even though the room's latest event is genuinely newer.
+    #[test]
+    fn latest_the_client_has_not_displayed_never_supersedes() {
+        let requested = at(5_000, 500);
+        let latest = at(9_000, 900);
+        assert!(!supersedes_requested_receipt(requested, latest));
+    }
+
+    /// An `origin_ts` tie is common (bridges stamp bursts within a millisecond),
+    /// and a tie means the event sorts at the same display position — the client
+    /// showed it, so a later-arriving one still supersedes.
+    #[test]
+    fn equal_origin_ts_still_supersedes_when_it_arrived_later() {
+        let requested = at(1_000, 10);
+        let latest = at(1_000, 11);
+        assert!(supersedes_requested_receipt(requested, latest));
+    }
+
+    /// Both orderings identical (the same event, or a re-request) is not a
+    /// substitution — `receipt_target` short-circuits this case, but the
+    /// predicate must not claim otherwise on its own.
+    #[test]
+    fn identical_position_does_not_supersede() {
+        let position = at(1_000, 10);
+        assert!(!supersedes_requested_receipt(position, position));
     }
 }

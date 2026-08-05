@@ -284,7 +284,7 @@ impl SyncEngine {
     /// path. `axon-server` wraps this in an adapter implementing its
     /// `MessageSender` port; the returned value is cheap to construct and clone.
     pub fn gateway(&self) -> SdkGateway {
-        SdkGateway::new(self.manager.clone())
+        SdkGateway::new(self.manager.clone(), self.store.clone())
     }
 
     /// An authenticated media fetcher over the per-account clients, for the API

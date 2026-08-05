@@ -3730,7 +3730,8 @@
         "tags": [
           "ephemeral"
         ],
-        "summary": "Mark a room read: sets both the public read receipt and the private\nfully-read marker to `event_id` in one homeserver call.",
+        "summary": "Mark a room read: sets both the public read receipt and the private\nfully-read marker in one homeserver call.",
+        "description": "`event_id` states how far the client has read in the order it displays\nevents (`origin_ts`). A Matrix receipt is interpreted in the homeserver's\nstream order instead, and the two disagree for backfilled events — so axon\nmay name a *later-arriving* event that sorts at or before `event_id`, never\none the client has not displayed (ADR 0089).",
         "operationId": "send_read_receipt",
         "parameters": [
           {
@@ -8203,7 +8204,7 @@
                 "reply_count": {
                   "type": "integer",
                   "format": "int64",
-                  "description": "Number of thread members, counting redacted ones for structure."
+                  "description": "Number of actual-message thread members: redacted members and any\n(illegitimate) state-event members are excluded."
                 },
                 "root_event_id": {
                   "type": "string",
@@ -9312,14 +9313,14 @@
       },
       "ReadReceiptRequest": {
         "type": "object",
-        "description": "Request body for marking a room read (`POST …/rooms/{room_id}/read`; ADR\n0067). Sets both the public read receipt and the private fully-read marker\nto `event_id` in one homeserver call.",
+        "description": "Request body for marking a room read (`POST …/rooms/{room_id}/read`; ADR\n0067). Sets both the public read receipt and the private fully-read marker in\none homeserver call.",
         "required": [
           "event_id"
         ],
         "properties": {
           "event_id": {
             "type": "string",
-            "description": "The event id to mark as read."
+            "description": "How far the client has read, as the newest event it has *displayed* —\ni.e. in `origin_ts` order, the order every axon read surface returns.\nThe receipt axon sends may name a different event: one that reached this\naccount later but sorts at or before this one, which is how a bridge's\nbackfilled message gets acknowledged (ADR 0089). Never an event that\ndisplays after this one."
           }
         }
       },
@@ -9986,7 +9987,7 @@
           "reply_count": {
             "type": "integer",
             "format": "int64",
-            "description": "Number of thread members, counting redacted ones for structure."
+            "description": "Number of actual-message thread members: redacted members and any\n(illegitimate) state-event members are excluded."
           },
           "root_event_id": {
             "type": "string",
