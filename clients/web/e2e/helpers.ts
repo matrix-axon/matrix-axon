@@ -20,6 +20,15 @@ export async function signIn(page: Page): Promise<void> {
   )
 }
 
+/** Select the documented chord for the platform modeled by a Playwright project. */
+export function shortcutForProject(
+  projectName: string,
+  windowsOrLinux: string,
+  apple: string,
+): string {
+  return projectName.startsWith('webkit') ? apple : windowsOrLinux
+}
+
 /** Wait until the initial room-list refresh has durably committed its cache. */
 export async function waitForRoomListCache(page: Page): Promise<void> {
   await expect
@@ -44,7 +53,6 @@ export async function waitForRoomListCache(page: Page): Promise<void> {
     )
     .toBeGreaterThan(0)
 }
-
 /** A signed-in tab at the room, wide enough for two panes, socket up. */
 export async function openRoom(page: Page): Promise<void> {
   await signIn(page)
