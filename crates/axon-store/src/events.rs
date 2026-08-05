@@ -1182,6 +1182,44 @@ impl Store {
             .await?;
         Ok(row)
     }
+
+    /// Look up the timeline position of specific events in one room, keyed by
+    /// event id. Events this account has never ingested are simply absent from
+    /// the map — the caller decides what an unknown event means.
+    ///
+    /// A [`TimelineCursor`] carries both orderings a caller needs to compare two
+    /// events: `origin_ts` (the *display* order every read surface sorts by) and
+    /// the monotonic `id` (the order this account actually ingested them). Those
+    /// two disagree whenever a homeserver hands us an event whose
+    /// `origin_server_ts` predates events we already have — routinely, for a
+    /// bridge that backfills a conversation into a freshly created portal room —
+    /// so a caller that needs "which of these arrived later" must not infer it
+    /// from `origin_ts`. See [`Store::room_timeline`] for why the pair is also
+    /// the pagination cursor.
+    pub async fn event_positions(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_ids: &[String],
+    ) -> Result<HashMap<String, TimelineCursor>, StoreError> {
+        if event_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows: Vec<(String, i64, i64)> =
+            sqlx_core::query_as::query_as::<Postgres, (String, i64, i64)>(
+                "SELECT event_id, origin_ts, id FROM events \
+                 WHERE account_id = $1 AND room_id = $2 AND event_id = ANY($3)",
+            )
+            .bind(account_id)
+            .bind(room_id)
+            .bind(event_ids)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(event_id, origin_ts, id)| (event_id, TimelineCursor { origin_ts, id }))
+            .collect())
+    }
 }
 
 /// One emoji's reaction tally for an event (M8), from

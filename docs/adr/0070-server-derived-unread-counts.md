@@ -109,6 +109,13 @@ unread messages rather than at the room's tail. In an unbridged room the
 fallback usually lands on the user's own last message or the true tail and
 the recount yields zero.
 
+Bridged rooms had a *second*, unrelated fault with the same symptom — a durable
+badge on every fresh load — that this guard does not address and should not be
+mistaken for: the read receipt itself named the wrong event, because clients
+derive their read position from axon's `origin_ts` display order while a receipt
+is interpreted in stream order. There the count was correct and the input was
+wrong. See ADR 0089.
+
 The watcher reacts to **every** notable update regardless of its `reasons`
 bitflag. `RoomInfoNotableUpdateReasons` has no dedicated "notification count
 changed" bit — the closest candidates (`RECENCY_STAMP`, `LATEST_EVENT`,
