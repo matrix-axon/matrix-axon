@@ -189,10 +189,29 @@ export function createUpdateChecker(
   let timer: ReturnType<typeof setInterval> | null = null
   /** Collapses overlapping checks — several triggers can fire at once. */
   let inFlight: Promise<void> | null = null
+  /**
+   * Bumped per check, so a run can tell whether it is still the current one.
+   *
+   * The watchdog on `check()` can free the de-duplication slot while a run is
+   * still outstanding, and that run's continuation is not cancellable. Without
+   * this it could resolve long afterwards and overwrite `status` / `latest` /
+   * `available` with an answer that later checks have already superseded. Not
+   * reachable through the shipped `fetchVersionManifest`, which aborts itself —
+   * but `fetchManifest` is an injection point, and a stale write is cheaper to
+   * make impossible than to reason about (raised in review of #114).
+   */
+  let generation = 0
 
   async function run(): Promise<void> {
+    const mine = ++generation
+    /** False once a later check has begun: this run's answer is stale. */
+    const current = () => mine === generation
+
     status.value = 'checking'
     const manifest = await fetchManifest()
+    if (!current()) {
+      return
+    }
     if (manifest === null) {
       status.value = 'error'
       return
@@ -223,6 +242,10 @@ export function createUpdateChecker(
       // promise, disabling update detection for the life of the tab. The
       // shipped `fetchVersionManifest` bounds itself, but `fetchManifest` is an
       // injection point and the slot should not depend on its manners.
+      //
+      // Freeing the slot does not cancel the run behind it — nothing can — so
+      // the abandoned run is fenced off by `generation` instead, and cannot
+      // write its late answer over a newer one.
       inFlight ??= settleWithin(run(), WATCHDOG_MS).finally(() => {
         inFlight = null
       })

@@ -269,6 +269,83 @@ describe('createUpdateChecker', () => {
     }
   })
 
+  /**
+   * The watchdog frees the de-duplication slot, but nothing can cancel the run
+   * behind it. A run abandoned that way must not surface its answer later and
+   * overwrite one a newer check has already produced. Raised in review of #114:
+   * not reachable via the shipped `fetchVersionManifest`, which aborts itself,
+   * but `fetchManifest` is an injection point.
+   */
+  it('ignores a late answer from a run the watchdog abandoned', async () => {
+    vi.useFakeTimers()
+    try {
+      let releaseStale: ((m: VersionManifest | null) => void) | undefined
+      let calls = 0
+      const checker = createUpdateChecker({
+        currentVersion: 'build-a',
+        fetchManifest: () => {
+          calls += 1
+          return calls === 1
+            ? new Promise<VersionManifest | null>((resolve) => {
+                releaseStale = resolve
+              })
+            : Promise.resolve({ ...MANIFEST, version: 'build-current' })
+        },
+      })
+
+      const abandoned = checker.check()
+      await vi.advanceTimersByTimeAsync(60_000)
+      await abandoned // watchdog freed the slot
+
+      // A newer check lands a real answer.
+      await checker.check()
+      expect(checker.latest.value?.version).toBe('build-current')
+
+      // Now the abandoned run finally answers, with something different.
+      releaseStale!({ ...MANIFEST, version: 'stale-answer' })
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(checker.latest.value?.version).toBe('build-current')
+      expect(checker.status.value).toBe('available')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('ignores a late error from an abandoned run', async () => {
+    vi.useFakeTimers()
+    try {
+      let releaseStale: ((m: VersionManifest | null) => void) | undefined
+      let calls = 0
+      const checker = createUpdateChecker({
+        currentVersion: 'build-a',
+        fetchManifest: () => {
+          calls += 1
+          return calls === 1
+            ? new Promise<VersionManifest | null>((resolve) => {
+                releaseStale = resolve
+              })
+            : Promise.resolve(MANIFEST)
+        },
+      })
+
+      const abandoned = checker.check()
+      await vi.advanceTimersByTimeAsync(60_000)
+      await abandoned
+      await checker.check()
+      expect(checker.available.value).toBe(true)
+
+      // `null` is "learned nothing" — it must not downgrade `status` to error
+      // after a newer check has reported an available build.
+      releaseStale!(null)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(checker.status.value).toBe('available')
+      expect(checker.available.value).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('polls on an interval once started, and stops on stop()', async () => {
     vi.useFakeTimers()
     try {

@@ -70,12 +70,26 @@ describe('reloadOnce', () => {
     expect(e.reloads()).toBe(MAX_ATTEMPTS)
   })
 
-  it('tracks a chunk failure separately from a version update', () => {
+  it('dedups a chunk failure separately from a version update', () => {
     const e = env()
     expect(reloadOnce('build-a', CHUNK_TARGET, e)).toBe(true)
     expect(reloadOnce('build-a', CHUNK_TARGET, e)).toBe(false)
+    // A spent chunk attempt does not block a version reload: different pair.
     expect(reloadOnce('build-a', 'build-b', e)).toBe(true)
     expect(e.reloads()).toBe(2)
+  })
+
+  // Dedup is per pair; the budget is not. Bounding how often a tab reloads at
+  // all is the budget's whole job, so per-target budgets would let one window
+  // spend MAX_ATTEMPTS on chunk failures and MAX_ATTEMPTS again on versions.
+  it('spends one shared budget across chunk and version targets', () => {
+    const e = env()
+    expect(reloadOnce('build-a', CHUNK_TARGET, e)).toBe(true)
+    expect(reloadOnce('build-a', 'build-b', e)).toBe(true)
+    expect(reloadOnce('build-a', 'build-c', e)).toBe(true)
+    // Spent, even though this target has never been attempted.
+    expect(reloadOnce('build-a', 'build-d', e)).toBe(false)
+    expect(e.reloads()).toBe(MAX_ATTEMPTS)
   })
 
   it('settles the pair once a boot lands on a new build', () => {

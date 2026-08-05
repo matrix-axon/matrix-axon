@@ -144,6 +144,11 @@ the life of the tab. Review of this PR caught it. Two layers now: the shipped
 slot on a watchdog, so the invariant does not depend on the manners of an
 injected `fetchManifest`.
 
+Freeing the slot does not cancel the run behind it — nothing can — so a second
+review pass noted the abandoned run could still resolve much later and write its
+answer over a newer one's. Each run therefore carries a generation and drops its
+result if a later check has begun.
+
 `available` latches. A poll that straddles a deploy restart can easily read the
 old manifest again, and retracting a banner the user has already seen would
 flicker it for no reason.
@@ -215,8 +220,12 @@ Bounding the *rate* is what separates thrash from ordinary use. Hitting the cap
 is not silent: the banner takes over, so the update is still applicable by hand.
 
 The chunk-failure path has no version to name and uses a `'chunk'` sentinel as
-its target, so it is tracked separately from version updates and neither
-consumes the other's attempt.
+its target. That keeps it separate for **pair dedup** — a spent chunk reload
+never blocks a later version reload, or the reverse — but the two deliberately
+share the one `spent` budget. The budget's job is to bound how often a tab
+reloads itself *at all*; giving each target kind its own would let a single
+window spend `MAX_ATTEMPTS` on chunk failures **and** `MAX_ATTEMPTS` on version
+updates, which is exactly the rate it exists to cap.
 
 Automatic reloads fail closed — an unwritable or unreadable `sessionStorage`
 blocks them — while a user clicking Reload is never guarded.
