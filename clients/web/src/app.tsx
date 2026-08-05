@@ -289,9 +289,11 @@ function isReloadOrRestoreNavigation(): boolean {
   const [entry] = performance.getEntriesByType(
     'navigation',
   ) as PerformanceNavigationTiming[]
-  if (entry !== undefined) {
-    return entry.type === 'reload' || entry.type === 'back_forward'
+  if (entry?.type === 'reload' || entry?.type === 'back_forward') {
+    return true
   }
+  // Firefox can report a scripted reload as `navigate` in Navigation Timing
+  // Level 2 while its legacy navigation entry still correctly identifies it.
   const legacyNavigation = (
     performance as Performance & {
       navigation?: {
