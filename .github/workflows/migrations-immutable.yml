@@ -23,6 +23,9 @@ name: Migrations are forward-only
 on:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   migrations-immutable:
     runs-on: ubuntu-latest

@@ -44,6 +44,9 @@ on:
       - 'beta-*'
       - 'alpha-*'
 
+permissions:
+  contents: read
+
 env:
   # Pin JS actions (docker/*) to Node 24 (matches cross-build.yml).
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

@@ -27,6 +27,9 @@ on:
       - "clients/web/**"
       - ".github/workflows/web-e2e.yml"
 
+permissions:
+  contents: read
+
 # A browser lane is the most expensive thing here, and only the newest commit
 # on a branch is worth a runner.
 concurrency:

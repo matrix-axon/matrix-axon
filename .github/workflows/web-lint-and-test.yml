@@ -15,6 +15,9 @@ on:
       - "clients/web/**"
       - ".github/workflows/web-lint-and-test.yml"
 
+permissions:
+  contents: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
