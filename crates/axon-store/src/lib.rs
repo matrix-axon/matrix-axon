@@ -24,6 +24,7 @@ mod spaces;
 mod state;
 mod tokens;
 mod unread;
+mod upstream_reconcile;
 
 pub use accounts::{Account, AccountState};
 pub use backfill::{AccountBackfillProgress, RoomBackfillState};
