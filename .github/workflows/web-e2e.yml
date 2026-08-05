@@ -1,14 +1,15 @@
 name: Web e2e
 
-# The M-W6 Playwright lane (ADR 0061): headless Chromium drives the built app
-# against the dependency-free mock backend in `clients/web/e2e/mock-server.mjs`.
-# `pnpm test:e2e` runs the same thing locally.
+# The M-W6 Playwright lane (ADR 0061): desktop Chromium, Firefox, and WebKit
+# drive the built app against the dependency-free mock backend in
+# `clients/web/e2e/mock-server.mjs`. `pnpm test:e2e` remains the local
+# Chromium default.
 #
 # This lane gates web PRs. It was dispatch-only on the grounds that it needs a
-# browser runner, but `ubuntu-latest` provides one and `playwright install
-# --with-deps chromium` is the whole cost; the suite is ~40 s of test time. The
-# price of not running it is what issue #96 documents: three real failures sat
-# on `main` from the PR that introduced them, because nothing ever ran them.
+# browser runner, but `ubuntu-latest` provides one and Playwright installs its
+# own browser dependencies. The price of not running it is what issue #96
+# documents: three real failures sat on `main` from the PR that introduced
+# them, because nothing ever ran them.
 #
 # Paths mirror `web-lint-and-test.yml`, minus its `openapi/openapi.json` entry —
 # that is there for the schema-drift gate, which this lane does not run. A
@@ -42,6 +43,16 @@ env:
 jobs:
   web-e2e:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: chromium
+            browser: chromium
+          - project: firefox
+            browser: firefox
+          - project: webkit-desktop
+            browser: webkit
 
     defaults:
       run:
@@ -69,17 +80,58 @@ jobs:
         run: pnpm build
 
       - name: Install Playwright browser
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
 
-      - name: Run e2e lane
-        run: pnpm test:e2e
+      - name: Run ${{ matrix.project }} e2e lane
+        run: pnpm exec playwright test --project=${{ matrix.project }} --fail-on-flaky-tests
 
       # The CI reporter is `github` (inline annotations), so the artifact worth
       # keeping is the trace `retries: 1` captures on a first-attempt failure.
       - uses: actions/upload-artifact@v7
         if: ${{ failure() }}
         with:
-          name: playwright-traces
+          name: playwright-traces-${{ matrix.project }}
+          path: clients/web/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  web-e2e-iphone:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: clients/web
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: clients/web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Install Playwright WebKit
+        run: pnpm exec playwright install --with-deps webkit
+
+      - name: Run iPhone-profile WebKit e2e lane
+        run: MOBILE_E2E=1 pnpm exec playwright test --project=webkit-iphone --fail-on-flaky-tests
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ failure() }}
+        with:
+          name: playwright-traces-webkit-iphone
           path: clients/web/test-results/
           retention-days: 7
           if-no-files-found: ignore

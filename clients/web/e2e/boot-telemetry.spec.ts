@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { reloadFromInsidePage, signIn } from './helpers'
+import { reloadFromInsidePage, signIn, waitForRoomListCache } from './helpers'
 
 /**
  * The ADR 0085 phase 2 boot summary, proven to exist and to carry real numbers
@@ -35,27 +35,7 @@ test('the boot summary reports the cache winning the race', async ({
   // A painted row means the refresh settled, not that the write-back landed —
   // that is one more async hop. Reloading before it lands gives a cold cache,
   // and then every assertion below reads a summary that was never emitted.
-  await expect
-    .poll(
-      () =>
-        page.evaluate(
-          () =>
-            new Promise<number>((resolve) => {
-              const request = indexedDB.open('axon-cache', 1)
-              request.onerror = () => resolve(0)
-              request.onsuccess = () => {
-                const keys = request.result
-                  .transaction('rooms', 'readonly')
-                  .objectStore('rooms')
-                  .getAllKeys()
-                keys.onerror = () => resolve(0)
-                keys.onsuccess = () => resolve(keys.result.length)
-              }
-            }),
-        ),
-      { timeout: 5000 },
-    )
-    .toBeGreaterThan(0)
+  await waitForRoomListCache(page)
 
   // Model an app *relaunch* for the measured load, not a navigation.
   // `setPerfEnabled` mirrors the flag into `sessionStorage`, which survives
@@ -84,15 +64,16 @@ test('the boot summary reports the cache winning the race', async ({
   // The summary is emitted when the *refresh* settles, which the hold defers.
   await expect(page.getByText('Updating…')).toBeHidden({ timeout: 10_000 })
 
-  const summary = await page.evaluate(() =>
-    performance
-      .getEntriesByType('mark')
-      .filter((mark) => mark.name === 'axon:boot:room-list')
-      .map((mark) => (mark as PerformanceMark).detail)
-      .at(-1),
-  )
-  expect(summary).toBeTruthy()
-  const detail = summary as {
+  const summary = () =>
+    page.evaluate(() =>
+      performance
+        .getEntriesByType('mark')
+        .filter((mark) => mark.name === 'axon:boot:room-list')
+        .map((mark) => (mark as PerformanceMark).detail)
+        .at(-1),
+    )
+  await expect.poll(summary, { timeout: 10_000 }).toBeTruthy()
+  const detail = (await summary()) as {
     nav: string
     hydrate: number | null
     read: number | null
@@ -102,7 +83,9 @@ test('the boot summary reports the cache winning the race', async ({
     saved: number | null
     rooms: number | null
   }
-  expect(detail.nav).toBe('reload')
+  // Firefox reports a scripted reload as `navigate`; both values still prove
+  // this is a cold document load rather than a resumed tab.
+  expect(['reload', 'navigate']).toContain(detail.nav)
   // Every field the readout shows has to be a number, not a null the phone
   // would render as a dash.
   expect(detail.hydrate).not.toBeNull()

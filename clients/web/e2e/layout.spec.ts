@@ -54,9 +54,9 @@ test('wide: sidebar beside the room-entry pane and timeline', async ({
   await expect(page.getByRole('heading', { name: 'Add a Room' })).toBeVisible()
 
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expect(
+    page.getByRole('status', { name: 'WebSocket: Live' }),
+  ).toHaveText('Live')
   await expect(page.locator('.shell-body')).toHaveClass(/mode-room/)
   expect(await shown(page, '.sidebar')).toBe('visible')
   expect(await shown(page, '.timeline')).toBe('visible')

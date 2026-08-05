@@ -274,7 +274,7 @@ test.describe('message actions on a phone', () => {
 
       const toolbar = page.locator('.lightbox-toolbar')
       await expect(
-        toolbar.getByRole('button', { name: 'Delete' }),
+        toolbar.getByRole('button', { name: 'Save image to device' }),
       ).toBeVisible()
       const visualLabels = await toolbar
         .locator('button')
