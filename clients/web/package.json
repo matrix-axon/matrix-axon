@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@preact/signals": "^2.9.2",
+    "brace-expansion": "2.1.2",
     "dompurify": "^3.4.12",
     "emoji-picker-element": "1.29.1",
     "emoji-picker-element-data": "1.8.0",
