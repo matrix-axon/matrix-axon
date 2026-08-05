@@ -171,3 +171,7 @@ Tier 1. The rest of ADR 0055 (the Tier 1/Tier 2 split, `is_direct`/
   round trip (ADR 0067) is what clears the count.
 - Web-client consumption (rendering these fields, retiring the live-only
   counter) is deferred to a follow-up PR.
+- *(Amended by ADR 0090.)* The prune above keys on `client.joined_rooms()`, which
+  cannot see a room the homeserver has stopped serving or a room that has been
+  tombstoned — both stay "joined" locally, and their rows freeze at whatever the
+  watcher last wrote. Those rooms are pinned to zero instead.
