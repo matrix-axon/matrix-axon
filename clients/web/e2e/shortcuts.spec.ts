@@ -269,14 +269,16 @@ test('the room-step shortcut from the room list does not steal focus to the comp
 
 test('? opens the help; Escape closes it; typing ? does not open it', async ({
   page,
-}) => {
+}, testInfo) => {
   await openRoom(page)
   const dialog = page.getByRole('dialog', { name: 'Help' })
 
   await page.keyboard.press('?')
   await expect(dialog).toBeVisible()
   // The popup renders the SHORTCUTS table, so it lists what is actually bound.
-  await expect(dialog).toContainText('Ctrl-K')
+  await expect(dialog).toContainText(
+    shortcutForProject(testInfo.project.name, 'Ctrl-K', '⌘-K'),
+  )
   await expect(dialog).toContainText('Cycle filter')
 
   await page.keyboard.press('Escape')
@@ -360,7 +362,7 @@ test('Escape closes the thread panel, then focuses the composer', async ({
 
 test('Ctrl-/ opens the help from the composer, where ? cannot', async ({
   page,
-}) => {
+}, testInfo) => {
   await openRoom(page)
   const composer = page.getByRole('textbox', { name: /^Message/ })
   const dialog = page.getByRole('dialog', { name: 'Help' })
@@ -373,7 +375,9 @@ test('Ctrl-/ opens the help from the composer, where ? cannot', async ({
 
   await page.keyboard.press('Control+/')
   await expect(dialog).toBeVisible()
-  await expect(dialog).toContainText('? or Ctrl-/')
+  await expect(dialog).toContainText(
+    shortcutForProject(testInfo.project.name, '? or Ctrl-/', '? or ⌘-/'),
+  )
 })
 
 test('the ? button opens the help without touching the keyboard', async ({
