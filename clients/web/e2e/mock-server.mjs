@@ -626,7 +626,10 @@ async function handleApi(req, res, url) {
   }
   // The media proxy: raw image bytes behind the bearer guard, mirroring the
   // real route's headers so the client's fetch → blob path is exercised.
-  if (method === 'GET' && /^\/v1\/media\/[^/]+\/[^/]+\/[^/]+$/.test(pathname)) {
+  if (
+    method === 'GET' &&
+    /^\/v1\/media\/[^/]+\/[^/]+\/[^/]+(?:\/thumbnail)?$/.test(pathname)
+  ) {
     res.writeHead(200, {
       'content-type': 'image/png',
       etag: '"e2eimg"',
