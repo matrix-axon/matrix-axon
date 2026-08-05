@@ -20,12 +20,39 @@ export async function signIn(page: Page): Promise<void> {
   )
 }
 
+/** Wait until the initial room-list refresh has durably committed its cache. */
+export async function waitForRoomListCache(page: Page): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          () =>
+            new Promise<number>((resolve) => {
+              const request = indexedDB.open('axon-cache', 1)
+              request.onerror = () => resolve(0)
+              request.onsuccess = () => {
+                const keys = request.result
+                  .transaction('rooms', 'readonly')
+                  .objectStore('rooms')
+                  .getAllKeys()
+                keys.onerror = () => resolve(0)
+                keys.onsuccess = () => resolve(keys.result.length)
+              }
+            }),
+        ),
+      { timeout: 5000 },
+    )
+    .toBeGreaterThan(0)
+}
+
 /** A signed-in tab at the room, wide enough for two panes, socket up. */
 export async function openRoom(page: Page): Promise<void> {
   await signIn(page)
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status')).toHaveText('Live')
+  await expect(
+    page.getByRole('status', { name: 'WebSocket: Live' }),
+  ).toHaveText('Live')
 }
 
 /**

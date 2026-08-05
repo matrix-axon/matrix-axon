@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { signIn } from './helpers'
+import { signIn, waitForRoomListCache } from './helpers'
 
 /**
  * ADR 0085 phase 2: a returning tab paints its room list from IndexedDB
@@ -42,6 +42,7 @@ test('a returning tab paints its room list before the request settles', async ({
   // which is what triggers the write-back.
   await page.goto('/')
   await expect(page.getByText('E2E Room')).toBeVisible()
+  await waitForRoomListCache(page)
 
   await setRoomsHold(page, HELD)
   await page.reload()
@@ -65,6 +66,7 @@ test('the same hold blanks the list once the cache is turned off', async ({
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.goto('/')
   await expect(page.getByText('E2E Room')).toBeVisible()
+  await waitForRoomListCache(page)
 
   await page.goto('/settings')
   const toggle = page.getByLabel('Keep the room list on this device')
@@ -85,6 +87,7 @@ test('cached rooms survive a refresh that never lands', async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.goto('/')
   await expect(page.getByText('E2E Room')).toBeVisible()
+  await waitForRoomListCache(page)
 
   // The only "offline" a client with no service worker can be tested against:
   // the bundle is already loaded, the API is not reachable. A radios-off reload

@@ -323,20 +323,20 @@ can still slot in later behind the same seam.
 
 ## Scripts
 
-| Script                              | Purpose                                                                                                                                      |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm dev`                          | Dev server with HMR and the `/v1` proxy                                                                                                      |
-| `pnpm build`                        | Type-check and produce a deployable `dist/`                                                                                                  |
-| `pnpm preview`                      | Serve the built `dist/` locally                                                                                                              |
-| `pnpm gen:api`                      | Regenerate `src/api/schema.d.ts` from the spec                                                                                               |
-| `pnpm check:api`                    | Check generated API types for drift                                                                                                          |
-| `pnpm test`                         | Vitest, single run                                                                                                                           |
-| `pnpm test:watch`                   | Vitest, watch mode                                                                                                                           |
-| `pnpm test:e2e`                     | Playwright e2e suite (Chromium)                                                                                                              |
-| `pnpm test:e2e:perf`                | The ADR 0071 timeline→room-list perf spec, also under WebKit (sets `PERF=1`, which gates the extra WebKit project in `playwright.config.ts`) |
-| `pnpm demo`                         | Record the ADR 0086 demo videos against a seeded local stack (needs `DEMO_MANIFEST`; see § Demo recording)                                   |
-| `pnpm lint`                         | ESLint + Prettier check                                                                                                                      |
-| `pnpm format` / `pnpm format:check` | Prettier write / check                                                                                                                       |
+| Script                              | Purpose                                                                                                                                        |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm dev`                          | Dev server with HMR and the `/v1` proxy                                                                                                        |
+| `pnpm build`                        | Type-check and produce a deployable `dist/`                                                                                                    |
+| `pnpm preview`                      | Serve the built `dist/` locally                                                                                                                |
+| `pnpm gen:api`                      | Regenerate `src/api/schema.d.ts` from the spec                                                                                                 |
+| `pnpm check:api`                    | Check generated API types for drift                                                                                                            |
+| `pnpm test`                         | Vitest, single run                                                                                                                             |
+| `pnpm test:watch`                   | Vitest, watch mode                                                                                                                             |
+| `pnpm test:e2e`                     | Playwright e2e suite (Chromium; CI also gates Firefox and desktop WebKit, then runs iPhone-profile WebKit after a web change merges to `main`) |
+| `pnpm test:e2e:perf`                | The ADR 0071 timeline→room-list perf spec, also under WebKit (sets `PERF=1`, which gates the extra WebKit project in `playwright.config.ts`)   |
+| `pnpm demo`                         | Record the ADR 0086 demo videos against a seeded local stack (needs `DEMO_MANIFEST`; see § Demo recording)                                     |
+| `pnpm lint`                         | ESLint + Prettier check                                                                                                                        |
+| `pnpm format` / `pnpm format:check` | Prettier write / check                                                                                                                         |
 
 An optional live round-trip suite runs against a real server when
 `AXON_LIVE_URL` and `AXON_LIVE_TOKEN` are set (see
