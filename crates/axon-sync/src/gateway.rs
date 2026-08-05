@@ -214,6 +214,20 @@ fn parse_event_id(event_id: &str) -> Result<OwnedEventId, GatewayError> {
     EventId::parse(event_id).map_err(|e| GatewayError::Invalid(format!("event id: {e}")))
 }
 
+/// Set both this account's public read receipt and its private fully-read
+/// marker to `event_id`, in the single `POST /rooms/{roomId}/read_markers` call
+/// ADR 0067 specifies. Split out so the send can be attempted twice — once for
+/// a resolved target, once for the caller's own event id — without duplicating
+/// how a receipt is built.
+async fn send_receipts_for(room: &Room, event_id: OwnedEventId) -> Result<(), GatewayError> {
+    let receipts = Receipts::new()
+        .fully_read_marker(event_id.clone())
+        .public_read_receipt(event_id);
+    room.send_multiple_receipts(receipts)
+        .await
+        .map_err(map_sdk_err)
+}
+
 /// The id of the last event in `room`'s matrix-sdk event-cache chunk — the
 /// newest event this account holds in *stream* order, and the anchor the SDK's
 /// unread counter measures a read receipt from (ADR 0089).
@@ -909,6 +923,14 @@ impl SdkGateway {
     /// The event actually named on the wire is [`Self::receipt_target`]'s, not
     /// necessarily the caller's — see there for why, and for the one case where
     /// they differ.
+    ///
+    /// If a *substituted* target is rejected upstream, this retries once with
+    /// exactly the event the caller asked for. The substitution names an event
+    /// from the SDK's event-cache chunk, which the homeserver normally also
+    /// holds — but a purged room answers `404 M_UNKNOWN: Could not find event …`
+    /// for it, and resolving a read position must never be able to fail a
+    /// receipt that would otherwise have been sent. The retry costs one extra
+    /// round trip in a case that was already failing.
     pub async fn send_read_receipt(
         &self,
         account_id: Uuid,
@@ -920,12 +942,21 @@ impl SdkGateway {
         let target = self
             .receipt_target(account_id, room_id, &room, &requested)
             .await;
-        let receipts = Receipts::new()
-            .fully_read_marker(target.clone())
-            .public_read_receipt(target);
-        room.send_multiple_receipts(receipts)
-            .await
-            .map_err(map_sdk_err)
+        let substituted = target != requested;
+        match send_receipts_for(&room, target).await {
+            Ok(()) => Ok(()),
+            Err(err) if substituted => {
+                tracing::debug!(
+                    %account_id,
+                    %room_id,
+                    %requested,
+                    error = %err,
+                    "read receipt: substituted event rejected; retrying with the requested event"
+                );
+                send_receipts_for(&room, requested).await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Which event a "the room is read up to here" request should actually name
