@@ -917,7 +917,6 @@ impl SdkGateway {
             );
         }
     }
-    }
 
     /// Set (or clear) this account's typing indicator in a room (ADR 0068,
     /// M19a). The SDK debounces/expires the underlying `m.typing` event itself;

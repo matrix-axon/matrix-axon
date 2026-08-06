@@ -2109,10 +2109,15 @@ async fn seed_unread_counts_cache(
     cache
 }
 
-/// Seed the set of rooms already confirmed absent upstream (ADR 0090), so a
-/// restart keeps honoring a verdict it has already reached instead of
-/// re-deriving counts for a room that cannot answer.
-async fn seed_gone_upstream_rooms(store: &Store, account_id: Uuid) -> HashSet<OwnedRoomId> {
+/// Read the set of rooms currently confirmed absent upstream (ADR 0090).
+///
+/// Called to seed the watcher and again at the top of every re-sweep, because
+/// the table — not the in-memory set — is the source of truth. Suppression has to
+/// be able to *stop*: a successful room-scoped send clears a room's row
+/// (`SdkGateway::note_room_reachability`), and an accumulate-only set would keep
+/// pinning that room's counts to zero for the rest of the process even though
+/// the homeserver serves it again.
+async fn read_gone_upstream_rooms(store: &Store, account_id: Uuid) -> HashSet<OwnedRoomId> {
     let rows = match store.rooms_gone_upstream(account_id).await {
         Ok(rows) => rows,
         Err(err) => {
@@ -2149,12 +2154,7 @@ async fn seed_gone_upstream_rooms(store: &Store, account_id: Uuid) -> HashSet<Ow
 ///
 /// At most [`UPSTREAM_PROBES_PER_SWEEP`] rooms per pass, and the remainder is
 /// logged rather than silently dropped.
-async fn reconcile_upstream_rooms(
-    client: &Client,
-    store: &Store,
-    account_id: Uuid,
-    gone_upstream: &Mutex<HashSet<OwnedRoomId>>,
-) {
+async fn reconcile_upstream_rooms(client: &Client, store: &Store, account_id: Uuid) {
     use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
     use matrix_sdk::ruma::events::StateEventType;
 
@@ -2214,10 +2214,10 @@ async fn reconcile_upstream_rooms(
                 tracing::warn!(%account_id, %room_id, error = %err, "failed to record a room as absent upstream");
                 continue;
             }
-            gone_upstream
-                .lock()
-                .expect("unread-counts gone-upstream lock")
-                .insert(parsed_room_id);
+            // Nothing is inserted into the watcher's in-memory set here: the
+            // caller re-reads it from the table right after this pass, so the
+            // durable row stays the only place a verdict lives.
+            //
             // `warn`: the room stays in the room list with its history, but it is
             // now inert — nothing sent to it will reach anyone.
             tracing::warn!(
@@ -2278,7 +2278,7 @@ async fn watch_unread_counts(
     // the store for the same reason `last` is: a restart must not re-derive a
     // count for a room it has already ruled out, and the verdict is durable.
     let gone_upstream: Mutex<HashSet<OwnedRoomId>> =
-        Mutex::new(seed_gone_upstream_rooms(&store, account_id).await);
+        Mutex::new(read_gone_upstream_rooms(&store, account_id).await);
 
     let mut updates = client.room_info_notable_update_receiver();
     sweep_unread_counts(
@@ -2305,9 +2305,18 @@ async fn watch_unread_counts(
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = resweep.tick() => {
-                // Probe first: a room confirmed gone in this pass is then zeroed by
-                // the sweep that follows, rather than waiting five more minutes.
-                reconcile_upstream_rooms(&client, &store, account_id, &gone_upstream).await;
+                // Probe first, then re-read the verdicts, then sweep: a room
+                // confirmed gone in this pass is zeroed by the sweep that
+                // follows rather than waiting five more minutes, and a room
+                // whose row was cleared since the last pass stops being
+                // suppressed in the same window.
+                reconcile_upstream_rooms(&client, &store, account_id).await;
+                {
+                    let refreshed = read_gone_upstream_rooms(&store, account_id).await;
+                    *gone_upstream
+                        .lock()
+                        .expect("unread-counts gone-upstream lock") = refreshed;
+                }
                 sweep_unread_counts(&client, &store, account_id, &live_tx, &last, &gone_upstream, true)
                     .await;
             }
