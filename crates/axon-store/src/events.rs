@@ -451,7 +451,14 @@ impl Store {
     /// outbox insert, an event change and its indexing obligation commit
     /// atomically, and a no-op (`ON CONFLICT DO NOTHING`) appends nothing — a
     /// duplicate delivery does no redundant indexing. See [`SEARCH_FANOUT_TAIL`].
-    pub async fn upsert_event(&self, ev: &NewEvent<'_>) -> Result<(), StoreError> {
+    ///
+    /// Returns the row's `id` — its **arrival order**, the monotonic sequence in
+    /// which this account ingested events. Callers hand it to clients (ADR 0089)
+    /// so a read receipt can name an event in arrival order rather than in the
+    /// `origin_ts` display order, which a backfilling bridge inverts. On a
+    /// duplicate delivery the existing row's id is read back, so the value is
+    /// stable across re-delivery.
+    pub async fn upsert_event(&self, ev: &NewEvent<'_>) -> Result<i64, StoreError> {
         let sql = format!(
             "WITH ins AS ( \
                INSERT INTO events \
@@ -460,10 +467,11 @@ impl Store {
                   decrypted_body_text) \
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
                ON CONFLICT (account_id, event_id) DO NOTHING \
-               RETURNING account_id, event_id, relates_to, redacts \
-             ) {SEARCH_FANOUT_TAIL}"
+               RETURNING id, account_id, event_id, relates_to, redacts \
+             ), outbox AS ( {SEARCH_FANOUT_TAIL} ) \
+             SELECT id FROM ins"
         );
-        sqlx_core::query::query(&sql)
+        let inserted: Option<(i64,)> = sqlx_core::query_as::query_as::<Postgres, (i64,)>(&sql)
             .bind(ev.event_id)
             .bind(ev.room_id)
             .bind(ev.account_id)
@@ -476,9 +484,23 @@ impl Store {
             .bind(ev.redacts)
             .bind(&ev.relates_to)
             .bind(ev.decrypted_body_text)
-            .execute(&self.pool)
+            .fetch_optional(&self.pool)
             .await?;
-        Ok(())
+        if let Some((id,)) = inserted {
+            return Ok(id);
+        }
+        // `ON CONFLICT DO NOTHING` returned no row, so this event was already
+        // ingested. Read its arrival order back rather than reporting none: the
+        // caller's contract is "where this event sits in arrival order", and that
+        // is the same answer whether this delivery created the row or not.
+        let (id,) = sqlx_core::query_as::query_as::<Postgres, (i64,)>(
+            "SELECT id FROM events WHERE account_id = $1 AND event_id = $2",
+        )
+        .bind(ev.account_id)
+        .bind(ev.event_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(id)
     }
 
     /// Persist the original ciphertext envelope for a UTD. Idempotent: the
@@ -1181,44 +1203,6 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row)
-    }
-
-    /// Look up the timeline position of specific events in one room, keyed by
-    /// event id. Events this account has never ingested are simply absent from
-    /// the map — the caller decides what an unknown event means.
-    ///
-    /// A [`TimelineCursor`] carries both orderings a caller needs to compare two
-    /// events: `origin_ts` (the *display* order every read surface sorts by) and
-    /// the monotonic `id` (the order this account actually ingested them). Those
-    /// two disagree whenever a homeserver hands us an event whose
-    /// `origin_server_ts` predates events we already have — routinely, for a
-    /// bridge that backfills a conversation into a freshly created portal room —
-    /// so a caller that needs "which of these arrived later" must not infer it
-    /// from `origin_ts`. See [`Store::room_timeline`] for why the pair is also
-    /// the pagination cursor.
-    pub async fn event_positions(
-        &self,
-        account_id: Uuid,
-        room_id: &str,
-        event_ids: &[String],
-    ) -> Result<HashMap<String, TimelineCursor>, StoreError> {
-        if event_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let rows: Vec<(String, i64, i64)> =
-            sqlx_core::query_as::query_as::<Postgres, (String, i64, i64)>(
-                "SELECT event_id, origin_ts, id FROM events \
-                 WHERE account_id = $1 AND room_id = $2 AND event_id = ANY($3)",
-            )
-            .bind(account_id)
-            .bind(room_id)
-            .bind(event_ids)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows
-            .into_iter()
-            .map(|(event_id, origin_ts, id)| (event_id, TimelineCursor { origin_ts, id }))
-            .collect())
     }
 }
 

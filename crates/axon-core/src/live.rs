@@ -265,6 +265,12 @@ pub struct LiveEvent {
     pub prev_content: Option<Value>,
     /// `origin_server_ts` in milliseconds.
     pub origin_ts: i64,
+    /// The event's arrival order: the monotonic position this account's store
+    /// assigned it on ingestion (`events.id`). Carried on the live bus so a
+    /// `/v1/ws` frame states it as authoritatively as a timeline read does —
+    /// clients pick their read-receipt target by this, not by `origin_ts`
+    /// (ADR 0089), and a frame that omitted it would force them to infer one.
+    pub arrival_order: i64,
     /// Matrix event type, e.g. `m.room.message`.
     pub event_type: String,
     /// Decrypted `content` JSON. `None` for events that arrived as UTDs.

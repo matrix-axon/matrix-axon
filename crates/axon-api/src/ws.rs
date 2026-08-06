@@ -491,6 +491,7 @@ mod tests {
             state_key: None,
             prev_content: None,
             origin_ts: 42,
+            arrival_order: 7,
             event_type: "m.room.message".to_owned(),
             content: None,
             body: Some("hi".to_owned()),
@@ -501,6 +502,10 @@ mod tests {
         assert_eq!(v["account_id"], account_id.to_string());
         assert_eq!(v["payload"]["event_id"], "$e:localhost");
         assert_eq!(v["payload"]["sender_trust"], "verified");
+        // A live frame carries arrival order like a timeline read does: a client
+        // choosing a read-receipt target must not have to treat a live event as a
+        // special case with no position (ADR 0089).
+        assert_eq!(v["payload"]["arrival_order"], 7);
     }
 
     #[test]

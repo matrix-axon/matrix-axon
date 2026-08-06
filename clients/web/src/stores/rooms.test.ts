@@ -376,6 +376,9 @@ describe('createRoomsStore', () => {
       room_id: NAMED.room_id,
       event_id: '$live',
       origin_ts: 500,
+      // Required by the generated contract; irrelevant to this store's
+      // behavior, which keys on origin_ts (ADR 0089).
+      arrival_order: 1,
       sender: '@adam:example.org',
       type: 'm.room.message',
       state_key: null,
@@ -416,6 +419,9 @@ describe('createRoomsStore', () => {
       room_id: NAMED.room_id,
       event_id: '$tie',
       origin_ts: NAMED.last_activity_ts,
+      // Required by the generated contract; irrelevant to this store's
+      // behavior, which keys on origin_ts (ADR 0089).
+      arrival_order: 2,
       sender: '@adam:example.org',
       type: 'm.room.message',
       state_key: null,
@@ -460,6 +466,9 @@ describe('createRoomsStore', () => {
       room_id: NAMED.room_id,
       event_id: '$live',
       origin_ts: 500,
+      // Required by the generated contract; irrelevant to this store's
+      // behavior, which keys on origin_ts (ADR 0089).
+      arrival_order: 3,
       sender: '@adam:example.org',
       type: 'm.room.message',
       state_key: null,
@@ -496,6 +505,9 @@ describe('createRoomsStore', () => {
       room_id: NAMED.room_id,
       event_id: '$redaction',
       origin_ts: NAMED.last_activity_ts + 1000,
+      // Required by the generated contract; irrelevant to this store's
+      // behavior, which keys on origin_ts (ADR 0089).
+      arrival_order: 4,
       sender: '@adam:example.org',
       type: 'm.room.redaction',
       state_key: null,
@@ -516,6 +528,9 @@ describe('createRoomsStore', () => {
       room_id: NAMED.room_id,
       event_id: '$member',
       origin_ts: NAMED.last_activity_ts + 2000,
+      // Required by the generated contract; irrelevant to this store's
+      // behavior, which keys on origin_ts (ADR 0089).
+      arrival_order: 5,
       sender: '@adam:example.org',
       type: 'm.room.member',
       state_key: '@adam:example.org',
@@ -550,6 +565,9 @@ describe('createRoomsStore', () => {
       room_id: '!new:hs',
       event_id: '$join',
       origin_ts: 900,
+      // Required by the generated contract; irrelevant to this store's
+      // behavior, which keys on origin_ts (ADR 0089).
+      arrival_order: 6,
       sender: '@me:example.org',
       type: 'm.room.member',
       state_key: '@me:example.org',
