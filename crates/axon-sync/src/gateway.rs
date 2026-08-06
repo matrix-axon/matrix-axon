@@ -16,6 +16,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use axon_store::Store;
+
 use axon_core::{
     CreateRoomRequest, Formatted, MatrixProfile, MediaAttachment, MediaSendKind, PowerLevelChanges,
     PublicRoomSummary, PublicRoomsPage, PublicRoomsQuery, Relation, ResolvedPowerLevels,
@@ -609,15 +611,21 @@ type PowerLevelLocks = Arc<Mutex<HashMap<(Uuid, String), PowerLevelLock>>>;
 #[derive(Clone)]
 pub struct SdkGateway {
     manager: ClientManager,
+    /// Read-only handle to the event store, used by
+    /// [`SdkGateway::note_room_reachability`] to record what a room-scoped send
+    /// revealed about whether the homeserver still serves the room (ADR 0090).
+    /// Nothing else in this type touches the store.
+    store: Store,
     power_level_locks: PowerLevelLocks,
 }
 
 impl SdkGateway {
     /// Build a gateway over a client manager. Constructed by the sync engine and
     /// exposed via [`SyncEngine::gateway`](crate::SyncEngine::gateway).
-    pub(crate) fn new(manager: ClientManager) -> Self {
+    pub(crate) fn new(manager: ClientManager, store: Store) -> Self {
         Self {
             manager,
+            store,
             power_level_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -859,9 +867,55 @@ impl SdkGateway {
         let receipts = Receipts::new()
             .fully_read_marker(event_id.clone())
             .public_read_receipt(event_id);
-        room.send_multiple_receipts(receipts)
+        let outcome = room
+            .send_multiple_receipts(receipts)
             .await
-            .map_err(map_sdk_err)
+            .map_err(map_sdk_err);
+        self.note_room_reachability(account_id, room_id, &outcome)
+            .await;
+        outcome
+    }
+
+    /// Record what this send just revealed about whether the homeserver still
+    /// serves the room (ADR 0090).
+    ///
+    /// A failure only ever writes a `suspect` row — deliberately no verdict. The
+    /// rejection a purged room produces (`404 M_UNKNOWN: Could not find event …`)
+    /// is scoped to the *event*, so it cannot be told apart from "that one event
+    /// is unknown" here, and a transient failure looks the same again. The
+    /// watcher's own bounded probe decides, which also keeps this call's latency
+    /// budget (`sync.ephemeral_send_timeout_secs`) free of an extra round trip.
+    ///
+    /// A success clears any row unconditionally rather than reading first: it is
+    /// one indexed delete that matches nothing in the normal case, and it is how
+    /// a room that comes back — a restored purge, a re-created portal — recovers
+    /// without anyone intervening.
+    async fn note_room_reachability(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        outcome: &Result<(), GatewayError>,
+    ) {
+        let result = match outcome {
+            Ok(()) => {
+                self.store
+                    .clear_room_upstream_reconcile(account_id, room_id)
+                    .await
+            }
+            Err(err) => {
+                self.store
+                    .flag_room_upstream_suspect(account_id, room_id, &err.to_string())
+                    .await
+            }
+        };
+        if let Err(err) = result {
+            // Never fatal to the send's own outcome: this is bookkeeping for a
+            // background sweep, and the next attempt records it again.
+            tracing::warn!(
+                %account_id, %room_id, error = %err,
+                "failed to record room reachability"
+            );
+        }
     }
 
     /// Set (or clear) this account's typing indicator in a room (ADR 0068,
