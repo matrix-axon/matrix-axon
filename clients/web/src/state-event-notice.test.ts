@@ -17,6 +17,7 @@ function memberEvent(fields: {
     content: fields.content,
     prev_content: fields.prev ?? null,
     origin_ts: 0,
+    arrival_order: 0,
     type: 'm.room.member',
     body: null,
     redacted: false,

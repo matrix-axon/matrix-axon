@@ -48,6 +48,7 @@ function image(
     room_id: '!r:hs',
     sender: '@alice:hs',
     origin_ts: 1000,
+    arrival_order: 1000,
     type: 'm.room.message',
     body: `${id}.png`,
     content: {

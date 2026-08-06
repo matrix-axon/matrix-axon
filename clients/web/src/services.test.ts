@@ -226,6 +226,7 @@ describe('connectLiveRooms', () => {
           account_id: ACCT,
           room_id: ROOM,
           origin_ts: 123,
+          arrival_order: 123,
         },
       }),
     )

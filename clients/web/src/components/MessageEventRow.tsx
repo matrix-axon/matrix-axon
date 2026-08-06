@@ -588,6 +588,7 @@ function eventDiagnostics(event: TimelineEvent) {
     room_id: event.room_id,
     sender: event.sender,
     origin_ts: event.origin_ts,
+    arrival_order: event.arrival_order,
     type: event.type,
     state_key: event.state_key ?? null,
     body: event.body ?? null,

@@ -61,6 +61,7 @@ function confirmed(id: string, body: string): EventDto {
     room_id: ROOM,
     sender: '@me:hs',
     origin_ts: 100,
+    arrival_order: 100,
     type: 'm.room.message',
     body,
     content: { msgtype: 'm.image', body, url: 'mxc://hs/abc' },

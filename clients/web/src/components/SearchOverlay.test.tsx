@@ -42,6 +42,7 @@ function hit(id: string, body: string) {
       room_id: ROOM,
       sender: '@bob:hs',
       origin_ts: 1_700_000_000_000,
+      arrival_order: 1_700_000_000_000,
       type: 'm.room.message',
       body,
       redacted: false,

@@ -465,6 +465,7 @@ describe('App', () => {
         event_id: '$reply',
         sender: '@alice:example.org',
         origin_ts: 200,
+        arrival_order: 200,
         type: 'm.room.message',
         body: 'thread reply',
         relates_to: { rel_type: 'm.thread', event_id: '$root' },

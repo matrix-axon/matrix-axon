@@ -64,6 +64,7 @@ function image(id: string, ts: number): TimelineEvent {
     room_id: '!r:hs',
     sender: '@alice:hs',
     origin_ts: ts,
+    arrival_order: ts,
     type: 'm.room.message',
     body: `${id}.png`,
     content: {

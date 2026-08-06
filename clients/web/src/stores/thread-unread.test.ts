@@ -17,6 +17,7 @@ function event(
     event_id: id,
     sender: options.sender ?? '@alice:hs',
     origin_ts: ts,
+    arrival_order: ts,
     type: 'm.room.message',
     state_key: null,
     body: options.body ?? `body ${id}`,

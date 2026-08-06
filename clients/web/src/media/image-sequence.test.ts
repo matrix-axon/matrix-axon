@@ -13,6 +13,7 @@ function event(
     room_id: '!r:hs',
     sender: '@alice:hs',
     origin_ts: 0,
+    arrival_order: 0,
     type: 'm.room.message',
     body: null,
     content,
@@ -67,6 +68,7 @@ describe('imageSequence', () => {
     // viewer holding one could have it pulled out from under it.
     const pending = event('$echo', null, {
       origin_ts: 50,
+      arrival_order: 50,
       localEcho: {
         status: 'pending',
         body: 'cat.png',

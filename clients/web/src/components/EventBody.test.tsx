@@ -16,6 +16,7 @@ function event(body: string): EventDto {
     room_id: '!room:hs',
     sender: '@alice:hs',
     origin_ts: 0,
+    arrival_order: 0,
     type: 'm.room.message',
     body,
     content: { msgtype: 'm.text', body },

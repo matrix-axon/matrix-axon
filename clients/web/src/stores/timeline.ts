@@ -1004,6 +1004,13 @@ export function createTimelineStore(
       room_id: roomId,
       sender: senderId ?? '',
       origin_ts: Date.now(),
+      // An echo has not been ingested, so it has no arrival position — the real
+      // one arrives with the confirming event (ADR 0089). `-1` cannot win the
+      // max-by-`arrival_order` receipt selection in `RoomPage`, and cannot pass
+      // the ephemeral sender's forward-only floor either, so an echo can never
+      // be receipted whichever way it is reached. It is already excluded in
+      // `RoomPage` by its `local:` id prefix; this is the belt to that brace.
+      arrival_order: -1,
       type: 'm.room.message',
       body,
       content: {

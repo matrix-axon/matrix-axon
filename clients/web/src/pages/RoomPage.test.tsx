@@ -53,6 +53,7 @@ function event(
     room_id: ROOM,
     sender: '@alice:hs',
     origin_ts: ts,
+    arrival_order: ts,
     type: 'm.room.message',
     body: `body of ${id}`,
     content: { msgtype: 'm.text', body: `body of ${id}` },
@@ -3652,6 +3653,109 @@ describe('RoomPage', () => {
       // Nothing, even though the head has been gap-filled behind the anchor —
       // which is why `atEnd` alone can't gate this.
       expect(mine()).toEqual([])
+    })
+  })
+
+  describe('the receipt names the arrival-newest event (ADR 0089)', () => {
+    /**
+     * The LinkedIn portal that prompted ADR 0089, with its real numbers. A
+     * mautrix bridge creates the room, emits its own state, and *then* backfills
+     * the pre-existing conversation carrying its real, older timestamps — so the
+     * room's only message is oldest by `origin_ts` and newest by arrival order:
+     *
+     *   event                  origin_ts        arrival_order
+     *   m.room.create          1785928306622    1871406
+     *   uk.half-shot.bridge    1785928309453    1871424   ← display-last
+     *   m.room.message         1785928304987    1871426   ← arrival-last
+     *
+     * A receipt is interpreted in arrival order, so naming the display-last
+     * event acknowledges stream position 2747068, which does not cover the
+     * message at 2747070: the room shows unread on every load, and re-reading it
+     * can never fix that.
+     */
+    const CREATE_TS = 1_785_928_306_622
+    const BRIDGE_TS = 1_785_928_309_453
+    const MESSAGE_TS = 1_785_928_304_987
+
+    function portal(tag: string) {
+      // Unique ids per test: the ephemeral sender's debounce timer outlives its
+      // own `cleanup()`, so a sibling test's receipt can land inside this one's
+      // window and identical fixtures would be indistinguishable.
+      const ids = {
+        create: `$create-${tag}`,
+        bridge: `$bridge-${tag}`,
+        message: `$message-${tag}`,
+      }
+      const all = [
+        event(ids.create, CREATE_TS, {
+          type: 'm.room.create',
+          state_key: '',
+          arrival_order: 1_871_406,
+        }),
+        event(ids.bridge, BRIDGE_TS, {
+          type: 'uk.half-shot.bridge',
+          state_key: 'linkedin',
+          arrival_order: 1_871_424,
+        }),
+        event(ids.message, MESSAGE_TS, {
+          arrival_order: 1_871_426,
+          body: 'body of $message',
+          content: { msgtype: 'm.text', body: 'body of $message' },
+        }),
+      ]
+      const reads: string[] = []
+      server.use(
+        http.post(
+          `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/read`,
+          async ({ request }) => {
+            const body = (await request.json()) as { event_id: string }
+            reads.push(body.event_id)
+            return HttpResponse.json({ data: {} })
+          },
+        ),
+      )
+      // The endpoint's shape is newest-first in display order, which the store
+      // reverses. No room summary: the summary-derived marker is a separate
+      // effect on a separate input, and leaving it out keeps this test about the
+      // timeline effect's two picks.
+      const rendered = renderRoom(
+        [...all].sort((a, b) => b.origin_ts - a.origin_ts),
+        { rooms: [] },
+      )
+      const ours = Object.values(ids)
+      return {
+        ...rendered,
+        ids,
+        mine: () => reads.filter((id) => ours.includes(id)),
+      }
+    }
+
+    it('receipts the backfilled message, not the display-last state event', async () => {
+      const { ids, mine, findByText } = portal('receipt')
+      await findByText('body of $message')
+
+      // Past the sender's debounce, so this is the settled choice.
+      await waitFor(() => expect(mine()).toEqual([ids.message]))
+      // Spelled out because it is the entire bug: the display-last event is the
+      // bridge state event, and that is what the old `findLast` sent.
+      expect(mine()).not.toContain(ids.bridge)
+    })
+
+    it('still advances the cross-device marker in display order', async () => {
+      const { services, ids, findByText } = portal('marker')
+      await findByText('body of $message')
+
+      // The marker is a display-order artifact (ADR 0048) and stays on
+      // `origin_ts`: it names the *display-last* event, not the receipt's.
+      // Handing it the arrival-newest event would feed it an older `origin_ts`
+      // than it already holds and — being forward-only — it would stop advancing
+      // altogether.
+      await waitFor(() =>
+        expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
+          eventId: ids.bridge,
+          originTs: BRIDGE_TS,
+        }),
+      )
     })
   })
 

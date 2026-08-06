@@ -162,9 +162,11 @@ before starting a milestone.
   gets gap-filled, so a view anchored five days back can have the newest events
   loaded and `atEnd` true. Removing any of these gates makes the
   client claim messages as read that it never displayed: the badge vanishes for
-  the session and returns on reload (the server correctly refuses to advance the
-  receipt, ADR 0089), and the marker is cross-device, so `connectReadMarkers`
-  zeroes the badge on your _other_ devices too. The accepted cost is that an
+  the session and returns on reload (`POST …/read` is a verbatim pass-through —
+  the receipt lands, naming an event that does not cover the unread tail, and the
+  server-derived count is recomputed from it, ADR 0089), and the marker is
+  cross-device, so `connectReadMarkers` zeroes the badge on your _other_ devices
+  too. The accepted cost is that an
   anchored view never marks the room read even after scrolling to the bottom;
   reopening the room normally does. The two conditions are derived once as
   `unanchored` / `showingNewestEvents` rather than restated per effect — add a
@@ -173,6 +175,22 @@ before starting a milestone.
   (`dropUnsatisfiableAnchor`), because a lingering dead `?event=` leaves every one
   of these gates closed for the room's whole visit while the user reads the
   newest messages.
+- **Which event is named** is a separate question from the gates above, and the
+  timeline effect answers it twice from one candidate set (ADR 0089). The
+  cross-device marker is a display-order artifact and names the **display-last**
+  event on `origin_ts`; a Matrix receipt is interpreted in **arrival** order and
+  names the greatest **`arrival_order`**, which is also the key
+  `ephemeral-sender`'s forward-only floor runs on. **Do not collapse these into
+  one pick.** They disagree whenever a homeserver delivers an event stamped
+  earlier than events already held — routinely, for a bridge backfilling a
+  conversation into a freshly created portal, where the room's only message is
+  oldest by `origin_ts` and newest by arrival order. Naming the display-last
+  event there receipts a portal state event that does not cover the message, so
+  the room shows unread forever; and handing the arrival-newest event to
+  `advanceReadMarker` instead would feed it an older `origin_ts` than it already
+  holds, so the marker — forward-only on `origin_ts` — would simply stop
+  advancing. Local echoes carry `arrival_order: -1` and are excluded by their
+  `local:` id prefix; display _ordering_ stays on `origin_ts` (#133).
 - **Async work in `RoomPage` outlives its own world.** The page does not remount
   across a room switch or an `?event=`/`?thread=` change (ADR 0085), so every
   `await` inside an effect can resolve after the user has moved on — a second

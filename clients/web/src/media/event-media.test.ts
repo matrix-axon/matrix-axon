@@ -12,6 +12,7 @@ function event(
     room_id: '!r:hs',
     sender: '@alice:hs',
     origin_ts: 0,
+    arrival_order: 0,
     type: 'm.room.message',
     body: null,
     content,

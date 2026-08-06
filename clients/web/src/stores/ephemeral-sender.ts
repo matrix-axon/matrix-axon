@@ -13,21 +13,30 @@ import { inBackground } from '../api/client'
  *   so a burst of newly-read events collapses to one `POST …/read` for the
  *   newest event — mirroring how the device-state PUT is debounced, per
  *   ADR 0067's "same call site and timer".
+ *
+ *   That floor is keyed on `arrival_order`, **not** `origin_ts` (ADR 0089). A
+ *   receipt is interpreted by the homeserver in arrival order while every axon
+ *   read surface sorts by `origin_ts`, and the two disagree whenever a bridge
+ *   backfills a conversation into a freshly created portal. An `origin_ts`
+ *   floor could then never name the backfilled message at all — its timestamp
+ *   sits *below* a floor already sent — which is half of the bug ADR 0089
+ *   fixes. `RoomPage` picks the target; this store only orders it.
  * - **Typing** is driven by composer activity: `noteTyping` on each keystroke
  *   (throttled `typing:true` + an idle timer), `stopTyping` on send, idle, or
  *   room switch (`typing:false`).
  */
 export interface EphemeralSender {
   /**
-   * The room was read up to `(eventId, originTs)`. Forward-only (an older or
-   * equal position is ignored) and debounced; the settled newest event is sent
-   * as a public + private read receipt.
+   * The room was read up to `(eventId, arrivalOrder)` — the greatest
+   * `arrival_order` among the events the caller has displayed (ADR 0089).
+   * Forward-only *in arrival order* (an earlier or equal position is ignored)
+   * and debounced; the settled event is sent as a public + private read receipt.
    */
   noteRead(
     accountId: string,
     roomId: string,
     eventId: string,
-    originTs: number,
+    arrivalOrder: number,
   ): void
   /**
    * The user is composing in this room (a non-empty, non-command draft). Sends
@@ -54,7 +63,7 @@ const keyOf = (accountId: string, roomId: string) =>
 
 interface PendingReceipt {
   eventId: string
-  originTs: number
+  arrivalOrder: number
 }
 
 interface TypingState {
@@ -67,7 +76,7 @@ export function createEphemeralSender(
   api: ApiClient,
   now: () => number = () => Date.now(),
 ): EphemeralSender {
-  /** The newest `originTs` already sent as a receipt, per room. */
+  /** The greatest `arrival_order` already sent as a receipt, per room. */
   const receiptFloor = new Map<string, number>()
   const pendingReceipt = new Map<string, PendingReceipt>()
   const receiptTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -80,7 +89,7 @@ export function createEphemeralSender(
     if (pending === undefined) {
       return
     }
-    receiptFloor.set(key, pending.originTs)
+    receiptFloor.set(key, pending.arrivalOrder)
     inBackground(
       api.POST('/v1/accounts/{account_id}/rooms/{room_id}/read', {
         params: { path: { account_id: accountId, room_id: roomId } },
@@ -106,17 +115,17 @@ export function createEphemeralSender(
     accountId: string,
     roomId: string,
     eventId: string,
-    originTs: number,
+    arrivalOrder: number,
   ): void {
     const key = keyOf(accountId, roomId)
     const floor = Math.max(
       receiptFloor.get(key) ?? -1,
-      pendingReceipt.get(key)?.originTs ?? -1,
+      pendingReceipt.get(key)?.arrivalOrder ?? -1,
     )
-    if (originTs <= floor) {
+    if (arrivalOrder <= floor) {
       return
     }
-    pendingReceipt.set(key, { eventId, originTs })
+    pendingReceipt.set(key, { eventId, arrivalOrder })
     const existing = receiptTimers.get(key)
     if (existing !== undefined) {
       clearTimeout(existing)

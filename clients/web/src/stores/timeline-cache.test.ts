@@ -33,6 +33,7 @@ function event(id: string, ts: number, roomId: string = ROOM): EventDto {
     room_id: roomId,
     sender: '@alice:hs',
     origin_ts: ts,
+    arrival_order: ts,
     type: 'm.room.message',
     body: `body of ${id}`,
     redacted: false,

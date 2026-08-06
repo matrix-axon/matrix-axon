@@ -42,6 +42,7 @@ function hit(id: string, score = 1): SearchResult {
       room_id: '!room:hs',
       sender: '@alice:hs',
       origin_ts: 1000,
+      arrival_order: 1000,
       type: 'm.room.message',
       body: `body of ${id}`,
       redacted: false,

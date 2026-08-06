@@ -27,6 +27,7 @@ function event(overrides: Partial<TimelineEvent> = {}): TimelineEvent {
     room_id: '!room:hs',
     sender: '@alice:hs',
     origin_ts: new Date(2026, 6, 16, 7, 26).getTime(),
+    arrival_order: new Date(2026, 6, 16, 7, 26).getTime(),
     type: 'm.room.message',
     body: 'hello',
     content: { msgtype: 'm.text', body: 'hello' },

@@ -19,6 +19,7 @@ function event(id: string, ts: number, overrides: object = {}): EventDto {
     room_id: ROOM,
     sender: '@alice:hs',
     origin_ts: ts,
+    arrival_order: ts,
     type: 'm.room.message',
     body: `body of ${id}`,
     redacted: false,

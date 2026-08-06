@@ -639,16 +639,38 @@ export function RoomPage() {
   // scrolling to the bottom; reopening the room normally does. That matches how
   // other Matrix clients treat permalinks, and erring the other way silently
   // consumes unread messages.
+  //
+  // The gate above answers "may this view claim anything?". Which *event* is
+  // named is a second, independent question, and the two consumers below answer
+  // it differently — one candidate set, two picks (ADR 0089):
+  //
+  //   - the cross-device marker is a display-order artifact (where to draw the
+  //     "new messages" line), so it names the display-last event, on `origin_ts`;
+  //   - a Matrix receipt is interpreted in *arrival* order, so it names the
+  //     greatest `arrival_order` among the same events.
+  //
+  // They disagree whenever a homeserver delivers an event stamped earlier than
+  // events already held — routinely, for a bridge backfilling a conversation
+  // into a freshly created portal, where the room's only message is oldest by
+  // `origin_ts` and newest by arrival order. Naming the display-last event there
+  // receipts a portal state event that does not cover the message, and the room
+  // shows unread forever. Do not collapse these back into one pick: handing the
+  // arrival-newest event to `advanceReadMarker` would feed it an older
+  // `origin_ts` than the marker already holds, and the marker — forward-only on
+  // `origin_ts` — would simply stop advancing.
   useEffect(() => {
     if (!showingNewestEvents) {
       return
     }
-    const events = timeline.events.value
-    const last = events.findLast(
+    const displayed = timeline.events.value.filter(
       (event) =>
+        // A local echo has not been ingested, so it has no arrival position and
+        // is not a receipt candidate; it is not the room's read position either.
         !event.event_id.startsWith('local:') &&
         (unreadThreadCutoff === null || event.origin_ts < unreadThreadCutoff),
     )
+    // Display order → cross-device marker (M-W6 step 5c, ADR 0048).
+    const last = displayed.at(-1)
     if (last !== undefined) {
       deviceState.advanceReadMarker(
         accountId,
@@ -656,10 +678,25 @@ export function RoomPage() {
         last.event_id,
         last.origin_ts,
       )
-      // Second, fire-and-forget action alongside the cross-device marker
-      // (ADR 0067): tell the homeserver too, so third-party Matrix clients see
-      // the room as read. Forward-only + debounced inside the sender.
-      ephemeralSender.noteRead(accountId, roomId, last.event_id, last.origin_ts)
+    }
+    // Arrival order → the Matrix receipt. Second, fire-and-forget action
+    // alongside the cross-device marker (ADR 0067): tell the homeserver too, so
+    // third-party Matrix clients see the room as read. Forward-only (on
+    // `arrival_order`) + debounced inside the sender.
+    const target = displayed.reduce<(typeof displayed)[number] | null>(
+      (best, event) =>
+        best === null || event.arrival_order > best.arrival_order
+          ? event
+          : best,
+      null,
+    )
+    if (target !== null) {
+      ephemeralSender.noteRead(
+        accountId,
+        roomId,
+        target.event_id,
+        target.arrival_order,
+      )
     }
   }, [
     timeline.events.value,

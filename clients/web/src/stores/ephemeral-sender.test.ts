@@ -20,6 +20,7 @@ import {
 const BASE_URL = 'http://axon.test'
 const ACCT = '6b53f7f0-0000-4000-8000-000000000001'
 const ROOM = '!room:hs'
+const OTHER_ROOM = '!other:hs'
 const READ_PATH = `${BASE_URL}/v1/accounts/:accountId/rooms/:roomId/read`
 const TYPING_PATH = `${BASE_URL}/v1/accounts/:accountId/rooms/:roomId/typing`
 
@@ -89,7 +90,7 @@ describe('read receipts', () => {
     const sender = createEphemeralSender(makeApi())
 
     sender.noteRead(ACCT, ROOM, '$b', 200)
-    sender.noteRead(ACCT, ROOM, '$older', 50) // older than pending → dropped
+    sender.noteRead(ACCT, ROOM, '$older', 50) // behind the pending one → dropped
     await vi.advanceTimersByTimeAsync(RECEIPT_DEBOUNCE_MS)
     expect(reads).toEqual(['$b'])
 
@@ -98,10 +99,47 @@ describe('read receipts', () => {
     await vi.advanceTimersByTimeAsync(RECEIPT_DEBOUNCE_MS)
     expect(reads).toEqual(['$b'])
 
-    // Strictly newer → sends again.
+    // Strictly ahead → sends again.
     sender.noteRead(ACCT, ROOM, '$c', 300)
     await vi.advanceTimersByTimeAsync(RECEIPT_DEBOUNCE_MS)
     expect(reads).toEqual(['$b', '$c'])
+  })
+
+  // ADR 0089. The floor orders on `arrival_order`, not `origin_ts`, and the
+  // whole point is the case where the two disagree: a bridge backfills a
+  // conversation into a freshly created portal, so the message arrives *after*
+  // the portal's own state events while being stamped *before* them. A floor
+  // kept on `origin_ts` could never name that message — its timestamp sits below
+  // a floor already sent — which is why re-reading the room never cleared it.
+  it('receipts a later-arriving event whose origin_ts is older', async () => {
+    vi.useFakeTimers()
+    const reads = captureReads()
+    const sender = createEphemeralSender(makeApi())
+
+    // The portal's `uk.half-shot.bridge` state event: arrival 1_871_424,
+    // origin_ts 1_785_928_309_453.
+    sender.noteRead(ACCT, ROOM, '$bridge', 1_871_424)
+    await vi.advanceTimersByTimeAsync(RECEIPT_DEBOUNCE_MS)
+    expect(reads).toEqual(['$bridge'])
+
+    // The backfilled message: arrived later (1_871_426) but stamped 1.6s
+    // *earlier* (origin_ts 1_785_928_304_987). It must still be receipted.
+    sender.noteRead(ACCT, ROOM, '$message', 1_871_426)
+    await vi.advanceTimersByTimeAsync(RECEIPT_DEBOUNCE_MS)
+    expect(reads).toEqual(['$bridge', '$message'])
+  })
+
+  it('keeps a separate floor per room', async () => {
+    vi.useFakeTimers()
+    const reads = captureReads()
+    const sender = createEphemeralSender(makeApi())
+
+    sender.noteRead(ACCT, ROOM, '$high', 900)
+    await vi.advanceTimersByTimeAsync(RECEIPT_DEBOUNCE_MS)
+    // A lower arrival order in a *different* room is not behind anything.
+    sender.noteRead(ACCT, OTHER_ROOM, '$low', 100)
+    await vi.advanceTimersByTimeAsync(RECEIPT_DEBOUNCE_MS)
+    expect(reads).toEqual(['$high', '$low'])
   })
 })
 
