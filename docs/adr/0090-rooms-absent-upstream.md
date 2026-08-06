@@ -91,20 +91,37 @@ messages are often the only copy left. Deleting axon's copy was considered and
 rejected: it is unrecoverable if a verdict is ever wrong, and the user's local
 history is not the homeserver's to retract.
 
-### Recovery is automatic
+### Recovery is automatic, and derived from the table
 
-A successful room-scoped call clears any row unconditionally — one indexed
-delete that matches nothing in the normal case — so a room that comes back (a
-restored purge, a re-created portal, an outage that resolved) recovers with no
-intervention. The `gone` set is seeded from the store at watcher startup, the
-same seed-from-store pattern ADR 0070 uses for the counts themselves, so a
-restart honors a verdict it already reached instead of re-deriving a count for a
-room that cannot answer.
+A successful room-scoped call clears any row unconditionally — one indexed delete
+that matches nothing in the normal case — so a room that comes back (a restored
+purge, a re-created portal, an outage that resolved) recovers with no
+intervention.
+
+For that to actually un-suppress the room, the **table is the single source of
+truth**: the watcher re-reads `rooms_gone_upstream` into its in-memory set at the
+top of every re-sweep, rather than accumulating verdicts in memory. The probe
+therefore records only durably and lets that refresh pick its verdict up in the
+same pass.
+
+The first implementation got this wrong, and review caught it: the in-memory set
+was insert-only, so clearing a row had no effect on a running process and a
+recovered room stayed pinned to zero until restart — the opposite of the
+unattended recovery this section promises. An accumulate-only cache of a mutable
+durable fact is the shape to avoid; suppression can only be as revocable as the
+state it is read from. The cost of reading it fresh is one indexed query per
+sweep against a table that is normally empty.
+
+A room whose row is cleared between sweeps stays suppressed for the remainder of
+that window (at most `UNREAD_COUNTS_RESWEEP`). The visible effect is a missing
+unread badge for a few minutes on a room that just came back, which is the mild
+direction to err in.
 
 ## Consequences
 
 - A room the homeserver has dropped stops showing a badge no one can clear, and
-  a tombstoned room stops carrying a count clients can't even see.
+  a tombstoned room stops carrying a count clients can't even see. A room that
+  comes back resumes carrying counts within one re-sweep, with no restart.
 - One extra store write per `POST …/read`: a delete on success, an
   insert-if-absent on failure. The route is client-debounced and fires on room
   open, and both are single-row primary-key operations.
