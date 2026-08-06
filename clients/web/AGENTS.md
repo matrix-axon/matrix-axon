@@ -164,7 +164,13 @@ before starting a milestone.
   receipt, ADR 0089), and the marker is cross-device, so `connectReadMarkers`
   zeroes the badge on your _other_ devices too. The accepted cost is that an
   anchored view never marks the room read even after scrolling to the bottom;
-  reopening the room normally does.
+  reopening the room normally does. The two conditions are derived once as
+  `unanchored` / `showingNewestEvents` rather than restated per effect — add a
+  new condition there, not in three places. The corollary caught in review: an
+  anchor the server cannot resolve **must be dropped from the URL**
+  (`dropUnresolvableAnchor`), because a lingering dead `?event=` leaves every one
+  of these gates closed for the room's whole visit while the user reads the
+  newest messages.
 - **Async work in `RoomPage` outlives its own world.** The page does not remount
   across a room switch or an `?event=`/`?thread=` change (ADR 0085), so every
   `await` inside an effect can resolve after the user has moved on — a second
