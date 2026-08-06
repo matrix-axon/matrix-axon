@@ -1,4 +1,4 @@
-# ADR 0087 — Render Matrix formatting in image/media captions
+# ADR 0088 — Render Matrix formatting in image/media captions
 
 ## Status
 
