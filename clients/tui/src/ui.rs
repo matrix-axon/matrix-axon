@@ -3307,6 +3307,7 @@ mod tests {
                     room_id: "!room:example.org".to_owned(),
                     sender: "@alice:example.org".to_owned(),
                     state_key: None,
+                    arrival_order: i,
                     origin_ts: i,
                     event_type: "m.room.message".to_owned(),
                     content: None,
@@ -3374,6 +3375,7 @@ mod tests {
                     room_id: "!room:example.org".to_owned(),
                     sender: "@alice:example.org".to_owned(),
                     state_key: None,
+                    arrival_order: i,
                     origin_ts: i,
                     event_type: "m.room.message".to_owned(),
                     content: None,
@@ -3743,6 +3745,7 @@ mod tests {
                 room_id: "!room:example.com".to_owned(),
                 sender: "@alice:example.com".to_owned(),
                 state_key: Some("@alice:example.com".to_owned()),
+                arrival_order: 0,
                 origin_ts: 0,
                 event_type: "m.room.member".to_owned(),
                 content: Some(serde_json::json!({

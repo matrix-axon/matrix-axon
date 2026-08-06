@@ -17,6 +17,35 @@
 //! client refuses backward movement everywhere: it neither applies an older
 //! incoming marker nor arms a PUT for one. Tombstones (a `null` marker) have
 //! no meaning for read state and are ignored.
+//!
+//! # Two values, two orders (ADR 0089)
+//!
+//! Reading a room settles **two** independent positions, and this module tracks
+//! them separately. Do not merge them back into one:
+//!
+//! - [`ReadMarker`] is the cross-device device-state marker above, and the key
+//!   unread detection compares against (`origin_ts > marker_ts`). It is a
+//!   *display-order* artifact — where to draw the "new messages" line — ordered
+//!   on `origin_ts`.
+//! - [`ReceiptTarget`] is what the Matrix read receipt names. A receipt is
+//!   interpreted by the homeserver in **arrival** order, so it is ordered on
+//!   `EventDto::arrival_order` and names the greatest one among the events this
+//!   client actually displayed.
+//!
+//! The two orders agree until a homeserver delivers an event stamped earlier
+//! than events already held — routinely, for a bridge that creates a portal,
+//! emits its own state, and *then* backfills the pre-existing conversation with
+//! its real, older timestamps. The room's only message is then oldest by
+//! `origin_ts` and newest by arrival order. Receipting the display-newest event
+//! there names a portal state event that does not cover the message, so the room
+//! shows unread on every load; and because the marker is forward-only on
+//! `origin_ts`, it is already *ahead* of that message and can never move again —
+//! which is why the receipt must advance independently of the marker, not as a
+//! passenger on it (see [`App::note_room_read`]).
+//!
+//! The receipt target is **session-local** and deliberately not hydrated: it is
+//! not device state. An empty map after a restart is what lets a room already
+//! broken by this bug repair itself on its next open.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -36,6 +65,41 @@ pub(crate) struct ReadMarker {
     pub(crate) event_id: String,
     /// `origin_server_ts` of that event, milliseconds — the monotonic ordering.
     pub(crate) origin_ts: i64,
+}
+
+/// A room's read-receipt target: the greatest-`arrival_order` event this client
+/// has displayed there (ADR 0089).
+///
+/// Separate from [`ReadMarker`] because the two order on different keys and
+/// genuinely disagree — see the module docs. Session-local, never persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReceiptTarget {
+    pub(crate) event_id: String,
+    /// `EventDto::arrival_order` of that event — the monotonic ordering for
+    /// receipts, which is *not* `origin_ts` order.
+    pub(crate) arrival_order: i64,
+}
+
+/// The greatest-`arrival_order` event among those actually shown, or `None` when
+/// nothing in `events` is displayed at all.
+///
+/// The filter matters: ADR 0089's rule is "among the events it has actually
+/// displayed", and [`should_show_event`] is this client's definition of that.
+/// It also keeps the bug case honest — the `uk.half-shot.bridge` state event
+/// that started all this is hidden at the default settings, so it must not be a
+/// legal receipt target even when it happens to be arrival-max.
+pub(crate) fn receipt_target_for(
+    events: &[crate::api::EventDto],
+    display: &crate::config::DisplayOptions,
+) -> Option<ReceiptTarget> {
+    events
+        .iter()
+        .filter(|event| super::timeline::should_show_event(event, display))
+        .max_by_key(|event| event.arrival_order)
+        .map(|event| ReceiptTarget {
+            event_id: event.event_id.clone(),
+            arrival_order: event.arrival_order,
+        })
 }
 
 /// A marker advance waiting out its debounce window before being PUT.
@@ -107,36 +171,71 @@ impl App {
         roots
     }
 
-    /// The user has the room on screen read up to `marker`: advance the local
-    /// marker and arm the debounced PUT. Backward or repeated positions are
-    /// no-ops (monotonic). Called from the timeline-load and live-event paths
-    /// that already clear the room's unread badge.
-    pub(crate) fn note_room_read(&mut self, room: RoomKey, event_id: &str, origin_ts: i64) {
-        if self
-            .read_markers
-            .get(&room)
-            .is_some_and(|current| current.origin_ts >= origin_ts)
-        {
+    /// The user has the room on screen read up to `(event_id, origin_ts)` in
+    /// display order and up to `receipt` in arrival order: advance whichever of
+    /// the two positions actually moved, and arm the debounced PUT if either
+    /// did. Backward or repeated positions are no-ops (monotonic, per key).
+    /// Called from the timeline-load and live-event paths that already clear the
+    /// room's unread badge.
+    ///
+    /// The two advances are computed **independently**, and the arm is `||` over
+    /// both, because that is the entire bug (ADR 0089). A room broken by it has
+    /// a marker sitting at a portal state event's `origin_ts`, permanently ahead
+    /// of the backfilled message it should have receipted; gating the receipt on
+    /// the marker advancing would mean no such room is ever repaired — only
+    /// rooms bridged after this ships would benefit.
+    pub(crate) fn note_room_read(
+        &mut self,
+        room: RoomKey,
+        event_id: &str,
+        origin_ts: i64,
+        receipt: Option<ReceiptTarget>,
+    ) {
+        let marker_advanced = self.apply_marker(
+            room.clone(),
+            ReadMarker {
+                event_id: event_id.to_owned(),
+                origin_ts,
+            },
+        );
+        let receipt_advanced =
+            receipt.is_some_and(|target| self.apply_receipt_target(room.clone(), target));
+        if !marker_advanced && !receipt_advanced {
             return;
         }
-        let marker = ReadMarker {
-            event_id: event_id.to_owned(),
-            origin_ts,
-        };
-        self.read_markers.insert(room.clone(), marker.clone());
         // One pending slot: a still-armed advance for a *different* room (the
         // user read it and switched away inside the debounce window) is sent
         // now rather than silently replaced.
         if let Some(pending) = self.pending_marker_put.take() {
             if pending.room != room {
-                self.spawn_current_marker_put(pending.room, pending.marker);
+                self.spawn_current_read_put(pending.room, pending.marker);
             }
         }
+        // The armed marker is only a fallback for `spawn_current_read_put`; the
+        // map is what actually gets sent, for both halves.
+        let marker = self.read_markers.get(&room).cloned().unwrap_or(ReadMarker {
+            event_id: event_id.to_owned(),
+            origin_ts,
+        });
         self.pending_marker_put = Some(PendingMarkerPut {
             room,
             marker,
             due: Instant::now() + DRAFT_DEBOUNCE,
         });
+    }
+
+    /// Advance a room's receipt target, monotonically on `arrival_order`.
+    /// Returns whether it moved.
+    fn apply_receipt_target(&mut self, room: RoomKey, target: ReceiptTarget) -> bool {
+        if self
+            .receipt_targets
+            .get(&room)
+            .is_some_and(|current| current.arrival_order >= target.arrival_order)
+        {
+            return false;
+        }
+        self.receipt_targets.insert(room, target);
+        true
     }
 
     /// Called on the main-loop tick: flush the pending marker once its
@@ -148,24 +247,47 @@ impl App {
         let Some(pending) = self.pending_marker_put.take() else {
             return;
         };
-        self.spawn_current_marker_put(pending.room, pending.marker);
+        self.spawn_current_read_put(pending.room, pending.marker);
     }
 
-    /// PUT a room's *current* marker, not the value captured when the slot was
-    /// armed: a sibling-device frame (`handle_read_marker_frame`) can advance
-    /// `self.read_markers` during the debounce window, and sending the stale
-    /// armed value would then overwrite the server with an older position.
-    /// Monotonicity guarantees the current value is never behind the armed one,
-    /// which is used only as a fallback if the entry has somehow gone.
-    fn spawn_current_marker_put(&self, room: RoomKey, armed: ReadMarker) {
-        let marker = self.read_markers.get(&room).cloned().unwrap_or(armed);
-        self.spawn_marker_put(room, marker);
+    /// The pair to send for a room: its *current* marker and receipt target, not
+    /// the values captured when the slot was armed. A sibling-device frame
+    /// (`handle_read_marker_frame`) can advance `self.read_markers` during the
+    /// debounce window, and sending the stale armed value would then overwrite
+    /// the server with an older position. Monotonicity guarantees the current
+    /// value is never behind the armed one, which is used only as a fallback if
+    /// the entry has somehow gone. The receipt target has no armed fallback: it
+    /// is only ever set by `note_room_read`, which arms the slot in the same
+    /// breath, and `None` simply means this room has no displayed event to name.
+    fn current_read_put(
+        &self,
+        room: &RoomKey,
+        armed: ReadMarker,
+    ) -> (ReadMarker, Option<ReceiptTarget>) {
+        (
+            self.read_markers.get(room).cloned().unwrap_or(armed),
+            self.receipt_targets.get(room).cloned(),
+        )
     }
 
-    /// PUT one room's marker in the background. Failures surface through the
-    /// same channel as draft PUTs; not wired (unit tests) means local-only,
-    /// like the other background channels.
-    fn spawn_marker_put(&self, room: RoomKey, marker: ReadMarker) {
+    /// PUT a room's current marker and send its current receipt.
+    fn spawn_current_read_put(&self, room: RoomKey, armed: ReadMarker) {
+        let (marker, receipt) = self.current_read_put(&room, armed);
+        self.spawn_read_put(room, marker, receipt);
+    }
+
+    /// PUT one room's marker in the background, and send its read receipt.
+    /// Failures surface through the same channel as draft PUTs; not wired (unit
+    /// tests) means local-only, like the other background channels.
+    ///
+    /// The device-state PUT fires whenever the slot was armed, even when only
+    /// the receipt moved. Suppressing it would need a "did the marker advance?"
+    /// flag OR-accumulated across every re-arm inside the sliding debounce
+    /// window, and getting that wrong stops publishing cross-device markers —
+    /// a failure invisible until another device is wrong. What it would save is
+    /// one idempotent PUT in a rare path, whose only effect is a
+    /// `device_state.changed` frame that siblings' own `apply_marker` refuses.
+    fn spawn_read_put(&self, room: RoomKey, marker: ReadMarker, receipt: Option<ReceiptTarget>) {
         let Some(tx) = self.drafts_tx.clone() else {
             return;
         };
@@ -173,16 +295,19 @@ impl App {
         let device_id = self.device_id;
         // Second, fire-and-forget action alongside the internal device-state PUT
         // (ADR 0067): tell the homeserver too, so third-party Matrix clients see
-        // the room as read. Same debounced/monotonic choke point, best-effort —
-        // a failed receipt is never surfaced (the local read UX must not depend
-        // on it, and the TUI has no in-session log surface to write to).
-        {
+        // the room as read. Same debounced choke point, best-effort — a failed
+        // receipt is never surfaced (the local read UX must not depend on it,
+        // and the TUI has no in-session log surface to write to).
+        //
+        // It names the receipt *target*, not the marker: a receipt is
+        // interpreted in arrival order and the marker is display order (ADR
+        // 0089, module docs).
+        if let Some(target) = receipt {
             let client = client.clone();
             let room = room.clone();
-            let event_id = marker.event_id.clone();
             tokio::spawn(async move {
                 let _ = client
-                    .send_read_receipt(room.account_id, &room.room_id, &event_id)
+                    .send_read_receipt(room.account_id, &room.room_id, &target.event_id)
                     .await;
             });
         }
@@ -387,26 +512,195 @@ mod tests {
         }
     }
 
+    /// A receipt target that moves in step with the marker — the ordinary case,
+    /// where display and arrival order agree.
+    fn in_step(event_id: &str, ts: i64) -> Option<ReceiptTarget> {
+        Some(ReceiptTarget {
+            event_id: event_id.to_owned(),
+            arrival_order: ts,
+        })
+    }
+
     #[test]
     fn note_room_read_is_monotonic() {
         let mut app = app_with(vec![test_room("!r:x", 0)]);
         let k = key("!r:x");
 
-        app.note_room_read(k.clone(), "$b", 200);
+        app.note_room_read(k.clone(), "$b", 200, in_step("$b", 200));
         assert_eq!(app.read_markers.get(&k).unwrap().origin_ts, 200);
         assert!(app.pending_marker_put.is_some());
 
         // Backward (or equal) never regresses the marker or re-arms a PUT.
+        // Both keys move backward together here: with neither advancing, the
+        // slot must stay empty.
         app.pending_marker_put = None;
-        app.note_room_read(k.clone(), "$a", 100);
-        app.note_room_read(k.clone(), "$b", 200);
+        app.note_room_read(k.clone(), "$a", 100, in_step("$a", 100));
+        app.note_room_read(k.clone(), "$b", 200, in_step("$b", 200));
         assert_eq!(app.read_markers.get(&k).unwrap().event_id, "$b");
         assert!(app.pending_marker_put.is_none());
 
         // Forward advances.
-        app.note_room_read(k.clone(), "$c", 300);
+        app.note_room_read(k.clone(), "$c", 300, in_step("$c", 300));
         assert_eq!(app.read_markers.get(&k).unwrap().origin_ts, 300);
         assert!(app.pending_marker_put.is_some());
+    }
+
+    /// ADR 0089's core case, and the one that repairs already-broken rooms.
+    ///
+    /// A bridge portal's marker sits at its `uk.half-shot.bridge` state event,
+    /// which is stamped *after* the backfilled message it should have receipted.
+    /// The marker is forward-only on `origin_ts`, so it can never move again —
+    /// if the receipt rode on the marker advancing, this room would stay unread
+    /// forever and the fix would only ever help rooms bridged after it shipped.
+    #[test]
+    fn receipt_advances_when_the_marker_cannot() {
+        let mut app = app_with(vec![test_room("!r:x", 0)]);
+        let k = key("!r:x");
+        // As hydration from device state would leave it.
+        app.read_markers.insert(
+            k.clone(),
+            ReadMarker {
+                event_id: "$bridge".to_owned(),
+                origin_ts: 1_785_928_309_453,
+            },
+        );
+
+        // The backfilled message: older by origin_ts, newer by arrival order.
+        app.note_room_read(
+            k.clone(),
+            "$bridge",
+            1_785_928_309_453,
+            Some(ReceiptTarget {
+                event_id: "$message".to_owned(),
+                arrival_order: 1_871_426,
+            }),
+        );
+
+        // The marker refused, correctly, and did not move.
+        assert_eq!(app.read_markers.get(&k).unwrap().event_id, "$bridge");
+        // The receipt advanced anyway, and the PUT is armed to send it.
+        assert_eq!(
+            app.receipt_targets.get(&k),
+            Some(&ReceiptTarget {
+                event_id: "$message".to_owned(),
+                arrival_order: 1_871_426,
+            })
+        );
+        assert!(app.pending_marker_put.is_some());
+    }
+
+    #[test]
+    fn receipt_target_is_monotonic_on_arrival_order() {
+        let mut app = app_with(vec![test_room("!r:x", 0)]);
+        let k = key("!r:x");
+        app.note_room_read(
+            k.clone(),
+            "$a",
+            100,
+            Some(ReceiptTarget {
+                event_id: "$a".to_owned(),
+                arrival_order: 900,
+            }),
+        );
+        app.pending_marker_put = None;
+
+        // Newer in display order, *older* in arrival order: the marker would
+        // take this, the receipt must not.
+        app.note_room_read(
+            k.clone(),
+            "$b",
+            200,
+            Some(ReceiptTarget {
+                event_id: "$b".to_owned(),
+                arrival_order: 500,
+            }),
+        );
+        assert_eq!(app.read_markers.get(&k).unwrap().event_id, "$b");
+        assert_eq!(app.receipt_targets.get(&k).unwrap().event_id, "$a");
+        // The marker moved, so the slot is armed regardless.
+        assert!(app.pending_marker_put.is_some());
+
+        // Neither key moves → no arm at all.
+        app.pending_marker_put = None;
+        app.note_room_read(
+            k.clone(),
+            "$b",
+            200,
+            Some(ReceiptTarget {
+                event_id: "$b".to_owned(),
+                arrival_order: 500,
+            }),
+        );
+        assert!(app.pending_marker_put.is_none());
+    }
+
+    /// Guards the `||` from the other side: a marker-only advance still arms,
+    /// and leaves the receipt target alone.
+    #[test]
+    fn marker_advance_alone_still_arms() {
+        let mut app = app_with(vec![test_room("!r:x", 0)]);
+        let k = key("!r:x");
+
+        app.note_room_read(k.clone(), "$a", 100, None);
+        assert_eq!(app.read_markers.get(&k).unwrap().event_id, "$a");
+        assert!(!app.receipt_targets.contains_key(&k));
+        assert!(app.pending_marker_put.is_some());
+
+        // A receipt at an arrival order already held is not an advance either.
+        app.note_room_read(
+            k.clone(),
+            "$b",
+            200,
+            Some(ReceiptTarget {
+                event_id: "$b".to_owned(),
+                arrival_order: 700,
+            }),
+        );
+        app.pending_marker_put = None;
+        app.note_room_read(
+            k.clone(),
+            "$b",
+            200,
+            Some(ReceiptTarget {
+                event_id: "$b-again".to_owned(),
+                arrival_order: 700,
+            }),
+        );
+        assert_eq!(app.receipt_targets.get(&k).unwrap().event_id, "$b");
+        assert!(app.pending_marker_put.is_none());
+    }
+
+    /// The "current, not armed" rule, which the spawn path itself cannot test
+    /// (no `drafts_tx` is wired, so it is inert). A sibling-device frame can
+    /// advance either map inside the debounce window; both halves must be read
+    /// from the map at flush time.
+    #[test]
+    fn flush_sends_the_current_values_not_the_armed_ones() {
+        let mut app = app_with(vec![test_room("!r:x", 0)]);
+        let k = key("!r:x");
+        app.note_room_read(k.clone(), "$a", 100, in_step("$a", 100));
+        let armed = app.pending_marker_put.as_ref().unwrap().marker.clone();
+        assert_eq!(armed.event_id, "$a");
+
+        // Both positions move on after the slot was armed.
+        app.apply_marker(
+            k.clone(),
+            ReadMarker {
+                event_id: "$c".to_owned(),
+                origin_ts: 300,
+            },
+        );
+        app.apply_receipt_target(
+            k.clone(),
+            ReceiptTarget {
+                event_id: "$c".to_owned(),
+                arrival_order: 300,
+            },
+        );
+
+        let (marker, receipt) = app.current_read_put(&k, armed);
+        assert_eq!(marker.event_id, "$c");
+        assert_eq!(receipt.unwrap().event_id, "$c");
     }
 
     #[test]
@@ -508,16 +802,25 @@ mod tests {
     #[test]
     fn switching_rooms_mid_debounce_flushes_the_previous_marker() {
         let mut app = app_with(vec![test_room("!a:x", 0), test_room("!b:x", 0)]);
-        app.note_room_read(key("!a:x"), "$a", 100);
+        app.note_room_read(key("!a:x"), "$a", 100, in_step("$a", 100));
         assert_eq!(app.pending_marker_put.as_ref().unwrap().room, key("!a:x"));
 
         // Reading a different room replaces the slot; the previous marker is
         // flushed (spawn is a no-op here with no channel wired) — the local
         // map keeps both.
-        app.note_room_read(key("!b:x"), "$b", 200);
+        app.note_room_read(key("!b:x"), "$b", 200, in_step("$b", 200));
         assert_eq!(app.pending_marker_put.as_ref().unwrap().room, key("!b:x"));
         assert_eq!(app.read_markers.get(&key("!a:x")).unwrap().origin_ts, 100);
         assert_eq!(app.read_markers.get(&key("!b:x")).unwrap().origin_ts, 200);
+        // Receipt targets are per-room too: reading B must not disturb A's.
+        assert_eq!(
+            app.receipt_targets.get(&key("!a:x")).unwrap().arrival_order,
+            100
+        );
+        assert_eq!(
+            app.receipt_targets.get(&key("!b:x")).unwrap().arrival_order,
+            200
+        );
     }
 
     fn timeline_event_from(
@@ -540,6 +843,7 @@ mod tests {
             room_id: "!r:x".to_owned(),
             sender: "@alice:example.com".to_owned(),
             state_key: None,
+            arrival_order: origin_ts,
             origin_ts,
             event_type: "m.room.message".to_owned(),
             content: Some(serde_json::json!({ "msgtype": "m.text", "body": "hi" })),
@@ -551,6 +855,96 @@ mod tests {
             reactions: None,
             sender_trust: None,
         }
+    }
+
+    fn display_with_state_events(show_state_events: bool) -> crate::config::DisplayOptions {
+        let mut display = TuiConfig::test_default().display;
+        display.show_state_events = show_state_events;
+        display
+    }
+
+    /// An event with display and arrival order deliberately out of step.
+    fn arrival_event(event_id: &str, origin_ts: i64, arrival_order: i64) -> EventDto {
+        let mut event = timeline_event(event_id, origin_ts, None);
+        event.arrival_order = arrival_order;
+        event
+    }
+
+    fn state_event(event_id: &str, origin_ts: i64, arrival_order: i64, ty: &str) -> EventDto {
+        let mut event = arrival_event(event_id, origin_ts, arrival_order);
+        event.event_type = ty.to_owned();
+        event.state_key = Some(String::new());
+        event.body = None;
+        event
+    }
+
+    /// The LinkedIn portal from ADR 0089, with its real numbers. The bridge
+    /// creates the room, emits its own state, then backfills the conversation
+    /// with its real (older) timestamps — so the only message is oldest by
+    /// `origin_ts` and newest by arrival order.
+    fn portal_page() -> Vec<EventDto> {
+        vec![
+            // Ascending display order, which is how a loaded page is held.
+            arrival_event("$message", 1_785_928_304_987, 1_871_426),
+            state_event("$create", 1_785_928_306_622, 1_871_406, "m.room.create"),
+            state_event(
+                "$bridge",
+                1_785_928_309_453,
+                1_871_424,
+                "uk.half-shot.bridge",
+            ),
+        ]
+    }
+
+    #[test]
+    fn receipt_target_picks_arrival_max_not_display_last() {
+        let display = display_with_state_events(true);
+        let page = portal_page();
+
+        // Display-last is the bridge state event — what the old code sent, and
+        // what does not cover the message in stream order.
+        assert_eq!(page.last().unwrap().event_id, "$bridge");
+        assert_eq!(
+            receipt_target_for(&page, &display).unwrap().event_id,
+            "$message"
+        );
+    }
+
+    #[test]
+    fn receipt_target_skips_hidden_events() {
+        // At the default settings the portal's state events do not render, so
+        // they are not candidates — which is also the right answer here.
+        let hidden = display_with_state_events(false);
+        assert_eq!(
+            receipt_target_for(&portal_page(), &hidden)
+                .unwrap()
+                .event_id,
+            "$message"
+        );
+
+        // And when a *hidden* event is the arrival-max, the shown arrival-max
+        // wins instead of it.
+        let mut page = vec![arrival_event("$msg", 100, 10)];
+        page.push(state_event("$topic", 200, 99, "m.room.topic"));
+        assert_eq!(receipt_target_for(&page, &hidden).unwrap().event_id, "$msg");
+        // With state events shown, that same event is a legal target.
+        let shown = display_with_state_events(true);
+        assert_eq!(
+            receipt_target_for(&page, &shown).unwrap().event_id,
+            "$topic"
+        );
+    }
+
+    #[test]
+    fn receipt_target_is_none_when_nothing_is_shown() {
+        let hidden = display_with_state_events(false);
+        let page = vec![
+            state_event("$create", 100, 1, "m.room.create"),
+            state_event("$topic", 200, 2, "m.room.topic"),
+        ];
+        // Nothing displayed → nothing to name, and the caller arms no receipt.
+        assert!(receipt_target_for(&page, &hidden).is_none());
+        assert!(receipt_target_for(&[], &hidden).is_none());
     }
 
     #[test]

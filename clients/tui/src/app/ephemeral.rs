@@ -274,6 +274,7 @@ mod tests {
             room_id: "!r:hs".to_owned(),
             sender: sender.to_owned(),
             state_key: None,
+            arrival_order: origin_ts,
             origin_ts,
             event_type: "m.room.message".to_owned(),
             content: Some(serde_json::json!({ "msgtype": "m.text", "body": "hi" })),

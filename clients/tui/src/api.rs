@@ -1268,6 +1268,27 @@ pub struct EventDto {
     pub sender: String,
     #[serde(default)]
     pub state_key: Option<String>,
+    /// The monotonic sequence in which this account ingested events — the row's
+    /// `events.id`, independent of `origin_ts`.
+    ///
+    /// Every read surface sorts by `origin_ts` (display order), and the two
+    /// disagree whenever a homeserver delivers an event stamped earlier than
+    /// events already held — routinely, for a bridge backfilling a conversation
+    /// into a freshly created portal. A Matrix read receipt is interpreted in
+    /// arrival order, so marking a room read names the greatest `arrival_order`
+    /// among the events actually displayed, not the display-last one
+    /// (ADR 0089); see [`crate::app::read_markers`].
+    ///
+    /// Comparable only within one room of one account, and only for ordering —
+    /// the values are not contiguous and carry no other meaning.
+    ///
+    /// Deliberately **not** `#[serde(default)]`, unlike the optional fields
+    /// around it: the server always emits this, and a defaulted `0` is not
+    /// inert. It would win the first receipt-target comparison in a session and
+    /// refuse every later one, freezing the target on the first event forever —
+    /// a quieter version of the bug ADR 0089 fixes. Failing to deserialize
+    /// against an axon too old to send it is the correct, loud outcome.
+    pub arrival_order: i64,
     pub origin_ts: i64,
     #[serde(rename = "type")]
     pub event_type: String,
@@ -1641,6 +1662,7 @@ mod tests {
                     "sender": "@alice:localhost",
                     "state_key": null,
                     "origin_ts": 1234,
+                    "arrival_order": 1234,
                     "type": "m.room.message",
                     "content": { "msgtype": "m.text", "body": "hello" },
                     "body": "hello",
@@ -1653,7 +1675,37 @@ mod tests {
         }"#;
         let response: ApiResponse<TimelinePage> = serde_json::from_str(body).unwrap();
         assert_eq!(response.data.events[0].display_body(), "hello");
+        assert_eq!(response.data.events[0].arrival_order, 1234);
         assert_eq!(response.data.next_cursor.as_deref(), Some("MTAuMQ"));
+    }
+
+    /// `arrival_order` deliberately carries no `#[serde(default)]`, unlike the
+    /// optional fields around it. A defaulted `0` is not inert: it would win the
+    /// first receipt-target comparison of a session and refuse every later one,
+    /// freezing the receipt on the first event forever and silently (ADR 0089).
+    /// Failing loudly against an axon too old to send the field is the correct
+    /// outcome — that server cannot support this client.
+    #[test]
+    fn event_without_arrival_order_is_rejected() {
+        let body = r#"{
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "event_id": "$event:localhost",
+            "room_id": "!room:localhost",
+            "sender": "@alice:localhost",
+            "state_key": null,
+            "origin_ts": 1234,
+            "type": "m.room.message",
+            "content": { "msgtype": "m.text", "body": "hello" },
+            "body": "hello",
+            "relates_to": null,
+            "redacted": false,
+            "redaction_event_id": null
+        }"#;
+        let err = serde_json::from_str::<EventDto>(body).unwrap_err();
+        assert!(
+            err.to_string().contains("arrival_order"),
+            "expected a missing-field error naming arrival_order, got: {err}"
+        );
     }
 
     #[test]
@@ -1666,6 +1718,7 @@ mod tests {
                     "room_id": "!room:localhost",
                     "sender": "@alice:localhost",
                     "origin_ts": 1234,
+                    "arrival_order": 1234,
                     "type": "m.room.message",
                     "content": {
                         "msgtype": "m.text",
@@ -1696,6 +1749,7 @@ mod tests {
             "room_id": "!room:localhost",
             "sender": "@alice:localhost",
             "origin_ts": 1234,
+            "arrival_order": 1234,
             "type": "m.room.message",
             "content": {
                 "msgtype": "m.text",
@@ -1733,6 +1787,7 @@ mod tests {
             "room_id": "!room:localhost",
             "sender": "@alice:localhost",
             "origin_ts": 1234,
+            "arrival_order": 1234,
             "type": "m.room.message",
             "content": { "msgtype": "m.text", "body": "hi" },
             "body": "hi",
@@ -1780,6 +1835,7 @@ mod tests {
             "room_id": "!room:localhost",
             "sender": "@alice:localhost",
             "origin_ts": 1234,
+            "arrival_order": 1234,
             "type": "m.room.message",
             "content": {
                 "msgtype": "m.image",
@@ -1819,6 +1875,7 @@ mod tests {
                 "sender": "@alice:localhost",
                 "state_key": "@alice:localhost",
                 "origin_ts": 1234,
+                "arrival_order": 1234,
                 "type": "m.room.message",
                 "content": { "msgtype": "m.text", "body": "hello" },
                 "body": "hello",
@@ -1841,7 +1898,8 @@ mod tests {
             "payload": {
                 "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 "event_id": "$e:localhost", "room_id": "!r:localhost",
-                "sender": "@a:localhost", "origin_ts": 1, "type": "m.room.message",
+                "sender": "@a:localhost", "origin_ts": 1, "arrival_order": 1,
+                "type": "m.room.message",
                 "content": null, "body": "hi", "relates_to": null,
                 "redacted": false, "redaction_event_id": null
             }
@@ -1860,7 +1918,8 @@ mod tests {
             "payload": {
                 "account_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
                 "event_id": "$e:localhost", "room_id": "!r:localhost",
-                "sender": "@a:localhost", "origin_ts": 1, "type": "m.room.message",
+                "sender": "@a:localhost", "origin_ts": 1, "arrival_order": 1,
+                "type": "m.room.message",
                 "content": null, "body": "hi", "relates_to": null,
                 "redacted": false, "redaction_event_id": null
             }

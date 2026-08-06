@@ -259,6 +259,9 @@ impl App {
             });
             let account_id = event.account_id;
             let origin_ts = event.origin_ts;
+            // Captured alongside `origin_ts` for the same reason: `event` is
+            // moved into `self.messages.events` below, before the read is noted.
+            let arrival_order = event.arrival_order;
             // A live message from a sender we have no name for (e.g. someone who
             // joined after the last full load) would render as a raw MXID until
             // the next room reload. Kick off a debounced /members refresh so it
@@ -296,9 +299,18 @@ impl App {
             // The room is on screen, so a *shown* live event counts as read —
             // the same rule that keeps its unread badge clear below (M12). A
             // hidden event (reaction, filtered state) advances nothing the user
-            // can see, so it must not move the cross-device marker.
+            // can see, so it must not move the cross-device marker, and for the
+            // same reason it is not a receipt target either (ADR 0089).
             if event_shown {
-                self.note_room_read(key.clone(), &event_id, origin_ts);
+                self.note_room_read(
+                    key.clone(),
+                    &event_id,
+                    origin_ts,
+                    Some(super::read_markers::ReceiptTarget {
+                        event_id: event_id.clone(),
+                        arrival_order,
+                    }),
+                );
             }
             if should_select {
                 self.messages.selection = Some(event_id);

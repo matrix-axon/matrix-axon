@@ -273,9 +273,14 @@ impl App {
                 // installed so in-slice roots aren't re-fetched.
                 let unseen_thread_roots = self.collect_unseen_thread_promotions(&key, &page.events);
                 // Opening the room reads it up to its newest loaded event (M12).
+                // Two positions, two orders: the marker names the display-last
+                // event (`page.events` is ascending by `origin_ts`), the receipt
+                // names the greatest `arrival_order` among the events actually
+                // shown (ADR 0089).
+                let receipt = super::read_markers::receipt_target_for(&page.events, &self.display);
                 if let Some(newest) = page.events.last() {
                     let (event_id, origin_ts) = (newest.event_id.clone(), newest.origin_ts);
-                    self.note_room_read(key.clone(), &event_id, origin_ts);
+                    self.note_room_read(key.clone(), &event_id, origin_ts, receipt);
                 }
                 self.messages.events.insert(key.clone(), page.events);
                 for (account_id, root) in unseen_thread_roots {
@@ -1457,6 +1462,7 @@ mod tests {
             room_id: "!room:localhost".to_owned(),
             sender: "@alice:localhost".to_owned(),
             state_key: None,
+            arrival_order: 0,
             origin_ts: 0,
             event_type: "m.room.message".to_owned(),
             content: Some(json!({"msgtype": "m.text", "body": body})),
@@ -1476,6 +1482,7 @@ mod tests {
             room_id: "!room:localhost".to_owned(),
             sender: "@alice:localhost".to_owned(),
             state_key: None,
+            arrival_order: 1,
             origin_ts: 1,
             event_type: "m.room.message".to_owned(),
             content: Some(json!({
@@ -1577,6 +1584,7 @@ mod tests {
             room_id: "!r:localhost".to_owned(),
             sender: "@a:localhost".to_owned(),
             state_key: None,
+            arrival_order: 0,
             origin_ts: 0,
             event_type: "m.room.message".to_owned(),
             content: Some(json!({"msgtype": "m.text", "body": "* edited"})),

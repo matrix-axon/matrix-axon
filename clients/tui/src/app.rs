@@ -888,6 +888,12 @@ pub(crate) struct App {
     /// Last known read marker per room (M12): the local mirror of the merged
     /// `read_markers` device-state namespace. Advances monotonically only.
     pub(crate) read_markers: HashMap<RoomKey, read_markers::ReadMarker>,
+    /// Per-room read-receipt target (ADR 0089): the greatest `arrival_order`
+    /// among the events this client displayed there. Advances monotonically on
+    /// `arrival_order`, which is *not* the `read_markers` order — see
+    /// [`read_markers`] for why these are two values, not one. Session-local: it
+    /// is not device state and is deliberately never hydrated.
+    pub(crate) receipt_targets: HashMap<RoomKey, read_markers::ReceiptTarget>,
     /// A read-marker advance waiting out its debounce window before being PUT
     /// (M12). One slot; arming for a different room flushes the old one.
     pub(crate) pending_marker_put: Option<read_markers::PendingMarkerPut>,
@@ -1094,6 +1100,7 @@ impl App {
             compose_room: None,
             drafts_tx: None,
             read_markers: HashMap::new(),
+            receipt_targets: HashMap::new(),
             pending_marker_put: None,
             typing: None,
             ephemeral: ephemeral::EphemeralState::default(),
@@ -2105,6 +2112,11 @@ impl App {
             room_id: room.room_id.clone(),
             sender,
             state_key: None,
+            // A local echo has not been ingested, so it has no arrival position
+            // — the real one arrives with the confirming event. `i64::MIN` can
+            // never win the max-by-`arrival_order` receipt selection, so an echo
+            // can never be receipted (ADR 0089).
+            arrival_order: i64::MIN,
             origin_ts: now_ms,
             event_type: "m.room.message".to_owned(),
             content: echo_content,
@@ -2751,6 +2763,7 @@ mod tests {
             room_id: "!room:example.com".to_owned(),
             sender: "@alice:example.com".to_owned(),
             state_key: state_key.map(str::to_owned),
+            arrival_order: 0,
             origin_ts: 0,
             event_type: event_type.to_owned(),
             content: Some(content),
@@ -3314,6 +3327,78 @@ mod tests {
         let action = app.handle_live_frame(LiveFrame::Timeline(Box::new(event)));
 
         assert_eq!(action, LiveFrameAction::RefreshRooms);
+    }
+
+    /// ADR 0089, live path. A backfilled event delivered while the room is on
+    /// screen is older by `origin_ts` than the marker already holds, so the
+    /// marker correctly refuses it — but it arrived last, so it is exactly what
+    /// the receipt must name. The receipt has to advance on its own.
+    #[test]
+    fn live_event_advances_the_receipt_target_when_the_marker_refuses() {
+        let mut app = app_with_rooms(vec![room(
+            "!room:example.com",
+            Some("#room:example.com"),
+            Some("Room"),
+        )]);
+        app.rooms.selected = Some(0);
+        let key = RoomKey {
+            account_id: Uuid::nil(),
+            room_id: "!room:example.com".to_owned(),
+        };
+        app.read_markers.insert(
+            key.clone(),
+            read_markers::ReadMarker {
+                event_id: "$bridge".to_owned(),
+                origin_ts: 1_785_928_309_453,
+            },
+        );
+
+        let mut event = event_with_id(
+            "$backfilled:example.com",
+            "m.room.message",
+            Some("hello"),
+            serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
+        );
+        event.origin_ts = 1_785_928_304_987;
+        event.arrival_order = 1_871_426;
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(event)));
+
+        assert_eq!(app.read_markers.get(&key).unwrap().event_id, "$bridge");
+        assert_eq!(
+            app.receipt_targets.get(&key).unwrap().event_id,
+            "$backfilled:example.com"
+        );
+    }
+
+    /// The `event_shown` gate governs both halves: an event the user cannot see
+    /// is neither a marker position nor a receipt target.
+    #[test]
+    fn hidden_live_event_advances_neither_position() {
+        let mut app = app_with_rooms(vec![room(
+            "!room:example.com",
+            Some("#room:example.com"),
+            Some("Room"),
+        )]);
+        app.rooms.selected = Some(0);
+        let key = RoomKey {
+            account_id: Uuid::nil(),
+            room_id: "!room:example.com".to_owned(),
+        };
+
+        let mut event = event_with_id(
+            "$reaction:example.com",
+            "m.reaction",
+            None,
+            serde_json::json!({
+                "m.relates_to": { "rel_type": "m.annotation", "event_id": "$t", "key": "👍" }
+            }),
+        );
+        event.origin_ts = 5_000;
+        event.arrival_order = 9_999;
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(event)));
+
+        assert!(!app.read_markers.contains_key(&key));
+        assert!(!app.receipt_targets.contains_key(&key));
     }
 
     #[test]

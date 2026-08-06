@@ -802,6 +802,7 @@ mod tests {
                 room_id: room_id.to_owned(),
                 sender: "@alice:example.org".to_owned(),
                 state_key: None,
+                arrival_order: origin_ts,
                 origin_ts,
                 event_type: "m.room.message".to_owned(),
                 content: None,
