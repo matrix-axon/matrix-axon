@@ -275,6 +275,14 @@ export function RoomPage() {
   const swipeStart = useRef<SwipeStart | null>(null)
   const swipeLocked = useRef(false)
   const highlighted = typeof query.event === 'string' ? query.event : null
+  // Whether this view may claim read state at all — the invariant the three
+  // effects below share (see `clients/web/AGENTS.md`). Derived once rather than
+  // re-stated per effect, so another condition is added in one place instead of
+  // three (PR review).
+  /** Not parked on a permalink or a search hit. */
+  const unanchored = highlighted === null
+  /** …and the loaded slice reaches the live end, so the newest events are shown. */
+  const showingNewestEvents = unanchored && timeline.atEnd.value
   const openThread = typeof query.thread === 'string' ? query.thread : null
   const unreadThreadCutoff = threadUnread.entries.value
     .filter((entry) => entry.accountId === accountId && entry.roomId === roomId)
@@ -310,7 +318,7 @@ export function RoomPage() {
     // badge disappears for the session and returns on the next load, which is
     // worse than never clearing. The timeline effect below picks the room up
     // once the view actually reaches the live end.
-    if (highlighted === null) {
+    if (unanchored) {
       rooms.noteUnreadCounts(accountId, roomId, 0, 0)
     }
     // The room list store also feeds this page's title; populate it on a
@@ -348,6 +356,35 @@ export function RoomPage() {
     rootId: string | null
   } | null>(null)
 
+  // A `?event=` anchor this view cannot satisfy must not keep blocking read
+  // state: while the URL names it, `unanchored` stays false for the room's whole
+  // visit and every claim below is suppressed — no badge clear, no marker, no
+  // receipt — even though the user is reading the newest messages (PR review).
+  //
+  // "Cannot satisfy" is judged on the **loaded slice**, not on the by-id lookup
+  // that just failed. A 404 there means only that the server would not serve
+  // that one event by id; the event may still be present in the room, and the
+  // e2e mock does exactly this for seeded history. Dropping the anchor on the
+  // lookup alone would discard the highlight the deep link exists for, so the
+  // tail is loaded first and the anchor is only dropped if the target really
+  // isn't in it. Only `event` is removed — `?thread=` and the rest are none of
+  // this effect's business, and a deep link that resolves *into* a thread keeps
+  // its anchor and stays correctly parked.
+  const dropUnsatisfiableAnchor = useCallback(async () => {
+    await timeline.loadLatest()
+    if (
+      highlighted === null ||
+      timeline.events.peek().some((event) => event.event_id === highlighted)
+    ) {
+      return
+    }
+    const [base, queryString = ''] = location.url.split('?', 2)
+    const params = new URLSearchParams(queryString)
+    params.delete('event')
+    const rest = params.toString()
+    location.route(rest === '' ? base : `${base}?${rest}`, true)
+  }, [highlighted, location, timeline])
+
   // Jump to the `?event=` target — on a cold deep link *and* whenever the
   // query changes while the room is already open (WCR-09; M-W10's search
   // results navigate this way). An event already in the loaded slice needs
@@ -374,30 +411,36 @@ export function RoomPage() {
       .GET('/v1/accounts/{account_id}/events/{event_id}', {
         params: { path: { account_id: accountId, event_id: highlighted } },
       })
-      .then(
-        ({ data }) => {
-          if (data === undefined) {
-            return timeline.loadLatest()
-          }
-          const rootId = threadRootId(data.data)
-          resolvedDeepLink.current = { eventId: highlighted, rootId }
-          // A thread reply has no row in the main room stream to jump to —
-          // it only ever renders inside its thread's own panel. Route
-          // straight there instead of jumping the main timeline toward the
-          // reply's timestamp, which would land near the thread root but
-          // never open the thread (or reveal the reply itself).
-          if (rootId !== null && rootId !== openThread) {
-            location.route(
-              localThreadEventHref(accountId, roomId, rootId, highlighted),
-              true,
-            )
-            return
-          }
-          return timeline.jumpTo(data.data.origin_ts)
-        },
-        () => timeline.loadLatest(),
-      )
-  }, [api, accountId, roomId, timeline, highlighted, openThread, location])
+      .then(({ data }) => {
+        if (data === undefined) {
+          return dropUnsatisfiableAnchor()
+        }
+        const rootId = threadRootId(data.data)
+        resolvedDeepLink.current = { eventId: highlighted, rootId }
+        // A thread reply has no row in the main room stream to jump to —
+        // it only ever renders inside its thread's own panel. Route
+        // straight there instead of jumping the main timeline toward the
+        // reply's timestamp, which would land near the thread root but
+        // never open the thread (or reveal the reply itself).
+        if (rootId !== null && rootId !== openThread) {
+          location.route(
+            localThreadEventHref(accountId, roomId, rootId, highlighted),
+            true,
+          )
+          return
+        }
+        return timeline.jumpTo(data.data.origin_ts)
+      }, dropUnsatisfiableAnchor)
+  }, [
+    api,
+    accountId,
+    roomId,
+    timeline,
+    highlighted,
+    openThread,
+    location,
+    dropUnsatisfiableAnchor,
+  ])
 
   // Mark this room active while it is open so shared chrome can mark the row.
   useEffect(() => {
@@ -428,7 +471,7 @@ export function RoomPage() {
   // jumping it to the summary's newest event would mark a room read
   // *everywhere* from a view that never showed that event.
   useEffect(() => {
-    if (highlighted !== null) {
+    if (!unanchored) {
       return
     }
     const room = rooms.rooms.value.find(
@@ -454,7 +497,7 @@ export function RoomPage() {
     rooms.rooms.value,
     deviceState,
     unreadThreadCutoff,
-    highlighted,
+    unanchored,
   ])
 
   // Advance this room's read marker to the newest event while it is open, so
@@ -478,7 +521,7 @@ export function RoomPage() {
   // other Matrix clients treat permalinks, and erring the other way silently
   // consumes unread messages.
   useEffect(() => {
-    if (highlighted !== null || !timeline.atEnd.value) {
+    if (!showingNewestEvents) {
       return
     }
     const events = timeline.events.value
@@ -501,8 +544,7 @@ export function RoomPage() {
     }
   }, [
     timeline.events.value,
-    timeline.atEnd.value,
-    highlighted,
+    showingNewestEvents,
     unreadThreadCutoff,
     accountId,
     roomId,

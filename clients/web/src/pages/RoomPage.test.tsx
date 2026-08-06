@@ -3426,6 +3426,87 @@ describe('RoomPage', () => {
     })
   })
 
+  /// A `?event=` target the server cannot resolve leaves the view on the live
+  /// tail. The anchor must not linger: while it does, the read-state gates all
+  /// treat the view as parked in history and the room can never be marked read
+  /// (PR review on #136).
+  it('drops an unresolvable ?event= anchor and then claims the room read', async () => {
+    const reads: string[] = []
+    server.use(
+      // The deep-link target is gone (redacted, purged, or never ours).
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/read`,
+        async ({ request }) => {
+          const body = (await request.json()) as { event_id: string }
+          reads.push(body.event_id)
+          return HttpResponse.json({ data: {} })
+        },
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$tail-dead-anchor', T0, { body: 'body of $tail' })],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24gone&thread=%24keep`,
+    )
+    const { findByText } = render(routedRoomPage(testServices()))
+    await findByText('body of $tail')
+
+    // The dead anchor is dropped; unrelated params are left alone.
+    await waitFor(() => expect(window.location.search).not.toContain('event='))
+    expect(window.location.search).toContain('thread=%24keep')
+
+    // And the view is now treated as the live-tail view it actually is.
+    await waitFor(() =>
+      expect(reads.filter((id) => id === '$tail-dead-anchor')).toEqual([
+        '$tail-dead-anchor',
+      ]),
+    )
+  })
+
+  /// The by-id lookup 404ing does not mean the anchor is unsatisfiable — the
+  /// server may simply not serve that event by id while the event is right there
+  /// in the room (the e2e mock does exactly this for seeded history). Dropping
+  /// the anchor then would throw away the highlight the deep link exists for.
+  it('keeps a ?event= anchor whose target is in the loaded tail', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$in-tail', T0, { body: 'body of $in-tail' })],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24in-tail`,
+    )
+    const { findByText } = render(routedRoomPage(testServices()))
+    await findByText('body of $in-tail')
+
+    // Give the fallback time to settle, then confirm the anchor survived.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(window.location.search).toContain('event=%24in-tail')
+  })
+
   // ADR 0085 phase 1: the store survives the room switch, so re-entry has
   // something to paint and reconciles it in place.
   describe('re-entering a room in one session (ADR 0085 phase 1)', () => {
