@@ -22,6 +22,7 @@ import { ServicesContext } from '../services'
 import { ShellActionsContext } from '../shell-actions'
 import type { MemberDto, RoomDto } from '../stores/room-list'
 import type { EventDto } from '../stores/timeline'
+import { RECEIPT_DEBOUNCE_MS } from '../stores/ephemeral-sender'
 import { memoryStorage } from '../test/memory-storage'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { RoomPage } from './RoomPage'
@@ -3295,6 +3296,134 @@ describe('RoomPage', () => {
         originTs: T0,
       }),
     )
+  })
+
+  describe('a view parked in history claims nothing as read', () => {
+    /**
+     * A `?event=$old` landing five days back, with `$new` at the present and a
+     * room summary whose `last_event_id` is newer still — so both the
+     * optimistic clear and the summary-derived marker have something they
+     * *could* wrongly claim, and the assertions below are not vacuous.
+     */
+    function historyJump(tag: string) {
+      // Unique ids per test: a sibling test's debounced receipt can fire inside
+      // this one's window (the sender's timer outlives its own `cleanup()`),
+      // and identical fixtures would make the two indistinguishable.
+      const old = `$old-${tag}`
+      const fresh = `$new-${tag}`
+      const all = [
+        event(old, T0 - 5 * DAY, { body: `body of ${old}` }),
+        event(`$mid-${tag}`, T0 - 2 * DAY, { body: 'body of $mid' }),
+        event(fresh, T0, { body: `body of ${fresh}` }),
+      ]
+      const reads: string[] = []
+      server.use(
+        http.post(
+          `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/read`,
+          async ({ request }) => {
+            const body = (await request.json()) as { event_id: string }
+            reads.push(body.event_id)
+            return HttpResponse.json({ data: {} })
+          },
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+          () => HttpResponse.json({ data: all[0] }),
+        ),
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({
+            data: [
+              {
+                account_id: ACCOUNT,
+                account_user_id: '@me:hs',
+                room_id: ROOM,
+                name: 'Ops',
+                topic: null,
+                avatar_url: null,
+                canonical_alias: null,
+                last_activity_ts: T0,
+                last_event_id: '$last',
+              },
+            ],
+          }),
+        ),
+        http.get(TIMELINE_PATH, ({ request }) => {
+          const atTs = new URL(request.url).searchParams.get('at_ts')
+          let pool = [...all].sort((a, b) => b.origin_ts - a.origin_ts)
+          if (atTs !== null) {
+            pool = pool.filter((e) => e.origin_ts <= Number(atTs))
+          }
+          return HttpResponse.json({
+            data: { events: pool, next_cursor: null },
+          })
+        }),
+      )
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=${encodeURIComponent(old)}`,
+      )
+      const services = testServices()
+      // Spy rather than seed-and-read: the optimistic clear races the room-list
+      // fetch that would repopulate the count, so the call itself is the
+      // deterministic signal.
+      const cleared = vi.spyOn(services.rooms, 'noteUnreadCounts')
+      const mine = () => reads.filter((id) => id === old || id === fresh)
+      return {
+        services,
+        reads,
+        cleared,
+        mine,
+        anchor: old,
+        newest: fresh,
+        ...render(routedRoomPage(services)),
+      }
+    }
+
+    it('does not clear the unread count on an anchored load', async () => {
+      const { cleared, anchor, findByText } = historyJump('count')
+      await findByText(`body of ${anchor}`)
+
+      // The badge belongs to `$new`, which this view has never shown. Clearing
+      // it here is the bug: it hides the room for the session and the count
+      // returns on the next load, since the server correctly refuses to
+      // advance the receipt past what was displayed (ADR 0089).
+      expect(cleared).not.toHaveBeenCalledWith(ACCOUNT, ROOM, 0, 0)
+    })
+
+    it('still clears optimistically on an ordinary open', async () => {
+      const { services } = renderRoom([event('$1', T0)])
+      const cleared = vi.spyOn(services.rooms, 'noteUnreadCounts')
+      cleanup()
+
+      render(routedRoomPage(services))
+      await waitFor(() =>
+        expect(cleared).toHaveBeenCalledWith(ACCOUNT, ROOM, 0, 0),
+      )
+    })
+
+    it('does not advance the cross-device read marker on an anchored load', async () => {
+      const { services, anchor, findByText } = historyJump('marker')
+      await findByText(`body of ${anchor}`)
+
+      // A sibling device turns this marker straight into a zeroed badge
+      // (`connectReadMarkers`), so jumping it to the summary's `$last` would
+      // mark the room read on every device from a view parked in history.
+      expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toBeNull()
+    })
+
+    it('sends no receipt while the view stays anchored in history', async () => {
+      const { mine, anchor, findByText } = historyJump('receipt')
+      await findByText(`body of ${anchor}`)
+      // Past the sender's own debounce, so "nothing sent" means nothing was
+      // going to be sent — not that the timer hasn't fired yet.
+      await new Promise((resolve) =>
+        setTimeout(resolve, RECEIPT_DEBOUNCE_MS + 150),
+      )
+      // Nothing, even though the head has been gap-filled behind the anchor —
+      // which is why `atEnd` alone can't gate this.
+      expect(mine()).toEqual([])
+    })
   })
 
   // ADR 0085 phase 1: the store survives the room switch, so re-entry has

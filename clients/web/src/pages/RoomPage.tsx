@@ -301,7 +301,18 @@ export function RoomPage() {
       // rides on the mark that is already here rather than a new one.
       warm: timeline.events.peek().length > 0,
     })
-    rooms.noteUnreadCounts(accountId, roomId, 0, 0)
+    // Clear the badge optimistically, since opening a room normally does read
+    // it and the receipt makes that true a moment later — but *only* when this
+    // page is not anchored to a specific event. With `?event=` the view opens
+    // parked in history (a search hit, a permalink), the server correctly
+    // refuses to advance the read receipt past what was displayed (ADR 0089),
+    // and zeroing here would claim messages below the anchor as read: the
+    // badge disappears for the session and returns on the next load, which is
+    // worse than never clearing. The timeline effect below picks the room up
+    // once the view actually reaches the live end.
+    if (highlighted === null) {
+      rooms.noteUnreadCounts(accountId, roomId, 0, 0)
+    }
     // The room list store also feeds this page's title; populate it on a
     // hard load straight into the room URL. `ensureLoaded` rather than a
     // length test: cached rows (ADR 0085 phase 2) make the list non-empty
@@ -408,8 +419,18 @@ export function RoomPage() {
 
   // Clear summary-derived room-list unread as soon as the room opens. The
   // timeline may not have loaded the newest summary event yet, especially on
-  // quick mobile switches.
+  // quick mobile switches — which is why this reads the *summary* rather than
+  // waiting for the timeline effect below.
+  //
+  // Anchored loads (`?event=`) are excluded for the same reason the optimistic
+  // badge clear is: this marker is cross-device (ADR 0048), and a sibling
+  // device turns it straight into a zeroed badge (`connectReadMarkers`), so
+  // jumping it to the summary's newest event would mark a room read
+  // *everywhere* from a view that never showed that event.
   useEffect(() => {
+    if (highlighted !== null) {
+      return
+    }
     const room = rooms.rooms.value.find(
       (candidate) =>
         candidate.account_id === accountId && candidate.room_id === roomId,
@@ -427,13 +448,39 @@ export function RoomPage() {
         room.last_activity_ts,
       )
     }
-  }, [accountId, roomId, rooms.rooms.value, deviceState, unreadThreadCutoff])
+  }, [
+    accountId,
+    roomId,
+    rooms.rooms.value,
+    deviceState,
+    unreadThreadCutoff,
+    highlighted,
+  ])
 
   // Advance this room's read marker to the newest event while it is open, so
   // sibling devices see it as read (M-W6 step 5c, ADR 0048). Hidden unread
   // thread replies are a hard stop: the user has opened the room, not that
   // thread panel, so a room marker must not silently consume them.
+  //
+  // An anchored view (`?event=`) and a slice that stops short of the present are
+  // both hard stops: the newest *loaded* event is then not the room's newest,
+  // and naming it would claim everything before it as read — including messages
+  // this view never showed.
+  //
+  // Both conditions are needed. `atEnd` alone is not enough: once a room summary
+  // is known, the head gets gap-filled, so a view parked at a five-day-old
+  // search hit can have the newest events loaded and `atEnd` true while the user
+  // is still looking at history. `highlighted` alone is not enough either — it
+  // says nothing about a plain scroll-back that has paged away from the live end.
+  //
+  // The cost is that an anchored view never marks the room read, even after
+  // scrolling to the bottom; reopening the room normally does. That matches how
+  // other Matrix clients treat permalinks, and erring the other way silently
+  // consumes unread messages.
   useEffect(() => {
+    if (highlighted !== null || !timeline.atEnd.value) {
+      return
+    }
     const events = timeline.events.value
     const last = events.findLast(
       (event) =>
@@ -454,6 +501,8 @@ export function RoomPage() {
     }
   }, [
     timeline.events.value,
+    timeline.atEnd.value,
+    highlighted,
     unreadThreadCutoff,
     accountId,
     roomId,

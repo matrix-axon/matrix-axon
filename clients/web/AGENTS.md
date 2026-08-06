@@ -150,6 +150,21 @@ before starting a milestone.
   `/:accountId/rooms/:roomId` + `?thread=<root_id>` + `?event=<event_id>` —
   search (M-W10) and the mobile clients build on it; do not change it.
   Deployment requires unknown-path → `index.html` rewrite.
+- **Marking a room read** (`RoomPage`): three effects claim read state — the
+  optimistic badge clear on mount, the summary-derived cross-device marker, and
+  the timeline-driven marker + receipt. **Every one of them is gated on the view
+  actually showing the room's newest events**, and the gates are not
+  interchangeable: the mount effects check `highlighted === null` (an `?event=`
+  landing is parked in history by definition), while the timeline effect needs
+  `highlighted === null` _and_ `timeline.atEnd` — once a room summary is known
+  the head gets gap-filled, so a view anchored five days back can have the
+  newest events loaded and `atEnd` true. Removing any of these gates makes the
+  client claim messages as read that it never displayed: the badge vanishes for
+  the session and returns on reload (the server correctly refuses to advance the
+  receipt, ADR 0089), and the marker is cross-device, so `connectReadMarkers`
+  zeroes the badge on your _other_ devices too. The accepted cost is that an
+  anchored view never marks the room read even after scrolling to the bottom;
+  reopening the room normally does.
 - **Live ephemerals** (`src/stores/ephemeral.ts`): `ephemeral.passthrough`
   frames are live-only overlays. `m.typing` is whole-list replace per room,
   self-expires, and clears on socket gaps. `m.receipt` is parsed from Matrix's
