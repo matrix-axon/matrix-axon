@@ -7,6 +7,7 @@
 //! about connection retry or caching; that is the manager's job. This is the
 //! concrete capability `axon-server` adapts onto the API layer's `MessageSender`
 //! port — `axon-api` never sees this type or any SDK type.
+
 //!
 //! Each method returns the resulting Matrix event id as a `String`. Errors are
 //! [`GatewayError`], chosen so the composition-root adapter can map them onto
@@ -834,6 +835,19 @@ impl SdkGateway {
     /// private fully-read marker to the same event in a single
     /// `POST /rooms/{roomId}/read_markers` call, so third-party Matrix clients
     /// reading standard receipt state see the room as read (ADR 0067).
+    ///
+    /// The caller's event id is sent **verbatim**. Choosing it is the client's
+    /// job, because only the client knows which events it displayed: a receipt is
+    /// interpreted in arrival order while every read surface sorts by
+    /// `origin_ts`, so the client names the greatest `EventDto::arrival_order`
+    /// among the events it actually showed (ADR 0089).
+    ///
+    /// An earlier version of this method resolved the target here, substituting
+    /// the last event of the SDK's event-cache chunk when it looked like the
+    /// client must have displayed it. That was unsound: a client pages by display
+    /// order, so an event stamped older than its page floor is not in the page at
+    /// all, and substituting it acknowledged messages that were never shown.
+    /// Visibility is not derivable server-side, so it is not inferred here.
     pub async fn send_read_receipt(
         &self,
         account_id: Uuid,

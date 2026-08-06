@@ -101,6 +101,20 @@ pub struct EventDto {
     /// message-like events and for state events with no prior state.
     #[schema(value_type = Option<Object>)]
     pub prev_content: Option<Value>,
+    /// Where this event falls in **arrival order** — the monotonic sequence in
+    /// which this account ingested events, independent of `origin_ts`.
+    ///
+    /// Every read surface sorts by `origin_ts` (display order), and the two
+    /// disagree whenever a homeserver delivers an event stamped earlier than
+    /// events already held — routinely, for a bridge backfilling a conversation
+    /// into a freshly created portal. A Matrix read receipt is interpreted in
+    /// arrival order, so a client marking a room read must name the event with
+    /// the greatest `arrival_order` **among the events it has actually
+    /// displayed**, not the last one in display order (ADR 0089).
+    ///
+    /// Comparable only within one room of one account, and only for ordering —
+    /// the values are not contiguous and carry no other meaning.
+    pub arrival_order: i64,
     /// `origin_server_ts` in milliseconds.
     pub origin_ts: i64,
     /// Matrix event type, e.g. `m.room.message`.
@@ -159,6 +173,7 @@ impl From<axon_core::LiveEvent> for EventDto {
             sender: e.sender,
             state_key: e.state_key,
             prev_content: e.prev_content,
+            arrival_order: e.arrival_order,
             origin_ts: e.origin_ts,
             r#type: e.event_type,
             content: e.content,
@@ -188,6 +203,7 @@ impl EventDto {
             sender: row.sender,
             state_key: row.state_key,
             prev_content: row.prev_content,
+            arrival_order: row.id,
             origin_ts: row.origin_ts,
             r#type: row.event_type,
             content: row.content,
@@ -601,11 +617,18 @@ pub struct SendResultDto {
 }
 
 /// Request body for marking a room read (`POST …/rooms/{room_id}/read`; ADR
-/// 0067). Sets both the public read receipt and the private fully-read marker
-/// to `event_id` in one homeserver call.
+/// 0067). Sets both the public read receipt and the private fully-read marker in
+/// one homeserver call.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ReadReceiptRequest {
-    /// The event id to mark as read.
+    /// The event to acknowledge, sent to the homeserver verbatim.
+    ///
+    /// A receipt is interpreted in arrival order, while every axon read surface
+    /// sorts by `origin_ts` — so this must be the event with the greatest
+    /// [`EventDto::arrival_order`] **among those the client has displayed**, which
+    /// is not generally the last event in display order (ADR 0089). Only the
+    /// client knows what it displayed, so only the client can choose this; axon
+    /// does not second-guess it.
     pub event_id: String,
 }
 

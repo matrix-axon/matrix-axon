@@ -745,21 +745,27 @@ async fn persist_event_core(
         decrypted_body_text: decrypted_body_text.as_deref(),
     };
 
-    if let Err(err) = ctx.store.upsert_event(&new_ev).await {
-        // Don't write sibling rows if the event row didn't land — they FK to it.
-        tracing::warn!(
-            account_id = %ctx.account_id,
-            event_id = %event_id,
-            error = %err,
-            "failed to persist event"
-        );
-        return;
-    }
+    // The returned id is the event's arrival order, which the live frame carries
+    // so a `/v1/ws` subscriber and a later timeline read agree on it (ADR 0089).
+    let arrival_order = match ctx.store.upsert_event(&new_ev).await {
+        Ok(arrival_order) => arrival_order,
+        Err(err) => {
+            // Don't write sibling rows if the event row didn't land — they FK to it.
+            tracing::warn!(
+                account_id = %ctx.account_id,
+                event_id = %event_id,
+                error = %err,
+                "failed to persist event"
+            );
+            return;
+        }
+    };
     tracing::debug!(
         account_id = %ctx.account_id,
         event_id = %event_id,
         room_id = %room_id,
         event_type = event_type.as_str(),
+        arrival_order,
         "persisted event"
     );
 
@@ -796,6 +802,7 @@ async fn persist_event_core(
             sender: ev.sender().as_str().to_owned(),
             state_key: state_key.clone(),
             prev_content,
+            arrival_order,
             origin_ts,
             event_type: event_type.clone(),
             content: new_ev.content.clone(),

@@ -3730,7 +3730,8 @@
         "tags": [
           "ephemeral"
         ],
-        "summary": "Mark a room read: sets both the public read receipt and the private\nfully-read marker to `event_id` in one homeserver call.",
+        "summary": "Mark a room read: sets both the public read receipt and the private\nfully-read marker in one homeserver call.",
+        "description": "`event_id` states how far the client has read in the order it displays\nevents (`origin_ts`). A Matrix receipt is interpreted in the homeserver's\nstream order instead, and the two disagree for backfilled events — so axon\nmay name a *later-arriving* event that sorts at or before `event_id`, never\none the client has not displayed (ADR 0089).",
         "operationId": "send_read_receipt",
         "parameters": [
           {
@@ -6924,6 +6925,7 @@
               "event_id",
               "room_id",
               "sender",
+              "arrival_order",
               "origin_ts",
               "type",
               "redacted",
@@ -6935,6 +6937,11 @@
                 "type": "string",
                 "format": "uuid",
                 "description": "Axon account this event belongs to."
+              },
+              "arrival_order": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Where this event falls in **arrival order** — the monotonic sequence in\nwhich this account ingested events, independent of `origin_ts`.\n\nEvery read surface sorts by `origin_ts` (display order), and the two\ndisagree whenever a homeserver delivers an event stamped earlier than\nevents already held — routinely, for a bridge backfilling a conversation\ninto a freshly created portal. A Matrix read receipt is interpreted in\narrival order, so a client marking a room read must name the event with\nthe greatest `arrival_order` **among the events it has actually\ndisplayed**, not the last one in display order (ADR 0089).\n\nComparable only within one room of one account, and only for ordering —\nthe values are not contiguous and carry no other meaning."
               },
               "body": {
                 "type": [
@@ -7711,6 +7718,7 @@
                 "event_id",
                 "room_id",
                 "sender",
+                "arrival_order",
                 "origin_ts",
                 "type",
                 "redacted",
@@ -7722,6 +7730,11 @@
                   "type": "string",
                   "format": "uuid",
                   "description": "Axon account this event belongs to."
+                },
+                "arrival_order": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Where this event falls in **arrival order** — the monotonic sequence in\nwhich this account ingested events, independent of `origin_ts`.\n\nEvery read surface sorts by `origin_ts` (display order), and the two\ndisagree whenever a homeserver delivers an event stamped earlier than\nevents already held — routinely, for a bridge backfilling a conversation\ninto a freshly created portal. A Matrix read receipt is interpreted in\narrival order, so a client marking a room read must name the event with\nthe greatest `arrival_order` **among the events it has actually\ndisplayed**, not the last one in display order (ADR 0089).\n\nComparable only within one room of one account, and only for ordering —\nthe values are not contiguous and carry no other meaning."
                 },
                 "body": {
                   "type": [
@@ -8203,7 +8216,7 @@
                 "reply_count": {
                   "type": "integer",
                   "format": "int64",
-                  "description": "Number of thread members, counting redacted ones for structure."
+                  "description": "Number of actual-message thread members: redacted members and any\n(illegitimate) state-event members are excluded."
                 },
                 "root_event_id": {
                   "type": "string",
@@ -8628,6 +8641,7 @@
           "event_id",
           "room_id",
           "sender",
+          "arrival_order",
           "origin_ts",
           "type",
           "redacted",
@@ -8639,6 +8653,11 @@
             "type": "string",
             "format": "uuid",
             "description": "Axon account this event belongs to."
+          },
+          "arrival_order": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Where this event falls in **arrival order** — the monotonic sequence in\nwhich this account ingested events, independent of `origin_ts`.\n\nEvery read surface sorts by `origin_ts` (display order), and the two\ndisagree whenever a homeserver delivers an event stamped earlier than\nevents already held — routinely, for a bridge backfilling a conversation\ninto a freshly created portal. A Matrix read receipt is interpreted in\narrival order, so a client marking a room read must name the event with\nthe greatest `arrival_order` **among the events it has actually\ndisplayed**, not the last one in display order (ADR 0089).\n\nComparable only within one room of one account, and only for ordering —\nthe values are not contiguous and carry no other meaning."
           },
           "body": {
             "type": [
@@ -9312,14 +9331,14 @@
       },
       "ReadReceiptRequest": {
         "type": "object",
-        "description": "Request body for marking a room read (`POST …/rooms/{room_id}/read`; ADR\n0067). Sets both the public read receipt and the private fully-read marker\nto `event_id` in one homeserver call.",
+        "description": "Request body for marking a room read (`POST …/rooms/{room_id}/read`; ADR\n0067). Sets both the public read receipt and the private fully-read marker in\none homeserver call.",
         "required": [
           "event_id"
         ],
         "properties": {
           "event_id": {
             "type": "string",
-            "description": "The event id to mark as read."
+            "description": "The event to acknowledge, sent to the homeserver verbatim.\n\nA receipt is interpreted in arrival order, while every axon read surface\nsorts by `origin_ts` — so this must be the event with the greatest\n[`EventDto::arrival_order`] **among those the client has displayed**, which\nis not generally the last event in display order (ADR 0089). Only the\nclient knows what it displayed, so only the client can choose this; axon\ndoes not second-guess it."
           }
         }
       },
@@ -9986,7 +10005,7 @@
           "reply_count": {
             "type": "integer",
             "format": "int64",
-            "description": "Number of thread members, counting redacted ones for structure."
+            "description": "Number of actual-message thread members: redacted members and any\n(illegitimate) state-event members are excluded."
           },
           "root_event_id": {
             "type": "string",
