@@ -1,4 +1,4 @@
-# ADR 0089 — Read receipts name a stream-ordered event, not the client's display-newest one
+# ADR 0089 — Read receipts name an event in arrival order, chosen by the client
 
 ## Context
 
@@ -51,90 +51,93 @@ derived from it was right. The receipt named the wrong event.
 
 ## Decision
 
-`SdkGateway::send_read_receipt` resolves the event to name, rather than passing
-the client's event id straight through. The client keeps stating what it means —
-"I have displayed everything up to here" — and axon translates that into stream
-order, in one place, for every client.
+Expose each event's **arrival order** on the wire and let the client name its own
+receipt target. `EventDto.arrival_order` (`i64`, always present, on timeline
+reads *and* `/v1/ws` frames alike) is the event's `events.id` — the monotonic
+sequence in which this account ingested events. A client marking a room read
+names the event with the greatest `arrival_order` **among the events it has
+displayed**, and `POST …/rooms/{room_id}/read` sends that id to the homeserver
+verbatim.
 
-### The candidate: the last event of the room's event-cache chunk
+Two consequences worth stating plainly, because both were violated by the first
+attempt at this:
 
-matrix-sdk's per-room event-cache chunk *is* the stream ordering — sync appends
-to its end, back-pagination prepends to its front — and it is the same structure
-`compute_unread_counts` anchors a receipt against. Naming its last event is
-therefore what actually drives the room's notification count to zero, which is
-the behavior this ADR exists to restore. The chunk is already subscribed in
-axon's process: `matrix-sdk-ui`'s room-list service calls
-`EventCache::subscribe()` when `SyncService` starts.
+- **`origin_ts` order is not receipt order.** Display order is
+  `(origin_ts, id)`; receipt order is arrival order. A client must therefore
+  keep its forward-only receipt floor on `arrival_order` too, or the message it
+  most needs to acknowledge — a backfilled one, stamped below the floor — can
+  never be named.
+- **Only the client knows what it displayed.** Nothing else does, so nothing else
+  may choose the target.
 
-Rejected alternatives for the candidate:
+### Rejected: resolving the target server-side
 
-- **`Room::latest_event()`** reads a `LatestEventValue` that is only computed
-  once something has called `Client::latest_events()`, which axon never does. It
-  returns `None` for every room here, so a fix built on it would have been
-  silently inert.
-- **The newest row in axon's own `events` table by `id`.** Ingest order tracks
-  stream order for live sync, but M10 backfill inserts *older* events with
-  *higher* row ids, so this would select a backfilled event and walk the receipt
-  backwards. Distinguishing the two ingest paths means a new column on `events`,
-  a migration, and a `NewEvent` field — and it would still fix nothing for rooms
-  whose rows predate the migration, including every room affected today.
+The first implementation of this ADR resolved the target inside
+`SdkGateway::send_read_receipt`: it took the last event of the room's matrix-sdk
+event-cache chunk (the stream ordering) and substituted it for the client's event
+whenever it had arrived later (`id`) *and* sorted at or before it in display
+order (`origin_ts`), the second condition standing in for "the client displayed
+it".
 
-### The guard: substitute only when both orderings agree
+That inference is unsound, as review caught before merge. A client pages by
+display order — the web client loads the newest 50 by `(origin_ts, id)` — so an
+event stamped older than the page floor is not in the page at all, however
+recently it arrived. In a room mixing backfilled history with current traffic
+(one live account has a bridged room with 2018-stamped events among 2026 ones),
+the chunk-latest event can sit hundreds of positions below the loaded page,
+satisfy both conditions, and be substituted — acknowledging messages the client
+never rendered, which is exactly the mid-history invariant the guard was
+introduced to protect.
 
-The candidate replaces the requested event only when
-`supersedes_requested_receipt` holds — a pure predicate over two
-`TimelineCursor`s (`Store::event_positions` supplies them):
+The `origin_ts`-only comparison was wrong on its own terms too: `(origin_ts, id)`
+is the display sort key, so an equal-timestamp event with a higher `id` sorts
+*after* the client's event in display order and therefore was not in its page
+either. Bridges stamp bursts within a single millisecond, so those ties are
+common rather than exotic.
 
-- `latest.id > requested.id` — the candidate reached *this account* after the
-  requested event, so naming it moves the read position forward, never back.
-- `latest.origin_ts <= requested.origin_ts` — the candidate sorts at or before
-  the requested event in display order, so the client had it on screen.
+The general lesson, and the reason the resolution moved to the client: **the
+server cannot prove what a client displayed.** Any server-side rule for that is a
+guess about page size, page count, and scroll state, and a wrong guess silently
+marks unread messages read. Making the client name the event removes the question
+instead of answering it badly — the client can only ever name an event it holds.
 
-The second condition is what keeps this honest. A client reading history —
-scrolled back, or landed mid-timeline from a search hit — passes an old event id,
-and the room's stream-latest event is one the user has *not* seen; the guard
-fails and the caller's event stands. Marking a room read past what a client
-displayed would be a worse bug than the one being fixed.
-
-Everything unresolvable falls back to the requested event, which is what this
-route sent unconditionally before: an empty or unhydrated chunk, an event id
-neither the chunk nor the store knows, or a store failure. This route is
-best-effort by contract (ADR 0067), and a fallback is never worse than the prior
-behavior.
+Passing the client's *window* to the server (an explicit oldest-displayed bound
+alongside the newest) was considered and rejected as the more complicated way to
+reach the same place: it keeps a resolver, an inference, and a fallback path on
+the server, for no capability the client doesn't already have once it can see
+arrival order.
 
 ### What this does not change
 
 - **`origin_ts` stays the display order.** Clients still sort and paginate by it,
   and a bridge-backfilled message still *renders* above the portal's creation
   notices. That is the other half of the same divergence, deliberately out of
-  scope, tracked in issue #133 — changing the display order touches the
-  pagination cursor, the room-list sort, the web scroll anchors (ADR 0076), and
-  the thread-unread cutoff.
-- **The cross-device read marker** (`read_markers` device state, ADR 0048) still
-  records the client's `origin_ts`-newest event. It is a display-order artifact —
-  where to draw the "new messages" line — not a Matrix receipt, and no unread
-  count derives from it.
+  scope, tracked in issue #133 — which this ADR's `arrival_order` field also
+  unblocks, since a display-order change needs exactly that key.
+- **The cross-device read marker** (`read_markers` device state, ADR 0048) stays
+  on `origin_ts`. It is a display-order artifact — where to draw the "new
+  messages" line — not a Matrix receipt, and no unread count derives from it.
 - **No new read-position model.** ADR 0070's rule holds: matrix-sdk stays
-  authoritative for unread semantics. This ADR corrects the input we hand it. In
-  particular, an earlier proposal to *clamp* the SDK's count against axon's own
-  event rows was rejected once the telemetry came back — the count was correct,
-  and clamping it would have hidden a genuinely unread message.
-- **No client change.** The fix lands server-side, so the TUI and the web client
-  are both corrected without touching either, and any future client inherits it.
+  authoritative for unread semantics. This ADR corrects the input we hand it. An
+  earlier proposal to *clamp* the SDK's count against axon's own rows was
+  rejected once telemetry came back — the count was correct, and clamping would
+  have hidden a genuinely unread message.
 
 ## Consequences
 
 - A bridge portal's backfilled conversation is acknowledged on the first read,
-  in axon and in every other Matrix client reading the same receipt. Existing
-  stuck rooms self-heal on the next read: the substitution depends on the
-  event-cache chunk and the `events` rows, both of which already exist for them.
-- One extra store round trip per `POST …/read` (a two-id lookup on the
-  `(account_id, event_id)` unique index), plus a clone of the room's in-memory
-  chunk. The route is debounced per room by clients (800 ms in the web client)
-  and fires on room open, not per event.
-- The receipt axon sends may differ from the event id the client asked for. The
-  substitution logs at debug with both ids; the request body's schema documents
-  it as part of the route's contract.
-- A client whose display order *is* stream order (a future client that sorts on
-  an arrival key) is unaffected: its requested event is already the chunk's last
-  event, and the substitution short-circuits.
+  in axon and in every other Matrix client reading the same receipt — once a
+  client sends the right event id. The server change alone fixes nothing; the
+  client work is the other half and ships alongside it.
+- `Store::upsert_event` now returns the row's arrival order, so the live-event
+  path can carry it. The insert already used `INSERT … RETURNING` to feed the
+  search outbox atomically; it now also selects that id out. A duplicate
+  delivery, which returns no row, costs one extra indexed read to report the
+  existing position rather than none.
+- Every client that marks rooms read must adopt `arrival_order`. Until it does,
+  its receipts keep landing on the display-newest event, i.e. today's behavior —
+  wrong for bridged rooms, but no worse than before.
+- The server no longer reasons about read positions at all: `POST …/read` is a
+  pass-through again. The route's failure logging (added alongside this ADR)
+  stays, because a receipt that never lands is otherwise invisible and presents
+  as a room that will not stop showing unread.
