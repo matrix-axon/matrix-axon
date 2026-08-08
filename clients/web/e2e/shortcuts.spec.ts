@@ -15,6 +15,7 @@ const roomStepShortcut = (
     projectName,
     `Control+${direction}`,
     `Meta+Alt+${direction}`,
+  )
 
 /**
  * Keyboard shortcuts (ADR 0078). These need a real browser: the chords carry
