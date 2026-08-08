@@ -12,6 +12,10 @@ import {
   width,
 } from './helpers'
 
+// Layout boxes are fractional CSS pixels; engines round their shared edge in
+// opposite directions. One rendered pixel is still visually unclipped.
+const LAYOUT_EDGE_TOLERANCE_PX = 1
+
 /**
  * The two-pane layout (ADR 0062). Everything here is decided by CSS, so it can
  * only be proven in a real browser: computed `display`, the widths panes
@@ -947,7 +951,9 @@ test('narrow: delayed thread badges preserve the bottom-pinned newest message', 
     }
   }, newest)
 
-  expect(geometry.rowBottom).toBeLessThanOrEqual(geometry.timelineBottom)
+  expect(geometry.rowBottom).toBeLessThanOrEqual(
+    geometry.timelineBottom + LAYOUT_EDGE_TOLERANCE_PX,
+  )
   expect(geometry.distanceFromBottom).toBeLessThanOrEqual(2)
 })
 
@@ -1191,7 +1197,9 @@ test('narrow: sparse room messages remain visible when composing', async ({
   })
 
   expect(geometry.rowTop).toBeGreaterThanOrEqual(geometry.timelineTop)
-  expect(geometry.rowBottom).toBeLessThanOrEqual(geometry.timelineBottom)
+  expect(geometry.rowBottom).toBeLessThanOrEqual(
+    geometry.timelineBottom + LAYOUT_EDGE_TOLERANCE_PX,
+  )
   expect(geometry.rowToComposer).toBeLessThan(80)
 })
 
