@@ -1,5 +1,12 @@
 import { expect, test } from '@playwright/test'
-import { active, LAST_ROOM_URL, openRoom, ROOM_URL, signIn } from './helpers'
+import {
+  active,
+  LAST_ROOM_URL,
+  openRoom,
+  ROOM_URL,
+  shortcutForProject,
+  signIn,
+} from './helpers'
 
 /**
  * Keyboard shortcuts (ADR 0078). These need a real browser: the chords carry
@@ -297,7 +304,7 @@ test('ArrowUp on an empty composer edits your last message', async ({
   await composer.fill('my last words')
   await composer.press('Enter')
   await expect(
-    page.locator('.event-row .body-text', { hasText: 'my last words' }),
+    page.locator('.event-row .body-text', { hasText: 'my last words' }).last(),
   ).toBeVisible()
   await expect(composer).toHaveValue('')
 
@@ -366,21 +373,39 @@ test('the ? button opens the help without touching the keyboard', async ({
   await expect(page.getByRole('dialog', { name: 'Help' })).toBeVisible()
 })
 
-test('the room controls carry their chords as tooltips', async ({ page }) => {
+test('the room controls carry their chords as tooltips', async ({
+  page,
+}, testInfo) => {
   await openRoom(page)
+
+  const filterShortcut = shortcutForProject(
+    testInfo.project.name,
+    'Ctrl-K',
+    '⌘-K',
+  )
+  const sortShortcut = shortcutForProject(
+    testInfo.project.name,
+    'Ctrl-Shift-S',
+    '⌘-Shift-S',
+  )
+  const roomsShortcut = shortcutForProject(
+    testInfo.project.name,
+    'Ctrl-B',
+    '⌘-B',
+  )
 
   await expect(page.getByLabel('Filter by name')).toHaveAttribute(
     'title',
-    'Filter rooms by name (Ctrl-K)',
+    `Filter rooms by name (${filterShortcut})`,
   )
   await expect(page.getByLabel('Sort')).toHaveAttribute(
     'title',
-    'Cycle sort order (Ctrl-Shift-S)',
+    `Cycle sort order (${sortShortcut})`,
   )
   await expect(
     page.getByRole('button', { name: 'Hide rooms' }),
   ).toHaveAttribute(
     'title',
-    'Hide rooms (Ctrl-B); drag or use arrow keys to resize',
+    `Hide rooms (${roomsShortcut}); drag or use arrow keys to resize`,
   )
 })

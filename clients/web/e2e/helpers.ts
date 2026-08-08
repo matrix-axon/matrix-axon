@@ -20,6 +20,15 @@ export async function signIn(page: Page): Promise<void> {
   )
 }
 
+/** Select the documented chord for the platform modeled by a Playwright project. */
+export function shortcutForProject(
+  projectName: string,
+  windowsOrLinux: string,
+  apple: string,
+): string {
+  return projectName.startsWith('webkit') ? apple : windowsOrLinux
+}
+
 /**
  * Reload the document from *inside* the page, not through `page.reload()`.
  *
