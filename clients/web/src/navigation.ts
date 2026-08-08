@@ -1,34 +1,12 @@
-type LegacyNavigation = {
-  type: number
-  TYPE_RELOAD: number
-  TYPE_BACK_FORWARD: number
-}
-
 type NavigationTimingEntry = {
   type?: string
 }
 
 export type NavigationPerformance = {
   getEntriesByType(type: string): PerformanceEntryList | NavigationTimingEntry[]
-  navigation?: LegacyNavigation
 }
 
-function isFirefox(userAgent: string): boolean {
-  return /Firefox\//.test(userAgent)
-}
-
-function isLegacyReloadOrRestore(performance: NavigationPerformance): boolean {
-  try {
-    const legacy = performance.navigation
-    return (
-      legacy !== undefined &&
-      (legacy.type === legacy.TYPE_RELOAD ||
-        legacy.type === legacy.TYPE_BACK_FORWARD)
-    )
-  } catch {
-    return false
-  }
-}
+type ThreadLoadStorage = Pick<Storage, 'getItem' | 'setItem'>
 
 /** Returns the Navigation Timing Level 2 entry type when the engine supports it. */
 export function navigationTimingType(
@@ -45,23 +23,27 @@ export function navigationTimingType(
 }
 
 /**
- * Whether this document was reloaded or restored from browser history.
+ * Whether this tab has already loaded a thread deep link for this room.
  *
- * Firefox reports the scripted reload exercised by the browser regression test
- * as `navigate` in Navigation Timing Level 2. Its legacy navigation entry is a
- * compatibility signal for that Firefox-only discrepancy; the modern entry
- * remains authoritative in every other engine.
+ * Browser navigation timing does not reliably distinguish first loads from
+ * reloads or history restoration across engines. A tab-scoped marker gives all
+ * browsers the same contract: preserve the first deep link, then clear its
+ * transient thread view on a later document load (including Back/Forward).
  */
-export function isReloadOrRestoreNavigation(
-  performance: NavigationPerformance = window.performance,
-  userAgent: string = navigator.userAgent,
+export function shouldScrubRestoredThread(
+  threadId: string,
+  pathname: string = window.location.pathname,
+  storage: ThreadLoadStorage = window.sessionStorage,
 ): boolean {
-  const navigationType = navigationTimingType(performance)
-  if (navigationType === 'reload' || navigationType === 'back_forward') {
-    return true
+  try {
+    const key = `axon.thread-document-load:${pathname}\0${threadId}`
+    if (storage.getItem(key) === '1') {
+      return true
+    }
+    storage.setItem(key, '1')
+  } catch {
+    // Private-mode storage failures keep the deep link rather than discarding
+    // an intentional navigation without a reliable restoration signal.
   }
-
-  // A missing/throwing modern API must not broaden the legacy fallback to
-  // engines whose stale value could erase an intentional thread deep link.
-  return isFirefox(userAgent) && isLegacyReloadOrRestore(performance)
+  return false
 }

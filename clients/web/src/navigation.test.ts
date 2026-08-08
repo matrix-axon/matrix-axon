@@ -1,73 +1,65 @@
 import { describe, expect, it } from 'vitest'
-import { isReloadOrRestoreNavigation } from './navigation'
+import { navigationTimingType, shouldScrubRestoredThread } from './navigation'
 
-function navigationPerformance(
-  modern: PerformanceNavigationTiming['type'] | undefined,
-  legacyType: number,
-  options: { throws?: boolean; legacyThrows?: boolean } = {},
-) {
+function navigationPerformance(type?: PerformanceNavigationTiming['type']) {
   return {
-    getEntriesByType: () => {
-      if (options.throws) {
-        throw new Error('Navigation Timing unavailable')
-      }
-      return modern === undefined ? [] : [{ type: modern }]
-    },
-    get navigation() {
-      if (options.legacyThrows) {
-        throw new Error('Legacy Navigation Timing unavailable')
-      }
-      return { type: legacyType, TYPE_RELOAD: 1, TYPE_BACK_FORWARD: 2 }
-    },
+    getEntriesByType: () => (type === undefined ? [] : [{ type }]),
   }
 }
 
-describe('isReloadOrRestoreNavigation', () => {
-  it('uses the modern result for non-Firefox navigations', () => {
+function memoryStorage() {
+  const entries = new Map<string, string>()
+  return {
+    getItem: (key: string) => entries.get(key) ?? null,
+    setItem: (key: string, value: string) => entries.set(key, value),
+  }
+}
+
+describe('navigationTimingType', () => {
+  it('reads a Navigation Timing Level 2 result', () => {
+    expect(navigationTimingType(navigationPerformance('reload'))).toBe('reload')
+  })
+
+  it('degrades when Navigation Timing is unavailable', () => {
     expect(
-      isReloadOrRestoreNavigation(
-        navigationPerformance('navigate', 1),
-        'Chrome',
+      navigationTimingType({
+        getEntriesByType: () => {
+          throw new Error('Navigation Timing unavailable')
+        },
+      }),
+    ).toBeUndefined()
+  })
+})
+
+describe('shouldScrubRestoredThread', () => {
+  it('preserves the first deep link in a tab', () => {
+    expect(
+      shouldScrubRestoredThread(
+        '$root',
+        '/account/rooms/room',
+        memoryStorage(),
       ),
     ).toBe(false)
   })
 
-  it('uses Firefox legacy navigation for a scripted reload reported as navigate', () => {
+  it('scrubs a reload or history restoration of the same deep link', () => {
+    const storage = memoryStorage()
     expect(
-      isReloadOrRestoreNavigation(
-        navigationPerformance('navigate', 1),
-        'Mozilla/5.0 Firefox/149.0',
-      ),
+      shouldScrubRestoredThread('$root', '/account/rooms/room', storage),
+    ).toBe(false)
+    expect(
+      shouldScrubRestoredThread('$root', '/account/rooms/room', storage),
     ).toBe(true)
   })
 
-  it('preserves a Firefox deep link when both navigation signals identify a genuine navigation', () => {
+  it('preserves a deep link when session storage is unavailable', () => {
     expect(
-      isReloadOrRestoreNavigation(
-        navigationPerformance('navigate', 0),
-        'Mozilla/5.0 Firefox/149.0',
-      ),
-    ).toBe(false)
-  })
-
-  it('does not trust a legacy value outside Firefox when Navigation Timing is unavailable', () => {
-    expect(
-      isReloadOrRestoreNavigation(
-        navigationPerformance(undefined, 2, { throws: true }),
-        'Chrome',
-      ),
-    ).toBe(false)
-  })
-
-  it('degrades gracefully when both navigation APIs are unavailable', () => {
-    expect(
-      isReloadOrRestoreNavigation(
-        navigationPerformance(undefined, 2, {
-          throws: true,
-          legacyThrows: true,
-        }),
-        'Mozilla/5.0 Firefox/149.0',
-      ),
+      shouldScrubRestoredThread('$root', '/account/rooms/room', {
+        getItem: () => {
+          throw new Error('Storage unavailable')
+        },
+        setItem: () => undefined,
+      }),
     ).toBe(false)
   })
 })

@@ -23,7 +23,7 @@ import {
   resolveMatrixToRoomLink,
   type MatrixRoomReference,
 } from './matrix-to'
-import { isReloadOrRestoreNavigation } from './navigation'
+import { shouldScrubRestoredThread } from './navigation'
 import {
   currentRoomFromPath,
   serializeSearchTokens,
@@ -680,7 +680,10 @@ function ShellChrome() {
       return
     }
     startupThreadScrubbed.current = true
-    if (typeof query.thread !== 'string' || !isReloadOrRestoreNavigation()) {
+    if (
+      typeof query.thread !== 'string' ||
+      !shouldScrubRestoredThread(query.thread)
+    ) {
       return
     }
     const params = new URLSearchParams(window.location.search)
