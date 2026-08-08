@@ -4,16 +4,21 @@ import { isReloadOrRestoreNavigation } from './navigation'
 function navigationPerformance(
   modern: PerformanceNavigationTiming['type'] | undefined,
   legacyType: number,
-  throws = false,
+  options: { throws?: boolean; legacyThrows?: boolean } = {},
 ) {
   return {
     getEntriesByType: () => {
-      if (throws) {
+      if (options.throws) {
         throw new Error('Navigation Timing unavailable')
       }
       return modern === undefined ? [] : [{ type: modern }]
     },
-    navigation: { type: legacyType, TYPE_RELOAD: 1, TYPE_BACK_FORWARD: 2 },
+    get navigation() {
+      if (options.legacyThrows) {
+        throw new Error('Legacy Navigation Timing unavailable')
+      }
+      return { type: legacyType, TYPE_RELOAD: 1, TYPE_BACK_FORWARD: 2 }
+    },
   }
 }
 
@@ -36,12 +41,33 @@ describe('isReloadOrRestoreNavigation', () => {
     ).toBe(true)
   })
 
-  it('uses the legacy entry when Navigation Timing is unavailable', () => {
+  it('preserves a Firefox deep link when both navigation signals identify a genuine navigation', () => {
     expect(
       isReloadOrRestoreNavigation(
-        navigationPerformance(undefined, 2, true),
+        navigationPerformance('navigate', 0),
+        'Mozilla/5.0 Firefox/149.0',
+      ),
+    ).toBe(false)
+  })
+
+  it('does not trust a legacy value outside Firefox when Navigation Timing is unavailable', () => {
+    expect(
+      isReloadOrRestoreNavigation(
+        navigationPerformance(undefined, 2, { throws: true }),
         'Chrome',
       ),
-    ).toBe(true)
+    ).toBe(false)
+  })
+
+  it('degrades gracefully when both navigation APIs are unavailable', () => {
+    expect(
+      isReloadOrRestoreNavigation(
+        navigationPerformance(undefined, 2, {
+          throws: true,
+          legacyThrows: true,
+        }),
+        'Mozilla/5.0 Firefox/149.0',
+      ),
+    ).toBe(false)
   })
 })
