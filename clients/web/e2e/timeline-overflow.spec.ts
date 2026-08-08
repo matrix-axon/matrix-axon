@@ -68,7 +68,9 @@ async function openRoomWith(
     route.fulfill({ json: { data: { events: EVENTS, next_cursor: null } } }),
   )
   await page.goto(`/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}`)
-  await expect(page.getByRole('status')).toHaveText('Live')
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
 }
 
 const geometry = (page: import('@playwright/test').Page) =>

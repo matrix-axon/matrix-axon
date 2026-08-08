@@ -54,7 +54,9 @@ test('wide: sidebar beside the room-entry pane and timeline', async ({
   await expect(page.getByRole('heading', { name: 'Add a Room' })).toBeVisible()
 
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status')).toHaveText('Live')
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
   await expect(page.locator('.shell-body')).toHaveClass(/mode-room/)
   expect(await shown(page, '.sidebar')).toBe('visible')
   expect(await shown(page, '.timeline')).toBe('visible')
@@ -751,7 +753,9 @@ test('topbar stays pinned when the composer is focused', async ({ page }) => {
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status')).toHaveText('Live')
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
 
   const composer = page.getByRole('textbox', { name: /^Message/ })
   const emptyComposer = await composer.evaluate((el) => {
@@ -877,7 +881,9 @@ test('standalone iOS focus inset leaves only a small composer gap', async ({
     }
   })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status')).toHaveText('Live')
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
   await expect(page.locator('html')).toHaveCSS(
     '--app-standalone-composer-bottom-padding',
     '4px',
@@ -961,7 +967,9 @@ test('narrow: delayed thread badges preserve the bottom-pinned newest message', 
   })
 
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status')).toHaveText('Live')
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
   await expect(page.getByRole('button', { name: /3 replies/ })).toBeVisible()
 
   const geometry = await page.evaluate((body) => {
@@ -991,7 +999,9 @@ test('narrow: event timestamps do not wrap after mobile chrome settles', async (
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status')).toHaveText('Live')
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
 
   await expect(page.locator('.event-head time').first()).toBeVisible()
   await page.getByRole('textbox', { name: /^Message/ }).fill('typing')
@@ -1023,7 +1033,9 @@ test('narrow: message actions fit as icon buttons', async ({ page }) => {
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status')).toHaveText('Live')
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
 
   const body = `mobile action fit ${Date.now()}`
   await page.getByRole('textbox', { name: /^Message/ }).fill(body)
@@ -1080,7 +1092,9 @@ test('narrow: thread badge opens on the first tap', async ({ page }) => {
   )
 
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status')).toHaveText('Live')
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
 
   const badge = page.getByRole('button', { name: /2 replies/ })
   await expect(badge).toBeVisible()
@@ -1169,7 +1183,9 @@ test('narrow: unread-thread drawer lists hidden thread replies', async ({
   })
 
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status')).toHaveText('Live')
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
   const button = page.getByRole('button', { name: 'Unread threads, 1' })
   await expect(button).toBeVisible()
   await button.click()
@@ -1200,7 +1216,9 @@ test('narrow: sparse room messages remain visible when composing', async ({
   )
 
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status')).toHaveText('Live')
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
   await page.getByRole('textbox', { name: /^Message/ }).focus()
   await page.evaluate(() => {
     document.documentElement.style.setProperty('--app-viewport-height', '520px')
@@ -1308,7 +1326,9 @@ for (const viewport of [320, 640, 880, 1024, 1400, 1920]) {
     await signIn(page)
     await page.setViewportSize({ width: viewport, height: 900 })
     await page.goto(ROOM_URL)
-    await expect(page.getByRole('status')).toHaveText('Live')
+    await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+      'Live',
+    )
 
     const overflow = await page.evaluate(() => {
       const el = document.documentElement

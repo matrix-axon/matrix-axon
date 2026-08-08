@@ -152,7 +152,9 @@ test('a deep link into a gallery keeps it grouped and centres the cell', async (
   await signIn(page)
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.goto(`${ROOM_URL}?event=%24gallery-2%3Ahs`)
-  await expect(page.getByRole('status').first()).toHaveText('Live')
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
 
   // Still one gallery, not split around the target.
   await expect(page.locator('.gallery-row')).toHaveCount(1)

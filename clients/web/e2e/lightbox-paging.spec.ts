@@ -202,7 +202,9 @@ test.describe('message actions on a phone', () => {
     // phone-layout test must keep the viewport declared above.
     await signIn(page)
     await page.goto(ROOM_URL)
-    await expect(page.getByRole('status')).toHaveText('Live')
+    await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+      'Live',
+    )
     const ids = await imageRowIds(page)
     await openImage(page, ids[0])
 
@@ -265,7 +267,9 @@ test.describe('message actions on a phone', () => {
     try {
       await signIn(page)
       await page.goto(ROOM_URL)
-      await expect(page.getByRole('status')).toHaveText('Live')
+      await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+        'Live',
+      )
       await openImage(page, '$seed-image-own:hs')
 
       const toolbar = page.locator('.lightbox-toolbar')

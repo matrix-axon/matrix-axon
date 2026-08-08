@@ -319,7 +319,9 @@ test('Escape closes the thread panel, then focuses the composer', async ({
   await signIn(page)
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.goto(`${ROOM_URL}?thread=%24root`)
-  await expect(page.getByRole('status')).toHaveText('Live')
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
   await expect(page.locator('.thread-panel')).toBeVisible()
 
   await page.keyboard.press('Escape')
