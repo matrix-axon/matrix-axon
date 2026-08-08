@@ -4,8 +4,12 @@ type LegacyNavigation = {
   TYPE_BACK_FORWARD: number
 }
 
+type NavigationTimingEntry = {
+  type?: string
+}
+
 export type NavigationPerformance = {
-  getEntriesByType(type: string): Array<{ type?: string }>
+  getEntriesByType(type: string): PerformanceEntryList | NavigationTimingEntry[]
   navigation?: LegacyNavigation
 }
 
@@ -31,7 +35,10 @@ export function navigationTimingType(
   performance: Pick<NavigationPerformance, 'getEntriesByType'>,
 ): string | undefined {
   try {
-    return performance.getEntriesByType('navigation')[0]?.type
+    return (
+      performance.getEntriesByType('navigation')[0] as
+        NavigationTimingEntry | undefined
+    )?.type
   } catch {
     return undefined
   }
@@ -46,7 +53,7 @@ export function navigationTimingType(
  * remains authoritative in every other engine.
  */
 export function isReloadOrRestoreNavigation(
-  performance: NavigationPerformance = window.performance as unknown as NavigationPerformance,
+  performance: NavigationPerformance = window.performance,
   userAgent: string = navigator.userAgent,
 ): boolean {
   const navigationType = navigationTimingType(performance)
