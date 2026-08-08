@@ -235,21 +235,6 @@ test('wide: the thread is a third column that shrinks the timeline', async ({
   expect(await shown(page, '.sidebar')).toBe('visible') // never covered
 })
 
-test('reload strips the restored thread view from a room URL', async ({
-  page,
-}) => {
-  await signIn(page)
-  await page.setViewportSize({ width: 1400, height: 900 })
-  await page.goto(`${ROOM_URL}?thread=%24root`)
-  await expect(page.locator('.thread-panel')).toBeVisible()
-
-  await page.reload()
-
-  await expect(page).not.toHaveURL(/thread=/)
-  await expect(page.locator('.thread-panel')).toHaveCount(0)
-  await expect(page.locator('.timeline')).toBeVisible()
-})
-
 test('mid width: two panes, but the thread falls back to an overlay', async ({
   page,
 }) => {

@@ -139,6 +139,21 @@ test('a backgrounded tab reloads itself on return', async ({ page }) => {
     .toBe(false)
 })
 
+test('an automatic reload closes the restored thread view', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.goto(`${ROOM_URL}?thread=%24root`)
+  await expect(page.locator('.thread-panel')).toBeVisible()
+
+  await stageDeploy(page, 'build-from-e2e')
+  await returnAfterAway(page, 90_000)
+
+  await expect(page).not.toHaveURL(/thread=/)
+  await expect(page.locator('.thread-panel')).toHaveCount(0)
+  await expect(page.locator('.timeline')).toBeVisible()
+})
+
 // The loop guard. With the origin permanently claiming a build the tab can
 // never become, an unguarded implementation reloads forever.
 test('a manifest that never matches reloads exactly once', async ({ page }) => {

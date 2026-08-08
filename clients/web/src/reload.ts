@@ -34,6 +34,7 @@
 
 /** sessionStorage, not localStorage: the block is per-tab and per-session. */
 const GUARD_KEY = 'axon:update-reload'
+const AUTOMATIC_RELOAD_KEY = 'axon:automatic-reload'
 
 /**
  * Ceiling on automatic reloads per window, across all builds and targets.
@@ -164,6 +165,39 @@ function write(storage: Storage | null, state: GuardState): boolean {
 }
 
 /**
+ * Records that this document is about to reload itself. The next boot consumes
+ * this one-shot marker before routing, so UI state which only made sense in the
+ * prior document can be reset without guessing from browser-specific timing.
+ */
+function markAutomaticReload(storage: Storage | null): void {
+  try {
+    storage?.setItem(AUTOMATIC_RELOAD_KEY, '1')
+  } catch {
+    // A failed marker must not turn a successful, loop-bounded reload into a
+    // failed update. The next document simply keeps its current route.
+  }
+}
+
+/**
+ * Returns whether this document follows an Axon-controlled automatic reload.
+ * Always consume the marker: a route without a thread must not leave it to
+ * affect a later navigation in the same tab.
+ */
+export function consumeAutomaticReload(
+  storage: Storage | null = browserStorage(),
+): boolean {
+  try {
+    if (storage?.getItem(AUTOMATIC_RELOAD_KEY) !== '1') {
+      return false
+    }
+    storage.removeItem(AUTOMATIC_RELOAD_KEY)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * Settle the previous boot's guard. Call once at startup, before anything can
  * ask to reload: if we came back on a different build than the one those
  * attempts were made from, they worked, so the *pair* record is spent.
@@ -247,6 +281,7 @@ export function reloadOnce(
     `reloading to pick up a new build: ${currentVersion} → ${target} ` +
       `(attempt ${next.spent}/${MAX_ATTEMPTS} this window)`,
   )
+  markAutomaticReload(env.storage)
   env.reload()
   return true
 }

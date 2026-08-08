@@ -6,11 +6,9 @@ export type NavigationPerformance = {
   getEntriesByType(type: string): PerformanceEntryList | NavigationTimingEntry[]
 }
 
-type ThreadLoadStorage = Pick<Storage, 'getItem' | 'setItem'>
-
 /** Returns the Navigation Timing Level 2 entry type when the engine supports it. */
 export function navigationTimingType(
-  performance: Pick<NavigationPerformance, 'getEntriesByType'>,
+  performance: NavigationPerformance,
 ): string | undefined {
   try {
     return (
@@ -23,27 +21,19 @@ export function navigationTimingType(
 }
 
 /**
- * Whether this tab has already loaded a thread deep link for this room.
- *
- * Browser navigation timing does not reliably distinguish first loads from
- * reloads or history restoration across engines. A tab-scoped marker gives all
- * browsers the same contract: preserve the first deep link, then clear its
- * transient thread view on a later document load (including Back/Forward).
+ * The document's navigation classification, sampled once while it is stable at
+ * boot. Startup routing and performance telemetry intentionally share this
+ * value so their view of the document cannot drift.
  */
-export function shouldScrubRestoredThread(
-  threadId: string,
-  pathname: string = window.location.pathname,
-  storage: ThreadLoadStorage = window.sessionStorage,
+export const bootNavigationTimingType = navigationTimingType(performance)
+
+/**
+ * Whether standard navigation timing identifies a reload or history restore.
+ * Axon's automatic reload is tracked separately in reload.ts because Firefox
+ * can report that scripted reload as `navigate`.
+ */
+export function isReloadOrRestoreNavigation(
+  navigationType: string | undefined = bootNavigationTimingType,
 ): boolean {
-  try {
-    const key = `axon.thread-document-load:${pathname}\0${threadId}`
-    if (storage.getItem(key) === '1') {
-      return true
-    }
-    storage.setItem(key, '1')
-  } catch {
-    // Private-mode storage failures keep the deep link rather than discarding
-    // an intentional navigation without a reliable restoration signal.
-  }
-  return false
+  return navigationType === 'reload' || navigationType === 'back_forward'
 }

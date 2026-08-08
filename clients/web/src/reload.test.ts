@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   BUDGET_WINDOW_MS,
   CHUNK_TARGET,
+  consumeAutomaticReload,
   initReloadGuard,
   MAX_ATTEMPTS,
   reloadNow,
@@ -208,6 +209,39 @@ describe('reloadOnce', () => {
     const e = env(storage)
     expect(reloadOnce('build-a', 'build-b', e)).toBe(false)
     expect(e.reloads()).toBe(0)
+  })
+})
+
+describe('automatic reload marker', () => {
+  it('marks an automatic reload and consumes the marker exactly once', () => {
+    const storage = memoryStorage()
+    expect(reloadOnce('build-a', 'build-b', env(storage))).toBe(true)
+
+    expect(consumeAutomaticReload(storage)).toBe(true)
+    expect(consumeAutomaticReload(storage)).toBe(false)
+  })
+
+  it('does not mark a user-requested reload', () => {
+    const storage = memoryStorage()
+    reloadNow(env(storage))
+
+    expect(consumeAutomaticReload(storage)).toBe(false)
+  })
+
+  it('keeps the automatic reload available when its marker cannot be written', () => {
+    const storage = memoryStorage()
+    const setItem = storage.setItem.bind(storage)
+    vi.spyOn(storage, 'setItem').mockImplementation((key, value) => {
+      if (key === 'axon:automatic-reload') {
+        throw new DOMException('QuotaExceededError')
+      }
+      setItem(key, value)
+    })
+    const e = env(storage)
+
+    expect(reloadOnce('build-a', 'build-b', e)).toBe(true)
+    expect(e.reloads()).toBe(1)
+    expect(consumeAutomaticReload(storage)).toBe(false)
   })
 })
 

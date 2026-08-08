@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { navigationTimingType, shouldScrubRestoredThread } from './navigation'
+import { isReloadOrRestoreNavigation, navigationTimingType } from './navigation'
 
 function navigationPerformance(type?: PerformanceNavigationTiming['type']) {
   return {
@@ -7,17 +7,13 @@ function navigationPerformance(type?: PerformanceNavigationTiming['type']) {
   }
 }
 
-function memoryStorage() {
-  const entries = new Map<string, string>()
-  return {
-    getItem: (key: string) => entries.get(key) ?? null,
-    setItem: (key: string, value: string) => entries.set(key, value),
-  }
-}
-
 describe('navigationTimingType', () => {
   it('reads a Navigation Timing Level 2 result', () => {
     expect(navigationTimingType(navigationPerformance('reload'))).toBe('reload')
+  })
+
+  it('returns undefined when Navigation Timing has no entry', () => {
+    expect(navigationTimingType(navigationPerformance())).toBeUndefined()
   })
 
   it('degrades when Navigation Timing is unavailable', () => {
@@ -31,35 +27,13 @@ describe('navigationTimingType', () => {
   })
 })
 
-describe('shouldScrubRestoredThread', () => {
-  it('preserves the first deep link in a tab', () => {
-    expect(
-      shouldScrubRestoredThread(
-        '$root',
-        '/account/rooms/room',
-        memoryStorage(),
-      ),
-    ).toBe(false)
-  })
-
-  it('scrubs a reload or history restoration of the same deep link', () => {
-    const storage = memoryStorage()
-    expect(
-      shouldScrubRestoredThread('$root', '/account/rooms/room', storage),
-    ).toBe(false)
-    expect(
-      shouldScrubRestoredThread('$root', '/account/rooms/room', storage),
-    ).toBe(true)
-  })
-
-  it('preserves a deep link when session storage is unavailable', () => {
-    expect(
-      shouldScrubRestoredThread('$root', '/account/rooms/room', {
-        getItem: () => {
-          throw new Error('Storage unavailable')
-        },
-        setItem: () => undefined,
-      }),
-    ).toBe(false)
+describe('isReloadOrRestoreNavigation', () => {
+  it.each([
+    ['navigate', false],
+    ['reload', true],
+    ['back_forward', true],
+    [undefined, false],
+  ] as const)('classifies %s navigation as %s', (type, expected) => {
+    expect(isReloadOrRestoreNavigation(type)).toBe(expected)
   })
 })

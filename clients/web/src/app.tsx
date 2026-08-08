@@ -23,7 +23,8 @@ import {
   resolveMatrixToRoomLink,
   type MatrixRoomReference,
 } from './matrix-to'
-import { shouldScrubRestoredThread } from './navigation'
+import { isReloadOrRestoreNavigation } from './navigation'
+import { consumeAutomaticReload } from './reload'
 import {
   currentRoomFromPath,
   serializeSearchTokens,
@@ -680,9 +681,10 @@ function ShellChrome() {
       return
     }
     startupThreadScrubbed.current = true
+    const automaticReload = consumeAutomaticReload()
     if (
       typeof query.thread !== 'string' ||
-      !shouldScrubRestoredThread(query.thread)
+      !(automaticReload || isReloadOrRestoreNavigation())
     ) {
       return
     }
