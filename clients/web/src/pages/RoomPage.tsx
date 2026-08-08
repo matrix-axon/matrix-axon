@@ -63,7 +63,7 @@ import {
 import { resolveEmojiShortcode, type EmojiEntry } from '../emoji'
 import { SINGLE_PANE_QUERY } from '../layout'
 import { perfMark, perfMarkFrames } from '../perf'
-import { withSearchParam } from '../search-tokens'
+import { withSearchParam, withoutQueryParam } from '../search-tokens'
 import { useServices } from '../services'
 import { useShellActions } from '../shell-actions'
 import { SHOW_HELP_EVENT, useShortcuts } from '../shortcuts'
@@ -361,29 +361,51 @@ export function RoomPage() {
   // visit and every claim below is suppressed — no badge clear, no marker, no
   // receipt — even though the user is reading the newest messages (PR review).
   //
-  // "Cannot satisfy" is judged on the **loaded slice**, not on the by-id lookup
-  // that just failed. A 404 there means only that the server would not serve
-  // that one event by id; the event may still be present in the room, and the
-  // e2e mock does exactly this for seeded history. Dropping the anchor on the
-  // lookup alone would discard the highlight the deep link exists for, so the
-  // tail is loaded first and the anchor is only dropped if the target really
-  // isn't in it. Only `event` is removed — `?thread=` and the rest are none of
-  // this effect's business, and a deep link that resolves *into* a thread keeps
-  // its anchor and stays correctly parked.
+  // Dropping it is guarded three ways, because each of these has a failure mode
+  // worse than leaving a stale anchor in place:
+  //
+  // 1. **Verified absent, not merely unverified.** A failed head load leaves the
+  //    slice unchanged (empty on a cold open), which looks exactly like a slice
+  //    that genuinely lacks the target. Concluding "unsatisfiable" there would
+  //    destroy a live permalink over a transient blip, so a load error bails.
+  // 2. **Absent from the loaded slice, not from the by-id lookup.** A 404 there
+  //    means only that the server would not serve that one event by id; the
+  //    event may still be in the room, and the e2e mock does exactly this for
+  //    seeded history. Dropping on the lookup alone discards the highlight the
+  //    deep link exists for.
+  // 3. **Still this closure's anchor.** The continuation can outlive its own
+  //    anchor: a second search hit (`?event=B`) or a room switch re-runs the
+  //    effect with a fresh closure while this one is in flight, and the page does
+  //    not remount across either (ADR 0085). Stripping `event` off whatever the
+  //    URL says *now* would delete an anchor belonging to a later navigation.
+  //
+  // Only `event` is removed — `?thread=` and the rest are none of this effect's
+  // business, and a deep link that resolves *into* a thread keeps its anchor and
+  // stays correctly parked.
   const dropUnsatisfiableAnchor = useCallback(async () => {
     await timeline.loadLatest()
+    if (timeline.error.peek() !== null) {
+      return
+    }
     if (
-      highlighted === null ||
       timeline.events.peek().some((event) => event.event_id === highlighted)
     ) {
       return
     }
-    const [base, queryString = ''] = location.url.split('?', 2)
-    const params = new URLSearchParams(queryString)
-    params.delete('event')
-    const rest = params.toString()
-    location.route(rest === '' ? base : `${base}?${rest}`, true)
-  }, [highlighted, location, timeline])
+    // Read the *live* URL, not this closure's `location`: the router hands each
+    // render its own location object, so a stale closure still sees the anchor
+    // it was created for and would cheerfully strip whichever newer one has
+    // since taken its place.
+    const path = window.location.pathname
+    const search = window.location.search
+    const stillOurs =
+      path === localRoomHref(accountId, roomId, null) &&
+      new URLSearchParams(search).get('event') === highlighted
+    if (!stillOurs) {
+      return
+    }
+    location.route(withoutQueryParam(`${path}${search}`, 'event'), true)
+  }, [accountId, highlighted, location, roomId, timeline])
 
   // Jump to the `?event=` target — on a cold deep link *and* whenever the
   // query changes while the room is already open (WCR-09; M-W10's search
@@ -411,26 +433,37 @@ export function RoomPage() {
       .GET('/v1/accounts/{account_id}/events/{event_id}', {
         params: { path: { account_id: accountId, event_id: highlighted } },
       })
-      .then(({ data }) => {
-        if (data === undefined) {
-          return dropUnsatisfiableAnchor()
-        }
-        const rootId = threadRootId(data.data)
-        resolvedDeepLink.current = { eventId: highlighted, rootId }
-        // A thread reply has no row in the main room stream to jump to —
-        // it only ever renders inside its thread's own panel. Route
-        // straight there instead of jumping the main timeline toward the
-        // reply's timestamp, which would land near the thread root but
-        // never open the thread (or reveal the reply itself).
-        if (rootId !== null && rootId !== openThread) {
-          location.route(
-            localThreadEventHref(accountId, roomId, rootId, highlighted),
-            true,
-          )
-          return
-        }
-        return timeline.jumpTo(data.data.origin_ts)
-      }, dropUnsatisfiableAnchor)
+      .then(
+        ({ data, response }) => {
+          if (data === undefined) {
+            // Only a 404 is the server saying it has no such event. A 5xx or a
+            // rate limit says nothing about the anchor and must not cost the user
+            // their permalink, so it falls back exactly like a rejection does.
+            return response.status === 404
+              ? dropUnsatisfiableAnchor()
+              : timeline.loadLatest()
+          }
+          const rootId = threadRootId(data.data)
+          resolvedDeepLink.current = { eventId: highlighted, rootId }
+          // A thread reply has no row in the main room stream to jump to —
+          // it only ever renders inside its thread's own panel. Route
+          // straight there instead of jumping the main timeline toward the
+          // reply's timestamp, which would land near the thread root but
+          // never open the thread (or reveal the reply itself).
+          if (rootId !== null && rootId !== openThread) {
+            location.route(
+              localThreadEventHref(accountId, roomId, rootId, highlighted),
+              true,
+            )
+            return
+          }
+          return timeline.jumpTo(data.data.origin_ts)
+          // A rejected lookup — offline, timeout, DNS — proves nothing about the
+          // anchor either. Load the tail and leave the URL alone so a retry or a
+          // reload can still resolve the permalink.
+        },
+        () => timeline.loadLatest(),
+      )
   }, [
     api,
     accountId,
