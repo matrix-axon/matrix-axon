@@ -168,7 +168,7 @@ before starting a milestone.
   `unanchored` / `showingNewestEvents` rather than restated per effect — add a
   new condition there, not in three places. The corollary caught in review: an
   anchor the server cannot resolve **must be dropped from the URL**
-  (`dropUnresolvableAnchor`), because a lingering dead `?event=` leaves every one
+  (`dropUnsatisfiableAnchor`), because a lingering dead `?event=` leaves every one
   of these gates closed for the room's whole visit while the user reads the
   newest messages.
 - **Live ephemerals** (`src/stores/ephemeral.ts`): `ephemeral.passthrough`

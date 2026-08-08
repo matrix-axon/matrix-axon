@@ -476,14 +476,22 @@ export function withSearchParam(url: string, tokens: string): string {
   return `${base}?${params.toString()}`
 }
 
-/** `url` with the search overlay's params stripped — the "closed" URL. */
-export function withoutSearchParam(url: string): string {
+/**
+ * `url` with one query param removed, others preserved — the split/delete/rejoin
+ * shape this app kept re-writing per call site. The `?` is dropped along with
+ * the last param so a bare path never ends in a stray separator.
+ */
+export function withoutQueryParam(url: string, name: string): string {
   const [base, queryString = ''] = url.split('?', 2)
   const params = new URLSearchParams(queryString)
-  params.delete('search')
-  params.delete('ssort')
+  params.delete(name)
   const rest = params.toString()
   return rest === '' ? base : `${base}?${rest}`
+}
+
+/** `url` with the search overlay's params stripped — the "closed" URL. */
+export function withoutSearchParam(url: string): string {
+  return withoutQueryParam(withoutQueryParam(url, 'search'), 'ssort')
 }
 
 /**

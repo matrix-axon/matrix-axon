@@ -3475,6 +3475,122 @@ describe('RoomPage', () => {
     )
   })
 
+  /// The page does not remount across an in-room navigation (ADR 0085), so a
+  /// slow lookup for anchor A can resolve *after* the user has followed a second
+  /// deep link to B. The stale continuation must not strip B's anchor off the
+  /// URL it now finds there.
+  it('a stale anchor lookup does not strip a newer anchor', async () => {
+    let releaseFirstLookup: () => void = () => {}
+    const firstLookupHeld = new Promise<void>((resolve) => {
+      releaseFirstLookup = resolve
+    })
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        async ({ params }) => {
+          // msw hands the path param decoded.
+          if (String(params.eventId).replace('%24', '$') === '$slow') {
+            // Held until the user has already navigated away to `$b`.
+            await firstLookupHeld
+            return new HttpResponse(null, { status: 404 })
+          }
+          return HttpResponse.json({ data: event('$b', T0 - DAY) })
+        },
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$b', T0 - DAY, { body: 'body of $b' })],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24slow`,
+    )
+    const { findByText } = render(routedRoomPage(testServices()))
+
+    // The user follows a second deep link before the first lookup answers.
+    window.history.pushState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24b`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await findByText('body of $b')
+
+    // Now let the abandoned lookup finish and fail.
+    releaseFirstLookup()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.search).toContain('event=%24b')
+  })
+
+  /// A lookup that fails for any reason *other* than "no such event" proves
+  /// nothing about the anchor. Dropping it there would let a transient blip
+  /// permanently destroy a permalink — and mark the room read on the way out.
+  it('keeps a ?event= anchor when the lookup fails transiently', async () => {
+    for (const [label, handler] of [
+      ['5xx', () => new HttpResponse(null, { status: 503 })],
+      ['network error', () => HttpResponse.error()],
+    ] as const) {
+      server.use(
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+          handler,
+        ),
+        http.get(TIMELINE_PATH, () =>
+          HttpResponse.json({
+            data: {
+              events: [event('$tail', T0, { body: `tail for ${label}` })],
+              next_cursor: null,
+            },
+          }),
+        ),
+      )
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24missing`,
+      )
+      const { findByText } = render(routedRoomPage(testServices()))
+      await findByText(`tail for ${label}`)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      expect(window.location.search, label).toContain('event=%24missing')
+      cleanup()
+    }
+  })
+
+  /// "Not in the slice" only means "absent" if the slice is trustworthy. When
+  /// the head load itself fails there is nothing to conclude from, and the
+  /// anchor must survive for a retry.
+  it('keeps a ?event= anchor when the head load fails', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+      http.get(TIMELINE_PATH, () => new HttpResponse(null, { status: 500 })),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24missing`,
+    )
+    render(routedRoomPage(testServices()))
+    await waitFor(() => expect(window.location.search).toBeTruthy())
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.search).toContain('event=%24missing')
+  })
+
   /// The by-id lookup 404ing does not mean the anchor is unsatisfiable — the
   /// server may simply not serve that event by id while the event is right there
   /// in the room (the e2e mock does exactly this for seeded history). Dropping
