@@ -382,14 +382,18 @@ test('Ctrl-/ opens the help from the composer, where ? cannot', async ({
 
 test('the ? button opens the help without touching the keyboard', async ({
   page,
-}) => {
+}, testInfo) => {
   await openRoom(page)
   const help = page.getByRole('button', { name: 'Keyboard shortcuts' })
   // The tooltip gained its slash-command hint in #88; the unit test at
   // `app.test.tsx` was updated with it and this lane was not.
   await expect(help).toHaveAttribute(
     'title',
-    'Keyboard shortcuts (/help; ? or Ctrl-/)',
+    `Keyboard shortcuts (/help; ${shortcutForProject(
+      testInfo.project.name,
+      '? or Ctrl-/',
+      '? or ⌘-/',
+    )})`,
   )
 
   await help.click()
