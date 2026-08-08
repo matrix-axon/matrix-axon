@@ -342,6 +342,32 @@ An optional live round-trip suite runs against a real server when
 `AXON_LIVE_URL` and `AXON_LIVE_TOKEN` are set (see
 `src/api/client.live.test.ts`); it is skipped otherwise, including in CI.
 
+### Playwright browser targets
+
+`pnpm test:e2e` builds the client and runs Chromium. The Playwright mock server
+serves the built `dist/` directory, so run `pnpm build` before invoking
+Playwright directly; otherwise the browser can exercise stale or absent build
+assets instead of the checked-out source.
+
+```sh
+# One desktop engine at a time.
+pnpm build
+pnpm exec playwright test --project=chromium --fail-on-flaky-tests
+pnpm exec playwright test --project=firefox --fail-on-flaky-tests
+pnpm exec playwright test --project=webkit-desktop --fail-on-flaky-tests
+
+# The iPhone 13 WebKit profile (the post-merge lane).
+MOBILE_E2E=1 pnpm exec playwright test --project=webkit-iphone --fail-on-flaky-tests
+
+# Every configured desktop and iPhone-profile target.
+MOBILE_E2E=1 pnpm exec playwright test --fail-on-flaky-tests
+```
+
+The `--fail-on-flaky-tests` flag makes a retry diagnostic rather than a passing
+result, matching the cross-browser CI gate. When reproducing CI locally, set
+`CI=1` as well; Playwright will require a fresh mock server instead of reusing
+one already listening on port 4599.
+
 CI runs the schema sync check, lint, format check, tests, and the build via
 `.github/workflows/web-lint-and-test.yml` (path-filtered `pull_request` plus
 manual `workflow_dispatch`). The repo-root `.pre-commit-config.yaml` can run the
