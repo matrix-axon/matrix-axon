@@ -550,7 +550,11 @@ test('narrow: room information scrolls when the member list overflows', async ({
   expect(initial.scrollTop).toBe(0)
 
   await panel.hover()
-  await page.mouse.wheel(0, 5000)
+  // Firefox translates one wheel event into a smaller scroll than Chromium.
+  // Repeat the user gesture so the last row is reached in every browser.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await page.mouse.wheel(0, 5000)
+  }
   await expect
     .poll(() => panel.evaluate((element) => element.scrollTop))
     .toBeGreaterThan(0)
