@@ -3488,8 +3488,8 @@ describe('RoomPage', () => {
       http.get(
         `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
         async ({ params }) => {
-          // msw hands the path param decoded.
-          if (String(params.eventId).replace('%24', '$') === '$slow') {
+          // Correct whether or not msw has already decoded the path param.
+          if (decodeURIComponent(String(params.eventId)) === '$slow') {
             // Held until the user has already navigated away to `$b`.
             await firstLookupHeld
             return new HttpResponse(null, { status: 404 })
