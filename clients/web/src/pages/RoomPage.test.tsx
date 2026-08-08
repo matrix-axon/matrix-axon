@@ -3532,6 +3532,85 @@ describe('RoomPage', () => {
     expect(window.location.search).toContain('event=%24b')
   })
 
+  /// `refreshHead` deliberately no-ops on a slice parked in history that shares
+  /// nothing with the head, without setting an error. Reading that untouched
+  /// slice as proof of absence would strip the anchor while the view is still
+  /// showing history — and then claim read state from it.
+  it('keeps a ?event= anchor when the head load declines to move a parked slice', async () => {
+    const parked = event('$old', T0 - 5 * DAY, { body: 'body of $old' })
+    const head = event('$new', T0, { body: 'body of $new' })
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        ({ params }) =>
+          decodeURIComponent(String(params.eventId)) === '$old'
+            ? HttpResponse.json({ data: parked })
+            : new HttpResponse(null, { status: 404 }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      // Head and parked page share no events, so `refreshHead` bails.
+      http.get(TIMELINE_PATH, ({ request }) => {
+        const atTs = new URL(request.url).searchParams.get('at_ts')
+        return HttpResponse.json({
+          data:
+            atTs === null
+              ? { events: [head], next_cursor: 'c1' }
+              : { events: [parked], next_cursor: 'c2' },
+        })
+      }),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24old`,
+    )
+    const { findByText } = render(routedRoomPage(testServices()))
+    await findByText('body of $old')
+
+    // A second, dead deep link while parked in history.
+    window.history.pushState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24dead`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.search).toContain('event=%24dead')
+  })
+
+  /// A room id reached by cold navigation or an external deep link keeps its
+  /// literal `:` in `location.pathname`, which no amount of `encodeURIComponent`
+  /// on our side will match. The staleness check must not depend on that.
+  it('drops a dead anchor on a URL with an unencoded room id', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$tail-raw', T0, { body: 'body of $tail-raw' })],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    // Note: no `encodeURIComponent` — this is what a browser actually shows.
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${ROOM}?event=%24gone`,
+    )
+    const { findByText } = render(routedRoomPage(testServices()))
+    await findByText('body of $tail-raw')
+
+    await waitFor(() => expect(window.location.search).not.toContain('event='))
+  })
+
   /// A lookup that fails for any reason *other* than "no such event" proves
   /// nothing about the anchor. Dropping it there would let a transient blip
   /// permanently destroy a permalink — and mark the room read on the way out.

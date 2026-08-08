@@ -346,6 +346,16 @@ export function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per room instance
   }, [timeline])
 
+  // The anchor this page is showing *now*, readable from an async continuation
+  // that may have been created several renders ago. Assigned during render
+  // rather than in an effect, because an effect would lag the very continuation
+  // this exists to fence out. Compared by value, never by URL: the browser keeps
+  // a literal `:` in a room id reached by a cold navigation or an external deep
+  // link while `localRoomHref` percent-encodes it, so comparing paths silently
+  // never matches for real Matrix room ids (PR review).
+  const currentAnchor = useRef({ roomId, highlighted })
+  currentAnchor.current = { roomId, highlighted }
+
   // Remembers the deep-link target already resolved. Routing into a thread
   // changes `openThread`, which re-runs the effect below with the same
   // `highlighted`; without this it fetches the same event a second time and
@@ -384,7 +394,14 @@ export function RoomPage() {
   // stays correctly parked.
   const dropUnsatisfiableAnchor = useCallback(async () => {
     await timeline.loadLatest()
-    if (timeline.error.peek() !== null) {
+    // Did that load actually establish where the live end is? An error is not
+    // the only way it can decline: `refreshHead` deliberately no-ops on a slice
+    // parked in history that shares nothing with the head (`stores/timeline.ts`,
+    // the WCR-05 rule), leaving `events`, `error` and `atEnd` untouched. Reading
+    // the stale parked slice as proof of absence would strip the anchor while
+    // the view is still showing history — the exact thing this PR exists to
+    // prevent — so both conditions are required (PR review).
+    if (timeline.error.peek() !== null || !timeline.atEnd.peek()) {
       return
     }
     if (
@@ -392,20 +409,21 @@ export function RoomPage() {
     ) {
       return
     }
-    // Read the *live* URL, not this closure's `location`: the router hands each
-    // render its own location object, so a stale closure still sees the anchor
-    // it was created for and would cheerfully strip whichever newer one has
-    // since taken its place.
-    const path = window.location.pathname
-    const search = window.location.search
-    const stillOurs =
-      path === localRoomHref(accountId, roomId, null) &&
-      new URLSearchParams(search).get('event') === highlighted
-    if (!stillOurs) {
+    // Still this closure's anchor, in this room? A slow lookup outlives its own
+    // anchor when the user follows a second deep link or switches rooms, and the
+    // page remounts across neither (ADR 0085).
+    const current = currentAnchor.current
+    if (current.roomId !== roomId || current.highlighted !== highlighted) {
       return
     }
-    location.route(withoutQueryParam(`${path}${search}`, 'event'), true)
-  }, [accountId, highlighted, location, roomId, timeline])
+    location.route(
+      withoutQueryParam(
+        `${window.location.pathname}${window.location.search}`,
+        'event',
+      ),
+      true,
+    )
+  }, [highlighted, location, roomId, timeline])
 
   // Jump to the `?event=` target — on a cold deep link *and* whenever the
   // query changes while the room is already open (WCR-09; M-W10's search
