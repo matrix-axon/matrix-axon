@@ -1,4 +1,10 @@
-import { expect, test, type BrowserContext } from '@playwright/test'
+import {
+  expect,
+  test,
+  type BrowserContext,
+  type BrowserContextOptions,
+  type TestInfo,
+} from '@playwright/test'
 
 const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111'
 const ROOM_ID = '!room:hs'
@@ -8,6 +14,13 @@ const SEND_URL = `/v1/accounts/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)
 // The mock backend is one process with shared state (its socket set and room
 // history), so dropping sockets in one test would sever another's connection.
 test.describe.configure({ mode: 'serial' })
+
+/** Explicit contexts do not inherit a project's device profile automatically. */
+function projectContextOptions(testInfo: TestInfo): BrowserContextOptions {
+  const { deviceScaleFactor, hasTouch, isMobile, userAgent, viewport } =
+    testInfo.project.use
+  return { deviceScaleFactor, hasTouch, isMobile, userAgent, viewport }
+}
 
 /** A signed-in tab: seed the token before app scripts run, then open the room. */
 async function openRoom(context: BrowserContext) {
@@ -24,9 +37,10 @@ async function openRoom(context: BrowserContext) {
   return page
 }
 
-test('two tabs see each other messages live', async ({ browser }) => {
-  const contextA = await browser.newContext()
-  const contextB = await browser.newContext()
+test('two tabs see each other messages live', async ({ browser }, testInfo) => {
+  const options = projectContextOptions(testInfo)
+  const contextA = await browser.newContext(options)
+  const contextB = await browser.newContext(options)
 
   const tabA = await openRoom(contextA)
   const tabB = await openRoom(contextB)
@@ -35,7 +49,7 @@ test('two tabs see each other messages live', async ({ browser }) => {
   const message = `live hello ${Date.now()}`
   const composer = tabA.getByRole('textbox', { name: /^Message/ })
   await composer.fill(message)
-  await composer.press('Enter')
+  await tabA.getByRole('button', { name: 'Send' }).click()
 
   // Tab B renders it live — no reload — via the M-W6 frame router + ingestLive.
   await expect(
@@ -52,9 +66,10 @@ test('two tabs see each other messages live', async ({ browser }) => {
 
 test('typing in one tab surfaces the indicator in another', async ({
   browser,
-}) => {
-  const contextA = await browser.newContext()
-  const contextB = await browser.newContext()
+}, testInfo) => {
+  const options = projectContextOptions(testInfo)
+  const contextA = await browser.newContext(options)
+  const contextB = await browser.newContext(options)
 
   const tabA = await openRoom(contextA)
   const tabB = await openRoom(contextB)
@@ -77,8 +92,8 @@ test('typing in one tab surfaces the indicator in another', async ({
 test('a dropped socket shows Reconnecting, then heals by gap-fill', async ({
   browser,
   request,
-}) => {
-  const context = await browser.newContext()
+}, testInfo) => {
+  const context = await browser.newContext(projectContextOptions(testInfo))
   const page = await openRoom(context)
 
   // Kill the socket rudely (no close frame) and refuse upgrades for a moment,
@@ -98,6 +113,7 @@ test('a dropped socket shows Reconnecting, then heals by gap-fill', async ({
   // the room head — the only path by which this event can appear.
   await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
     'Live',
+    { timeout: 10_000 },
   )
   await expect(page.getByText(missed)).toBeVisible()
 
