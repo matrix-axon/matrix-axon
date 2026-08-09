@@ -352,9 +352,12 @@ export function RoomPage() {
   // this exists to fence out. Compared by value, never by URL: the browser keeps
   // a literal `:` in a room id reached by a cold navigation or an external deep
   // link while `localRoomHref` percent-encodes it, so comparing paths silently
-  // never matches for real Matrix room ids (PR review).
-  const currentAnchor = useRef({ roomId, highlighted })
-  currentAnchor.current = { roomId, highlighted }
+  // never matches for real Matrix room ids. The account is part of the identity:
+  // the timeline store is keyed by account *and* room (ADR 0085), two of the
+  // user's accounts can be in the same room, and this page does not remount when
+  // the account changes under the same room and anchor (PR review).
+  const currentAnchor = useRef({ accountId, roomId, highlighted })
+  currentAnchor.current = { accountId, roomId, highlighted }
 
   // Remembers the deep-link target already resolved. Routing into a thread
   // changes `openThread`, which re-runs the effect below with the same
@@ -393,19 +396,31 @@ export function RoomPage() {
   // business, and a deep link that resolves *into* a thread keeps its anchor and
   // stays correctly parked.
   const dropUnsatisfiableAnchor = useCallback(async () => {
-    // Two different questions, and both must hold (PR review):
-    //
-    // - Did *this* load apply a head? `loadLatest` reports its own outcome
-    //   because nothing else can. `refreshHead` deliberately no-ops on a slice
-    //   parked in history that shares nothing with the head (the WCR-05 rule),
-    //   leaving every signal untouched; and `error` is store-wide — a concurrent
-    //   send, redaction, or re-decryption retry writes it too, so a failure with
-    //   nothing to do with this load would read as "couldn't verify" and strand
-    //   the anchor for the whole visit.
-    // - Does the slice *still* reach the live end? A jump can move it out from
-    //   under this continuation between the load and this check.
-    const appliedHead = await timeline.loadLatest()
-    if (!appliedHead || !timeline.atEnd.peek()) {
+    // Already loaded? Then the anchor is satisfiable and there is nothing to
+    // drop — and the refresh below must not run, because `refreshHead`'s
+    // wholesale-replace branch discards the outgoing slice entirely and would
+    // evict the very event being checked for, turning a live permalink into a
+    // "verified absent" one (PR review).
+    if (
+      timeline.events.peek().some((event) => event.event_id === highlighted)
+    ) {
+      return
+    }
+    // `superseded` is not a failure: a sibling load — the mount effect's own, or
+    // a reconnect gap-fill — won the generation race, and it may have applied a
+    // perfectly good head. Bailing on it would strand the anchor for the visit,
+    // the failure class earlier rounds fixed. Ask once more now the race has
+    // settled; a second supersession is treated as "couldn't verify" and keeps
+    // the anchor, which is the safe direction (PR review).
+    let outcome = await timeline.loadLatest()
+    if (outcome === 'superseded') {
+      outcome = await timeline.loadLatest()
+    }
+    // Two remaining questions, both required: did a head actually get applied
+    // (a decline and a success leave identical state behind), and does the slice
+    // still reach the live end (a jump can move it out from under this
+    // continuation between the load and the check)?
+    if (outcome !== 'applied' || !timeline.atEnd.peek()) {
       return
     }
     if (
@@ -413,11 +428,16 @@ export function RoomPage() {
     ) {
       return
     }
-    // Still this closure's anchor, in this room? A slow lookup outlives its own
-    // anchor when the user follows a second deep link or switches rooms, and the
-    // page remounts across neither (ADR 0085).
+    // Still this continuation's anchor, in this room, under this account? A slow
+    // lookup outlives its own anchor when the user follows a second deep link,
+    // switches rooms, or switches accounts, and the page remounts across none of
+    // them (ADR 0085).
     const current = currentAnchor.current
-    if (current.roomId !== roomId || current.highlighted !== highlighted) {
+    if (
+      current.accountId !== accountId ||
+      current.roomId !== roomId ||
+      current.highlighted !== highlighted
+    ) {
       return
     }
     location.route(
@@ -427,7 +447,7 @@ export function RoomPage() {
       ),
       true,
     )
-  }, [highlighted, location, roomId, timeline])
+  }, [accountId, highlighted, location, roomId, timeline])
 
   // Jump to the `?event=` target — on a cold deep link *and* whenever the
   // query changes while the room is already open (WCR-09; M-W10's search

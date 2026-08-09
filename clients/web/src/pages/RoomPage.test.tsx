@@ -3611,6 +3611,152 @@ describe('RoomPage', () => {
     await waitFor(() => expect(window.location.search).not.toContain('event='))
   })
 
+  /// `refreshHead`'s wholesale-replace branch discards the outgoing slice when
+  /// the fresh head shares nothing with it. If the anchor's target arrived in
+  /// that slice while the by-id lookup was in flight, refreshing to "check"
+  /// evicts the proof that the event exists — so a target already loaded is
+  /// answer enough and the refresh must not run at all.
+  it('keeps a ?event= anchor whose target arrived while the lookup was in flight', async () => {
+    let release404!: () => void
+    const held = new Promise<void>((resolve) => {
+      release404 = resolve
+    })
+    let headCalls = 0
+    let byIdCalls = 0
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        async () => {
+          byIdCalls += 1
+          await held
+          return new HttpResponse(null, { status: 404 })
+        },
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(TIMELINE_PATH, () => {
+        headCalls += 1
+        return HttpResponse.json({
+          data:
+            headCalls === 1
+              ? { events: [event('$seed', T0 - DAY)], next_cursor: null }
+              : // Any later head shares nothing with the slice — the eviction
+                // branch.
+                { events: [event('$fresh', T0 + 10)], next_cursor: null },
+        })
+      }),
+    )
+    // Cold, unanchored: seeds a slice at the live end without the target.
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+    )
+    const services = testServices()
+    const { findByText } = render(routedRoomPage(services))
+    await findByText('body of $seed')
+
+    // Anchor on an event the slice does not hold: the by-id lookup fires, and
+    // is held open.
+    window.history.pushState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24late`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    // Let the effect actually issue the lookup before anything else happens —
+    // otherwise the live event below lands first, the effect finds the target
+    // already loaded, and never asks.
+    await waitFor(() => expect(byIdCalls).toBe(1))
+
+    // While it is in flight the event arrives live, so the anchor is now
+    // satisfiable — the room can highlight it.
+    services.live.start()
+    services.sockets[0].emitOpen()
+    services.sockets[0].emitMessage(
+      JSON.stringify({
+        type: 'timeline.event',
+        account_id: ACCOUNT,
+        payload: event('$late', T0, { body: 'body of $late' }),
+      }),
+    )
+    await findByText('body of $late')
+
+    // Only now does the lookup answer 404.
+    release404()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.search).toContain('event=%24late')
+  })
+
+  /// The timeline store is keyed by account *and* room (ADR 0085), two of the
+  /// user's accounts can be in the same room, and the page does not remount when
+  /// the account changes under the same room and anchor. A stale continuation
+  /// from the old account must not act on the new account's URL.
+  it('a stale lookup from another account does not strip the current anchor', async () => {
+    const OTHER = '6b53f7f0-0000-4000-8000-000000000002'
+    let releaseFirst!: () => void
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    server.use(
+      // Account A's lookup hangs, then 404s; account B's resolves fine.
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        async () => {
+          await firstHeld
+          return new HttpResponse(null, { status: 404 })
+        },
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/${OTHER}/events/:eventId`, () =>
+        HttpResponse.json({ data: event('$shared', T0 - DAY) }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      // The two accounts see different rooms' worth of history: A cannot see
+      // `$shared` at all, which is why its lookup 404s and why its slice can
+      // never corroborate B's anchor.
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/timeline`,
+        ({ params }) =>
+          HttpResponse.json({
+            data: {
+              events: [
+                params.accountId === OTHER
+                  ? event('$shared', T0 - DAY, { body: 'body of $shared' })
+                  : event('$a-only', T0 - DAY, { body: 'body of $a-only' }),
+              ],
+              next_cursor: null,
+            },
+          }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24shared`,
+    )
+    const { findAllByText } = render(routedRoomPage(testServices()))
+
+    // Same room, same anchor, different account — no remount.
+    window.history.pushState(
+      null,
+      '',
+      `/${OTHER}/rooms/${encodeURIComponent(ROOM)}?event=%24shared`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await findAllByText('body of $shared')
+
+    // Account A's lookup finally fails. It says nothing about account B's view.
+    releaseFirst()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.pathname).toContain(OTHER)
+    expect(window.location.search).toContain('event=%24shared')
+  })
+
   /// A lookup that fails for any reason *other* than "no such event" proves
   /// nothing about the anchor. Dropping it there would let a transient blip
   /// permanently destroy a permalink — and mark the room read on the way out.

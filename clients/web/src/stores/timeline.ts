@@ -69,6 +69,15 @@ const PAGE_LIMIT = 50
  */
 const RETAINED_EVENT_LIMIT = PAGE_LIMIT * 12
 
+/**
+ * What a head load did. Callers that gate on "the slice reflects the live head"
+ * need all four apart: a decline and a success leave identical state behind, and
+ * `superseded` means *this* call lost a generation race — the store may well be
+ * holding a perfectly good head that a sibling load applied, so it is not a
+ * failure and must not be read as one (PR review on #136).
+ */
+export type HeadLoadOutcome = 'applied' | 'declined' | 'failed' | 'superseded'
+
 export interface TimelineStore {
   /** Loaded events, oldest first (display order). */
   events: ReadonlySignal<TimelineEvent[]>
@@ -98,11 +107,12 @@ export interface TimelineStore {
 
   /**
    * Load the newest page, replacing any loaded slice. Resolves to whether a head
-   * page was actually applied — `false` when the fetch failed, a newer load
-   * superseded it, or the slice was deliberately left parked in history. A
-   * caller must not infer this from `error`, which is store-wide.
+   * page was applied, and if not, why — see [`HeadLoadOutcome`]. A caller must
+   * not infer any of this from `error`, which is store-wide, nor read
+   * `'superseded'` as a failure: it means a sibling load won the race, and that
+   * load may well have applied a head of its own.
    */
-  loadLatest(): Promise<boolean>
+  loadLatest(): Promise<HeadLoadOutcome>
   /** Prepend the next older page (infinite scroll-back). */
   /**
    * Resolves to whether the page *landed* — the cursor moved on. `false` means
@@ -471,7 +481,9 @@ export function createTimelineStore(
   /// *know* the slice reflects what they asked for must read this rather than
   /// the store-wide `error` signal, which sends/edits/redactions and the
   /// re-decryption retry also write (PR review on #136).
-  async function replaceSlice(query: { at_ts?: number }): Promise<boolean> {
+  async function replaceSlice(query: {
+    at_ts?: number
+  }): Promise<HeadLoadOutcome> {
     // `loading` swaps the whole timeline for a placeholder, which is right
     // for both callers — the first load has nothing to show and a jump is
     // *leaving* what is shown (the remount also re-anchors the view on the
@@ -497,7 +509,10 @@ export function createTimelineStore(
     if (generation === sliceGeneration) {
       loading.value = false
     }
-    return page !== null && generation === sliceGeneration
+    if (page === null) {
+      return 'failed'
+    }
+    return generation === sliceGeneration ? 'applied' : 'superseded'
   }
 
   async function replaceSliceForDate(
@@ -583,11 +598,14 @@ export function createTimelineStore(
   /// three ways this declines — a failed fetch, a superseded generation, and the
   /// deliberate no-op on a parked slice below — which a caller cannot otherwise
   /// tell apart from success, since the no-op leaves every signal untouched.
-  async function refreshHead(): Promise<boolean> {
+  async function refreshHead(): Promise<HeadLoadOutcome> {
     const generation = sliceGeneration
     const page = await fetchPage({})
-    if (page === null || generation !== sliceGeneration) {
-      return false
+    if (page === null) {
+      return 'failed'
+    }
+    if (generation !== sliceGeneration) {
+      return 'superseded'
     }
     const loaded = events.value
     const headIds = new Set(page.events.map((e) => e.event_id))
@@ -598,7 +616,7 @@ export function createTimelineStore(
       // the cursor chain below it is still sound. Replacing it here would
       // teleport a reader to the newest page on every reconnect, which is the
       // very thing WCR-05 set out to stop; `loadNewer` is what walks forward.
-      return false
+      return 'declined'
     }
     if (!overlaps) {
       sliceGeneration += 1
@@ -617,7 +635,7 @@ export function createTimelineStore(
       // The slice *is* the head now, wherever it was parked before.
       reachedEnd.value = true
       resolveReplyTargets(page.events)
-      return true
+      return 'applied'
     }
     // Overlap: merge. No generation bump — an in-flight `loadOlder` prepend
     // still applies, since the old history and cursor survive.
@@ -631,7 +649,7 @@ export function createTimelineStore(
     // The merged slice provably ends at the head just fetched.
     reachedEnd.value = true
     resolveReplyTargets(page.events)
-    return true
+    return 'applied'
   }
 
   /**
