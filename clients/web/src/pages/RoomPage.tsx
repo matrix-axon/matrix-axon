@@ -393,15 +393,19 @@ export function RoomPage() {
   // business, and a deep link that resolves *into* a thread keeps its anchor and
   // stays correctly parked.
   const dropUnsatisfiableAnchor = useCallback(async () => {
-    await timeline.loadLatest()
-    // Did that load actually establish where the live end is? An error is not
-    // the only way it can decline: `refreshHead` deliberately no-ops on a slice
-    // parked in history that shares nothing with the head (`stores/timeline.ts`,
-    // the WCR-05 rule), leaving `events`, `error` and `atEnd` untouched. Reading
-    // the stale parked slice as proof of absence would strip the anchor while
-    // the view is still showing history — the exact thing this PR exists to
-    // prevent — so both conditions are required (PR review).
-    if (timeline.error.peek() !== null || !timeline.atEnd.peek()) {
+    // Two different questions, and both must hold (PR review):
+    //
+    // - Did *this* load apply a head? `loadLatest` reports its own outcome
+    //   because nothing else can. `refreshHead` deliberately no-ops on a slice
+    //   parked in history that shares nothing with the head (the WCR-05 rule),
+    //   leaving every signal untouched; and `error` is store-wide — a concurrent
+    //   send, redaction, or re-decryption retry writes it too, so a failure with
+    //   nothing to do with this load would read as "couldn't verify" and strand
+    //   the anchor for the whole visit.
+    // - Does the slice *still* reach the live end? A jump can move it out from
+    //   under this continuation between the load and this check.
+    const appliedHead = await timeline.loadLatest()
+    if (!appliedHead || !timeline.atEnd.peek()) {
       return
     }
     if (
@@ -452,14 +456,17 @@ export function RoomPage() {
         params: { path: { account_id: accountId, event_id: highlighted } },
       })
       .then(
-        ({ data, response }) => {
+        async ({ data, response }) => {
           if (data === undefined) {
             // Only a 404 is the server saying it has no such event. A 5xx or a
-            // rate limit says nothing about the anchor and must not cost the user
-            // their permalink, so it falls back exactly like a rejection does.
-            return response.status === 404
-              ? dropUnsatisfiableAnchor()
-              : timeline.loadLatest()
+            // rate limit says nothing about the anchor and must not cost the
+            // user their permalink, so it falls back exactly like a rejection.
+            if (response.status === 404) {
+              await dropUnsatisfiableAnchor()
+            } else {
+              await timeline.loadLatest()
+            }
+            return
           }
           const rootId = threadRootId(data.data)
           resolvedDeepLink.current = { eventId: highlighted, rootId }
@@ -475,12 +482,14 @@ export function RoomPage() {
             )
             return
           }
-          return timeline.jumpTo(data.data.origin_ts)
-          // A rejected lookup — offline, timeout, DNS — proves nothing about the
-          // anchor either. Load the tail and leave the URL alone so a retry or a
-          // reload can still resolve the permalink.
+          await timeline.jumpTo(data.data.origin_ts)
         },
-        () => timeline.loadLatest(),
+        // A rejected lookup — offline, timeout, DNS — proves nothing about the
+        // anchor either. Load the tail and leave the URL alone so a retry or a
+        // reload can still resolve the permalink.
+        async () => {
+          await timeline.loadLatest()
+        },
       )
   }, [
     api,

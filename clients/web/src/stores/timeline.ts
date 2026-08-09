@@ -96,8 +96,13 @@ export interface TimelineStore {
    */
   replyTargets: ReadonlySignal<ReadonlyMap<string, EventDto>>
 
-  /** Load the newest page, replacing any loaded slice. */
-  loadLatest(): Promise<void>
+  /**
+   * Load the newest page, replacing any loaded slice. Resolves to whether a head
+   * page was actually applied — `false` when the fetch failed, a newer load
+   * superseded it, or the slice was deliberately left parked in history. A
+   * caller must not infer this from `error`, which is store-wide.
+   */
+  loadLatest(): Promise<boolean>
   /** Prepend the next older page (infinite scroll-back). */
   /**
    * Resolves to whether the page *landed* — the cursor moved on. `false` means
@@ -461,7 +466,12 @@ export function createTimelineStore(
     }
   }
 
-  async function replaceSlice(query: { at_ts?: number }): Promise<void> {
+  /// Resolves to whether this call's page was actually applied — `false` when
+  /// the fetch failed or a newer slice load superseded it. Callers that need to
+  /// *know* the slice reflects what they asked for must read this rather than
+  /// the store-wide `error` signal, which sends/edits/redactions and the
+  /// re-decryption retry also write (PR review on #136).
+  async function replaceSlice(query: { at_ts?: number }): Promise<boolean> {
     // `loading` swaps the whole timeline for a placeholder, which is right
     // for both callers — the first load has nothing to show and a jump is
     // *leaving* what is shown (the remount also re-anchors the view on the
@@ -487,6 +497,7 @@ export function createTimelineStore(
     if (generation === sliceGeneration) {
       loading.value = false
     }
+    return page !== null && generation === sliceGeneration
   }
 
   async function replaceSliceForDate(
@@ -568,11 +579,15 @@ export function createTimelineStore(
    * with the loaded slice replaces it — the gap is real, the old cursor
    * chain no longer describes what would sit below the head.
    */
-  async function refreshHead(): Promise<void> {
+  /// Resolves to whether a head page was actually applied. `false` covers all
+  /// three ways this declines — a failed fetch, a superseded generation, and the
+  /// deliberate no-op on a parked slice below — which a caller cannot otherwise
+  /// tell apart from success, since the no-op leaves every signal untouched.
+  async function refreshHead(): Promise<boolean> {
     const generation = sliceGeneration
     const page = await fetchPage({})
     if (page === null || generation !== sliceGeneration) {
-      return
+      return false
     }
     const loaded = events.value
     const headIds = new Set(page.events.map((e) => e.event_id))
@@ -583,7 +598,7 @@ export function createTimelineStore(
       // the cursor chain below it is still sound. Replacing it here would
       // teleport a reader to the newest page on every reconnect, which is the
       // very thing WCR-05 set out to stop; `loadNewer` is what walks forward.
-      return
+      return false
     }
     if (!overlaps) {
       sliceGeneration += 1
@@ -602,7 +617,7 @@ export function createTimelineStore(
       // The slice *is* the head now, wherever it was parked before.
       reachedEnd.value = true
       resolveReplyTargets(page.events)
-      return
+      return true
     }
     // Overlap: merge. No generation bump — an in-flight `loadOlder` prepend
     // still applies, since the old history and cursor survive.
@@ -616,6 +631,7 @@ export function createTimelineStore(
     // The merged slice provably ends at the head just fetched.
     reachedEnd.value = true
     resolveReplyTargets(page.events)
+    return true
   }
 
   /**
@@ -1241,12 +1257,12 @@ export function createTimelineStore(
     // head fetch must leave a jumped-back slice marked as history.
     loadLatest: () =>
       events.value.length === 0 ? replaceSlice({}) : refreshHead(),
-    jumpTo: (atTs: number) => {
+    jumpTo: async (atTs: number) => {
       // The page at `atTs` ends somewhere in history. Pessimistic on purpose:
       // a jump near the present costs one `loadNewer` that comes back empty
       // and flips this back, which is cheaper than ever faking contiguity.
       reachedEnd.value = false
-      return replaceSlice({ at_ts: atTs })
+      await replaceSlice({ at_ts: atTs })
     },
     jumpToDate: (
       startTs: number,
