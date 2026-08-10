@@ -20,6 +20,39 @@ export async function signIn(page: Page): Promise<void> {
   )
 }
 
+/**
+ * Reload the document from *inside* the page, not through `page.reload()`.
+ *
+ * Use this wherever a test depends on the engine *classifying* the load as a
+ * reload — anything reading Navigation Timing, directly or through `perf.ts`'s
+ * `nav` field, and anything gated on `isReloadOrRestoreNavigation`. Playwright's
+ * driver reload is reported as `navigate` by Navigation Timing under Firefox.
+ * Measured on Firefox 151:
+ *
+ * | engine   | `page.reload()` | in-page `location.reload()` |
+ * |----------|-----------------|-----------------------------|
+ * | chromium | `reload`        | `reload`                    |
+ * | firefox  | **`navigate`**  | `reload`                    |
+ * | webkit   | `reload`        | `reload`                    |
+ *
+ * So the driver is the outlier, not the engine, and nothing a user does reaches
+ * it. An in-page reload is engine-neutral and the closer stand-in for Ctrl-R.
+ *
+ * `page.reload()` is still correct — and stays — wherever a test only needs a
+ * fresh document and asserts nothing about how the load was classified.
+ *
+ * The `setTimeout` lets `evaluate` return before the execution context is torn
+ * down; calling `location.reload()` synchronously rejects it instead.
+ */
+export async function reloadFromInsidePage(page: Page): Promise<void> {
+  await Promise.all([
+    page.waitForEvent('load'),
+    page.evaluate(() => {
+      window.setTimeout(() => location.reload(), 0)
+    }),
+  ])
+}
+
 /** A signed-in tab at the room, wide enough for two panes, socket up. */
 export async function openRoom(page: Page): Promise<void> {
   await signIn(page)

@@ -186,6 +186,13 @@ test('a manifest that never matches reloads exactly once', async ({ page }) => {
 test('an automatic reload closes the restored thread view', async ({
   page,
 }) => {
+  // Three 15s assertion budgets stack sequentially, and the per-test default is
+  // 30s (`playwright.config.ts` sets no top-level `timeout`), so the test itself
+  // would expire first and report a generic "Test timeout of 30000ms exceeded"
+  // instead of the assertion the budget exists to name. Raised past 45s of
+  // assertions plus the setup ahead of them.
+  test.setTimeout(60_000)
+
   await signIn(page)
   await page.goto(`${ROOM_URL}?thread=%24root`)
   await expect(page.locator('.thread-panel')).toBeVisible()

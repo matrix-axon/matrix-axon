@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { signIn } from './helpers'
+import { reloadFromInsidePage, signIn } from './helpers'
 
 /**
  * The ADR 0085 phase 2 boot summary, proven to exist and to carry real numbers
@@ -72,7 +72,10 @@ test('the boot summary reports the cache winning the race', async ({
   expect(
     (await page.request.post('/__e2e/rooms-delay?hold=typical')).ok(),
   ).toBe(true)
-  await page.reload()
+  // In-page rather than `page.reload()`: the summary asserted below carries
+  // `nav`, which is the Navigation Timing type, and the driver's reload is
+  // reported as `navigate` under Firefox. See `reloadFromInsidePage`.
+  await reloadFromInsidePage(page)
   await expect(page.getByText('E2E Room')).toBeVisible()
   // Visible *then* hidden. Waiting only for hidden passes instantly when the
   // affordance never appeared at all — a cold cache would sail through it, and
