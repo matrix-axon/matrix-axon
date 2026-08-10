@@ -24,7 +24,6 @@ import {
   type MatrixRoomReference,
 } from './matrix-to'
 import { isReloadOrRestoreNavigation } from './navigation'
-import { consumeAutomaticReload } from './reload'
 import {
   currentRoomFromPath,
   serializeSearchTokens,
@@ -681,11 +680,7 @@ function ShellChrome() {
       return
     }
     startupThreadScrubbed.current = true
-    const automaticReload = consumeAutomaticReload()
-    if (
-      typeof query.thread !== 'string' ||
-      !(automaticReload || isReloadOrRestoreNavigation())
-    ) {
+    if (typeof query.thread !== 'string' || !isReloadOrRestoreNavigation()) {
       return
     }
     const params = new URLSearchParams(window.location.search)

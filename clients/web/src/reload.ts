@@ -34,7 +34,7 @@
 
 /** sessionStorage, not localStorage: the block is per-tab and per-session. */
 const GUARD_KEY = 'axon:update-reload'
-const AUTOMATIC_RELOAD_KEY = 'axon:automatic-reload'
+const SCRIPTED_RELOAD_KEY = 'axon:scripted-reload'
 
 /**
  * Ceiling on automatic reloads per window, across all builds and targets.
@@ -167,11 +167,18 @@ function write(storage: Storage | null, state: GuardState): boolean {
 /**
  * Records that this document is about to reload itself. The next boot consumes
  * this one-shot marker before routing, so UI state which only made sense in the
- * prior document can be reset without guessing from browser-specific timing.
+ * prior document can be reset without guessing from browser-specific timing:
+ * Firefox reports a scripted `location.reload()` as `navigate`, not `reload`.
+ *
+ * Both reload paths mark, the automatic one and the one the user asks for. A
+ * reload is a reload as far as the document is concerned — a native Ctrl-R drops
+ * a restored thread view on every engine, and a reload the user requested from
+ * our own banner must not behave differently on Firefox just because the engine
+ * misreports who called it.
  */
-function markAutomaticReload(storage: Storage | null): void {
+function markScriptedReload(storage: Storage | null): void {
   try {
-    storage?.setItem(AUTOMATIC_RELOAD_KEY, '1')
+    storage?.setItem(SCRIPTED_RELOAD_KEY, '1')
   } catch {
     // A failed marker must not turn a successful, loop-bounded reload into a
     // failed update. The next document simply keeps its current route.
@@ -179,18 +186,21 @@ function markAutomaticReload(storage: Storage | null): void {
 }
 
 /**
- * Returns whether this document follows an Axon-controlled automatic reload.
- * Always consume the marker: a route without a thread must not leave it to
- * affect a later navigation in the same tab.
+ * Returns whether this document follows a reload Axon performed itself, and
+ * clears the marker.
+ *
+ * Always consume it, even on a route with nothing to reset: a marker left behind
+ * would be read by a later, genuine navigation in the same tab. `navigation.ts`
+ * calls this once at boot for that reason — see `bootNavigationSignals`.
  */
-export function consumeAutomaticReload(
+export function consumeScriptedReload(
   storage: Storage | null = browserStorage(),
 ): boolean {
   try {
-    if (storage?.getItem(AUTOMATIC_RELOAD_KEY) !== '1') {
+    if (storage?.getItem(SCRIPTED_RELOAD_KEY) !== '1') {
       return false
     }
-    storage.removeItem(AUTOMATIC_RELOAD_KEY)
+    storage.removeItem(SCRIPTED_RELOAD_KEY)
     return true
   } catch {
     return false
@@ -281,7 +291,7 @@ export function reloadOnce(
     `reloading to pick up a new build: ${currentVersion} → ${target} ` +
       `(attempt ${next.spent}/${MAX_ATTEMPTS} this window)`,
   )
-  markAutomaticReload(env.storage)
+  markScriptedReload(env.storage)
   env.reload()
   return true
 }
@@ -292,5 +302,6 @@ export function reloadOnce(
  * path is allowed to fail closed into this one.
  */
 export function reloadNow(env: ReloadEnvironment): void {
+  markScriptedReload(env.storage)
   env.reload()
 }

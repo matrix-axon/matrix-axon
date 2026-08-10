@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   BUDGET_WINDOW_MS,
   CHUNK_TARGET,
-  consumeAutomaticReload,
+  consumeScriptedReload,
   initReloadGuard,
   MAX_ATTEMPTS,
   reloadNow,
@@ -212,27 +212,43 @@ describe('reloadOnce', () => {
   })
 })
 
-describe('automatic reload marker', () => {
+describe('scripted reload marker', () => {
   it('marks an automatic reload and consumes the marker exactly once', () => {
     const storage = memoryStorage()
     expect(reloadOnce('build-a', 'build-b', env(storage))).toBe(true)
 
-    expect(consumeAutomaticReload(storage)).toBe(true)
-    expect(consumeAutomaticReload(storage)).toBe(false)
+    expect(consumeScriptedReload(storage)).toBe(true)
+    expect(consumeScriptedReload(storage)).toBe(false)
   })
 
-  it('does not mark a user-requested reload', () => {
+  // Both paths mark. A native Ctrl-R drops a restored thread view on every
+  // engine, so a reload the user asked *us* for must not differ on Firefox,
+  // which reports our `location.reload()` as `navigate`.
+  it('marks a user-requested reload too', () => {
     const storage = memoryStorage()
     reloadNow(env(storage))
 
-    expect(consumeAutomaticReload(storage)).toBe(false)
+    expect(consumeScriptedReload(storage)).toBe(true)
+    expect(consumeScriptedReload(storage)).toBe(false)
+  })
+
+  it('reads an unmarked boot as an ordinary navigation', () => {
+    expect(consumeScriptedReload(memoryStorage())).toBe(false)
+  })
+
+  it('degrades when there is no storage to mark or read', () => {
+    const e = env(null)
+    reloadNow(e)
+
+    expect(e.reloads()).toBe(1)
+    expect(consumeScriptedReload(null)).toBe(false)
   })
 
   it('keeps the automatic reload available when its marker cannot be written', () => {
     const storage = memoryStorage()
     const setItem = storage.setItem.bind(storage)
     vi.spyOn(storage, 'setItem').mockImplementation((key, value) => {
-      if (key === 'axon:automatic-reload') {
+      if (key === 'axon:scripted-reload') {
         throw new DOMException('QuotaExceededError')
       }
       setItem(key, value)
@@ -241,7 +257,17 @@ describe('automatic reload marker', () => {
 
     expect(reloadOnce('build-a', 'build-b', e)).toBe(true)
     expect(e.reloads()).toBe(1)
-    expect(consumeAutomaticReload(storage)).toBe(false)
+    expect(consumeScriptedReload(storage)).toBe(false)
+  })
+
+  it('degrades when the marker cannot be read', () => {
+    const storage = memoryStorage()
+    expect(reloadOnce('build-a', 'build-b', env(storage))).toBe(true)
+    vi.spyOn(storage, 'getItem').mockImplementation(() => {
+      throw new DOMException('SecurityError')
+    })
+
+    expect(consumeScriptedReload(storage)).toBe(false)
   })
 })
 

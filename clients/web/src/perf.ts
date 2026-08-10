@@ -1,5 +1,5 @@
 import { signal } from '@preact/signals'
-import { bootNavigationTimingType } from './navigation'
+import { bootNavigationSignals } from './navigation'
 
 const STORAGE_KEY = 'axon.perf'
 
@@ -281,7 +281,7 @@ function summariseBoot(): void {
       (entry.detail as { hasRows?: unknown } | undefined)?.hasRows === true,
   )
   const rowsAt = rows === undefined ? null : Math.round(rows.t)
-  const nav = bootNavigationTimingType ?? null
+  const nav = bootNavigationSignals.timingType ?? null
   // Ordered by what a reader needs first, because the overlay is a fixed box on
   // a phone screen and the tail of a long line goes off the edge. `saved` was
   // last in the first version and was the field that got clipped — the one
