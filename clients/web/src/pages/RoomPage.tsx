@@ -346,18 +346,22 @@ export function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per room instance
   }, [timeline])
 
-  // The anchor this page is showing *now*, readable from an async continuation
-  // that may have been created several renders ago. Assigned during render
-  // rather than in an effect, because an effect would lag the very continuation
-  // this exists to fence out. Compared by value, never by URL: the browser keeps
-  // a literal `:` in a room id reached by a cold navigation or an external deep
+  // The deep-link view this page is showing *now*, readable from an async
+  // continuation created several renders ago. Assigned during render rather
+  // than in an effect, because effect cleanup lags the render that invalidates
+  // an old continuation. Compared by value, never by URL: the browser keeps a
+  // literal `:` in a room id reached by a cold navigation or an external deep
   // link while `localRoomHref` percent-encodes it, so comparing paths silently
-  // never matches for real Matrix room ids. The account is part of the identity:
-  // the timeline store is keyed by account *and* room (ADR 0085), two of the
-  // user's accounts can be in the same room, and this page does not remount when
-  // the account changes under the same room and anchor (PR review).
-  const currentAnchor = useRef({ accountId, roomId, highlighted })
-  currentAnchor.current = { accountId, roomId, highlighted }
+  // never matches for real Matrix room ids. Account and thread are both part of
+  // the identity: the timeline is account+room-keyed, and changing the open
+  // thread invalidates the old redirect even when the event anchor is unchanged.
+  const currentDeepLink = useRef({
+    accountId,
+    roomId,
+    highlighted,
+    openThread,
+  })
+  currentDeepLink.current = { accountId, roomId, highlighted, openThread }
 
   // Remembers the deep-link target already resolved. Routing into a thread
   // changes `openThread`, which re-runs the effect below with the same
@@ -374,7 +378,7 @@ export function RoomPage() {
   // visit and every claim below is suppressed — no badge clear, no marker, no
   // receipt — even though the user is reading the newest messages (PR review).
   //
-  // Dropping it is guarded three ways, because each of these has a failure mode
+  // Dropping it is guarded four ways, because each of these has a failure mode
   // worse than leaving a stale anchor in place:
   //
   // 1. **Verified absent, not merely unverified.** A failed head load leaves the
@@ -391,63 +395,73 @@ export function RoomPage() {
   //    effect with a fresh closure while this one is in flight, and the page does
   //    not remount across either (ADR 0085). Stripping `event` off whatever the
   //    URL says *now* would delete an anchor belonging to a later navigation.
+  // 4. **Still mounted.** No later render updates the identity ref after the
+  //    page unmounts, so the invoking effect also supplies a cleanup-backed
+  //    liveness check before this helper can mutate browser history.
   //
   // Only `event` is removed — `?thread=` and the rest are none of this effect's
   // business, and a deep link that resolves *into* a thread keeps its anchor and
   // stays correctly parked.
-  const dropUnsatisfiableAnchor = useCallback(async () => {
-    // Already loaded? Then the anchor is satisfiable and there is nothing to
-    // drop — and the refresh below must not run, because `refreshHead`'s
-    // wholesale-replace branch discards the outgoing slice entirely and would
-    // evict the very event being checked for, turning a live permalink into a
-    // "verified absent" one (PR review).
-    if (
-      timeline.events.peek().some((event) => event.event_id === highlighted)
-    ) {
-      return
-    }
-    // `superseded` is not a failure: a sibling load — the mount effect's own, or
-    // a reconnect gap-fill — won the generation race, and it may have applied a
-    // perfectly good head. Bailing on it would strand the anchor for the visit,
-    // the failure class earlier rounds fixed. Ask once more now the race has
-    // settled; a second supersession is treated as "couldn't verify" and keeps
-    // the anchor, which is the safe direction (PR review).
-    let outcome = await timeline.loadLatest()
-    if (outcome === 'superseded') {
-      outcome = await timeline.loadLatest()
-    }
-    // Two remaining questions, both required: did a head actually get applied
-    // (a decline and a success leave identical state behind), and does the slice
-    // still reach the live end (a jump can move it out from under this
-    // continuation between the load and the check)?
-    if (outcome !== 'applied' || !timeline.atEnd.peek()) {
-      return
-    }
-    if (
-      timeline.events.peek().some((event) => event.event_id === highlighted)
-    ) {
-      return
-    }
-    // Still this continuation's anchor, in this room, under this account? A slow
-    // lookup outlives its own anchor when the user follows a second deep link,
-    // switches rooms, or switches accounts, and the page remounts across none of
-    // them (ADR 0085).
-    const current = currentAnchor.current
-    if (
-      current.accountId !== accountId ||
-      current.roomId !== roomId ||
-      current.highlighted !== highlighted
-    ) {
-      return
-    }
-    location.route(
-      withoutQueryParam(
-        `${window.location.pathname}${window.location.search}`,
-        'event',
-      ),
-      true,
-    )
-  }, [accountId, highlighted, location, roomId, timeline])
+  const dropUnsatisfiableAnchor = useCallback(
+    async (isCurrent: () => boolean) => {
+      if (!isCurrent()) {
+        return
+      }
+      // Already loaded? Then the anchor is satisfiable and there is nothing to
+      // drop — and the refresh below must not run, because `refreshHead`'s
+      // wholesale-replace branch discards the outgoing slice entirely and would
+      // evict the very event being checked for, turning a live permalink into a
+      // "verified absent" one (PR review).
+      if (
+        timeline.events.peek().some((event) => event.event_id === highlighted)
+      ) {
+        return
+      }
+      // `superseded` is not a failure: a sibling load — the mount effect's own, or
+      // a reconnect gap-fill — won the generation race, and it may have applied a
+      // perfectly good head. Bailing on it would strand the anchor for the visit,
+      // the failure class earlier rounds fixed. Ask once more now the race has
+      // settled; a second supersession is treated as "couldn't verify" and keeps
+      // the anchor, which is the safe direction (PR review).
+      let outcome = await timeline.loadLatest()
+      if (!isCurrent()) {
+        return
+      }
+      if (outcome === 'superseded') {
+        outcome = await timeline.loadLatest()
+        if (!isCurrent()) {
+          return
+        }
+      }
+      // Two remaining questions, both required: did a head actually get applied
+      // (a decline and a success leave identical state behind), and does the slice
+      // still reach the live end (a jump can move it out from under this
+      // continuation between the load and the check)?
+      if (outcome !== 'applied' || !timeline.atEnd.peek()) {
+        return
+      }
+      if (
+        timeline.events.peek().some((event) => event.event_id === highlighted)
+      ) {
+        return
+      }
+      // Still this continuation's anchor, in this room, under this account? A slow
+      // lookup outlives its own anchor when the user follows a second deep link,
+      // switches rooms, or switches accounts, and the page remounts across none of
+      // them (ADR 0085).
+      if (!isCurrent()) {
+        return
+      }
+      location.route(
+        withoutQueryParam(
+          `${window.location.pathname}${window.location.search}`,
+          'event',
+        ),
+        true,
+      )
+    },
+    [highlighted, location, timeline],
+  )
 
   // Jump to the `?event=` target — on a cold deep link *and* whenever the
   // query changes while the room is already open (WCR-09; M-W10's search
@@ -471,46 +485,70 @@ export function RoomPage() {
     ) {
       return
     }
-    void api
-      .GET('/v1/accounts/{account_id}/events/{event_id}', {
-        params: { path: { account_id: accountId, event_id: highlighted } },
-      })
-      .then(
-        async ({ data, response }) => {
-          if (data === undefined) {
-            // Only a 404 is the server saying it has no such event. A 5xx or a
-            // rate limit says nothing about the anchor and must not cost the
-            // user their permalink, so it falls back exactly like a rejection.
-            if (response.status === 404) {
-              await dropUnsatisfiableAnchor()
-            } else {
+    // The render-assigned identity closes the render-before-cleanup window; the
+    // effect-local flag closes unmount, when no later render exists to replace
+    // that identity. Every continuation that can route checks both.
+    let active = true
+    const isCurrent = () => {
+      const current = currentDeepLink.current
+      return (
+        active &&
+        current.accountId === accountId &&
+        current.roomId === roomId &&
+        current.highlighted === highlighted &&
+        current.openThread === openThread
+      )
+    }
+    inBackground(
+      api
+        .GET('/v1/accounts/{account_id}/events/{event_id}', {
+          params: { path: { account_id: accountId, event_id: highlighted } },
+        })
+        .then(
+          async ({ data, response }) => {
+            if (!isCurrent()) {
+              return
+            }
+            if (data === undefined) {
+              // Only a 404 is the server saying it has no such event. A 5xx or a
+              // rate limit says nothing about the anchor and must not cost the
+              // user their permalink, so it falls back exactly like a rejection.
+              if (response.status === 404) {
+                await dropUnsatisfiableAnchor(isCurrent)
+              } else {
+                await timeline.loadLatest()
+              }
+              return
+            }
+            const rootId = threadRootId(data.data)
+            resolvedDeepLink.current = { eventId: highlighted, rootId }
+            // A thread reply has no row in the main room stream to jump to —
+            // it only ever renders inside its thread's own panel. Route
+            // straight there instead of jumping the main timeline toward the
+            // reply's timestamp, which would land near the thread root but
+            // never open the thread (or reveal the reply itself).
+            if (rootId !== null && rootId !== openThread && isCurrent()) {
+              location.route(
+                localThreadEventHref(accountId, roomId, rootId, highlighted),
+                true,
+              )
+              return
+            }
+            await timeline.jumpTo(data.data.origin_ts)
+          },
+          // A rejected lookup — offline, timeout, DNS — proves nothing about the
+          // anchor either. Load the tail and leave the URL alone so a retry or a
+          // reload can still resolve the permalink.
+          async () => {
+            if (isCurrent()) {
               await timeline.loadLatest()
             }
-            return
-          }
-          const rootId = threadRootId(data.data)
-          resolvedDeepLink.current = { eventId: highlighted, rootId }
-          // A thread reply has no row in the main room stream to jump to —
-          // it only ever renders inside its thread's own panel. Route
-          // straight there instead of jumping the main timeline toward the
-          // reply's timestamp, which would land near the thread root but
-          // never open the thread (or reveal the reply itself).
-          if (rootId !== null && rootId !== openThread) {
-            location.route(
-              localThreadEventHref(accountId, roomId, rootId, highlighted),
-              true,
-            )
-            return
-          }
-          await timeline.jumpTo(data.data.origin_ts)
-        },
-        // A rejected lookup — offline, timeout, DNS — proves nothing about the
-        // anchor either. Load the tail and leave the URL alone so a retry or a
-        // reload can still resolve the permalink.
-        async () => {
-          await timeline.loadLatest()
-        },
-      )
+          },
+        ),
+    )
+    return () => {
+      active = false
+    }
   }, [
     api,
     accountId,

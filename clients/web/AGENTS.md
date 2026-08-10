@@ -175,13 +175,16 @@ before starting a milestone.
   across a room switch or an `?event=`/`?thread=` change (ADR 0085), so every
   `await` inside an effect can resolve after the user has moved on — a second
   search hit, another room, a closed panel. Anything that acts on the result must
-  re-check identity first, against a **render-assigned ref** holding the room and
-  anchor the page is currently showing. Two things that look like they'd work and
-  don't: the closure's own `location` (the router hands each render its own
-  object, so a stale continuation still sees the URL it was created for and
-  passes the check), and comparing serialized paths (see the encoding trap under
-  Testing traps). Found twice in the #136 review — once as the race, once in the
-  guard written to close it.
+  re-check identity first, against a **render-assigned ref** holding the account,
+  room, anchor, and thread the page is currently showing. That ref does not
+  change when the page unmounts, so work that can navigate also needs an
+  **effect-cleanup flag** and must check both immediately before routing. Two
+  things that look like they'd work and don't: the closure's own `location` (the
+  router hands each render its own object, so a stale continuation still sees
+  the URL it was created for and passes the check), and comparing serialized
+  paths (see the encoding trap under Testing traps). Found repeatedly in the
+  #136 review — first as an in-page race, then across account changes and page
+  unmount.
 - **Ask the operation, not the store.** `error`, `atEnd`, and `events` describe
   the store, not your call. `error` is written by sends, edits, reactions,
   redactions (`mutate`/`mutateWithResult`) and `RoomPage`'s re-decryption retry;

@@ -148,6 +148,23 @@ function routedRoomPage(services: ReturnType<typeof testServices>) {
   )
 }
 
+function routedRoomPageWithAwayRoute(
+  services: ReturnType<typeof testServices>,
+) {
+  const AwayPage = () => <main>Unrelated page</main>
+  return (
+    <ServicesContext.Provider value={services}>
+      <LocationProvider>
+        <Router>
+          <Route path="/:accountId/rooms/:roomId" component={RoomPage} />
+          <Route path="/away" component={AwayPage} />
+          <Route default component={AwayPage} />
+        </Router>
+      </LocationProvider>
+    </ServicesContext.Provider>
+  )
+}
+
 function routedRoomPageWithJumpButton(
   services: ReturnType<typeof testServices>,
 ) {
@@ -3086,6 +3103,138 @@ describe('RoomPage', () => {
     await waitFor(() =>
       expect(window.location.search).toBe('?thread=%24root&event=%24reply'),
     )
+  })
+
+  it('a dead-anchor lookup cannot mutate an unrelated page after RoomPage unmounts', async () => {
+    let releaseLookup!: () => void
+    const heldLookup = new Promise<void>((resolve) => {
+      releaseLookup = resolve
+    })
+    let lookupStarted = false
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        async () => {
+          lookupStarted = true
+          await heldLookup
+          return new HttpResponse(null, { status: 404 })
+        },
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$tail-after-away', T0)],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24gone`,
+    )
+    const { findByText } = render(routedRoomPageWithAwayRoute(testServices()))
+    await waitFor(() => expect(lookupStarted).toBe(true))
+
+    window.history.pushState(null, '', '/away?event=%24belongs-to-away')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await findByText('Unrelated page')
+
+    releaseLookup()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.pathname).toBe('/away')
+    expect(window.location.search).toBe('?event=%24belongs-to-away')
+  })
+
+  it('a stale thread lookup cannot navigate back after RoomPage unmounts', async () => {
+    let releaseLookup!: () => void
+    const heldLookup = new Promise<void>((resolve) => {
+      releaseLookup = resolve
+    })
+    let lookupStarted = false
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        async () => {
+          lookupStarted = true
+          await heldLookup
+          return HttpResponse.json({
+            data: event('$reply-after-away', T0, {
+              relates_to: { rel_type: 'm.thread', event_id: '$root' },
+            }),
+          })
+        },
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24reply-after-away`,
+    )
+    const { findByText } = render(routedRoomPageWithAwayRoute(testServices()))
+    await waitFor(() => expect(lookupStarted).toBe(true))
+
+    window.history.pushState(null, '', '/away?event=%24belongs-to-away')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await findByText('Unrelated page')
+
+    releaseLookup()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.pathname).toBe('/away')
+    expect(window.location.search).toBe('?event=%24belongs-to-away')
+  })
+
+  it('handles a failed anchor-route replacement without an unhandled rejection', async () => {
+    let releaseHead!: () => void
+    const heldHead = new Promise<void>((resolve) => {
+      releaseHead = resolve
+    })
+    let headStarted = false
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+      http.get(TIMELINE_PATH, async () => {
+        headStarted = true
+        await heldHead
+        return HttpResponse.json({
+          data: {
+            events: [event('$tail-route-error', T0)],
+            next_cursor: null,
+          },
+        })
+      }),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24gone`,
+    )
+    render(routedRoomPage(testServices()))
+    await waitFor(() => expect(headStarted).toBe(true))
+    const replaceState = vi
+      .spyOn(window.history, 'replaceState')
+      .mockImplementation(() => {
+        throw new DOMException('rate limited', 'SecurityError')
+      })
+
+    releaseHead()
+    await waitFor(() => expect(replaceState).toHaveBeenCalled())
+
+    expect(window.location.search).toContain('event=%24gone')
   })
 
   it('keeps a search/deep-link target centered when timeline rows resize', async () => {
