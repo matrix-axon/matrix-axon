@@ -1,5 +1,4 @@
 import { signal } from '@preact/signals'
-import { bootNavigationSignals } from './navigation'
 
 const STORAGE_KEY = 'axon.perf'
 
@@ -281,7 +280,13 @@ function summariseBoot(): void {
       (entry.detail as { hasRows?: unknown } | undefined)?.hasRows === true,
   )
   const rowsAt = rows === undefined ? null : Math.round(rows.t)
-  const nav = bootNavigationSignals.timingType ?? null
+  let nav: string | null = null
+  try {
+    const [entry] = performance.getEntriesByType('navigation')
+    nav = (entry as PerformanceNavigationTiming | undefined)?.type ?? null
+  } catch {
+    // Not every engine exposes navigation timing; the rest still reads.
+  }
   // Ordered by what a reader needs first, because the overlay is a fixed box on
   // a phone screen and the tail of a long line goes off the edge. `saved` was
   // last in the first version and was the field that got clipped — the one

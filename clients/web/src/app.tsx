@@ -23,7 +23,6 @@ import {
   resolveMatrixToRoomLink,
   type MatrixRoomReference,
 } from './matrix-to'
-import { isReloadOrRestoreNavigation } from './navigation'
 import {
   currentRoomFromPath,
   serializeSearchTokens,
@@ -367,6 +366,30 @@ function isStandaloneDisplay(media: MediaQueryList | undefined): boolean {
     navigator as Navigator & { standalone?: boolean }
   ).standalone
   return navigatorStandalone === true || media?.matches === true
+}
+
+function isReloadOrRestoreNavigation(): boolean {
+  const [entry] = performance.getEntriesByType(
+    'navigation',
+  ) as PerformanceNavigationTiming[]
+  if (entry !== undefined) {
+    return entry.type === 'reload' || entry.type === 'back_forward'
+  }
+
+  const legacyNavigation = (
+    performance as Performance & {
+      navigation?: {
+        type: number
+        TYPE_RELOAD: number
+        TYPE_BACK_FORWARD: number
+      }
+    }
+  ).navigation
+  return (
+    legacyNavigation !== undefined &&
+    (legacyNavigation.type === legacyNavigation.TYPE_RELOAD ||
+      legacyNavigation.type === legacyNavigation.TYPE_BACK_FORWARD)
+  )
 }
 
 /** The signed-out state: the auth provider's bootstrap UI. */

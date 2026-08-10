@@ -34,7 +34,6 @@
 
 /** sessionStorage, not localStorage: the block is per-tab and per-session. */
 const GUARD_KEY = 'axon:update-reload'
-const SCRIPTED_RELOAD_KEY = 'axon:scripted-reload'
 
 /**
  * Ceiling on automatic reloads per window, across all builds and targets.
@@ -165,49 +164,6 @@ function write(storage: Storage | null, state: GuardState): boolean {
 }
 
 /**
- * Records that this document is about to reload itself. The next boot consumes
- * this one-shot marker before routing, so UI state which only made sense in the
- * prior document can be reset without guessing from browser-specific timing:
- * Firefox reports a scripted `location.reload()` as `navigate`, not `reload`.
- *
- * Both reload paths mark, the automatic one and the one the user asks for. A
- * reload is a reload as far as the document is concerned — a native Ctrl-R drops
- * a restored thread view on every engine, and a reload the user requested from
- * our own banner must not behave differently on Firefox just because the engine
- * misreports who called it.
- */
-function markScriptedReload(storage: Storage | null): void {
-  try {
-    storage?.setItem(SCRIPTED_RELOAD_KEY, '1')
-  } catch {
-    // A failed marker must not turn a successful, loop-bounded reload into a
-    // failed update. The next document simply keeps its current route.
-  }
-}
-
-/**
- * Returns whether this document follows a reload Axon performed itself, and
- * clears the marker.
- *
- * Always consume it, even on a route with nothing to reset: a marker left behind
- * would be read by a later, genuine navigation in the same tab. `navigation.ts`
- * calls this once at boot for that reason — see `bootNavigationSignals`.
- */
-export function consumeScriptedReload(
-  storage: Storage | null = browserStorage(),
-): boolean {
-  try {
-    if (storage?.getItem(SCRIPTED_RELOAD_KEY) !== '1') {
-      return false
-    }
-    storage.removeItem(SCRIPTED_RELOAD_KEY)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/**
  * Settle the previous boot's guard. Call once at startup, before anything can
  * ask to reload: if we came back on a different build than the one those
  * attempts were made from, they worked, so the *pair* record is spent.
@@ -291,7 +247,6 @@ export function reloadOnce(
     `reloading to pick up a new build: ${currentVersion} → ${target} ` +
       `(attempt ${next.spent}/${MAX_ATTEMPTS} this window)`,
   )
-  markScriptedReload(env.storage)
   env.reload()
   return true
 }
@@ -302,6 +257,5 @@ export function reloadOnce(
  * path is allowed to fail closed into this one.
  */
 export function reloadNow(env: ReloadEnvironment): void {
-  markScriptedReload(env.storage)
   env.reload()
 }

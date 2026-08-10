@@ -1,4 +1,4 @@
-import { expect, test, type Locator } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 import {
   ACCOUNT_ID,
   active,
@@ -236,10 +236,34 @@ test('wide: the thread is a third column that shrinks the timeline', async ({
 })
 
 /**
- * The reload a *user* performs, classified from Navigation Timing. Axon's own
- * scripted reload is a separate path with its own marker, covered by
- * `update-refresh.spec.ts` — keep both: they reach the same scrub through
- * different signals, and this stack has already lost this one once.
+ * Reload the document from *inside* the page, not through `page.reload()`.
+ *
+ * Only this spec cares, because only this behaviour is gated on the engine
+ * *classifying* the load as a reload. Playwright's driver reload is reported as
+ * `navigate` by Navigation Timing under Firefox — measured on Firefox 151:
+ * `page.reload()` gives `navigate` there while Chromium and WebKit give
+ * `reload`, and all three give `reload` for an in-page `location.reload()`. So
+ * the driver's reload is the outlier, not the engine, and nothing a user does
+ * reaches it. An in-page reload is both engine-neutral and the closer stand-in
+ * for Ctrl-R. See the AGENTS.md note; every other `page.reload()` in the suite
+ * only needs a fresh document and is unaffected.
+ *
+ * The `setTimeout` lets `evaluate` return before the context is torn down;
+ * calling `location.reload()` synchronously rejects it instead.
+ */
+async function reloadFromInsidePage(page: Page): Promise<void> {
+  await Promise.all([
+    page.waitForEvent('load'),
+    page.evaluate(() => {
+      window.setTimeout(() => location.reload(), 0)
+    }),
+  ])
+}
+
+/**
+ * A reload drops the restored thread view: `?thread=` leaves the URL and the
+ * panel does not come back. `update-refresh.spec.ts` covers the same contract
+ * for the reload Axon performs itself on a new build (ADR 0087) — keep both.
  */
 test('reload strips the restored thread view from a room URL', async ({
   page,
@@ -249,7 +273,7 @@ test('reload strips the restored thread view from a room URL', async ({
   await page.goto(`${ROOM_URL}?thread=%24root`)
   await expect(page.locator('.thread-panel')).toBeVisible()
 
-  await page.reload()
+  await reloadFromInsidePage(page)
 
   await expect(page).not.toHaveURL(/thread=/)
   await expect(page.locator('.thread-panel')).toHaveCount(0)

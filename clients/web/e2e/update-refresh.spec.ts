@@ -139,6 +139,13 @@ test('a backgrounded tab reloads itself on return', async ({ page }) => {
     .toBe(false)
 })
 
+/**
+ * The reload this module performs is an in-page `location.reload()`, so every
+ * engine classifies it as a reload and the ordinary startup thread scrub applies
+ * — no special case anywhere in the app. This pins that, because an automatic
+ * reload restoring a thread panel the user did not ask for is the one way this
+ * feature could quietly change what the app looks like after an update.
+ */
 test('an automatic reload closes the restored thread view', async ({
   page,
 }) => {
