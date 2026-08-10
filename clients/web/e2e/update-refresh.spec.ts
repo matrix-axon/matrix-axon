@@ -139,28 +139,6 @@ test('a backgrounded tab reloads itself on return', async ({ page }) => {
     .toBe(false)
 })
 
-/**
- * The reload this module performs is an in-page `location.reload()`, so every
- * engine classifies it as a reload and the ordinary startup thread scrub applies
- * — no special case anywhere in the app. This pins that, because an automatic
- * reload restoring a thread panel the user did not ask for is the one way this
- * feature could quietly change what the app looks like after an update.
- */
-test('an automatic reload closes the restored thread view', async ({
-  page,
-}) => {
-  await signIn(page)
-  await page.goto(`${ROOM_URL}?thread=%24root`)
-  await expect(page.locator('.thread-panel')).toBeVisible()
-
-  await stageDeploy(page, 'build-from-e2e')
-  await returnAfterAway(page, 90_000)
-
-  await expect(page).not.toHaveURL(/thread=/)
-  await expect(page.locator('.thread-panel')).toHaveCount(0)
-  await expect(page.locator('.timeline')).toBeVisible()
-})
-
 // The loop guard. With the origin permanently claiming a build the tab can
 // never become, an unguarded implementation reloads forever.
 test('a manifest that never matches reloads exactly once', async ({ page }) => {
@@ -185,4 +163,39 @@ test('a manifest that never matches reloads exactly once', async ({ page }) => {
   // The initial goto plus at most the one permitted reload.
   expect(navigations).toBeLessThanOrEqual(2)
   await expect(page.getByRole('status').first()).toHaveText('Live')
+})
+
+/**
+ * The reload this module performs is an in-page `location.reload()`, so every
+ * engine classifies it as a reload and the ordinary startup thread scrub applies
+ * — no special case anywhere in the app. This pins that, because an automatic
+ * reload restoring a thread panel the user did not ask for is the one way this
+ * feature could quietly change what the app looks like after an update.
+ *
+ * Declared last on purpose. Under `mode: 'serial'` a failure skips every test
+ * declared after it, so a slow reload here would have silently dropped the
+ * loop-guard regression above from the run — the one test in this file whose
+ * absence nobody would notice, because a reload loop is what it exists to catch.
+ *
+ * Every assertion after the reload gets the same 15s budget the sibling reload
+ * tests use: `returnAfterAway` only *starts* the sequence, and the update check
+ * is async and awaits a draft flush of up to `FLUSH_TIMEOUT_MS` (2s) before the
+ * navigation even begins, after which the timeline has to mount and paint again.
+ * The 5s default is not enough headroom for that on a loaded runner.
+ */
+test('an automatic reload closes the restored thread view', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.goto(`${ROOM_URL}?thread=%24root`)
+  await expect(page.locator('.thread-panel')).toBeVisible()
+
+  await stageDeploy(page, 'build-from-e2e')
+  await returnAfterAway(page, 90_000)
+
+  await expect(page).not.toHaveURL(/thread=/, { timeout: 15_000 })
+  await expect(page.locator('.thread-panel')).toHaveCount(0, {
+    timeout: 15_000,
+  })
+  await expect(page.locator('.timeline')).toBeVisible({ timeout: 15_000 })
 })
