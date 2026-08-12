@@ -122,6 +122,30 @@ impl Drop for HandleGuard {
     }
 }
 
+/// Releases our [`Inner::flight`] slot on **every** exit path from
+/// [`MediaCache::get_or_fetch_keyed`], including the one plain control flow
+/// misses: an axum handler future dropped when the client disconnects
+/// mid-fetch (the user scrolls past an image, the browser aborts). Without
+/// this the map entry outlives the request and is only ever reclaimed if the
+/// same key is fetched again — see GH #27.
+///
+/// The unconditional call in `Drop` is safe because
+/// [`Inner::release_flight`]'s `ptr_eq` check already ignores a slot that a
+/// newer caller has since re-inserted for the same key.
+struct FlightGuard {
+    inner: Arc<Inner>,
+    account_id: Uuid,
+    hash: String,
+    slot: Arc<AsyncMutex<()>>,
+}
+
+impl Drop for FlightGuard {
+    fn drop(&mut self) {
+        self.inner
+            .release_flight(self.account_id, &self.hash, &self.slot);
+    }
+}
+
 /// A point-in-time snapshot for the fd-diagnostics logger (GH #242).
 #[derive(Debug, Clone, Copy)]
 pub struct MediaCacheStats {
@@ -319,25 +343,26 @@ impl MediaCache {
             return Ok(resource);
         }
 
-        // Single-flight: only one task fetches a given key at a time.
+        // Single-flight: only one task fetches a given key at a time. The
+        // release guard is declared *before* the lock guard so that drop order
+        // (reverse of declaration) unlocks the slot first and only then unmaps
+        // it — the same order the previous hand-rolled cleanup used.
         let slot = self.inner.flight_slot(account_id, hash);
+        let _release = FlightGuard {
+            inner: self.inner.clone(),
+            account_id,
+            hash: hash.to_owned(),
+            slot: slot.clone(),
+        };
         let _guard = slot.lock().await;
 
         // Re-check under the slot — a peer may have populated it while we waited.
         if let Some(resource) = self.inner.try_hit(account_id, hash).await {
-            self.inner.release_flight(account_id, hash, &slot);
             return Ok(resource);
         }
 
-        let result = async {
-            let data = self.inner.fetch_capped(fetch).await?;
-            self.inner.store_and_open(account_id, hash, data).await
-        }
-        .await;
-
-        drop(_guard);
-        self.inner.release_flight(account_id, hash, &slot);
-        result
+        let data = self.inner.fetch_capped(fetch).await?;
+        self.inner.store_and_open(account_id, hash, data).await
     }
 
     /// A cheap handle for the lifecycle-teardown purge path.
@@ -497,6 +522,8 @@ impl Inner {
     /// `ptr_eq` guard. This avoids the strong-count race where two concurrent
     /// releasers each observe the other's live clone and neither removes,
     /// orphaning the entry forever.
+    ///
+    /// Called only from [`FlightGuard::drop`], so it runs on cancellation too.
     fn release_flight(&self, account_id: Uuid, hash: &str, held: &Arc<AsyncMutex<()>>) {
         let mut flight = self.flight.lock().expect("flight mutex");
         let key = (account_id, hash.to_owned());
@@ -930,6 +957,36 @@ mod tests {
         }
     }
 
+    /// Signals once the fetch has been entered, then never completes — so a
+    /// caller can be parked precisely inside `fetch_capped` and then dropped,
+    /// reproducing an axum handler future cancelled by a client disconnect.
+    struct StalledFetcher {
+        entered: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait]
+    impl MediaFetcher for StalledFetcher {
+        async fn fetch(
+            &self,
+            _account_id: Uuid,
+            _mxc_url: &str,
+            _encrypted_file: Option<Value>,
+        ) -> Result<Vec<u8>, FetchError> {
+            let _ = self.entered.send(());
+            std::future::pending().await
+        }
+
+        async fn fetch_thumbnail(
+            &self,
+            _account_id: Uuid,
+            _mxc_url: &str,
+            _spec: ThumbnailSpec,
+        ) -> Result<Vec<u8>, FetchError> {
+            let _ = self.entered.send(());
+            std::future::pending().await
+        }
+    }
+
     struct FailingFetcher;
 
     #[async_trait]
@@ -1171,6 +1228,46 @@ mod tests {
             assert_eq!(handle.await.unwrap().unwrap(), 6);
         }
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_releases_its_single_flight_slot() {
+        // GH #27: an axum handler future is dropped when the client
+        // disconnects, which for media is the common case (scrolling past an
+        // image). Cancellation inside `fetch_capped` must still unmap the
+        // `flight` entry; hand-rolled cleanup after the await could not.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = MediaCache::open(&config_in(dir.path(), 1 << 20, 1 << 20, true))
+            .await
+            .unwrap();
+        let account = Uuid::new_v4();
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let fetcher = StalledFetcher {
+            entered: entered_tx,
+        };
+
+        {
+            let mut request =
+                Box::pin(cache.get_or_fetch(account, "mxc://s/abandoned", None, &fetcher));
+
+            // Drive the request only as far as the (never-completing) fetch.
+            tokio::select! {
+                _ = &mut request => panic!("stalled fetch must not complete"),
+                signal = entered_rx.recv() => assert!(signal.is_some()),
+            }
+
+            // Guard against a vacuous test: the slot really is mapped here.
+            assert_eq!(
+                cache.inner.flight.lock().unwrap().len(),
+                1,
+                "in-flight request should hold a slot"
+            );
+        } // `request` dropped mid-fetch, exactly as a disconnect would.
+
+        assert!(
+            cache.inner.flight.lock().unwrap().is_empty(),
+            "cancelled request leaked its single-flight slot"
+        );
     }
 
     #[tokio::test]
