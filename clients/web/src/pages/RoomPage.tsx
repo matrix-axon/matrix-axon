@@ -407,14 +407,14 @@ export function RoomPage() {
       if (!isCurrent()) {
         return
       }
+      const anchorIsLoaded = () =>
+        timeline.events.peek().some((event) => event.event_id === highlighted)
       // Already loaded? Then the anchor is satisfiable and there is nothing to
       // drop — and the refresh below must not run, because `refreshHead`'s
       // wholesale-replace branch discards the outgoing slice entirely and would
       // evict the very event being checked for, turning a live permalink into a
       // "verified absent" one (PR review).
-      if (
-        timeline.events.peek().some((event) => event.event_id === highlighted)
-      ) {
+      if (anchorIsLoaded()) {
         return
       }
       // `superseded` is not a failure: a sibling load — the mount effect's own, or
@@ -428,6 +428,12 @@ export function RoomPage() {
         return
       }
       if (outcome === 'superseded') {
+        // The sibling winner may have loaded the anchor. Check its slice before
+        // retrying: a disjoint refresh could otherwise replace that slice and
+        // evict the evidence the retry exists to verify (PR review).
+        if (anchorIsLoaded()) {
+          return
+        }
         outcome = await timeline.loadLatest()
         if (!isCurrent()) {
           return
@@ -440,9 +446,7 @@ export function RoomPage() {
       if (outcome !== 'applied' || !timeline.atEnd.peek()) {
         return
       }
-      if (
-        timeline.events.peek().some((event) => event.event_id === highlighted)
-      ) {
+      if (anchorIsLoaded()) {
         return
       }
       // Still this continuation's anchor, in this room, under this account? A slow
@@ -527,7 +531,7 @@ export function RoomPage() {
             // straight there instead of jumping the main timeline toward the
             // reply's timestamp, which would land near the thread root but
             // never open the thread (or reveal the reply itself).
-            if (rootId !== null && rootId !== openThread && isCurrent()) {
+            if (rootId !== null && rootId !== openThread) {
               location.route(
                 localThreadEventHref(accountId, roomId, rootId, highlighted),
                 true,

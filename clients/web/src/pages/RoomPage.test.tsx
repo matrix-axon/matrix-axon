@@ -3839,6 +3839,47 @@ describe('RoomPage', () => {
     expect(window.location.search).toContain('event=%24late')
   })
 
+  /// A superseded head load means a sibling load won the generation race. If
+  /// that winner loaded the anchor, retrying without checking the winner's
+  /// slice can immediately evict the proof that the permalink is valid.
+  it('keeps a ?event= anchor loaded by the call that superseded its head check', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+    )
+    const services = testServices()
+    const timeline = services.timelines.acquire(ACCOUNT, ROOM)
+    const loadLatest = vi
+      .spyOn(timeline, 'loadLatest')
+      .mockImplementationOnce(async () => {
+        // The sibling winner loaded the anchor into the shared store.
+        timeline.ingestLive(event('$race-winner', T0))
+        return 'superseded'
+      })
+      .mockImplementationOnce(async () => {
+        // A disjoint retry models refreshHead's wholesale-replace branch.
+        timeline.resumeAtHead()
+        return 'applied'
+      })
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24race-winner`,
+    )
+
+    render(routedRoomPage(services))
+    await waitFor(() => expect(loadLatest).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(loadLatest).toHaveBeenCalledTimes(1)
+    expect(window.location.search).toContain('event=%24race-winner')
+  })
+
   /// The timeline store is keyed by account *and* room (ADR 0085), two of the
   /// user's accounts can be in the same room, and the page does not remount when
   /// the account changes under the same room and anchor. A stale continuation
