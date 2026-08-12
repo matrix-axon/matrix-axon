@@ -82,14 +82,8 @@ jobs:
       - name: Install Playwright browser
         run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
 
-      # Deliberately *without* `--fail-on-flaky-tests`, so the `retries: 1` this
-      # lane relies on is allowed to mask a first-attempt failure. That is not
-      # the end state: a handful of specs flake on socket setup only when the
-      # whole suite runs across several projects, and gating on it would keep
-      # this lane from landing at all. Restore the flag when #157 closes — until
-      # then a retried pass reports as a pass, which is what #116 objects to.
       - name: Run ${{ matrix.project }} e2e lane
-        run: pnpm exec playwright test --project=${{ matrix.project }}
+        run: pnpm exec playwright test --project=${{ matrix.project }} --fail-on-flaky-tests
 
       # The CI reporter is `github` (inline annotations), so the artifact worth
       # keeping is the trace `retries: 1` captures on a first-attempt failure.
@@ -131,9 +125,8 @@ jobs:
       - name: Install Playwright WebKit
         run: pnpm exec playwright install --with-deps webkit
 
-      # Same as the desktop lane: no `--fail-on-flaky-tests` until #157 closes.
       - name: Run iPhone-profile WebKit e2e lane
-        run: MOBILE_E2E=1 pnpm exec playwright test --project=webkit-iphone
+        run: MOBILE_E2E=1 pnpm exec playwright test --project=webkit-iphone --fail-on-flaky-tests
 
       - uses: actions/upload-artifact@v7
         if: ${{ failure() }}

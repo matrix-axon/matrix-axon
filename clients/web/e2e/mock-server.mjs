@@ -949,6 +949,9 @@ const server = createServer((req, res) => {
     sockets.clear()
     return json(res, { data: { dropped: true, block_ms: blockMs } })
   }
+  if (req.method === 'GET' && url.pathname === '/__e2e/socket-count') {
+    return json(res, { data: { open: sockets.size } })
+  }
   if (url.pathname.startsWith('/v1/')) {
     void handleApi(req, res, url)
   } else {
@@ -957,9 +960,10 @@ const server = createServer((req, res) => {
 })
 
 // WebSocket upgrade: RFC 6455 handshake echoing the benign `axon` subprotocol
-// (the #238 contract) and registering the socket for broadcast. We never read
-// client frames — the app sends over REST — so no frame parsing is needed.
+// (the #238 contract) and registering the socket for broadcast. The app sends
+// data over REST, so the only client frame consumed here is Close.
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+const WS_CLOSE_FRAME = Buffer.from([0x88, 0x00])
 server.on('upgrade', (req, socket) => {
   if (Date.now() < blockUpgradesUntil) {
     socket.destroy()
@@ -983,8 +987,22 @@ server.on('upgrade', (req, socket) => {
   }
   socket.write(lines.join('\r\n') + '\r\n\r\n')
   sockets.add(socket)
-  socket.on('close', () => sockets.delete(socket))
-  socket.on('error', () => sockets.delete(socket))
+  socket.on('data', (data) => {
+    // The app never sends data over the live bus, but the browser does send a
+    // Close frame when a page or context is torn down. Complete that handshake
+    // so Firefox can release the connection immediately instead of retaining
+    // each test's half-closed socket until its network timeout.
+    if ((data[0] & 0x0f) === 0x08) {
+      sockets.delete(socket)
+      socket.end(WS_CLOSE_FRAME)
+    }
+  })
+  socket.on('close', () => {
+    sockets.delete(socket)
+  })
+  socket.on('error', () => {
+    sockets.delete(socket)
+  })
 })
 
 server.listen(PORT, '127.0.0.1', () => {
