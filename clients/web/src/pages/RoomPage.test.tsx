@@ -1342,6 +1342,86 @@ describe('RoomPage', () => {
     expect(await findByText('body of $old')).toBeTruthy()
   })
 
+  it('does not advance the summary read marker after a jump to date', async () => {
+    const expectedStartTs = new Date(2026, 4, 20).getTime()
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({
+          data: [
+            {
+              account_id: ACCOUNT,
+              account_user_id: '@me:hs',
+              room_id: ROOM,
+              name: 'Ops',
+              topic: null,
+              avatar_url: null,
+              canonical_alias: null,
+              last_activity_ts: T0,
+              last_event_id: '$latest',
+            },
+            {
+              account_id: ACCOUNT,
+              account_user_id: '@me:hs',
+              room_id: '!other:hs',
+              name: 'Other',
+              topic: null,
+              avatar_url: null,
+              canonical_alias: null,
+              last_activity_ts: T0 + 1,
+              last_event_id: '$other',
+            },
+          ],
+        }),
+      ),
+      http.get(TIMELINE_PATH, ({ request }) => {
+        const atTs = new URL(request.url).searchParams.get('at_ts')
+        return HttpResponse.json({
+          data: {
+            events:
+              atTs === null
+                ? [event('$latest', T0)]
+                : [event('$old', expectedStartTs + 1)],
+            next_cursor: null,
+          },
+        })
+      }),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+    )
+    const services = testServices()
+    const timeline = services.timelines.acquire(ACCOUNT, ROOM)
+    const { findByRole, findByText } = render(
+      routedRoomPageWithJumpButton(services),
+    )
+    await findByText('body of $latest')
+    await waitFor(() =>
+      expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
+        eventId: '$latest',
+        originTs: T0,
+      }),
+    )
+
+    fireEvent.click(await findByRole('button', { name: 'Jump' }))
+    const dialog = await findByRole('dialog', { name: 'Jump to date' })
+    fireEvent.input(within(dialog).getByLabelText('Date'), {
+      target: { value: '2026-05-20' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Jump' }))
+
+    await findByText('body of $old')
+    await waitFor(() => expect(timeline.atEnd.value).toBe(false))
+    services.rooms.noteTimelineEvent(event('$new-after-jump', T0 + 2))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
+      eventId: '$latest',
+      originTs: T0,
+    })
+  })
+
   it('keeps the jump dialog open on invalid input and closes it with Escape', async () => {
     server.use(
       http.get(`${TEST_BASE_URL}/v1/rooms`, () =>

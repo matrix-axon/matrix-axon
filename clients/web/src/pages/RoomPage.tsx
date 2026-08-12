@@ -93,6 +93,7 @@ import {
 import type { ThreadUnreadStore } from '../stores/thread-unread'
 import {
   type EventDto,
+  type HeadLoadOutcome,
   type TimelineEvent,
   type TimelineStore,
 } from '../stores/timeline'
@@ -144,6 +145,13 @@ type SwipeStart = {
 
 function isUnableToDecrypt(event: EventDto): boolean {
   return event.type === 'm.room.encrypted' && event.content === null
+}
+
+function timelineContainsEvent(
+  events: readonly TimelineEvent[],
+  eventId: string | null,
+): boolean {
+  return events.some((event) => event.event_id === eventId)
 }
 
 function isGestureControl(target: EventTarget | null): boolean {
@@ -347,21 +355,26 @@ export function RoomPage() {
   }, [timeline])
 
   // The deep-link view this page is showing *now*, readable from an async
-  // continuation created several renders ago. Assigned during render rather
-  // than in an effect, because effect cleanup lags the render that invalidates
-  // an old continuation. Compared by value, never by URL: the browser keeps a
-  // literal `:` in a room id reached by a cold navigation or an external deep
-  // link while `localRoomHref` percent-encodes it, so comparing paths silently
-  // never matches for real Matrix room ids. Account and thread are both part of
-  // the identity: the timeline is account+room-keyed, and changing the open
-  // thread invalidates the old redirect even when the event anchor is unchanged.
-  const currentDeepLink = useRef({
+  // continuation created several renders ago. Bump its generation during
+  // render rather than in an effect, because effect cleanup lags the render
+  // that invalidates an old continuation. The value tuple avoids URL-string
+  // comparison: the browser keeps a literal `:` in a room id reached by a cold
+  // navigation while `localRoomHref` percent-encodes it. Account and thread are
+  // both part of the identity because changing either invalidates an old route.
+  const deepLinkIdentity = JSON.stringify([
     accountId,
     roomId,
     highlighted,
     openThread,
-  })
-  currentDeepLink.current = { accountId, roomId, highlighted, openThread }
+  ])
+  const currentDeepLink = useRef({ identity: deepLinkIdentity, generation: 0 })
+  if (currentDeepLink.current.identity !== deepLinkIdentity) {
+    currentDeepLink.current = {
+      identity: deepLinkIdentity,
+      generation: currentDeepLink.current.generation + 1,
+    }
+  }
+  const deepLinkGeneration = currentDeepLink.current.generation
 
   // Remembers the deep-link target already resolved. Routing into a thread
   // changes `openThread`, which re-runs the effect below with the same
@@ -407,36 +420,27 @@ export function RoomPage() {
       if (!isCurrent()) {
         return
       }
-      const anchorIsLoaded = () =>
-        timeline.events.peek().some((event) => event.event_id === highlighted)
       // Already loaded? Then the anchor is satisfiable and there is nothing to
       // drop — and the refresh below must not run, because `refreshHead`'s
       // wholesale-replace branch discards the outgoing slice entirely and would
       // evict the very event being checked for, turning a live permalink into a
       // "verified absent" one (PR review).
-      if (anchorIsLoaded()) {
-        return
-      }
       // `superseded` is not a failure: a sibling load — the mount effect's own, or
       // a reconnect gap-fill — won the generation race, and it may have applied a
-      // perfectly good head. Bailing on it would strand the anchor for the visit,
-      // the failure class earlier rounds fixed. Ask once more now the race has
-      // settled; a second supersession is treated as "couldn't verify" and keeps
-      // the anchor, which is the safe direction (PR review).
-      let outcome = await timeline.loadLatest()
-      if (!isCurrent()) {
-        return
-      }
-      if (outcome === 'superseded') {
-        // The sibling winner may have loaded the anchor. Check its slice before
-        // retrying: a disjoint refresh could otherwise replace that slice and
-        // evict the evidence the retry exists to verify (PR review).
-        if (anchorIsLoaded()) {
+      // perfectly good head. Try at most twice, checking the winner's slice
+      // before either refresh; a second supersession means "couldn't verify"
+      // and keeps the anchor, which is the safe direction (PR review).
+      let outcome: HeadLoadOutcome = 'superseded'
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (timelineContainsEvent(timeline.events.peek(), highlighted)) {
           return
         }
         outcome = await timeline.loadLatest()
         if (!isCurrent()) {
           return
+        }
+        if (outcome !== 'superseded') {
+          break
         }
       }
       // Two remaining questions, both required: did a head actually get applied
@@ -446,7 +450,7 @@ export function RoomPage() {
       if (outcome !== 'applied' || !timeline.atEnd.peek()) {
         return
       }
-      if (anchorIsLoaded()) {
+      if (timelineContainsEvent(timeline.events.peek(), highlighted)) {
         return
       }
       // Still this continuation's anchor, in this room, under this account? A slow
@@ -477,7 +481,7 @@ export function RoomPage() {
     if (highlighted === null) {
       return
     }
-    if (timeline.events.value.some((event) => event.event_id === highlighted)) {
+    if (timelineContainsEvent(timeline.events.value, highlighted)) {
       return
     }
     const resolved = resolvedDeepLink.current
@@ -489,20 +493,12 @@ export function RoomPage() {
     ) {
       return
     }
-    // The render-assigned identity closes the render-before-cleanup window; the
-    // effect-local flag closes unmount, when no later render exists to replace
-    // that identity. Every continuation that can route checks both.
+    // The render-bumped generation closes the render-before-cleanup window; the
+    // effect-local flag closes unmount, when no later render exists to bump it.
+    // Every continuation that can route checks both.
     let active = true
-    const isCurrent = () => {
-      const current = currentDeepLink.current
-      return (
-        active &&
-        current.accountId === accountId &&
-        current.roomId === roomId &&
-        current.highlighted === highlighted &&
-        current.openThread === openThread
-      )
-    }
+    const isCurrent = () =>
+      active && currentDeepLink.current.generation === deepLinkGeneration
     inBackground(
       api
         .GET('/v1/accounts/{account_id}/events/{event_id}', {
@@ -562,6 +558,7 @@ export function RoomPage() {
     openThread,
     location,
     dropUnsatisfiableAnchor,
+    deepLinkGeneration,
   ])
 
   // Mark this room active while it is open so shared chrome can mark the row.
@@ -587,13 +584,13 @@ export function RoomPage() {
   // quick mobile switches — which is why this reads the *summary* rather than
   // waiting for the timeline effect below.
   //
-  // Anchored loads (`?event=`) are excluded for the same reason the optimistic
-  // badge clear is: this marker is cross-device (ADR 0048), and a sibling
-  // device turns it straight into a zeroed badge (`connectReadMarkers`), so
-  // jumping it to the summary's newest event would mark a room read
-  // *everywhere* from a view that never showed that event.
+  // Anchored loads (`?event=`) and slices parked short of the live end (for
+  // example after jump-to-date) are excluded: this marker is cross-device (ADR
+  // 0048), and a sibling device turns it straight into a zeroed badge
+  // (`connectReadMarkers`). Advancing it from either view would mark a room read
+  // *everywhere* from a view that never showed the summary's newest event.
   useEffect(() => {
-    if (!unanchored) {
+    if (!showingNewestEvents) {
       return
     }
     const room = rooms.rooms.value.find(
@@ -619,7 +616,7 @@ export function RoomPage() {
     rooms.rooms.value,
     deviceState,
     unreadThreadCutoff,
-    unanchored,
+    showingNewestEvents,
   ])
 
   // Advance this room's read marker to the newest event while it is open, so

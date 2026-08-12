@@ -154,11 +154,13 @@ before starting a milestone.
   optimistic badge clear on mount, the summary-derived cross-device marker, and
   the timeline-driven marker + receipt. **Every one of them is gated on the view
   actually showing the room's newest events**, and the gates are not
-  interchangeable: the mount effects check `highlighted === null` (an `?event=`
-  landing is parked in history by definition), while the timeline effect needs
-  `highlighted === null` _and_ `timeline.atEnd` — once a room summary is known
-  the head gets gap-filled, so a view anchored five days back can have the
-  newest events loaded and `atEnd` true. Removing any of these gates makes the
+  interchangeable: the optimistic badge clear checks `highlighted === null`
+  (an `?event=` landing is parked in history by definition), while both marker
+  effects need `highlighted === null` _and_ `timeline.atEnd`. The second half
+  matters even without an event anchor: jump-to-date parks the slice in history
+  without changing the URL. Conversely, once a room summary is known the head
+  gets gap-filled, so a view anchored five days back can have the newest events
+  loaded and `atEnd` true. Removing any of these gates makes the
   client claim messages as read that it never displayed: the badge vanishes for
   the session and returns on reload (the server correctly refuses to advance the
   receipt, ADR 0089), and the marker is cross-device, so `connectReadMarkers`
@@ -175,9 +177,9 @@ before starting a milestone.
   across a room switch or an `?event=`/`?thread=` change (ADR 0085), so every
   `await` inside an effect can resolve after the user has moved on — a second
   search hit, another room, a closed panel. Anything that acts on the result must
-  re-check identity first, against a **render-assigned ref** holding the account,
-  room, anchor, and thread the page is currently showing. That ref does not
-  change when the page unmounts, so work that can navigate also needs an
+  re-check identity first, against a **render-bumped generation** covering the
+  account, room, anchor, and thread the page is currently showing. The generation
+  does not change when the page unmounts, so work that can navigate also needs an
   **effect-cleanup flag** and must check both immediately before routing. Two
   things that look like they'd work and don't: the closure's own `location` (the
   router hands each render its own object, so a stale continuation still sees
