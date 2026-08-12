@@ -363,17 +363,28 @@ MOBILE_E2E=1 pnpm exec playwright test --project=webkit-iphone --fail-on-flaky-t
 MOBILE_E2E=1 pnpm exec playwright test --fail-on-flaky-tests
 ```
 
-The `--fail-on-flaky-tests` flag makes a retry diagnostic rather than a passing
-result. The commands above keep it, because surfacing flakiness is the point of
-running them by hand — but note the CI lanes currently **omit** it, so they are
-more forgiving than these are. A handful of specs flake on socket setup when the
-whole suite runs across several projects, and gating on that would have kept the
-cross-browser lane from landing at all (#157). So expect these commands to
-report a flake that CI reported as a pass, and read that as the flag doing its
-job rather than as a discrepancy to reconcile.
+`--fail-on-flaky-tests` turns a pass-on-retry into a failure — which means it
+does nothing at all unless retries are enabled, and `playwright.config.ts` sets
+`retries: process.env.CI ? 1 : 0`. So:
 
-When reproducing CI locally, set `CI=1` as well; Playwright will require a fresh
-mock server instead of reusing one already listening on port 4599.
+- **Locally** there are no retries, so there is no "flaky" outcome to begin with:
+  a test that fails its first attempt is simply a failure, with or without the
+  flag. The flag is harmless here but redundant.
+- **On CI** `retries: 1` applies, and the lanes deliberately _omit_ the flag
+  (#157), so a test that passes on its second attempt is reported as a pass.
+
+The practical consequence is that CI is more forgiving than your terminal, and
+the difference is the retry, not the flag. When reproducing a CI result exactly,
+set `CI=1` — that also makes Playwright require a fresh mock server rather than
+reusing one already listening on port 4599.
+
+**A local full-suite Firefox run currently fails**, and that is expected until
+#157 is fixed: two specs per run hang waiting for the socket to report `Live`,
+which spec varies from run to run, and each passes on Firefox in isolation. The
+wait is shared setup (`openRoom`/`expectLive`, used by a dozen specs), so this is
+not attributable to any one test. `CI=1 pnpm exec playwright test
+--project=firefox` reproduces what the gate sees, because the retry absorbs it.
+Chromium and WebKit are green locally.
 
 CI runs the schema sync check, lint, format check, tests, and the build via
 `.github/workflows/web-lint-and-test.yml` (path-filtered `pull_request` plus
