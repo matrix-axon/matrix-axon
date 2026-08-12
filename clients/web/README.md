@@ -370,21 +370,22 @@ does nothing at all unless retries are enabled, and `playwright.config.ts` sets
 - **Locally** there are no retries, so there is no "flaky" outcome to begin with:
   a test that fails its first attempt is simply a failure, with or without the
   flag. The flag is harmless here but redundant.
-- **On CI** `retries: 1` applies, and the lanes deliberately _omit_ the flag
-  (#157), so a test that passes on its second attempt is reported as a pass.
+- **On CI** `retries: 1` applies, and the lanes pass the flag, so a test that
+  fails its first attempt still fails the job even when its retry passes.
 
-The practical consequence is that CI is more forgiving than your terminal, and
-the difference is the retry, not the flag. When reproducing a CI result exactly,
-set `CI=1` — that also makes Playwright require a fresh mock server rather than
-reusing one already listening on port 4599.
+The practical consequence is that both environments reject a first-attempt
+failure, while CI still retries to capture a trace and distinguish a flaky test
+from a persistent failure. To reproduce the gate exactly, set `CI=1` and pass
+`--fail-on-flaky-tests`; `CI=1` also makes Playwright require a fresh mock server
+rather than reusing one already listening on port 4599.
 
-**A local full-suite Firefox run currently fails**, and that is expected until
-#157 is fixed: two specs per run hang waiting for the socket to report `Live`,
-which spec varies from run to run, and each passes on Firefox in isolation. The
-wait is shared setup (`openRoom`/`expectLive`, used by a dozen specs), so this is
-not attributable to any one test. `CI=1 pnpm exec playwright test
---project=firefox` reproduces what the gate sees, because the retry absorbs it.
-Chromium and WebKit are green locally.
+**A local full-suite Firefox run should pass.** #157 traced its former
+order-dependent failures to the mock backend leaving every client-initiated
+WebSocket close half-finished. The retained connections eventually prevented
+Firefox from opening another socket, so whichever spec next entered shared
+setup (`openRoom`/`expectLive`) appeared to hang. The mock now completes the
+close handshake and the CI lanes use `--fail-on-flaky-tests`, so a retry can no
+longer hide a recurrence.
 
 CI runs the schema sync check, lint, format check, tests, and the build via
 `.github/workflows/web-lint-and-test.yml` (path-filtered `pull_request` plus
