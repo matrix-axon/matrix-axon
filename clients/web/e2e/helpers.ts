@@ -92,9 +92,36 @@ export async function openRoom(page: Page): Promise<void> {
   await signIn(page)
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.goto(ROOM_URL)
-  await expect(
-    page.getByRole('status', { name: 'WebSocket: Live' }),
-  ).toHaveText('Live')
+  await expectLive(page)
+}
+
+/**
+ * Budget for the connection indicator to reach `Live`.
+ *
+ * A first connect has no backoff and is normally immediate, so the 5s default
+ * looks generous — but any refused or slow upgrade drops the client into
+ * `live-connection.ts`'s schedule, where `INITIAL_BACKOFF_MS` doubles and
+ * attempts land at roughly 1s, 3s and 7s. The default therefore sits *inside*
+ * that ladder, one slow handshake away from failing, which is how Firefox
+ * flaked here. This covers through the third attempt instead.
+ */
+export const LIVE_TIMEOUT_MS = 15_000
+
+/**
+ * Assert the socket is reporting `Live`.
+ *
+ * Matched on `/^WebSocket:/` rather than the full `'WebSocket: Live'`, even
+ * though the exact name is more specific: the accessible name *contains the
+ * state being asserted*, so keying the locator to it means a socket that never
+ * goes live fails with "element(s) not found" instead of naming the state it
+ * was actually stuck in. The prefix disambiguates this indicator from the other
+ * `role="status"` elements just as well, and reports `Reconnecting…` as text.
+ */
+export async function expectLive(page: Page): Promise<void> {
+  await expect(page.getByRole('status', { name: /^WebSocket:/ })).toHaveText(
+    'Live',
+    { timeout: LIVE_TIMEOUT_MS },
+  )
 }
 
 /**

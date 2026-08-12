@@ -15,6 +15,18 @@ const SEND_URL = `/v1/accounts/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)
 // history), so dropping sockets in one test would sever another's connection.
 test.describe.configure({ mode: 'serial' })
 
+/**
+ * Budgets for the connection indicator, sized from `live-connection.ts`'s
+ * reconnect ladder rather than guessed: `INITIAL_BACKOFF_MS` is 1s and doubles,
+ * so attempts after a drop land at roughly 1s, 3s, 7s, 15s.
+ *
+ * A first connect has no backoff, but a single slow or refused upgrade puts it
+ * on that ladder, so both budgets have to clear a rung rather than sit between
+ * two — which is exactly where the old values fell, and where Firefox flaked.
+ */
+const LIVE_TIMEOUT_MS = 15_000
+const RECONNECT_TIMEOUT_MS = 20_000
+
 /** Explicit contexts do not inherit a project's device profile automatically. */
 function projectContextOptions(testInfo: TestInfo): BrowserContextOptions {
   const { deviceScaleFactor, hasTouch, isMobile, userAgent, viewport } =
@@ -33,6 +45,7 @@ async function openRoom(context: BrowserContext) {
   // LiveConnection wiring against a real socket.
   await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
     'Live',
+    { timeout: LIVE_TIMEOUT_MS },
   )
   return page
 }
@@ -110,10 +123,12 @@ test('a dropped socket shows Reconnecting, then heals by gap-fill', async ({
   await expect(page.getByText(missed)).toBeHidden()
 
   // Backoff reconnects once upgrades are allowed again, and gap-fill refetches
-  // the room head — the only path by which this event can appear.
+  // the room head — the only path by which this event can appear. The 1.5s
+  // upgrade block guarantees the first attempt is refused, so recovery cannot
+  // land before the second rung; the budget clears the fourth plus the gap-fill.
   await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
     'Live',
-    { timeout: 10_000 },
+    { timeout: RECONNECT_TIMEOUT_MS },
   )
   await expect(page.getByText(missed)).toBeVisible()
 

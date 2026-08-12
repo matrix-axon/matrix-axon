@@ -83,9 +83,12 @@ test('the boot summary reports the cache winning the race', async ({
     saved: number | null
     rooms: number | null
   }
-  // Firefox reports a scripted reload as `navigate`; both values still prove
-  // this is a cold document load rather than a resumed tab.
-  expect(['reload', 'navigate']).toContain(detail.nav)
+  // Tightened back from `['reload', 'navigate']`. That widening was added here
+  // for a Firefox quirk that turned out not to exist: what reports `navigate` is
+  // Playwright's *driver* reload, not the engine, and this test now reloads from
+  // inside the page (#131), which all three engines classify as `reload`.
+  // Accepting `navigate` would silently pass a misclassified reload again.
+  expect(detail.nav).toBe('reload')
   // Every field the readout shows has to be a number, not a null the phone
   // would render as a dash.
   expect(detail.hydrate).not.toBeNull()

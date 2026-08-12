@@ -1,4 +1,9 @@
-import { expect, test, type Page } from '@playwright/test'
+import {
+  expect,
+  request as apiRequest,
+  test,
+  type Page,
+} from '@playwright/test'
 import { openRoom, ROOM_URL, shortcutForProject } from './helpers'
 
 /**
@@ -13,6 +18,25 @@ import { openRoom, ROOM_URL, shortcutForProject } from './helpers'
  * would double the hit counts the second time around.
  */
 test.describe.configure({ mode: 'serial' })
+
+/**
+ * Start from the seeded fixture rather than from whatever ran before.
+ *
+ * The nonce above keeps *hit counts* honest across reruns, but the forward-
+ * paging test asserts on how much history sits between its hit and the present,
+ * and that is not nonce-scoped: one mock process serves every project, so each
+ * engine in a cross-browser run inherits the previous engine's sends and has
+ * further to page. That is why that test passes alone and fails as the second
+ * project. Dropping test-sent traffic once, up front, makes the fixture the
+ * same for whichever engine is running.
+ */
+test.beforeAll(async () => {
+  const context = await apiRequest.newContext({
+    baseURL: test.info().project.use.baseURL,
+  })
+  expect((await context.post('/__e2e/reset-timeline')).ok()).toBe(true)
+  await context.dispose()
+})
 
 const NONCE = `n${Date.now()}`
 
