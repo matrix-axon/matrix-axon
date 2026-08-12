@@ -364,9 +364,16 @@ MOBILE_E2E=1 pnpm exec playwright test --fail-on-flaky-tests
 ```
 
 The `--fail-on-flaky-tests` flag makes a retry diagnostic rather than a passing
-result, matching the cross-browser CI gate. When reproducing CI locally, set
-`CI=1` as well; Playwright will require a fresh mock server instead of reusing
-one already listening on port 4599.
+result. The commands above keep it, because surfacing flakiness is the point of
+running them by hand — but note the CI lanes currently **omit** it, so they are
+more forgiving than these are. A handful of specs flake on socket setup when the
+whole suite runs across several projects, and gating on that would have kept the
+cross-browser lane from landing at all (#157). So expect these commands to
+report a flake that CI reported as a pass, and read that as the flag doing its
+job rather than as a discrepancy to reconcile.
+
+When reproducing CI locally, set `CI=1` as well; Playwright will require a fresh
+mock server instead of reusing one already listening on port 4599.
 
 CI runs the schema sync check, lint, format check, tests, and the build via
 `.github/workflows/web-lint-and-test.yml` (path-filtered `pull_request` plus
