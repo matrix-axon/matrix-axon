@@ -849,6 +849,15 @@ const server = createServer((req, res) => {
   // assertions depend on how much history sits after its own sends calls this
   // once up front, so a cross-browser run does not hand the second engine the
   // first engine's traffic. See `SEEDED_TIMELINE_LENGTH`.
+  //
+  // Opt-in, and deliberately so: the only caller is `search.spec.ts`'s
+  // `beforeAll`, because it is the only spec asserting on history *depth* rather
+  // than on the presence of its own nonce'd messages. Every other spec is
+  // indifferent to accumulated traffic, and resetting globally would break the
+  // specs that deliberately send and then look for what they sent. If a second
+  // spec ever starts counting history length, it should call this too — and if a
+  // third does, that is the point to promote it to a shared fixture rather than
+  // let each spec remember.
   if (req.method === 'POST' && url.pathname === '/__e2e/reset-timeline') {
     const dropped = timeline.length - SEEDED_TIMELINE_LENGTH
     timeline.length = SEEDED_TIMELINE_LENGTH

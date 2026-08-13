@@ -5,27 +5,27 @@ import {
   type BrowserContextOptions,
   type TestInfo,
 } from '@playwright/test'
+import { LIVE_TIMEOUT_MS, RECONNECT_TIMEOUT_MS } from './helpers'
 
 const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111'
 const ROOM_ID = '!room:hs'
 const ROOM_URL = `/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}`
 const SEND_URL = `/v1/accounts/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}/send`
 
-// The mock backend is one process with shared state (its socket set and room
-// history), so dropping sockets in one test would sever another's connection.
-test.describe.configure({ mode: 'serial' })
-
 /**
- * Budgets for the connection indicator, sized from `live-connection.ts`'s
- * reconnect ladder rather than guessed: `INITIAL_BACKOFF_MS` is 1s and doubles,
- * so attempts after a drop land at roughly 1s, 3s, 7s, 15s.
+ * `mode: 'serial'` because the mock backend is one process with shared state
+ * (its socket set and room history), so dropping sockets in one test would sever
+ * another's connection.
  *
- * A first connect has no backoff, but a single slow or refused upgrade puts it
- * on that ladder, so both budgets have to clear a rung rather than sit between
- * two — which is exactly where the old values fell, and where Firefox flaked.
+ * `timeout` because every test here opens at least one socket on the
+ * `LIVE_TIMEOUT_MS` budget and some open two, and the reconnect test adds
+ * `RECONNECT_TIMEOUT_MS` on top — up to ~36s against Playwright's 30s per-test
+ * default. Without this the *outer* timeout fires first and reports a generic
+ * "Test timeout of 30000ms exceeded", throwing away the budget the inner
+ * assertions were sized to spend. Set on the file rather than per test so a new
+ * socket-opening test here inherits it instead of rediscovering this.
  */
-const LIVE_TIMEOUT_MS = 15_000
-const RECONNECT_TIMEOUT_MS = 20_000
+test.describe.configure({ mode: 'serial', timeout: 60_000 })
 
 /** Explicit contexts do not inherit a project's device profile automatically. */
 function projectContextOptions(testInfo: TestInfo): BrowserContextOptions {

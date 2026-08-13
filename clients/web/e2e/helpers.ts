@@ -96,16 +96,24 @@ export async function openRoom(page: Page): Promise<void> {
 }
 
 /**
- * Budget for the connection indicator to reach `Live`.
+ * Budgets for the connection indicator, both derived from one policy: the
+ * reconnect ladder in `src/stores/live-connection.ts`, where
+ * `INITIAL_BACKOFF_MS` is 1s and doubles, so attempts after a failure land at
+ * roughly 1s, 3s, 7s and 15s.
  *
- * A first connect has no backoff and is normally immediate, so the 5s default
- * looks generous — but any refused or slow upgrade drops the client into
- * `live-connection.ts`'s schedule, where `INITIAL_BACKOFF_MS` doubles and
- * attempts land at roughly 1s, 3s and 7s. The default therefore sits *inside*
- * that ladder, one slow handshake away from failing, which is how Firefox
- * flaked here. This covers through the third attempt instead.
+ * They live here, together, so that retuning that ladder means editing one
+ * place. A copy in a spec file has no signal that the policy it was derived from
+ * moved, and would drift back toward the 5s default that sits *inside* the
+ * ladder — one slow handshake from failing, which is how Firefox flaked here.
+ *
+ * - `LIVE_TIMEOUT_MS` covers a first connect through the third attempt. A first
+ *   connect has no backoff and is normally immediate, but any refused or slow
+ *   upgrade drops it onto the ladder.
+ * - `RECONNECT_TIMEOUT_MS` covers a reconnect after a deliberate drop, which
+ *   starts one rung in because the drop refuses the first attempt outright.
  */
 export const LIVE_TIMEOUT_MS = 15_000
+export const RECONNECT_TIMEOUT_MS = 20_000
 
 /**
  * Assert the socket is reporting `Live`.
