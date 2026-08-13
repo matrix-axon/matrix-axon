@@ -12,8 +12,21 @@ import {
   width,
 } from './helpers'
 
-// Layout boxes are fractional CSS pixels; engines round their shared edge in
-// opposite directions. One rendered pixel is still visually unclipped.
+/**
+ * Layout boxes are fractional CSS pixels; engines round their shared edge in
+ * opposite directions. One rendered pixel is still visually unclipped.
+ *
+ * Applies to every *containment* assertion in this file — a child's
+ * `getBoundingClientRect()` edge compared against its container's, in either
+ * direction (`rowBottom <= timelineBottom`, `rowTop >= timelineTop`). Both sides
+ * are then fractional and both round independently, so any of them can miss by a
+ * sub-pixel on one engine and not another. Add it to new ones too.
+ *
+ * Deliberately *not* applied where the container side is `window.innerHeight`,
+ * as in the thread-drawer and composer checks above: that is an integer, and the
+ * question there is whether a pane runs off the bottom of the screen. A pixel of
+ * slack is precisely what those tests exist to catch, so they stay strict.
+ */
 const LAYOUT_EDGE_TOLERANCE_PX = 1
 
 /**
@@ -887,7 +900,9 @@ test('standalone iOS focus inset leaves only a small composer gap', async ({
 
   await expect(page.locator('.event-row', { hasText: newest })).toBeVisible()
   expect(geometry.bottomGap).toBeLessThanOrEqual(12)
-  expect(geometry.newestBottom).toBeLessThanOrEqual(geometry.timelineBottom)
+  expect(geometry.newestBottom).toBeLessThanOrEqual(
+    geometry.timelineBottom + LAYOUT_EDGE_TOLERANCE_PX,
+  )
   expect(geometry.shellHeight).toBeGreaterThan(700)
 })
 
@@ -1196,7 +1211,9 @@ test('narrow: sparse room messages remain visible when composing', async ({
     }
   })
 
-  expect(geometry.rowTop).toBeGreaterThanOrEqual(geometry.timelineTop)
+  expect(geometry.rowTop).toBeGreaterThanOrEqual(
+    geometry.timelineTop - LAYOUT_EDGE_TOLERANCE_PX,
+  )
   expect(geometry.rowBottom).toBeLessThanOrEqual(
     geometry.timelineBottom + LAYOUT_EDGE_TOLERANCE_PX,
   )
@@ -1262,8 +1279,12 @@ test('narrow: sparse thread messages remain visible when composing', async ({
 
   expect(geometry.rootTop).toBeGreaterThanOrEqual(0)
   expect(geometry.rootToRow).toBeLessThan(24)
-  expect(geometry.rowTop).toBeGreaterThanOrEqual(geometry.timelineTop)
-  expect(geometry.rowBottom).toBeLessThanOrEqual(geometry.timelineBottom)
+  expect(geometry.rowTop).toBeGreaterThanOrEqual(
+    geometry.timelineTop - LAYOUT_EDGE_TOLERANCE_PX,
+  )
+  expect(geometry.rowBottom).toBeLessThanOrEqual(
+    geometry.timelineBottom + LAYOUT_EDGE_TOLERANCE_PX,
+  )
   expect(geometry.composerTop).toBeGreaterThan(geometry.rowBottom)
 })
 
