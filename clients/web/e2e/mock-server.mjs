@@ -949,8 +949,12 @@ const server = createServer((req, res) => {
     sockets.clear()
     return json(res, { data: { dropped: true, block_ms: blockMs } })
   }
-  if (req.method === 'GET' && url.pathname === '/__e2e/socket-count') {
-    return json(res, { data: { open: sockets.size } })
+  if (req.method === 'GET' && url.pathname === '/__e2e/socket-open') {
+    const probe = url.searchParams.get('probe')
+    const open =
+      probe !== null &&
+      [...sockets].some((socket) => socketProbeIds.get(socket) === probe)
+    return json(res, { data: { open } })
   }
   if (url.pathname.startsWith('/v1/')) {
     void handleApi(req, res, url)
@@ -964,6 +968,33 @@ const server = createServer((req, res) => {
 // data over REST, so the only client frame consumed here is Close.
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 const WS_CLOSE_FRAME = Buffer.from([0x88, 0x00])
+const MAX_CLIENT_FRAME_PAYLOAD_BYTES = 125
+const MAX_CLIENT_BUFFER_BYTES = 2 * (14 + MAX_CLIENT_FRAME_PAYLOAD_BYTES)
+const socketProbeIds = new WeakMap()
+
+function clientFrameLength(buffer) {
+  if (buffer.length < 2) return null
+
+  const shortLength = buffer[1] & 0x7f
+  let headerLength = 2
+  let payloadLength = shortLength
+  if (shortLength === 126) {
+    if (buffer.length < 4) return null
+    headerLength = 4
+    payloadLength = buffer.readUInt16BE(2)
+  } else if (shortLength === 127) {
+    if (buffer.length < 10) return null
+    const wideLength = buffer.readBigUInt64BE(2)
+    if (wideLength > BigInt(MAX_CLIENT_FRAME_PAYLOAD_BYTES)) return -1
+    headerLength = 10
+    payloadLength = Number(wideLength)
+  }
+
+  const masked = (buffer[1] & 0x80) !== 0
+  if (!masked || payloadLength > MAX_CLIENT_FRAME_PAYLOAD_BYTES) return -1
+  return headerLength + 4 + payloadLength
+}
+
 server.on('upgrade', (req, socket) => {
   if (Date.now() < blockUpgradesUntil) {
     socket.destroy()
@@ -987,14 +1018,40 @@ server.on('upgrade', (req, socket) => {
   }
   socket.write(lines.join('\r\n') + '\r\n\r\n')
   sockets.add(socket)
+  const probe = new URL(req.url ?? '/', 'http://localhost').searchParams.get(
+    'probe',
+  )
+  if (probe !== null) socketProbeIds.set(socket, probe)
+
+  let clientBuffer = Buffer.alloc(0)
   socket.on('data', (data) => {
     // The app never sends data over the live bus, but the browser does send a
     // Close frame when a page or context is torn down. Complete that handshake
     // so Firefox can release the connection immediately instead of retaining
     // each test's half-closed socket until its network timeout.
-    if ((data[0] & 0x0f) === 0x08) {
+    if (clientBuffer.length + data.length > MAX_CLIENT_BUFFER_BYTES) {
       sockets.delete(socket)
-      socket.end(WS_CLOSE_FRAME)
+      socket.destroy()
+      return
+    }
+    clientBuffer = Buffer.concat([clientBuffer, data])
+    while (clientBuffer.length > 0) {
+      const frameLength = clientFrameLength(clientBuffer)
+      if (frameLength === null) return
+      if (frameLength < 0) {
+        sockets.delete(socket)
+        socket.destroy()
+        return
+      }
+      if (clientBuffer.length < frameLength) return
+
+      const opcode = clientBuffer[0] & 0x0f
+      clientBuffer = clientBuffer.subarray(frameLength)
+      if (opcode === 0x08) {
+        sockets.delete(socket)
+        socket.end(WS_CLOSE_FRAME)
+        return
+      }
     }
   })
   socket.on('close', () => {
