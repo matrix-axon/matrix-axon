@@ -7,7 +7,8 @@
 //!
 //! ```sh
 //! docker compose up -d postgres
-//! DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon cargo test -p axon-api --test oauth -- --ignored
+//! DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon \
+//!   cargo test -p axon-api --test oauth -- --ignored --test-threads=1
 //! ```
 
 mod common;
@@ -303,12 +304,20 @@ fn bootstrap_config_allow_remote() -> BootstrapConfig {
 /// An arbitrary non-loopback address for exercising `bootstrap_web_allow_remote`.
 const REMOTE_PEER: &str = "203.0.113.7:54321";
 
-fn extract_pre(body: &str) -> String {
-    body.split("<pre>")
-        .nth(1)
-        .and_then(|rest| rest.split("</pre>").next())
-        .expect("pre token")
+fn extract_bootstrap_token(body: &str) -> String {
+    body.split_once(r#"id="axon-bootstrap-token""#)
+        .and_then(|(_, rest)| rest.split_once('>'))
+        .and_then(|(_, rest)| rest.split_once("</pre>"))
+        .map(|(token, _)| token)
+        .expect("bootstrap token element")
         .to_owned()
+}
+
+#[test]
+fn extract_bootstrap_token_uses_element_id() {
+    let body =
+        r#"<pre>wrong</pre><pre id="axon-bootstrap-token" data-kind="bearer">axon_right</pre>"#;
+    assert_eq!(extract_bootstrap_token(body), "axon_right");
 }
 
 async fn get_authed(app: &axum::Router, uri: &str, token: &str) -> StatusCode {
@@ -340,7 +349,7 @@ async fn bootstrap_bearer_token_mints_once_and_then_closes() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let token = extract_pre(&body);
+    let token = extract_bootstrap_token(&body);
     assert!(token.starts_with("axon_"));
     assert!(body.contains(r#"href="https://web.test/app""#));
     assert!(!body.contains(&format!("https://web.test/app?token={token}")));
@@ -464,7 +473,7 @@ async fn bootstrap_allow_remote_permits_non_loopback_peer() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let token = extract_pre(&body);
+    let token = extract_bootstrap_token(&body);
     assert!(
         store.verify_token(&token).await.expect("verify").is_some(),
         "the remotely-minted token should verify"
