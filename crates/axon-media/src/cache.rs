@@ -1022,6 +1022,100 @@ mod tests {
         }
     }
 
+    /// Fixture for the single-flight cancellation tests: a cache backed by a
+    /// [`StalledFetcher`], so callers can be parked at a chosen point —
+    /// inside the fetch, or queued behind whoever holds the slot — and then
+    /// dropped, which is what an axum handler future does on client
+    /// disconnect. Keeping the stalling and parking mechanics here means the
+    /// tests below state only what they assert.
+    struct StalledGroup {
+        _dir: tempfile::TempDir,
+        cache: MediaCache,
+        account: Uuid,
+        fetcher: Arc<StalledFetcher>,
+        /// Async mutex (not `std`) so every method can take `&self` and still
+        /// await — tests hold a request future across these calls.
+        entered: AsyncMutex<tokio::sync::mpsc::UnboundedReceiver<()>>,
+    }
+
+    /// How long to poll a caller before concluding it is parked on the slot
+    /// lock. It is only ever expected to elapse, so it trades test latency for
+    /// certainty rather than the reverse.
+    const PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+
+    impl StalledGroup {
+        async fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let cache = MediaCache::open(&config_in(dir.path(), 1 << 20, 1 << 20, true))
+                .await
+                .unwrap();
+            let (entered_tx, entered_rx) = tokio::sync::mpsc::unbounded_channel();
+            Self {
+                _dir: dir,
+                cache,
+                account: Uuid::new_v4(),
+                fetcher: Arc::new(StalledFetcher::new(entered_tx)),
+                entered: AsyncMutex::new(entered_rx),
+            }
+        }
+
+        /// An unpolled request for `url` against this group's cache.
+        fn request(
+            &self,
+            url: &'static str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<MediaResource, MediaCacheError>> + '_>,
+        > {
+            Box::pin(
+                self.cache
+                    .get_or_fetch(self.account, url, None, self.fetcher.as_ref()),
+            )
+        }
+
+        /// Block until some caller has entered the (never-completing) fetch.
+        async fn wait_until_fetching(&self) {
+            assert!(
+                self.entered.lock().await.recv().await.is_some(),
+                "a caller should have entered the fetch"
+            );
+        }
+
+        /// Spawn the caller that wins the slot and parks inside the fetch,
+        /// holding the lock until the returned handle is aborted.
+        async fn spawn_owner(&self, url: &'static str) -> JoinHandle<()> {
+            let cache = self.cache.clone();
+            let fetcher = self.fetcher.clone();
+            let account = self.account;
+            let owner = tokio::spawn(async move {
+                let _ = cache
+                    .get_or_fetch(account, url, None, fetcher.as_ref())
+                    .await;
+            });
+            self.wait_until_fetching().await;
+            owner
+        }
+
+        /// Poll a caller until it parks behind the owner on `slot.lock()`,
+        /// then drop it — the client-disconnect case, from the queue.
+        async fn park_then_cancel(&self, url: &'static str) {
+            let mut queued = self.request(url);
+            assert!(
+                tokio::time::timeout(PARK_TIMEOUT, &mut queued)
+                    .await
+                    .is_err(),
+                "queued caller must not get past the slot lock"
+            );
+        }
+
+        fn flight_len(&self) -> usize {
+            self.cache.inner.flight.lock().expect("flight mutex").len()
+        }
+
+        fn fetches_started(&self) -> usize {
+            self.fetcher.calls.load(Ordering::SeqCst)
+        }
+    }
+
     struct FailingFetcher;
 
     #[async_trait]
@@ -1274,49 +1368,18 @@ mod tests {
         // group when it is cancelled. If its release unmapped the shared slot,
         // the next arrival would find no entry, mint an independent slot, and
         // duplicate the in-flight origin fetch (PR #160 review).
-        let dir = tempfile::tempdir().unwrap();
-        let cache = MediaCache::open(&config_in(dir.path(), 1 << 20, 1 << 20, true))
-            .await
-            .unwrap();
-        let account = Uuid::new_v4();
-        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
-        let fetcher = Arc::new(StalledFetcher::new(entered_tx));
+        let group = StalledGroup::new().await;
+        let owner = group.spawn_owner("mxc://s/queued").await;
 
-        // Owner: parks inside the fetch, holding the slot lock throughout.
-        let owner = tokio::spawn({
-            let cache = cache.clone();
-            let fetcher = fetcher.clone();
-            async move {
-                cache
-                    .get_or_fetch(account, "mxc://s/queued", None, fetcher.as_ref())
-                    .await
-            }
-        });
-        assert!(
-            entered_rx.recv().await.is_some(),
-            "owner should be fetching"
-        );
-
-        {
-            // Queued peer: polled far enough to park on `slot.lock()`, then
-            // dropped — the client-disconnect case again, but from the queue.
-            let mut queued =
-                Box::pin(cache.get_or_fetch(account, "mxc://s/queued", None, fetcher.as_ref()));
-            assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(50), &mut queued)
-                    .await
-                    .is_err(),
-                "queued peer must not get past the slot lock"
-            );
-        }
+        group.park_then_cancel("mxc://s/queued").await;
 
         assert_eq!(
-            cache.inner.flight.lock().unwrap().len(),
+            group.flight_len(),
             1,
             "a cancelled queued peer must not unmap the owner's slot"
         );
         // The owner still owns the fetch: no second download was started.
-        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(group.fetches_started(), 1);
 
         owner.abort();
     }
@@ -1326,49 +1389,18 @@ mod tests {
         // The failure mode the old `ptr_eq` comment warned about, in reverse:
         // if every member of a group defers cleanup to "someone else", the
         // entry is orphaned forever. Whoever is last out must take it.
-        let dir = tempfile::tempdir().unwrap();
-        let cache = MediaCache::open(&config_in(dir.path(), 1 << 20, 1 << 20, true))
-            .await
-            .unwrap();
-        let account = Uuid::new_v4();
-        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
-        let fetcher = Arc::new(StalledFetcher::new(entered_tx));
+        let group = StalledGroup::new().await;
+        let owner = group.spawn_owner("mxc://s/group").await;
 
-        let owner = tokio::spawn({
-            let cache = cache.clone();
-            let fetcher = fetcher.clone();
-            async move {
-                cache
-                    .get_or_fetch(account, "mxc://s/group", None, fetcher.as_ref())
-                    .await
-            }
-        });
-        assert!(entered_rx.recv().await.is_some());
-
-        {
-            let mut first =
-                Box::pin(cache.get_or_fetch(account, "mxc://s/group", None, fetcher.as_ref()));
-            let mut second =
-                Box::pin(cache.get_or_fetch(account, "mxc://s/group", None, fetcher.as_ref()));
-            for queued in [&mut first, &mut second] {
-                assert!(
-                    tokio::time::timeout(std::time::Duration::from_millis(50), queued)
-                        .await
-                        .is_err()
-                );
-            }
-        } // both queued peers cancelled, owner still holds the slot
-
-        assert_eq!(cache.inner.flight.lock().unwrap().len(), 1);
+        group.park_then_cancel("mxc://s/group").await;
+        group.park_then_cancel("mxc://s/group").await;
+        assert_eq!(group.flight_len(), 1, "the owner still holds the slot");
 
         // Now the owner goes too. `await` resolves after the task's future has
         // been dropped, so its guard has run by the time we assert.
         owner.abort();
         assert!(owner.await.unwrap_err().is_cancelled());
-        assert!(
-            cache.inner.flight.lock().unwrap().is_empty(),
-            "last caller out must unmap the slot"
-        );
+        assert_eq!(group.flight_len(), 0, "last caller out must unmap the slot");
     }
 
     #[tokio::test]
@@ -1377,34 +1409,28 @@ mod tests {
         // disconnects, which for media is the common case (scrolling past an
         // image). Cancellation inside `fetch_capped` must still unmap the
         // `flight` entry; hand-rolled cleanup after the await could not.
-        let dir = tempfile::tempdir().unwrap();
-        let cache = MediaCache::open(&config_in(dir.path(), 1 << 20, 1 << 20, true))
-            .await
-            .unwrap();
-        let account = Uuid::new_v4();
-        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
-        let fetcher = StalledFetcher::new(entered_tx);
+        let group = StalledGroup::new().await;
 
         {
-            let mut request =
-                Box::pin(cache.get_or_fetch(account, "mxc://s/abandoned", None, &fetcher));
+            let mut request = group.request("mxc://s/abandoned");
 
             // Drive the request only as far as the (never-completing) fetch.
             tokio::select! {
                 _ = &mut request => panic!("stalled fetch must not complete"),
-                signal = entered_rx.recv() => assert!(signal.is_some()),
+                () = group.wait_until_fetching() => {}
             }
 
             // Guard against a vacuous test: the slot really is mapped here.
             assert_eq!(
-                cache.inner.flight.lock().unwrap().len(),
+                group.flight_len(),
                 1,
                 "in-flight request should hold a slot"
             );
         } // `request` dropped mid-fetch, exactly as a disconnect would.
 
-        assert!(
-            cache.inner.flight.lock().unwrap().is_empty(),
+        assert_eq!(
+            group.flight_len(),
+            0,
             "cancelled request leaked its single-flight slot"
         );
     }
