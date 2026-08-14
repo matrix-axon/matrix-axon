@@ -75,6 +75,18 @@ is wrong. A `5xx` is the homeserver failing rather than answering, a transport
 error carries no status at all, and both leave the row `suspect` for the next
 pass. An outage therefore delays a verdict instead of fabricating one.
 
+**A probe settles into three outcomes, not two** (`ProbeVerdict`). The first
+implementation classified into a `bool` "absent", which made *reachable* and
+*inconclusive* the same value: an inconclusive result took the same branch as a
+success and **cleared** the suspicion. A transient `502` on a genuinely purged
+room therefore erased its row, destroyed its `first_flagged_at`, and dropped it
+out of `suspect_upstream_rooms` — the only queue that is re-probed — while
+logging *"suspect room answered upstream"*. Nothing but the user re-opening the
+room would put it back, which is the unattended reconcile this ADR promises,
+inverted. The predicate was right and unit-tested the whole time; the branch
+consuming it was not tested at all, so it shipped green. "It answered" and "we
+could not tell" are different facts, and only one of them is evidence.
+
 ### Pin to zero, don't skip; never delete content
 
 A settled room's counts are **pinned to zero** through the ordinary write path

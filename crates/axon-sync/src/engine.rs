@@ -1188,6 +1188,41 @@ fn probe_proves_room_absent(status: Option<u16>) -> bool {
     matches!(status, Some(403) | Some(404))
 }
 
+/// What one upstream probe settled (ADR 0090).
+///
+/// Three outcomes, deliberately not two. An earlier version carried a
+/// `bool` "absent", which made `Reachable` and `Inconclusive` the same value and
+/// cleared the suspect row for both — so a transient `502` during an outage
+/// erased the suspicion on a genuinely purged room, destroyed its
+/// `first_flagged_at`, dropped it out of `suspect_upstream_rooms` (only
+/// `suspect` rows are re-probed), and logged *"suspect room answered upstream"*
+/// while doing it. Nothing but the user re-opening the room would put it back,
+/// which is the opposite of the unattended reconcile this ADR promises. Keep
+/// these three distinct: "it answered" and "we could not tell" are not the same
+/// fact, and only one of them is evidence.
+#[derive(Debug, PartialEq, Eq)]
+enum ProbeVerdict {
+    /// The homeserver served the room. Clears any suspicion.
+    Reachable,
+    /// A client rejection proves the homeserver does not serve it.
+    Absent,
+    /// The homeserver failed rather than answered, or never answered. Proves
+    /// nothing; the row stays `suspect` for a later pass.
+    Inconclusive,
+}
+
+/// Classify a probe's result. Split from the probe itself so the three-way
+/// decision is testable without a homeserver — the predicate it wraps was always
+/// unit-tested, while the branch consuming it was not, which is how the
+/// two-outcome version shipped green.
+fn probe_verdict<T, E>(outcome: &Result<T, E>, status: Option<u16>) -> ProbeVerdict {
+    match outcome {
+        Ok(_) => ProbeVerdict::Reachable,
+        Err(_) if probe_proves_room_absent(status) => ProbeVerdict::Absent,
+        Err(_) => ProbeVerdict::Inconclusive,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UnreadCountsSnapshot {
     notification: u64,
@@ -2228,13 +2263,18 @@ async fn reconcile_upstream_rooms(
             }
             outcome = tokio::time::timeout(UPSTREAM_PROBE_TIMEOUT, client.send(request)) => outcome,
         };
-        let (absent, detail) = match outcome {
-            Ok(Ok(_)) => (false, "probe succeeded".to_owned()),
-            Ok(Err(err)) => {
-                let status = err
-                    .as_client_api_error()
+        let (verdict, detail) = match outcome {
+            Ok(result) => {
+                let status = result
+                    .as_ref()
+                    .err()
+                    .and_then(|err| err.as_client_api_error())
                     .map(|api_err| api_err.status_code.as_u16());
-                (probe_proves_room_absent(status), err.to_string())
+                let detail = match &result {
+                    Ok(_) => "probe succeeded".to_owned(),
+                    Err(err) => err.to_string(),
+                };
+                (probe_verdict(&result, status), detail)
             }
             Err(_elapsed) => {
                 tracing::debug!(
@@ -2246,7 +2286,20 @@ async fn reconcile_upstream_rooms(
             }
         };
 
-        if absent {
+        if verdict == ProbeVerdict::Inconclusive {
+            // The homeserver failed rather than answered. Leave the row — and
+            // its `first_flagged_at` — exactly as it is, the same way the
+            // timeout arm above does. Clearing here would erase a genuine
+            // suspicion on a transient blip and take the room out of the probe
+            // queue, since only `suspect` rows are re-probed.
+            tracing::debug!(
+                %account_id, %room_id, detail,
+                "upstream room probe was inconclusive; leaving the room suspect"
+            );
+            continue;
+        }
+
+        if verdict == ProbeVerdict::Absent {
             let promoted = match store
                 .mark_room_upstream_gone(account_id, room_id, &detail)
                 .await
@@ -2590,7 +2643,7 @@ mod ephemeral_tests {
 
 #[cfg(test)]
 mod upstream_reconcile_tests {
-    use super::{probe_proves_room_absent, unread_suppression_reason};
+    use super::{probe_proves_room_absent, probe_verdict, unread_suppression_reason, ProbeVerdict};
 
     /// A healthy joined room is never suppressed — the whole point of the guard
     /// is that it fires only for rooms whose counts can no longer be corrected.
@@ -2641,5 +2694,306 @@ mod upstream_reconcile_tests {
     #[test]
     fn success_statuses_prove_nothing() {
         assert!(!probe_proves_room_absent(Some(200)));
+    }
+
+    /// "It answered" and "we could not tell" are different facts, and only the
+    /// first is evidence. The two-outcome version of this code collapsed them
+    /// into one `bool` and cleared a genuine suspicion on any 5xx.
+    #[test]
+    fn an_inconclusive_probe_is_not_a_success() {
+        let failed: Result<(), ()> = Err(());
+        for status in [Some(500), Some(502), Some(429), None] {
+            assert_eq!(
+                probe_verdict(&failed, status),
+                ProbeVerdict::Inconclusive,
+                "status {status:?} proves nothing and must not read as reachable"
+            );
+        }
+    }
+
+    /// Only a client rejection settles a room as absent.
+    #[test]
+    fn a_client_rejection_settles_the_room_absent() {
+        let failed: Result<(), ()> = Err(());
+        assert_eq!(probe_verdict(&failed, Some(403)), ProbeVerdict::Absent);
+        assert_eq!(probe_verdict(&failed, Some(404)), ProbeVerdict::Absent);
+    }
+
+    /// A served room clears its suspicion, and the status carried alongside a
+    /// success never overrides that.
+    #[test]
+    fn a_served_room_is_reachable() {
+        let served: Result<(), ()> = Ok(());
+        assert_eq!(probe_verdict(&served, None), ProbeVerdict::Reachable);
+        assert_eq!(probe_verdict(&served, Some(200)), ProbeVerdict::Reachable);
+        assert_eq!(
+            probe_verdict(&served, Some(404)),
+            ProbeVerdict::Reachable,
+            "the outcome decides, not a stray status"
+        );
+    }
+}
+
+/// Probe-classification tests that drive the real loop against a stand-in
+/// homeserver (ADR 0090).
+///
+/// The three-way verdict is unit-tested above, but the bug that motivated it was
+/// in the *branch consuming it*, not the predicate — so these run
+/// [`reconcile_upstream_rooms`] end to end against an axum loopback server and
+/// assert what happened to the durable row. DB-gated like the rest of the
+/// store-touching tests.
+#[cfg(test)]
+mod reconcile_loop_tests {
+    use std::net::SocketAddr;
+
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use serde_json::json;
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    use super::*;
+
+    /// Serve `router` on an ephemeral loopback port, mirroring `discovery.rs`'s
+    /// harness. The task lives for the duration of the test process.
+    async fn serve(router: Router) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        addr
+    }
+
+    /// A homeserver that answers `status` to the probe.
+    ///
+    /// A fallback rather than a route for the state endpoint: ruma sends the
+    /// empty `state_key` as a trailing empty path segment
+    /// (`…/state/m.room.create/`), which an obvious `{state_key}` pattern does
+    /// not match — the router would 404 on its own and every test would read as
+    /// a client rejection no matter what it configured. Answering everything
+    /// keeps the stand-in honest about the one thing it is standing in for.
+    ///
+    /// `restore_session`'s account-data read is excepted and always 404s, which
+    /// is what a homeserver says for account data that was never set; letting it
+    /// fall through would hand the client a room-create body for it.
+    fn state_router(status: StatusCode, body: serde_json::Value) -> Router {
+        Router::new()
+            .route(
+                "/_matrix/client/v3/user/{user_id}/account_data/{event_type}",
+                get(|| async {
+                    (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({ "errcode": "M_NOT_FOUND", "error": "not set" })),
+                    )
+                }),
+            )
+            .fallback(move || {
+                let body = body.clone();
+                async move { (status, Json(body)) }
+            })
+    }
+
+    /// A client that will actually *send* the probe.
+    ///
+    /// The session restore is load-bearing, not ceremony: the room-state
+    /// endpoint requires authentication, so an anonymous client fails locally
+    /// with "no access token provided" and never opens a connection. That error
+    /// carries no status, so it classifies as `Inconclusive` — which is the
+    /// verdict two of these tests are asserting, and they would pass without the
+    /// homeserver being consulted at all.
+    async fn client_for(addr: SocketAddr) -> Client {
+        use matrix_sdk::authentication::matrix::MatrixSession;
+        use matrix_sdk::store::RoomLoadSettings;
+        use matrix_sdk::{SessionMeta, SessionTokens};
+
+        let client = Client::builder()
+            .homeserver_url(format!("http://{addr}"))
+            .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11])
+            // Retry is disabled for the same reason the session is restored: with
+            // it on, matrix-sdk retries a 5xx until `UPSTREAM_PROBE_TIMEOUT`
+            // elapses, so the loop takes the *timeout* arm and the inconclusive
+            // branch under test is never reached. That version of this test
+            // passed against the two-outcome bug it exists to catch, and took 15
+            // seconds to do it.
+            .request_config(matrix_sdk::config::RequestConfig::new().disable_retry())
+            .build()
+            .await
+            .expect("client against the stand-in homeserver");
+        client
+            .matrix_auth()
+            .restore_session(
+                MatrixSession {
+                    meta: SessionMeta {
+                        user_id: matrix_sdk::ruma::UserId::parse("@probe:localhost")
+                            .expect("test user id"),
+                        device_id: "PROBEDEV".into(),
+                    },
+                    tokens: SessionTokens {
+                        access_token: "probe-token".to_owned(),
+                        refresh_token: None,
+                    },
+                },
+                RoomLoadSettings::default(),
+            )
+            .await
+            .expect("restore a session so the probe is actually sent");
+        client
+    }
+
+    async fn test_store() -> Store {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for these tests");
+        Store::connect(&url, 5).await.expect("connect + migrate")
+    }
+
+    /// A homeserver that fails rather than answers must **delay** a verdict, not
+    /// erase the suspicion.
+    ///
+    /// This is the case the two-outcome version got wrong: `502` is not a client
+    /// rejection, so it was classified "not absent", fell into the same branch as
+    /// a success, and cleared the row — dropping a genuinely purged room out of
+    /// `suspect_upstream_rooms`, which is the only queue that gets re-probed.
+    /// Reverting to that behaviour fails this test.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn an_inconclusive_probe_leaves_the_room_suspect() {
+        let store = test_store().await;
+        let account = store
+            .upsert_account(
+                &format!("@probe-502-{}:localhost", Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .expect("account");
+        let account_id = account.account_id;
+        let room_id = format!("!inconclusive-{}:localhost", Uuid::new_v4());
+
+        store
+            .flag_room_upstream_suspect(account_id, &room_id, "M_FORBIDDEN")
+            .await
+            .expect("flag suspect");
+
+        let addr = serve(state_router(
+            StatusCode::BAD_GATEWAY,
+            json!({ "errcode": "M_UNKNOWN", "error": "bad gateway" }),
+        ))
+        .await;
+        reconcile_upstream_rooms(
+            &client_for(addr).await,
+            &store,
+            account_id,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(
+            store
+                .suspect_upstream_rooms(account_id)
+                .await
+                .expect("suspects"),
+            vec![room_id.clone()],
+            "an outage delays the verdict; it must not erase the suspicion"
+        );
+        assert!(
+            store
+                .rooms_gone_upstream(account_id)
+                .await
+                .expect("gone")
+                .is_empty(),
+            "nor does it fabricate one"
+        );
+    }
+
+    /// A client rejection is the only thing that settles a room as absent.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_rejected_probe_settles_the_room_absent() {
+        let store = test_store().await;
+        let account = store
+            .upsert_account(
+                &format!("@probe-404-{}:localhost", Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .expect("account");
+        let account_id = account.account_id;
+        let room_id = format!("!purged-{}:localhost", Uuid::new_v4());
+
+        store
+            .flag_room_upstream_suspect(account_id, &room_id, "M_FORBIDDEN")
+            .await
+            .expect("flag suspect");
+
+        let addr = serve(state_router(
+            StatusCode::NOT_FOUND,
+            json!({ "errcode": "M_NOT_FOUND", "error": "unknown room" }),
+        ))
+        .await;
+        reconcile_upstream_rooms(
+            &client_for(addr).await,
+            &store,
+            account_id,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(
+            store
+                .rooms_gone_upstream(account_id)
+                .await
+                .expect("gone")
+                .contains(&room_id),
+            "a 404 proves the homeserver does not serve the room"
+        );
+    }
+
+    /// A served room clears its suspicion — the recovery path ADR 0090 promises.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_served_room_clears_its_suspicion() {
+        let store = test_store().await;
+        let account = store
+            .upsert_account(
+                &format!("@probe-200-{}:localhost", Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .expect("account");
+        let account_id = account.account_id;
+        let room_id = format!("!alive-{}:localhost", Uuid::new_v4());
+
+        store
+            .flag_room_upstream_suspect(account_id, &room_id, "M_FORBIDDEN")
+            .await
+            .expect("flag suspect");
+
+        let addr = serve(state_router(
+            StatusCode::OK,
+            json!({ "room_version": "10", "creator": "@alice:localhost" }),
+        ))
+        .await;
+        reconcile_upstream_rooms(
+            &client_for(addr).await,
+            &store,
+            account_id,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(
+            store
+                .suspect_upstream_rooms(account_id)
+                .await
+                .expect("suspects")
+                .is_empty(),
+            "a room that answers is no longer suspect"
+        );
+        assert!(
+            store
+                .rooms_gone_upstream(account_id)
+                .await
+                .expect("gone")
+                .is_empty(),
+            "and is certainly not gone"
+        );
     }
 }
