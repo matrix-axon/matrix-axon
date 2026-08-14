@@ -16,11 +16,17 @@ import {
  * Layout boxes are fractional CSS pixels; engines round their shared edge in
  * opposite directions. One rendered pixel is still visually unclipped.
  *
- * Applies to every *containment* assertion in this file — a child's
+ * Applies to every *containment* check in this file — a child's
  * `getBoundingClientRect()` edge compared against its container's, in either
  * direction (`rowBottom <= timelineBottom`, `rowTop >= timelineTop`). Both sides
  * are then fractional and both round independently, so any of them can miss by a
  * sub-pixel on one engine and not another. Add it to new ones too.
+ *
+ * "Check", not "assertion": one of these is a raw `>=`/`<=` pair inside an
+ * `evaluate` callback rather than a `toBeLessThanOrEqual` matcher, and grepping
+ * for the matchers misses it — which is exactly how it got left out of the first
+ * pass. Inside a callback the value has to be passed in as an argument, since the
+ * callback runs in the browser and cannot close over this constant.
  *
  * Deliberately *not* applied where the container side is `window.innerHeight`,
  * as in the thread-drawer and composer checks above: that is an integer, and the
@@ -580,7 +586,13 @@ test('narrow: room information scrolls when the member list overflows', async ({
   await expect(lastMember).toBeVisible()
   await expect
     .poll(() =>
-      lastMember.evaluate((element) => {
+      // The tolerance has to be *passed in*: this runs in the browser, so it
+      // cannot close over the module constant. It matters more here than at the
+      // matcher-based sites — a sub-pixel overhang makes the poll condition
+      // never become true, and the failure is a bare "expected true, received
+      // false" after the poll times out rather than an assertion naming the two
+      // edges that missed each other.
+      lastMember.evaluate((element, tolerance) => {
         const panel = element.closest<HTMLElement>('.room-info-panel')
         if (panel === null) {
           return false
@@ -588,9 +600,10 @@ test('narrow: room information scrolls when the member list overflows', async ({
         const panelBox = panel.getBoundingClientRect()
         const memberBox = element.getBoundingClientRect()
         return (
-          memberBox.top >= panelBox.top && memberBox.bottom <= panelBox.bottom
+          memberBox.top >= panelBox.top - tolerance &&
+          memberBox.bottom <= panelBox.bottom + tolerance
         )
-      }),
+      }, LAYOUT_EDGE_TOLERANCE_PX),
     )
     .toBe(true)
 })
