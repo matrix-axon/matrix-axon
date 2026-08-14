@@ -191,6 +191,14 @@ before starting a milestone.
   holds, so the marker — forward-only on `origin_ts` — would simply stop
   advancing. Local echoes carry `arrival_order: -1` and are excluded by their
   `local:` id prefix; display _ordering_ stays on `origin_ts` (#133).
+  **The candidate set is what actually rendered** — it runs through
+  `isVisibleTimelineEvent`, the same predicate that builds `visible`. ADR 0089's
+  contract is "among the events it has actually displayed", and under the default
+  `stateEvents: 'important'` the events that predicate hides include the very
+  `uk.half-shot.bridge` event from the bug report. Both picks read this set, so
+  an unfiltered one lets an unrendered event become the receipt target _and_ the
+  position of the "new messages" line. Caught in review on #165 — the first
+  version filtered only local echoes and the thread cutoff.
 - **Async work in `RoomPage` outlives its own world.** The page does not remount
   across a room switch or an `?event=`/`?thread=` change (ADR 0085), so every
   `await` inside an effect can resolve after the user has moved on — a second

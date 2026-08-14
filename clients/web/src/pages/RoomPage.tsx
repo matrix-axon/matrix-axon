@@ -619,6 +619,36 @@ export function RoomPage() {
     showingNewestEvents,
   ])
 
+  // Thread members live in the panel, not the main timeline (TUI parity);
+  // state events are tiered behind the visibility setting, and bodyless
+  // unsupported events are developer diagnostics rather than ordinary timeline
+  // content.
+  const isVisibleTimelineEvent = (event: TimelineEvent): boolean => {
+    if (threadRootId(event) !== null) {
+      return false
+    }
+    if (!settings.developerMode.value && isUnsupportedBodylessEvent(event)) {
+      return false
+    }
+    if (hideRedacted && event.redacted) {
+      return false
+    }
+    if (!isStateEvent(event)) {
+      return true
+    }
+    if (stateEvents === 'all') {
+      return true
+    }
+    // The `important` tier is membership only, and only when there is
+    // something to say: a member event whose profile fields are unchanged is
+    // routine re-sync traffic with no notice to render (ADR 0083).
+    return (
+      stateEvents === 'important' &&
+      stateEventTier(event) === 'important' &&
+      stateEventNotice(event) !== null
+    )
+  }
+
   // Advance this room's read marker to the newest event while it is open, so
   // sibling devices see it as read (M-W6 step 5c, ADR 0048). Hidden unread
   // thread replies are a hard stop: the user has opened the room, not that
@@ -664,6 +694,14 @@ export function RoomPage() {
     }
     const displayed = timeline.events.value.filter(
       (event) =>
+        // The same predicate that decides what renders as a row. ADR 0089's
+        // contract is "among the events it has actually displayed", and under
+        // the default `stateEvents: 'important'` the events it hides include
+        // the `uk.half-shot.bridge` event from the original bug report — which
+        // would otherwise be a legal receipt target (and marker position)
+        // precisely because it is arrival-newest. Matches the TUI, whose
+        // `receipt_target_for` filters through `should_show_event`.
+        isVisibleTimelineEvent(event) &&
         // A local echo has not been ingested, so it has no arrival position and
         // is not a receipt candidate; it is not the room's read position either.
         !event.event_id.startsWith('local:') &&
@@ -880,35 +918,6 @@ export function RoomPage() {
     roomReadMarker,
   ])
 
-  // Thread members live in the panel, not the main timeline (TUI parity);
-  // state events are tiered behind the visibility setting, and bodyless
-  // unsupported events are developer diagnostics rather than ordinary timeline
-  // content.
-  const isVisibleTimelineEvent = (event: TimelineEvent): boolean => {
-    if (threadRootId(event) !== null) {
-      return false
-    }
-    if (!settings.developerMode.value && isUnsupportedBodylessEvent(event)) {
-      return false
-    }
-    if (hideRedacted && event.redacted) {
-      return false
-    }
-    if (!isStateEvent(event)) {
-      return true
-    }
-    if (stateEvents === 'all') {
-      return true
-    }
-    // The `important` tier is membership only, and only when there is
-    // something to say: a member event whose profile fields are unchanged is
-    // routine re-sync traffic with no notice to render (ADR 0083).
-    return (
-      stateEvents === 'important' &&
-      stateEventTier(event) === 'important' &&
-      stateEventNotice(event) !== null
-    )
-  }
   /**
    * Memoised on the values the filter actually reads, not on render.
    *
