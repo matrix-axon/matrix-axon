@@ -52,27 +52,35 @@ impl Store {
         Ok(())
     }
 
-    /// Promote a room to `gone`: a bounded probe has confirmed the homeserver
-    /// does not serve it. Upserts, so this is also the entry point for a room
-    /// confirmed gone without a prior `suspect` row.
+    /// Promote a `suspect` room to `gone`: a bounded probe has confirmed the
+    /// homeserver does not serve it. Returns whether the promotion applied.
+    ///
+    /// Conditional on the row still being `suspect`, rather than an upsert,
+    /// because a probe holds an upstream round trip open for many seconds and a
+    /// genuine room-scoped call can succeed underneath it. That
+    /// success clears the row — proving the room reachable with newer evidence
+    /// than the probe holds — and an unconditional upsert would then write the
+    /// stale verdict back over it. The room would be pinned to zero *and*
+    /// invisible to future probes, which read only `suspect` rows, so nothing
+    /// short of another successful call would ever undo it. Losing the race is
+    /// the correct outcome: absence is the claim that needs proving, and the
+    /// caller logs the discard.
     pub async fn mark_room_upstream_gone(
         &self,
         account_id: Uuid,
         room_id: &str,
         detail: &str,
-    ) -> Result<(), StoreError> {
-        sqlx_core::query::query(
-            "INSERT INTO room_upstream_reconcile (account_id, room_id, state, detail) \
-             VALUES ($1, $2, 'gone', $3) \
-             ON CONFLICT (account_id, room_id) DO UPDATE SET \
-               state = 'gone', detail = EXCLUDED.detail",
+    ) -> Result<bool, StoreError> {
+        let result = sqlx_core::query::query(
+            "UPDATE room_upstream_reconcile SET state = 'gone', detail = $3 \
+             WHERE account_id = $1 AND room_id = $2 AND state = 'suspect'",
         )
         .bind(account_id)
         .bind(room_id)
         .bind(detail)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
     /// Forget any reconcile state for a room — the probe found it healthy, or a

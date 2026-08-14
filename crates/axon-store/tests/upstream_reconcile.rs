@@ -60,10 +60,13 @@ async fn suspect_is_promoted_to_gone_and_never_demoted() {
         "first_flagged_at survives a repeat rejection"
     );
 
-    store
-        .mark_room_upstream_gone(account_id, &room_id, "probe: M_FORBIDDEN")
-        .await
-        .expect("mark gone");
+    assert!(
+        store
+            .mark_room_upstream_gone(account_id, &room_id, "probe: M_FORBIDDEN")
+            .await
+            .expect("mark gone"),
+        "promoting a room still under suspicion applies"
+    );
 
     assert!(
         store
@@ -111,14 +114,19 @@ async fn clearing_is_idempotent_and_account_scoped() {
         .await
         .expect("clear unflagged");
 
-    store
-        .mark_room_upstream_gone(account_id, &room_id, "probe")
-        .await
-        .expect("mark gone");
-    store
-        .mark_room_upstream_gone(other_account_id, &room_id, "probe")
-        .await
-        .expect("mark gone for the other account");
+    for account in [account_id, other_account_id] {
+        store
+            .flag_room_upstream_suspect(account, &room_id, "M_FORBIDDEN")
+            .await
+            .expect("flag suspect");
+        assert!(
+            store
+                .mark_room_upstream_gone(account, &room_id, "probe")
+                .await
+                .expect("mark gone"),
+            "a suspect room is promoted"
+        );
+    }
 
     store
         .clear_room_upstream_reconcile(account_id, &room_id)
@@ -141,6 +149,61 @@ async fn clearing_is_idempotent_and_account_scoped() {
 
     common::cleanup_account(&pool, account_id).await;
     common::cleanup_account(&pool, other_account_id).await;
+}
+
+/// A probe's verdict must not resurrect suspicion a concurrent success cleared.
+///
+/// The probe holds an upstream round trip open for seconds; a genuine
+/// room-scoped call can succeed in that window, and its `clear` is newer and
+/// stronger evidence than the verdict the probe is still carrying. Writing the
+/// stale verdict back would pin the room's unread count to zero *and* hide it
+/// from every future probe, which read only `suspect` rows — so nothing but
+/// another lucky success would ever undo it.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_cleared_room_is_not_promoted_by_an_in_flight_probe() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "reconcile-race").await;
+    let room_id = format!("!raced-{}:localhost", Uuid::new_v4());
+
+    store
+        .flag_room_upstream_suspect(account_id, &room_id, "M_FORBIDDEN")
+        .await
+        .expect("flag suspect");
+
+    // ...the probe for it is now in flight, and a real call succeeds.
+    store
+        .clear_room_upstream_reconcile(account_id, &room_id)
+        .await
+        .expect("clear on success");
+
+    // The probe returns with its stale rejection.
+    assert!(
+        !store
+            .mark_room_upstream_gone(account_id, &room_id, "probe: M_FORBIDDEN")
+            .await
+            .expect("mark gone"),
+        "the promotion does not apply to a row that is no longer suspect"
+    );
+    assert!(
+        store
+            .rooms_gone_upstream(account_id)
+            .await
+            .expect("gone")
+            .is_empty(),
+        "a room proved reachable stays reachable"
+    );
+    assert!(
+        store
+            .suspect_upstream_rooms(account_id)
+            .await
+            .expect("suspects")
+            .is_empty(),
+        "and it is not left suspect either"
+    );
+
+    common::cleanup_account(&pool, account_id).await;
 }
 
 /// Read `first_flagged_at` directly: the store API deliberately doesn't expose

@@ -1150,6 +1150,19 @@ const UPSTREAM_PROBES_PER_SWEEP: usize = 8;
 ///   hides it — so a count here is invisible to clients but still sums into
 ///   totals and sits in the table forever. Its successor carries the
 ///   conversation, and any unread state belongs there.
+///
+/// `is_tombstoned` must be decided the way `Store::list_rooms` decides to hide —
+/// on the *presence* of an `m.room.tombstone` state event, not on whether a
+/// successor can be read out of it. A tombstone whose `replacement_room` is
+/// missing, or one that has been redacted, still hides the room from every
+/// client while yielding no successor; inferring from the successor would leave
+/// exactly those rooms accruing an unreadable count forever, which is the bug
+/// ADR 0090 exists to fix.
+///
+/// Nothing tests that, and this function's own tests cannot: by the time a
+/// `bool` reaches here, the choice of predicate has already been made at the
+/// call site. Swapping `is_tombstoned()` back for `successor_room().is_some()`
+/// is green today. Issue #164 tracks the missing seam.
 fn unread_suppression_reason(is_gone_upstream: bool, is_tombstoned: bool) -> Option<&'static str> {
     if is_gone_upstream {
         Some("room is absent upstream")
@@ -1926,7 +1939,7 @@ async fn capture_unread_counts(
             .lock()
             .expect("unread-counts gone-upstream lock")
             .contains(room_id),
-        room.successor_room().is_some(),
+        room.is_tombstoned(),
     );
     let snapshot = if suppression.is_some() {
         UnreadCountsSnapshot::new(0, 0)
@@ -2154,7 +2167,20 @@ async fn read_gone_upstream_rooms(store: &Store, account_id: Uuid) -> HashSet<Ow
 ///
 /// At most [`UPSTREAM_PROBES_PER_SWEEP`] rooms per pass, and the remainder is
 /// logged rather than silently dropped.
-async fn reconcile_upstream_rooms(client: &Client, store: &Store, account_id: Uuid) {
+///
+/// Checks `cancel` between probes. The loop is the one place in the unread
+/// watcher that can hold the tick for minutes — `UPSTREAM_PROBES_PER_SWEEP`
+/// sequential round trips, each up to [`UPSTREAM_PROBE_TIMEOUT`] — and its
+/// caller's `select!` cannot observe cancellation until it returns, so without
+/// this a shutdown would wait out the whole backlog. Abandoning mid-pass costs
+/// nothing: every verdict is written durably as it is reached, and the rooms
+/// left unprobed are still `suspect` for the next boot.
+async fn reconcile_upstream_rooms(
+    client: &Client,
+    store: &Store,
+    account_id: Uuid,
+    cancel: &CancellationToken,
+) {
     use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
     use matrix_sdk::ruma::events::StateEventType;
 
@@ -2187,7 +2213,21 @@ async fn reconcile_upstream_rooms(client: &Client, store: &Store, account_id: Uu
             StateEventType::RoomCreate,
             String::new(),
         );
-        let outcome = tokio::time::timeout(UPSTREAM_PROBE_TIMEOUT, client.send(request)).await;
+        // Races cancellation rather than only checking between probes: an
+        // in-flight probe can sit for `UPSTREAM_PROBE_TIMEOUT`, and shutdown
+        // should not have to wait it out. `biased` so a token already cancelled
+        // wins without starting another round trip.
+        let outcome = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                tracing::debug!(
+                    %account_id,
+                    "cancelled mid-reconcile; unprobed rooms stay suspect for the next pass"
+                );
+                return;
+            }
+            outcome = tokio::time::timeout(UPSTREAM_PROBE_TIMEOUT, client.send(request)) => outcome,
+        };
         let (absent, detail) = match outcome {
             Ok(Ok(_)) => (false, "probe succeeded".to_owned()),
             Ok(Err(err)) => {
@@ -2207,11 +2247,25 @@ async fn reconcile_upstream_rooms(client: &Client, store: &Store, account_id: Uu
         };
 
         if absent {
-            if let Err(err) = store
+            let promoted = match store
                 .mark_room_upstream_gone(account_id, room_id, &detail)
                 .await
             {
-                tracing::warn!(%account_id, %room_id, error = %err, "failed to record a room as absent upstream");
+                Ok(promoted) => promoted,
+                Err(err) => {
+                    tracing::warn!(%account_id, %room_id, error = %err, "failed to record a room as absent upstream");
+                    continue;
+                }
+            };
+            if !promoted {
+                // A room-scoped call succeeded while this probe was in flight
+                // and cleared the row. That is newer, stronger evidence than a
+                // probe that has already returned, so the verdict is dropped
+                // rather than written back over it.
+                tracing::debug!(
+                    %account_id, %room_id, detail,
+                    "discarding an absent verdict: the room proved reachable while the probe ran"
+                );
                 continue;
             }
             // Nothing is inserted into the watcher's in-memory set here: the
@@ -2310,7 +2364,7 @@ async fn watch_unread_counts(
                 // follows rather than waiting five more minutes, and a room
                 // whose row was cleared since the last pass stops being
                 // suppressed in the same window.
-                reconcile_upstream_rooms(&client, &store, account_id).await;
+                reconcile_upstream_rooms(&client, &store, account_id, &cancel).await;
                 {
                     let refreshed = read_gone_upstream_rooms(&store, account_id).await;
                     *gone_upstream

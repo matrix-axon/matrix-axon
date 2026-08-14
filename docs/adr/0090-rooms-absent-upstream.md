@@ -85,6 +85,23 @@ the ADR 0070 `pending` guard is bypassed for it since a decrease was always
 allowed. Tombstoned rooms are pinned by the same predicate
 (`unread_suppression_reason`), on the same reasoning.
 
+"Tombstoned" here means what `Store::list_rooms` means by it: an
+`m.room.tombstone` state event is **present**, whatever its content. The first
+implementation asked `Room::successor_room().is_some()` instead, which is a
+strictly narrower question — that returns `None` when the tombstone's
+`replacement_room` field is absent or the event has been redacted. Such a room is
+already hidden from every client's room list while never being suppressed, so it
+would accrue an invisible count into account-wide totals with no surface left to
+clear it from: the exact failure this ADR exists to fix, reached by a different
+route. The two predicates have to be read as one — if `list_rooms` ever changes
+what hides a room, this changes with it.
+
+That correspondence is currently held by this paragraph and nothing else:
+`unread_suppression_reason` takes `bool`s, so its tests cannot see which question
+the call site asked, and `axon-sync` has no seam for building a `Room` to ask it
+of. Reverting to `successor_room().is_some()` would be green. Issue #164 tracks
+the seam.
+
 Nothing here deletes room content. `events`, `room_state`, and the room's place
 in the room list are untouched, so history stays readable — a purged portal's
 messages are often the only copy left. Deleting axon's copy was considered and
@@ -116,6 +133,16 @@ A room whose row is cleared between sweeps stays suppressed for the remainder of
 that window (at most `UNREAD_COUNTS_RESWEEP`). The visible effect is a missing
 unread badge for a few minutes on a room that just came back, which is the mild
 direction to err in.
+
+**A success beats a probe that was already in flight.** `mark_room_upstream_gone`
+promotes only a row that is still `suspect`, so a genuine room-scoped call that
+succeeds while a probe is outstanding — the probe holds a round trip open for up
+to `UPSTREAM_PROBE_TIMEOUT` — wins, and the returning verdict is discarded and
+logged rather than written back over it. An unconditional upsert here would be
+worse than a stale verdict: promoting a cleared room re-suppresses it *and* hides
+it from every future probe, which read only `suspect` rows, leaving nothing but
+another lucky success to undo it. Absence is the claim that has to be proven, so
+losing this race is the correct direction.
 
 ## Consequences
 
