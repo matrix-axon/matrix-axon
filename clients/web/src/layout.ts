@@ -32,6 +32,7 @@ export function layoutMode(path: string): LayoutMode {
   return path === '/rooms/discover' ||
     path === '/rooms/dm' ||
     path === '/rooms/create' ||
+    path === '/invites' ||
     path === '/settings'
     ? 'room-entry'
     : 'utility'

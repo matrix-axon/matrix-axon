@@ -33,6 +33,7 @@ import { AccountsPage } from './pages/AccountsPage'
 import { LicensesPage } from './pages/LicensesPage'
 import { NotFound } from './pages/NotFound'
 import { RoomPage } from './pages/RoomPage'
+import { InvitesPage } from './pages/InvitesPage'
 import { RoomsIndex } from './pages/RoomsIndex'
 import { SettingsPage } from './pages/SettingsPage'
 import { applyAppBadge } from './app-badge'
@@ -1130,6 +1131,7 @@ function ShellChrome() {
               <Route path="/rooms/discover" component={RoomsIndex} />
               <Route path="/rooms/create" component={RoomsIndex} />
               <Route path="/rooms/dm" component={RoomsIndex} />
+              <Route path="/invites" component={InvitesPage} />
               <Route path="/accounts" component={AccountsPage} />
               <Route path="/settings" component={SettingsPage} />
               <Route path="/licenses" component={LicensesPage} />

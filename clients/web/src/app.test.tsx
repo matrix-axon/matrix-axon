@@ -44,6 +44,9 @@ const server = setupServer(
     HttpResponse.json({ data: [ACCOUNT_DTO] }),
   ),
   http.get(`${TEST_BASE_URL}/v1/rooms`, () => HttpResponse.json({ data: [] })),
+  http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+    HttpResponse.json({ data: [] }),
+  ),
   http.get(`${TEST_BASE_URL}/v1/status`, () =>
     HttpResponse.json({
       data: { backfill: { paused: false, free_bytes: 0, accounts: [] } },
@@ -831,6 +834,7 @@ describe('layoutMode (ADR 0062)', () => {
     ['/rooms/discover', 'room-entry'],
     ['/rooms/dm', 'room-entry'],
     ['/rooms/create', 'room-entry'],
+    ['/invites', 'room-entry'],
     ['/nonsense', 'utility'],
     // A room URL missing its room id is not a room surface.
     ['/acct-1/rooms/', 'utility'],

@@ -25,6 +25,9 @@ const ROOM = '!ops:hs'
 let cleanupPromptCapture: (() => void) | null = null
 
 const server = setupServer(
+  http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+    HttpResponse.json({ data: [] }),
+  ),
   http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
     HttpResponse.json({ data: [] }),
   ),

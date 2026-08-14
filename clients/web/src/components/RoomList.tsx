@@ -9,9 +9,9 @@ import {
 } from 'preact/hooks'
 import { layoutMode } from '../layout'
 import { localRoomHref } from '../matrix-to'
-import { useMediaBlob } from '../media/use-media-blob'
 import { useServices } from '../services'
 import { ErrorBanner } from './ErrorBanner'
+import { RoomAvatar, roomAvatarColor } from './RoomAvatar'
 import { perfMark, perfMarkFrames } from '../perf'
 import {
   hasModifier,
@@ -89,19 +89,6 @@ function scrollParentOf(element: HTMLElement | null): HTMLElement | null {
   return null
 }
 
-function roomAvatarLabel(title: string): string {
-  const trimmed = title.trim()
-  return trimmed === '' ? '?' : trimmed[0].toLocaleUpperCase()
-}
-
-function roomAvatarColor(roomKeyValue: string): number {
-  let hash = 0
-  for (let index = 0; index < roomKeyValue.length; index += 1) {
-    hash = (hash * 31 + roomKeyValue.charCodeAt(index)) >>> 0
-  }
-  return hash % 8
-}
-
 /**
  * The room list (ADR 0046, M-W4): TUI semantics — pinned section on top in
  * pin order (ADR 0038), sort modes and category/name filters (ADR 0042),
@@ -116,6 +103,7 @@ export function RoomList() {
   const {
     accounts: accountStore,
     rooms,
+    invites,
     settings,
     spaces,
     activeRoom,
@@ -136,6 +124,9 @@ export function RoomList() {
   useEffect(() => {
     void rooms.refresh()
   }, [rooms])
+  useEffect(() => {
+    void invites.ensureLoaded()
+  }, [invites])
   useEffect(() => {
     if (accountStore.loading.value) {
       void accountStore.refresh()
@@ -503,16 +494,42 @@ export function RoomList() {
    * window's edge scrolls the next row in rather than running out of links.
    */
   const moveFocus = (delta: number) => {
-    if (visible.length === 0) {
+    const invitesLink =
+      document.querySelector<HTMLAnchorElement>('a.invites-link')
+    const active = document.activeElement
+    if (
+      active instanceof HTMLElement &&
+      active.classList.contains('invites-link')
+    ) {
+      if (delta < 0) {
+        filterInput.current?.focus()
+        return
+      }
+      if (visible.length > 0) {
+        focusRow(0)
+      }
       return
     }
-    const active = document.activeElement
+    if (visible.length === 0) {
+      if (delta > 0 && invitesLink !== null) {
+        invitesLink.focus()
+      }
+      return
+    }
     const attribute =
       active instanceof HTMLElement && active.classList.contains('room-link')
         ? active.getAttribute('data-index')
         : null
     const current = attribute === null ? -1 : Number(attribute)
+    if (current < 0 && delta > 0 && invitesLink !== null) {
+      invitesLink.focus()
+      return
+    }
     if (current === 0 && delta < 0) {
+      if (invitesLink !== null) {
+        invitesLink.focus()
+        return
+      }
       filterInput.current?.focus()
       return
     }
@@ -892,6 +909,30 @@ export function RoomList() {
           a cached list that flinches on every load is worse than the 1.3 s
           wait it replaces (ADR 0085 phase 2). `aria-live="polite"` lets a
           screen reader hear the update settle without interrupting. */}
+      {invites.count.value > 0 && (
+        <a
+          href="/invites"
+          class="room-link invites-link"
+          data-invites="true"
+          aria-current={location.path === '/invites' ? 'page' : undefined}
+          onKeyDown={onListKeyDown}
+        >
+          <span class="room-copy">
+            <span class="room-title">
+              <span class="room-title-main">
+                <span class="room-name">Invites</span>
+                <span
+                  class="badge unread-count"
+                  aria-label={`${invites.count.value} pending invites`}
+                >
+                  {invites.count.value}
+                </span>
+              </span>
+            </span>
+          </span>
+        </a>
+      )}
+
       {rooms.stale.value && (
         <p class="room-list-stale muted" aria-live="polite">
           Updating…
@@ -1212,35 +1253,6 @@ function RoomRow({
         {pinned ? '★' : '☆'}
       </button>
     </li>
-  )
-}
-
-function RoomAvatar({
-  accountId,
-  mxcUrl,
-  title,
-  color,
-}: {
-  accountId: string
-  mxcUrl: string | null
-  title: string
-  color: number
-}) {
-  const { ref, state } = useMediaBlob<HTMLSpanElement>(accountId, mxcUrl)
-  const label = roomAvatarLabel(title)
-  return (
-    <span
-      ref={ref}
-      class={`room-avatar room-avatar-color-${color}`}
-      aria-hidden="true"
-      title={mxcUrl === null ? undefined : `${title} avatar`}
-    >
-      {state.status === 'ready' && state.url !== undefined ? (
-        <img src={state.url} alt="" />
-      ) : (
-        <span>{label}</span>
-      )}
-    </span>
   )
 }
 

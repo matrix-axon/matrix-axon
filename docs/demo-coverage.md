@@ -37,6 +37,7 @@ shows it.
 | Capability | TUI (`axon-demo-tui`) | Web desktop | Web mobile |
 |---|---|---|---|
 | Room list, with names and topics | `rooms` | `rooms` | `rooms` |
+| Incoming invite inbox (Accept/Reject) | **n/a** | **not covered** — demo corpus joins invitees through the appservice, so there is no standing-invite scene | **not covered** |
 | Room list sort (ADR 0042) | `rooms` | `rooms` | **not covered** |
 | Room list filter: all / DMs / groups | `rooms` | `rooms` | **not covered** |
 | Live room-name filter (Alt-/) | `rooms` | `rooms` | **not covered** |

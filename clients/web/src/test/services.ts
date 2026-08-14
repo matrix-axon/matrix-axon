@@ -7,6 +7,8 @@ import {
   connectCacheReset,
   connectCacheSetting,
   connectRoomsSessionReset,
+  connectInvitesSessionReset,
+  connectLiveInvites,
   connectLiveRooms,
   connectLiveThreadUnread,
   connectEphemeralPassthrough,
@@ -26,6 +28,7 @@ import { createMediaService } from '../media/media-service'
 import { createLiveConnection } from '../stores/live-connection'
 import { cacheNamespace, createMemoryCacheStore } from '../stores/cache-store'
 import { createRoomListCache } from '../stores/room-list-cache'
+import { createInvitesStore } from '../stores/invites'
 import { createRoomsStore } from '../stores/rooms'
 import { createSearchStore } from '../stores/search'
 import { createSettingsStore } from '../stores/settings'
@@ -136,8 +139,11 @@ export function testServices(
     currentVersion: options.currentVersion ?? 'test-build',
     fetchManifest: options.versionManifest ?? (() => Promise.resolve(null)),
   })
+  const invites = createInvitesStore(api, rooms)
   connectUnreadCounts(live, rooms)
   connectLiveRooms(live, rooms)
+  connectLiveInvites(live, invites)
+  connectInvitesSessionReset(auth, invites)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
@@ -157,6 +163,7 @@ export function testServices(
     settings,
     accounts,
     rooms,
+    invites,
     spaces,
     search,
     threadUnread,

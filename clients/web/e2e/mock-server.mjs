@@ -520,6 +520,9 @@ async function handleApi(req, res, url) {
       data: { backfill: { paused: false, free_bytes: 0, accounts: [] } },
     })
   }
+  if (method === 'GET' && pathname === '/v1/invites') {
+    return json(res, { data: [] })
+  }
   if (method === 'GET' && pathname === '/v1/rooms') {
     if (roomsDelayMs > 0) {
       await sleep(roomsDelayMs)

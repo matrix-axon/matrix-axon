@@ -37,6 +37,9 @@ const server = setupServer(
     HttpResponse.json({ data: [ACCOUNT_DTO] }),
   ),
   http.get(`${TEST_BASE_URL}/v1/rooms`, () => HttpResponse.json({ data: [] })),
+  http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+    HttpResponse.json({ data: [] }),
+  ),
 )
 let localStorageMock: Storage
 let originalLocalStorage: PropertyDescriptor | undefined

@@ -5,6 +5,8 @@ import { createApiClient, type ApiClient } from './api/client'
 import {
   deviceStateChange,
   ephemeralPassthrough,
+  inviteAdded,
+  inviteRemoved,
   timelineEvent,
   unreadCountsChange,
 } from './api/frames'
@@ -41,6 +43,7 @@ import {
 } from './stores/cache-store'
 import { roomTitle } from './stores/room-list'
 import { createRoomListCache } from './stores/room-list-cache'
+import { createInvitesStore, type InvitesStore } from './stores/invites'
 import { createRoomsStore, type RoomsStore } from './stores/rooms'
 import { createSearchStore, type SearchStore } from './stores/search'
 import { createSettingsStore, type SettingsStore } from './stores/settings'
@@ -73,6 +76,7 @@ export interface AppServices {
   settings: SettingsStore
   accounts: AccountsStore
   rooms: RoomsStore
+  invites: InvitesStore
   spaces: SpacesStore
   search: SearchStore
   threadUnread: ThreadUnreadStore
@@ -406,6 +410,45 @@ export function connectRoomsSessionReset(
   })
 }
 
+export function connectInvitesSessionReset(
+  auth: CompositeAuthProvider,
+  invites: InvitesStore,
+): () => void {
+  return effect(() => {
+    if (!auth.signedIn.value) {
+      invites.resetSession()
+    }
+  })
+}
+
+/** Keep the invite inbox live (ADR 0091). Reconnect re-reads the list. */
+export function connectLiveInvites(
+  live: LiveConnection,
+  invites: InvitesStore,
+): () => void {
+  const unsubscribe = live.subscribe((frame) => {
+    const added = inviteAdded(frame)
+    if (added !== null) {
+      invites.noteAdded(added)
+      return
+    }
+    const removed = inviteRemoved(frame)
+    if (removed !== null) {
+      invites.noteRemoved(frame.accountId, removed.roomId)
+    }
+  })
+  const dispose = effect(() => {
+    if (live.reconnects.value === 0) {
+      return
+    }
+    void invites.refresh()
+  })
+  return () => {
+    unsubscribe()
+    dispose()
+  }
+}
+
 /**
  * Honor the room-list cache setting: turning it off must remove what is
  * already on disk, not merely stop adding to it. Turning it back on rebuilds
@@ -525,8 +568,11 @@ export function createServices(
   const composerFocus = signal(0)
   const deviceState = createDeviceStateStore(api, live, storage)
   const spaces = createSpacesStore(api, rooms, live)
+  const invites = createInvitesStore(api, rooms)
   connectUnreadCounts(live, rooms)
   connectLiveRooms(live, rooms)
+  connectLiveInvites(live, invites)
+  connectInvitesSessionReset(auth, invites)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
@@ -546,6 +592,7 @@ export function createServices(
     settings,
     accounts,
     rooms,
+    invites,
     spaces,
     search,
     threadUnread,

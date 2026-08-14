@@ -4,6 +4,10 @@ import {
   deviceStateChange,
   ephemeralPassthrough,
   EPHEMERAL_PASSTHROUGH,
+  inviteAdded,
+  INVITE_ADDED,
+  inviteRemoved,
+  INVITE_REMOVED,
   timelineEvent,
   TIMELINE_EVENT,
   unreadCountsChange,
@@ -200,6 +204,45 @@ describe('unreadCountsChange', () => {
       unreadCountsChange(
         unreadFrame({ room_id: 1, notification_count: 1, highlight_count: 0 }),
       ),
+    ).toBeNull()
+  })
+})
+
+describe('invite frames', () => {
+  it('extracts invite.added and invite.removed', () => {
+    const added = decodeFrame(
+      envelope(INVITE_ADDED, 'acct-1', {
+        account_id: 'acct-1',
+        account_user_id: '@me:hs',
+        room_id: '!r:hs',
+        name: 'Room',
+        avatar_url: null,
+        topic: null,
+        canonical_alias: null,
+        room_type: null,
+        inviter_user_id: '@a:hs',
+        inviter_display_name: 'A',
+        is_direct: true,
+        encrypted: false,
+        invited_at: '2026-08-14T12:00:00+00:00',
+      }),
+    )!
+    expect(inviteAdded(added)?.room_id).toBe('!r:hs')
+    expect(inviteAdded(added)?.is_direct).toBe(true)
+    const removed = decodeFrame(
+      envelope(INVITE_REMOVED, 'acct-1', { room_id: '!r:hs' }),
+    )!
+    expect(inviteRemoved(removed)).toEqual({ roomId: '!r:hs' })
+  })
+
+  it('returns null for the other invite tag', () => {
+    expect(
+      inviteAdded(
+        decodeFrame(envelope(INVITE_REMOVED, 'a', { room_id: '!r' }))!,
+      ),
+    ).toBeNull()
+    expect(
+      inviteRemoved(decodeFrame(envelope(INVITE_ADDED, 'a', {}))!),
     ).toBeNull()
   })
 })

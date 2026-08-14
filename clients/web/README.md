@@ -33,7 +33,9 @@ thread replies unread until their thread panel loads), full-text message
 search (M-W10, ADR 0066: a URL-addressed overlay opened with `/`, `Ctrl-G`, a
 topbar button, or `/search`, with chip/token filters and client-side
 re-sorting), `/leave`, `/part`, and `/forget` room-membership slash commands
-(M19-W1), `/invite` and `/cancel` room invite commands, room entry via
+(M19-W1), an incoming-invite inbox (`/invites`, Accept/Reject and Accept
+all/Reject all; an Invites row appears at the top of the room list when any
+are pending), `/invite` and `/cancel` room invite commands, room entry via
 `/join <room-or-matrix-link>` and `/knock <room-or-matrix-link> [reason]`
 (M19-W2: parses raw room ids/aliases, matrix.to links, and `matrix:` URIs;
 intercepts Matrix room links in the signed-in shell, showing an unknown target

@@ -97,6 +97,9 @@ function event(id: string, ts: number, overrides: object = {}): EventDto {
 }
 
 const server = setupServer(
+  http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+    HttpResponse.json({ data: [] }),
+  ),
   http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
     HttpResponse.json({
       data: [

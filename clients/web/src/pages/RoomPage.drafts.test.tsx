@@ -20,6 +20,9 @@ const ROOM_A = '!a:hs'
 const ROOM_B = '!b:hs'
 
 const server = setupServer(
+  http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+    HttpResponse.json({ data: [] }),
+  ),
   http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
     HttpResponse.json({
       data: [ROOM_A, ROOM_B].map((room_id) => ({

@@ -11,7 +11,7 @@ export type EventDto = components['schemas']['EventDto']
  * server frame type reaches no handler until one is added, rather than
  * breaking decode. Known tags today: `timeline.event`, `verification.*`,
  * `sender_trust.violation`, `device_state.changed`, `ephemeral.passthrough`,
- * `unread_counts.changed`.
+ * `unread_counts.changed`, `invite.added`, `invite.removed`.
  */
 export interface LiveFrame {
   /** Namespaced tag, e.g. `timeline.event`. */
@@ -33,6 +33,12 @@ export const EPHEMERAL_PASSTHROUGH = 'ephemeral.passthrough'
 
 /** The `type` tag for server-derived per-room unread counts (ADR 0070). */
 export const UNREAD_COUNTS_CHANGED = 'unread_counts.changed'
+
+/** The `type` tag for a newly persisted pending invite (ADR 0091). */
+export const INVITE_ADDED = 'invite.added'
+
+/** The `type` tag for a pending invite that is no longer pending (ADR 0091). */
+export const INVITE_REMOVED = 'invite.removed'
 
 /**
  * The payload of a `device_state.changed` frame (M12, ADR 0048): the writing
@@ -193,4 +199,80 @@ export function unreadCountsChange(
 
 function isCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function optionalString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+/**
+ * The payload of an `invite.added` frame, or `null` for any other tag or a
+ * malformed body. Field names match `InviteDto`.
+ */
+export function inviteAdded(frame: LiveFrame): InviteAdded | null {
+  if (frame.type !== INVITE_ADDED) {
+    return null
+  }
+  if (typeof frame.payload !== 'object' || frame.payload === null) {
+    return null
+  }
+  const payload = frame.payload as Record<string, unknown>
+  if (
+    typeof payload.account_id !== 'string' ||
+    typeof payload.account_user_id !== 'string' ||
+    typeof payload.room_id !== 'string' ||
+    typeof payload.inviter_user_id !== 'string' ||
+    typeof payload.is_direct !== 'boolean' ||
+    typeof payload.encrypted !== 'boolean' ||
+    typeof payload.invited_at !== 'string'
+  ) {
+    return null
+  }
+  return {
+    account_id: payload.account_id,
+    account_user_id: payload.account_user_id,
+    room_id: payload.room_id,
+    name: optionalString(payload.name),
+    avatar_url: optionalString(payload.avatar_url),
+    topic: optionalString(payload.topic),
+    canonical_alias: optionalString(payload.canonical_alias),
+    room_type: optionalString(payload.room_type),
+    inviter_user_id: payload.inviter_user_id,
+    inviter_display_name: optionalString(payload.inviter_display_name),
+    is_direct: payload.is_direct,
+    encrypted: payload.encrypted,
+    invited_at: payload.invited_at,
+  }
+}
+
+/** The payload of an `invite.removed` frame. Account is on the envelope. */
+export interface InviteRemoved {
+  roomId: string
+}
+
+export type InviteAdded = {
+  account_id: string
+  account_user_id: string
+  room_id: string
+  name: string | null
+  avatar_url: string | null
+  topic: string | null
+  canonical_alias: string | null
+  room_type: string | null
+  inviter_user_id: string
+  inviter_display_name: string | null
+  is_direct: boolean
+  encrypted: boolean
+  invited_at: string
+}
+
+export function inviteRemoved(frame: LiveFrame): InviteRemoved | null {
+  if (frame.type !== INVITE_REMOVED) {
+    return null
+  }
+  if (typeof frame.payload !== 'object' || frame.payload === null) {
+    return null
+  }
+  const { room_id: roomId } = frame.payload as Record<string, unknown>
+  return typeof roomId === 'string' ? { roomId } : null
 }

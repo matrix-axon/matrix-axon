@@ -4819,3 +4819,65 @@ audio.media-player {
 .gallery-caption-index {
   display: none;
 }
+
+.invites-link {
+  margin: 0 0.5rem 0.4rem;
+  display: flex;
+  align-items: center;
+}
+
+.invites-page {
+  padding: 1rem 1.25rem 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.invites-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.invites-header h1 {
+  margin: 0;
+}
+
+.invites-bulk,
+.invite-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.invite-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.invite-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.invite-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.invite-name {
+  margin: 0;
+  font-weight: 600;
+}
+
+.invite-body .muted,
+.invites-header .muted {
+  margin: 0.2rem 0 0;
+}

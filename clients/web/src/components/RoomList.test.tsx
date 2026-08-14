@@ -116,6 +116,9 @@ function renderPage(
     http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
       HttpResponse.json({ data: rooms }),
     ),
+    http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+      HttpResponse.json({ data: [] }),
+    ),
     http.get(
       `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/space/children`,
       ({ params }) =>
@@ -1262,4 +1265,25 @@ describe('RoomList selection and shortcut hints', () => {
       options.diffed = previous
     }
   })
+})
+
+it('shows an Invites row only while invites are pending', async () => {
+  const { findByRole, queryByRole, services } = renderPage()
+  expect(queryByRole('link', { name: /Invites/ })).toBeNull()
+  services.invites.noteAdded({
+    account_id: ACCOUNT,
+    account_user_id: '@me:hs',
+    room_id: '!inv:hs',
+    name: 'Pending',
+    inviter_user_id: '@alice:hs',
+    is_direct: false,
+    encrypted: false,
+    invited_at: '2026-08-14T12:00:00+00:00',
+  })
+  expect(await findByRole('link', { name: /Invites/ })).toBeTruthy()
+  expect(await findByRole('link', { name: /1 pending invites/ })).toBeTruthy()
+  services.invites.noteRemoved(ACCOUNT, '!inv:hs')
+  await waitFor(() =>
+    expect(queryByRole('link', { name: /Invites/ })).toBeNull(),
+  )
 })

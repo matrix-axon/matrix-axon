@@ -63,6 +63,9 @@ function handlers(rooms: unknown[], roomsResponse: () => Promise<Response>) {
       }),
     ),
     http.get(`${TEST_BASE_URL}/v1/rooms`, () => roomsResponse()),
+    http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+      HttpResponse.json({ data: [] }),
+    ),
     http.get(
       `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/space/children`,
       () => HttpResponse.json({ data: [] }),
