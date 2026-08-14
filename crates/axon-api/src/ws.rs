@@ -14,6 +14,7 @@
 //! `unread_counts.changed` carries a room's SDK-derived unread counts
 //! (issue #313, ADR 0070) — *not* built on the ADR 0056 ephemeral path, since
 //! notification counts are per-room counters, not an ephemeral event.
+//! `invite.added` / `invite.removed` carry the pending-invite inbox (ADR 0091).
 //!
 //! Delivery is **best-effort live tail**, not a replay: a client sees events
 //! that arrive after it connects, and uses the HTTP read API for history. The
@@ -43,8 +44,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axon_core::{
-    DeviceStateFrame, EphemeralFrame, LiveFrame, SenderTrustFrame, SyncStateFrame,
-    UnreadCountsFrame, VerificationFrame, VerificationFrameKind,
+    DeviceStateFrame, EphemeralFrame, InviteAddedFrame, InviteRemovedFrame, LiveFrame,
+    SenderTrustFrame, SyncStateFrame, UnreadCountsFrame, VerificationFrame, VerificationFrameKind,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -234,6 +235,65 @@ impl From<SyncStateFrame> for SyncStateFramePayload {
     }
 }
 
+/// The `type` tag for a newly persisted (or refreshed) pending invite
+/// (ADR 0091).
+const INVITE_ADDED: &str = "invite.added";
+
+/// The `type` tag for a pending invite that is no longer pending (ADR 0091).
+const INVITE_REMOVED: &str = "invite.removed";
+
+/// Wire payload for `invite.added`: the same fields as [`InviteDto`].
+#[derive(Debug, Serialize)]
+struct InviteAddedFramePayload {
+    account_id: uuid::Uuid,
+    account_user_id: String,
+    room_id: String,
+    name: Option<String>,
+    avatar_url: Option<String>,
+    topic: Option<String>,
+    canonical_alias: Option<String>,
+    room_type: Option<String>,
+    inviter_user_id: String,
+    inviter_display_name: Option<String>,
+    is_direct: bool,
+    encrypted: bool,
+    invited_at: String,
+}
+
+impl From<InviteAddedFrame> for InviteAddedFramePayload {
+    fn from(frame: InviteAddedFrame) -> Self {
+        Self {
+            account_id: frame.account_id,
+            account_user_id: frame.account_user_id,
+            room_id: frame.room_id,
+            name: frame.name,
+            avatar_url: frame.avatar_url,
+            topic: frame.topic,
+            canonical_alias: frame.canonical_alias,
+            room_type: frame.room_type,
+            inviter_user_id: frame.inviter_user_id,
+            inviter_display_name: frame.inviter_display_name,
+            is_direct: frame.is_direct,
+            encrypted: frame.encrypted,
+            invited_at: frame.invited_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Wire payload for `invite.removed`.
+#[derive(Debug, Serialize)]
+struct InviteRemovedFramePayload {
+    room_id: String,
+}
+
+impl From<InviteRemovedFrame> for InviteRemovedFramePayload {
+    fn from(frame: InviteRemovedFrame) -> Self {
+        Self {
+            room_id: frame.room_id,
+        }
+    }
+}
+
 /// The `type` tag for a verification frame of the given kind.
 fn verification_type(kind: VerificationFrameKind) -> &'static str {
     match kind {
@@ -353,6 +413,16 @@ fn encode_frame(frame: LiveFrame) -> Result<String, serde_json::Error> {
             kind: ACCOUNT_SYNC_STATE,
             account_id: frame.account_id,
             payload: SyncStateFramePayload::from(frame),
+        }),
+        LiveFrame::InviteAdded(frame) => serde_json::to_string(&WsEnvelope {
+            kind: INVITE_ADDED,
+            account_id: frame.account_id,
+            payload: InviteAddedFramePayload::from(frame),
+        }),
+        LiveFrame::InviteRemoved(frame) => serde_json::to_string(&WsEnvelope {
+            kind: INVITE_REMOVED,
+            account_id: frame.account_id,
+            payload: InviteRemovedFramePayload::from(frame),
         }),
     }
 }
@@ -671,5 +741,47 @@ mod tests {
         assert_eq!(v["type"], "account.sync_state");
         assert_eq!(v["account_id"], account_id.to_string());
         assert_eq!(v["payload"]["sync_state"], "ready");
+    }
+
+    #[test]
+    fn invite_added_frame_wire_shape() {
+        let account_id = Uuid::new_v4();
+        let invited_at = chrono::DateTime::parse_from_rfc3339("2026-08-14T12:00:00Z")
+            .expect("ts")
+            .with_timezone(&chrono::Utc);
+        let v = decode(LiveFrame::InviteAdded(InviteAddedFrame {
+            account_id,
+            account_user_id: "@me:localhost".to_owned(),
+            room_id: "!r:localhost".to_owned(),
+            name: Some("Room".to_owned()),
+            avatar_url: None,
+            topic: None,
+            canonical_alias: None,
+            room_type: None,
+            inviter_user_id: "@inviter:localhost".to_owned(),
+            inviter_display_name: Some("Inviter".to_owned()),
+            is_direct: true,
+            encrypted: false,
+            invited_at,
+        }));
+        assert_eq!(v["type"], "invite.added");
+        assert_eq!(v["account_id"], account_id.to_string());
+        assert_eq!(v["payload"]["room_id"], "!r:localhost");
+        assert_eq!(v["payload"]["inviter_user_id"], "@inviter:localhost");
+        assert_eq!(v["payload"]["is_direct"], true);
+        assert_eq!(v["payload"]["encrypted"], false);
+        assert_eq!(v["payload"]["invited_at"], "2026-08-14T12:00:00+00:00");
+    }
+
+    #[test]
+    fn invite_removed_frame_wire_shape() {
+        let account_id = Uuid::new_v4();
+        let v = decode(LiveFrame::InviteRemoved(InviteRemovedFrame {
+            account_id,
+            room_id: "!r:localhost".to_owned(),
+        }));
+        assert_eq!(v["type"], "invite.removed");
+        assert_eq!(v["account_id"], account_id.to_string());
+        assert_eq!(v["payload"]["room_id"], "!r:localhost");
     }
 }

@@ -10,7 +10,7 @@ use axon_core::{
     ResolvedPowerLevels, RoomPreset,
 };
 use axon_store::{
-    Account, AccountState, DeviceStateRow, ReactionTally, RoomSummary, SpaceChildRow,
+    Account, AccountState, DeviceStateRow, ReactionTally, RoomInvite, RoomSummary, SpaceChildRow,
     SpaceParentRow, ThreadSummary, TimelineRow,
 };
 use serde::{Deserialize, Serialize};
@@ -73,6 +73,60 @@ impl From<RoomSummary> for RoomDto {
             last_event_id: r.last_event_id,
             notification_count: r.notification_count,
             highlight_count: r.highlight_count,
+        }
+    }
+}
+
+/// A pending room invite (`GET /v1/invites`, ADR 0091). Identity is
+/// `(account_id, room_id)` — the same room invited to two accounts appears
+/// twice. Accept is `POST …/rooms/join`; reject is `POST …/rooms/{id}/leave`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct InviteDto {
+    /// Axon account this invite belongs to.
+    pub account_id: Uuid,
+    /// Matrix user ID for this Axon account.
+    pub account_user_id: String,
+    /// Matrix room ID.
+    pub room_id: String,
+    /// Room name from stripped invite state, if set.
+    pub name: Option<String>,
+    /// Avatar `mxc://` URI, if set.
+    pub avatar_url: Option<String>,
+    /// Room topic, if set.
+    pub topic: Option<String>,
+    /// Canonical alias, if set.
+    pub canonical_alias: Option<String>,
+    /// The room's `m.room.create` `type`, if any (for example `m.space`).
+    pub room_type: Option<String>,
+    /// Matrix user ID of who sent the invite.
+    pub inviter_user_id: String,
+    /// Inviter display name from stripped member state, if known.
+    pub inviter_display_name: Option<String>,
+    /// Whether this invite is a direct message.
+    pub is_direct: bool,
+    /// Whether stripped state advertised `m.room.encryption`.
+    pub encrypted: bool,
+    /// When Axon first persisted this invite, RFC 3339. Not the Matrix
+    /// origin timestamp (stripped state usually has none).
+    pub invited_at: String,
+}
+
+impl From<RoomInvite> for InviteDto {
+    fn from(invite: RoomInvite) -> Self {
+        InviteDto {
+            account_id: invite.account_id,
+            account_user_id: invite.account_user_id,
+            room_id: invite.room_id,
+            name: invite.name,
+            avatar_url: invite.avatar_url,
+            topic: invite.topic,
+            canonical_alias: invite.canonical_alias,
+            room_type: invite.room_type,
+            inviter_user_id: invite.inviter_user_id,
+            inviter_display_name: invite.inviter_display_name,
+            is_direct: invite.is_direct,
+            encrypted: invite.encrypted,
+            invited_at: invite.invited_at.to_rfc3339(),
         }
     }
 }

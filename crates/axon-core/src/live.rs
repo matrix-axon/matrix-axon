@@ -51,6 +51,10 @@ pub enum LiveFrame {
     /// connected client update its per-account status without polling
     /// `GET /v1/accounts`.
     SyncStateChanged(SyncStateFrame),
+    /// A pending invite was added or its display fields changed (ADR 0091).
+    InviteAdded(InviteAddedFrame),
+    /// A pending invite is gone — accepted, rejected, or withdrawn (ADR 0091).
+    InviteRemoved(InviteRemovedFrame),
 }
 
 impl From<LiveEvent> for LiveFrame {
@@ -92,6 +96,18 @@ impl From<UnreadCountsFrame> for LiveFrame {
 impl From<SyncStateFrame> for LiveFrame {
     fn from(frame: SyncStateFrame) -> Self {
         LiveFrame::SyncStateChanged(frame)
+    }
+}
+
+impl From<InviteAddedFrame> for LiveFrame {
+    fn from(frame: InviteAddedFrame) -> Self {
+        LiveFrame::InviteAdded(frame)
+    }
+}
+
+impl From<InviteRemovedFrame> for LiveFrame {
+    fn from(frame: InviteRemovedFrame) -> Self {
+        LiveFrame::InviteRemoved(frame)
     }
 }
 
@@ -172,6 +188,34 @@ pub struct SyncStateFrame {
     pub account_id: Uuid,
     /// The new state: `"connecting"`, `"syncing"`, `"ready"`, or `"offline"`.
     pub sync_state: &'static str,
+}
+
+/// A pending invite appeared or its display snapshot changed (ADR 0091).
+/// Payload matches `GET /v1/invites` so a connected client can upsert
+/// without a read-back. The bus is lossy; a reconnecting client re-reads
+/// the list.
+#[derive(Debug, Clone)]
+pub struct InviteAddedFrame {
+    pub account_id: Uuid,
+    pub account_user_id: String,
+    pub room_id: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub topic: Option<String>,
+    pub canonical_alias: Option<String>,
+    pub room_type: Option<String>,
+    pub inviter_user_id: String,
+    pub inviter_display_name: Option<String>,
+    pub is_direct: bool,
+    pub encrypted: bool,
+    pub invited_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A pending invite is no longer pending (ADR 0091).
+#[derive(Debug, Clone)]
+pub struct InviteRemovedFrame {
+    pub account_id: Uuid,
+    pub room_id: String,
 }
 
 /// A change in a *sender's* current device trust (M7c), ready to fan out over the

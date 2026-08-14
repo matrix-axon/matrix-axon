@@ -13,12 +13,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axon_core::{
-    EphemeralFrame, LiveEvent, LiveFrame, SenderTrustFrame, SyncConfig, SyncStateFrame,
-    UnreadCountsFrame,
+    EphemeralFrame, InviteAddedFrame, InviteRemovedFrame, LiveEvent, LiveFrame, SenderTrustFrame,
+    SyncConfig, SyncStateFrame, UnreadCountsFrame,
 };
 use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
-use axon_store::{Account, AccountDataUpsert, EventCiphertext, NewEvent, RoomStateUpsert, Store};
+use axon_store::{
+    Account, AccountDataUpsert, EventCiphertext, NewEvent, RoomInviteSnapshot, RoomStateUpsert,
+    Store,
+};
 use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::event_handler::{Ctx, RawEvent};
 use matrix_sdk::ruma::events::room::member::MembershipState;
@@ -1223,6 +1226,17 @@ fn probe_verdict<T, E>(outcome: &Result<T, E>, status: Option<u16>) -> ProbeVerd
     }
 }
 
+/// How often [`watch_invites`] re-walks `invited_rooms()` as a self-healing
+/// backstop (ADR 0091). Same interval as unread counts: the notable-update
+/// receiver is lossy and has no dedicated "invite changed" reason bit.
+const INVITES_RESWEEP: Duration = Duration::from_secs(300);
+
+/// Bound on concurrent `capture_invite` calls within one [`sweep_invites`]
+/// pass. Pending invites are usually a handful; the cap is for a backlog of
+/// unsolicited invites, not a 1755-room joined list.
+const INVITES_SWEEP_CONCURRENCY: usize = 8;
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UnreadCountsSnapshot {
     notification: u64,
@@ -1634,6 +1648,19 @@ async fn run_account(
         unread_cancel.clone(),
     ));
 
+    // Pending-invite watcher (issue #279, ADR 0091): persist
+    // `client.invited_rooms()` so `GET /v1/invites` can list rooms that never
+    // land in `events`. Same child-token + join-handle lifecycle.
+    let invites_cancel = cancel.child_token();
+    let invites_handle = tokio::spawn(watch_invites(
+        client.clone(),
+        store.clone(),
+        account.account_id,
+        account.user_id.clone(),
+        live_tx.clone(),
+        invites_cancel.clone(),
+    ));
+
     // Cross-user verification room delivery (ADR 0040): register this run's
     // resubscribe waker, and poll for new candidate invites. The sliding-sync
     // selective window (rank 0..=19) delivers no timeline events to a DM outside
@@ -1802,6 +1829,14 @@ async fn run_account(
             account_id = %account.account_id,
             error = %err,
             "unread-counts watcher did not shut down cleanly"
+        );
+    }
+    invites_cancel.cancel();
+    if let Err(err) = invites_handle.await {
+        tracing::warn!(
+            account_id = %account.account_id,
+            error = %err,
+            "invites watcher did not shut down cleanly"
         );
     }
 
@@ -2500,6 +2535,300 @@ async fn watch_unread_counts(
             },
         }
     }
+}
+
+/// Keep `room_invites` tracking matrix-sdk's invited rooms (issue #279, ADR
+/// 0091). Invited rooms never land in `events`, so this watcher is the only
+/// write path that makes them listable. Dedup cache is seeded from what's
+/// already persisted so a restart does not re-broadcast every standing invite.
+///
+/// Subscribe before the startup sweep so a notable update mid-sweep is
+/// queued rather than missed. React to every notable update (no dedicated
+/// invite reason bit) and dedup on the display snapshot. A `Lagged` gap is
+/// self-healing via the next update or the periodic re-sweep.
+async fn watch_invites(
+    client: Client,
+    store: Store,
+    account_id: Uuid,
+    account_user_id: String,
+    live_tx: broadcast::Sender<LiveFrame>,
+    cancel: CancellationToken,
+) {
+    let last: Mutex<HashMap<OwnedRoomId, RoomInviteSnapshot>> =
+        Mutex::new(seed_invites_cache(&store, account_id).await);
+
+    let mut updates = client.room_info_notable_update_receiver();
+    sweep_invites(
+        &client,
+        &store,
+        account_id,
+        &account_user_id,
+        &live_tx,
+        &last,
+        false,
+    )
+    .await;
+
+    let mut resweep = tokio::time::interval_at(
+        tokio::time::Instant::now() + INVITES_RESWEEP,
+        INVITES_RESWEEP,
+    );
+    resweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = resweep.tick() => {
+                sweep_invites(
+                    &client,
+                    &store,
+                    account_id,
+                    &account_user_id,
+                    &live_tx,
+                    &last,
+                    true,
+                )
+                .await;
+            }
+            update = updates.recv() => match update {
+                Ok(update) => {
+                    if let Some(room) = client.get_room(&update.room_id) {
+                        capture_invite(
+                            &room,
+                            &store,
+                            account_id,
+                            &account_user_id,
+                            &live_tx,
+                            &last,
+                        )
+                        .await;
+                    }
+                    // `get_room` returning None is not "invite withdrawn" —
+                    // the room list may not have hydrated this id yet (ADR 0091).
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+        }
+    }
+}
+
+async fn seed_invites_cache(
+    store: &Store,
+    account_id: Uuid,
+) -> HashMap<OwnedRoomId, RoomInviteSnapshot> {
+    let rows = match store.room_invite_snapshots(account_id).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(
+                %account_id, error = %err,
+                "failed to read persisted invites; starting dedup cache empty"
+            );
+            return HashMap::new();
+        }
+    };
+    let mut cache = HashMap::with_capacity(rows.len());
+    for (room_id, snapshot) in rows {
+        let Ok(parsed) = RoomId::parse(&room_id) else {
+            tracing::warn!(%account_id, %room_id, "skipping malformed persisted invite room id");
+            continue;
+        };
+        cache.insert(parsed, snapshot);
+    }
+    cache
+}
+
+/// Drop a cached invite whose room is no longer `Invited`. Used both when a
+/// notable update names a room that is now joined/left, and when
+/// `get_room` returns `None` for a room we already persisted (the SDK
+/// forgot it — treat as withdrawn).
+async fn drop_invite_if_known(
+    store: &Store,
+    account_id: Uuid,
+    room_id: &RoomId,
+    live_tx: &broadcast::Sender<LiveFrame>,
+    last: &Mutex<HashMap<OwnedRoomId, RoomInviteSnapshot>>,
+) {
+    let had = last
+        .lock()
+        .expect("invites cache lock")
+        .contains_key(room_id);
+    if !had {
+        return;
+    }
+    match store.delete_room_invite(account_id, room_id.as_str()).await {
+        Ok(deleted) => {
+            last.lock().expect("invites cache lock").remove(room_id);
+            if deleted {
+                tracing::info!(%account_id, %room_id, "dropped pending invite");
+                let _ = live_tx.send(LiveFrame::InviteRemoved(InviteRemovedFrame {
+                    account_id,
+                    room_id: room_id.as_str().to_owned(),
+                }));
+            }
+        }
+        Err(err) => {
+            tracing::warn!(%account_id, %room_id, error = %err, "failed to delete pending invite");
+        }
+    }
+}
+
+async fn capture_invite(
+    room: &Room,
+    store: &Store,
+    account_id: Uuid,
+    account_user_id: &str,
+    live_tx: &broadcast::Sender<LiveFrame>,
+    last: &Mutex<HashMap<OwnedRoomId, RoomInviteSnapshot>>,
+) {
+    let room_id = room.room_id().to_owned();
+    if room.state() != RoomState::Invited {
+        drop_invite_if_known(store, account_id, &room_id, live_tx, last).await;
+        return;
+    }
+
+    let details = match room.invite_details().await {
+        Ok(details) => details,
+        Err(err) => {
+            tracing::warn!(
+                %account_id,
+                %room_id,
+                error = %err,
+                "failed to read invite details; leaving persisted row untouched"
+            );
+            return;
+        }
+    };
+
+    let snapshot = RoomInviteSnapshot {
+        name: room.name(),
+        avatar_url: room.avatar_url().map(|url| url.to_string()),
+        topic: room.topic(),
+        canonical_alias: room.canonical_alias().map(|alias| alias.to_string()),
+        room_type: room.room_type().map(|room_type| room_type.to_string()),
+        inviter_user_id: details.inviter_id.as_str().to_owned(),
+        inviter_display_name: details
+            .inviter
+            .as_ref()
+            .and_then(|member| member.display_name().map(str::to_owned)),
+        is_direct: room.is_direct().await.unwrap_or(false),
+        encrypted: room.encryption_state().is_encrypted(),
+    };
+
+    {
+        let cache = last.lock().expect("invites cache lock");
+        if cache.get(&room_id) == Some(&snapshot) {
+            return;
+        }
+    }
+
+    let invited_at = match store
+        .upsert_room_invite(account_id, room_id.as_str(), &snapshot)
+        .await
+    {
+        Ok(invited_at) => invited_at,
+        Err(err) => {
+            tracing::warn!(%account_id, %room_id, error = %err, "failed to persist pending invite");
+            return;
+        }
+    };
+
+    last.lock()
+        .expect("invites cache lock")
+        .insert(room_id.clone(), snapshot.clone());
+
+    tracing::info!(
+        %account_id,
+        %room_id,
+        inviter_user_id = %snapshot.inviter_user_id,
+        "persisted pending invite"
+    );
+    let _ = live_tx.send(LiveFrame::InviteAdded(InviteAddedFrame {
+        account_id,
+        account_user_id: account_user_id.to_owned(),
+        room_id: room_id.as_str().to_owned(),
+        name: snapshot.name,
+        avatar_url: snapshot.avatar_url,
+        topic: snapshot.topic,
+        canonical_alias: snapshot.canonical_alias,
+        room_type: snapshot.room_type,
+        inviter_user_id: snapshot.inviter_user_id,
+        inviter_display_name: snapshot.inviter_display_name,
+        is_direct: snapshot.is_direct,
+        encrypted: snapshot.encrypted,
+        invited_at,
+    }));
+}
+
+/// Re-walk currently-invited rooms and capture each snapshot. With `prune`,
+/// also drop rows for rooms we can positively see are no longer invited
+/// (ADR 0091): `get_room` returned and `state() != Invited`, or — only when
+/// `invited_rooms()` is non-empty — a persisted id absent from that list.
+/// An empty invited list is "not loaded yet," not "zero invites."
+async fn sweep_invites(
+    client: &Client,
+    store: &Store,
+    account_id: Uuid,
+    account_user_id: &str,
+    live_tx: &broadcast::Sender<LiveFrame>,
+    last: &Mutex<HashMap<OwnedRoomId, RoomInviteSnapshot>>,
+    prune: bool,
+) {
+    use futures_util::stream::{self, StreamExt};
+
+    let invited = client.invited_rooms();
+
+    // Positive-absence: any cached room the SDK now reports as joined/left
+    // is no longer an invite. Safe on the startup sweep — `get_room`
+    // returning a non-invited room is not a hydration miss.
+    let cached_ids: Vec<OwnedRoomId> = last
+        .lock()
+        .expect("invites cache lock")
+        .keys()
+        .cloned()
+        .collect();
+    for room_id in cached_ids {
+        match client.get_room(&room_id) {
+            Some(room) if room.state() != RoomState::Invited => {
+                drop_invite_if_known(store, account_id, &room_id, live_tx, last).await;
+            }
+            Some(_) | None => {}
+        }
+    }
+
+    if prune && !invited.is_empty() {
+        let keep: HashSet<OwnedRoomId> = invited
+            .iter()
+            .map(|room| room.room_id().to_owned())
+            .collect();
+        last.lock()
+            .expect("invites cache lock")
+            .retain(|room_id, _| keep.contains(room_id));
+        let keep_ids: Vec<String> = keep
+            .iter()
+            .map(|room_id| room_id.as_str().to_owned())
+            .collect();
+        match store.delete_stale_room_invites(account_id, &keep_ids).await {
+            Ok(removed) => {
+                for room_id in removed {
+                    tracing::info!(%account_id, %room_id, "pruned stale pending invite");
+                    let _ = live_tx.send(LiveFrame::InviteRemoved(InviteRemovedFrame {
+                        account_id,
+                        room_id,
+                    }));
+                }
+            }
+            Err(err) => {
+                tracing::warn!(%account_id, error = %err, "failed to prune stale pending invites");
+            }
+        }
+    }
+
+    stream::iter(invited)
+        .for_each_concurrent(INVITES_SWEEP_CONCURRENCY, |room| async move {
+            capture_invite(&room, store, account_id, account_user_id, live_tx, last).await;
+        })
+        .await;
 }
 
 #[cfg(test)]

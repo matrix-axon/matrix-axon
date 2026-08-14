@@ -11,6 +11,7 @@ mod backfill;
 mod device_state;
 mod error;
 mod events;
+mod invites;
 mod media_uploads;
 mod migrations;
 mod oauth_authorization_requests;
@@ -34,6 +35,7 @@ pub use events::{
     EventCiphertext, EventCrypto, EventSenderTrust, NewEvent, PendingUtd, ReactionTally,
     ThreadSummary, TimelineCursor, TimelineRow,
 };
+pub use invites::{RoomInvite, RoomInviteSnapshot};
 pub use media_uploads::{MediaUpload, MediaUploadKind, MediaUploadState, NewMediaUpload};
 pub use migrations::{embedded_migrations, EmbeddedMigration};
 pub use oauth_authorization_requests::{AuthorizationRequest, NewAuthorizationRequest};

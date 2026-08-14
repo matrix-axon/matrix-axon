@@ -7,6 +7,7 @@ pub mod device_state;
 pub mod devices;
 pub mod ephemeral;
 pub mod events;
+pub mod invites;
 pub mod media;
 pub mod membership;
 pub mod messages;

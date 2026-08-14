@@ -1221,6 +1221,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/invites": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List pending room invites across accounts, newest first. */
+        get: operations["list_invites"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/media/{account_id}/{server_name}/{media_id}": {
         parameters: {
             query?: never;
@@ -2089,6 +2106,43 @@ export interface components {
             }[];
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_Vec_InviteDto: {
+            data: {
+                /**
+                 * Format: uuid
+                 * @description Axon account this invite belongs to.
+                 */
+                account_id: string;
+                /** @description Matrix user ID for this Axon account. */
+                account_user_id: string;
+                /** @description Avatar `mxc://` URI, if set. */
+                avatar_url?: string | null;
+                /** @description Canonical alias, if set. */
+                canonical_alias?: string | null;
+                /** @description Whether stripped state advertised `m.room.encryption`. */
+                encrypted: boolean;
+                /**
+                 * @description When Axon first persisted this invite, RFC 3339. Not the Matrix
+                 *     origin timestamp (stripped state usually has none).
+                 */
+                invited_at: string;
+                /** @description Inviter display name from stripped member state, if known. */
+                inviter_display_name?: string | null;
+                /** @description Matrix user ID of who sent the invite. */
+                inviter_user_id: string;
+                /** @description Whether this invite is a direct message. */
+                is_direct: boolean;
+                /** @description Room name from stripped invite state, if set. */
+                name?: string | null;
+                /** @description Matrix room ID. */
+                room_id: string;
+                /** @description The room's `m.room.create` `type`, if any (for example `m.space`). */
+                room_type?: string | null;
+                /** @description Room topic, if set. */
+                topic?: string | null;
+            }[];
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_Vec_MemberDto: {
             data: {
                 /**
@@ -2607,6 +2661,45 @@ export interface components {
             homeserver_url: string;
             /** @description Full Matrix user ID, e.g. `@alice:example.org`. */
             username: string;
+        };
+        /**
+         * @description A pending room invite (`GET /v1/invites`, ADR 0091). Identity is
+         *     `(account_id, room_id)` — the same room invited to two accounts appears
+         *     twice. Accept is `POST …/rooms/join`; reject is `POST …/rooms/{id}/leave`.
+         */
+        InviteDto: {
+            /**
+             * Format: uuid
+             * @description Axon account this invite belongs to.
+             */
+            account_id: string;
+            /** @description Matrix user ID for this Axon account. */
+            account_user_id: string;
+            /** @description Avatar `mxc://` URI, if set. */
+            avatar_url?: string | null;
+            /** @description Canonical alias, if set. */
+            canonical_alias?: string | null;
+            /** @description Whether stripped state advertised `m.room.encryption`. */
+            encrypted: boolean;
+            /**
+             * @description When Axon first persisted this invite, RFC 3339. Not the Matrix
+             *     origin timestamp (stripped state usually has none).
+             */
+            invited_at: string;
+            /** @description Inviter display name from stripped member state, if known. */
+            inviter_display_name?: string | null;
+            /** @description Matrix user ID of who sent the invite. */
+            inviter_user_id: string;
+            /** @description Whether this invite is a direct message. */
+            is_direct: boolean;
+            /** @description Room name from stripped invite state, if set. */
+            name?: string | null;
+            /** @description Matrix room ID. */
+            room_id: string;
+            /** @description The room's `m.room.create` `type`, if any (for example `m.space`). */
+            room_type?: string | null;
+            /** @description Room topic, if set. */
+            topic?: string | null;
         };
         /**
          * @description Request body for inviting a user to a room
@@ -7563,6 +7656,40 @@ export interface operations {
             /** @description No such account */
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    list_invites: {
+        parameters: {
+            query?: {
+                /** @description Narrow the list to a single account. Omit for all accounts. */
+                account_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Pending invites, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Vec_InviteDto"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
                     [name: string]: unknown;
                 };
                 content: {

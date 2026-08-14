@@ -21,7 +21,7 @@ mod common;
 use std::sync::Arc;
 
 use axon_api::{AccountLifecycle, AppState, MediaProxy, RedecryptUtdsStats};
-use axon_store::{AccountState, NewEvent, RoomStateUpsert, Store};
+use axon_store::{AccountState, NewEvent, RoomInviteSnapshot, RoomStateUpsert, Store};
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use common::{
@@ -3077,6 +3077,80 @@ async fn device_state_put_rejects_oversized_writes() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _) = get(&app, &ns_uri).await;
     assert_eq!(status, StatusCode::OK);
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+/// `GET /v1/invites` returns persisted pending invites (ADR 0091) and an
+/// empty list when there are none.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn list_invites_returns_persisted_rows() {
+    let store = store().await;
+    let pool = store.pool().clone();
+
+    let account_id = store
+        .upsert_account(
+            &format!("@invite-http-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!inv-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_room_invite(
+            account_id,
+            &room_id,
+            &RoomInviteSnapshot {
+                name: Some("Invited Room".to_owned()),
+                avatar_url: None,
+                topic: None,
+                canonical_alias: None,
+                room_type: None,
+                inviter_user_id: "@alice:localhost".to_owned(),
+                inviter_display_name: Some("Alice".to_owned()),
+                is_direct: true,
+                encrypted: false,
+            },
+        )
+        .await
+        .expect("seed invite");
+
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    let app = axon_api::router(AppState::new(
+        store.clone(),
+        live,
+        Arc::new(StubSender::ok("$unused:localhost")),
+        Arc::new(StubLifecycle::ok(Uuid::nil())),
+        Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTrust::ok()),
+        Arc::new(StubDeviceList::ok()),
+        Arc::new(StubTokenVerifier::ok()),
+        Arc::new(StubMediaProxy),
+        None,
+    ));
+
+    let (status, body) = get(&app, &format!("/v1/invites?account_id={account_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let invites = body["data"].as_array().expect("data array");
+    let invite = invites
+        .iter()
+        .find(|row| row["room_id"] == room_id.as_str())
+        .expect("seeded invite");
+    assert_eq!(invite["name"], "Invited Room");
+    assert_eq!(invite["inviter_user_id"], "@alice:localhost");
+    assert_eq!(invite["inviter_display_name"], "Alice");
+    assert_eq!(invite["is_direct"], true);
+    assert_eq!(invite["encrypted"], false);
+
+    let (status, empty) = get(&app, &format!("/v1/invites?account_id={}", Uuid::new_v4())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty["data"].as_array().expect("data").len(), 0);
 
     sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
         .bind(account_id)

@@ -6044,6 +6044,57 @@
         }
       }
     },
+    "/v1/invites": {
+      "get": {
+        "tags": [
+          "invites"
+        ],
+        "summary": "List pending room invites across accounts, newest first.",
+        "operationId": "list_invites",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "query",
+            "description": "Narrow the list to a single account. Omit for all accounts.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pending invites, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_InviteDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/media/{account_id}/{server_name}/{media_id}": {
       "get": {
         "tags": [
@@ -7916,6 +7967,104 @@
           }
         }
       },
+      "ApiResponse_Vec_InviteDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A pending room invite (`GET /v1/invites`, ADR 0091). Identity is\n`(account_id, room_id)` — the same room invited to two accounts appears\ntwice. Accept is `POST …/rooms/join`; reject is `POST …/rooms/{id}/leave`.",
+              "required": [
+                "account_id",
+                "account_user_id",
+                "room_id",
+                "inviter_user_id",
+                "is_direct",
+                "encrypted",
+                "invited_at"
+              ],
+              "properties": {
+                "account_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "Axon account this invite belongs to."
+                },
+                "account_user_id": {
+                  "type": "string",
+                  "description": "Matrix user ID for this Axon account."
+                },
+                "avatar_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Avatar `mxc://` URI, if set."
+                },
+                "canonical_alias": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Canonical alias, if set."
+                },
+                "encrypted": {
+                  "type": "boolean",
+                  "description": "Whether stripped state advertised `m.room.encryption`."
+                },
+                "invited_at": {
+                  "type": "string",
+                  "description": "When Axon first persisted this invite, RFC 3339. Not the Matrix\norigin timestamp (stripped state usually has none)."
+                },
+                "inviter_display_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Inviter display name from stripped member state, if known."
+                },
+                "inviter_user_id": {
+                  "type": "string",
+                  "description": "Matrix user ID of who sent the invite."
+                },
+                "is_direct": {
+                  "type": "boolean",
+                  "description": "Whether this invite is a direct message."
+                },
+                "name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Room name from stripped invite state, if set."
+                },
+                "room_id": {
+                  "type": "string",
+                  "description": "Matrix room ID."
+                },
+                "room_type": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The room's `m.room.create` `type`, if any (for example `m.space`)."
+                },
+                "topic": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Room topic, if set."
+                }
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_Vec_MemberDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -8861,6 +9010,92 @@
           "username": {
             "type": "string",
             "description": "Full Matrix user ID, e.g. `@alice:example.org`."
+          }
+        }
+      },
+      "InviteDto": {
+        "type": "object",
+        "description": "A pending room invite (`GET /v1/invites`, ADR 0091). Identity is\n`(account_id, room_id)` — the same room invited to two accounts appears\ntwice. Accept is `POST …/rooms/join`; reject is `POST …/rooms/{id}/leave`.",
+        "required": [
+          "account_id",
+          "account_user_id",
+          "room_id",
+          "inviter_user_id",
+          "is_direct",
+          "encrypted",
+          "invited_at"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Axon account this invite belongs to."
+          },
+          "account_user_id": {
+            "type": "string",
+            "description": "Matrix user ID for this Axon account."
+          },
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Avatar `mxc://` URI, if set."
+          },
+          "canonical_alias": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Canonical alias, if set."
+          },
+          "encrypted": {
+            "type": "boolean",
+            "description": "Whether stripped state advertised `m.room.encryption`."
+          },
+          "invited_at": {
+            "type": "string",
+            "description": "When Axon first persisted this invite, RFC 3339. Not the Matrix\norigin timestamp (stripped state usually has none)."
+          },
+          "inviter_display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Inviter display name from stripped member state, if known."
+          },
+          "inviter_user_id": {
+            "type": "string",
+            "description": "Matrix user ID of who sent the invite."
+          },
+          "is_direct": {
+            "type": "boolean",
+            "description": "Whether this invite is a direct message."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Room name from stripped invite state, if set."
+          },
+          "room_id": {
+            "type": "string",
+            "description": "Matrix room ID."
+          },
+          "room_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The room's `m.room.create` `type`, if any (for example `m.space`)."
+          },
+          "topic": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Room topic, if set."
           }
         }
       },
@@ -10181,6 +10416,10 @@
     {
       "name": "rooms",
       "description": "Rooms and their timelines"
+    },
+    {
+      "name": "invites",
+      "description": "Pending room invitations for this Axon's accounts"
     },
     {
       "name": "search",

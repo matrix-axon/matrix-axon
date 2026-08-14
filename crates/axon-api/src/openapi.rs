@@ -103,6 +103,7 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::routes::search::search,
         crate::routes::status::get_status,
         crate::routes::rooms::list_rooms,
+        crate::routes::invites::list_invites,
         crate::routes::rooms::room_members,
         crate::routes::rooms::room_timeline,
         crate::routes::rooms::room_threads,
@@ -166,6 +167,7 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::dto::AccountDto,
         crate::dto::AccountStateDto,
         crate::dto::RoomDto,
+        crate::dto::InviteDto,
         crate::dto::MemberDto,
         crate::dto::EventDto,
         crate::dto::TimelinePage,
@@ -235,6 +237,7 @@ fn unauthorized_response() -> RefOr<Response> {
     tags(
         (name = "accounts", description = "The Matrix accounts this Axon manages"),
         (name = "rooms", description = "Rooms and their timelines"),
+        (name = "invites", description = "Pending room invitations for this Axon's accounts"),
         (name = "search", description = "Full-text search across the index"),
         (name = "status", description = "Server health and backfill status"),
         (name = "events", description = "Individual events"),

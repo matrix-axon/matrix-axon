@@ -147,6 +147,9 @@ pub fn router(state: AppState) -> Router {
         // client can tell when backfill has paused.
         .route("/v1/status", get(routes::status::get_status))
         .route("/v1/rooms", get(routes::rooms::list_rooms))
+        // Pending invites (ADR 0091). Cross-account like `/v1/rooms`; accept
+        // and reject reuse the existing join / leave verbs.
+        .route("/v1/invites", get(routes::invites::list_invites))
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/members",
             get(routes::rooms::room_members),

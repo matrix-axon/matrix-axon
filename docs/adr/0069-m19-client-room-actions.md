@@ -26,10 +26,10 @@ this follow-up rollout. ADR 0067's outbound read receipts are likewise already
 surfaced by both clients.
 
 Tier C of issue #279 (invited-room visibility, presence, unread counts) remains
-separate from M19. In particular, invited-room visibility still lacks stripped
-state projection in `axon-sync`/`axon-store`, so a pending invite cannot appear
-in `list_rooms`. That is still the hard precondition for a real invitation
-inbox.
+separate from M19. Invited-room visibility has since landed as ADR 0091
+(`GET /v1/invites` plus `invite.added` / `invite.removed`); it is a dedicated
+projection, not an extension of `list_rooms`. Presence remains deferred per
+ADR 0056. Unread counts landed separately as ADR 0070.
 
 ## Decision
 
@@ -51,10 +51,9 @@ nine user-facing features:
 9. **Account and user actions**: own display name/avatar, user-profile read,
    ignore/unignore (M19f).
 
-The **invitation inbox** is explicitly excluded until invited-room visibility
-lands a separate ADR and server projection. Accepting an invite is still just
-join, and rejecting is still leave, once a client has obtained the invited
-room id from some future invite list.
+The **invitation inbox** is now unblocked on the server (ADR 0091). Accepting
+an invite is still just join, and rejecting is still leave, against room ids
+from `GET /v1/invites`. Client inbox UI is a separate silo follow-up.
 
 ## Implemented Server Contracts
 
@@ -144,9 +143,8 @@ lands.
 - **Con / accepted:** the rollout is larger than the original room-actions-only
   draft. Splitting by feature and by client silo is more PRs, but keeps review
   surface focused and preserves AGENTS.md's one-silo-per-PR rule.
-- **Con / accepted:** invitation inbox remains unscheduled beyond "blocked on
-  invited-room visibility," because designing stripped-state storage is server
-  work outside M19 and outside this client ADR.
+- **Con / accepted:** invitation inbox UI is still a client follow-up. The
+  server projection it needed is ADR 0091, not this ADR.
 
 ## Suggested PR Sequence
 
@@ -166,8 +164,8 @@ requires splitting further:
 8. **M19-W8:** Power-level viewer/editor with self-demotion confirmation (Feature 8).
 9. **M19-W9:** Account profile, user profile read, and ignore/unignore UI (Feature 9).
 
-**Blocked:** invitation inbox PRs for TUI and web wait on Tier-C invited-room
-visibility and stripped-state projection.
+**Ready:** invitation inbox PRs for web (and later TUI) can consume ADR 0091's
+`GET /v1/invites` plus join/leave. TUI is not required to grow an inbox.
 
 Each PR updates the corresponding `docs/client-parity.md` row in the same PR,
 per that doc's cross-silo exception to the one-silo-per-PR rule.
