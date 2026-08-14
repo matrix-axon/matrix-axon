@@ -24,7 +24,13 @@ ADR 0068 / 0069 and `docs/client-parity.md` already named this as the largest
 remaining Tier-C gap (issue #279): without a durable invite projection, M19b's
 `invite` verb is only useful outbound, and no client can show an inbox.
 Accept (`POST …/rooms/join`) and reject (`POST …/rooms/{room_id}/leave`)
-already exist; `SdkGateway::leave` does not require `RoomState::Joined`.
+already exist; `SdkGateway::leave` does not require `RoomState::Joined`
+and does not require a local SDK `Room` handle. Sliding Sync can evict an
+invited room from `get_room` while the `room_invites` row is still the
+inbox source of truth; reject then sends the same
+`POST /_matrix/client/v3/rooms/{roomId}/leave` the SDK would. A
+successful leave also deletes the invite row (the watcher cannot observe
+positive absence when `get_room` stays `None`).
 
 `join_candidate_invites` (ADR 0040) still auto-joins direct invites from
 known contacts so cross-user SAS verification can proceed. This ADR does not
@@ -69,8 +75,11 @@ same hydration race ADR 0070 hit. Two complementary prunes:
    "zero invites."
 
 A withdrawn invite whose room the SDK has forgotten may linger until the
-account is deleted (`ON DELETE CASCADE`). That is accepted; inventing
-absence from an unloaded store is worse.
+account is deleted (`ON DELETE CASCADE`) *or* the user rejects it. Reject
+is a positive signal: after a successful leave the invite row is deleted
+even when the SDK never had a `Room`. Inventing absence from an unloaded
+store on a sweep is still worse, so the watcher itself does not prune on
+`get_room == None`.
 
 ### Wire
 

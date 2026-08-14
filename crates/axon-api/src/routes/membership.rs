@@ -3,9 +3,11 @@
 //!
 //! Each handler routes through the [`MembershipSender`] port (injected via
 //! `AppState`), mirroring [`messages`](crate::routes::messages) — all six
-//! resolve through the same `SdkGateway::room()` path as `send_message`/
-//! `redact` — except none return an event id: the resulting `m.room.member`
-//! state event round-trips through sync like any other state change, so the
+//! except `leave` resolve through the same `SdkGateway::room()` path as
+//! `send_message`/`redact`. `leave` also declines a pending invite whose
+//! local SDK `Room` has been evicted (ADR 0091), so it must not require
+//! `get_room`. None return an event id: the resulting `m.room.member` state
+//! event round-trips through sync like any other state change, so the
 //! success envelope carries an empty object, same as
 //! [`ephemeral`](crate::routes::ephemeral). Every call is logged (ADR 0068's
 //! structured-logging requirement for M19 routes) with `account_id`,
@@ -16,7 +18,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use axon_core::{InviteRemovedFrame, LiveFrame};
+use axon_store::Store;
 use axum::extract::State;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::dto::{InviteRequest, MemberActionRequest};
@@ -44,11 +49,34 @@ use crate::sender::MembershipSender;
 )]
 pub async fn leave_room(
     State(membership): State<Arc<dyn MembershipSender>>,
+    State(store): State<Store>,
+    State(live): State<broadcast::Sender<LiveFrame>>,
     Path((account_id, room_id)): Path<(Uuid, String)>,
 ) -> Result<ApiResponse<serde_json::Value>, ApiError> {
     let started_at = Instant::now();
     match membership.leave(account_id, &room_id).await {
         Ok(()) => {
+            // A declined invite whose Room the SDK already evicted will never
+            // hit ADR 0091's positive-absence prune (`get_room` stays None
+            // and `invited_rooms()` stays empty). Drop the row here so
+            // reject cannot resurrect the invite on the next GET /v1/invites.
+            match store.delete_room_invite(account_id, &room_id).await {
+                Ok(true) => {
+                    let _ = live.send(LiveFrame::InviteRemoved(InviteRemovedFrame {
+                        account_id,
+                        room_id: room_id.clone(),
+                    }));
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        account_id = %account_id,
+                        room_id = %room_id,
+                        error = %err,
+                        "membership: leave succeeded but failed to drop pending invite"
+                    );
+                }
+            }
             tracing::info!(
                 account_id = %account_id,
                 room_id = %room_id,

@@ -2638,10 +2638,10 @@ async fn seed_invites_cache(
     cache
 }
 
-/// Drop a cached invite whose room is no longer `Invited`. Used both when a
-/// notable update names a room that is now joined/left, and when
-/// `get_room` returns `None` for a room we already persisted (the SDK
-/// forgot it — treat as withdrawn).
+/// Drop a cached invite whose room is no longer `Invited`. Used when a
+/// notable update or sweep sees `get_room` return a room whose
+/// `state() != Invited`. `get_room` returning `None` is **not** treated
+/// as withdrawn here (ADR 0091: that is a hydration miss, not absence).
 async fn drop_invite_if_known(
     store: &Store,
     account_id: Uuid,

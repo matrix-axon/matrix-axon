@@ -144,7 +144,10 @@ pub trait EphemeralSender: Send + Sync {
 /// `()` on success, same shape as [`EphemeralSender`].
 #[async_trait]
 pub trait MembershipSender: Send + Sync {
-    /// Leave this room (and any predecessor rooms via tombstone, per the SDK).
+    /// Leave this room (and any predecessor rooms via tombstone, per the SDK),
+    /// or decline a pending invite. Must not require a local SDK `Room`
+    /// handle — Sliding Sync can evict an invited room while Axon still
+    /// lists it (ADR 0091).
     async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError>;
 
     /// Forget a left or banned-from room, clearing it from the account's room

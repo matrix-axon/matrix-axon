@@ -27,6 +27,7 @@ use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseFileInfo, Bas
 use matrix_sdk::room::reply::{EnforceThread, Reply};
 use matrix_sdk::room::Receipts;
 use matrix_sdk::ruma::api::client::directory::get_public_rooms_filtered;
+use matrix_sdk::ruma::api::client::membership::leave_room;
 use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName};
 use matrix_sdk::ruma::api::client::room::{create_room, Visibility};
 use matrix_sdk::ruma::api::error::ErrorKind;
@@ -931,13 +932,49 @@ impl SdkGateway {
         room.typing_notice(typing).await.map_err(map_sdk_err)
     }
 
-    /// Leave this room (ADR 0068, M19b). The `m.room.member` leave event this
-    /// produces already drives existing downstream handling — the ADR 0037
-    /// membership filter and ADR 0044's opt-in `purge_on_leave` — via the sync
-    /// path's own `persist_state_event`; this method only issues the call.
+    /// Leave this room (ADR 0068, M19b), or decline a pending invite (ADR 0091).
+    /// The `m.room.member` leave event this produces already drives existing
+    /// downstream handling — the ADR 0037 membership filter and ADR 0044's
+    /// opt-in `purge_on_leave` — via the sync path's own `persist_state_event`;
+    /// this method only issues the call.
+    ///
+    /// Sliding Sync can evict an invited room from the SDK's in-memory map
+    /// while Axon still lists it in `room_invites`. Reject must not depend
+    /// on `get_room`: a missing local [`Room`] falls through to the same
+    /// `POST /_matrix/client/v3/rooms/{roomId}/leave` the SDK would send.
+    /// A homeserver `M_FORBIDDEN` on that fallback is treated as success,
+    /// matching [`Room::leave`]'s own handling of "already left / not invited."
     pub async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<(), GatewayError> {
-        let room = self.room(account_id, room_id).await?;
-        room.leave().await.map_err(map_sdk_err)
+        let client = self.manager.get_or_connect(account_id).await?;
+        let parsed =
+            RoomId::parse(room_id).map_err(|e| GatewayError::Invalid(format!("room id: {e}")))?;
+        if let Some(room) = client.get_room(&parsed) {
+            return room.leave().await.map_err(map_sdk_err);
+        }
+        tracing::info!(
+            %account_id,
+            %room_id,
+            "leave: no local Room handle; sending client-server leave"
+        );
+        match client
+            .send(leave_room::v3::Request::new(parsed.to_owned()))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                let sdk_err = matrix_sdk::Error::from(err);
+                if matches!(sdk_err.client_api_error_kind(), Some(ErrorKind::Forbidden)) {
+                    tracing::info!(
+                        %account_id,
+                        %room_id,
+                        "leave: homeserver forbidden without a local Room; treating as already left"
+                    );
+                    Ok(())
+                } else {
+                    Err(map_sdk_err(sdk_err))
+                }
+            }
+        }
     }
 
     /// Forget a left or banned-from room (ADR 0068, M19b). The homeserver only

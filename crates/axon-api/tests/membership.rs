@@ -16,7 +16,8 @@ mod common;
 use std::sync::Arc;
 
 use axon_api::{AppState, MembershipSender};
-use axon_store::Store;
+use axon_core::LiveFrame;
+use axon_store::{RoomInviteSnapshot, Store};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{
@@ -114,6 +115,171 @@ async fn leave_routes_to_sender_and_envelope_result() {
             room_id: room_id.to_owned(),
         }]
     );
+}
+
+/// A successful leave drops a persisted invite the SDK may no longer have a
+/// `Room` for, and fans out `invite.removed` so reconnect is not required.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn leave_drops_pending_invite_and_emits_removed() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@leave-invite-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!leave-inv-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_room_invite(
+            account_id,
+            &room_id,
+            &RoomInviteSnapshot {
+                name: Some("Pending".to_owned()),
+                avatar_url: None,
+                topic: None,
+                canonical_alias: None,
+                room_type: None,
+                inviter_user_id: "@alice:localhost".to_owned(),
+                inviter_display_name: None,
+                is_direct: false,
+                encrypted: false,
+            },
+        )
+        .await
+        .expect("seed invite");
+
+    let stub = Arc::new(StubMembership::ok());
+    let (live, mut rx) = tokio::sync::broadcast::channel(16);
+    let app = axon_api::router(
+        AppState::new(
+            store.clone(),
+            live,
+            Arc::new(StubSender::ok("$unused:localhost")),
+            Arc::new(StubLifecycle::ok(Uuid::nil())),
+            Arc::new(StubVerification::ok("$unused-flow")),
+            Arc::new(StubTrust::ok()),
+            Arc::new(StubDeviceList::ok()),
+            Arc::new(StubTokenVerifier::ok()),
+            Arc::new(StubMediaProxy),
+            None,
+        )
+        .with_membership(stub),
+    );
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/leave"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"], json!({}));
+
+    let remaining = store.list_invites(Some(account_id)).await.expect("list");
+    assert!(
+        remaining.iter().all(|invite| invite.room_id != room_id),
+        "leave must drop the invite row, got {remaining:?}"
+    );
+
+    match rx.try_recv().expect("invite.removed") {
+        LiveFrame::InviteRemoved(frame) => {
+            assert_eq!(frame.account_id, account_id);
+            assert_eq!(frame.room_id, room_id);
+        }
+        other => panic!("unexpected live frame: {other:?}"),
+    }
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+/// A failed leave must not delete the invite row or emit `invite.removed`.
+/// The inbox stays the reconnect source of truth until the homeserver
+/// actually accepts the decline.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn failed_leave_does_not_drop_pending_invite() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@leave-keep-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!leave-keep-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_room_invite(
+            account_id,
+            &room_id,
+            &RoomInviteSnapshot {
+                name: Some("Still pending".to_owned()),
+                avatar_url: None,
+                topic: None,
+                canonical_alias: None,
+                room_type: None,
+                inviter_user_id: "@alice:localhost".to_owned(),
+                inviter_display_name: None,
+                is_direct: false,
+                encrypted: false,
+            },
+        )
+        .await
+        .expect("seed invite");
+
+    let stub = Arc::new(StubMembership::failing(MembershipOutcome::NotFound(
+        format!("room not found: {room_id}"),
+    )));
+    let (live, mut rx) = tokio::sync::broadcast::channel(16);
+    let app = axon_api::router(
+        AppState::new(
+            store.clone(),
+            live,
+            Arc::new(StubSender::ok("$unused:localhost")),
+            Arc::new(StubLifecycle::ok(Uuid::nil())),
+            Arc::new(StubVerification::ok("$unused-flow")),
+            Arc::new(StubTrust::ok()),
+            Arc::new(StubDeviceList::ok()),
+            Arc::new(StubTokenVerifier::ok()),
+            Arc::new(StubMediaProxy),
+            None,
+        )
+        .with_membership(stub),
+    );
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/leave"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+
+    let remaining = store.list_invites(Some(account_id)).await.expect("list");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].room_id, room_id);
+    assert!(
+        rx.try_recv().is_err(),
+        "failed leave must not emit invite.removed"
+    );
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
 }
 
 #[tokio::test]
