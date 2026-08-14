@@ -2,16 +2,35 @@ import { expect, test, type APIRequestContext } from '@playwright/test'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { connect, type Socket } from 'node:net'
 
-const MOCK_HOST = '127.0.0.1'
-const MOCK_PORT = 4599
+/**
+ * Where the mock is listening, taken from the project's `baseURL`.
+ *
+ * This is the only spec that opens a raw TCP socket instead of going through
+ * Playwright, so it is the only one that has to name the address at all — the
+ * rest get it for free from relative URLs. Hardcoding it would put a second copy
+ * of `playwright.config.ts`'s port here, and if the two ever diverged the symptom
+ * would be this probe connecting to nothing and reporting an upgrade timeout,
+ * which reads as a broken mock rather than as a stale constant.
+ */
+function mockAddress(): { host: string; port: number } {
+  const baseURL = test.info().project.use.baseURL
+  if (baseURL === undefined) {
+    throw new Error(
+      'no baseURL on this project to derive the mock address from',
+    )
+  }
+  const { hostname, port } = new URL(baseURL)
+  return { host: hostname, port: Number(port) }
+}
 
 function openRawWebSocket(probe: string): Promise<Socket> {
+  const { host, port } = mockAddress()
   return new Promise((resolve, reject) => {
-    const socket = connect({ host: MOCK_HOST, port: MOCK_PORT }, () => {
+    const socket = connect({ host, port }, () => {
       socket.write(
         [
           `GET /v1/ws?probe=${encodeURIComponent(probe)} HTTP/1.1`,
-          `Host: ${MOCK_HOST}:${MOCK_PORT}`,
+          `Host: ${host}:${port}`,
           'Upgrade: websocket',
           'Connection: Upgrade',
           `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`,
