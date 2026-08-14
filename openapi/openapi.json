@@ -3731,7 +3731,7 @@
           "ephemeral"
         ],
         "summary": "Mark a room read: sets both the public read receipt and the private\nfully-read marker in one homeserver call.",
-        "description": "`event_id` states how far the client has read in the order it displays\nevents (`origin_ts`). A Matrix receipt is interpreted in the homeserver's\nstream order instead, and the two disagree for backfilled events — so axon\nmay name a *later-arriving* event that sorts at or before `event_id`, never\none the client has not displayed (ADR 0089).",
+        "description": "`event_id` is sent to the homeserver **verbatim**. A receipt is interpreted\nin arrival order while every axon read surface sorts by `origin_ts`, and the\ntwo disagree for backfilled events — so the client must name the event with\nthe greatest `arrival_order` among those it has displayed (ADR 0089). Only\nthe client knows what it displayed, so only the client can choose it: this\nroute does not resolve, substitute, or second-guess the id it is given.",
         "operationId": "send_read_receipt",
         "parameters": [
           {

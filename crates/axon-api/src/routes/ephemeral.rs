@@ -30,11 +30,12 @@ use crate::sender::EphemeralSender;
 /// Mark a room read: sets both the public read receipt and the private
 /// fully-read marker in one homeserver call.
 ///
-/// `event_id` states how far the client has read in the order it displays
-/// events (`origin_ts`). A Matrix receipt is interpreted in the homeserver's
-/// stream order instead, and the two disagree for backfilled events — so axon
-/// may name a *later-arriving* event that sorts at or before `event_id`, never
-/// one the client has not displayed (ADR 0089).
+/// `event_id` is sent to the homeserver **verbatim**. A receipt is interpreted
+/// in arrival order while every axon read surface sorts by `origin_ts`, and the
+/// two disagree for backfilled events — so the client must name the event with
+/// the greatest `arrival_order` among those it has displayed (ADR 0089). Only
+/// the client knows what it displayed, so only the client can choose it: this
+/// route does not resolve, substitute, or second-guess the id it is given.
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/rooms/{room_id}/read",
