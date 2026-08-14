@@ -103,8 +103,16 @@ export async function openRoom(page: Page): Promise<void> {
  *
  * They live here, together, so that retuning that ladder means editing one
  * place. A copy in a spec file has no signal that the policy it was derived from
- * moved, and would drift back toward the 5s default that sits *inside* the
- * ladder — one slow handshake from failing, which is how Firefox flaked here.
+ * moved, and would drift back toward the 5s default — a number that sits
+ * *inside* the ladder, and so cannot survive even one refused handshake.
+ *
+ * Worth being exact about what these did *not* fix, because the imprecision was
+ * expensive. They are headroom, not the cure for the Firefox flake that prompted
+ * them: that was the mock backend leaving client-initiated closes half-finished
+ * until the retained sockets stopped Firefox from opening another one at all,
+ * and raising these budgets did not stop it (#157). A socket that will never
+ * connect looks exactly like a budget that is too small, and reading the first
+ * as the second is how a harness bug became weeks of work.
  *
  * - `LIVE_TIMEOUT_MS` covers a first connect through the third attempt. A first
  *   connect has no backoff and is normally immediate, but any refused or slow
