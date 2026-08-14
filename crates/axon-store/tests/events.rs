@@ -1052,3 +1052,112 @@ async fn pinned_events_drops_missing_ids_and_is_empty_when_unset() {
 
     common::cleanup_account(&pool, account_id).await;
 }
+
+/// `upsert_event` reports the same arrival order for a re-delivered event.
+///
+/// The receipt target a client names is an `arrival_order` (ADR 0089), and the
+/// live path takes it from this return value. Sync re-delivers events routinely
+/// — a resumed `/sync`, a backfill overlapping the live tail — so if the
+/// conflict fallback ever reported a different number (or the caller had to
+/// invent one), the client would receipt a position that does not exist and the
+/// room would not clear. Pins the "stable across re-delivery" half of the
+/// contract, which the conflict-fallback `SELECT` is the only thing providing.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn upsert_event_reports_the_same_arrival_order_on_re_delivery() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "arrival-dup").await;
+    let room_id = format!("!r-{}:localhost", Uuid::new_v4());
+    let event_id = format!("$evt-{}:localhost", Uuid::new_v4());
+    let content = json!({ "msgtype": "m.text", "body": "once" });
+    let ev = NewEvent {
+        event_id: &event_id,
+        room_id: &room_id,
+        account_id,
+        sender: "@alice:localhost",
+        origin_ts: 1_700_000_000_000,
+        event_type: "m.room.message",
+        content: Some(content.clone()),
+        raw_event: json!({ "type": "m.room.message", "content": content }),
+        megolm_session_id: None,
+        redacts: None,
+        relates_to: None,
+        decrypted_body_text: Some("once"),
+    };
+
+    let first = store.upsert_event(&ev).await.expect("first delivery");
+    let second = store.upsert_event(&ev).await.expect("re-delivery");
+    assert_eq!(
+        first, second,
+        "a re-delivered event keeps its arrival order (the conflict fallback \
+         reads the existing row's id back)"
+    );
+
+    // And it is the row's own id — the value `EventDto::arrival_order` carries.
+    let page = store
+        .room_timeline(account_id, &room_id, None, 10)
+        .await
+        .expect("timeline");
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].id, first, "the reported id is the row's id");
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// Arrival order is ingest order, not `origin_ts` order.
+///
+/// The bridge inversion from ADR 0089: a mautrix portal emits its own state
+/// events and *then* backfills the pre-existing conversation with its real,
+/// older timestamps. The backfilled message is therefore **last** in arrival
+/// order and **first** (oldest) in display order, and a receipt naming the
+/// display-newest event does not cover it. This asserts the store keeps the two
+/// orders distinct — that `id` follows the sequence and never gets quietly
+/// re-derived from `origin_ts` — because every client's receipt selection is
+/// built on that being true.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn arrival_order_follows_ingest_not_origin_ts() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "arrival-order").await;
+    let room_id = format!("!r-{}:localhost", Uuid::new_v4());
+
+    // Timestamps and the inversion from the LinkedIn portal in ADR 0089.
+    let create = insert_message(&store, account_id, &room_id, 1_785_928_306_622, "create").await;
+    let bridge = insert_message(&store, account_id, &room_id, 1_785_928_309_453, "bridge").await;
+    let message = insert_message(&store, account_id, &room_id, 1_785_928_304_987, "message").await;
+
+    let page = store
+        .room_timeline(account_id, &room_id, None, 10)
+        .await
+        .expect("timeline");
+    assert_eq!(page.len(), 3);
+
+    let id_of = |wanted: &str| {
+        page.iter()
+            .find(|row| row.event_id == wanted)
+            .expect("event in page")
+            .id
+    };
+    assert!(
+        id_of(&create) < id_of(&bridge) && id_of(&bridge) < id_of(&message),
+        "ids ascend with ingest even though the last-ingested event is the \
+         oldest by origin_ts"
+    );
+
+    // Display order (newest-first by origin_ts) disagrees with arrival order:
+    // the display-newest event is the bridge one, the arrival-newest is the
+    // backfilled message. A receipt has to name the latter.
+    assert_eq!(
+        page[0].event_id, bridge,
+        "display-newest is the bridge event"
+    );
+    let arrival_newest = page.iter().max_by_key(|row| row.id).expect("non-empty");
+    assert_eq!(
+        arrival_newest.event_id, message,
+        "arrival-newest is the backfilled message"
+    );
+
+    common::cleanup_account(&pool, account_id).await;
+}
