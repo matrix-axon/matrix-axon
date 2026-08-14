@@ -59,10 +59,16 @@ test('two tabs see each other messages live', async ({ browser }, testInfo) => {
   const tabB = await openRoom(contextB)
 
   // Tab A sends; the mock broadcasts a timeline.event to every socket.
+  //
+  // Enter rather than the Send button, matching the sibling test below. What
+  // this file is about is the socket, not which affordance submitted — and the
+  // button has its own coverage in `media-send`, `reaction-scroll` and
+  // `layout`. Enter was measured working on all three engines, so there is no
+  // cross-browser reason to differ here.
   const message = `live hello ${Date.now()}`
   const composer = tabA.getByRole('textbox', { name: /^Message/ })
   await composer.fill(message)
-  await tabA.getByRole('button', { name: 'Send' }).click()
+  await composer.press('Enter')
 
   // Tab B renders it live — no reload — via the M-W6 frame router + ingestLive.
   await expect(
