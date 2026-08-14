@@ -122,27 +122,49 @@ impl Drop for HandleGuard {
     }
 }
 
-/// Releases our [`Inner::flight`] slot on **every** exit path from
-/// [`MediaCache::get_or_fetch_keyed`], including the one plain control flow
+/// Owns a caller's participation in the single-flight group for one key, and
+/// releases it on **every** exit path from
+/// [`MediaCache::get_or_fetch_keyed`] — including the one plain control flow
 /// misses: an axum handler future dropped when the client disconnects
 /// mid-fetch (the user scrolls past an image, the browser aborts). Without
 /// this the map entry outlives the request and is only ever reclaimed if the
 /// same key is fetched again — see GH #27.
 ///
-/// The unconditional call in `Drop` is safe because
-/// [`Inner::release_flight`]'s `ptr_eq` check already ignores a slot that a
-/// newer caller has since re-inserted for the same key.
+/// This is deliberately the *only* caller-side `Arc` for the slot, which is
+/// what makes [`Inner::release_flight`]'s liveness check exact: `drop` gives
+/// up this reference before inspecting the map, so the strong count it reads
+/// counts only the callers that still need the slot.
 struct FlightGuard {
     inner: Arc<Inner>,
-    account_id: Uuid,
-    hash: String,
-    slot: Arc<AsyncMutex<()>>,
+    key: Key,
+    /// `Some` for the guard's whole life; taken in `drop` to release our
+    /// reference before the map is inspected. Access it via [`Self::slot`].
+    slot: Option<Arc<AsyncMutex<()>>>,
+}
+
+impl FlightGuard {
+    /// Join (or open) the single-flight group for `(account_id, hash)`.
+    fn join(inner: Arc<Inner>, account_id: Uuid, hash: &str) -> Self {
+        let slot = inner.flight_slot(account_id, hash);
+        Self {
+            inner,
+            key: (account_id, hash.to_owned()),
+            slot: Some(slot),
+        }
+    }
+
+    /// The shared per-key mutex; lock it to become the group's fetcher.
+    fn slot(&self) -> &AsyncMutex<()> {
+        self.slot.as_ref().expect("slot is taken only in drop")
+    }
 }
 
 impl Drop for FlightGuard {
     fn drop(&mut self) {
-        self.inner
-            .release_flight(self.account_id, &self.hash, &self.slot);
+        // Order matters: give up our own reference *first*, so the count
+        // `release_flight` reads is exactly "other callers still using this".
+        self.slot.take();
+        self.inner.release_flight(&self.key);
     }
 }
 
@@ -343,18 +365,12 @@ impl MediaCache {
             return Ok(resource);
         }
 
-        // Single-flight: only one task fetches a given key at a time. The
-        // release guard is declared *before* the lock guard so that drop order
-        // (reverse of declaration) unlocks the slot first and only then unmaps
-        // it — the same order the previous hand-rolled cleanup used.
-        let slot = self.inner.flight_slot(account_id, hash);
-        let _release = FlightGuard {
-            inner: self.inner.clone(),
-            account_id,
-            hash: hash.to_owned(),
-            slot: slot.clone(),
-        };
-        let _guard = slot.lock().await;
+        // Single-flight: only one task fetches a given key at a time. `flight`
+        // is declared *before* the lock guard so drop order (reverse of
+        // declaration) unlocks the slot first and only then releases our claim
+        // on it.
+        let flight = FlightGuard::join(self.inner.clone(), account_id, hash);
+        let _guard = flight.slot().lock().await;
 
         // Re-check under the slot — a peer may have populated it while we waited.
         if let Some(resource) = self.inner.try_hit(account_id, hash).await {
@@ -513,23 +529,28 @@ impl Inner {
             .clone()
     }
 
-    /// Remove our single-flight slot from the map so it doesn't grow unbounded
-    /// across distinct media keys. Removal is unconditional once the mapped slot
-    /// is still *ours* (`ptr_eq`): any peer parked on `slot.lock()` already holds
-    /// its own `Arc` clone, so it proceeds correctly on the now-unmapped mutex and
-    /// re-checks the cache (populated by us). A newer caller that has since
-    /// inserted a *different* slot for the same key is left untouched by the
-    /// `ptr_eq` guard. This avoids the strong-count race where two concurrent
-    /// releasers each observe the other's live clone and neither removes,
-    /// orphaning the entry forever.
+    /// Drop the single-flight entry for `key` once no caller needs it, so the
+    /// map doesn't grow unbounded across distinct media keys.
     ///
-    /// Called only from [`FlightGuard::drop`], so it runs on cancellation too.
-    fn release_flight(&self, account_id: Uuid, hash: &str, held: &Arc<AsyncMutex<()>>) {
+    /// Called only from [`FlightGuard::drop`] — after that guard has released
+    /// its own `Arc` — so a strong count of 1 means the map itself holds the
+    /// last reference: nobody is fetching under this slot and nobody is parked
+    /// on it. That check is exact rather than merely conservative, because the
+    /// only way to obtain a new reference is [`Inner::flight_slot`], which
+    /// needs the very mutex held here.
+    ///
+    /// Deliberately *not* keyed on the departing caller's identity. A caller
+    /// that is cancelled while still queued behind the fetcher must leave the
+    /// group intact (count > 1, so it does nothing); removing the entry there
+    /// would let the next arrival mint a second slot and duplicate the
+    /// in-flight download. Conversely, whichever caller happens to be last out
+    /// sees count 1 and cleans up, so two concurrent releasers can never both
+    /// skip and orphan the entry.
+    fn release_flight(&self, key: &Key) {
         let mut flight = self.flight.lock().expect("flight mutex");
-        let key = (account_id, hash.to_owned());
-        if let Some(slot) = flight.get(&key) {
-            if Arc::ptr_eq(slot, held) {
-                flight.remove(&key);
+        if let Some(slot) = flight.get(key) {
+            if Arc::strong_count(slot) == 1 {
+                flight.remove(key);
             }
         }
     }
@@ -961,7 +982,23 @@ mod tests {
     /// caller can be parked precisely inside `fetch_capped` and then dropped,
     /// reproducing an axum handler future cancelled by a client disconnect.
     struct StalledFetcher {
+        calls: AtomicUsize,
         entered: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    impl StalledFetcher {
+        fn new(entered: tokio::sync::mpsc::UnboundedSender<()>) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                entered,
+            }
+        }
+
+        async fn stall(&self) -> Result<Vec<u8>, FetchError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let _ = self.entered.send(());
+            std::future::pending().await
+        }
     }
 
     #[async_trait]
@@ -972,8 +1009,7 @@ mod tests {
             _mxc_url: &str,
             _encrypted_file: Option<Value>,
         ) -> Result<Vec<u8>, FetchError> {
-            let _ = self.entered.send(());
-            std::future::pending().await
+            self.stall().await
         }
 
         async fn fetch_thumbnail(
@@ -982,8 +1018,7 @@ mod tests {
             _mxc_url: &str,
             _spec: ThumbnailSpec,
         ) -> Result<Vec<u8>, FetchError> {
-            let _ = self.entered.send(());
-            std::future::pending().await
+            self.stall().await
         }
     }
 
@@ -1228,6 +1263,112 @@ mod tests {
             assert_eq!(handle.await.unwrap().unwrap(), 6);
         }
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+        // Whoever leaves last unmaps the slot — the group drains completely.
+        assert!(cache.inner.flight.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_queued_request_leaves_the_owner_s_slot_mapped() {
+        // A *queued* requester — one parked on `slot.lock()` behind the task
+        // that is actually fetching — must not dissolve the single-flight
+        // group when it is cancelled. If its release unmapped the shared slot,
+        // the next arrival would find no entry, mint an independent slot, and
+        // duplicate the in-flight origin fetch (PR #160 review).
+        let dir = tempfile::tempdir().unwrap();
+        let cache = MediaCache::open(&config_in(dir.path(), 1 << 20, 1 << 20, true))
+            .await
+            .unwrap();
+        let account = Uuid::new_v4();
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let fetcher = Arc::new(StalledFetcher::new(entered_tx));
+
+        // Owner: parks inside the fetch, holding the slot lock throughout.
+        let owner = tokio::spawn({
+            let cache = cache.clone();
+            let fetcher = fetcher.clone();
+            async move {
+                cache
+                    .get_or_fetch(account, "mxc://s/queued", None, fetcher.as_ref())
+                    .await
+            }
+        });
+        assert!(
+            entered_rx.recv().await.is_some(),
+            "owner should be fetching"
+        );
+
+        {
+            // Queued peer: polled far enough to park on `slot.lock()`, then
+            // dropped — the client-disconnect case again, but from the queue.
+            let mut queued =
+                Box::pin(cache.get_or_fetch(account, "mxc://s/queued", None, fetcher.as_ref()));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), &mut queued)
+                    .await
+                    .is_err(),
+                "queued peer must not get past the slot lock"
+            );
+        }
+
+        assert_eq!(
+            cache.inner.flight.lock().unwrap().len(),
+            1,
+            "a cancelled queued peer must not unmap the owner's slot"
+        );
+        // The owner still owns the fetch: no second download was started.
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+
+        owner.abort();
+    }
+
+    #[tokio::test]
+    async fn whole_group_cancelled_leaves_no_orphaned_slot() {
+        // The failure mode the old `ptr_eq` comment warned about, in reverse:
+        // if every member of a group defers cleanup to "someone else", the
+        // entry is orphaned forever. Whoever is last out must take it.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = MediaCache::open(&config_in(dir.path(), 1 << 20, 1 << 20, true))
+            .await
+            .unwrap();
+        let account = Uuid::new_v4();
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let fetcher = Arc::new(StalledFetcher::new(entered_tx));
+
+        let owner = tokio::spawn({
+            let cache = cache.clone();
+            let fetcher = fetcher.clone();
+            async move {
+                cache
+                    .get_or_fetch(account, "mxc://s/group", None, fetcher.as_ref())
+                    .await
+            }
+        });
+        assert!(entered_rx.recv().await.is_some());
+
+        {
+            let mut first =
+                Box::pin(cache.get_or_fetch(account, "mxc://s/group", None, fetcher.as_ref()));
+            let mut second =
+                Box::pin(cache.get_or_fetch(account, "mxc://s/group", None, fetcher.as_ref()));
+            for queued in [&mut first, &mut second] {
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(50), queued)
+                        .await
+                        .is_err()
+                );
+            }
+        } // both queued peers cancelled, owner still holds the slot
+
+        assert_eq!(cache.inner.flight.lock().unwrap().len(), 1);
+
+        // Now the owner goes too. `await` resolves after the task's future has
+        // been dropped, so its guard has run by the time we assert.
+        owner.abort();
+        assert!(owner.await.unwrap_err().is_cancelled());
+        assert!(
+            cache.inner.flight.lock().unwrap().is_empty(),
+            "last caller out must unmap the slot"
+        );
     }
 
     #[tokio::test]
@@ -1242,9 +1383,7 @@ mod tests {
             .unwrap();
         let account = Uuid::new_v4();
         let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
-        let fetcher = StalledFetcher {
-            entered: entered_tx,
-        };
+        let fetcher = StalledFetcher::new(entered_tx);
 
         {
             let mut request =
