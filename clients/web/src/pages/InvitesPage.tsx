@@ -34,7 +34,7 @@ function inviterLabel(invite: InviteDto): string {
  * reuse join/leave. The sidebar Invites row is the only way in.
  */
 export function InvitesPage() {
-  const { invites, accounts, rooms } = useServices()
+  const { invites, accounts } = useServices()
   const location = useLocation()
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [bulkBusy, setBulkBusy] = useState<'accept' | 'reject' | null>(null)
@@ -51,6 +51,10 @@ export function InvitesPage() {
 
   async function onAccept(invite: InviteDto) {
     invites.error.value = null
+    // A bulk run's outcome describes rows that are no longer on screen. Left
+    // up, its "N failed" would keep claiming a failure the user has since
+    // cleared one row at a time.
+    setBulkResult(null)
     setBusyKey(inviteKey(invite))
     const result = await invites.accept(invite)
     setBusyKey(null)
@@ -65,6 +69,7 @@ export function InvitesPage() {
 
   async function onReject(invite: InviteDto) {
     invites.error.value = null
+    setBulkResult(null)
     setBusyKey(inviteKey(invite))
     const result = await invites.reject(invite)
     setBusyKey(null)
@@ -77,13 +82,12 @@ export function InvitesPage() {
     invites.error.value = null
     setBulkResult(null)
     setBulkBusy(kind)
+    // `runBulk` already refreshes the room list after a successful accept —
+    // repeating it here issued a second GET /v1/rooms per bulk accept.
     const result =
       kind === 'accept' ? await invites.acceptAll() : await invites.rejectAll()
     setBulkBusy(null)
     setBulkResult(result)
-    if (kind === 'accept' && result.succeeded > 0) {
-      void rooms.refresh()
-    }
   }
 
   return (

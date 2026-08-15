@@ -197,6 +197,148 @@ describe('invites store', () => {
     expect(invites.count.value).toBe(0)
   })
 
+  it('a server-driven removal leaves no suppression behind', async () => {
+    // `invite.removed` says the row is already gone upstream, so there is
+    // nothing for a later GET to wrongly restore and nothing to suppress.
+    // Recording it as locally-resolved is a trap: every later GET that does
+    // carry the key keeps the suppression alive, so the row can never come
+    // back — the ADR's "GET /v1/invites is the reconnect source of truth"
+    // stops holding.
+    server.use(
+      http.get(`${BASE}/v1/invites`, () =>
+        HttpResponse.json({ data: [invite('!a:hs', 'Alpha')] }),
+      ),
+    )
+    const invites = store()
+    invites.noteRemoved(ACCOUNT, '!a:hs')
+    expect(invites.count.value).toBe(0)
+    await invites.refresh()
+    expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+    await invites.refresh()
+    expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+  })
+
+  it('shows a re-invite after a local reject', async () => {
+    // Same shape, but the suppression is legitimate at first: we rejected
+    // locally, so a lagging GET must not restore the row. An `invite.added`
+    // is the server saying it exists *now*, which outranks that.
+    server.use(
+      http.post(
+        `${BASE}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+        () => new HttpResponse(null, { status: 200 }),
+      ),
+      http.get(`${BASE}/v1/invites`, () =>
+        HttpResponse.json({ data: [invite('!a:hs', 'Alpha')] }),
+      ),
+    )
+    const invites = store()
+    await invites.refresh()
+    await invites.reject(invite('!a:hs', 'Alpha'))
+    expect(invites.count.value).toBe(0)
+
+    invites.noteAdded(invite('!a:hs', 'Alpha'))
+    expect(invites.count.value).toBe(1)
+    await invites.refresh()
+    expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+  })
+
+  it('keeps an invite added while a GET was in flight', async () => {
+    let release: (() => void) | undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(`${BASE}/v1/invites`, async () => {
+        await held
+        return HttpResponse.json({ data: [invite('!a:hs', 'Alpha')] })
+      }),
+    )
+    const invites = store()
+    const pending = invites.refresh()
+    // The response was already on the wire, so it cannot carry this one.
+    invites.noteAdded(invite('!b:hs', 'Beta'))
+    release?.()
+    await pending
+    expect(invites.invites.value.map((row) => row.room_id).sort()).toEqual([
+      '!a:hs',
+      '!b:hs',
+    ])
+  })
+
+  it('does not treat a single live frame as a settled list', async () => {
+    // The initial GET fails, then one frame arrives. `rejectAll` must still
+    // confirm the list rather than act on the single row it can see.
+    let attempt = 0
+    server.use(
+      http.get(`${BASE}/v1/invites`, () => {
+        attempt += 1
+        return attempt === 1
+          ? new HttpResponse(null, { status: 503 })
+          : HttpResponse.json({
+              data: [invite('!a:hs', 'Alpha'), invite('!b:hs', 'Beta')],
+            })
+      }),
+      http.post(
+        `${BASE}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+        () => new HttpResponse(null, { status: 200 }),
+      ),
+    )
+    const invites = store()
+    await invites.refresh()
+    expect(invites.error.value).not.toBeNull()
+
+    invites.noteAdded(invite('!a:hs', 'Alpha'))
+    expect(invites.count.value).toBe(1)
+
+    const result = await invites.rejectAll()
+    expect(result.succeeded).toBe(2)
+  })
+
+  it('refresh after a mutation does not resolve against an older GET', async () => {
+    const gets: (() => void)[] = []
+    let served = 0
+    server.use(
+      http.get(`${BASE}/v1/invites`, async () => {
+        served += 1
+        const mine = served
+        await new Promise<void>((resolve) => gets.push(resolve))
+        // Only the second GET knows the invite is gone.
+        return HttpResponse.json({
+          data: mine === 1 ? [invite('!a:hs', 'Alpha')] : [],
+        })
+      }),
+      http.post(
+        `${BASE}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+        () => new HttpResponse(null, { status: 200 }),
+      ),
+    )
+    /** Wait until the handler for GET number `n` is parked. */
+    async function waitForGet(n: number): Promise<void> {
+      for (let i = 0; i < 200 && gets.length < n; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+      expect(gets.length).toBeGreaterThanOrEqual(n)
+    }
+
+    const invites = store()
+    const first = invites.refresh()
+    await waitForGet(1)
+    // A second caller arrives while the first GET is still in flight; it must
+    // get a fetch issued after this point, not the one already on the wire.
+    const second = invites.refresh()
+    expect(second).not.toBe(first)
+
+    gets[0]()
+    await first
+    expect(invites.invites.value.map((row) => row.room_id)).toEqual(['!a:hs'])
+
+    await waitForGet(2)
+    gets[1]()
+    await second
+    expect(served).toBe(2)
+    expect(invites.invites.value).toEqual([])
+  })
+
   it('discards a refresh that finishes after resetSession', async () => {
     let release: (() => void) | undefined
     const held = new Promise<void>((resolve) => {

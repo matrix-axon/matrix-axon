@@ -155,4 +155,62 @@ describe('InvitesPage', () => {
     expect(alert.textContent).toMatch(/1 succeeded, 1 failed/)
     expect(alert.textContent).toMatch(/Alpha: room not found/)
   })
+
+  it('clears a stale bulk banner once the row is rejected on its own', async () => {
+    // The banner describes a run that is over. Leaving it up while the user
+    // clears the remaining rows one at a time keeps claiming a failure that
+    // no longer applies.
+    let failLeave = true
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+        HttpResponse.json({
+          data: failLeave ? [invite('!a:hs', 'Alpha')] : [],
+        }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+        () =>
+          failLeave
+            ? HttpResponse.json(
+                { error: { code: 'not_found', message: 'room not found' } },
+                { status: 404 },
+              )
+            : HttpResponse.json({ data: {} }),
+      ),
+    )
+    const { findByRole, queryByRole } = renderInbox()
+    fireEvent.click(await findByRole('button', { name: 'Reject all' }))
+    expect((await findByRole('alert')).textContent).toMatch(/0 succeeded/)
+
+    failLeave = false
+    fireEvent.click(await findByRole('button', { name: 'Reject' }))
+    await waitFor(() => {
+      expect(queryByRole('alert')).toBeNull()
+    })
+  })
+
+  it('refreshes the room list once per bulk accept', async () => {
+    let roomGets = 0
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () => {
+        roomGets += 1
+        return HttpResponse.json({ data: [] })
+      }),
+      http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+        HttpResponse.json({ data: [invite('!a:hs', 'Alpha')] }),
+      ),
+      http.post(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`, () =>
+        HttpResponse.json({ data: { room_id: '!a:hs' } }),
+      ),
+    )
+    const { findByRole } = renderInbox()
+    const before = roomGets
+    fireEvent.click(await findByRole('button', { name: 'Accept all' }))
+    await waitFor(() => {
+      expect(roomGets).toBeGreaterThan(before)
+    })
+    // Let any second refresh land before asserting there wasn't one.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(roomGets - before).toBe(1)
+  })
 })

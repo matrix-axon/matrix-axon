@@ -49,11 +49,22 @@ export function createInvitesStore(
   const error = signal<string | null>(null)
   let settled = false
   let sessionGeneration = 0
+  /** The GET in flight, if any. */
   let refreshing: Promise<void> | null = null
+  /** At most one trailing GET, shared by callers that arrived while
+   * `refreshing` was already running and so cannot use its older response. */
+  let queued: Promise<void> | null = null
   /** Keys we accepted or rejected locally. A GET that still carries them
    * (watcher lag) must not put them back; a later GET that omits them
-   * clears the suppression so a fresh re-invite can appear. */
+   * clears the suppression so a fresh re-invite can appear. Only *local*
+   * mutations belong here — see `noteRemoved`. */
   const resolvedKeys = new Set<string>()
+  /** Invites announced by a live frame since the in-flight GET was issued.
+   * That response predates them, so assigning it wholesale would drop the
+   * row; there is no periodic refresh, so it would stay gone until the next
+   * reconnect. Reassigned (not mutated) per fetch so a late frame from an
+   * abandoned fetch cannot leak into the next one. */
+  let liveAdds = new Map<string, InviteDto>()
 
   function resetSession(): void {
     sessionGeneration += 1
@@ -67,6 +78,7 @@ export function createInvitesStore(
     }
     invites.value = []
     resolvedKeys.clear()
+    liveAdds = new Map()
     settled = false
     error.value = null
     loading.value = true
@@ -75,6 +87,8 @@ export function createInvitesStore(
   async function doRefresh(): Promise<void> {
     const generation = sessionGeneration
     loading.value = invites.value.length === 0
+    const added = new Map<string, InviteDto>()
+    liveAdds = added
     try {
       const { data, error: apiError } = await api.GET('/v1/invites')
       if (generation !== sessionGeneration) {
@@ -93,9 +107,16 @@ export function createInvitesStore(
           resolvedKeys.delete(key)
         }
       }
-      invites.value = data.data.filter(
-        (row) => !resolvedKeys.has(inviteKey(row)),
-      )
+      const next = data.data.filter((row) => !resolvedKeys.has(inviteKey(row)))
+      // Frames that arrived after this GET was issued describe invites the
+      // response cannot know about. Keep them rather than let a list fetched
+      // moments earlier delete the row.
+      for (const [key, invite] of added) {
+        if (!serverKeys.has(key) && !resolvedKeys.has(key)) {
+          next.unshift(invite)
+        }
+      }
+      invites.value = next
       error.value = null
       settled = true
     } catch (cause) {
@@ -111,21 +132,43 @@ export function createInvitesStore(
   }
 
   function refresh(): Promise<void> {
-    refreshing ??= doRefresh().finally(() => {
-      refreshing = null
+    if (refreshing !== null) {
+      // Do not hand back the in-flight promise: a caller that awaits
+      // `refresh()` *after* a mutation would resolve against a response
+      // fetched before it, and `runBulk` would set `settled` from
+      // pre-mutation data. Chain one trailing fetch instead, shared by every
+      // caller that lands here, so this stays a single extra request.
+      queued ??= refreshing.then(() => {
+        queued = null
+        return refresh()
+      })
+      return queued
+    }
+    const started = doRefresh().finally(() => {
+      if (refreshing === started) {
+        refreshing = null
+      }
     })
-    return refreshing
+    refreshing = started
+    return started
   }
 
   function ensureLoaded(): Promise<void> {
     return settled ? Promise.resolve() : refresh()
   }
 
-  function dropLocal(accountId: string, roomId: string): void {
-    resolvedKeys.add(`${accountId}/${roomId}`)
+  function removeLocal(accountId: string, roomId: string): void {
+    liveAdds.delete(`${accountId}/${roomId}`)
     invites.value = invites.value.filter(
       (invite) => invite.account_id !== accountId || invite.room_id !== roomId,
     )
+  }
+
+  /** Drop a row we just accepted or rejected ourselves, and suppress it until
+   * the server agrees it is gone. */
+  function dropLocal(accountId: string, roomId: string): void {
+    resolvedKeys.add(`${accountId}/${roomId}`)
+    removeLocal(accountId, roomId)
   }
 
   async function mutate(
@@ -212,18 +255,30 @@ export function createInvitesStore(
 
   function noteAdded(invite: InviteDto): void {
     const key = inviteKey(invite)
-    if (resolvedKeys.has(key)) {
-      return
-    }
+    // The server asserting the invite exists right now outranks a stale local
+    // suppression, so clear the key rather than drop the frame. Dropping it
+    // is what made a re-invite permanently invisible: every later GET then
+    // carries the key, so the "a GET that omits it clears the suppression"
+    // rule never fires. The cost is that an `invite.added` still in flight
+    // when the user resolves the row can briefly re-show it, which the
+    // follow-up refresh corrects.
+    resolvedKeys.delete(key)
     const next = invites.value.filter((row) => inviteKey(row) !== key)
     next.unshift(invite)
     invites.value = next
-    settled = true
+    liveAdds.set(key, invite)
+    // Deliberately not `settled = true`: one frame is content, not a
+    // complete list, and `settled` is what lets `runBulk` skip its
+    // confirming refresh and act on everything it can see.
     loading.value = false
   }
 
   function noteRemoved(accountId: string, roomId: string): void {
-    dropLocal(accountId, roomId)
+    // Server-driven, so there is nothing to suppress — the row is already
+    // gone upstream and no GET can put it back. Adding the key to
+    // `resolvedKeys` here would outlive the removal and hide a later
+    // re-invite for the rest of the session.
+    removeLocal(accountId, roomId)
   }
 
   return {
