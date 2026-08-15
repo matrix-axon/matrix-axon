@@ -53,37 +53,39 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # `jobs.<job_id>.if` can't see the `matrix` context — the condition decides
-  # whether the whole matrix job runs at all, before that matrix is expanded —
-  # so a manual single-project pick has to narrow the matrix itself instead of
-  # filtering it via `if`. This job computes that matrix once, up front.
-  resolve-matrix:
-    runs-on: ubuntu-latest
-    outputs:
-      include: ${{ steps.resolve.outputs.include }}
-    steps:
-      - id: resolve
-        run: |
-          full='[{"project":"chromium","browser":"chromium"},{"project":"firefox","browser":"firefox"},{"project":"webkit-desktop","browser":"webkit"}]'
-          selected="${{ github.event.inputs.projects }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "$selected" ] && [ "$selected" != "all" ]; then
-            include=$(echo "$full" | jq -c --arg project "$selected" '[.[] | select(.project == $project)]')
-          else
-            include="$full"
-          fi
-          echo "include=$include" >> "$GITHUB_OUTPUT"
-
   web-e2e:
-    needs: resolve-matrix
-    # Empty when a manual dispatch picked `webkit-iphone` alone — an empty
-    # `strategy.matrix.include` is a hard error, so skip the job outright
-    # rather than let it try to expand a zero-entry matrix.
-    if: needs.resolve-matrix.outputs.include != '[]'
+    # `jobs.<job_id>.if` and `strategy.matrix` can't see the `matrix` context
+    # (the condition/matrix decide whether and how the job runs, before any
+    # matrix value exists), but both can see `github` directly — so the
+    # workflow_dispatch `projects` choice is read as a plain expression
+    # comparison right here, with no separate job and no shell script to feed
+    # it into. Piping untrusted `workflow_dispatch` input through a `run:`
+    # shell string is a script-injection risk (the `type: choice` dropdown
+    # only constrains the web UI — a workflow_dispatch fired via the API can
+    # send any string), so this avoids that class of bug entirely rather than
+    # hardening a script against it.
+    #
+    # `webkit-iphone` alone resolves to an empty matrix below, which is a
+    # hard error for `strategy.matrix.include` — so it's excluded here too,
+    # skipping the job outright instead of expanding a zero-entry matrix.
+    if: |
+      github.event_name != 'workflow_dispatch' ||
+      contains(fromJson('["all","chromium","firefox","webkit-desktop"]'), github.event.inputs.projects)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJson(needs.resolve-matrix.outputs.include) }}
+        include: >-
+          ${{
+            (github.event_name != 'workflow_dispatch' || github.event.inputs.projects == 'all')
+              && fromJson('[{"project":"chromium","browser":"chromium"},{"project":"firefox","browser":"firefox"},{"project":"webkit-desktop","browser":"webkit"}]')
+            || github.event.inputs.projects == 'chromium'
+              && fromJson('[{"project":"chromium","browser":"chromium"}]')
+            || github.event.inputs.projects == 'firefox'
+              && fromJson('[{"project":"firefox","browser":"firefox"}]')
+            || github.event.inputs.projects == 'webkit-desktop'
+              && fromJson('[{"project":"webkit-desktop","browser":"webkit"}]')
+          }}
 
     defaults:
       run:
