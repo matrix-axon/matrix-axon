@@ -390,9 +390,9 @@ longer hide a recurrence.
 CI runs the schema sync check, lint, format check, tests, and the build via
 `.github/workflows/web-lint-and-test.yml` (path-filtered `pull_request` plus
 manual `workflow_dispatch`). The repo-root `.pre-commit-config.yaml` can run the
-same web checks at pre-push time for both git and jj users. Those hooks use the
-normal web dependencies, so run `pnpm install --frozen-lockfile` here before
-relying on them locally.
+same web checks at pre-push time for both git and jj users, and rustfmt/clippy
+when rust sources change. The web hooks use the normal web dependencies, so run
+`pnpm install --frozen-lockfile` here before relying on them locally.
 
 ## Demo recording
 

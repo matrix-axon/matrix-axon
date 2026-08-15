@@ -1,18 +1,27 @@
 # Shared git-hook config for the repo, run at push time.
 #
-# Purpose: stop web-client CI failures from reaching CI. The web checks mirror
-# web-lint-and-test.yml's local steps.
+# Purpose: stop cheap, path-filtered CI failures from reaching CI. Web hooks
+# mirror web-lint-and-test.yml. Rust hooks run rustfmt and clippy (the same
+# commands as lint-and-test.yml / lint-and-clippy.yml) when rust sources
+# change. `cargo test --all` stays in `.githooks/pre-push` — it is the
+# expensive gate, not a cheap pre-push check.
 #
 # Works for both VCS front-ends the team uses:
 #   * git users:  `pre-commit install --hook-type pre-push`   (fires on `git push`)
 #   * jj users:   `jj-hooks --runner pre-commit push`         (git hooks don't fire under jj)
 # Both read THIS file; only the driver differs.
 #
+# Git users who also ran `./scripts/setup-hooks.sh` (`core.hooksPath =
+# .githooks`) will run rustfmt/clippy twice on a rust push until the two
+# hook systems are unified. That double-run is accepted; skipping rust
+# here would leave jj `push` with no rustfmt at all.
+#
 # The prettier hook is self-contained (`language: node` + pinned
 # `additional_dependencies`), so it needs neither the repo's `node_modules`
 # nor a global prettier. The pnpm-backed hooks below use the repo's normal
 # clients/web dependencies so they match CI; run `pnpm install --frozen-lockfile`
-# in clients/web before relying on them locally or through jj-hooks.
+# in clients/web before relying on them locally or through jj-hooks. The
+# rust hooks use the repo toolchain (`rust-toolchain.toml`).
 #
 # Check-only: failures print the same command CI expects locally.
 minimum_pre_commit_version: "3.2.0"
@@ -56,5 +65,21 @@ repos:
         language: system
         entry: pnpm --dir clients/web build
         files: '^(\.github/workflows/web-lint-and-test\.yml|openapi/openapi\.json|clients/web/|\.pre-commit-config\.yaml)$'
+        pass_filenames: false
+        stages: [pre-push]
+      # Workspace members: crates/*, clients/tui, smoke/{tui,server,local-stack}.
+      # rustfmt is seconds; clippy matches CI and is the next-cheapest catch.
+      - id: rustfmt
+        name: rustfmt (check)
+        language: system
+        entry: cargo fmt --all -- --check
+        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rustfmt\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|crates/|clients/tui/|smoke/)'
+        pass_filenames: false
+        stages: [pre-push]
+      - id: rust-clippy
+        name: clippy
+        language: system
+        entry: cargo clippy --all-features --all-targets -- -D warnings
+        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|crates/|clients/tui/|smoke/)'
         pass_filenames: false
         stages: [pre-push]

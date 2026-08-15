@@ -119,7 +119,7 @@ Each crate's own `Cargo.toml` `description` is the source of truth; this table i
   - Push: `jj git push --bookmark <name>`  
   - Restack after base moves: `jj rebase -d <base-bookmark>` then re-push  
   - PRs are still opened with `gh pr create --base <base> --head <branch>`; `gh`'s "uncommitted changes" warning in colocated mode can be ignored as long as the bookmark was pushed correctly.
-- **Pre-push web hook (optional but recommended).** CI (`web-lint-and-test.yml`) runs generated-schema drift detection, lint, formatting, tests, and build for `clients/web`. To catch those failures before CI, the repo ships a shared `.pre-commit-config.yaml` that runs the same web checks at push time when web-relevant files change. It requires the [`pre-commit`](https://pre-commit.com) runner (`pipx install pre-commit`, `uv tool install pre-commit`, `pip install --user pre-commit`, or `sudo apt install pre-commit`) and the normal `clients/web` pnpm dependencies (`pnpm install --frozen-lockfile` in `clients/web`). Enable it once per clone:
+- **Pre-push hook (optional but recommended).** CI's web job (`web-lint-and-test.yml`) and rust fmt/clippy jobs (`lint-and-test.yml` / `lint-and-clippy.yml`) are mirrored locally by `.pre-commit-config.yaml`, path-filtered so a web-only push does not run clippy and a rust-only push does not run `pnpm`. `cargo test --all` is *not* in that file — it stays in `.githooks/pre-push` (and CI). The hook requires the [`pre-commit`](https://pre-commit.com) runner (`pipx install pre-commit`, `uv tool install pre-commit`, `pip install --user pre-commit`, or `sudo apt install pre-commit`). Web hooks also need `pnpm install --frozen-lockfile` in `clients/web`; rust hooks use `rust-toolchain.toml`. Enable it once per clone:
   - **git users:** `pre-commit install --hook-type pre-push` — fires natively on `git push`.
   - **jj users:** git hooks don't fire under jj, so push through the `jj-hooks` tool (`cargo install jj-hooks`) instead: `jj-hooks --runner pre-commit push`. To make `jj push` do that by default, add this alias to `~/.config/jj/config.toml`:
 
@@ -130,7 +130,7 @@ Each crate's own `Cargo.toml` `description` is the source of truth; this table i
 
     Use `jj push`, not `jj git push`; direct `jj git push` bypasses the alias.
 
-  Both front-ends read the same `.pre-commit-config.yaml`; only the driver differs. On a failure, run the command printed by the hook (for example `pnpm --dir clients/web format` for formatting, or `pnpm --dir clients/web gen:api` for schema drift) and push again. CI remains the backstop for anyone who skips the hook.
+  Both front-ends read the same `.pre-commit-config.yaml`; only the driver differs. On a failure, run the command printed by the hook (for example `pnpm --dir clients/web format` for formatting, `cargo fmt --all` for rustfmt, or `pnpm --dir clients/web gen:api` for schema drift) and push again. CI remains the backstop for anyone who skips the hook. Git users who also ran `./scripts/setup-hooks.sh` will run rustfmt/clippy twice on a rust push until the two hook systems are unified.
 - **Web verification uses the package scripts.** For `clients/web` code
   changes, the local gate is `pnpm --dir clients/web lint`,
   `pnpm --dir clients/web test`, and `pnpm --dir clients/web build`. Do not

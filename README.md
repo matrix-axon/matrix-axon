@@ -224,7 +224,7 @@ web bootstrap locks for the rest of that process after six wrong bootstrap
 URLs. After any account, token, or OAuth identity exists, the web bootstrap
 closes permanently; use the backend CLI/admin paths for later credentials.
 
-CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push. The pre-commit hook in `.githooks/` runs the fmt + clippy subset locally (enable with `./scripts/setup-hooks.sh`); bypass a single commit with `git commit --no-verify`.
+CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push. Locally, rustfmt and clippy also run from the shared `.pre-commit-config.yaml` at pre-push time when rust files change (git: `pre-commit install --hook-type pre-push`; jj: `jj push` through the `jj-hooks` alias in `AGENTS.md`). `./scripts/setup-hooks.sh` still enables `.githooks/` (`cargo test --all` on push). Bypass a single git commit with `git commit --no-verify`.
 
 ### 5. Start over
 
