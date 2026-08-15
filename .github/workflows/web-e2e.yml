@@ -53,26 +53,37 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # `jobs.<job_id>.if` can't see the `matrix` context — the condition decides
+  # whether the whole matrix job runs at all, before that matrix is expanded —
+  # so a manual single-project pick has to narrow the matrix itself instead of
+  # filtering it via `if`. This job computes that matrix once, up front.
+  resolve-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.resolve.outputs.include }}
+    steps:
+      - id: resolve
+        run: |
+          full='[{"project":"chromium","browser":"chromium"},{"project":"firefox","browser":"firefox"},{"project":"webkit-desktop","browser":"webkit"}]'
+          selected="${{ github.event.inputs.projects }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "$selected" ] && [ "$selected" != "all" ]; then
+            include=$(echo "$full" | jq -c --arg project "$selected" '[.[] | select(.project == $project)]')
+          else
+            include="$full"
+          fi
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+
   web-e2e:
-    # Manual dispatch can narrow the run to a single project via the
-    # `projects` input; every other trigger (and the `all` choice) runs the
-    # full desktop matrix. `matrix.project` is available here because the
-    # matrix is expanded before this condition is evaluated.
-    if: |
-      github.event_name != 'workflow_dispatch' ||
-      github.event.inputs.projects == 'all' ||
-      github.event.inputs.projects == matrix.project
+    needs: resolve-matrix
+    # Empty when a manual dispatch picked `webkit-iphone` alone — an empty
+    # `strategy.matrix.include` is a hard error, so skip the job outright
+    # rather than let it try to expand a zero-entry matrix.
+    if: needs.resolve-matrix.outputs.include != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - project: chromium
-            browser: chromium
-          - project: firefox
-            browser: firefox
-          - project: webkit-desktop
-            browser: webkit
+        include: ${{ fromJson(needs.resolve-matrix.outputs.include) }}
 
     defaults:
       run:
