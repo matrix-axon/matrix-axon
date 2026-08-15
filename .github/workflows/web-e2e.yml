@@ -173,3 +173,23 @@ jobs:
           path: clients/web/test-results/
           retention-days: 7
           if-no-files-found: ignore
+
+  # `type: choice` only constrains the web UI — a workflow_dispatch fired via
+  # the REST/GraphQL API can send any string for `projects`. An unrecognized
+  # value makes both e2e jobs' `if` conditions false, so the run would
+  # otherwise complete with zero jobs and no failure, easy to misread as
+  # "e2e passed" rather than "e2e didn't run." Fail loudly instead. The input
+  # goes through `env:`, not into the script text, so this can't reintroduce
+  # the injection class the `resolve-matrix` removal fixed above.
+  invalid-projects-input:
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      !contains(fromJson('["all","chromium","firefox","webkit-desktop","webkit-iphone"]'), github.event.inputs.projects)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail on unrecognized projects input
+        env:
+          PROJECTS_INPUT: ${{ github.event.inputs.projects }}
+        run: |
+          echo "::error::Unrecognized 'projects' input: '$PROJECTS_INPUT'. Expected one of: all, chromium, firefox, webkit-desktop, webkit-iphone."
+          exit 1
