@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { ROOM_URL, signIn } from './helpers'
+import { ROOM_URL, active, expectLive, signIn } from './helpers'
 
 /**
  * The sidebar has to stay readable on the screens people actually use.
@@ -198,11 +198,14 @@ test('arrow-key focus stays visible on the room links', async ({ page }) => {
   await signIn(page)
   await page.setViewportSize(VIEWPORTS[2])
   await page.goto(ROOM_URL)
+  // Control+K is subscribed in an effect. Pressing it the instant the
+  // document loads misses the listener — Playwright hits that, a human
+  // cannot. Live means first paint and effects have flushed, same as the
+  // dedicated Ctrl-K coverage in `shortcuts.spec.ts`.
+  await expectLive(page)
 
   await page.keyboard.press('Control+k')
-  await expect
-    .poll(() => page.evaluate(() => document.activeElement?.className))
-    .toContain('name-filter')
+  await expect.poll(() => active(page)).toContain('Filter by name')
   await page.keyboard.press('ArrowDown')
 
   const outline = await page.evaluate(() => {
