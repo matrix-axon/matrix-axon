@@ -3777,6 +3777,30 @@ describe('RoomPage', () => {
       )
     })
 
+    it('recomputes both picks when the visibility rule changes mid-room', async () => {
+      // The predicate is re-created every render and so cannot be a dependency
+      // itself; the values it closes over have to be listed instead. Without
+      // them, turning state events on repaints the timeline while both read
+      // positions stay computed under the old rule — visibly inconsistent with
+      // what is on screen, and stuck that way until some unrelated dependency
+      // happens to fire the effect.
+      const { services, ids, mine, findByText } = portal('toggle', 1_871_999)
+      await findByText('body of $message')
+      await waitFor(() => expect(mine()).toEqual([ids.message]))
+
+      // The bridge event becomes a rendered row, and it is both display-last
+      // and arrival-max — so it is now the correct answer to both picks.
+      services.settings.stateEvents.value = 'all'
+
+      await waitFor(() => expect(mine().at(-1)).toBe(ids.bridge))
+      await waitFor(() =>
+        expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
+          eventId: ids.bridge,
+          originTs: BRIDGE_TS,
+        }),
+      )
+    })
+
     it('names no event the user never saw, on either pick', async () => {
       // The bridge event now wins *both* comparisons outright — it is
       // display-last by `origin_ts` and, at 1_871_999, arrival-max as well. It

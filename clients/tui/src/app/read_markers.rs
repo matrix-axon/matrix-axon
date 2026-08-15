@@ -213,6 +213,17 @@ impl App {
         }
         // The armed marker is only a fallback for `spawn_current_read_put`; the
         // map is what actually gets sent, for both halves.
+        //
+        // `apply_marker` above leaves an entry for this room on both of its
+        // paths — it either found one already at or ahead of ours, or inserted
+        // — so the fallback is unreachable today. It stays because a running
+        // TUI should degrade to the value it was just handed rather than panic
+        // if that ever stops holding, and the assertion is what keeps such a
+        // gap from being silently masked (review note on #165).
+        debug_assert!(
+            self.read_markers.contains_key(&room),
+            "apply_marker must leave a marker for the room it was given"
+        );
         let marker = self.read_markers.get(&room).cloned().unwrap_or(ReadMarker {
             event_id: event_id.to_owned(),
             origin_ts,

@@ -744,6 +744,15 @@ export function RoomPage() {
     roomId,
     deviceState,
     ephemeralSender,
+    // What `isVisibleTimelineEvent` closes over, listed for the same reason the
+    // `visible` memo lists them: the predicate is re-created every render and so
+    // can never be a dependency itself. Without these, changing a visibility
+    // setting while the room is open repaints the timeline but leaves both read
+    // positions computed under the old rule until an unrelated dep happens to
+    // fire this effect.
+    hideRedacted,
+    stateEvents,
+    settings.developerMode.value,
   ])
 
   // Clear any live typing notice when leaving this room (RoomPage does not
