@@ -130,7 +130,7 @@ Each crate's own `Cargo.toml` `description` is the source of truth; this table i
 
     Use `jj push`, not `jj git push`; direct `jj git push` bypasses the alias.
 
-  Both front-ends read the same `.pre-commit-config.yaml`; only the driver differs. On a failure, run the command printed by the hook (for example `pnpm --dir clients/web format` for formatting, `cargo fmt --all` for rustfmt, or `pnpm --dir clients/web gen:api` for schema drift) and push again. CI remains the backstop for anyone who skips the hook. Git users who also ran `./scripts/setup-hooks.sh` will run rustfmt/clippy twice on a rust push until the two hook systems are unified.
+  Both front-ends read the same `.pre-commit-config.yaml`; only the driver differs. On a failure, run the command printed by the hook (for example `pnpm --dir clients/web format` for formatting, `cargo fmt --all` for rustfmt, or `pnpm --dir clients/web gen:api` for schema drift) and push again. CI remains the backstop for anyone who skips the hook. Do not install both hook systems for git: `./scripts/setup-hooks.sh` sets `core.hooksPath = .githooks`, and `pre-commit install` then refuses to install. If pre-commit was installed first, `setup-hooks.sh` orphans that hook by taking over `hooksPath`. Use one or the other.
 - **Web verification uses the package scripts.** For `clients/web` code
   changes, the local gate is `pnpm --dir clients/web lint`,
   `pnpm --dir clients/web test`, and `pnpm --dir clients/web build`. Do not
