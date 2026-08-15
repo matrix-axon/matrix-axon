@@ -104,6 +104,47 @@ test('open with /, search, jump to the hit, and Back reopens the search', async 
   await expect(page.locator('a.search-hit')).toHaveCount(1)
 })
 
+/**
+ * Typing the instant the box appears must stick. The overlay resets its text
+ * box whenever the URL's tokens change, and effects flush *after* paint — so
+ * the mount run of that reset, harmless by intent, once landed on a box the
+ * user could already see and wiped the first thing typed into it. The submit
+ * that followed carried no text, and a room-scoped search with no text
+ * answers with the whole room (the CI flake behind this test: 9 hits, not 1).
+ *
+ * Driven in-page rather than through `fill`, so the keystroke lands in the
+ * same task as the box's first paint: that is the widest the window ever
+ * gets, and it makes a race deterministic instead of load-dependent.
+ */
+test('a query typed the instant the box paints survives', async ({ page }) => {
+  await openRoom(page)
+  const typed = await page.evaluate(async () => {
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { key: '/', bubbles: true }),
+    )
+    let box: HTMLInputElement | null = null
+    // Preact renders on a microtask; drain them until the box exists.
+    for (let i = 0; i < 2000 && box === null; i += 1) {
+      box = document.querySelector<HTMLInputElement>('input.search-input')
+      await Promise.resolve()
+    }
+    if (box === null) {
+      return null
+    }
+    // What a keystroke leaves behind: a value the framework hears about.
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set?.call(box, 'typed at first paint')
+    box.dispatchEvent(new Event('input', { bubbles: true }))
+    return box.value
+  })
+  expect(typed).toBe('typed at first paint')
+  await expect(page.getByLabel('Search query')).toHaveValue(
+    'typed at first paint',
+  )
+})
+
 test('the modifier search shortcut opens search from the composer; Escape closes it', async ({
   page,
 }, testInfo) => {

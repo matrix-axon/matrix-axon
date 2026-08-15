@@ -64,7 +64,15 @@ export function SearchOverlay() {
   /** Parse errors from the *box*, blocking a submit — distinct from
    *  `parsed.errors`, which belong to the URL's already-submitted tokens. */
   const [inputErrors, setInputErrors] = useState<string[]>([])
+  // Only on an actual change: the mount run is a no-op by intent (the state
+  // above initializes from the same value), but effects flush after paint, so
+  // it would clobber anything typed into a box the user can already see.
+  const seenTokens = useRef(tokens)
   useEffect(() => {
+    if (seenTokens.current === tokens) {
+      return
+    }
+    seenTokens.current = tokens
     setInput(parsed.query.text)
     setInputErrors([])
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reset on URL change only, not on store loads re-parsing
