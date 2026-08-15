@@ -17,6 +17,18 @@ name: Web e2e
 
 on:
   workflow_dispatch:
+    inputs:
+      projects:
+        description: "Which e2e project(s) to run"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - chromium
+          - firefox
+          - webkit-desktop
+          - webkit-iphone
   push:
     branches:
       - main
@@ -42,6 +54,14 @@ env:
 
 jobs:
   web-e2e:
+    # Manual dispatch can narrow the run to a single project via the
+    # `projects` input; every other trigger (and the `all` choice) runs the
+    # full desktop matrix. `matrix.project` is available here because the
+    # matrix is expanded before this condition is evaluated.
+    if: |
+      github.event_name != 'workflow_dispatch' ||
+      github.event.inputs.projects == 'all' ||
+      github.event.inputs.projects == matrix.project
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -96,7 +116,12 @@ jobs:
           if-no-files-found: ignore
 
   web-e2e-iphone:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Runs on the main push gate as before, plus manual dispatch when the
+    # `projects` input asks for it (either `all` or the lane by name).
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' &&
+        (github.event.inputs.projects == 'all' || github.event.inputs.projects == 'webkit-iphone'))
     runs-on: ubuntu-latest
 
     defaults:
