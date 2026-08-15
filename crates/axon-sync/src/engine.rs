@@ -1236,7 +1236,6 @@ const INVITES_RESWEEP: Duration = Duration::from_secs(300);
 /// unsolicited invites, not a 1755-room joined list.
 const INVITES_SWEEP_CONCURRENCY: usize = 8;
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UnreadCountsSnapshot {
     notification: u64,
