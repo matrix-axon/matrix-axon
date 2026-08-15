@@ -2553,8 +2553,7 @@ async fn watch_invites(
     live_tx: broadcast::Sender<LiveFrame>,
     cancel: CancellationToken,
 ) {
-    let last: Mutex<HashMap<OwnedRoomId, RoomInviteSnapshot>> =
-        Mutex::new(seed_invites_cache(&store, account_id).await);
+    let last: Mutex<InvitesCache> = Mutex::new(seed_invites_cache(&store, account_id).await);
 
     let mut updates = client.room_info_notable_update_receiver();
     sweep_invites(
@@ -2564,7 +2563,6 @@ async fn watch_invites(
         &account_user_id,
         &live_tx,
         &last,
-        false,
     )
     .await;
 
@@ -2585,7 +2583,6 @@ async fn watch_invites(
                     &account_user_id,
                     &live_tx,
                     &last,
-                    true,
                 )
                 .await;
             }
@@ -2612,20 +2609,41 @@ async fn watch_invites(
     }
 }
 
-async fn seed_invites_cache(
-    store: &Store,
-    account_id: Uuid,
-) -> HashMap<OwnedRoomId, RoomInviteSnapshot> {
-    let rows = match store.room_invite_snapshots(account_id).await {
-        Ok(rows) => rows,
+/// The watcher's view of `room_invites`: what it has already persisted and
+/// announced, so a repeat of the same snapshot is neither re-written nor
+/// re-broadcast.
+///
+/// `seeded` records whether `rows` is known to mirror the table. Until it
+/// does, a cache miss means "we don't know", not "there is no row" — reading
+/// it as absence is what would let a failed seed disable pruning and let a
+/// row deleted out of band stay invisible (ADR 0091).
+#[derive(Default)]
+struct InvitesCache {
+    seeded: bool,
+    rows: HashMap<OwnedRoomId, RoomInviteSnapshot>,
+}
+
+async fn seed_invites_cache(store: &Store, account_id: Uuid) -> InvitesCache {
+    match store.room_invite_snapshots(account_id).await {
+        Ok(rows) => InvitesCache {
+            seeded: true,
+            rows: parse_invite_rows(account_id, rows),
+        },
         Err(err) => {
             tracing::warn!(
                 %account_id, error = %err,
-                "failed to read persisted invites; starting dedup cache empty"
+                "failed to read persisted invites; dedup cache starts unseeded \
+                 and the first sweep re-reads it"
             );
-            return HashMap::new();
+            InvitesCache::default()
         }
-    };
+    }
+}
+
+fn parse_invite_rows(
+    account_id: Uuid,
+    rows: Vec<(String, RoomInviteSnapshot)>,
+) -> HashMap<OwnedRoomId, RoomInviteSnapshot> {
     let mut cache = HashMap::with_capacity(rows.len());
     for (room_id, snapshot) in rows {
         let Ok(parsed) = RoomId::parse(&room_id) else {
@@ -2646,18 +2664,22 @@ async fn drop_invite_if_known(
     account_id: Uuid,
     room_id: &RoomId,
     live_tx: &broadcast::Sender<LiveFrame>,
-    last: &Mutex<HashMap<OwnedRoomId, RoomInviteSnapshot>>,
+    last: &Mutex<InvitesCache>,
 ) {
-    let had = last
-        .lock()
-        .expect("invites cache lock")
-        .contains_key(room_id);
-    if !had {
-        return;
+    {
+        // Only a cache known to mirror the table can rule the delete out.
+        // While unseeded, fall through and let the store answer.
+        let cache = last.lock().expect("invites cache lock");
+        if cache.seeded && !cache.rows.contains_key(room_id) {
+            return;
+        }
     }
     match store.delete_room_invite(account_id, room_id.as_str()).await {
         Ok(deleted) => {
-            last.lock().expect("invites cache lock").remove(room_id);
+            last.lock()
+                .expect("invites cache lock")
+                .rows
+                .remove(room_id);
             if deleted {
                 tracing::info!(%account_id, %room_id, "dropped pending invite");
                 let _ = live_tx.send(LiveFrame::InviteRemoved(InviteRemovedFrame {
@@ -2678,7 +2700,7 @@ async fn capture_invite(
     account_id: Uuid,
     account_user_id: &str,
     live_tx: &broadcast::Sender<LiveFrame>,
-    last: &Mutex<HashMap<OwnedRoomId, RoomInviteSnapshot>>,
+    last: &Mutex<InvitesCache>,
 ) {
     let room_id = room.room_id().to_owned();
     if room.state() != RoomState::Invited {
@@ -2715,8 +2737,11 @@ async fn capture_invite(
     };
 
     {
+        // An unseeded cache cannot prove the row is still there, so re-upsert
+        // rather than trust a match. Skipping the write when the row has in
+        // fact been deleted is what would strand a still-pending invite.
         let cache = last.lock().expect("invites cache lock");
-        if cache.get(&room_id) == Some(&snapshot) {
+        if cache.seeded && cache.rows.get(&room_id) == Some(&snapshot) {
             return;
         }
     }
@@ -2734,6 +2759,7 @@ async fn capture_invite(
 
     last.lock()
         .expect("invites cache lock")
+        .rows
         .insert(room_id.clone(), snapshot.clone());
 
     tracing::info!(
@@ -2759,34 +2785,58 @@ async fn capture_invite(
     }));
 }
 
-/// Re-walk currently-invited rooms and capture each snapshot. With `prune`,
-/// also drop rows for rooms we can positively see are no longer invited
-/// (ADR 0091): `get_room` returned and `state() != Invited`, or — only when
-/// `invited_rooms()` is non-empty — a persisted id absent from that list.
-/// An empty invited list is "not loaded yet," not "zero invites."
+/// Re-walk currently-invited rooms and capture each snapshot, and drop rows
+/// for rooms we can *positively* see are no longer invited (ADR 0091):
+/// `get_room` returned and `state() != Invited`.
+///
+/// Absence from `invited_rooms()` is deliberately not a prune signal.
+/// `invited_rooms()` is `rooms_filtered(INVITED)` over the SDK's in-memory
+/// room store — the same partial knowledge that makes `get_room` return
+/// `None` for a still-pending invite. A non-empty list is no proof the list
+/// is *complete*, so pruning against it can delete valid invites whenever
+/// the SDK has hydrated some but not all of them; the row is only re-created
+/// later with a fresh `invited_at`, re-sorting the user's inbox. Every delete
+/// here needs per-room evidence instead.
 async fn sweep_invites(
     client: &Client,
     store: &Store,
     account_id: Uuid,
     account_user_id: &str,
     live_tx: &broadcast::Sender<LiveFrame>,
-    last: &Mutex<HashMap<OwnedRoomId, RoomInviteSnapshot>>,
-    prune: bool,
+    last: &Mutex<InvitesCache>,
 ) {
     use futures_util::stream::{self, StreamExt};
 
-    let invited = client.invited_rooms();
+    // Reconcile the dedup cache against what is actually persisted, before
+    // anything reads it. This is the watcher's recovery path for both a
+    // failed seed and rows deleted out of band — `POST .../leave` writes
+    // `room_invites` directly, and a stale cache entry would otherwise
+    // suppress the re-persist for the life of the process.
+    match store.room_invite_snapshots(account_id).await {
+        Ok(rows) => {
+            let mut cache = last.lock().expect("invites cache lock");
+            cache.rows = parse_invite_rows(account_id, rows);
+            cache.seeded = true;
+        }
+        Err(err) => {
+            tracing::warn!(
+                %account_id, error = %err,
+                "failed to re-read persisted invites; sweeping against a stale cache"
+            );
+        }
+    }
 
-    // Positive-absence: any cached room the SDK now reports as joined/left
-    // is no longer an invite. Safe on the startup sweep — `get_room`
+    // Positive-absence: any persisted room the SDK now reports as joined or
+    // left is no longer an invite. Safe on the startup sweep too — `get_room`
     // returning a non-invited room is not a hydration miss.
-    let cached_ids: Vec<OwnedRoomId> = last
+    let known_ids: Vec<OwnedRoomId> = last
         .lock()
         .expect("invites cache lock")
+        .rows
         .keys()
         .cloned()
         .collect();
-    for room_id in cached_ids {
+    for room_id in known_ids {
         match client.get_room(&room_id) {
             Some(room) if room.state() != RoomState::Invited => {
                 drop_invite_if_known(store, account_id, &room_id, live_tx, last).await;
@@ -2795,35 +2845,7 @@ async fn sweep_invites(
         }
     }
 
-    if prune && !invited.is_empty() {
-        let keep: HashSet<OwnedRoomId> = invited
-            .iter()
-            .map(|room| room.room_id().to_owned())
-            .collect();
-        last.lock()
-            .expect("invites cache lock")
-            .retain(|room_id, _| keep.contains(room_id));
-        let keep_ids: Vec<String> = keep
-            .iter()
-            .map(|room_id| room_id.as_str().to_owned())
-            .collect();
-        match store.delete_stale_room_invites(account_id, &keep_ids).await {
-            Ok(removed) => {
-                for room_id in removed {
-                    tracing::info!(%account_id, %room_id, "pruned stale pending invite");
-                    let _ = live_tx.send(LiveFrame::InviteRemoved(InviteRemovedFrame {
-                        account_id,
-                        room_id,
-                    }));
-                }
-            }
-            Err(err) => {
-                tracing::warn!(%account_id, error = %err, "failed to prune stale pending invites");
-            }
-        }
-    }
-
-    stream::iter(invited)
+    stream::iter(client.invited_rooms())
         .for_each_concurrent(INVITES_SWEEP_CONCURRENCY, |room| async move {
             capture_invite(&room, store, account_id, account_user_id, live_tx, last).await;
         })

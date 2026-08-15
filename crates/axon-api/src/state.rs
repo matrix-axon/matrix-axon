@@ -25,8 +25,8 @@ use crate::member_profiles::{MemberProfileService, NoopMemberProfileService};
 use crate::oauth::OAuthRuntime;
 use crate::search::SearchQuery;
 use crate::sender::{
-    AccountActionsSender, EphemeralSender, MembershipSender, MessageSender, PowerLevelsSender,
-    RoomEntrySender, RoomSettingsSender, SendError,
+    AccountActionsSender, EphemeralSender, LeaveOutcome, MembershipSender, MessageSender,
+    PowerLevelsSender, RoomEntrySender, RoomSettingsSender, SendError,
 };
 use crate::sync_state::{NoSyncState, SyncStateProvider};
 use crate::sync_status::{NoSyncStatus, SyncStatusProvider};
@@ -456,7 +456,11 @@ struct NoopMembershipSender;
 
 #[async_trait::async_trait]
 impl MembershipSender for NoopMembershipSender {
-    async fn leave(&self, _account_id: uuid::Uuid, _room_id: &str) -> Result<(), SendError> {
+    async fn leave(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+    ) -> Result<LeaveOutcome, SendError> {
         Err(SendError::Unavailable(
             "membership port is not configured".to_owned(),
         ))

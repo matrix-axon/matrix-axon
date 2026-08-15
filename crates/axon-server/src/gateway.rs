@@ -14,14 +14,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axon_api::{
-    AccountActionsSender, EphemeralSender, Formatted, MediaAttachment, MembershipSender,
-    MessageSender, PowerLevelsSender, Relation, RoomEntrySender, RoomSettingsSender, SendError,
+    AccountActionsSender, EphemeralSender, Formatted, LeaveOutcome, MediaAttachment,
+    MembershipSender, MessageSender, PowerLevelsSender, Relation, RoomEntrySender,
+    RoomSettingsSender, SendError,
 };
 use axon_core::{
     CreateRoomRequest, MatrixProfile, PowerLevelChanges, PublicRoomsPage, PublicRoomsQuery,
     ResolvedPowerLevels,
 };
-use axon_sync::{GatewayError, SdkGateway};
+use axon_sync::{GatewayError, GatewayLeaveOutcome, SdkGateway};
 use uuid::Uuid;
 
 /// Wraps the sync engine's gateway so it satisfies the API's `MessageSender`
@@ -249,13 +250,17 @@ impl EphemeralSender for GatewayAdapter {
 
 #[async_trait]
 impl MembershipSender for GatewayAdapter {
-    async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError> {
+    async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<LeaveOutcome, SendError> {
         tokio::time::timeout(
             self.membership_mutation_timeout,
             self.gateway.leave(account_id, room_id),
         )
         .await
         .map_err(|_| timed_out("leave", self.membership_mutation_timeout))?
+        .map(|outcome| match outcome {
+            GatewayLeaveOutcome::Left => LeaveOutcome::Left,
+            GatewayLeaveOutcome::Unconfirmed => LeaveOutcome::Unconfirmed,
+        })
         .map_err(map_err)
     }
 

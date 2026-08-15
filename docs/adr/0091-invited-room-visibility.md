@@ -65,21 +65,53 @@ re-sweep re-derives the current invited set.
 
 Guardrail 5: a gone invite must disappear. Do **not** treat an empty
 `invited_rooms()` as "the account has no invites" on startup — that is the
-same hydration race ADR 0070 hit. Two complementary prunes:
+same hydration race ADR 0070 hit.
 
-1. **Positive absence (always safe):** if `get_room(id)` returns a room whose
-   `state() != Invited`, delete the row. A now-joined or left room is
-   definitely not a pending invite.
-2. **List prune (only when `invited_rooms()` is non-empty):** delete rows
-   whose room id is not in that list. An empty list is "not loaded yet," not
-   "zero invites."
+**Every prune needs per-room positive evidence:** if `get_room(id)` returns a
+room whose `state() != Invited`, delete the row. A now-joined or left room is
+definitely not a pending invite.
+
+Absence from `invited_rooms()` is **not** such evidence, not even when the
+list is non-empty. `invited_rooms()` is `rooms_filtered(INVITED)` over the
+SDK's in-memory room store — the very same partial knowledge that makes
+`get_room` return `None` for a still-pending invite — so a non-empty result
+proves only that *some* invites have hydrated, never that the list is
+complete. Set-difference against it deletes valid invites whenever the SDK
+knows one of three, and re-creating the row later resets `invited_at` and
+re-sorts the user's inbox. There is deliberately no store primitive for
+"delete every row not in this list."
 
 A withdrawn invite whose room the SDK has forgotten may linger until the
-account is deleted (`ON DELETE CASCADE`) *or* the user rejects it. Reject
-is a positive signal: after a successful leave the invite row is deleted
-even when the SDK never had a `Room`. Inventing absence from an unloaded
-store on a sweep is still worse, so the watcher itself does not prune on
-`get_room == None`.
+account is deleted (`ON DELETE CASCADE`) *or* the user rejects it. That is
+the acceptable direction: a stale row is visible and the user can clear it,
+whereas a wrongly-deleted row is silent and unrecoverable. Reject is a
+positive signal, but only when the homeserver confirms it — see below.
+
+### Reject must not delete on an unconfirmed leave
+
+`POST .../leave` falls back to a raw client-server `leave` when the SDK has
+no local `Room`. A homeserver `M_FORBIDDEN` there usually means "not in that
+room", but it is also what a server ACL or an unknown room returns, and with
+no `Room` to corroborate against there is nothing to tell them apart.
+`SdkGateway::leave` therefore reports `LeaveOutcome::{Left, Unconfirmed}`
+rather than a bare `Ok(())`. Both answer `200` — the request stands — but
+only `Left` may drive the `room_invites` delete. (`Room::leave` can absorb
+the same error internally because it follows up with `room_left()` +
+`forget()` and converges its own state; the raw fallback has no such
+follow-up.)
+
+### The dedup cache is not the source of truth
+
+The watcher's in-memory snapshot cache exists to suppress redundant writes
+and `invite.added` frames, so a cache *miss* must never be read as "there is
+no row". It carries a `seeded` flag for exactly that: until the cache is
+known to mirror the table, a miss means "unknown" and the store gets the
+final say. Each sweep re-reads `room_invites` and reconciles the cache
+against it, which is what lets the watcher recover both from a failed
+startup seed (otherwise pruning stays disabled and every standing invite is
+re-broadcast) and from rows deleted out of band by the API (otherwise a
+stale matching snapshot suppresses the re-persist for the life of the
+process).
 
 ### Wire
 

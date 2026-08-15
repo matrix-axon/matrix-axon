@@ -56,8 +56,8 @@ pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use search::{SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams};
 pub use sender::{
-    AccountActionsSender, EphemeralSender, MembershipSender, MessageSender, PowerLevelsSender,
-    RoomEntrySender, RoomSettingsSender, SendError,
+    AccountActionsSender, EphemeralSender, LeaveOutcome, MembershipSender, MessageSender,
+    PowerLevelsSender, RoomEntrySender, RoomSettingsSender, SendError,
 };
 pub use state::{AppState, BootstrapConfig};
 pub use sync_state::SyncStateProvider;

@@ -195,25 +195,10 @@ impl Store {
         .await?;
         Ok(result.rows_affected() > 0)
     }
-
-    /// Delete this account's invite rows whose room id is not in `keep`.
-    /// Returns the deleted room ids so the watcher can emit `invite.removed`.
-    /// An empty `keep` deletes every row for the account — callers must not
-    /// pass empty unless they have positively established there are no
-    /// invites (ADR 0091: an unloaded SDK list is not that signal).
-    pub async fn delete_stale_room_invites(
-        &self,
-        account_id: Uuid,
-        keep: &[String],
-    ) -> Result<Vec<String>, StoreError> {
-        let rows: Vec<String> = sqlx_core::query_scalar::query_scalar::<Postgres, String>(
-            "DELETE FROM room_invites WHERE account_id = $1 AND room_id <> ALL($2) \
-             RETURNING room_id",
-        )
-        .bind(account_id)
-        .bind(keep)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows)
-    }
 }
+
+// There is deliberately no "delete every row not in this list" primitive.
+// The only list Axon could pass is the SDK's `invited_rooms()`, which is a
+// view of partially-hydrated in-memory state, so set-difference against it
+// deletes invites that are merely not loaded yet. Invites are dropped one
+// room at a time, on positive evidence, via `delete_room_invite` (ADR 0091).

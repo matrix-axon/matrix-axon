@@ -35,7 +35,7 @@ pub use backfill::BackfillHealth;
 pub use devices::{DeviceInfo, DeviceList, DeviceListEngine, DeviceListError};
 pub use engine::SyncEngine;
 pub use error::{GatewayError, SyncError};
-pub use gateway::SdkGateway;
+pub use gateway::{LeaveOutcome as GatewayLeaveOutcome, SdkGateway};
 pub use lifecycle::{AccountLifecycle, LifecycleError};
 pub use media::SdkMediaProxy;
 pub use member_profiles::{MemberProfile, MemberProfileEngine, MemberProfileError};

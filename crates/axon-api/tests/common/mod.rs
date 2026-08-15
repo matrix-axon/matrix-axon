@@ -16,13 +16,13 @@ use async_trait::async_trait;
 use axon_api::{
     AccountActionsSender, AccountLifecycle, ApiError, CurrentTrust, DeleteError, DeviceInfo,
     DeviceList, DeviceListError, DeviceListService, EphemeralSender, FlowStage, FlowSummary,
-    Formatted, LoginError, LogoutError, MediaAttachment, MediaError, MediaProxy, MediaResource,
-    MemberProfile, MemberProfileError, MemberProfileService, MembershipSender, MessageSender,
-    PowerLevelsSender, RecoverError, RedecryptUtdsError, RedecryptUtdsStats, Relation,
-    RoomEntrySender, RoomSettingsSender, SearchHit, SearchHits, SearchQuery, SearchQueryError,
-    SearchQueryParams, SendError, SenderTrustService, StageUploadError, StageUploadRequest,
-    StagedUpload, StagedUploadService, SyncStateProvider, TokenVerifier, TrustBundle, TrustError,
-    TrustSnapshot, UploadStream, VerificationService, VerifyError,
+    Formatted, LeaveOutcome, LoginError, LogoutError, MediaAttachment, MediaError, MediaProxy,
+    MediaResource, MemberProfile, MemberProfileError, MemberProfileService, MembershipSender,
+    MessageSender, PowerLevelsSender, RecoverError, RedecryptUtdsError, RedecryptUtdsStats,
+    Relation, RoomEntrySender, RoomSettingsSender, SearchHit, SearchHits, SearchQuery,
+    SearchQueryError, SearchQueryParams, SendError, SenderTrustService, StageUploadError,
+    StageUploadRequest, StagedUpload, StagedUploadService, SyncStateProvider, TokenVerifier,
+    TrustBundle, TrustError, TrustSnapshot, UploadStream, VerificationService, VerifyError,
 };
 use axon_core::{
     CreateRoomRequest, MatrixProfile, PowerLevelChanges, PublicRoomsPage, PublicRoomsQuery,
@@ -414,15 +414,28 @@ impl MembershipOutcome {
 /// An in-memory [`MembershipSender`] for tests.
 pub struct StubMembership {
     outcome: MembershipOutcome,
+    leave_outcome: LeaveOutcome,
     calls: Mutex<Vec<MembershipCall>>,
 }
 
 impl StubMembership {
-    /// A stub that returns `Ok(())` for every call.
+    /// A stub that returns `Ok(())` for every call, reporting `leave` as a
+    /// confirmed [`LeaveOutcome::Left`].
     pub fn ok() -> Self {
         Self {
             outcome: MembershipOutcome::Ok,
+            leave_outcome: LeaveOutcome::Left,
             calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub whose `leave` succeeds without establishing that the membership
+    /// is gone — what the gateway reports for a homeserver `M_FORBIDDEN` on
+    /// the no-local-`Room` fallback (ADR 0091).
+    pub fn ok_unconfirmed() -> Self {
+        Self {
+            leave_outcome: LeaveOutcome::Unconfirmed,
+            ..Self::ok()
         }
     }
 
@@ -430,6 +443,7 @@ impl StubMembership {
     pub fn failing(outcome: MembershipOutcome) -> Self {
         Self {
             outcome,
+            leave_outcome: LeaveOutcome::Left,
             calls: Mutex::new(Vec::new()),
         }
     }
@@ -442,12 +456,12 @@ impl StubMembership {
 
 #[async_trait]
 impl MembershipSender for StubMembership {
-    async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError> {
+    async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<LeaveOutcome, SendError> {
         self.calls.lock().unwrap().push(MembershipCall::Leave {
             account_id,
             room_id: room_id.to_owned(),
         });
-        self.outcome.to_result()
+        self.outcome.to_result().map(|()| self.leave_outcome)
     }
 
     async fn forget(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError> {

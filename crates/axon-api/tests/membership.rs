@@ -282,6 +282,92 @@ async fn failed_leave_does_not_drop_pending_invite() {
         .expect("cleanup");
 }
 
+/// A leave the homeserver would not confirm (`M_FORBIDDEN` on the
+/// no-local-`Room` fallback) still answers 200 — the request stands — but it
+/// is not evidence the invite is gone, so the row and the inbox stay put.
+/// Deleting here would silently destroy an invite that is still pending;
+/// ADR 0091 puts that reconciliation on the sync watcher, which has a
+/// per-room signal to do it with.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn unconfirmed_leave_keeps_pending_invite() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@leave-unconfirmed-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!leave-unconf-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_room_invite(
+            account_id,
+            &room_id,
+            &RoomInviteSnapshot {
+                name: Some("Unconfirmed".to_owned()),
+                avatar_url: None,
+                topic: None,
+                canonical_alias: None,
+                room_type: None,
+                inviter_user_id: "@alice:localhost".to_owned(),
+                inviter_display_name: None,
+                is_direct: false,
+                encrypted: false,
+            },
+        )
+        .await
+        .expect("seed invite");
+
+    let stub = Arc::new(StubMembership::ok_unconfirmed());
+    let (live, mut rx) = tokio::sync::broadcast::channel(16);
+    let app = axon_api::router(
+        AppState::new(
+            store.clone(),
+            live,
+            Arc::new(StubSender::ok("$unused:localhost")),
+            Arc::new(StubLifecycle::ok(Uuid::nil())),
+            Arc::new(StubVerification::ok("$unused-flow")),
+            Arc::new(StubTrust::ok()),
+            Arc::new(StubDeviceList::ok()),
+            Arc::new(StubTokenVerifier::ok()),
+            Arc::new(StubMediaProxy),
+            None,
+        )
+        .with_membership(stub),
+    );
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/leave"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"], json!({}));
+
+    let remaining = store.list_invites(Some(account_id)).await.expect("list");
+    assert_eq!(
+        remaining.len(),
+        1,
+        "an unconfirmed leave must not drop the invite row, got {remaining:?}"
+    );
+    assert_eq!(remaining[0].room_id, room_id);
+    assert!(
+        rx.try_recv().is_err(),
+        "an unconfirmed leave must not emit invite.removed"
+    );
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn forget_routes_to_sender_and_envelope_result() {

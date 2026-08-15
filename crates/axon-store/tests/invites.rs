@@ -148,7 +148,7 @@ async fn list_invites_excludes_deactivated_accounts_and_other_accounts() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn delete_and_stale_prune_return_removed_ids() {
+async fn delete_reports_whether_a_row_was_removed() {
     let store = common::migrated_store().await;
     let pool = common::raw_pool().await;
     let account_id = test_account(&store, "invite-del").await;
@@ -173,15 +173,6 @@ async fn delete_and_stale_prune_return_removed_ids() {
         .await
         .expect("already gone"));
 
-    store
-        .upsert_room_invite(account_id, &drop, &snapshot("@a:localhost", "Drop"))
-        .await
-        .expect("reinsert");
-    let removed = store
-        .delete_stale_room_invites(account_id, std::slice::from_ref(&keep))
-        .await
-        .expect("prune");
-    assert_eq!(removed, vec![drop]);
     let left = store.list_invites(Some(account_id)).await.expect("left");
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].room_id, keep);

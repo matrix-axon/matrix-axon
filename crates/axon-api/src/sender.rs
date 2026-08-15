@@ -136,19 +136,36 @@ pub trait EphemeralSender: Send + Sync {
     ) -> Result<(), SendError>;
 }
 
+/// What a [`MembershipSender::leave`] call established about the membership.
+/// Port-side mirror of `axon_sync::gateway::LeaveOutcome`, the same way
+/// [`SendError`] mirrors that crate's `GatewayError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaveOutcome {
+    /// The homeserver accepted the leave. The account is no longer a member,
+    /// so local bookkeeping for that membership can be torn down.
+    Left,
+    /// The request stands, but the homeserver's answer did not establish that
+    /// the membership is gone. Callers must leave locally-persisted
+    /// membership state (notably `room_invites`) in place and let sync
+    /// reconcile it — see ADR 0091.
+    Unconfirmed,
+}
+
 /// Mutates this account's own or another user's membership in an
 /// already-joined room (ADR 0068, M19b): `leave`, `forget`, `invite`, `kick`,
 /// `ban`, `unban`. Split from [`MessageSender`] because these produce no event
 /// id a caller needs back — the resulting `m.room.member` state event round-trips
 /// through sync like any other state change — so every method here returns
-/// `()` on success, same shape as [`EphemeralSender`].
+/// `()` on success, same shape as [`EphemeralSender`]. `leave` is the one
+/// exception: it reports a [`LeaveOutcome`], because "the account left" and
+/// "the homeserver would not confirm it" must not drive the same local cleanup.
 #[async_trait]
 pub trait MembershipSender: Send + Sync {
     /// Leave this room (and any predecessor rooms via tombstone, per the SDK),
     /// or decline a pending invite. Must not require a local SDK `Room`
     /// handle — Sliding Sync can evict an invited room while Axon still
     /// lists it (ADR 0091).
-    async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError>;
+    async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<LeaveOutcome, SendError>;
 
     /// Forget a left or banned-from room, clearing it from the account's room
     /// list. The homeserver rejects forgetting a room this account is still

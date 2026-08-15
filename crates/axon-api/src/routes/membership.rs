@@ -27,7 +27,7 @@ use uuid::Uuid;
 use crate::dto::{InviteRequest, MemberActionRequest};
 use crate::extract::{Json, Path};
 use crate::response::{ApiError, ApiResponse};
-use crate::sender::MembershipSender;
+use crate::sender::{LeaveOutcome, MembershipSender};
 
 /// Leave this room.
 #[utoipa::path(
@@ -55,32 +55,42 @@ pub async fn leave_room(
 ) -> Result<ApiResponse<serde_json::Value>, ApiError> {
     let started_at = Instant::now();
     match membership.leave(account_id, &room_id).await {
-        Ok(()) => {
+        Ok(outcome) => {
             // A declined invite whose Room the SDK already evicted will never
-            // hit ADR 0091's positive-absence prune (`get_room` stays None
-            // and `invited_rooms()` stays empty). Drop the row here so
-            // reject cannot resurrect the invite on the next GET /v1/invites.
-            match store.delete_room_invite(account_id, &room_id).await {
-                Ok(true) => {
-                    let _ = live.send(LiveFrame::InviteRemoved(InviteRemovedFrame {
-                        account_id,
-                        room_id: room_id.clone(),
-                    }));
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    tracing::warn!(
-                        account_id = %account_id,
-                        room_id = %room_id,
-                        error = %err,
-                        "membership: leave succeeded but failed to drop pending invite"
-                    );
+            // hit ADR 0091's positive-absence prune (`get_room` stays None),
+            // so drop the row here — otherwise reject would resurrect the
+            // invite on the next GET /v1/invites.
+            //
+            // Only on a confirmed leave, though. `Unconfirmed` means the
+            // homeserver refused to say whether the membership is gone, and
+            // deleting the row on that would silently destroy an invite that
+            // is still pending; a row that outlives the invite is the
+            // recoverable direction, and the watcher clears it as soon as the
+            // SDK hydrates the room.
+            if outcome == LeaveOutcome::Left {
+                match store.delete_room_invite(account_id, &room_id).await {
+                    Ok(true) => {
+                        let _ = live.send(LiveFrame::InviteRemoved(InviteRemovedFrame {
+                            account_id,
+                            room_id: room_id.clone(),
+                        }));
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            account_id = %account_id,
+                            room_id = %room_id,
+                            error = %err,
+                            "membership: leave succeeded but failed to drop pending invite"
+                        );
+                    }
                 }
             }
             tracing::info!(
                 account_id = %account_id,
                 room_id = %room_id,
                 elapsed_ms = started_at.elapsed().as_millis(),
+                confirmed = outcome == LeaveOutcome::Left,
                 "membership: leave succeeded"
             );
             Ok(ApiResponse::new(serde_json::json!({})))

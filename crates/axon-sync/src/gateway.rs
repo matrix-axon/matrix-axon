@@ -607,6 +607,24 @@ fn message_relates_to(relation: Relation<'_>) -> Result<Option<Value>, GatewayEr
 type PowerLevelLock = Arc<AsyncMutex<()>>;
 type PowerLevelLocks = Arc<Mutex<HashMap<(Uuid, String), PowerLevelLock>>>;
 
+/// What [`SdkGateway::leave`] managed to establish about the membership.
+///
+/// Both variants are a success as far as the client is concerned — the
+/// request stands — but only [`Left`](LeaveOutcome::Left) is evidence about
+/// the room, so callers must not drive destructive local bookkeeping (such as
+/// dropping the `room_invites` row) off [`Unconfirmed`](LeaveOutcome::Unconfirmed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaveOutcome {
+    /// The homeserver accepted the leave, or the SDK's own `Room::leave` did.
+    Left,
+    /// The homeserver answered `M_FORBIDDEN` to the no-local-`Room` fallback.
+    /// Most often that means "not in that room" — already left, or the invite
+    /// withdrawn — but it is also what a server ACL or an unknown room
+    /// returns, and without a local [`Room`] there is nothing to tell them
+    /// apart. Treat the membership as unknown until sync says otherwise.
+    Unconfirmed,
+}
+
 /// Sends Matrix message-like events on behalf of an account, routed through that
 /// account's SDK client. Cheap to [`Clone`] (every field is a handle).
 #[derive(Clone)]
@@ -942,14 +960,23 @@ impl SdkGateway {
     /// while Axon still lists it in `room_invites`. Reject must not depend
     /// on `get_room`: a missing local [`Room`] falls through to the same
     /// `POST /_matrix/client/v3/rooms/{roomId}/leave` the SDK would send.
-    /// A homeserver `M_FORBIDDEN` on that fallback is treated as success,
-    /// matching [`Room::leave`]'s own handling of "already left / not invited."
-    pub async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<(), GatewayError> {
+    /// A homeserver `M_FORBIDDEN` on that fallback reports
+    /// [`LeaveOutcome::Unconfirmed`] rather than a plain success — see that
+    /// variant for why the distinction matters.
+    pub async fn leave(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<LeaveOutcome, GatewayError> {
         let client = self.manager.get_or_connect(account_id).await?;
         let parsed =
             RoomId::parse(room_id).map_err(|e| GatewayError::Invalid(format!("room id: {e}")))?;
         if let Some(room) = client.get_room(&parsed) {
-            return room.leave().await.map_err(map_sdk_err);
+            return room
+                .leave()
+                .await
+                .map(|()| LeaveOutcome::Left)
+                .map_err(map_sdk_err);
         }
         tracing::info!(
             %account_id,
@@ -960,16 +987,17 @@ impl SdkGateway {
             .send(leave_room::v3::Request::new(parsed.to_owned()))
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(LeaveOutcome::Left),
             Err(err) => {
                 let sdk_err = matrix_sdk::Error::from(err);
                 if matches!(sdk_err.client_api_error_kind(), Some(ErrorKind::Forbidden)) {
                     tracing::info!(
                         %account_id,
                         %room_id,
-                        "leave: homeserver forbidden without a local Room; treating as already left"
+                        "leave: homeserver forbidden without a local Room; \
+                         membership unconfirmed"
                     );
-                    Ok(())
+                    Ok(LeaveOutcome::Unconfirmed)
                 } else {
                     Err(map_sdk_err(sdk_err))
                 }
