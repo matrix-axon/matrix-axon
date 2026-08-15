@@ -71,6 +71,12 @@ async function openRoomWith(
   await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
     'Live',
   )
+  // Live is the socket, not the routed timeline. Measuring before those
+  // events land made `.body-html pre` null — WebKit in a long suite loses
+  // that race; Chromium usually does not. The table is unique to this
+  // fixture, so once it is in the DOM the GET has been applied.
+  await expect(page.locator('.body-html pre')).toBeVisible()
+  await expect(page.locator('.body-html table')).toBeVisible()
 }
 
 const geometry = (page: import('@playwright/test').Page) =>
@@ -140,7 +146,10 @@ test('wide content scrolls inside its own box instead of the pane', async ({
     const main = document.querySelector('main')!
     const mainRight = main.getBoundingClientRect().right
     const inspect = (selector: string) => {
-      const el = document.querySelector<HTMLElement>(selector)!
+      const el = document.querySelector<HTMLElement>(selector)
+      if (el === null) {
+        throw new Error(`missing ${selector}`)
+      }
       return {
         scrollsItself: el.scrollWidth > el.clientWidth + 1,
         withinPane: el.getBoundingClientRect().right <= mainRight + 0.5,

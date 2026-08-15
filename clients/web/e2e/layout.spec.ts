@@ -755,8 +755,10 @@ test('topbar stays pinned when the composer is focused', async ({ page }) => {
   await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
     'Live',
   )
-
-  const composer = page.getByRole('textbox', { name: /^Message/ })
+  // Live is the socket. The placeholder stays the generic "Message" until
+  // the room list names this room; WebKit in a long suite loses that race.
+  const composer = page.getByRole('textbox', { name: 'Message E2E Room' })
+  await expect(composer).toBeVisible()
   const emptyComposer = await composer.evaluate((el) => {
     const textarea = el as HTMLTextAreaElement
     return {

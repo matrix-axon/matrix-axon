@@ -81,7 +81,9 @@ test('attaches a file, uploads its real bytes, and sends it with a caption', asy
   await expect(page.locator('.composer-attachment')).toContainText('cat.png')
   expect(await staged(page)).toHaveLength(before)
 
-  await page.locator('.composer textarea').fill('look at this')
+  const composer = page.getByRole('textbox', { name: /^Message/ })
+  await composer.fill('look at this')
+  await expect(composer).toHaveValue('look at this')
   await page.getByRole('button', { name: 'Send' }).click()
 
   await expect
@@ -99,8 +101,10 @@ test('attaches a file, uploads its real bytes, and sends it with a caption', asy
   expect(upload.filename).toBe('cat.png')
 
   // The sent event lands in the timeline, rendered as an image from the proxy.
+  // Key the caption by text rather than `.media-figure`.last(): seed images
+  // have figures too, and a late echo would make last() the wrong row.
   await expect(page.locator('.composer-attachment')).toHaveCount(0)
-  const sent = page.locator('.media-figure').last()
+  const sent = page.locator('.media-figure', { hasText: 'look at this' })
   await expect(sent.locator('figcaption')).toHaveText('look at this')
   await expect(sent.locator('img')).toHaveAttribute('src', /^blob:/)
 })

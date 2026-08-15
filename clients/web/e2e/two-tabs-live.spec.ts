@@ -3,6 +3,7 @@ import {
   test,
   type BrowserContext,
   type BrowserContextOptions,
+  type Page,
   type TestInfo,
 } from '@playwright/test'
 import { LIVE_TIMEOUT_MS, RECONNECT_TIMEOUT_MS } from './helpers'
@@ -34,6 +35,29 @@ function projectContextOptions(testInfo: TestInfo): BrowserContextOptions {
   return { deviceScaleFactor, hasTouch, isMobile, userAgent, viewport }
 }
 
+/**
+ * Submit the composer the way the current layout actually sends.
+ *
+ * Desktop: Enter sends. Single-pane (the iPhone project, any viewport under
+ * 48rem) treats Enter as a newline so a phone can compose a multi-line
+ * message; the Send button is the submit path. The composer advertises that
+ * split on `enterkeyhint` (`send` vs `enter`), so this follows the product
+ * rather than guessing from the project name.
+ *
+ * This file is about the socket, not which affordance submitted. The Send
+ * button has its own coverage in `media-send`, `reaction-scroll` and
+ * `layout`. Desktop engines still go through Enter here.
+ */
+async function submitComposer(page: Page): Promise<void> {
+  const composer = page.getByRole('textbox', { name: /^Message/ })
+  const hint = await composer.getAttribute('enterkeyhint')
+  if (hint === 'enter') {
+    await page.getByRole('button', { name: 'Send' }).click()
+    return
+  }
+  await composer.press('Enter')
+}
+
 /** A signed-in tab: seed the token before app scripts run, then open the room. */
 async function openRoom(context: BrowserContext) {
   await context.addInitScript(() =>
@@ -59,16 +83,10 @@ test('two tabs see each other messages live', async ({ browser }, testInfo) => {
   const tabB = await openRoom(contextB)
 
   // Tab A sends; the mock broadcasts a timeline.event to every socket.
-  //
-  // Enter rather than the Send button, matching the sibling test below. What
-  // this file is about is the socket, not which affordance submitted — and the
-  // button has its own coverage in `media-send`, `reaction-scroll` and
-  // `layout`. Enter was measured working on all three engines, so there is no
-  // cross-browser reason to differ here.
   const message = `live hello ${Date.now()}`
   const composer = tabA.getByRole('textbox', { name: /^Message/ })
   await composer.fill(message)
-  await composer.press('Enter')
+  await submitComposer(tabA)
 
   // Tab B renders it live — no reload — via the M-W6 frame router + ingestLive.
   await expect(
@@ -101,7 +119,7 @@ test('typing in one tab surfaces the indicator in another', async ({
   await expect(tabB.getByText(/is typing/)).toBeVisible()
 
   // Sending clears the notice (typing:false), so the indicator disappears.
-  await composer.press('Enter')
+  await submitComposer(tabA)
   await expect(tabB.getByText(/is typing/)).toBeHidden()
 
   await contextA.close()
