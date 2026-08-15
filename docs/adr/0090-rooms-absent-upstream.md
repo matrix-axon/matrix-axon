@@ -146,6 +146,16 @@ that window (at most `UNREAD_COUNTS_RESWEEP`). The visible effect is a missing
 unread badge for a few minutes on a room that just came back, which is the mild
 direction to err in.
 
+**A failed re-read keeps the previous set.** Re-reading the table every sweep is
+what makes suppression revocable, but it also means a store error has to be told
+apart from an empty answer: "no room is gone" and "we could not find out" arrive
+at the same place. The first version returned an empty set for both, so one
+transient pool timeout un-suppressed every confirmed room, and the sweep running
+immediately after wrote each purged room's stale non-zero snapshot back and
+broadcast it — the frozen badge, restored for a whole window. Only a successful
+read replaces the set. At the initial seed there is no prior set to lose, so an
+error there does start empty, and the first re-sweep corrects it.
+
 **A success beats a probe that was already in flight.** `mark_room_upstream_gone`
 promotes only a row that is still `suspect`, so a genuine room-scoped call that
 succeeds while a probe is outstanding — the probe holds a round trip open for up

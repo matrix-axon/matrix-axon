@@ -2165,18 +2165,21 @@ async fn seed_unread_counts_cache(
 /// (`SdkGateway::note_room_reachability`), and an accumulate-only set would keep
 /// pinning that room's counts to zero for the rest of the process even though
 /// the homeserver serves it again.
-async fn read_gone_upstream_rooms(store: &Store, account_id: Uuid) -> HashSet<OwnedRoomId> {
-    let rows = match store.rooms_gone_upstream(account_id).await {
-        Ok(rows) => rows,
-        Err(err) => {
-            tracing::warn!(
-                %account_id, error = %err,
-                "failed to read rooms absent upstream; starting that set empty"
-            );
-            return HashSet::new();
-        }
-    };
-    rows.iter()
+///
+/// Returns `Err` rather than an empty set on a failed read, because "no room is
+/// gone" and "we could not find out" are different answers and only one of them
+/// is safe to act on. At the seed there is no prior state to lose, so the caller
+/// starts empty; at a re-sweep the same value would drop every confirmed verdict
+/// on one transient pool timeout, and the sweep immediately after would write
+/// each purged room's stale non-zero SDK snapshot back and broadcast it — the
+/// frozen badge this ADR exists to clear, restored for a full re-sweep window.
+async fn read_gone_upstream_rooms(
+    store: &Store,
+    account_id: Uuid,
+) -> Result<HashSet<OwnedRoomId>, axon_store::StoreError> {
+    let rows = store.rooms_gone_upstream(account_id).await?;
+    Ok(rows
+        .iter()
         .filter_map(|room_id| match RoomId::parse(room_id) {
             Ok(parsed) => Some(parsed),
             Err(_) => {
@@ -2184,7 +2187,36 @@ async fn read_gone_upstream_rooms(store: &Store, account_id: Uuid) -> HashSet<Ow
                 None
             }
         })
-        .collect()
+        .collect())
+}
+
+/// Apply a re-sweep's re-read of the absent-upstream set, keeping the current
+/// one if the read failed (ADR 0090).
+///
+/// Split out so the choice is testable without a store: it is a two-line
+/// decision that was wrong once and is invisible in the loop it lives in. "No
+/// room is gone" and "we could not find out" arrive here as different values and
+/// must stay that way — replacing the set from an `Err` un-suppresses every
+/// confirmed room, and the sweep that runs next writes each purged room's stale
+/// non-zero snapshot back and broadcasts it.
+fn apply_gone_upstream_refresh(
+    gone_upstream: &Mutex<HashSet<OwnedRoomId>>,
+    account_id: Uuid,
+    refreshed: Result<HashSet<OwnedRoomId>, axon_store::StoreError>,
+) {
+    match refreshed {
+        Ok(rooms) => {
+            *gone_upstream
+                .lock()
+                .expect("unread-counts gone-upstream lock") = rooms;
+        }
+        Err(err) => {
+            tracing::warn!(
+                %account_id, error = %err,
+                "failed to refresh rooms absent upstream; keeping the previous set"
+            );
+        }
+    }
 }
 
 /// Verify rooms a failed room-scoped call flagged as suspect, and settle each
@@ -2384,8 +2416,21 @@ async fn watch_unread_counts(
     // Rooms a probe has already confirmed absent upstream (ADR 0090). Seeded from
     // the store for the same reason `last` is: a restart must not re-derive a
     // count for a room it has already ruled out, and the verdict is durable.
-    let gone_upstream: Mutex<HashSet<OwnedRoomId>> =
-        Mutex::new(read_gone_upstream_rooms(&store, account_id).await);
+    let gone_upstream: Mutex<HashSet<OwnedRoomId>> = Mutex::new(
+        read_gone_upstream_rooms(&store, account_id)
+            .await
+            .unwrap_or_else(|err| {
+                // Only safe to swallow here: there is no prior set to lose, and
+                // the first re-sweep re-reads it. Erring open means a purged
+                // room's badge stays wrong until then, which beats pinning a
+                // live room to zero on a verdict we never actually read.
+                tracing::warn!(
+                    %account_id, error = %err,
+                    "failed to read rooms absent upstream; starting that set empty"
+                );
+                HashSet::new()
+            }),
+    );
 
     let mut updates = client.room_info_notable_update_receiver();
     sweep_unread_counts(
@@ -2418,12 +2463,23 @@ async fn watch_unread_counts(
                 // whose row was cleared since the last pass stops being
                 // suppressed in the same window.
                 reconcile_upstream_rooms(&client, &store, account_id, &cancel).await;
-                {
-                    let refreshed = read_gone_upstream_rooms(&store, account_id).await;
-                    *gone_upstream
-                        .lock()
-                        .expect("unread-counts gone-upstream lock") = refreshed;
+                // `reconcile_upstream_rooms` returns on cancellation rather than
+                // finishing its backlog, so re-check before starting the two
+                // steps that follow: a store read plus a full sweep of up to
+                // `UNREAD_COUNTS_SWEEP_CONCURRENCY` concurrent writes. Without
+                // this, a shutdown signalled mid-probe still waits both of them
+                // out before the outer `select!` gets to look at the token
+                // again, which is the delay probing races to avoid.
+                if cancel.is_cancelled() {
+                    return;
                 }
+                // Only on a successful read; a failed one keeps the previous
+                // set. See `apply_gone_upstream_refresh`.
+                apply_gone_upstream_refresh(
+                    &gone_upstream,
+                    account_id,
+                    read_gone_upstream_rooms(&store, account_id).await,
+                );
                 sweep_unread_counts(&client, &store, account_id, &live_tx, &last, &gone_upstream, true)
                     .await;
             }
@@ -2643,7 +2699,16 @@ mod ephemeral_tests {
 
 #[cfg(test)]
 mod upstream_reconcile_tests {
-    use super::{probe_proves_room_absent, probe_verdict, unread_suppression_reason, ProbeVerdict};
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    use matrix_sdk::ruma::{OwnedRoomId, RoomId};
+    use uuid::Uuid;
+
+    use super::{
+        apply_gone_upstream_refresh, probe_proves_room_absent, probe_verdict,
+        unread_suppression_reason, ProbeVerdict,
+    };
 
     /// A healthy joined room is never suppressed — the whole point of the guard
     /// is that it fires only for rooms whose counts can no longer be corrected.
@@ -2717,6 +2782,52 @@ mod upstream_reconcile_tests {
         let failed: Result<(), ()> = Err(());
         assert_eq!(probe_verdict(&failed, Some(403)), ProbeVerdict::Absent);
         assert_eq!(probe_verdict(&failed, Some(404)), ProbeVerdict::Absent);
+    }
+
+    fn room(id: &str) -> OwnedRoomId {
+        RoomId::parse(id).expect("test room id")
+    }
+
+    /// A failed re-read is not evidence that nothing is gone.
+    ///
+    /// The set is replaced on every re-sweep, so a store error that produced an
+    /// empty set here would un-suppress every confirmed room on one transient
+    /// pool timeout — and the sweep that runs immediately after would write each
+    /// purged room's stale non-zero snapshot back and broadcast it, restoring
+    /// the frozen badge ADR 0090 exists to clear for a whole re-sweep window.
+    #[test]
+    fn a_failed_refresh_keeps_the_previous_gone_set() {
+        let gone: Mutex<HashSet<OwnedRoomId>> =
+            Mutex::new(HashSet::from([room("!purged:localhost")]));
+
+        apply_gone_upstream_refresh(
+            &gone,
+            Uuid::new_v4(),
+            Err(axon_store::StoreError::EmbeddedMigration(
+                "pool timeout".to_owned(),
+            )),
+        );
+
+        assert_eq!(
+            *gone.lock().unwrap(),
+            HashSet::from([room("!purged:localhost")]),
+            "a read that failed must not be read as an empty verdict set"
+        );
+    }
+
+    /// A successful re-read *does* replace it — including with an empty set,
+    /// which is how a recovered room stops being suppressed without a restart.
+    #[test]
+    fn a_successful_refresh_replaces_the_gone_set() {
+        let gone: Mutex<HashSet<OwnedRoomId>> =
+            Mutex::new(HashSet::from([room("!recovered:localhost")]));
+
+        apply_gone_upstream_refresh(&gone, Uuid::new_v4(), Ok(HashSet::new()));
+
+        assert!(
+            gone.lock().unwrap().is_empty(),
+            "clearing a room's row must un-suppress it in the same window"
+        );
     }
 
     /// A served room clears its suspicion, and the status carried alongside a
