@@ -84,17 +84,37 @@ pub(crate) struct ReceiptTarget {
 /// nothing in `events` is displayed at all.
 ///
 /// The filter matters: ADR 0089's rule is "among the events it has actually
-/// displayed", and [`should_show_event`] is this client's definition of that.
-/// It also keeps the bug case honest — the `uk.half-shot.bridge` state event
-/// that started all this is hidden at the default settings, so it must not be a
-/// legal receipt target even when it happens to be arrival-max.
+/// displayed", so this has to match what the main timeline renders —
+/// [`App::selected_events`]'s pair of `should_show_event` **and**
+/// `thread_visible`, not either one alone. It keeps the bug case honest: the
+/// `uk.half-shot.bridge` state event that started all this is hidden at the
+/// default settings, so it must not be a legal receipt target even when it is
+/// arrival-max.
+///
+/// `thread_visible` is checked with `thread_panel: None`, because this answers
+/// "what does the *main* timeline show" and the only caller (room open) clears
+/// the panel moments later. Without it a thread reply could be receipted while
+/// hidden behind its root's badge, on two paths — a room's first-ever load,
+/// where `collect_unseen_thread_promotions` has no marker to measure against
+/// and promotes nothing at all; and any load where the reply is *backfilled*,
+/// since promotion requires `origin_ts > marker_ts` and a backfilled reply is
+/// old by `origin_ts` while being new by `arrival_order`. That second path is
+/// this ADR's own scenario, which is what makes the omission more than
+/// theoretical. Caught in review on #165.
+///
+/// The live path in [`super::timeline`] needs no equivalent: it promotes a
+/// thread reply into `promoted_thread_events` before it reaches the read gate
+/// (or the panel is open on that root, which displays it), so anything that
+/// gets there is visible by construction.
 pub(crate) fn receipt_target_for(
     events: &[crate::api::EventDto],
     display: &crate::config::DisplayOptions,
+    promoted: &std::collections::HashSet<String>,
 ) -> Option<ReceiptTarget> {
     events
         .iter()
         .filter(|event| super::timeline::should_show_event(event, display))
+        .filter(|event| super::relations::thread_visible(event, None, promoted))
         .max_by_key(|event| event.arrival_order)
         .map(|event| ReceiptTarget {
             event_id: event.event_id.clone(),
@@ -907,6 +927,13 @@ mod tests {
         ]
     }
 
+    /// No thread reply has been promoted into the main timeline. The common
+    /// case, and the one that matters: promotion is what makes a reply visible
+    /// outside its thread panel.
+    fn nothing_promoted() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
     #[test]
     fn receipt_target_picks_arrival_max_not_display_last() {
         let display = display_with_state_events(true);
@@ -916,7 +943,9 @@ mod tests {
         // what does not cover the message in stream order.
         assert_eq!(page.last().unwrap().event_id, "$bridge");
         assert_eq!(
-            receipt_target_for(&page, &display).unwrap().event_id,
+            receipt_target_for(&page, &display, &nothing_promoted())
+                .unwrap()
+                .event_id,
             "$message"
         );
     }
@@ -927,7 +956,7 @@ mod tests {
         // they are not candidates — which is also the right answer here.
         let hidden = display_with_state_events(false);
         assert_eq!(
-            receipt_target_for(&portal_page(), &hidden)
+            receipt_target_for(&portal_page(), &hidden, &nothing_promoted())
                 .unwrap()
                 .event_id,
             "$message"
@@ -937,12 +966,61 @@ mod tests {
         // wins instead of it.
         let mut page = vec![arrival_event("$msg", 100, 10)];
         page.push(state_event("$topic", 200, 99, "m.room.topic"));
-        assert_eq!(receipt_target_for(&page, &hidden).unwrap().event_id, "$msg");
+        assert_eq!(
+            receipt_target_for(&page, &hidden, &nothing_promoted())
+                .unwrap()
+                .event_id,
+            "$msg"
+        );
         // With state events shown, that same event is a legal target.
         let shown = display_with_state_events(true);
         assert_eq!(
-            receipt_target_for(&page, &shown).unwrap().event_id,
+            receipt_target_for(&page, &shown, &nothing_promoted())
+                .unwrap()
+                .event_id,
             "$topic"
+        );
+    }
+
+    /// A thread reply the main timeline hides is not a receipt candidate, even
+    /// as arrival-max.
+    ///
+    /// `should_show_event` alone lets one through — it never looks at
+    /// `thread_relation()`, so `is_message_event()` passes any reply. The
+    /// rendered timeline additionally filters on `thread_visible`, which hides a
+    /// reply behind its root's badge until something promotes it. Two loads
+    /// reach here with nothing promoted: a room's first ever (no marker, so
+    /// `collect_unseen_thread_promotions` returns immediately), and any load
+    /// where the reply is *backfilled* — promotion needs `origin_ts >
+    /// marker_ts`, and a backfilled reply is old by `origin_ts` while being new
+    /// by `arrival_order`. The second is this ADR's own scenario, which is why
+    /// the numbers here are shaped like it. Review finding on #165.
+    #[test]
+    fn receipt_target_skips_an_unpromoted_thread_reply() {
+        let display = display_with_state_events(false);
+        let root = arrival_event("$root", 1_785_928_300_000, 1_871_400);
+        // Backfilled: oldest by origin_ts, newest by arrival order.
+        let mut reply = arrival_event("$reply", 1_785_928_200_000, 1_871_999);
+        reply.relates_to = Some(serde_json::json!({ "rel_type": "m.thread", "event_id": "$root" }));
+        let plain = arrival_event("$plain", 1_785_928_400_000, 1_871_500);
+        let page = vec![root, reply, plain];
+
+        assert_eq!(
+            receipt_target_for(&page, &display, &nothing_promoted())
+                .unwrap()
+                .event_id,
+            "$plain",
+            "an unpromoted thread reply is hidden from the main timeline, so it \
+             cannot be receipted however recently it arrived"
+        );
+
+        // Once promoted it *is* on screen, and then it is the right answer.
+        let promoted: std::collections::HashSet<String> = ["$reply".to_owned()].into();
+        assert_eq!(
+            receipt_target_for(&page, &display, &promoted)
+                .unwrap()
+                .event_id,
+            "$reply"
         );
     }
 
@@ -954,8 +1032,8 @@ mod tests {
             state_event("$topic", 200, 2, "m.room.topic"),
         ];
         // Nothing displayed → nothing to name, and the caller arms no receipt.
-        assert!(receipt_target_for(&page, &hidden).is_none());
-        assert!(receipt_target_for(&[], &hidden).is_none());
+        assert!(receipt_target_for(&page, &hidden, &nothing_promoted()).is_none());
+        assert!(receipt_target_for(&[], &hidden, &nothing_promoted()).is_none());
     }
 
     #[test]

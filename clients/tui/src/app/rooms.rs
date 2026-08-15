@@ -277,7 +277,11 @@ impl App {
                 // event (`page.events` is ascending by `origin_ts`), the receipt
                 // names the greatest `arrival_order` among the events actually
                 // shown (ADR 0089).
-                let receipt = super::read_markers::receipt_target_for(&page.events, &self.display);
+                let receipt = super::read_markers::receipt_target_for(
+                    &page.events,
+                    &self.display,
+                    &self.promoted_thread_events,
+                );
                 if let Some(newest) = page.events.last() {
                     let (event_id, origin_ts) = (newest.event_id.clone(), newest.origin_ts);
                     self.note_room_read(key.clone(), &event_id, origin_ts, receipt);
