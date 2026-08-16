@@ -583,9 +583,37 @@ It is not a test lane and is not a CI gate — it needs Docker and several
 minutes — but its scenes are the only thing that walks these render paths
 against a real backend, so a scene that stops passing is a real finding.
 
+## Definition of done for a UI change
+
+The milestone bar below is for a milestone. This is the bar for any PR that
+changes what the client renders — `src/pages/`, `src/components/`, CSS, or the
+stores behind them. Playwright is deliberately **not** in the pre-push hook (ADR
+0092: browsers and minutes), so it is on you rather than on the gate.
+
+- **Run `pnpm test:e2e` before pushing** a change to rendering or interaction.
+  `web-e2e.yml` gates the PR on chromium, firefox and webkit-desktop anyway; the
+  local round trip is minutes, and a CI round trip is not. It builds first, which
+  matters — see "the e2e lane serves `dist/`" under Testing traps, and kill any
+  long-lived `e2e/mock-server.mjs` before you start.
+- **Anything whose failure mode is layout or a real browser API needs an e2e
+  spec, not a jsdom test.** Viewport and keyboard geometry, scroll anchoring,
+  `IntersectionObserver`, history and reload classification, and upload bytes are
+  all invisible to jsdom — it will report your code correct. This generalizes the
+  root `AGENTS.md` rule about `expectPaneCenterUncovered()`, which is one
+  instance of it. Everything else stays a vitest interaction test, which is
+  faster and more precise.
+- **Layout, scrolling, or composer changes run the iPhone profile too:**
+  `MOBILE_E2E=1 pnpm exec playwright test --project=webkit-iphone`. CI does not
+  run that project on a pull request — only after the change merges to `main` —
+  so a mobile regression that a PR introduces is found by whoever notices it on a
+  phone.
+- **A change that only touches stores, api, or types** does not need any of this;
+  `pnpm test` covers it.
+
 ## Definition of done for a milestone
 
-`pnpm test && pnpm lint && pnpm format:check && pnpm build` all green; new
+`pnpm test && pnpm lint && pnpm format:check && pnpm build` all green; the UI
+bar above met for anything the milestone renders; new
 logic has unit tests (stores) and interaction tests (pages, msw-backed);
 README status paragraph updated; a human pass against the live server
 (read-only outside the test room); **`docs/demo-coverage.md` updated in the same
