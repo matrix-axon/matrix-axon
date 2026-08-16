@@ -76,17 +76,38 @@ repos:
         stages: [pre-push]
       # Workspace members: crates/*, clients/tui, smoke/{tui,server,local-stack}.
       # rustfmt is seconds; clippy matches CI and is the next-cheapest catch.
+      #
+      # The filter is *.rs, *.toml and *.sql under those trees, not the bare
+      # directory prefixes: a full `cargo clippy --all-features --all-targets`
+      # is minutes, and a README or a corpus fixture cannot change a
+      # compilation unit.
+      #
+      # Two things here are compile-time file inputs and are in the filter for
+      # that reason, not by accident:
+      #   * tests/fixtures/ -- axon-sync's redecrypt.rs and backfill.rs
+      #     `include_str!` from it, and it lives outside crates/, so the old
+      #     directory-prefix filter missed it entirely.
+      #   * crates/axon-store/migrations/*.sql -- migrations.rs embeds the
+      #     directory with `include_dir!` (NOT sqlx::migrate!, which would drag
+      #     sqlx-sqlite in and collide with matrix-sdk's rusqlite). A .sql edit
+      #     changes the embedded checksums that axon-server reads and that
+      #     axon-store's tests assert on. Grepping only for include_str!/
+      #     migrate! misses this; check for include_dir! too.
+      # Beyond those: no sqlx::query! macros, no .sqlx offline data, and both
+      # build.rs files read only env vars and git/jj output. If that changes,
+      # widen this in the same commit -- scripts/check-hook-filters.py pins the
+      # intended selection, so it will tell you.
       - id: rustfmt
         name: rustfmt (check)
         language: system
         entry: cargo fmt --all -- --check
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rustfmt\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|crates/|clients/tui/|smoke/)'
+        files: &rust_files '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rustfmt\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|tests/fixtures/.*|(crates|clients/tui|smoke)/.*\.(rs|toml|sql))$'
         pass_filenames: false
         stages: [pre-push]
       - id: rust-clippy
         name: clippy
         language: system
         entry: cargo clippy --all-features --all-targets -- -D warnings
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|crates/|clients/tui/|smoke/)'
+        files: *rust_files
         pass_filenames: false
         stages: [pre-push]
