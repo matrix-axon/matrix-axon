@@ -29,8 +29,36 @@
 # Check-only: failures print the same command CI expects locally.
 minimum_pre_commit_version: "3.2.0"
 repos:
+  # actionlint vendors its own binary, so it needs nothing installed -- the same
+  # property that makes prettier-web work everywhere. `.github/actionlint.yaml`
+  # (the self-hosted runner labels) is picked up from the repo root.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+        stages: [pre-push]
   - repo: local
     hooks:
+      # Cheapest first: these three are git plumbing and shell, seconds at most,
+      # and they fail before anything spends a build on the same push.
+      - id: adr-numbers
+        name: ADR numbers are unique
+        language: system
+        entry: scripts/check-adr-numbers.sh
+        files: '^docs/adr/'
+        pass_filenames: false
+        stages: [pre-push]
+      - id: migrations-immutable
+        name: applied migrations are immutable
+        language: system
+        # No base ref: the script searches base/main, upstream/main,
+        # origin/main, main. `git fetch upstream main` before trusting a clean
+        # result -- a lagging fork's main reads as though this branch changed a
+        # published migration (AGENTS.md, ADR 0004).
+        entry: scripts/check-migrations-immutable.sh
+        files: '^crates/axon-store/migrations/'
+        pass_filenames: false
+        stages: [pre-push]
       - id: prettier-web
         name: prettier (web, check)
         language: node

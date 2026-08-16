@@ -20,17 +20,11 @@ jobs:
       - name: check-environment
         uses: ./.github/actions/check-environment
 
+      # Same script the pre-push hook runs (.pre-commit-config.yaml), so CI and
+      # the local gate cannot disagree about what a valid ADR number is.
       - name: check-duplicate-adrs
         shell: bash
-        run: |
-          echo "Checking for duplicate ADR numbers..."
-          adr_dupe=$(ls -1 docs/adr/ | sed -E 's/([0-9]{4})-.*/\1/g' | sort | uniq -c | awk '$1 > 1 {print $2}')
-          if [ -n "${adr_dupe}" ]; then
-            echo "Duplicate ADR number ${adr_dupe} detected, renumber before submitting PR"
-            exit 1
-          else
-            echo 'ADR numbers clear.'
-          fi
+        run: ./scripts/check-adr-numbers.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
