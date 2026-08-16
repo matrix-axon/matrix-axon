@@ -139,3 +139,22 @@ repos:
         files: *rust_files
         pass_filenames: false
         stages: [pre-push]
+      # The expensive gate, and the only thing in this file that is not also a
+      # push-triggered CI job: lint-and-test.yml is workflow_dispatch-only and
+      # lint-and-clippy.yml has no test step, so nothing else runs the suite
+      # before review. `SKIP=cargo-test` to skip it deliberately.
+      - id: cargo-test
+        name: cargo test --all
+        language: system
+        entry: cargo test --all
+        files: *rust_files
+        pass_filenames: false
+        stages: [pre-push]
+      # Last, and a no-op unless RUN_SMOKE names a lane. Docker + minutes.
+      - id: smoke-gate
+        name: smoke gate (opt in with RUN_SMOKE=<lane>)
+        language: system
+        entry: scripts/smoke-gate-hook.sh
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
