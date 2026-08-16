@@ -124,12 +124,30 @@ pub async fn send_round_trip(ctx: &Ctx) -> ScenarioOutcome {
 
 /// Wait until the room list, the seeded message, and the input line have all
 /// painted — i.e. the TUI is up and talking to the stub.
+/// Wait until the stub profile has actually painted: room list, input line,
+/// **and** the seeded timeline.
+///
+/// The timeline assertion is the important one. Without it, first paint was
+/// satisfied by the chrome alone, so a page the TUI rejected wholesale looked
+/// identical to a page it rendered — which is how #190 hid: the stub's
+/// `EventDto` was missing `arrival_order`, every timeline response failed to
+/// deserialize, and *every* stub scenario ran against an empty message pane
+/// without noticing. Only the one scenario that needed a request made on the
+/// success path went red, and it reported a missing `/threads` rather than the
+/// empty timeline that caused it.
+///
+/// Every stub scenario is seeded with the "smoke seed" message by
+/// `get_timeline`, so this holds for all of them.
 fn wait_first_paint(
     driver: &mut PtyDriver,
     state: &StubState,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    wait_for_room_and_input(driver, &state.room_name, timeout)
+    wait_for_room_and_input(driver, &state.room_name, timeout)?;
+    driver.wait_for_screen_or_exit("the seeded timeline to render", timeout, |screen| {
+        screen.contains("smoke seed")
+    })?;
+    Ok(())
 }
 
 fn wait_for_room_and_input(
@@ -185,7 +203,22 @@ where
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(anyhow!("timed out after {timeout:?} waiting for {what}"));
+            // Name what *did* arrive. Without it the message says only which
+            // request never came, which cannot distinguish "the TUI asked and
+            // the stub rejected it" from "the TUI never got far enough to ask"
+            // — two failures with completely different causes.
+            let seen = state.journal();
+            let served = if seen.is_empty() {
+                "nothing at all".to_owned()
+            } else {
+                seen.iter()
+                    .map(|e| format!("{} {}", e.method, e.path))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return Err(anyhow!(
+                "timed out after {timeout:?} waiting for {what}; stub served: {served}"
+            ));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
