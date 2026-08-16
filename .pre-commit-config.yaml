@@ -28,6 +28,8 @@
 #
 # Check-only: failures print the same command CI expects locally.
 minimum_pre_commit_version: "3.2.0"
+# So a bare `pre-commit install` picks up pre-push, matching setup-hooks.sh.
+default_install_hook_types: [pre-push]
 repos:
   # actionlint vendors its own binary, so it needs nothing installed -- the same
   # property that makes prettier-web work everywhere. `.github/actionlint.yaml`

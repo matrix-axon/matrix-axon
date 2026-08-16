@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-command -v actionlint && actionlint
-cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-echo "pre-commit: ok"
