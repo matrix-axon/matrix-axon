@@ -90,9 +90,11 @@ positive signal, but only when the homeserver confirms it — see below.
 ### Reject must not delete on an unconfirmed leave
 
 `POST .../leave` falls back to a raw client-server `leave` when the SDK has
-no local `Room`. A homeserver `M_FORBIDDEN` there usually means "not in that
-room", but it is also what a server ACL or an unknown room returns, and with
-no `Room` to corroborate against there is nothing to tell them apart.
+no local `Room`. A homeserver `M_FORBIDDEN`, `M_NOT_FOUND`, or `M_UNKNOWN`
+there usually means "not in that room" (already left, invite withdrawn, or
+the server no longer resolves it), but `M_FORBIDDEN` is also what a server
+ACL returns, and with no `Room` to corroborate against there is nothing to
+tell them apart.
 `SdkGateway::leave` therefore reports `LeaveOutcome::{Left, Unconfirmed}`
 rather than a bare `Ok(())`. Both answer `200` — the request stands — but
 only `Left` may drive the `room_invites` delete. (`Room::leave` can absorb

@@ -61,12 +61,14 @@ pub async fn leave_room(
             // so drop the row here — otherwise reject would resurrect the
             // invite on the next GET /v1/invites.
             //
-            // Only on a confirmed leave, though. `Unconfirmed` means the
-            // homeserver refused to say whether the membership is gone, and
-            // deleting the row on that would silently destroy an invite that
-            // is still pending; a row that outlives the invite is the
-            // recoverable direction, and the watcher clears it as soon as the
-            // SDK hydrates the room.
+            // Only on a confirmed leave. `Unconfirmed` is not evidence the
+            // membership is gone; deleting then would silently destroy an
+            // invite that is still pending. A successful decline via
+            // `Room::leave` is `Left` too, so this cannot be gated on "looks
+            // like an invite" — every ordinary room leave issues one
+            // indexed DELETE that matches nothing. That miss is accepted
+            // (same shape as `note_room_reachability`'s clear); a SELECT
+            // first would cost more than the no-op delete.
             if outcome == LeaveOutcome::Left {
                 match store.delete_room_invite(account_id, &room_id).await {
                     Ok(true) => {

@@ -2721,6 +2721,19 @@ async fn capture_invite(
         }
     };
 
+    let is_direct = match room.is_direct().await {
+        Ok(is_direct) => is_direct,
+        Err(err) => {
+            tracing::warn!(
+                %account_id,
+                %room_id,
+                error = %err,
+                "failed to read whether the invite is a DM; leaving persisted row untouched"
+            );
+            return;
+        }
+    };
+
     let snapshot = RoomInviteSnapshot {
         name: room.name(),
         avatar_url: room.avatar_url().map(|url| url.to_string()),
@@ -2732,7 +2745,7 @@ async fn capture_invite(
             .inviter
             .as_ref()
             .and_then(|member| member.display_name().map(str::to_owned)),
-        is_direct: room.is_direct().await.unwrap_or(false),
+        is_direct,
         encrypted: room.encryption_state().is_encrypted(),
     };
 
