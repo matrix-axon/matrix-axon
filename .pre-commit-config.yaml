@@ -53,21 +53,25 @@ repos:
         name: web lint
         language: system
         entry: pnpm --dir clients/web lint
-        files: '^(\.github/workflows/web-lint-and-test\.yml|clients/web/|\.pre-commit-config\.yaml)$'
+        files: &web_sources '^(\.github/workflows/web-lint-and-test\.yml|clients/web/|\.pre-commit-config\.yaml)'
         pass_filenames: false
         stages: [pre-push]
       - id: web-test
         name: web test
         language: system
         entry: pnpm --dir clients/web test
-        files: '^(\.github/workflows/web-lint-and-test\.yml|clients/web/|\.pre-commit-config\.yaml)$'
+        files: *web_sources
         pass_filenames: false
         stages: [pre-push]
       - id: web-build
         name: web build
         language: system
         entry: pnpm --dir clients/web build
-        files: '^(\.github/workflows/web-lint-and-test\.yml|openapi/openapi\.json|clients/web/|\.pre-commit-config\.yaml)$'
+        # Deliberately not *web_sources: the build additionally consumes
+        # openapi/openapi.json (via the generated client), which lint and the
+        # unit tests do not. A YAML alias cannot extend a scalar, so this one
+        # is spelled out -- scripts/check-hook-filters.py pins both shapes.
+        files: '^(\.github/workflows/web-lint-and-test\.yml|openapi/openapi\.json|clients/web/|\.pre-commit-config\.yaml)'
         pass_filenames: false
         stages: [pre-push]
       # Workspace members: crates/*, clients/tui, smoke/{tui,server,local-stack}.
