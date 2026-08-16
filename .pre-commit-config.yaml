@@ -50,6 +50,16 @@ repos:
         files: '^docs/adr/'
         pass_filenames: false
         stages: [pre-push]
+      # A hook whose filter matches nothing passes forever without running --
+      # #180. This asserts the filters below select what they claim.
+      - id: hook-filters
+        name: pre-push filters select what they claim
+        language: python
+        additional_dependencies: ["pyyaml"]
+        entry: scripts/check-hook-filters.py
+        files: '^(\.pre-commit-config\.yaml|scripts/check-hook-filters\.py)$'
+        pass_filenames: false
+        stages: [pre-push]
       - id: migrations-immutable
         name: applied migrations are immutable
         language: system
