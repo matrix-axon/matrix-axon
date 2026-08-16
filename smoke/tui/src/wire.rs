@@ -50,6 +50,15 @@ pub struct EventDto {
     pub room_id: String,
     pub sender: String,
     pub state_key: Option<String>,
+    /// Monotonic ingest order, `events.id` on a real axon (ADR 0089).
+    ///
+    /// The TUI's own `EventDto` declares this **without** `#[serde(default)]`
+    /// on purpose — a defaulted `0` would freeze the read-receipt target on
+    /// the first event forever, so it would rather fail to deserialize. That
+    /// makes it required here too: a stub that omits it serves pages the TUI
+    /// rejects wholesale, which renders an empty timeline and no error the
+    /// scenarios can see (#190).
+    pub arrival_order: i64,
     pub origin_ts: i64,
     #[serde(rename = "type")]
     pub event_type: String,

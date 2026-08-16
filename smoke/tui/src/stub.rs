@@ -7,6 +7,7 @@
 //! live path renders it. Login and the remaining mutations are deferred to S2.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,6 +45,9 @@ pub struct StubState {
     /// Thread summaries returned by `GET .../rooms/{room_id}/threads`.
     pub thread_summaries: Vec<ThreadSummaryDto>,
     journal: Arc<Mutex<Vec<JournalEntry>>>,
+    /// Hands out `arrival_order` for live sends. Seeded above the highest value
+    /// `get_timeline` derives, so an echo is always newer than the whole page.
+    send_arrival_order: Arc<AtomicI64>,
     ws_tx: broadcast::Sender<String>,
 }
 
@@ -54,6 +58,7 @@ impl StubState {
         thread_summaries: Vec<ThreadSummaryDto>,
     ) -> Self {
         let (ws_tx, _) = broadcast::channel(64);
+        let extra_seed_count = extra_seed_bodies.len() as i64;
         Self {
             account_id: Uuid::new_v4(),
             user_id: "@smoke:localhost".to_owned(),
@@ -63,8 +68,15 @@ impl StubState {
             extra_seed_bodies,
             thread_summaries,
             journal: Arc::new(Mutex::new(Vec::new())),
+            send_arrival_order: Arc::new(AtomicI64::new(extra_seed_count + 2)),
             ws_tx,
         }
+    }
+
+    /// Next `arrival_order` for a live send: strictly greater than every value
+    /// `get_timeline` derives, and increasing per send.
+    fn next_arrival_order(&self) -> i64 {
+        self.send_arrival_order.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Snapshot of every request the stub has served so far.
@@ -111,13 +123,20 @@ impl StubState {
     }
 
     /// A message event in this room from the configured sender.
-    fn message_event(&self, event_id: String, body: String) -> EventDto {
+    ///
+    /// `arrival_order` is the caller's business: it must increase with ingest
+    /// order, and the newest event in a page must hold the greatest value
+    /// (ADR 0089), which is the opposite of this stub's newest-first page
+    /// order. Callers therefore compute it rather than letting this helper
+    /// guess.
+    fn message_event(&self, event_id: String, body: String, arrival_order: i64) -> EventDto {
         EventDto {
             account_id: self.account_id,
             event_id,
             room_id: self.room_id.clone(),
             sender: self.user_id.clone(),
             state_key: None,
+            arrival_order,
             origin_ts: now_ms(),
             event_type: "m.room.message".to_owned(),
             content: Some(serde_json::json!({ "msgtype": "m.text", "body": body })),
@@ -254,13 +273,22 @@ async fn get_timeline(
         &format!("/v1/accounts/{account_id}/rooms/{room_id}/timeline"),
         None,
     );
+    // The page is newest-first and `arrival_order` must be greatest for the
+    // newest, so count down from the page size. Values are stable across
+    // requests because they are derived from position, not a counter.
+    let newest = state.extra_seed_bodies.len() as i64 + 1;
     let seed = state.message_event(
         seed_event_id(&state.run_id),
         format!("smoke seed {}", state.run_id),
+        newest,
     );
     let mut events = vec![seed];
     for (i, body) in state.extra_seed_bodies.iter().enumerate() {
-        events.push(state.message_event(format!("$seed-extra-{i}-{}", state.run_id), body.clone()));
+        events.push(state.message_event(
+            format!("$seed-extra-{i}-{}", state.run_id),
+            body.clone(),
+            newest - 1 - i as i64,
+        ));
     }
     Json(ApiResponse {
         data: TimelinePage {
@@ -297,7 +325,7 @@ async fn post_send(
     );
 
     let event_id = format!("$smoke-{}", Uuid::new_v4());
-    let echo = state.message_event(event_id.clone(), request.body);
+    let echo = state.message_event(event_id.clone(), request.body, state.next_arrival_order());
     let envelope = WsEnvelope {
         kind: "timeline.event".to_owned(),
         account_id: state.account_id,
