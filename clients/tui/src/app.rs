@@ -2,6 +2,7 @@ use ratatui::layout::{Rect, Size};
 use ratatui_image::picker::Picker;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Semaphore};
 use uuid::Uuid;
 
@@ -51,6 +52,14 @@ pub(crate) use room_actions::{PendingRoomAction, RoomActionOutcome};
 pub(crate) use rooms::{account_localpart, apply_edits, dm_title_from_members};
 #[cfg(test)]
 use timeline::should_show_event;
+
+/// How long a Sixel image is left alone before its pixels are retransmitted.
+///
+/// tmux does not retain the pixel data behind a pane, so a Sixel image that
+/// scrolls, is uncovered, or simply sits there can lose it. Bumping a
+/// generation counter changes the encoded payload's trailing SGR, which is
+/// enough to make ratatui's cell diff re-emit the image.
+pub(crate) const SIXEL_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 const TIMELINE_LIMIT: usize = 50;
 pub(super) const PENDING_ECHO_MSG: &str =
@@ -804,7 +813,14 @@ pub(crate) struct App {
     pub(crate) sixel_inline_generation: u64,
     /// Changes periodically while a Sixel preview is open inside tmux, forcing
     /// ratatui's diff renderer to retransmit pixels that tmux does not retain.
+    ///
+    /// Per-preview, not global: [`App::open_popup`] resets it (and the deadline
+    /// below) so every preview starts on the canonical variant and gets its
+    /// first retransmit a full interval after *it* opened (#49).
     pub(crate) sixel_preview_generation: u64,
+    /// When the open Sixel preview is next due a retransmit. Lives here rather
+    /// than in the main loop because only `App` knows when a preview opens.
+    pub(crate) sixel_preview_refresh_after: Instant,
     /// Set for one frame after the media-preview popup closes so `draw()` can
     /// issue a targeted Clear over the former popup area.  Sixel/iTerm2 pixels
     /// are not erased by ratatui's cell-diff pass when the image disappears, so
@@ -1068,6 +1084,7 @@ impl App {
             verification: None,
             sixel_inline_generation: 0,
             sixel_preview_generation: 0,
+            sixel_preview_refresh_after: Instant::now() + SIXEL_REFRESH_INTERVAL,
             clear_media_preview: false,
             force_terminal_clear: false,
             prev_image_rects: Vec::new(),
@@ -1860,6 +1877,17 @@ impl App {
         self.popup_scroll = 0;
         if kind == PopupKind::Help {
             self.help_selection = 0;
+        }
+        if kind == PopupKind::MediaPreview {
+            // Start every preview from the canonical encoding and give it a
+            // full interval before its first retransmit. Both used to carry
+            // over from the previous preview — the counter is global and the
+            // deadline was a main-loop local — so a fresh preview could open on
+            // the alternate variant and be retransmitted immediately, or wait
+            // out most of an interval that had elapsed while nothing was open
+            // (#49).
+            self.sixel_preview_generation = 0;
+            self.sixel_preview_refresh_after = Instant::now() + SIXEL_REFRESH_INTERVAL;
         }
         self.mode = Mode::Popup(kind);
     }
@@ -5620,6 +5648,39 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('v'))).await;
 
         assert_eq!(app.mode, Mode::Popup(PopupKind::MediaPreview));
+    }
+
+    /// #49: the Sixel retransmit state is per-preview, not global.
+    ///
+    /// The counter selects between two encodings of the same image that differ
+    /// only in a trailing SGR, so a preview inheriting odd parity opens on the
+    /// alternate variant; the deadline used to be a main-loop local, so an
+    /// interval that elapsed while nothing was open left the next preview due
+    /// for a retransmit on its very first tick.
+    #[test]
+    fn opening_a_media_preview_resets_the_sixel_retransmit_state() {
+        let mut app = app_with_rooms(Vec::new());
+        app.sixel_preview_generation = 7;
+        app.sixel_preview_refresh_after = Instant::now() - Duration::from_secs(60);
+
+        app.open_popup(PopupKind::MediaPreview);
+
+        assert_eq!(app.sixel_preview_generation, 0);
+        assert!(app.sixel_preview_refresh_after > Instant::now());
+    }
+
+    /// Only the media preview owns this state; other popups leave it alone.
+    #[test]
+    fn opening_another_popup_leaves_the_sixel_retransmit_state_alone() {
+        let mut app = app_with_rooms(Vec::new());
+        app.sixel_preview_generation = 7;
+        let deadline = Instant::now() - Duration::from_secs(60);
+        app.sixel_preview_refresh_after = deadline;
+
+        app.open_popup(PopupKind::Help);
+
+        assert_eq!(app.sixel_preview_generation, 7);
+        assert_eq!(app.sixel_preview_refresh_after, deadline);
     }
 
     #[tokio::test]

@@ -500,8 +500,7 @@ async fn run_app(
     app.refresh_drafts().await;
 
     let mut tick = time::interval(Duration::from_millis(100));
-    let mut next_sixel_inline_refresh = Instant::now() + Duration::from_secs(5);
-    let mut next_sixel_preview_refresh = Instant::now() + Duration::from_secs(5);
+    let mut next_sixel_inline_refresh = Instant::now() + app::SIXEL_REFRESH_INTERVAL;
     loop {
         terminal.draw(|frame| draw(frame, &mut app))?;
 
@@ -523,16 +522,19 @@ async fn run_app(
                 {
                     app.sixel_inline_generation =
                         app.sixel_inline_generation.wrapping_add(1);
-                    next_sixel_inline_refresh = now + Duration::from_secs(5);
+                    next_sixel_inline_refresh = now + app::SIXEL_REFRESH_INTERVAL;
                 }
+                // The preview deadline lives on `app` so opening a preview can
+                // reset it; a main-loop local could not see that event, so it
+                // kept running between previews (#49).
                 if inside_tmux()
                     && app.picker.protocol_type() == ProtocolType::Sixel
                     && app.mode == Mode::Popup(PopupKind::MediaPreview)
-                    && now >= next_sixel_preview_refresh
+                    && now >= app.sixel_preview_refresh_after
                 {
                     app.sixel_preview_generation =
                         app.sixel_preview_generation.wrapping_add(1);
-                    next_sixel_preview_refresh = now + Duration::from_secs(5);
+                    app.sixel_preview_refresh_after = now + app::SIXEL_REFRESH_INTERVAL;
                 }
             }
             Some(event) = key_rx.recv() => {
