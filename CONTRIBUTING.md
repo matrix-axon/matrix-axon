@@ -266,6 +266,21 @@ agents alike. The rules that most often surprise a first contributor:
   `scripts/check-migrations-immutable.sh` enforces this in CI and in the hook.
 - **Docs track code in the same PR.** Behavior described by `README.md`,
   `AGENTS.md`, or this file must be updated alongside the change.
+- **Break prose lines after sentences, not at a column.**
+  One sentence per line, or per long clause.
+  Nothing enforces it and nothing reflows — `prettier` runs with
+  `proseWrap: "preserve"`, so it fixes tables, lists and emphasis and never
+  moves a line break in body text.
+  The reason is diffs: an unwrapped paragraph makes every edit one enormous
+  changed line, and a hard column wrap makes a one-word edit rewrap the whole
+  paragraph.
+  A break per sentence gives a diff that names the sentence that changed.
+  Existing files are not being reflowed; this is for prose you write.
+- **Keep a code span on one line** inside a list item or blockquote.
+  Whitespace inside backticks is content, so prettier cannot re-indent a
+  continuation line and dedents it out of the block instead — which drops the
+  list indent or the blockquote's `>`.
+  It still renders correctly, which is exactly why it goes unnoticed.
 
 ## Start over
 
