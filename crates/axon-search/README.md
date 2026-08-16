@@ -16,8 +16,8 @@ Opens and manages the Tantivy index, indexes events as they are written by `axon
 - `SearchIndex::open` / `spawn_indexer` — open the index and start the single-writer
   indexing actor that drains the store's `search_outbox`.
 - `SearchIndex::search(&SearchParams) -> SearchResults` — BM25 query, or filter-only
-  query when text is empty, with keyword/time filters, returning `(account_id,
-  event_id, score)` hits to hydrate from Postgres.
+  query when text is empty, with keyword/time filters, returning
+  `(account_id, event_id, score)` hits to hydrate from Postgres.
 - `SearchIndex::mark_for_reseed` — clear the seed-completion marker so the next `open`
   rebuilds the corpus from `events` (the `axon search reindex` operator path).
 

@@ -68,12 +68,12 @@ One Rust binary, one Postgres database, media cached to local disk. See the [arc
 
 ## Clients
 
-| Client | Platform | Status |
-| --- | --- | --- |
-| [`axon-tui`](clients/tui/README.md) | Terminal | Active (MVP reference client) |
-| [`axon-web`](clients/web/README.md) | Web browser + Windows/Linux/Mac desktop (Tauri) | Active (nearing MVP) |
-| `axon-apple` | iOS + macOS (shared Swift Package) | Planned |
-| `axon-android` | Android | Planned |
+| Client                              | Platform                                        | Status                        |
+| ----------------------------------- | ----------------------------------------------- | ----------------------------- |
+| [`axon-tui`](clients/tui/README.md) | Terminal                                        | Active (MVP reference client) |
+| [`axon-web`](clients/web/README.md) | Web browser + Windows/Linux/Mac desktop (Tauri) | Active (nearing MVP)          |
+| `axon-apple`                        | iOS + macOS (shared Swift Package)              | Planned                       |
+| `axon-android`                      | Android                                         | Planned                       |
 
 See [ADR 0031](docs/adr/0031-client-strategy.md) for the client strategy and sequencing.
 
@@ -101,14 +101,14 @@ troubleshooting.
 
 ## Docs
 
-|                                                   |                                                  |
-| ------------------------------------------------- | ------------------------------------------------ |
-| [CONTRIBUTING.md](CONTRIBUTING.md)                | Setup, the pre-push gate, and conventions        |
-| [PRD](docs/mvp/prd.md)                            | What we're building and why                      |
-| [Tech spec](docs/mvp/tech-spec.md)                | Architecture decisions                           |
-| [Implementation spec](docs/mvp/implementation.md) | Milestone-by-milestone build plan                |
+|                                                   |                                                              |
+| ------------------------------------------------- | ------------------------------------------------------------ |
+| [CONTRIBUTING.md](CONTRIBUTING.md)                | Setup, the pre-push gate, and conventions                    |
+| [PRD](docs/mvp/prd.md)                            | What we're building and why                                  |
+| [Tech spec](docs/mvp/tech-spec.md)                | Architecture decisions                                       |
+| [Implementation spec](docs/mvp/implementation.md) | Milestone-by-milestone build plan                            |
 | [AGENTS.md](AGENTS.md)                            | Working conventions and current state, for humans and agents |
-| [ADRs](docs/adr/)                                 | Decisions made during implementation             |
+| [ADRs](docs/adr/)                                 | Decisions made during implementation                         |
 
 ## Environment variables
 
@@ -116,13 +116,13 @@ Two kinds of `AXON_`-prefixed environment variables exist:
 
 **Standalone vars** — not tied to any config field, used by the CLI directly:
 
-| Variable         | Used by                              | Meaning                                                                                          |
-| ---------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `AXON_CONFIG`    | server, all CLI subcommands           | Path to `axon.toml`, when not passed via `--config`. Falls back to `./axon.toml`, then the platform config dir. |
-| `DATABASE_URL`   | server, all CLI subcommands           | Postgres connection string. Also settable as `AXON_DATABASE__URL` or `[database].url`.             |
-| `AXON_BASE_URL`  | `axon utd redecrypt` (HTTP CLI calls), TUI | Base URL of the running axon-server to call. **Defaults to `http://127.0.0.1:8080` — set explicitly for any non-local server.** |
-| `AXON_TOKEN`     | `axon utd redecrypt`, TUI             | Bearer token sent with the request, in place of `--token` (web does not consume token from env)     |
-| `RUST_LOG`       | server                                | Overrides `log.level` / `AXON_LOG__LEVEL` with a raw `tracing` filter directive.                    |
+| Variable        | Used by                                    | Meaning                                                                                                                         |
+| --------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `AXON_CONFIG`   | server, all CLI subcommands                | Path to `axon.toml`, when not passed via `--config`. Falls back to `./axon.toml`, then the platform config dir.                 |
+| `DATABASE_URL`  | server, all CLI subcommands                | Postgres connection string. Also settable as `AXON_DATABASE__URL` or `[database].url`.                                          |
+| `AXON_BASE_URL` | `axon utd redecrypt` (HTTP CLI calls), TUI | Base URL of the running axon-server to call. **Defaults to `http://127.0.0.1:8080` — set explicitly for any non-local server.** |
+| `AXON_TOKEN`    | `axon utd redecrypt`, TUI                  | Bearer token sent with the request, in place of `--token` (web does not consume token from env)                                 |
+| `RUST_LOG`      | server                                     | Overrides `log.level` / `AXON_LOG__LEVEL` with a raw `tracing` filter directive.                                                |
 
 TUI-specific display vars (`AXON_FONT_SIZE`, `AXON_IMAGE_PROTOCOL`, `AXON_NO_IMAGE_QUERY`) are documented in [`clients/tui/README.md`](clients/tui/README.md).
 

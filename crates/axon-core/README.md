@@ -28,6 +28,6 @@ primitive types shared across crates.
 - Config precedence (lowest → highest): struct defaults → TOML file →
   `DATABASE_URL` → `AXON_`-prefixed env (`__` denotes nesting, e.g.
   `AXON_SERVER__PORT`).
-- Downstream crates define their own `thiserror` enums and convert *into*
+- Downstream crates define their own `thiserror` enums and convert _into_
   `axon_core::Error`; because `axon-core` is the lowest crate, the `Store`
   variant carries a `String` rather than depending on `axon-store`.

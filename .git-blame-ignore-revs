@@ -1,0 +1,13 @@
+# Revisions `git blame` should skip: mechanical, meaning-preserving reformats.
+#
+# GitHub honors this file automatically. Locally, once per clone:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Only whole-tree formatting passes belong here, and only by their final SHA on
+# `main` — an entry naming a commit that was rebased away is worse than no
+# entry, because it silently ignores nothing while still claiming to. A commit
+# that changes prose, code, or behavior must never be listed, however small.
+#
+# Add the "style: prettier pass over repo markdown" commit here once it has
+# landed on `main` and its SHA is stable.

@@ -34,47 +34,47 @@ shows it.
 
 ## Coverage
 
-| Capability | TUI (`axon-demo-tui`) | Web desktop | Web mobile |
-|---|---|---|---|
-| Room list, with names and topics | `rooms` | `rooms` | `rooms` |
-| Incoming invite inbox (Accept/Reject) | **n/a** | **not covered** — demo corpus joins invitees through the appservice, so there is no standing-invite scene | **not covered** |
-| Room list sort (ADR 0042) | `rooms` | `rooms` | **not covered** |
-| Room list filter: all / DMs / groups | `rooms` | `rooms` | **not covered** |
-| Live room-name filter (Alt-/) | `rooms` | `rooms` | **not covered** |
-| DM title derived from the other member | `rooms` | `rooms` | `rooms` |
-| Timeline text, sender names, day separators | `timeline` | `timeline` | `timeline` |
-| Formatted (HTML) messages with links | `timeline` | `timeline` | `timeline` |
-| Reactions (seeded badges render) | `timeline` | `timeline` | `send` |
-| React to a message, then withdraw it | `react` | `send` | **not covered** |
-| Replies | `timeline` | `timeline` | `send` |
-| Edits (`m.replace`, applied in place) | `threads` | `threads` | **not covered** |
-| Redactions (`[redacted]` tombstone) | `threads` | `threads` | **not covered** |
-| In-timeline find (Ctrl-F, n/N) | `threads` | **n/a** | **n/a** |
-| Threads: open panel, read replies | `threads` | `threads` | `threads` |
-| Inline images (Sixel / Kitty / iTerm2) | `media` | **n/a** | **n/a** |
-| Full-size image preview | `media` | `media` | `media` |
-| Image galleries (adjacency grouping, ADR 0081) | **n/a** | `media` | `media` |
-| Lightbox paging across a gallery run | **n/a** | `media` | `media` |
-| Full-text search across rooms (Tantivy) | `search` | `search` | `search` |
-| Search field filters (`room:`, `all:true`) | `search` | `search` | `search` |
-| Search hit as a deep link into a room | **not covered** | `search` | `search` |
-| Jump to a date in history | `jump` | **not covered** | **not covered** |
-| Sending a message | `send` | `send` | `send` |
-| Deleting one's own message | **not covered** | `send` | `send` |
-| Shortcuts and help popups | `shortcuts` | `shortcuts` | **n/a** |
-| Spaces: picker, filtering, hierarchy (ADR 0084) | **n/a** | `spaces` | `rooms` |
-| Single-pane navigation and Back (ADR 0062) | **n/a** | **n/a** | `rooms` |
-| Room information panel | **not covered** | **not covered** | `timeline` |
-| Unread thread picker (Alt-T) | **not covered** | **not covered** | **not covered** |
-| Search result sort / group / edit toggles | **not covered** | **not covered** | **not covered** |
-| Sending media | **not covered** | **not covered** | **not covered** |
-| Message actions: edit, redact, reply | **not covered** | **not covered** | **not covered** |
-| Room actions: invite, leave, pin (M19) | **not covered** | **not covered** | **not covered** |
-| Device verification (SAS) | **not covered** | **not covered** | **not covered** |
-| Typing indicators and read receipts (M18) | **not covered** | **not covered** | **not covered** |
-| Inline image whose terminal encode failed (placeholder) | **not covered** | **n/a** | **n/a** |
-| Debug overlay diagnostics (`display.debug`) | **not covered** | **n/a** | **n/a** |
-| State-event notices (ADR 0083) | **not covered** | **not covered** | **not covered** |
+| Capability                                              | TUI (`axon-demo-tui`) | Web desktop                                                                                               | Web mobile      |
+| ------------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------- | --------------- |
+| Room list, with names and topics                        | `rooms`               | `rooms`                                                                                                   | `rooms`         |
+| Incoming invite inbox (Accept/Reject)                   | **n/a**               | **not covered** — demo corpus joins invitees through the appservice, so there is no standing-invite scene | **not covered** |
+| Room list sort (ADR 0042)                               | `rooms`               | `rooms`                                                                                                   | **not covered** |
+| Room list filter: all / DMs / groups                    | `rooms`               | `rooms`                                                                                                   | **not covered** |
+| Live room-name filter (Alt-/)                           | `rooms`               | `rooms`                                                                                                   | **not covered** |
+| DM title derived from the other member                  | `rooms`               | `rooms`                                                                                                   | `rooms`         |
+| Timeline text, sender names, day separators             | `timeline`            | `timeline`                                                                                                | `timeline`      |
+| Formatted (HTML) messages with links                    | `timeline`            | `timeline`                                                                                                | `timeline`      |
+| Reactions (seeded badges render)                        | `timeline`            | `timeline`                                                                                                | `send`          |
+| React to a message, then withdraw it                    | `react`               | `send`                                                                                                    | **not covered** |
+| Replies                                                 | `timeline`            | `timeline`                                                                                                | `send`          |
+| Edits (`m.replace`, applied in place)                   | `threads`             | `threads`                                                                                                 | **not covered** |
+| Redactions (`[redacted]` tombstone)                     | `threads`             | `threads`                                                                                                 | **not covered** |
+| In-timeline find (Ctrl-F, n/N)                          | `threads`             | **n/a**                                                                                                   | **n/a**         |
+| Threads: open panel, read replies                       | `threads`             | `threads`                                                                                                 | `threads`       |
+| Inline images (Sixel / Kitty / iTerm2)                  | `media`               | **n/a**                                                                                                   | **n/a**         |
+| Full-size image preview                                 | `media`               | `media`                                                                                                   | `media`         |
+| Image galleries (adjacency grouping, ADR 0081)          | **n/a**               | `media`                                                                                                   | `media`         |
+| Lightbox paging across a gallery run                    | **n/a**               | `media`                                                                                                   | `media`         |
+| Full-text search across rooms (Tantivy)                 | `search`              | `search`                                                                                                  | `search`        |
+| Search field filters (`room:`, `all:true`)              | `search`              | `search`                                                                                                  | `search`        |
+| Search hit as a deep link into a room                   | **not covered**       | `search`                                                                                                  | `search`        |
+| Jump to a date in history                               | `jump`                | **not covered**                                                                                           | **not covered** |
+| Sending a message                                       | `send`                | `send`                                                                                                    | `send`          |
+| Deleting one's own message                              | **not covered**       | `send`                                                                                                    | `send`          |
+| Shortcuts and help popups                               | `shortcuts`           | `shortcuts`                                                                                               | **n/a**         |
+| Spaces: picker, filtering, hierarchy (ADR 0084)         | **n/a**               | `spaces`                                                                                                  | `rooms`         |
+| Single-pane navigation and Back (ADR 0062)              | **n/a**               | **n/a**                                                                                                   | `rooms`         |
+| Room information panel                                  | **not covered**       | **not covered**                                                                                           | `timeline`      |
+| Unread thread picker (Alt-T)                            | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Search result sort / group / edit toggles               | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Sending media                                           | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Message actions: edit, redact, reply                    | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Room actions: invite, leave, pin (M19)                  | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Device verification (SAS)                               | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Typing indicators and read receipts (M18)               | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Inline image whose terminal encode failed (placeholder) | **not covered**       | **n/a**                                                                                                   | **n/a**         |
+| Debug overlay diagnostics (`display.debug`)             | **not covered**       | **n/a**                                                                                                   | **n/a**         |
+| State-event notices (ADR 0083)                          | **not covered**       | **not covered**                                                                                           | **not covered** |
 
 ## Why the uncovered rows are uncovered
 
@@ -90,12 +90,12 @@ shows it.
 - **Sending media, the remaining message actions, room actions.** These mutate
   the world. They are safe against the disposable local stack and worth adding;
   they are simply not written yet. `react` shows the pattern the rest should
-  follow: script the *undo* as well, so the scene leaves the room as it found it
+  follow: script the _undo_ as well, so the scene leaves the room as it found it
   and its assertions stay honest on a second run — a react-only scene passes
   vacuously the second time, on the badge the first run left behind.
 - **Device verification.** Needs a second device to verify against, which the
   corpus does not stand up.
-- **Failed inline encode, and the debug overlay.** Both are states a *healthy*
+- **Failed inline encode, and the debug overlay.** Both are states a _healthy_
   run never reaches. The placeholder needs an image the terminal-graphics
   encoder rejects, or a protocol cache saturated with in-flight encodes; the
   overlay needs `display.debug = true`, which no scene sets. Covering the first
@@ -121,7 +121,7 @@ shows it.
 - **Jump to a date on web.** The client has no date-jump entry point of its own
   — the TUI's `/jump` has no web counterpart yet — so this is closer to a
   parity gap than a demo gap; see `docs/client-parity.md`.
-- **State-event notices (ADR 0083).** Deliberately switched *off* for both web
+- **State-event notices (ADR 0083).** Deliberately switched _off_ for both web
   recordings. `/createRoom` does not honour a backdated `ts`, so the newest
   event in every corpus room is the viewer's own join; at the shipped default
   every timeline would end on "Alex Marx joined the room", which reads as a
@@ -161,7 +161,7 @@ scene now depends on:
 ### Web
 
 - **Search scope is the point of invocation** (ADR 0066). Opened from inside a
-  room, an unqualified query searches *that room* — so a scene that means to
+  room, an unqualified query searches _that room_ — so a scene that means to
   show cross-room search has to say `all:true`, and one that searches for a word
   living in another room finds nothing at all. Both web `search` scenes are
   built around this rather than around it.
@@ -172,7 +172,7 @@ scene now depends on:
   The list auto-pages on scroll, so counting rendered hits measures where the
   list happens to be scrolled to.
 - **A redaction leaves a permanent tombstone row.** "Script the undo" keeps the
-  *content* out of the next run but cannot remove the row, so two mutating
+  _content_ out of the next run but cannot remove the row, so two mutating
   scenes must not share a room — whichever runs second opens on the other's
   "message deleted" — and a real take is recorded against a freshly seeded
   stack.

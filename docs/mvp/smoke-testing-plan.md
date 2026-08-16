@@ -61,7 +61,7 @@ tests; contract details stay in the `axon-api` tests; deep E2EE stays in
 The first draft proposed Python (pytest + pexpect + pyte + pywinpty) on the
 rationale that a non-Rust harness guarantees black-box discipline and survives
 a future repo split. That rationale does not hold up: black-boxness is a
-*dependency* property, not a language property. A Rust crate that depends on
+_dependency_ property, not a language property. A Rust crate that depends on
 no `axon-*` crate and only spawns released binaries is exactly as black-box as
 a Python package, and each harness moves intact in a split (`smoke/server`
 with the server, `smoke/tui` with the client).
@@ -115,7 +115,7 @@ artifacts — no JUnit machinery.
 - Every run mints a run ID; mutating scenarios embed it in message bodies so
   observations match only their own writes.
 - Waiting is condition-based polling with bounded deadlines. Eventually
-  consistent *observations* are retried; failed *scenarios* are not.
+  consistent _observations_ are retried; failed _scenarios_ are not.
 - On failure the runner captures: server log tail, HTTP request/response
   journal, WS frames, PTY transcript and final rendered screen, with
   configured secrets redacted.
@@ -144,7 +144,7 @@ artifacts — no JUnit machinery.
   activates an account that then appears in `GET /v1/accounts` /
   `GET /v1/accounts/{id}`; logout transitions state; re-login reactivates.
 - **Inbound flow** (S1): a peer — a plain Matrix Client-Server API client
-  over reqwest, in an *unencrypted* room — invites the Axon account and sends
+  over reqwest, in an _unencrypted_ room — invites the Axon account and sends
   a marked message; assert the room appears in `/v1/rooms`, the event in the
   timeline and in event lookup, and a `timeline.event` frame arrives on
   `/v1/ws`.

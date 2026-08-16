@@ -269,7 +269,7 @@ Scenes live in `src/demo/scenes.rs`. Three rules, all learned the hard way:
 - **Address content by corpus name, never by Matrix id** — `manifest.demo` maps
   the stable names onto the per-run ids.
 - **Every step that changes state must be followed by a wait that only the new
-  state satisfies.** A needle the *previous* frame already satisfies is not a
+  state satisfies.** A needle the _previous_ frame already satisfies is not a
   wait at all: the script runs ahead of the client and the next keystroke lands
   somewhere unintended. Prefer state-unique chrome (a popup title, the
   `[in thread]` marker, `result 1 of`) over message text that is on screen
@@ -297,7 +297,7 @@ partial areas:
   second trusted device.
 - Sender-trust `/bundle` is not covered beyond the lower-level TUI tests; a
   stable fixture should be added once trust data is available in the local stack.
-- Media rendering is not *asserted*. The demo pilot renders it for real
+- Media rendering is not _asserted_. The demo pilot renders it for real
   (`axon-demo-tui --scene media`, above), which proves the path end to end by
   eye, but no smoke scenario asserts on terminal graphics: the `vt100` screen
   model the harness reads discards them by design, so an assertion would have to

@@ -12,7 +12,7 @@ API share one origin, the browser needs no CORS, and a TUI can point at the very
 same URL (`axon-server` itself is not published to the host). Open the browser at
 `http://<host>:8080`.
 
-> This is the *deployment* stack (`deploy/docker-compose.yml`). The Postgres-only
+> This is the _deployment_ stack (`deploy/docker-compose.yml`). The Postgres-only
 > `docker-compose.yml` at the repo root is for local development and is unrelated.
 
 ## Quick start (one command)
@@ -75,7 +75,7 @@ and the bootstrap page on one origin — drops the token straight into the web c
 redirects you in, **signed in with nothing to paste**. The `<code>` is unguessable and
 the bootstrap is consumed by first use (and then permanently closed).
 
-Because every request reaches axon *through* the `web` proxy, axon can't tell your
+Because every request reaches axon _through_ the `web` proxy, axon can't tell your
 browser from any other peer, so the stack enables `bootstrap_web_allow_remote`. The
 protection is the unguessable one-time code plus a wrong-URL lockout; on a TLS profile,
 also set `AXON_PUBLISH_ADDR=127.0.0.1` so only the proxy is reachable. Disable the whole
@@ -91,7 +91,7 @@ curl -H "Authorization: Bearer <token>" localhost:8080/v1/status   # -> 200
 ```
 
 Paste it into the web client's manual-token field, drop it in an axon-tui config, or use
-it from scripts. **Note:** minting a token creates a credential, which *consumes* an
+it from scripts. **Note:** minting a token creates a credential, which _consumes_ an
 unused web bootstrap — so if you want the zero-paste web sign-in, open the bootstrap URL
 first, then mint additional tokens. Revoke an exposed token with
 `docker compose exec axon-server axon token revoke <id>` (`axon token list` for ids).
@@ -163,7 +163,7 @@ docker compose exec tailscale tailscale serve status
 
 Public exposure is opt-in via Tailscale Funnel (configure separately).
 
-**Already running Tailscale on the host?** The sidecar is a *separate* tailnet
+**Already running Tailscale on the host?** The sidecar is a _separate_ tailnet
 node (its own `tailscaled` in userspace networking, its own state on the
 `axon-tsstate` volume) and coexists with a host `tailscaled` — no daemon, port,
 or routing conflict. But you'd normally pick one. The simplest option when the
@@ -176,7 +176,7 @@ tailscale serve --bg http://localhost:8080
 
 Because the front door is same-origin (SPA **and** API on one port), the host's
 `tailscale serve` proxies the whole thing with no extra config. One caveat if you
-*do* run both: if your host node is also named `axon`, Tailscale suffixes the
+_do_ run both: if your host node is also named `axon`, Tailscale suffixes the
 second node `axon-1`, which changes the serve URL / cert domain — set a distinct
 `TS_HOSTNAME` in `.env` for the sidecar.
 
@@ -193,12 +193,12 @@ curl -fsS https://$DOMAIN/healthz
 
 ## Volumes & backup
 
-| Volume | Contents | Criticality |
-|---|---|---|
-| `axon-data` | `axon.toml` (**store_key**), sync/crypto store, search index, media cache | **Critical — back this up** |
-| `axon-pgdata` | Postgres data | **Critical** |
-| `axon-tsstate` | Tailscale node state | Rebuildable (re-auth) |
-| `axon-caddy-data` / `-config` | Caddy certs/state | Rebuildable (re-issue certs) |
+| Volume                        | Contents                                                                  | Criticality                  |
+| ----------------------------- | ------------------------------------------------------------------------- | ---------------------------- |
+| `axon-data`                   | `axon.toml` (**store_key**), sync/crypto store, search index, media cache | **Critical — back this up**  |
+| `axon-pgdata`                 | Postgres data                                                             | **Critical**                 |
+| `axon-tsstate`                | Tailscale node state                                                      | Rebuildable (re-auth)        |
+| `axon-caddy-data` / `-config` | Caddy certs/state                                                         | Rebuildable (re-issue certs) |
 
 > ⚠️ **Losing `axon-data` (or resetting `store_key`) orphans all encrypted data** —
 > account tokens and historical Megolm keys become undecryptable, forcing re-login
@@ -237,7 +237,7 @@ echo "$GHCR_PAT" | docker login ghcr.io -u <you> --password-stdin   # write:pack
 
 Or push a `beta-*` git tag (or run the **Publish images** workflow) to build and
 push from CI (`.github/workflows/publish-images.yml`, on a GitHub-hosted
-runner). On the package's *first* push, set its visibility to **Public** in the
+runner). On the package's _first_ push, set its visibility to **Public** in the
 org's Packages settings — GHCR defaults new packages to private, and neither
 `publish.sh` nor the CI workflow's token can change that setting, so it's a
 one-time manual step. The package also needs this repository added under

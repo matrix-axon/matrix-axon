@@ -27,7 +27,7 @@ scripts/integration-test.sh
 What it does, with no manual steps:
 
 1. Brings up Postgres + Synapse (the `integration` compose profile) and waits for
-   Synapse to advertise Simplified Sliding Sync (MSC4186) — axon speaks *only*
+   Synapse to advertise Simplified Sliding Sync (MSC4186) — axon speaks _only_
    this, so it's the make-or-break capability.
 2. Creates a throwaway `axon_itest` database (dropped + recreated each run) so the
    test is fully isolated from your dev `axon` DB.
@@ -51,16 +51,16 @@ exits non-zero. It tears the containers + test DB down at the end.
 
 Knobs (all optional, via env):
 
-| Var | Default | Meaning |
-|-----|---------|---------|
-| `POSTGRES_PORT` | `5432` | host port for the compose Postgres |
-| `SYNAPSE_PORT` | `8008` | host port for Synapse |
-| `MESSAGE_COUNT` | `3` | messages the seeder sends |
-| `TIMEOUT` | `90` | seconds to wait for each DB condition |
-| `KEEP_UP=1` | off | leave containers + test DB up for inspection |
+| Var             | Default | Meaning                                      |
+| --------------- | ------- | -------------------------------------------- |
+| `POSTGRES_PORT` | `5432`  | host port for the compose Postgres           |
+| `SYNAPSE_PORT`  | `8008`  | host port for Synapse                        |
+| `MESSAGE_COUNT` | `3`     | messages the seeder sends                    |
+| `TIMEOUT`       | `90`    | seconds to wait for each DB condition        |
+| `KEEP_UP=1`     | off     | leave containers + test DB up for inspection |
 
 > **Why it asserts on 1 UTD even though the seeder sends 3:** axon archives the
-> events Simplified Sliding Sync surfaces, which is the *latest* timeline event
+> events Simplified Sliding Sync surfaces, which is the _latest_ timeline event
 > per room — not the full backlog. The script asserts on the count axon actually
 > archived, then proves that exact set re-decrypts, so it's robust regardless.
 
@@ -94,7 +94,7 @@ docker compose --profile integration ps synapse
 
 First boot generates the signing key into the `axon-synapse-data` volume and
 runs schema migrations; give it ~10s. Confirm Simplified Sliding Sync (MSC4186)
-is advertised — axon speaks *only* this, so it's the thing that must be on:
+is advertised — axon speaks _only_ this, so it's the thing that must be on:
 
 ```sh
 curl -fsS http://localhost:8008/_matrix/client/versions | python3 -m json.tool | grep simplified
@@ -221,7 +221,7 @@ Grab the `recovery_key` and `room_id` from that JSON, then:
    lines, and re-run the query — the `m.room.encrypted / decrypted=f` count falls
    as real types with `decrypted=t` rise.
 
-> The recovery key here is a *fresh, local* one minted by the seeder on this
+> The recovery key here is a _fresh, local_ one minted by the seeder on this
 > Synapse — not any key you may have used elsewhere.
 
 ## Teardown
