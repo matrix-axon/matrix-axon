@@ -111,15 +111,54 @@ pub(crate) fn receipt_target_for(
     display: &crate::config::DisplayOptions,
     promoted: &std::collections::HashSet<String>,
 ) -> Option<ReceiptTarget> {
-    events
-        .iter()
-        .filter(|event| super::timeline::should_show_event(event, display))
-        .filter(|event| super::relations::thread_visible(event, None, promoted))
+    displayed_events(events, display, promoted)
         .max_by_key(|event| event.arrival_order)
         .map(|event| ReceiptTarget {
             event_id: event.event_id.clone(),
             arrival_order: event.arrival_order,
         })
+}
+
+/// The display-order marker position for a loaded page: its display-*last*
+/// event, which is the newest by `origin_ts` because a page is installed in
+/// ascending order.
+///
+/// Same candidate set as [`receipt_target_for`], read on the other order. See
+/// [`displayed_events`] for why they must share it.
+pub(crate) fn marker_target_for(
+    events: &[crate::api::EventDto],
+    display: &crate::config::DisplayOptions,
+    promoted: &std::collections::HashSet<String>,
+) -> Option<ReadMarker> {
+    displayed_events(events, display, promoted)
+        .last()
+        .map(|event| ReadMarker {
+            event_id: event.event_id.clone(),
+            origin_ts: event.origin_ts,
+        })
+}
+
+/// The events in `events` the main timeline actually displays, in page order:
+/// the pair `should_show_event` **and** `thread_visible`, matching
+/// [`App::selected_events`].
+///
+/// Both positions a room load settles are picked from this one set. They read
+/// it on different orders — the marker takes the display-last element, the
+/// receipt the `arrival_order` max — but sharing the set is the point: #167
+/// was the marker reading the raw page while the receipt filtered, one line
+/// apart, so the same room produced a different marker depending on whether
+/// its newest event arrived live or came from a page. The live path
+/// (`super::timeline`) only calls `note_room_read` for an event it showed, so
+/// this is the load-path half of the same rule.
+fn displayed_events<'a>(
+    events: &'a [crate::api::EventDto],
+    display: &'a crate::config::DisplayOptions,
+    promoted: &'a std::collections::HashSet<String>,
+) -> impl Iterator<Item = &'a crate::api::EventDto> {
+    events
+        .iter()
+        .filter(move |event| super::timeline::should_show_event(event, display))
+        .filter(move |event| super::relations::thread_visible(event, None, promoted))
 }
 
 /// A marker advance waiting out its debounce window before being PUT.
@@ -1022,6 +1061,122 @@ mod tests {
                 .event_id,
             "$reply"
         );
+    }
+
+    /// The marker half of `receipt_target_skips_hidden_events` (#167).
+    ///
+    /// The load path used to take `page.events.last()` raw, one line below a
+    /// receipt pick that filtered — so a trailing hidden state event became the
+    /// marker even though the TUI never rendered it.
+    #[test]
+    fn marker_target_skips_hidden_events() {
+        let hidden = display_with_state_events(false);
+        let page = portal_page();
+
+        // What the old code sent: the raw display-last, a bridge state event
+        // that does not render at the default settings.
+        assert_eq!(page.last().unwrap().event_id, "$bridge");
+        assert_eq!(
+            marker_target_for(&page, &hidden, &nothing_promoted())
+                .unwrap()
+                .event_id,
+            "$message"
+        );
+
+        // With state events shown it *is* rendered, so it is a legal marker.
+        let shown = display_with_state_events(true);
+        assert_eq!(
+            marker_target_for(&page, &shown, &nothing_promoted())
+                .unwrap()
+                .event_id,
+            "$bridge"
+        );
+    }
+
+    /// An unpromoted thread reply is hidden behind its root's badge, so it is
+    /// no more a marker candidate than a receipt one — both picks read the same
+    /// displayed set.
+    #[test]
+    fn marker_target_skips_an_unpromoted_thread_reply() {
+        let display = display_with_state_events(false);
+        let plain = arrival_event("$plain", 100, 1);
+        let mut reply = arrival_event("$reply", 200, 2);
+        reply.relates_to = Some(serde_json::json!({ "rel_type": "m.thread", "event_id": "$root" }));
+        let page = vec![plain, reply];
+
+        assert_eq!(
+            marker_target_for(&page, &display, &nothing_promoted())
+                .unwrap()
+                .event_id,
+            "$plain"
+        );
+
+        let promoted: std::collections::HashSet<String> = ["$reply".to_owned()].into();
+        assert_eq!(
+            marker_target_for(&page, &display, &promoted)
+                .unwrap()
+                .event_id,
+            "$reply"
+        );
+    }
+
+    #[test]
+    fn marker_target_is_none_when_nothing_is_shown() {
+        let hidden = display_with_state_events(false);
+        let page = vec![
+            state_event("$create", 100, 1, "m.room.create"),
+            state_event("$topic", 200, 2, "m.room.topic"),
+        ];
+        // Nothing displayed → the load path advances neither position, rather
+        // than falling back to the raw newest event.
+        assert!(marker_target_for(&page, &hidden, &nothing_promoted()).is_none());
+        assert!(marker_target_for(&[], &hidden, &nothing_promoted()).is_none());
+    }
+
+    /// #167's named exposure — the reason filtering the marker is more than
+    /// tidiness, and the consumer test guardrail 9 asks for.
+    ///
+    /// `collect_unseen_thread_promotions` treats anything at or before the
+    /// marker as already seen. A marker over-advanced onto a hidden trailing
+    /// state event therefore swallows a thread reply stamped between the last
+    /// *visible* event and it: the badge that reply caused stays, but nothing
+    /// on the main timeline explains why.
+    #[test]
+    fn a_filtered_marker_leaves_a_later_thread_reply_promotable() {
+        let hidden = display_with_state_events(false);
+        let promoted = nothing_promoted();
+
+        // First load: one visible message, then a state event the default
+        // config hides.
+        let first_page = vec![
+            arrival_event("$message", 100, 1),
+            state_event("$bridge", 300, 2, "uk.half-shot.bridge"),
+        ];
+        assert_eq!(
+            first_page.last().unwrap().origin_ts,
+            300,
+            "the raw display-last is the hidden event, which is the whole bug"
+        );
+
+        let marker = marker_target_for(&first_page, &hidden, &promoted).expect("a shown event");
+        assert_eq!(marker.origin_ts, 100);
+
+        let mut app = app_with(vec![test_room("!r:x", 0)]);
+        let k = key("!r:x");
+        app.note_room_read(
+            k.clone(),
+            &marker.event_id,
+            marker.origin_ts,
+            receipt_target_for(&first_page, &hidden, &promoted),
+        );
+
+        // A later load brings a thread reply stamped *between* the last visible
+        // event and that hidden one. Against the filtered marker (100) it is
+        // unseen and promotes; against the raw one (300) it never would.
+        let reply = timeline_event("$reply", 200, Some("$root"));
+        let roots = app.collect_unseen_thread_promotions(&k, std::slice::from_ref(&reply));
+        assert_eq!(roots, vec![(Uuid::nil(), "$root".to_owned())]);
+        assert!(app.promoted_thread_events.contains("$reply"));
     }
 
     #[test]

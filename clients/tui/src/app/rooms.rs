@@ -276,15 +276,21 @@ impl App {
                 // Two positions, two orders: the marker names the display-last
                 // event (`page.events` is ascending by `origin_ts`), the receipt
                 // names the greatest `arrival_order` among the events actually
-                // shown (ADR 0089).
+                // shown (ADR 0089). Both pick from the *same* displayed-event
+                // set — the marker used to read the raw page here, so a trailing
+                // hidden state event advanced it past everything rendered
+                // (#167).
                 let receipt = super::read_markers::receipt_target_for(
                     &page.events,
                     &self.display,
                     &self.promoted_thread_events,
                 );
-                if let Some(newest) = page.events.last() {
-                    let (event_id, origin_ts) = (newest.event_id.clone(), newest.origin_ts);
-                    self.note_room_read(key.clone(), &event_id, origin_ts, receipt);
+                if let Some(marker) = super::read_markers::marker_target_for(
+                    &page.events,
+                    &self.display,
+                    &self.promoted_thread_events,
+                ) {
+                    self.note_room_read(key.clone(), &marker.event_id, marker.origin_ts, receipt);
                 }
                 self.messages.events.insert(key.clone(), page.events);
                 for (account_id, root) in unseen_thread_roots {
