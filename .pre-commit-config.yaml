@@ -72,6 +72,27 @@ repos:
         exclude: '^clients/web/(dist/|pnpm-lock\.yaml|src/api/schema\.d\.ts|public/emoji-picker-data-en\.json)'
         pass_filenames: true
         stages: [pre-push]
+      # Before any pnpm-backed hook: the web hooks use the repo's real
+      # node_modules, so a lockfile change that has not been installed makes
+      # them test a different tree than CI does. --frozen-lockfile can never
+      # rewrite the lockfile, so this only ever brings the tree up to it.
+      - id: web-install
+        name: web deps match the lockfile
+        language: system
+        entry: pnpm --dir clients/web install --frozen-lockfile
+        files: &web_manifest '^clients/web/(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml)$'
+        pass_filenames: false
+        stages: [pre-push]
+      # pnpm reports unmet peers as an install-time warning nobody reads.
+      # Deliberate exceptions belong in pnpm-workspace.yaml's
+      # peerDependencyRules, where they are reviewable.
+      - id: web-peers
+        name: pnpm peers check
+        language: system
+        entry: pnpm --dir clients/web peers check
+        files: *web_manifest
+        pass_filenames: false
+        stages: [pre-push]
       - id: web-api-schema
         name: web API schema is current
         language: system
