@@ -573,20 +573,38 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // overlaps the active modal's region.
     let blocking_popup = blocking_popup_area(app, frame.area());
     for (rect, size, media) in thumb_specs {
-        app.request_protocol(media.clone(), size);
+        let _ = app.request_protocol(media.clone(), size);
         let protocol_key = ProtocolKey { media, size };
-        if let Some(ProtocolState::Ready(protocol)) = app.proto_cache.get(&protocol_key) {
-            let inline = protocol.inline(app.sixel_inline_generation);
-            // The widget anchors the image at `rect`'s top-left and paints it at
-            // its own aspect-fit cell size — only this sub-rect holds pixels.
-            // Collision/ghost tracking must use it; the full-width `rect` would
-            // hide thumbnails whose real pixels sit clear of the popup.
-            let drawn = image_draw_rect(rect, inline.size());
-            if thumbnail_overlaps_blocking_popup(drawn, blocking_popup) {
-                continue;
+        match app.proto_cache.get(&protocol_key) {
+            Some(ProtocolState::Ready(protocol)) => {
+                let inline = protocol.inline(app.sixel_inline_generation);
+                // The widget anchors the image at `rect`'s top-left and paints it at
+                // its own aspect-fit cell size — only this sub-rect holds pixels.
+                // Collision/ghost tracking must use it; the full-width `rect` would
+                // hide thumbnails whose real pixels sit clear of the popup.
+                let drawn = image_draw_rect(rect, inline.size());
+                if thumbnail_overlaps_blocking_popup(drawn, blocking_popup) {
+                    continue;
+                }
+                frame.render_widget(Image::new(inline), rect);
+                frame_image_rects.push(drawn);
             }
-            frame.render_widget(Image::new(inline), rect);
-            frame_image_rects.push(drawn);
+            // A failed encode is terminal: the rows stay reserved in the layout
+            // forever, so leaving them blank reads as a rendering glitch. The
+            // preview modal already says so; the inline path used to match only
+            // `Ready` and say nothing (#51). No image is ever painted here, so
+            // this cannot flash over one mid-encode.
+            Some(ProtocolState::Failed(error))
+                if !thumbnail_overlaps_blocking_popup(rect, blocking_popup) =>
+            {
+                frame.render_widget(
+                    Paragraph::new(format!("[image unavailable: {error}]"))
+                        .style(Style::default().fg(app.colors.status))
+                        .wrap(Wrap { trim: true }),
+                    rect,
+                );
+            }
+            _ => {}
         }
     }
     // After all message-pane widgets have rendered, mark blank cells as
@@ -2433,12 +2451,22 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         format!("Terminal graphics: {protocol}  (cell {width}x{height}px)")
     };
 
+    // Encode requests that could not be started. Both are self-healing per
+    // frame, so neither is worth a status message, but a count that keeps
+    // climbing is the signal that thumbnails are starving or the media channel
+    // was never wired (#51).
+    let media_drops_line = format!(
+        "Encode drops: {} cache-saturated, {} channel-unwired",
+        app.protocol_drops.cache_saturated, app.protocol_drops.channel_unwired
+    );
+
     let mut lines = vec![
         format!("Axon server: {}", app.client.base_url()),
         auth_line,
         version,
         graphics_line,
         conn_line,
+        media_drops_line,
         "".to_owned(),
         format!("Rooms loaded: {}", app.rooms.rooms.len()),
         account_filter_line,
@@ -3182,6 +3210,100 @@ mod tests {
         assert!(preview_lines[0].contains("@oldest:example.com"));
         assert!(preview_lines[1].contains("@middle:example.com"));
         assert!(preview_lines[2].contains("@newest:example.com"));
+    }
+
+    /// #51: a thumbnail whose encode failed says so.
+    ///
+    /// The rows stay reserved in the layout for as long as the message is on
+    /// screen, and the encode will never be retried, so the inline path
+    /// matching only `Ready` left them permanently blank — indistinguishable
+    /// from a rendering bug. The preview modal already reported the same state.
+    #[tokio::test]
+    async fn a_failed_inline_encode_renders_a_marker_instead_of_blank_rows() {
+        let mut app = App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::app::MEDIA_WORKERS * 2);
+        app.set_media_sender(tx);
+
+        let room = RoomDto {
+            account_id: Uuid::nil(),
+            account_user_id: Some("@me:example.com".to_owned()),
+            room_id: "!room:example.com".to_owned(),
+            name: Some("Ops".to_owned()),
+            topic: None,
+            avatar_url: None,
+            canonical_alias: None,
+            last_activity_ts: 0,
+            last_event_id: None,
+        };
+        let media = MediaKey::new(Uuid::nil(), "mxc://example.com/photo".to_owned());
+        app.rooms.rooms = vec![room.clone()];
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            crate::app::RoomKey::from(&room),
+            vec![EventDto {
+                account_id: Uuid::nil(),
+                event_id: "$image:example.com".to_owned(),
+                room_id: "!room:example.com".to_owned(),
+                sender: "@alice:example.com".to_owned(),
+                state_key: None,
+                arrival_order: 0,
+                origin_ts: 0,
+                event_type: "m.room.message".to_owned(),
+                content: Some(serde_json::json!({
+                    "msgtype": "m.image",
+                    "body": "photo.jpg",
+                    "url": "mxc://example.com/photo"
+                })),
+                body: Some("photo.jpg".to_owned()),
+                relates_to: None,
+                redacted: false,
+                redaction_event_id: None,
+                reactions: None,
+                sender_trust: None,
+            }],
+        );
+        app.image_cache.insert(
+            media.clone(),
+            crate::app::ImageState::Ready(std::sync::Arc::new(image::DynamicImage::new_rgb8(1, 1))),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+
+        // First pass: let `draw` compute the reserved geometry and request the
+        // encode, so the test never has to replicate the layout math.
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw succeeds");
+        let requested: Vec<_> = app.proto_cache.keys().cloned().collect();
+        assert!(!requested.is_empty(), "draw should request an encode");
+
+        // Fail every encode it asked for, then redraw.
+        for key in requested {
+            app.proto_cache.insert(
+                key,
+                crate::app::ProtocolState::Failed("decode blew up".to_owned()),
+            );
+        }
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw succeeds");
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .flat_map(|y| {
+                (0..buffer.area.width)
+                    .filter_map(move |x| buffer.cell((x, y)).map(|c| c.symbol().to_owned()))
+            })
+            .collect::<String>();
+        assert!(
+            screen.contains("image unavailable"),
+            "a failed inline encode should report itself, got:\n{screen}"
+        );
     }
 
     #[test]

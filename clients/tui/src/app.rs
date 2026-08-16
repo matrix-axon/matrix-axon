@@ -53,6 +53,39 @@ pub(crate) use rooms::{account_localpart, apply_edits, dm_title_from_members};
 #[cfg(test)]
 use timeline::should_show_event;
 
+/// The outcome of an [`App::request_protocol`] call.
+///
+/// The function used to return `()`, so a caller could not tell an encode that
+/// started from one silently dropped (#51).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProtocolRequest {
+    /// An encode was spawned.
+    Started,
+    /// Already encoded, or already encoding — nothing more to do.
+    AlreadyPresent,
+    /// Zero width or height; there is nothing to encode into.
+    EmptySize,
+    /// The decoded image has not arrived yet. Expected, and self-correcting.
+    ImageNotReady,
+    /// Every protocol-cache slot is mid-encode, so no slot could be freed.
+    CacheSaturated,
+    /// The media channel was never wired, so no encode can ever complete.
+    ChannelUnwired,
+}
+
+/// Counts of [`App::request_protocol`] calls that could not start an encode,
+/// surfaced in the `display.debug` overlay.
+///
+/// Faults only: a request still waiting on its image is the normal path, not a
+/// drop, and is deliberately not counted.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProtocolDropCounts {
+    /// Bumped when the protocol cache is entirely `Encoding`.
+    pub(crate) cache_saturated: u64,
+    /// Bumped when `media_tx` is unset — a wiring bug, not a transient.
+    pub(crate) channel_unwired: u64,
+}
+
 /// How long a Sixel image is left alone before its pixels are retransmitted.
 ///
 /// tmux does not retain the pixel data behind a pane, so a Sixel image that
@@ -821,6 +854,8 @@ pub(crate) struct App {
     /// When the open Sixel preview is next due a retransmit. Lives here rather
     /// than in the main loop because only `App` knows when a preview opens.
     pub(crate) sixel_preview_refresh_after: Instant,
+    /// Encode requests that could not be started, for the debug overlay (#51).
+    pub(crate) protocol_drops: ProtocolDropCounts,
     /// Set for one frame after the media-preview popup closes so `draw()` can
     /// issue a targeted Clear over the former popup area.  Sixel/iTerm2 pixels
     /// are not erased by ratatui's cell-diff pass when the image disappears, so
@@ -1085,6 +1120,7 @@ impl App {
             sixel_inline_generation: 0,
             sixel_preview_generation: 0,
             sixel_preview_refresh_after: Instant::now() + SIXEL_REFRESH_INTERVAL,
+            protocol_drops: ProtocolDropCounts::default(),
             clear_media_preview: false,
             force_terminal_clear: false,
             prev_image_rects: Vec::new(),
@@ -1211,9 +1247,17 @@ impl App {
         );
     }
 
-    pub(crate) fn request_protocol(&mut self, key: MediaKey, size: Size) {
+    /// Ask for a terminal-protocol encoding of an already-decoded image.
+    ///
+    /// Returns why it did or did not start one. Both call sites are in `draw()`
+    /// and ignore the answer — the value is that the outcomes are now named and
+    /// testable, and that the two that are genuine faults are counted into
+    /// [`App::protocol_drops`] for the `display.debug` overlay instead of
+    /// vanishing. It cannot report through `self.status`: at 10 Hz from `draw`
+    /// that would bulldoze whatever the user was reading (#51).
+    pub(crate) fn request_protocol(&mut self, key: MediaKey, size: Size) -> ProtocolRequest {
         if size.width == 0 || size.height == 0 {
-            return;
+            return ProtocolRequest::EmptySize;
         }
         let protocol_key = ProtocolKey {
             media: key.clone(),
@@ -1221,13 +1265,19 @@ impl App {
         };
         if self.proto_cache.contains_key(&protocol_key) {
             touch_lru(&mut self.proto_cache_order, &protocol_key);
-            return;
+            return ProtocolRequest::AlreadyPresent;
         }
         let Some(ImageState::Ready(image)) = self.image_cache.get(&key) else {
-            return;
+            // Expected: the fetch/decode has not landed yet and the next frame
+            // asks again. Not a fault, so not counted.
+            return ProtocolRequest::ImageNotReady;
         };
         let Some(tx) = self.media_tx.clone() else {
-            return;
+            // `set_media_sender` was never called. Every encode for the life of
+            // the process is dropped here, which is exactly the kind of wiring
+            // mistake that should not be silent.
+            self.protocol_drops.channel_unwired += 1;
+            return ProtocolRequest::ChannelUnwired;
         };
         let image = Arc::clone(image);
         if !evict_lru_where(
@@ -1236,7 +1286,11 @@ impl App {
             PROTOCOL_CACHE_LIMIT,
             |state| !matches!(state, ProtocolState::Encoding),
         ) {
-            return;
+            // All PROTOCOL_CACHE_LIMIT slots are mid-encode, so there is nothing
+            // evictable. Self-healing — a slot frees and the next frame retries
+            // — but a sustained count here means thumbnails are starving.
+            self.protocol_drops.cache_saturated += 1;
+            return ProtocolRequest::CacheSaturated;
         }
         self.proto_cache
             .insert(protocol_key.clone(), ProtocolState::Encoding);
@@ -1248,10 +1302,14 @@ impl App {
             self.media_workers.clone(),
             tx,
         );
+        ProtocolRequest::Started
     }
 
+    /// Install a completed fetch or encode. A result for an entry that is no
+    /// longer awaiting one (evicted, or superseded) is discarded — the media
+    /// workers' stale-result rule.
     pub(crate) fn handle_media_result(&mut self, result: MediaResult) {
-        let updated = match result {
+        match result {
             MediaResult::Image { key, outcome } => {
                 if !matches!(self.image_cache.get(&key), Some(ImageState::Fetching)) {
                     return;
@@ -1262,7 +1320,6 @@ impl App {
                 };
                 self.image_cache.insert(key.clone(), state);
                 touch_lru(&mut self.image_cache_order, &key);
-                true
             }
             MediaResult::Protocol { key, outcome } => {
                 if !matches!(self.proto_cache.get(&key), Some(ProtocolState::Encoding)) {
@@ -1274,10 +1331,8 @@ impl App {
                 };
                 self.proto_cache.insert(key.clone(), state);
                 touch_lru(&mut self.proto_cache_order, &key);
-                true
             }
-        };
-        let _ = updated;
+        }
     }
 
     pub(crate) fn take_edit_config_request(&mut self) -> bool {
@@ -5648,6 +5703,85 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('v'))).await;
 
         assert_eq!(app.mode, Mode::Popup(PopupKind::MediaPreview));
+    }
+
+    fn ready_image() -> Arc<image::DynamicImage> {
+        Arc::new(image::DynamicImage::new_rgb8(1, 1))
+    }
+
+    /// #51: the outcomes of a protocol request are named, and the two that are
+    /// faults are counted rather than dropped in silence.
+    #[test]
+    fn request_protocol_reports_why_it_did_not_start_an_encode() {
+        let mut app = app_with_rooms(Vec::new());
+        let key = MediaKey::new(Uuid::nil(), "mxc://example.com/a".to_owned());
+
+        // Degenerate geometry: nothing to encode into.
+        assert_eq!(
+            app.request_protocol(key.clone(), Size::new(0, 4)),
+            ProtocolRequest::EmptySize
+        );
+
+        // The image has not been decoded yet. Expected, self-correcting, and
+        // deliberately not counted as a drop.
+        assert_eq!(
+            app.request_protocol(key.clone(), Size::new(8, 4)),
+            ProtocolRequest::ImageNotReady
+        );
+        assert_eq!(app.protocol_drops, ProtocolDropCounts::default());
+
+        // Image ready but the media channel was never wired: every encode for
+        // the life of the process dies here, so it is counted.
+        app.image_cache
+            .insert(key.clone(), ImageState::Ready(ready_image()));
+        assert_eq!(
+            app.request_protocol(key.clone(), Size::new(8, 4)),
+            ProtocolRequest::ChannelUnwired
+        );
+        assert_eq!(app.protocol_drops.channel_unwired, 1);
+        assert_eq!(app.protocol_drops.cache_saturated, 0);
+    }
+
+    // `Started` spawns the encode, so this needs a runtime.
+    #[tokio::test]
+    async fn request_protocol_counts_a_saturated_protocol_cache() {
+        let mut app = app_with_rooms(Vec::new());
+        let (tx, _rx) = tokio::sync::mpsc::channel(MEDIA_WORKERS * 2);
+        app.set_media_sender(tx);
+
+        let key = MediaKey::new(Uuid::nil(), "mxc://example.com/a".to_owned());
+        app.image_cache
+            .insert(key.clone(), ImageState::Ready(ready_image()));
+
+        // Every slot mid-encode, so `evict_lru_where` can free nothing.
+        for i in 0..PROTOCOL_CACHE_LIMIT {
+            let filler = ProtocolKey {
+                media: MediaKey::new(Uuid::nil(), format!("mxc://example.com/filler{i}")),
+                size: Size::new(8, 4),
+            };
+            app.proto_cache
+                .insert(filler.clone(), ProtocolState::Encoding);
+            touch_lru(&mut app.proto_cache_order, &filler);
+        }
+
+        assert_eq!(
+            app.request_protocol(key.clone(), Size::new(8, 4)),
+            ProtocolRequest::CacheSaturated
+        );
+        assert_eq!(app.protocol_drops.cache_saturated, 1);
+
+        // Self-healing: once a slot settles, the same request goes through.
+        let settled = ProtocolKey {
+            media: MediaKey::new(Uuid::nil(), "mxc://example.com/filler0".to_owned()),
+            size: Size::new(8, 4),
+        };
+        app.proto_cache
+            .insert(settled, ProtocolState::Failed("boom".to_owned()));
+        assert_eq!(
+            app.request_protocol(key, Size::new(8, 4)),
+            ProtocolRequest::Started
+        );
+        assert_eq!(app.protocol_drops.cache_saturated, 1);
     }
 
     /// #49: the Sixel retransmit state is per-preview, not global.
