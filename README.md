@@ -193,7 +193,7 @@ secret and adjust `DATABASE_URL` if your Postgres is configured differently.
 ### 4. Build and run
 
 ```bash
-# Enable the git pre-commit hook (fmt + clippy) — once per clone
+# Enable the pre-push gate (fmt, clippy, tests, web) — once per clone
 ./scripts/setup-hooks.sh
 
 # Quick path — auto-detects local Postgres or starts one via Docker, tears down on exit:
@@ -224,7 +224,7 @@ web bootstrap locks for the rest of that process after six wrong bootstrap
 URLs. After any account, token, or OAuth identity exists, the web bootstrap
 closes permanently; use the backend CLI/admin paths for later credentials.
 
-CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push. Locally, rustfmt and clippy also run from the shared `.pre-commit-config.yaml` at pre-push time when rust files change (git: `pre-commit install --hook-type pre-push`; jj: `jj push` through the `jj-hooks` alias in `AGENTS.md`). `./scripts/setup-hooks.sh` still enables `.githooks/` (`cargo test --all` on push). Bypass a single git commit with `git commit --no-verify`.
+CI runs `cargo fmt --all --check` and `cargo clippy --all-targets --all-features -- -D warnings` on every push (`lint-and-clippy.yml`). `cargo test --all` is **not** on that path — `lint-and-test.yml` is `workflow_dispatch`-only — so the pre-push hook is where the suite actually runs before review. `.pre-commit-config.yaml` is the single list of checks; `./scripts/setup-hooks.sh` installs it for git, and jj users get the same list through the `jj-hooks` alias in `AGENTS.md`. It is path-filtered, so a web-only push does not build rust. Skip one check with `SKIP=<hook-id> git push`, or all of them with `git push --no-verify`.
 
 ### 5. Start over
 
