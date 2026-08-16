@@ -193,9 +193,12 @@ cargo clippy --all-features --all-targets -- -D warnings
 cargo test --all
 ```
 
-Smoke gates are manual because they may require Docker and a true-local Synapse
-stack. Use `scripts/smoke-gate.sh <mode>` before pushing component changes that
-cross process/network boundaries:
+The `tui` smoke lane runs in CI on every pull request (`smoke.yml`): it needs
+no Docker and takes about 90 seconds. The Docker-backed lanes stay out of the
+PR path — they need a true-local Synapse stack — and run on push to `main` and
+nightly instead. Use `scripts/smoke-gate.sh <mode>` before pushing component
+changes that cross process/network boundaries, so a Docker-lane break is caught
+before it lands rather than after:
 
 | Changed area | Smoke gate |
 |---|---|

@@ -1,11 +1,41 @@
 name: smoke
 
-# S1 black-box smoke coverage. This manual workflow runs the same gate as
-# `scripts/smoke-gate.sh all`: TUI PTY smoke against the in-process stub, TUI
-# PTY smoke against the true-local stack, then server smoke against true-local.
+# S1 black-box smoke coverage, split by what each lane costs.
+#
+# `stub` is the cheap one: it builds axon-tui and axon-smoke-tui and drives the
+# real TUI over a PTY against an in-process stub. No Docker, no Synapse, no
+# Postgres — measured at ~90s cold and ~45s warm, cheaper than the web-e2e
+# lanes that already gate pull requests. So it gates them too.
+#
+# `true-local` needs a real local Synapse stack and takes minutes, so it runs
+# after a change lands on main, plus nightly. That is late enough to let a
+# regression through; the honest alternative — blocking every PR on a Docker
+# stack — costs more than it saves at this size.
+#
+# Before this split the whole gate was workflow_dispatch-only, so nothing ran
+# it automatically and `scroll_pin_on_relation_refresh` sat broken on main long
+# enough that its start could not be dated (#190).
 
 on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    # 04:17 UTC — off the hour, so this does not queue behind everything else
+    # scheduled at :00.
+    - cron: "17 4 * * *"
   workflow_dispatch:
+    inputs:
+      lane:
+        description: Which lane to run by hand
+        type: choice
+        default: all
+        options:
+          - tui
+          - tui-true-local
+          - server
+          - all
 
 permissions:
   contents: read
@@ -15,7 +45,41 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  smoke:
+  # Gates pull requests. Keep this job free of Docker and of anything needing a
+  # network service, or it stops being cheap enough to block on.
+  stub:
+    if: github.event_name != 'workflow_dispatch' || inputs.lane == 'tui' || inputs.lane == 'all'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-smoke-stub-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-smoke-stub-
+
+      - name: TUI smoke against the in-process stub
+        run: ./scripts/smoke-gate.sh tui
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-artifacts-stub
+          path: smoke-artifacts/
+          if-no-files-found: ignore
+
+  # Does not gate pull requests: needs Docker and a real Synapse.
+  true-local:
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.lane != 'tui')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -33,13 +97,17 @@ jobs:
           key: ${{ runner.os }}-cargo-smoke-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-smoke-
 
-      - name: Run smoke gate
-        run: ./scripts/smoke-gate.sh all
+      - name: Run the requested lane
+        # A dispatch names its lane; a push or a schedule runs everything, which
+        # re-runs the stub lane too. That overlap is deliberate: `all` is the
+        # documented S1 gate, and carving it up here would create a second
+        # definition of what S1 means.
+        run: ./scripts/smoke-gate.sh "${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'all' }}"
 
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: smoke-artifacts
+          name: smoke-artifacts-true-local
           path: smoke-artifacts/
           if-no-files-found: ignore
