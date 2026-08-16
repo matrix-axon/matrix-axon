@@ -54,13 +54,16 @@ repos:
         pass_filenames: false
         stages: [pre-push]
       # A hook whose filter matches nothing passes forever without running --
-      # #180. This asserts the filters below select what they claim.
+      # #180. This asserts the filters below select what they claim, and that
+      # every `SKIP=<id>` example in the docs still names a hook that exists.
+      # (The docs point here for the list rather than copying it; a stale
+      # SKIP= is the one way prose can name a hook and be silently wrong.)
       - id: hook-filters
         name: pre-push filters select what they claim
         language: python
         additional_dependencies: ["pyyaml"]
         entry: scripts/check-hook-filters.py
-        files: '^(\.pre-commit-config\.yaml|scripts/check-hook-filters\.py)$'
+        files: '^(\.pre-commit-config\.yaml|scripts/(check-hook-filters\.py|setup-hooks\.sh)|AGENTS\.md|CONTRIBUTING\.md)$'
         pass_filenames: false
         stages: [pre-push]
       - id: migrations-immutable

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Assert that .pre-commit-config.yaml's `files` regexes select what they claim.
+"""Assert that .pre-commit-config.yaml says what the docs say it says.
+
+Two checks, both about the config drifting from something that claims to
+describe it.
+
+## 1. The `files` regexes select what they claim
 
 A hook whose filter matches nothing is worse than no hook: it reports success on
 every push. That is what #180 was -- `web-lint`, `web-test` and `web-build`
@@ -18,6 +23,21 @@ Scope is the `repo: local` hooks. A remote repo's hooks carry their own filters
 upstream, combined with a `types:` selector that a regex-only model cannot
 represent -- guessing at those would assert something this script does not
 actually check.
+
+## 2. Hook ids named in prose still exist
+
+AGENTS.md and CONTRIBUTING.md deliberately do *not* enumerate the gate -- they
+point at `.pre-commit-config.yaml`, because a prose copy of the list is a second
+list to keep in sync, which is the failure ADR 0092 exists to end. (An earlier
+version of this script instead asserted that both docs listed every hook in
+order. That worked, but it was enforcing agreement between three copies rather
+than removing two of them.)
+
+What the docs do name is individual ids, in `SKIP=<id>` examples. Those are the
+one place prose can go stale invisibly: rename `cargo-test` and every
+`SKIP=cargo-test` in the tree silently becomes a no-op that still looks like it
+skips something. So every `SKIP=<id>` in the docs and in the config's own header
+must name a hook that exists.
 
 Usage: scripts/check-hook-filters.py [<config>]
 """
@@ -100,6 +120,11 @@ CASES: list[tuple[str, set[str]]] = [
             "hook-filters",
         },
     ),
+    # Watched so a `SKIP=<id>` example edited into any of them is checked
+    # (see SKIP_EXAMPLE and PROSE_NAMING_HOOKS below).
+    ("AGENTS.md", {"hook-filters"}),
+    ("CONTRIBUTING.md", {"hook-filters"}),
+    ("scripts/setup-hooks.sh", {"hook-filters"}),
     # Nothing local claims a workflow file or the root README; actionlint does
     # claim the former, and it is out of scope here (see the module docstring).
     (".github/workflows/smoke.yml", set()),
@@ -109,6 +134,29 @@ CASES: list[tuple[str, set[str]]] = [
 # Hooks that intentionally have no `files` filter, i.e. run on every push.
 # Keep this list short and explicit; an unfiltered hook is a cost everyone pays.
 ALWAYS_RUN = {"smoke-gate"}
+
+# Files whose prose names hook ids. They are not required to mention any, and
+# they must not enumerate the gate -- the config is the list. This only asks
+# that whatever they *do* name exists.
+PROSE_NAMING_HOOKS = (
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    ".pre-commit-config.yaml",
+    "scripts/setup-hooks.sh",  # prints the same escape hatch after installing
+)
+
+# `SKIP=cargo-test` matches; the `SKIP=<hook-id>` placeholder does not, because
+# `<` is outside the character class.
+SKIP_EXAMPLE = re.compile(r"SKIP=([a-z][a-z0-9-]*)")
+
+
+def skip_examples(path: str) -> set[str] | None:
+    """Hook ids named in `SKIP=<id>` examples, or None if the file is missing."""
+    try:
+        with open(path) as fh:
+            return set(SKIP_EXAMPLE.findall(fh.read()))
+    except FileNotFoundError:
+        return None
 
 
 def selected(hooks: dict[str, dict], path: str) -> set[str]:
@@ -164,6 +212,18 @@ def main() -> int:
     unknown = covered - set(hooks)
     if unknown:
         problems.append(f"CASES names hooks that do not exist: {sorted(unknown)}")
+
+    # A `SKIP=<id>` example naming a hook that no longer exists still reads like
+    # a working incantation, and silently skips nothing. Remote hooks count.
+    all_ids = {h["id"] for repo in parsed["repos"] for h in repo["hooks"]}
+    for doc in PROSE_NAMING_HOOKS:
+        named = skip_examples(doc)
+        if named is None:
+            problems.append(f"{doc}: not found -- SKIP= examples unchecked")
+            continue
+        stale = named - all_ids
+        if stale:
+            problems.append(f"{doc}: SKIP= names hooks that do not exist: {sorted(stale)}")
 
     for problem in problems:
         print(problem, file=sys.stderr)

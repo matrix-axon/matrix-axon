@@ -99,7 +99,7 @@ see the note in `src/stores/accounts.ts`.
    ```
 
 4. Have an axon server to talk to. By default the dev server expects one at
-   `http://localhost:8080`; see the repo's top-level README for running the
+   `http://localhost:8080`; see [CONTRIBUTING.md](../../CONTRIBUTING.md) for running the
    server, or set `AXON_SERVER_URL` (below) to point at an existing one.
 
 5. Start the dev server:
