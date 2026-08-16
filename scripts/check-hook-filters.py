@@ -55,15 +55,15 @@ import yaml
 # loudly, which is the point -- the failure mode being tested is silence.
 CASES: list[tuple[str, set[str]]] = [
     # The #180 regression: a real web source file must reach every web hook.
-    ("clients/web/src/app.tsx", {"prettier-web", "web-lint", "web-test", "web-build"}),
-    ("clients/web/src/stores/invites.ts", {"prettier-web", "web-lint", "web-test", "web-build"}),
-    ("clients/web/src/app.css", {"prettier-web", "web-lint", "web-test", "web-build"}),
+    ("clients/web/src/app.tsx", {"prettier", "web-lint", "web-test", "web-build"}),
+    ("clients/web/src/stores/invites.ts", {"prettier", "web-lint", "web-test", "web-build"}),
+    ("clients/web/src/app.css", {"prettier", "web-lint", "web-test", "web-build"}),
     # A manifest change additionally reinstalls, re-checks peers, and re-checks
     # the generated API client.
     (
         "clients/web/package.json",
         {
-            "prettier-web",
+            "prettier",
             "web-install",
             "web-peers",
             "web-api-schema",
@@ -74,7 +74,7 @@ CASES: list[tuple[str, set[str]]] = [
     ),
     (
         "clients/web/pnpm-workspace.yaml",
-        {"prettier-web", "web-install", "web-peers", "web-lint", "web-test", "web-build"},
+        {"prettier", "web-install", "web-peers", "web-lint", "web-test", "web-build"},
     ),
     # Generated and vendored files are excluded from prettier but still build.
     ("clients/web/src/api/schema.d.ts", {"web-api-schema", "web-lint", "web-test", "web-build"}),
@@ -89,11 +89,13 @@ CASES: list[tuple[str, set[str]]] = [
     # ...including the fixtures axon-sync `include_str!`s, which the old filter
     # missed entirely.
     ("tests/fixtures/decryption/utd_encrypted_event.json", {"rustfmt", "rust-clippy", "cargo-test"}),
-    # ...and docs and binary fixtures under the same trees do not. A full
-    # `cargo clippy --all-features --all-targets` is minutes; a README cannot
-    # change a compilation unit.
-    ("crates/axon-store/README.md", set()),
-    ("clients/tui/README.md", set()),
+    # ...and docs and binary fixtures under the same trees reach *no rust hook*.
+    # A full `cargo clippy --all-features --all-targets` is minutes and a README
+    # cannot change a compilation unit. They do reach prettier, which is the
+    # point of these two rows: the rust filter must not claim them and the
+    # markdown filter must.
+    ("crates/axon-store/README.md", {"prettier"}),
+    ("clients/tui/README.md", {"prettier"}),
     ("smoke/local-stack/corpus/media/avatar.png", set()),
     # Migrations are BOTH an immutability-checked input and a rust build input:
     # migrations.rs embeds the directory with `include_dir!`, so a .sql edit
@@ -107,13 +109,19 @@ CASES: list[tuple[str, set[str]]] = [
     # .cargo/config.toml can carry rustflags and target overrides, so it is a
     # rust build input even though it holds only aliases today.
     (".cargo/config.toml", {"rustfmt", "rust-clippy", "cargo-test"}),
+    # ADRs are numbered-checked but deliberately not prettier-formatted.
     ("docs/adr/0092-unified-pre-push-gate.md", {"adr-numbers"}),
+    ("docs/client-parity.md", {"prettier"}),
+    ("docs/mvp/prd.md", {"prettier"}),
+    # Generated wholesale by scripts/generate-thirdparty.sh; not ours to format.
+    ("THIRDPARTY.md", set()),
+    ("LICENSE.md", set()),
     ("scripts/check-hook-filters.py", {"hook-filters"}),
     # Editing the config re-runs everything it could invalidate, including this.
     (
         ".pre-commit-config.yaml",
         {
-            "prettier-web",
+            "prettier",
             "web-lint",
             "web-test",
             "web-build",
@@ -125,13 +133,13 @@ CASES: list[tuple[str, set[str]]] = [
     ),
     # Watched so a `SKIP=<id>` example edited into any of them is checked
     # (see SKIP_EXAMPLE and PROSE_NAMING_HOOKS below).
-    ("AGENTS.md", {"hook-filters"}),
-    ("CONTRIBUTING.md", {"hook-filters"}),
+    ("AGENTS.md", {"hook-filters", "prettier"}),
+    ("CONTRIBUTING.md", {"hook-filters", "prettier"}),
     ("scripts/setup-hooks.sh", {"hook-filters"}),
-    # Nothing local claims a workflow file or the root README; actionlint does
-    # claim the former, and it is out of scope here (see the module docstring).
+    # Nothing local claims a workflow file; actionlint does, and it is out of
+    # scope here (see the module docstring).
     (".github/workflows/smoke.yml", set()),
-    ("README.md", set()),
+    ("README.md", {"prettier"}),
 ]
 
 # Hooks that intentionally have no `files` filter, i.e. run on every push.

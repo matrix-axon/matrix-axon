@@ -23,7 +23,7 @@
 #   git push --no-verify         skip all of them
 #   RUN_SMOKE=tui jj push        additionally run a Docker smoke lane
 #
-# Tooling: `prettier-web` and `actionlint` vendor their own binaries, so they
+# Tooling: `prettier` and `actionlint` vendor their own binaries, so they
 # need nothing installed. `web-install` keeps clients/web/node_modules matching
 # the lockfile for the pnpm-backed hooks. The rust hooks use the repo toolchain
 # (`rust-toolchain.toml`).
@@ -35,7 +35,7 @@ minimum_pre_commit_version: "3.2.0"
 default_install_hook_types: [pre-push]
 repos:
   # actionlint vendors its own binary, so it needs nothing installed -- the same
-  # property that makes prettier-web work everywhere. `.github/actionlint.yaml`
+  # property that makes the prettier hook work everywhere. `.github/actionlint.yaml`
   # (the self-hosted runner labels) is picked up from the repo root.
   #
   # One caveat it does NOT vendor: actionlint shells out to `shellcheck` to
@@ -91,15 +91,24 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-      - id: prettier-web
-        name: prettier (web, check)
+      - id: prettier
+        name: prettier (check)
         language: node
         additional_dependencies: ["prettier@3.9.4"]
         entry: prettier --check
-        # Config (.prettierrc.json) resolves by walking up from each path.
-        files: '^(.pre-commit-config.yaml|clients/web/README.md|clients/web/.*\.(ts|tsx|mjs|cjs|js|css|json|md|html|yml|yaml))$'
-        # Mirror clients/web/.prettierignore (generated / vendored files).
-        exclude: '^clients/web/(dist/|pnpm-lock\.yaml|src/api/schema\.d\.ts|public/emoji-picker-data-en\.json)'
+        # Config resolves by walking up from each path: clients/web has its own
+        # .prettierrc.json (semi/singleQuote), everything else gets the root one.
+        # `proseWrap: preserve` there means prose line breaks are never touched --
+        # this hook normalizes tables, lists and emphasis, not wrapping. Line
+        # length is a convention, not a check (AGENTS.md § Docs and prose).
+        files: '^(\.pre-commit-config\.yaml|[^/]+\.md|docs/.*\.md|(clients|crates|smoke|deploy)/.*\.md|clients/web/.*\.(ts|tsx|mjs|cjs|js|css|json|html|yml|yaml))$'
+        # Generated or not-ours, in both trees:
+        #   THIRDPARTY.md   scripts/generate-thirdparty.sh rewrites it wholesale
+        #   LICENSE.md      license text is not ours to reflow
+        #   docs/adr/       historical records; reformatting costs blame and
+        #                   buys consistency in files nobody edits after merge
+        #   clients/web/*   mirror of clients/web/.prettierignore
+        exclude: '^(THIRDPARTY\.md|LICENSE\.md|docs/adr/|clients/web/(dist/|pnpm-lock\.yaml|src/api/schema\.d\.ts|public/emoji-picker-data-en\.json))'
         pass_filenames: true
         stages: [pre-push]
       # Before any pnpm-backed hook: the web hooks use the repo's real
