@@ -122,8 +122,6 @@ pub async fn send_round_trip(ctx: &Ctx) -> ScenarioOutcome {
     outcome
 }
 
-/// Wait until the room list, the seeded message, and the input line have all
-/// painted — i.e. the TUI is up and talking to the stub.
 /// Wait until the stub profile has actually painted: room list, input line,
 /// **and** the seeded timeline.
 ///
