@@ -37,6 +37,13 @@ repos:
   # actionlint vendors its own binary, so it needs nothing installed -- the same
   # property that makes prettier-web work everywhere. `.github/actionlint.yaml`
   # (the self-hosted runner labels) is picked up from the repo root.
+  #
+  # One caveat it does NOT vendor: actionlint shells out to `shellcheck` to
+  # analyze `run:` blocks, and silently drops that analysis when shellcheck is
+  # absent -- no warning, just a smaller check. GitHub runners ship shellcheck,
+  # so CI is always the strict version and a machine without it is not. Install
+  # shellcheck locally (CONTRIBUTING.md) or expect CI to find things your push
+  # did not: that is how the SC2086s in cross-build.yml surfaced.
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12
     hooks:

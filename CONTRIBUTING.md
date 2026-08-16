@@ -44,6 +44,12 @@ hooks also watch:**
   gets (see [AGENTS.md](AGENTS.md) for the alias).
 - **Playwright browsers**, for the web end-to-end suite:
   `pnpm --dir clients/web exec playwright install`.
+- **[shellcheck](https://www.shellcheck.net/)** (`sudo apt install shellcheck`,
+  `brew install shellcheck`). The `actionlint` hook vendors its own binary, but
+  it shells out to shellcheck for the `run:` blocks inside workflows and
+  **silently skips that analysis when shellcheck is missing** — no warning, just
+  a weaker check. GitHub runners ship it, so CI always runs the strict version;
+  without it locally, the hook can pass on a workflow CI will reject.
 
 ### Platform install commands
 
