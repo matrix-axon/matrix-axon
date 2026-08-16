@@ -1,3 +1,12 @@
 # msw's postinstall only prints a support notice; nothing needs building.
 allowBuilds:
   msw: false
+
+# Workspace level graph overrides
+overrides:
+  'openapi-typescript@7.13.0>typescript': '~6.0.3'
+
+# Peer dependency suppression rules
+peerDependencyRules:
+  allowedVersions:
+    typescript: '6.x'
