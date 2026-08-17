@@ -852,6 +852,45 @@ describe('RoomList keyboard shortcuts (ADR 0078)', () => {
     expect(document.activeElement).toBe(filter)
   })
 
+  it('arrows from the filter land on Invites before the first room', async () => {
+    const { findByText, findByRole, getByLabelText, container, services } =
+      renderPage()
+    await findByText('Ops')
+    services.invites.noteAdded({
+      account_id: ACCOUNT,
+      account_user_id: '@me:hs',
+      room_id: '!inv:hs',
+      name: 'Pending',
+      inviter_user_id: '@alice:hs',
+      is_direct: false,
+      encrypted: false,
+      invited_at: '2026-08-14T12:00:00+00:00',
+    })
+    const invites = await findByRole('link', { name: /Invites/ })
+    const filter = getByLabelText('Filter by name')
+    const firstRoom = container.querySelector<HTMLAnchorElement>(
+      'a.room-link[data-index="0"]',
+    )
+    expect(firstRoom).not.toBeNull()
+    filter.focus()
+
+    fireEvent.keyDown(filter, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(invites)
+
+    fireEvent.keyDown(invites, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(firstRoom)
+
+    fireEvent.keyDown(firstRoom!, { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(invites)
+
+    fireEvent.keyDown(invites, { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(filter)
+
+    filter.focus()
+    fireEvent.keyDown(filter, { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(invites)
+  })
+
   it('clears the room filter with the clear button and keeps focus in the filter', async () => {
     const { findByText, getByLabelText, getByRole, queryByRole } = renderPage()
     await findByText('Ops')

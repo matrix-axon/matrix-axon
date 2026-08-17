@@ -48,8 +48,21 @@ export function InvitesPage() {
   }, [invites])
 
   const rows = invites.invites.value
+  // One leave/join at a time per account: two concurrent SDK calls dropped
+  // the second invite on a live homeserver. Bulk already serializes; a
+  // single-row click must lock every other row (and the bulk buttons) too.
+  const mutating = busyKey !== null || bulkBusy !== null
+  const pendingFailed =
+    bulkResult === null
+      ? []
+      : bulkResult.failed.filter((item) =>
+          rows.some((row) => inviteKey(row) === inviteKey(item.invite)),
+        )
 
   async function onAccept(invite: InviteDto) {
+    if (mutating) {
+      return
+    }
     invites.error.value = null
     // A bulk run's outcome describes rows that are no longer on screen. Left
     // up, its "N failed" would keep claiming a failure the user has since
@@ -68,6 +81,9 @@ export function InvitesPage() {
   }
 
   async function onReject(invite: InviteDto) {
+    if (mutating) {
+      return
+    }
     invites.error.value = null
     setBulkResult(null)
     setBusyKey(inviteKey(invite))
@@ -79,6 +95,9 @@ export function InvitesPage() {
   }
 
   async function onBulk(kind: 'accept' | 'reject') {
+    if (mutating) {
+      return
+    }
     invites.error.value = null
     setBulkResult(null)
     setBulkBusy(kind)
@@ -105,7 +124,7 @@ export function InvitesPage() {
           <div class="invites-bulk">
             <button
               type="button"
-              disabled={bulkBusy !== null}
+              disabled={mutating}
               onClick={() => void onBulk('accept')}
             >
               {bulkBusy === 'accept' ? 'Accepting…' : 'Accept all'}
@@ -113,7 +132,7 @@ export function InvitesPage() {
             <button
               type="button"
               class="danger"
-              disabled={bulkBusy !== null}
+              disabled={mutating}
               onClick={() => void onBulk('reject')}
             >
               {bulkBusy === 'reject' ? 'Rejecting…' : 'Reject all'}
@@ -122,10 +141,10 @@ export function InvitesPage() {
         )}
       </header>
       <ErrorBanner error={invites.error} />
-      {bulkResult !== null && bulkResult.failed.length > 0 && (
+      {pendingFailed.length > 0 && bulkResult !== null && (
         <p class="error" role="alert">
-          {bulkResult.succeeded} succeeded, {bulkResult.failed.length} failed.
-          {bulkResult.failed
+          {bulkResult.succeeded} succeeded, {pendingFailed.length} failed.
+          {pendingFailed
             .map((item) => ` ${inviteTitle(item.invite)}: ${item.message}`)
             .join('')}
         </p>
@@ -141,7 +160,7 @@ export function InvitesPage() {
               key={inviteKey(invite)}
               invite={invite}
               showAccount={showAccount}
-              busy={busyKey === inviteKey(invite) || bulkBusy !== null}
+              busy={mutating}
               onAccept={() => void onAccept(invite)}
               onReject={() => void onReject(invite)}
             />

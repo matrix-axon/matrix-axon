@@ -486,8 +486,10 @@ export function RoomList() {
   /**
    * Arrow keys rove real DOM focus across the room links rather than tracking a
    * selected index: `Enter` then activates the anchor natively, and screen
-   * readers announce each room as it is reached. `ArrowUp` off the top returns
-   * to the filter input, which is where the sequence began.
+   * readers announce each room as it is reached. When an Invites row is
+   * showing it sits above the list: ArrowDown from the filter (or from
+   * nothing focused) lands there first, and ArrowUp off the first room
+   * lands there too. ArrowUp off Invites returns to the filter.
    *
    * The roved position is the focused row's index into `visible`, read off the
    * DOM, because only the windowed rows exist to be focused — stepping past the
@@ -511,7 +513,7 @@ export function RoomList() {
       return
     }
     if (visible.length === 0) {
-      if (delta > 0 && invitesLink !== null) {
+      if (invitesLink !== null) {
         invitesLink.focus()
       }
       return
@@ -521,7 +523,7 @@ export function RoomList() {
         ? active.getAttribute('data-index')
         : null
     const current = attribute === null ? -1 : Number(attribute)
-    if (current < 0 && delta > 0 && invitesLink !== null) {
+    if (current < 0 && invitesLink !== null) {
       invitesLink.focus()
       return
     }

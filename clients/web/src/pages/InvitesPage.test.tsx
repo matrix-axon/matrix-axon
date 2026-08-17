@@ -129,6 +129,41 @@ describe('InvitesPage', () => {
     )
   })
 
+  it('disables every row while one invite is mutating', async () => {
+    let release: (() => void) | undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+        HttpResponse.json({
+          data: [invite('!a:hs', 'Alpha'), invite('!b:hs', 'Beta')],
+        }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+        async () => {
+          await held
+          return HttpResponse.json({ data: {} })
+        },
+      ),
+    )
+    const { findByText, findAllByRole } = renderInbox()
+    expect(await findByText('Alpha')).toBeTruthy()
+    const rejects = await findAllByRole('button', { name: 'Reject' })
+    fireEvent.click(rejects[0])
+    await waitFor(() => {
+      const buttons = document.querySelectorAll(
+        '.invite-actions button, .invites-bulk button',
+      )
+      expect(
+        [...buttons].every((button) => (button as HTMLButtonElement).disabled),
+      ).toBe(true)
+    })
+    release?.()
+    expect(await findByText('Beta')).toBeTruthy()
+  })
+
   it('shows a bulk failure banner when reject all partly fails', async () => {
     server.use(
       http.get(`${TEST_BASE_URL}/v1/invites`, () =>
@@ -184,6 +219,38 @@ describe('InvitesPage', () => {
 
     failLeave = false
     fireEvent.click(await findByRole('button', { name: 'Reject' }))
+    await waitFor(() => {
+      expect(queryByRole('alert')).toBeNull()
+    })
+  })
+
+  it('drops a bulk-failure line once that invite is gone from the list', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+        HttpResponse.json({
+          data: [invite('!a:hs', 'Alpha'), invite('!b:hs', 'Beta')],
+        }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+        ({ params }) => {
+          if (params.roomId === '!a:hs') {
+            return HttpResponse.json(
+              { error: { code: 'not_found', message: 'room not found' } },
+              { status: 404 },
+            )
+          }
+          return HttpResponse.json({ data: {} })
+        },
+      ),
+    )
+    const { findByRole, queryByRole, services } = renderInbox()
+    fireEvent.click(await findByRole('button', { name: 'Reject all' }))
+    expect((await findByRole('alert')).textContent).toMatch(
+      /Alpha: room not found/,
+    )
+
+    services.invites.noteRemoved(ACCOUNT, '!a:hs')
     await waitFor(() => {
       expect(queryByRole('alert')).toBeNull()
     })
