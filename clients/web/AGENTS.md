@@ -449,11 +449,14 @@ the most time in the ADR 0076 investigation:
   the specific risk to watch for. Weigh it against the fact that the residual is
   motion _during_ the keyboard animation, when motion is expected — unlike the
   jitter while scrolling, which is what actually read as broken.
-- **A long-lived `e2e/mock-server.mjs` will fail the suite.** `reuseExistingServer`
-  hands Playwright whatever is already on 4599, and that process accumulates
-  state — a mock left running for device testing collected four copies of one
-  message and broke a strict-mode locator in `shortcuts.spec.ts`, twice, looking
-  exactly like a real regression. Kill it before running the suite.
+- **A long-lived `e2e/mock-server.mjs` must never be reused by the suite.** An
+  old process accumulates state, and one left running for device testing once
+  collected four copies of a message and broke a strict-mode locator in
+  `shortcuts.spec.ts`, twice, looking exactly like a real regression. Worse, a
+  process on the shared port can belong to another jj workspace and serve that
+  workspace's `dist/`. Playwright therefore requires a fresh server and fails
+  when 4599 is occupied. Set `AXON_WEB_E2E_PORT` to an unused port when the
+  existing process must stay up.
 
 ## Driving a real iOS Simulator by hand
 
@@ -548,9 +551,10 @@ TimelineEvent`).
   runs again, and a stale bundle reports a fix as broken or a break as fixed,
   silently. `test:e2e` therefore builds first; if you invoke `playwright test`
   directly, build first yourself.
-- **The e2e mock server outlives a single spec file** (`reuseExistingServer`).
-  A spec that appends to its seeded `timeline` array pollutes every later spec;
-  `send-media` deliberately only broadcasts and records for `/events/:id`.
+- **One e2e mock server serves the whole Playwright invocation.** It is fresh at
+  the start, but still outlives each individual spec file. A spec that appends
+  to its seeded `timeline` array pollutes every later spec; `send-media`
+  deliberately only broadcasts and records for `/events/:id`.
 - **A fixture that uses the same helper as the code agrees with it by
   construction.** A URL check compared `window.location.pathname` against
   `localRoomHref`, which runs the room id through `encodeURIComponent` — but a

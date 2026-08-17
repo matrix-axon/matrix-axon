@@ -1,6 +1,9 @@
 import { defineConfig, devices } from '@playwright/test'
 
-const PORT = 4599
+const PORT = Number(process.env.AXON_WEB_E2E_PORT ?? 4599)
+if (!Number.isSafeInteger(PORT) || PORT < 1 || PORT > 65_535) {
+  throw new Error('AXON_WEB_E2E_PORT must be an integer from 1 to 65535')
+}
 const BASE_URL = `http://127.0.0.1:${PORT}`
 const IPHONE = devices['iPhone 13']
 
@@ -8,8 +11,10 @@ const IPHONE = devices['iPhone 13']
  * The web e2e lanes: a headless Chromium drives the built app against the
  * dependency-free mock backend (`e2e/mock-server.mjs`), which serves `dist/`
  * and a real `/v1/ws`. Run `pnpm build` first — the mock serves static assets,
- * so the app must be built. `reuseExistingServer` keeps local reruns fast; CI
- * starts fresh.
+ * so the app must be built. Every run starts its own server so an old process —
+ * including one from another jj workspace — cannot silently supply the wrong
+ * build or retained fixture state. Set `AXON_WEB_E2E_PORT` when another
+ * workspace or a manually driven mock needs the default port.
  *
  * Lanes: live sockets (ADR 0061), two-pane layout (ADR 0062), keyboard
  * shortcuts (ADR 0078).
@@ -77,7 +82,7 @@ export default defineConfig({
     command: 'node e2e/mock-server.mjs',
     url: BASE_URL,
     env: { PORT: String(PORT) },
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 30_000,
   },
 })
