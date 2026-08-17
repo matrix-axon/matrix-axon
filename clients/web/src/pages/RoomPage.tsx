@@ -623,31 +623,34 @@ export function RoomPage() {
   // state events are tiered behind the visibility setting, and bodyless
   // unsupported events are developer diagnostics rather than ordinary timeline
   // content.
-  const isVisibleTimelineEvent = (event: TimelineEvent): boolean => {
-    if (threadRootId(event) !== null) {
-      return false
-    }
-    if (!settings.developerMode.value && isUnsupportedBodylessEvent(event)) {
-      return false
-    }
-    if (hideRedacted && event.redacted) {
-      return false
-    }
-    if (!isStateEvent(event)) {
-      return true
-    }
-    if (stateEvents === 'all') {
-      return true
-    }
-    // The `important` tier is membership only, and only when there is
-    // something to say: a member event whose profile fields are unchanged is
-    // routine re-sync traffic with no notice to render (ADR 0083).
-    return (
-      stateEvents === 'important' &&
-      stateEventTier(event) === 'important' &&
-      stateEventNotice(event) !== null
-    )
-  }
+  const isVisibleTimelineEvent = useCallback(
+    (event: TimelineEvent): boolean => {
+      if (threadRootId(event) !== null) {
+        return false
+      }
+      if (!settings.developerMode.value && isUnsupportedBodylessEvent(event)) {
+        return false
+      }
+      if (hideRedacted && event.redacted) {
+        return false
+      }
+      if (!isStateEvent(event)) {
+        return true
+      }
+      if (stateEvents === 'all') {
+        return true
+      }
+      // The `important` tier is membership only, and only when there is
+      // something to say: a member event whose profile fields are unchanged is
+      // routine re-sync traffic with no notice to render (ADR 0083).
+      return (
+        stateEvents === 'important' &&
+        stateEventTier(event) === 'important' &&
+        stateEventNotice(event) !== null
+      )
+    },
+    [hideRedacted, settings.developerMode.value, stateEvents],
+  )
 
   // Advance this room's read marker to the newest event while it is open, so
   // sibling devices see it as read (M-W6 step 5c, ADR 0048). Hidden unread
@@ -744,15 +747,7 @@ export function RoomPage() {
     roomId,
     deviceState,
     ephemeralSender,
-    // What `isVisibleTimelineEvent` closes over, listed for the same reason the
-    // `visible` memo lists them: the predicate is re-created every render and so
-    // can never be a dependency itself. Without these, changing a visibility
-    // setting while the room is open repaints the timeline but leaves both read
-    // positions computed under the old rule until an unrelated dep happens to
-    // fire this effect.
-    hideRedacted,
-    stateEvents,
-    settings.developerMode.value,
+    isVisibleTimelineEvent,
   ])
 
   // Clear any live typing notice when leaving this room (RoomPage does not
@@ -940,15 +935,7 @@ export function RoomPage() {
    */
   const visible = useMemo(
     () => timeline.events.value.filter(isVisibleTimelineEvent),
-    // The filter is re-created every render, so it can never be a dependency
-    // itself; these are the values it closes over.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [
-      timeline.events.value,
-      hideRedacted,
-      stateEvents,
-      settings.developerMode.value,
-    ],
+    [timeline.events.value, isVisibleTimelineEvent],
   )
   /**
    * Adjacent images from one sender collapse into a gallery row (ADR 0081).
