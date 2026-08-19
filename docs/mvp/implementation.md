@@ -324,6 +324,8 @@ Sync alone only ingests events _going forward_ (plus the shallow `sync.timeline_
 
 ### 15. Media send/upload
 
+**Landed.** **M15 — media send/upload (ADR 0059) — shipped, server and both clients.** The write-side counterpart to M11's download proxy: Axon accepts a staged upload over `/v1/`, then sends it into a room as `m.image` or `m.file` through the account's SDK client (`crates/axon-api/src/uploads.rs`, `StagedUploadService`). Landed as planned (staging substrate → send-media mutation → reconcile/integration coverage), plus client UX that was originally out of scope for the milestone: `axon-tui`'s `/send` command (ADR 0061/0062) and `axon-web`'s attach/drop/paste (ADR 0065). Still no audio/video send, no thumbnail generation on upload (M17 added thumbnails on the _read_ side only), and no off-host storage — those remain out of scope, not just unstarted.
+
 ### 16. Device-list / discovery endpoint
 
 ### 17. Media thumbnail proxy
