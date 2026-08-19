@@ -288,6 +288,8 @@ Sync alone only ingests events _going forward_ (plus the shallow `sync.timeline_
 
 ### 12. Drafts and per-device read state
 
+**Landed.** **M12 — drafts and per-device read state (partial).** The server-side `device_state` store, its `GET`/`PUT /v1/devices/{device_id}/state/{namespace}` route, and the `device_state.changed` WS fan-out — keyed `(account_id, device_id, namespace, key)`, last-write-wins by server clock (PR 191, ADR 0048) — were **dropped from `main` by a post-merge force-push** and restored in PR 226; verify they're present before building on them. The TUI's cross-device _draft_ sync that consumes them landed (PR 192). Cross-device **read markers** (PR 196) were merged and then **reverted** (`116b3cb`), so read-marker state is not currently in `main` — treat that surface as unlanded until it returns.
+
 - Tables: `device_state` keyed by `(account_id, device_id, namespace, key)` with an opaque value blob and `updated_at`.
 - Devices are identified by a client-supplied UUID at first registration.
 - Endpoints: `GET/PUT /v1/devices/{device_id}/state/{namespace}`.
