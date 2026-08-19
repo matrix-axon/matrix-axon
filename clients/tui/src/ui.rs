@@ -384,7 +384,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         } else {
             Style::default().fg(app.colors.border)
         };
-        let rooms_title = if let Mode::Search(SearchKind::Rooms, q) = &app.mode {
+        let rooms_title = if let Some(stage) = app.bootstrap.label() {
+            // Startup is still fetching. Say so, or an empty panel reads as
+            // "this account has no rooms" (#189).
+            format!("Rooms — {stage}…")
+        } else if let Mode::Search(SearchKind::Rooms, q) = &app.mode {
             format!("Rooms  Search: {q}")
         } else if let Mode::Search(SearchKind::RoomNameFilter, q) = &app.mode {
             format!("Rooms  Filter: {q}")

@@ -11,17 +11,6 @@ use super::{
 };
 
 impl App {
-    pub(crate) async fn refresh_rooms(&mut self) {
-        match self.client.list_rooms(self.account_filter).await {
-            Ok(rooms) => self.apply_room_refresh(rooms),
-            Err(err) => {
-                if !self.is_mid_command() {
-                    self.status = Status::from(format!("room refresh failed: {err}"));
-                }
-            }
-        }
-    }
-
     pub(crate) fn apply_room_refresh(&mut self, mut rooms: Vec<RoomDto>) {
         // A logged-out (deactivated) account keeps its rows in Axon's `events`
         // table, and `GET /v1/rooms` joins accounts without a state filter, so it

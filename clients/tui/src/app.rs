@@ -21,12 +21,14 @@ use crate::search::{SearchFormState, SearchRequest, SearchResultsState};
 #[cfg(test)]
 use ratatui::style::Modifier;
 use std::path::PathBuf;
+mod bootstrap;
 mod completion;
 mod drafts;
 mod ephemeral;
 pub(crate) use drafts::{load_or_create_device_id, DraftOutcome};
 mod lifecycle;
 mod read_markers;
+pub(crate) use bootstrap::{BootstrapOutcome, BootstrapStage};
 pub(crate) use lifecycle::LifecycleOutcome;
 pub(crate) mod media;
 pub(crate) use media::{
@@ -856,6 +858,18 @@ pub(crate) struct App {
     pub(crate) sixel_preview_refresh_after: Instant,
     /// Encode requests that could not be started, for the debug overlay (#51).
     pub(crate) protocol_drops: ProtocolDropCounts,
+    /// Delivers completed startup stages to the main loop (#189).
+    pub(crate) bootstrap_tx: Option<mpsc::UnboundedSender<BootstrapOutcome>>,
+    /// How far startup has got; drives the rooms-panel loading label.
+    pub(crate) bootstrap: BootstrapStage,
+    /// A room-list fetch is in flight, so another must not be started.
+    pub(crate) rooms_fetch_inflight: bool,
+    /// A room-list fetch was asked for while one was in flight; run one more
+    /// when it lands rather than one per request.
+    pub(crate) rooms_fetch_again: bool,
+    /// Whether a room was selected when the in-flight fetch was requested, so
+    /// the handler knows if the refresh revealed the session's first room.
+    pub(crate) rooms_fetch_had_selection: bool,
     /// Set for one frame after the media-preview popup closes so `draw()` can
     /// issue a targeted Clear over the former popup area.  Sixel/iTerm2 pixels
     /// are not erased by ratatui's cell-diff pass when the image disappears, so
@@ -1121,6 +1135,11 @@ impl App {
             sixel_preview_generation: 0,
             sixel_preview_refresh_after: Instant::now() + SIXEL_REFRESH_INTERVAL,
             protocol_drops: ProtocolDropCounts::default(),
+            bootstrap_tx: None,
+            bootstrap: BootstrapStage::Accounts,
+            rooms_fetch_inflight: false,
+            rooms_fetch_again: false,
+            rooms_fetch_had_selection: false,
             clear_media_preview: false,
             force_terminal_clear: false,
             prev_image_rects: Vec::new(),
@@ -1167,6 +1186,12 @@ impl App {
 
     pub(crate) fn set_room_action_sender(&mut self, tx: mpsc::UnboundedSender<RoomActionOutcome>) {
         self.room_action_tx = Some(tx);
+    }
+
+    /// Wire up the channel the main loop drains for completed startup stages
+    /// and coalesced room refreshes (#189).
+    pub(crate) fn set_bootstrap_sender(&mut self, tx: mpsc::UnboundedSender<BootstrapOutcome>) {
+        self.bootstrap_tx = Some(tx);
     }
 
     /// Wire up the channel the main loop drains for completed image downloads.
@@ -1862,9 +1887,7 @@ impl App {
             Command::Bundle(event_id) => self.show_verification_bundle(&event_id).await,
             Command::Help => self.open_popup(PopupKind::Help),
             Command::Shortcuts => self.open_popup(PopupKind::Shortcuts),
-            Command::Refresh => {
-                self.refresh_rooms().await;
-            }
+            Command::Refresh => self.request_rooms_refresh(),
             Command::EditConfig => {
                 self.edit_config_requested = true;
             }

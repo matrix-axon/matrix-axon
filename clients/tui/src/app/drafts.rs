@@ -243,31 +243,13 @@ impl App {
     /// active account. Called at startup (and safe to call again — e.g. after
     /// a reconnect, since the lossy bus may have dropped frames). A failed
     /// read leaves that account's local drafts as they are.
-    pub(crate) async fn refresh_drafts(&mut self) {
-        let device_id = self.device_id;
-        let account_ids: Vec<Uuid> = self
-            .accounts
-            .accounts
-            .iter()
-            .map(|a| a.account_id)
-            .collect();
-        // Fetch every account's merged view concurrently: this runs inline in
-        // the event loop, so a sequential GET-per-account would freeze the UI
-        // for account_count × RTT right after a network blip (or at startup,
-        // before first paint).
-        let reads = account_ids.into_iter().map(|account_id| {
-            let client = self.client.clone();
-            async move {
-                (
-                    account_id,
-                    client
-                        .get_device_state(device_id, account_id, DRAFTS_NAMESPACE)
-                        .await,
-                )
-            }
-        });
-        let results = futures_util::future::join_all(reads).await;
-        for (account_id, result) in results {
+    /// Apply the merged draft view for every account, then restore the current
+    /// room's draft into the compose buffer.
+    ///
+    /// The fetch half lives in [`super::bootstrap`] so startup and every WS
+    /// (re)connect can run it off the event loop (#189).
+    pub(crate) fn apply_draft_reads(&mut self, reads: super::bootstrap::DeviceStateReads) {
+        for (account_id, result) in reads {
             let Ok(state) = result else {
                 continue;
             };

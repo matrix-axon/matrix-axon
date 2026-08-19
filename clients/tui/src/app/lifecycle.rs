@@ -122,9 +122,11 @@ pub(crate) enum VerifyResyncError {
 }
 
 impl App {
-    pub(crate) async fn refresh_accounts(&mut self) {
-        match self.client.list_accounts().await {
-            Ok(accounts) => {
+    /// Install a fetched account list. Split out from [`Self::refresh_accounts`]
+    /// so startup can fetch off the event loop and apply here (#189).
+    pub(crate) fn apply_account_refresh(&mut self, accounts: Vec<AccountDto>) {
+        {
+            {
                 self.set_accounts(accounts);
                 // Apply the CLI --account-id flag once, before user interaction
                 if self.accounts.selected == AccountSelection::All {
@@ -140,7 +142,6 @@ impl App {
                     }
                 }
             }
-            Err(err) => self.status = Status::from(format!("account refresh failed: {err}")),
         }
     }
 
