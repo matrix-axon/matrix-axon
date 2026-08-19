@@ -207,11 +207,14 @@ impl App {
             }
             return LiveFrameAction::None;
         }
+        // Field comparison, not `RoomKey::from(room) == key`: that allocated a
+        // room-id `String` for every room in the list, for every live event
+        // (#189).
         let known_room = self
             .rooms
             .rooms
             .iter()
-            .any(|room| RoomKey::from(room) == key);
+            .any(|room| room.account_id == key.account_id && room.room_id == key.room_id);
         if known_room && self.is_own_membership_departure(&event, &key) {
             return LiveFrameAction::RefreshRooms;
         }
@@ -1103,7 +1106,27 @@ pub(crate) fn room_matches_search(room: &RoomDto, query: &str) -> bool {
     ]
     .into_iter()
     .flatten()
-    .any(|field| field.to_ascii_lowercase().contains(query))
+    .any(|field| contains_ascii_case_insensitive(field, query))
+}
+
+/// `haystack.to_ascii_lowercase().contains(needle)` without the allocation.
+///
+/// `needle` is already lowercased by the caller. The room-name filter runs this
+/// over every room on every keystroke *and* every frame; allocating a lowercased
+/// copy of each room's id, alias, name, and topic there was four `String`s per
+/// room per pass (#189). Byte windows are exact here because
+/// `to_ascii_lowercase` only ever folded ASCII, which is what
+/// `eq_ignore_ascii_case` compares.
+pub(crate) fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let needle = needle.as_bytes();
+    haystack.len() >= needle.len()
+        && haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn message_matches_search(event: &EventDto, query: &str) -> bool {
@@ -1114,4 +1137,40 @@ fn message_matches_search(event: &EventDto, query: &str) -> bool {
         .body
         .as_deref()
         .is_some_and(|body| body.to_ascii_lowercase().contains(query))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contains_ascii_case_insensitive;
+
+    /// The allocation-free matcher must agree with the
+    /// `to_ascii_lowercase().contains(..)` it replaced, including on the
+    /// non-ASCII input where `to_ascii_lowercase` deliberately does nothing.
+    #[test]
+    fn case_insensitive_contains_matches_the_allocating_form() {
+        let cases = [
+            ("Ops Room", "ops"),
+            ("Ops Room", "ROOM"),
+            ("Ops Room", "room"),
+            ("Ops Room", "zzz"),
+            ("", "x"),
+            ("x", ""),
+            ("short", "much longer needle"),
+            ("!AbC:example.com", "abc:example"),
+            // `to_ascii_lowercase` leaves these alone, so both forms agree that
+            // an uppercase non-ASCII needle does not match its lowercase form.
+            ("Ärger", "ärger"),
+            ("Ärger", "Ärger"),
+            ("straße", "STRASSE"),
+        ];
+        for (haystack, needle) in cases {
+            assert_eq!(
+                contains_ascii_case_insensitive(haystack, needle),
+                haystack
+                    .to_ascii_lowercase()
+                    .contains(&needle.to_ascii_lowercase()),
+                "disagreed on {haystack:?} / {needle:?}"
+            );
+        }
+    }
 }

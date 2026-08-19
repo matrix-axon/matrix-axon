@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
@@ -1131,24 +1132,41 @@ pub(crate) fn sort_rooms_by_pin_with_title<F>(
 ) where
     F: Fn(&RoomDto) -> String,
 {
+    // Both halves of the key used to be recomputed inside the comparator: the
+    // pin rank was a linear scan of `pinned`, and the alpha tiebreak allocated
+    // two lowercased `String`s — so O(n log n) scans and allocations for a
+    // sort that runs on every room refresh (#189). Index the pins once, and let
+    // `sort_by_cached_key` compute each room's key exactly once.
+    //
+    // Borrowing `pinned` (not `rooms`) keeps this free of the `&mut rooms`
+    // borrow, and the tuple key avoids building a `RoomKey` per lookup.
+    let pin_rank: HashMap<(Uuid, &str), usize> = pinned
+        .iter()
+        .enumerate()
+        .map(|(index, key)| ((key.account_id, key.room_id.as_str()), index))
+        .collect();
+    // Lower rank (earlier in `pinned`) sorts first; unpinned rooms get
+    // usize::MAX and fall to the bottom. Ties use the active sort mode.
     let rank = |room: &RoomDto| {
-        let key = RoomKey::from(room);
-        pinned
-            .iter()
-            .position(|pinned| *pinned == key)
+        pin_rank
+            .get(&(room.account_id, room.room_id.as_str()))
+            .copied()
             .unwrap_or(usize::MAX)
     };
-    let tiebreak = |a: &RoomDto, b: &RoomDto| match sort {
-        RoomSort::RecentActivity => b.last_activity_ts.cmp(&a.last_activity_ts),
-        RoomSort::OldestActivity => a.last_activity_ts.cmp(&b.last_activity_ts),
-        RoomSort::AlphaAsc => title(a).to_lowercase().cmp(&title(b).to_lowercase()),
-        RoomSort::AlphaDesc => title(b).to_lowercase().cmp(&title(a).to_lowercase()),
-    };
-    rooms.sort_by(|a, b| {
-        // Lower rank (earlier in `pinned`) sorts first; unpinned rooms get
-        // usize::MAX and fall to the bottom. Ties use the active sort mode.
-        rank(a).cmp(&rank(b)).then_with(|| tiebreak(a, b))
-    });
+    match sort {
+        RoomSort::RecentActivity => {
+            rooms.sort_by_cached_key(|room| (rank(room), Reverse(room.last_activity_ts)))
+        }
+        RoomSort::OldestActivity => {
+            rooms.sort_by_cached_key(|room| (rank(room), room.last_activity_ts))
+        }
+        RoomSort::AlphaAsc => {
+            rooms.sort_by_cached_key(|room| (rank(room), title(room).to_lowercase()))
+        }
+        RoomSort::AlphaDesc => {
+            rooms.sort_by_cached_key(|room| (rank(room), Reverse(title(room).to_lowercase())))
+        }
+    }
 }
 
 #[cfg(test)]

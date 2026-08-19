@@ -1642,7 +1642,7 @@ impl App {
             RoomFilter::Favorites => self.is_room_pinned(&RoomKey::from(room)),
             RoomFilter::Name(q) => {
                 timeline::room_matches_search(room, q)
-                    || self.room_list_title(room).to_ascii_lowercase().contains(q)
+                    || timeline::contains_ascii_case_insensitive(&self.room_list_title(room), q)
             }
         }
     }
