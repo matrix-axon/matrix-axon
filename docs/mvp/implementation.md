@@ -68,7 +68,7 @@ Read the tech spec before starting. Highlights that gate implementation:
 
 Each milestone has explicit deliverables and a verification step that exercises real behavior, not just `cargo check`. Stop and ask before deviating; if an ambiguity arises that the specs do not cover, raise it instead of picking silently.
 
-> **Status:** Milestones 1–14 have shipped (through the OAuth authorization server, M14), along with M15 (media send/upload), M16 (device-list endpoint), M17 (media thumbnail proxy), M18 (ephemeral passthrough), and M19 (Matrix C-S verb batching, all six PRs). **MVP has not shipped.** The gate is M13 (deployment docs): `docs/self-hosting.md` and the deployment recipes below are still unwritten, and client-side coverage of the M19 server verbs (room settings, power levels, account actions) hasn't landed on either `axon-tui` or `axon-web` yet — see `docs/client-parity.md`. This document tracks the _plan_, not live progress — for what's actually built and in flight, see `AGENTS.md` "Current state" (kept here to avoid two sources of truth drifting) and `docs/client-parity.md` for the per-client picture. The milestone sequence has been resequenced and extended more than once since this document was first written (see the table near the end, now extended through M19); expect it to keep evolving until MVP ships.
+> **Status:** Milestones 1–19 have shipped. MVP has not: it is gated on finishing M13 (`docs/self-hosting.md` and the non-Docker deployment recipes) — see #221 and the M13 section below. What each milestone actually landed, and the non-obvious choices made along the way, is recorded per milestone below; `AGENTS.md` keeps the conventions those choices produced, not the history of making them.
 
 ### 1. Workspace scaffolding
 
@@ -311,6 +311,18 @@ Sync alone only ingests events _going forward_ (plus the shallow `sync.timeline_
     - Bare Linux VPS (covered in the operational basics above).
 
 **Verification:** A reader who has not touched the codebase follows the doc top to bottom on a fresh VM and reaches the "daily-driver through `axon-tui`" PRD success criterion. At least one deployment recipe is exercised end-to-end (any of them) by someone other than the author.
+
+### 14. OAuth authorization server
+
+### 15. Media send/upload
+
+### 16. Device-list / discovery endpoint
+
+### 17. Media thumbnail proxy
+
+### 18. Live-event ephemeral passthrough
+
+### 19. Matrix C-S verb batching
 
 ## Milestone resequencing (post-M6)
 
