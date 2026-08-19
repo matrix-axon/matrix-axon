@@ -81,7 +81,14 @@ repos:
         # result -- a lagging fork's main reads as though this branch changed a
         # published migration (AGENTS.md, ADR 0004).
         entry: scripts/check-migrations-immutable.sh
-        files: "^crates/axon-store/migrations/"
+        # Deliberately unfiltered. A files: filter here would be decided from
+        # the push's two-ref diff, but the script walks the range commit by
+        # commit precisely so it catches a published migration edited and then
+        # reverted within one push -- whose net diff under migrations/ is
+        # empty. The filter would skip exactly the case the script exists for.
+        # Sub-second git plumbing with no build behind it, so it costs nothing
+        # to run every push.
+        always_run: true
         pass_filenames: false
         stages: [pre-push]
       - id: prettier-web
@@ -182,7 +189,7 @@ repos:
         # test suite behind it buys nothing. Requires rustfmt to stay ordered
         # first among the rust hooks.
         fail_fast: true
-        files: &rust_files '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rustfmt\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|tests/fixtures/.*|(crates|clients/tui|smoke)/.*\.(rs|toml|sql))$'
+        files: &rust_files '^(Cargo\.(toml|lock)|\.cargo/config\.toml|rust-toolchain\.toml|rustfmt\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|tests/fixtures/.*|(crates|clients/tui|smoke)/.*\.(rs|toml|sql))$'
         pass_filenames: false
         stages: [pre-push]
       - id: rust-clippy

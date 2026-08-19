@@ -102,8 +102,11 @@ CASES: list[tuple[str, set[str]]] = [
     # near-miss these cases exist to pin down.
     (
         "crates/axon-store/migrations/20260101000000_init.sql",
-        {"migrations-immutable", "rustfmt", "rust-clippy", "cargo-test"},
+        {"rustfmt", "rust-clippy", "cargo-test"},
     ),
+    # .cargo/config.toml can carry rustflags and target overrides, so it is a
+    # rust build input even though it holds only aliases today.
+    (".cargo/config.toml", {"rustfmt", "rust-clippy", "cargo-test"}),
     ("docs/adr/0092-unified-pre-push-gate.md", {"adr-numbers"}),
     ("scripts/check-hook-filters.py", {"hook-filters"}),
     # Editing the config re-runs everything it could invalidate, including this.
@@ -133,7 +136,10 @@ CASES: list[tuple[str, set[str]]] = [
 
 # Hooks that intentionally have no `files` filter, i.e. run on every push.
 # Keep this list short and explicit; an unfiltered hook is a cost everyone pays.
-ALWAYS_RUN = {"smoke-gate"}
+#   smoke-gate           returns immediately unless RUN_SMOKE names a lane
+#   migrations-immutable sub-second, and a filter would skip the edit-then-
+#                        revert-in-one-push case the script exists to catch
+ALWAYS_RUN = {"smoke-gate", "migrations-immutable"}
 
 # Files whose prose names hook ids. They are not required to mention any, and
 # they must not enumerate the gate -- the config is the list. This only asks
