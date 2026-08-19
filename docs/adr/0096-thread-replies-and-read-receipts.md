@@ -97,11 +97,11 @@ It stays on the main timeline, in `origin_ts` order: it positions a "new message
 A thread member may be named only when all of these hold for that room:
 
 1. **The main timeline is at its live end** — the room view is unanchored and showing the newest events (`showingNewestEvents` in the web client).
-2. **No thread in the room is unread** — the client's thread-unread set for that room is empty, which is true exactly when the user has read every thread it knows carries replies.
+2. **Every other thread in the room is _positively known_ read** — which is not the same as "not currently flagged unread". See § 3.
 3. **The thread view is at its live end**, so its arrival-max member is the thread's newest, not the top of a page parked in history.
-4. **The state the first three are read from has actually loaded** — thread summaries fetched, thread read markers hydrated.
+4. **The state the first three are read from has actually loaded** — thread summaries fetched, read markers hydrated.
 
-Together these say: every event between the current receipt floor and the target has been displayed, either as a main-timeline row or as a member of a thread this client considers read.
+Together these say: every event between the current receipt floor and the target has been displayed, either as a main-timeline row or as a member of a thread this client has a read position for.
 That is the honest version of the claim an unthreaded receipt makes.
 
 Condition 4 is not pedantry.
@@ -111,14 +111,29 @@ An empty thread-summary map means "not fetched yet" just as often as it means "n
 When the gate is closed the receipt behaves exactly as it does today: it stops at the arrival-max **main-timeline** event, below the unread thread.
 That is the correct answer in that state — there is genuinely unread content in the room.
 
-### 3. `unreadThreadCutoff` inverts rather than disappears
+### 3. Read, unread, and unknown are three answers
 
-The web client already computes the set this gate needs.
-`unreadThreadCutoff` (`clients/web/src/pages/RoomPage.tsx`) today clamps the receipt target below the oldest unread thread reply; under this ADR the same set becomes condition 2.
-Non-empty, and the clamp applies as it does now.
-Empty, and the receipt may advance past thread members to the room-wide arrival-max.
+The first implementation read condition 2 off the existing thread-unread set: no entry for this room, so nothing is unread, so the gate opens.
+A test written from #207's own fixture failed against it, and the reason generalises past this feature.
 
-Its clamp on the cross-device read _marker_ stays untouched — per § 1, that is a display question, and the answer to it does not change.
+`reconcileSummary` has always had three outcomes, not two.
+A thread is read when its newest reply is at or before its read position; unread when it is after; and **unknown** when there is no read position to compare against — in which case the store is deliberately left alone, because a display that guessed "unread" there would light up every thread in a room whose markers predate them.
+An empty unread set therefore means "nothing is _known_ unread", which is what made it the wrong input for a receipt.
+
+The two consumers want opposite defaults from `'unknown'`, so it becomes an explicit verdict (`threadReadVerdict`) rather than an absence:
+
+- **display** treats it as "say nothing" — do not cry wolf;
+- **the receipt** treats it as "not proven" — do not acknowledge.
+
+That distinction is load-bearing rather than theoretical, because in this ADR's own bug the fallback read position is itself poisoned.
+A thread with no marker of its own falls back to the room's, and the room's marker is seeded from `RoomDto.last_event_id` — `MAX(origin_ts)` over every event, thread replies included.
+In the room from #207 the newest event _is_ a reply, so opening the room parks the room marker on that reply, and the fallback then answers "read" for every thread below it, including the thread the marker came from.
+So the room marker is admissible as a thread's fallback **only when it does not point at a thread member**; where it does, the verdict is `'unknown'` and the gate stays shut until the user has actually opened those threads.
+A marker whose event is not in the loaded slice stays admissible — it is usually one that scrolled out of a long room, and withholding it there would close the gate on rooms that have nothing wrong with them.
+
+`unreadThreadCutoff` (`clients/web/src/pages/RoomPage.tsx`) is untouched by all of this.
+It clamps the room view's own receipt and marker below the oldest _known_ unread reply, which remains the right rule for a claim made from the main timeline.
+The gate is a second, stricter question asked only of a thread view.
 
 ### 4. Client work, one silo per PR
 
@@ -127,6 +142,7 @@ There is no server change: no route, no DTO, no gateway, no `ClientBuilder` call
 - **Web.**
   `ThreadPanel`'s read effect calls `ephemeralSender.noteRead` with the thread's arrival-max displayed member, subject to the gate; the room-view effect keeps its own call, and the ephemeral sender's existing forward-only `arrival_order` floor merges the two without either needing to know about the other.
   The floor stays keyed per `(account, room)` — one room, one receipt.
+  Condition 3 lands as the panel's own `showingNewestReplies`, the exact pair of checks the room stream derives as `showingNewestEvents`, and closing **#154** is a prerequisite rather than a bonus: that issue is the panel claiming read state from a view parked in history, and every condition here is worthless if the panel's own claim is not honest first.
 - **TUI.**
   `read_targets_for` keeps computing the main-timeline target.
   Its thread-promotion machinery supplies condition 2, and its thread panel supplies a target the same way the web panel does.
@@ -193,4 +209,8 @@ Condition 2 of the gate is a fact about client state — which threads the user 
 - A room stays badged until the user opens the thread, not merely the room.
   That is a visible behaviour change from "opening the room clears the badge until reload", and it is the honest one: before, the badge was lying in both directions.
 - No server work, so no deployment coupling — each client fixes itself, and a client that has not been updated behaves exactly as it does today.
-- Test seams: the gate is four conditions, and each deserves a case where it is the only one false — in particular the not-yet-loaded case, which is the one that fails open and is invisible in a test that hydrates everything first.
+- **The badge is now honest but still unhelpful in exactly the room this ADR is about.**
+  The thread whose replies are holding the badge open is `'unknown'`, not `'unread'`, so the root row's "New" chip and the Unread threads panel both stay silent: the user is told the room has something, and not which thread it is in.
+  Fixing that means fixing where the room marker comes from, which is a different change with a server-shaped option in it — filed as #209.
+- Test seams: every gate condition needs a case where it is the only one false, and each such test must be checked to fail when _its_ condition alone is removed.
+  Verifying against the unfixed code is not enough here, and this is not a hypothetical: the first five tests written for this all passed against the unfixed client, because with no thread receipt implemented at all, "sends nothing" is true for every reason at once.

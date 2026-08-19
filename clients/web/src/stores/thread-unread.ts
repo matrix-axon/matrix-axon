@@ -50,6 +50,49 @@ export interface ThreadUnreadStore {
   markThreadRead(accountId: string, roomId: string, rootEventId: string): void
 }
 
+/**
+ * What is known about whether a thread has been read. `'unknown'` is a third
+ * answer, not a shade of `'read'`: a thread with no marker of its own and no
+ * usable room-marker fallback has a read position nobody has established, and
+ * the two consumers want opposite defaults from it — the unread-threads display
+ * declines to cry wolf over it (a room joined years ago would light up every
+ * thread in it), while a read receipt declines to acknowledge it (ADR 0096's
+ * gate, where being wrong tells the homeserver the user has seen something they
+ * have not).
+ */
+export type ThreadReadVerdict = 'read' | 'unread' | 'unknown'
+
+/**
+ * Whether `summary`'s newest reply falls at or before the read position that
+ * applies to it. The thread's own marker wins; a room marker is the fallback,
+ * for threads that predate any per-thread position.
+ *
+ * Callers own which room marker is admissible. `RoomPage` withholds one that
+ * points *at a thread member*: the summary-derived marker takes the room's
+ * `last_event_id`, which is `MAX(origin_ts)` over every event including thread
+ * replies, so in a room whose newest event is a reply the marker lands on that
+ * reply — and would then answer "read" for the very thread it came from, and
+ * for every other thread below it.
+ */
+export function threadReadVerdict(
+  summary: ThreadSummaryDto,
+  markers: {
+    threadMarker: ThreadReadMarker | null
+    roomMarker: ReadMarker | null
+  },
+): ThreadReadVerdict {
+  const latestTs = summary.latest_reply_ts ?? null
+  if (latestTs === null || (summary.latest_reply_event_id ?? null) === null) {
+    return 'read'
+  }
+  const markerTs =
+    markers.threadMarker?.originTs ?? markers.roomMarker?.originTs ?? null
+  if (markerTs === null) {
+    return 'unknown'
+  }
+  return latestTs <= markerTs ? 'read' : 'unread'
+}
+
 export function threadUnreadKey(
   accountId: string,
   roomId: string,
@@ -174,17 +217,22 @@ export function createThreadUnreadStore(): ThreadUnreadStore {
         context.roomId,
         summary.root_event_id,
       )
-      if (latestTs === null || latestEventId === null) {
+      const verdict = threadReadVerdict(summary, {
+        threadMarker: context.threadMarker,
+        roomMarker: context.roomMarker,
+      })
+      if (verdict === 'read') {
         remove(key)
         return
       }
-      const markerTs =
-        context.threadMarker?.originTs ?? context.roomMarker?.originTs ?? null
-      if (markerTs === null) {
-        return
-      }
-      if (latestTs <= markerTs) {
-        remove(key)
+      // `'unknown'` leaves the entry exactly as it is: nothing has established a
+      // read position for this thread, and a display that guessed "unread" from
+      // that would light up every thread in a room whose marker predates them.
+      if (
+        verdict === 'unknown' ||
+        latestTs === null ||
+        latestEventId === null
+      ) {
         return
       }
       upsert({

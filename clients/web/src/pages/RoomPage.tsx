@@ -86,11 +86,18 @@ import {
 } from '../stores/settings'
 import type { EphemeralStore } from '../stores/ephemeral'
 import {
+  READ_MARKERS_NAMESPACE,
+  THREAD_READ_MARKERS_NAMESPACE,
+} from '../stores/device-state'
+import {
   createThreadsStore,
   threadRootId,
   type ThreadsStore,
 } from '../stores/threads'
-import type { ThreadUnreadStore } from '../stores/thread-unread'
+import {
+  threadReadVerdict,
+  type ThreadUnreadStore,
+} from '../stores/thread-unread'
 import {
   type EventDto,
   type HeadLoadOutcome,
@@ -895,6 +902,29 @@ export function RoomPage() {
     members,
   )
   const roomReadMarker = deviceState.readMarker(accountId, roomId)
+  /**
+   * The room marker, but only where it can speak for a *thread's* read position
+   * (`threadReadVerdict`). It cannot when it points at a thread member: the
+   * summary-derived marker takes the room's `last_event_id`, which is
+   * `MAX(origin_ts)` over every event — thread replies included — so in the room
+   * from #207, where the newest event *is* a reply, opening the room parks the
+   * marker on that reply and it then answers "read" for every thread below it,
+   * including the one it came from.
+   *
+   * A marker whose event is not in the loaded slice stays admissible: it is
+   * usually one that scrolled out of a long room, and withholding it there would
+   * turn every old thread `'unknown'` — which closes the receipt gate for rooms
+   * that have nothing wrong with them.
+   */
+  const roomMarkerForThreads =
+    roomReadMarker !== null &&
+    timeline.events.value.some(
+      (event) =>
+        event.event_id === roomReadMarker.eventId &&
+        threadRootId(event) !== null,
+    )
+      ? null
+      : roomReadMarker
   const threadSummaryStates = [...threads.summaries.value.values()].map(
     (summary) => ({
       summary,
@@ -906,6 +936,42 @@ export function RoomPage() {
       rootPreview: eventPreview(threads.roots.value.get(summary.root_event_id)),
     }),
   )
+  /**
+   * Whether a thread view in this room may name the room's Matrix receipt
+   * (ADR 0096 § 2). A receipt has no thread scope — it acknowledges everything
+   * at or before its target in *arrival* order, threads included — so a thread
+   * member is only a legal target once nothing between the receipt's floor and
+   * it is still unseen.
+   *
+   * Every other thread must be **positively known read**, which is why this
+   * reads verdicts rather than asking `threadUnread` whether anything is
+   * flagged. Those are different questions: a thread nobody has established a
+   * read position for is `'unknown'`, the display deliberately leaves it
+   * unflagged, and "not flagged" would have read as "caught up" here — sending
+   * a receipt over replies the user has never opened. The open thread is
+   * excluded because the panel is displaying it, and the panel's own live-end
+   * check is what decides whether that display is complete.
+   *
+   * The stores behind all of that must have loaded first, or their emptiness
+   * answers the question by itself: an unfetched summary map looks like a room
+   * with no threads, and an unhydrated marker namespace makes every verdict
+   * `'unknown'`. ADR 0070's startup sweep made this mistake in the large — it
+   * pruned against a room list that had not loaded yet.
+   */
+  const mayNameRoomReceiptFromThread =
+    showingNewestEvents &&
+    !threads.loading.value &&
+    threads.error.value === null &&
+    deviceState.hydrated(accountId, READ_MARKERS_NAMESPACE) &&
+    deviceState.hydrated(accountId, THREAD_READ_MARKERS_NAMESPACE) &&
+    threadSummaryStates.every(
+      ({ summary, threadMarker }) =>
+        summary.root_event_id === openThread ||
+        threadReadVerdict(summary, {
+          threadMarker,
+          roomMarker: roomMarkerForThreads,
+        }) === 'read',
+    )
 
   useEffect(() => {
     for (const { summary, threadMarker, rootPreview } of threadSummaryStates) {
@@ -914,7 +980,7 @@ export function RoomPage() {
         roomId,
         roomTitle: title,
         rootPreview,
-        roomMarker: roomReadMarker,
+        roomMarker: roomMarkerForThreads,
         threadMarker,
       })
     }
@@ -924,7 +990,7 @@ export function RoomPage() {
     accountId,
     roomId,
     title,
-    roomReadMarker,
+    roomMarkerForThreads,
   ])
 
   /**
@@ -1810,6 +1876,7 @@ export function RoomPage() {
             }
             ownUserId={ownUserId}
             threadUnread={threadUnread}
+            mayNameRoomReceipt={mayNameRoomReceiptFromThread}
             onCommand={handleThreadComposerCommand}
             roomCompletions={roomCompletions}
             onClose={() => setThreadParam(null)}

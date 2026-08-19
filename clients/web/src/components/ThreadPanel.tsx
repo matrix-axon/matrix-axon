@@ -97,6 +97,7 @@ export function ThreadPanel({
   rooms,
   roomTitles,
   threadUnread,
+  mayNameRoomReceipt = false,
   onCommand,
   roomCompletions,
   onClose,
@@ -111,13 +112,22 @@ export function ThreadPanel({
   rooms: readonly RoomDto[]
   roomTitles: ReadonlyMap<string, string>
   threadUnread: ThreadUnreadStore
+  /**
+   * Whether the rest of the room is caught up, so a member of *this* thread is
+   * a legal target for the room's Matrix receipt (ADR 0096). The room page owns
+   * that judgement; this panel adds the half only it can know — that its own
+   * slice reaches the thread's newest reply. Defaults to `false`: a caller that
+   * has not thought about it must not have a receipt sent on its behalf.
+   */
+  mayNameRoomReceipt?: boolean
   onCommand?: ThreadCommandHandler
   roomCompletions?(query: string): ComposerAutocompleteOption[]
   onClose: () => void
   /** An event in this thread to fetch, reveal, and highlight. */
   highlightedEventId?: string | null
 }) {
-  const { api, deviceState, live, media, search, settings } = useServices()
+  const { api, deviceState, ephemeralSender, live, media, search, settings } =
+    useServices()
   const location = useLocation()
   const hideRedacted = settings.hideRedactedEvents.value
   const thread = useMemo(
@@ -247,8 +257,24 @@ export function ThreadPanel({
     }
   }, [api, accountId, rootId, thread, targetEventId])
 
+  /**
+   * Whether this panel is showing the thread's newest replies, the same pair of
+   * conditions the room stream derives as `showingNewestEvents` (#136): not
+   * parked on an anchor, *and* the loaded slice reaches the live end. Both are
+   * needed here for the same reasons they are there — `highlightedEventId` opens
+   * the panel on an old reply and `jumpTo` parks the slice below the tail, while
+   * a live-end slice says nothing about an anchor the panel is still resolving.
+   */
+  const showingNewestReplies = targetEventId === null && thread.atEnd.value
+
   useEffect(() => {
-    if (thread.loading.value) {
+    // Read state may only be claimed from a view that showed the newest replies
+    // (#154). Everything below this line is a claim: the thread marker is
+    // cross-device, `markThreadRead` clears the unread-threads entry outright,
+    // and the receipt is a homeserver-visible acknowledgement of the whole room
+    // up to its target. A panel opened on a deep link is parked in history by
+    // definition and has displayed none of that.
+    if (thread.loading.value || !showingNewestReplies) {
       return
     }
     const latest = thread.events.value.findLast(
@@ -265,10 +291,41 @@ export function ThreadPanel({
       latest.origin_ts,
     )
     threadUnread.markThreadRead(accountId, roomId, rootId)
+    if (!mayNameRoomReceipt) {
+      return
+    }
+    // A receipt is interpreted in arrival order, which is not display order, so
+    // it names the arrival-max member rather than `latest` (ADR 0089) — and only
+    // one this panel actually rendered, so the redaction filter applies here
+    // exactly as it does to `visibleEvents` below. The room stream names its own
+    // target from the same room's main timeline; `ephemeral-sender`'s
+    // forward-only floor is what merges the two picks into one receipt, so
+    // neither call site needs to know about the other (ADR 0096).
+    const target = thread.events.value.reduce<TimelineEvent | null>(
+      (best, event) =>
+        event.event_id.startsWith('local:') || (hideRedacted && event.redacted)
+          ? best
+          : best === null || event.arrival_order > best.arrival_order
+            ? event
+            : best,
+      null,
+    )
+    if (target !== null) {
+      ephemeralSender.noteRead(
+        accountId,
+        roomId,
+        target.event_id,
+        target.arrival_order,
+      )
+    }
   }, [
     thread.loading.value,
     thread.events.value,
+    showingNewestReplies,
+    mayNameRoomReceipt,
+    hideRedacted,
     deviceState,
+    ephemeralSender,
     threadUnread,
     accountId,
     roomId,

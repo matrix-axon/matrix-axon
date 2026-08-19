@@ -150,10 +150,11 @@ before starting a milestone.
   `/:accountId/rooms/:roomId` + `?thread=<root_id>` + `?event=<event_id>` —
   search (M-W10) and the mobile clients build on it; do not change it.
   Deployment requires unknown-path → `index.html` rewrite.
-- **Marking a room read** (`RoomPage`): three effects claim read state — the
-  optimistic badge clear on mount, the summary-derived cross-device marker, and
-  the timeline-driven marker + receipt. **Every one of them is gated on the view
-  actually showing the room's newest events**, and the gates are not
+- **Marking a room read** (`RoomPage`, plus one in `ThreadPanel`): four effects
+  claim read state — the optimistic badge clear on mount, the summary-derived
+  cross-device marker, the timeline-driven marker + receipt, and the thread
+  panel's marker + receipt (ADR 0096, below). **Every one of them is gated on the
+  view actually showing the room's newest events**, and the gates are not
   interchangeable: the optimistic badge clear checks `highlighted === null`
   (an `?event=` landing is parked in history by definition), while both marker
   effects need `highlighted === null` _and_ `timeline.atEnd`. The second half
@@ -199,6 +200,25 @@ before starting a milestone.
   an unfiltered one lets an unrendered event become the receipt target _and_ the
   position of the "new messages" line. Caught in review on #165 — the first
   version filtered only local echoes and the thread cutoff.
+- **A thread member can be the room's receipt target, behind a gate** (ADR 0096).
+  Thread members are hidden from the main timeline, so nothing the room view can
+  name ever covers them — in a room whose arrival-newest events are all replies,
+  the receipt stops below them and the badge returns on every load (#207). The
+  panel may therefore name its own arrival-max member, but only when the whole
+  room is caught up: the room stream at its live end, every _other_ thread
+  positively known read, this panel at its own live end, and the stores those are
+  read from actually loaded. `RoomPage` owns all but the third and passes one
+  boolean down. **"Not flagged unread" is not "read".** `reconcileSummary` has
+  three outcomes — read, unread, and `'unknown'` when nothing has established a
+  read position — and the display deliberately renders `'unknown'` as nothing, so
+  an empty unread set means "nothing is _known_ unread". Reading the gate off
+  that set was the first implementation and it sent receipts over threads nobody
+  had opened; it reads `threadReadVerdict` instead. The trap has teeth because
+  the fallback read position is itself poisoned in this exact room: the room
+  marker is seeded from `RoomDto.last_event_id`, which is `MAX(origin_ts)` over
+  every event including replies, so it lands on a thread member and then answers
+  "read" for the thread it came from. `RoomPage` withholds it in that case; the
+  display half of the same problem is #209.
 - **Async work in `RoomPage` outlives its own world.** The page does not remount
   across a room switch or an `?event=`/`?thread=` change (ADR 0085), so every
   `await` inside an effect can resolve after the user has moved on — a second
