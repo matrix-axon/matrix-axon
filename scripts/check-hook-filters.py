@@ -143,6 +143,10 @@ PROSE_NAMING_HOOKS = (
     "CONTRIBUTING.md",
     ".pre-commit-config.yaml",
     "scripts/setup-hooks.sh",  # prints the same escape hatch after installing
+    # The ADR carries three SKIP=cargo-test examples of its own. Omitting it
+    # meant a rename could update every watched file, pass green, and leave the
+    # one document that explains why that cannot happen holding stale ids.
+    "docs/adr/0092-unified-pre-push-gate.md",
 )
 
 # `SKIP=cargo-test` matches; the `SKIP=<hook-id>` placeholder does not, because
@@ -160,6 +164,14 @@ def skip_examples(path: str) -> set[str] | None:
 
 
 def selected(hooks: dict[str, dict], path: str) -> set[str]:
+    # Deliberately a copy of pre-commit's include/exclude logic rather than an
+    # import of it. `pre_commit.commands.run` is a private module with no
+    # stability promise, and coupling this check to it would mean a pre-commit
+    # bump could break the guard that protects the gate. The contract being
+    # mirrored is one documented line -- `re.search` on `files`, then on
+    # `exclude` -- so a copy is cheaper to own than the dependency. The
+    # `types:` guard in main() is what keeps that copy honest: a hook using a
+    # selector this does not model is rejected rather than silently mismodeled.
     out = set()
     for hook_id, hook in hooks.items():
         include = hook.get("files")

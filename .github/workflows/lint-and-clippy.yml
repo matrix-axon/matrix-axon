@@ -55,6 +55,15 @@ jobs:
         shell: bash
         run: pre-commit run adr-numbers --all-files --hook-stage pre-push
 
+      # The #180 regression guard. Without a CI step it only runs for people
+      # who installed the hook, so a filter broken by --no-verify or from an
+      # un-set-up clone would merge unnoticed -- and no other job would catch
+      # it, because a filter that selects nothing looks exactly like one that
+      # selects correctly.
+      - name: check-hook-filters
+        shell: bash
+        run: pre-commit run hook-filters --all-files --hook-stage pre-push
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
