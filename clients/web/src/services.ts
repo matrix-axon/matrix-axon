@@ -1,7 +1,7 @@
 import { effect, signal, type Signal } from '@preact/signals'
 import { createContext } from 'preact'
 import { useContext } from 'preact/hooks'
-import { createApiClient, type ApiClient } from './api/client'
+import { createApiClient, inBackground, type ApiClient } from './api/client'
 import {
   deviceStateChange,
   ephemeralPassthrough,
@@ -238,6 +238,134 @@ export function connectReadMarkers(
       }
     }
   })
+}
+
+/**
+ * Learn that a thread was read on a client axon does not run — Element and
+ * friends — from the threaded read receipts they send (#209).
+ *
+ * `m.receipt` reaches us verbatim through the ADR 0056 passthrough, and a
+ * per-user receipt carries `thread_id` when it is thread-scoped (MSC3771). Axon
+ * itself only ever sends *unthreaded* receipts (ADR 0096 § 2 keeps them that
+ * way), so a thread-scoped receipt for our own user can only have come from
+ * somewhere else — no echo to suppress, unlike the device-state paths above.
+ *
+ * The receipt is turned into a durable `thread_read_markers` entry rather than
+ * just clearing the in-memory flag. Receipts are live-only and never replayed,
+ * so a session-scoped clear would last until the next reload and no longer —
+ * which is the complaint this exists to answer. Writing the marker also carries
+ * the knowledge to this account's other axon clients, the same way opening the
+ * thread here would.
+ *
+ * The receipt names an event but not its `origin_ts`, and the marker is ordered
+ * on `origin_ts`, so the event is resolved through the API. One fetch per
+ * newly-seen receipt target, deduped — these arrive only when the user reads a
+ * thread elsewhere, which is rare, and a repeat costs nothing but a map lookup.
+ */
+export function connectThreadReceipts(
+  api: ApiClient,
+  live: LiveConnection,
+  rooms: RoomsStore,
+  accounts: AccountsStore,
+  deviceState: DeviceStateStore,
+  threadUnread: ThreadUnreadStore,
+): () => void {
+  const seen = new Set<string>()
+  return live.subscribe((frame) => {
+    const passthrough = ephemeralPassthrough(frame)
+    if (
+      passthrough === null ||
+      passthrough.eventType !== 'm.receipt' ||
+      passthrough.roomId === null
+    ) {
+      return
+    }
+    const roomId = passthrough.roomId
+    const room = rooms.rooms.value.find(
+      (candidate) =>
+        candidate.account_id === frame.accountId &&
+        candidate.room_id === roomId,
+    )
+    const ownUserId =
+      accounts.accounts.value.find((a) => a.account_id === frame.accountId)
+        ?.user_id ??
+      room?.account_user_id ??
+      null
+    if (ownUserId === null) {
+      return
+    }
+    for (const [eventId, threadRootId] of ownThreadedReceipts(
+      passthrough.content,
+      ownUserId,
+    )) {
+      const key = `${frame.accountId}\u0000${roomId}\u0000${eventId}`
+      if (seen.has(key)) {
+        continue
+      }
+      seen.add(key)
+      inBackground(
+        api
+          .GET('/v1/accounts/{account_id}/events/{event_id}', {
+            params: {
+              path: { account_id: frame.accountId, event_id: eventId },
+            },
+          })
+          .then(({ data }) => {
+            if (data === undefined) {
+              // A miss is not retried: the marker stays unset and the thread
+              // stays flagged, which is the safe direction to be wrong in.
+              return
+            }
+            deviceState.advanceThreadReadMarker(
+              frame.accountId,
+              roomId,
+              threadRootId,
+              eventId,
+              data.data.origin_ts,
+            )
+            threadUnread.markThreadRead(frame.accountId, roomId, threadRootId)
+          }),
+      )
+    }
+  })
+}
+
+/**
+ * The `(event id, thread root)` pairs in one `m.receipt` content that are this
+ * user's own thread-scoped receipts. `thread_id: "main"` is the main timeline,
+ * not a thread, and is deliberately ignored — acting on it would be a claim
+ * about the room stream, which has its own read position.
+ */
+function ownThreadedReceipts(
+  content: unknown,
+  ownUserId: string,
+): [string, string][] {
+  if (typeof content !== 'object' || content === null) {
+    return []
+  }
+  const found: [string, string][] = []
+  for (const [eventId, receiptTypes] of Object.entries(
+    content as Record<string, unknown>,
+  )) {
+    if (typeof receiptTypes !== 'object' || receiptTypes === null) {
+      continue
+    }
+    for (const type of ['m.read', 'm.read.private']) {
+      const byUser = (receiptTypes as Record<string, unknown>)[type]
+      if (typeof byUser !== 'object' || byUser === null) {
+        continue
+      }
+      const receipt = (byUser as Record<string, unknown>)[ownUserId]
+      if (typeof receipt !== 'object' || receipt === null) {
+        continue
+      }
+      const threadId = (receipt as Record<string, unknown>)['thread_id']
+      if (typeof threadId === 'string' && threadId !== 'main') {
+        found.push([eventId, threadId])
+      }
+    }
+  }
+  return found
 }
 
 /** Apply sibling devices' thread-read markers to local unread-thread state. */
@@ -577,6 +705,7 @@ export function createServices(
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
   connectThreadReadMarkers(live, threadUnread, deviceState)
+  connectThreadReceipts(api, live, rooms, accounts, deviceState, threadUnread)
   connectTimelineCacheReset(auth, timelines)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)

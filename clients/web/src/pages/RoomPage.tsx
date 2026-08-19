@@ -597,9 +597,28 @@ export function RoomPage() {
       (candidate) =>
         candidate.account_id === accountId && candidate.room_id === roomId,
     )
+    // `last_event_id` is `MAX(origin_ts)` over *every* event in the room, thread
+    // replies included, and this marker is a main-timeline position — where to
+    // draw the "new messages" line (ADR 0048, ADR 0096 § 1). In a room whose
+    // newest event is a reply the two disagree, and seeding from the summary
+    // parks the marker on an event the main timeline never renders. That is not
+    // just untidy: the marker is what `reconcileSummary` falls back to for a
+    // thread with no marker of its own, so the fallback ends up answering "read"
+    // for the very thread it came from, and the room reports no unread thread
+    // while badging for one (#209).
+    //
+    // Only skippable when the slice can *show* that the summary event is a
+    // reply, which is exactly when the timeline effect below has the events to
+    // name a main-timeline position itself — so nothing is left unmarked. An
+    // unloaded slice keeps today's behaviour, which is this effect's whole
+    // reason for existing.
+    const summaryEvent = timeline.events.value.find(
+      (event) => event.event_id === room?.last_event_id,
+    )
     if (
       room?.last_event_id !== null &&
       room?.last_event_id !== undefined &&
+      (summaryEvent === undefined || threadRootId(summaryEvent) === null) &&
       (unreadThreadCutoff === null ||
         room.last_activity_ts < unreadThreadCutoff)
     ) {
@@ -614,6 +633,7 @@ export function RoomPage() {
     accountId,
     roomId,
     rooms.rooms.value,
+    timeline.events.value,
     deviceState,
     unreadThreadCutoff,
     showingNewestEvents,

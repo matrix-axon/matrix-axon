@@ -202,8 +202,18 @@ Condition 2 of the gate is a fact about client state — which threads the user 
 - A room stays badged until the user opens the thread, not merely the room.
   That is a visible behaviour change from "opening the room clears the badge until reload", and it is the honest one: before, the badge was lying in both directions.
 - No server work, so no deployment coupling — each client fixes itself, and a client that has not been updated behaves exactly as it does today.
-- **The badge is now honest but still unhelpful in exactly the room this ADR is about.**
-  The thread whose replies are holding the badge open is `'unknown'`, not `'unread'`, so the root row's "New" chip and the Unread threads panel both stay silent: the user is told the room has something, and not which thread it is in.
-  Fixing that means fixing where the room marker comes from, which is a different change with a server-shaped option in it — filed as #209.
-- Test seams: every gate condition needs a case where it is the only one false, and each such test must be checked to fail when _its_ condition alone is removed.
-  Verifying against the unfixed code is not enough here, and this is not a hypothetical: the first five tests written for this all passed against the unfixed client, because with no thread receipt implemented at all, "sends nothing" is true for every reason at once.
+- **The room now tells the user which thread is unread**, which it did not before and which the receipt fix alone would not have given it.
+  The summary-derived marker no longer seeds from a `last_event_id` that the loaded slice shows to be a thread member, so `reconcileSummary`'s fallback stops answering "read" for the thread it came from, and the root row's "New" chip and the Unread threads panel light up.
+  That change is strictly conservative in the direction that matters: the marker advances _less_ far, so every consumer of it — the sibling-device badge clear, `unreadThreadCutoff`, the receipt ceiling, the "new messages" divider — claims less, never more.
+  What it costs is more persistent unread, with one sharp edge: a thread read in Element would otherwise stay flagged here forever.
+- **So axon consumes the thread-scoped receipts other clients send** (MSC3771), which arrive verbatim through ADR 0056's passthrough and were previously parsed away.
+  Axon's own receipts are always unthreaded, so a `thread_id` on this user's own receipt can only have come from another client — there is no echo to suppress.
+  It is recorded as a durable `thread_read_markers` entry rather than an in-memory clear, because receipts are live-only and never replayed: a session-scoped clear would come back on the next reload, which is the complaint it exists to answer.
+  This is also a better source of truth than the marker fallback ever was — it is what the homeserver actually knows about what the user read.
+  What remains of #209 is the cross-room half: the unread-thread store is fed from `RoomPage` and from live frames, so on a cold load it knows only about rooms visited this session.
+- Test seams, and a caution about them:
+  - Every gate condition needs a case where it is the only one false, and each such test must be checked to fail when _its_ condition alone is removed.
+    Verifying against the unfixed code is not enough: the first five tests written here all passed against the unfixed client, because with no thread receipt implemented at all, "sends nothing" is true for every reason at once.
+  - **A suite of "must not send" tests will happily certify a gate that never opens.**
+    The version this ADR rejected passed seven of them and reached a dev server that never cleared a badge.
+    The must-send cases carry the weight, and they have to be built from a room shaped like a real one — several threads, most never opened — not from the minimal fixture that reproduces the bug.

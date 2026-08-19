@@ -217,6 +217,29 @@ before starting a milestone.
   marker, no summary and no unread state on purpose: each of those is a model of
   what the user has read, and each was wrong here in a different way. The window
   is a fact about the events in hand.
+- **The room read marker is a _main-timeline_ position** (ADR 0048, ADR 0096
+  § 1), but `RoomDto.last_event_id` is `MAX(origin_ts)` over every event in the
+  room, thread replies included. The summary-derived marker effect therefore
+  skips a summary event the loaded slice shows to be a thread member, and lets
+  the timeline effect name a main-timeline position instead. Without that skip
+  the marker parks on a reply the main timeline never rendered, and — because
+  `reconcileSummary` falls back to the room marker for a thread with no marker
+  of its own — the fallback answers "read" for the very thread it came from, so
+  the room badges while reporting no unread thread (#209). Only skippable when
+  the slice can _show_ the event is a reply, which is exactly when the timeline
+  effect has what it needs; an unloaded slice keeps the old behaviour, which is
+  that effect's whole reason for existing.
+- **A thread read in another client comes back as a receipt, not as device
+  state** (`connectThreadReceipts`). Element sends a thread-scoped `m.read`
+  (MSC3771) and it reaches us verbatim through ADR 0056's passthrough; axon's
+  own receipts are always unthreaded (ADR 0096), so a `thread_id` on _our_
+  user's receipt can only have come from somewhere else — no echo suppression
+  needed, unlike the `device_state.changed` paths. Write it through to a
+  `thread_read_markers` entry rather than just clearing the in-memory flag:
+  receipts are live-only and never replayed, so a session-scoped clear is
+  undone by the next reload. `thread_id: "main"` is the room stream, not a
+  thread, and is ignored — acting on it would be a claim about a read position
+  that has its own owner.
 - **Async work in `RoomPage` outlives its own world.** The page does not remount
   across a room switch or an `?event=`/`?thread=` change (ADR 0085), so every
   `await` inside an effect can resolve after the user has moved on — a second

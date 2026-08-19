@@ -320,6 +320,24 @@ describe('a thread view names the room receipt (ADR 0096)', () => {
     expect(reads).toContain(MAIN.event_id)
   })
 
+  it('flags the thread as unread instead of seeding the marker from it', async () => {
+    const { services, findByText } = renderRoom({ threads: [MAIN_THREAD] })
+    await findByText(`body of ${MAIN.event_id}`)
+
+    // The summary's newest event is `$reply2`, a thread member. Seeding the
+    // room marker from it makes `reconcileSummary` compare the thread against a
+    // position derived from that very reply and call it read — so the room
+    // badges with nothing anywhere saying which thread to open (#209).
+    await waitFor(() =>
+      expect(services.threadUnread.isUnread(ACCOUNT, ROOM, ROOT)).toBe(true),
+    )
+    expect(services.threadUnread.count.value).toBe(1)
+    expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
+      eventId: MAIN.event_id,
+      originTs: MAIN.origin_ts,
+    })
+  })
+
   it('still sends when the room has other threads the user has never opened', async () => {
     const { reads, findByText } = renderRoom({
       query: `?thread=${encodeURIComponent(ROOT)}`,
