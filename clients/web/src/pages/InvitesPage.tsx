@@ -64,10 +64,9 @@ export function InvitesPage() {
       return
     }
     invites.error.value = null
-    // A bulk run's outcome describes rows that are no longer on screen. Left
-    // up, its "N failed" would keep claiming a failure the user has since
-    // cleared one row at a time.
-    setBulkResult(null)
+    // Do not clear `bulkResult` here. `pendingFailed` already drops lines
+    // whose invite has left the list; wiping the whole result would hide
+    // still-valid failures when the user acts on a different row.
     setBusyKey(inviteKey(invite))
     const result = await invites.accept(invite)
     setBusyKey(null)
@@ -85,7 +84,6 @@ export function InvitesPage() {
       return
     }
     invites.error.value = null
-    setBulkResult(null)
     setBusyKey(inviteKey(invite))
     const result = await invites.reject(invite)
     setBusyKey(null)

@@ -224,6 +224,45 @@ describe('InvitesPage', () => {
     })
   })
 
+  it('keeps other bulk-failure lines after a single-row action', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+        HttpResponse.json({
+          data: [invite('!a:hs', 'Alpha'), invite('!b:hs', 'Beta')],
+        }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/leave`,
+        ({ params }) => {
+          if (params.roomId === '!a:hs') {
+            return HttpResponse.json(
+              { error: { code: 'not_found', message: 'room not found' } },
+              { status: 404 },
+            )
+          }
+          return HttpResponse.json({ data: {} })
+        },
+      ),
+    )
+    const { findByRole, findByText, findAllByRole, queryByText, services } =
+      renderInbox()
+    fireEvent.click(await findByRole('button', { name: 'Reject all' }))
+    expect((await findByRole('alert')).textContent).toMatch(
+      /Alpha: room not found/,
+    )
+
+    services.invites.noteAdded(invite('!c:hs', 'Gamma'))
+    expect(await findByText('Gamma')).toBeTruthy()
+    const rejects = await findAllByRole('button', { name: 'Reject' })
+    // `noteAdded` prepends, so Gamma's Reject is first.
+    fireEvent.click(rejects[0])
+    await waitFor(() => {
+      expect(queryByText('Gamma')).toBeNull()
+    })
+    const alert = await findByRole('alert')
+    expect(alert.textContent).toMatch(/Alpha: room not found/)
+  })
+
   it('drops a bulk-failure line once that invite is gone from the list', async () => {
     server.use(
       http.get(`${TEST_BASE_URL}/v1/invites`, () =>

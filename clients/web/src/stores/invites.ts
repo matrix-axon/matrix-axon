@@ -111,8 +111,10 @@ export function createInvitesStore(
       // Frames that arrived after this GET was issued describe invites the
       // response cannot know about. Keep them rather than let a list fetched
       // moments earlier delete the row.
+      // `resolvedKeys ⊆ serverKeys` after the cleanup above, so a key
+      // missing from the GET cannot still be suppressed.
       for (const [key, invite] of added) {
-        if (!serverKeys.has(key) && !resolvedKeys.has(key)) {
+        if (!serverKeys.has(key)) {
           next.unshift(invite)
         }
       }
