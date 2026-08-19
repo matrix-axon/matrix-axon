@@ -53,3 +53,8 @@ crossterm = { workspace = true }
 # `axon-demo-tui` only: poll(2) + isatty for the bounded XTWINOPS cell-size probe
 # against the developer's real terminal (Unix-only, like the whole demo lane).
 libc = { workspace = true }
+
+[dev-dependencies]
+# Parse the handwritten smoke and TUI DTO declarations in the contract test
+# without introducing a product-crate dependency across the black-box boundary.
+syn = { version = "2", features = ["full"] }

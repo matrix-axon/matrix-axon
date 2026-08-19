@@ -141,10 +141,13 @@ fn wait_first_paint(
     state: &StubState,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    wait_for_room_and_input(driver, &state.room_name, timeout)?;
-    driver.wait_for_screen_or_exit("the seeded timeline to render", timeout, |screen| {
-        screen.contains("smoke seed")
-    })?;
+    let deadline = Instant::now() + timeout;
+    wait_for_room_and_input_until(driver, &state.room_name, deadline)?;
+    driver.wait_for_screen_or_exit(
+        "the seeded timeline to render",
+        deadline.saturating_duration_since(Instant::now()),
+        |screen| screen.contains("smoke seed"),
+    )?;
     Ok(())
 }
 
@@ -153,16 +156,28 @@ fn wait_for_room_and_input(
     room_name: &str,
     timeout: Duration,
 ) -> anyhow::Result<()> {
+    wait_for_room_and_input_until(driver, room_name, Instant::now() + timeout)
+}
+
+fn wait_for_room_and_input_until(
+    driver: &mut PtyDriver,
+    room_name: &str,
+    deadline: Instant,
+) -> anyhow::Result<()> {
     let room_name = room_name.to_owned();
-    driver.wait_for_screen_or_exit("the room list to render", timeout, move |screen| {
-        screen.contains("Rooms") && screen.contains(&room_name)
-    })?;
+    driver.wait_for_screen_or_exit(
+        "the room list to render",
+        deadline.saturating_duration_since(Instant::now()),
+        move |screen| screen.contains("Rooms") && screen.contains(&room_name),
+    )?;
     // Anchor to the bottom section of the screen where the input box lives,
     // not the entire screen — the room-list selection marker "> " renders at
     // the top and would satisfy screen.contains('>') immediately.
-    driver.wait_for_screen_or_exit("the input line to render", timeout, |screen| {
-        screen.lines().rev().take(5).any(|l| l.contains('>'))
-    })?;
+    driver.wait_for_screen_or_exit(
+        "the input line to render",
+        deadline.saturating_duration_since(Instant::now()),
+        |screen| screen.lines().rev().take(5).any(|l| l.contains('>')),
+    )?;
     Ok(())
 }
 

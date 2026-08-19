@@ -520,6 +520,7 @@ dependencies = [
  "portable-pty",
  "serde",
  "serde_json",
+ "syn 2.0.118",
  "tokio",
  "uuid",
  "vt100",
