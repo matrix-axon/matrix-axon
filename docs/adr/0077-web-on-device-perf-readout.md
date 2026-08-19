@@ -22,7 +22,7 @@ Three obstacles, each of which cost real time before being addressed:
   they scroll past faster than a recording can capture.
 
 This mattered concretely: a scroll-stability bug (ADR 0076) went through four
-wrong hypotheses, three of them about browser behaviour, because the app's own
+wrong hypotheses, three of them about browser behavior, because the app's own
 measurements were unreachable from the device exhibiting the problem. The first
 on-device readout falsified two of them immediately.
 
@@ -36,7 +36,7 @@ off clears the readout so no stale tail is left on screen.
 **2. An on-screen readout** (`PerfOverlay`) drawing the tail of selected marks
 over the app: fixed, `pointer-events: none`, outside the timeline's layout so
 watching cannot perturb what is watched. Because the user is screen-recording
-anyway, the numbers and the behaviour they explain land **in the same frames**,
+anyway, the numbers and the behavior they explain land **in the same frames**,
 which is what makes them correlatable at all.
 
 Only curated marks are mirrored — the scroll anchor, the paging that feeds it,
@@ -71,14 +71,14 @@ For a future agent handed "the app feels slow/jumpy on my phone":
    Layout bugs are input-independent and can be measured directly from
    `getBoundingClientRect()` — orders of magnitude faster to iterate on than
    the loop below, which should be reserved for what only a device shows
-   (CPU-bound behaviour, real momentum scrolling, confirming a fix in the
+   (CPU-bound behavior, real momentum scrolling, confirming a fix in the
    reporter's hands). This step was skipped in the ADR 0076 investigation at a
-   cost of nine record-and-analyse cycles.
+   cost of nine record-and-analyze cycles.
 1. Ask the reporter to enable **Settings → Performance instrumentation**, use
    the app normally, and send a **screen recording** of the problem.
 2. Read the overlay out of the video (`ffmpeg` to crop and upscale the readout
    region, then read the frames).
-3. Measure the behaviour independently from the same video — frame extraction
+3. Measure the behavior independently from the same video — frame extraction
    plus 2D phase correlation gives per-frame displacement. ADR 0076 documents
    the two traps: 1D profiles alias against the row pitch, and only near-still
    frames yield meaningful displacements.

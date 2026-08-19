@@ -27,7 +27,7 @@ The root cause differs by protocol:
   changes, so the pixels are never erased.
 
 * **Halfblock** — characters are in ratatui's buffer, but the `messages_background`
-  colour defaults to `Color::Reset`.  Cells that were under an image in the
+  color defaults to `Color::Reset`.  Cells that were under an image in the
   previous frame carry `bg = Reset, skip = true`; cells at those same positions
   in the new frame carry `bg = Reset, skip = false`.  Because `Cell::PartialEq`
   in ratatui 0.30 includes the `skip` field, these cells *should* compare as
@@ -96,7 +96,7 @@ characters, causing them to disappear.
   repaint and without staggering borders.
 * Any future code that changes the message pane content wholesale (e.g. a new
   search-results view) must set `force_terminal_clear = true` to get the same
-  behaviour.
+  behavior.
 * If ratatui changes its `Cell::PartialEq` semantics or adds a first-class
   "force repaint region" API, the `AlwaysUpdate` workaround can be removed.
 

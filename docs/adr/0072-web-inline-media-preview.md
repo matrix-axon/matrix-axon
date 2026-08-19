@@ -163,7 +163,7 @@ dynamic `import()`. Pages rasterise lazily as they scroll into view (reusing the
 media layer's `observeVisible`) and each reserves its aspect ratio first, so the
 scrollbar is honest and lazy rendering cannot shift the document under a
 reader's finger. Both the inline and lightbox presentations use it — one code
-path, one set of behaviours.
+path, one set of behaviors.
 
 The cost is real and paid only on use: a ~425 KB viewer chunk (127 KB gzipped)
 and a ~1.25 MB worker, fetched the first time someone opens a PDF and never

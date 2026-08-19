@@ -257,7 +257,7 @@ first:
    `.pre-commit-config.yaml`, which reaches git and jj alike — ADR 0092.)
 3. **Human-confirmed.** Real Sixel/Kitty rendering, gallery layout, and lightbox
    paging have no honest headless substitute, so an agent changing visual
-   behaviour offers the one-command check and asks for an eyeball. This is the
+   behavior offers the one-command check and asks for an eyeball. This is the
    role `clients/web/AGENTS.md`'s "human pass against the live server" plays
    today, moved onto a disposable stack.
 

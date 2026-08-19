@@ -168,7 +168,7 @@ scene now depends on:
   overlay gates on `pointerType`, or the phone recording grows a desktop arrow
   cursor hovering beside the finger.
 - **Mobile WebKit has no mouse wheel**, which is the correct answer — a phone
-  has none either. The mobile timeline scene scrolls with a smooth-behaviour
+  has none either. The mobile timeline scene scrolls with a smooth-behavior
   `scrollBy` rather than pretending to a gesture it is not.
 - **Message actions are hidden until the row is tapped** at phone widths, and
   Enter is not the send affordance a touch-only user has — the Send button is.
