@@ -299,6 +299,8 @@ Sync alone only ingests events _going forward_ (plus the shallow `sync.timeline_
 
 ### 13. Deployment docs
 
+**Landed.** **M13 — deployment scaffolding (partial — this is the current MVP gate).** Platform-convention data/config/cache dirs (PR 206, ADR 0050); the `axon init` first-run config bootstrap that generates a starter config + `store_key` (PR 207/208, ADR 0051); and the Docker deployment framework (ADR 0052) has since landed for real — `deploy/` now has a working `Dockerfile`, a full-stack `docker-compose.yml` (Postgres + `axon-server` + `axon-web` behind one front door), `run-docker.sh`, a Caddy/Tailscale TLS profile, and `publish-images.yml` pushes `axon-server`/`axon-web` images to GHCR on a `beta-*` tag or by hand. The Dockerfile in the project root is for development, not deployment, as it only builds axon-server. Tagged-release single-binary artifacts also shipped: `cross-build.yml` builds Linux/Windows/macOS (Intel + Apple Silicon) on every version tag and uploads `axon-tui`/`axon-server`/combined zips per platform. `README.md` documents `axon init`, the Docker quick start, and the beta image flow. **Still missing:** the `docs/self-hosting.md` walkthrough itself (a reader following one doc top-to-bottom, per the M13 verification criterion) and the non-Docker deployment recipes (Railway, DigitalOcean, AWS, bare VPS) — tracked against #221. Until those land, M13 isn't done and MVP hasn't shipped.
+
 - `docs/self-hosting.md` covering:
   - Prerequisites (Postgres, Synapse / Dendrite accessible).
   - Build / install (Cargo + Docker options).
