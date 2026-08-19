@@ -328,6 +328,8 @@ Sync alone only ingests events _going forward_ (plus the shallow `sync.timeline_
 
 ### 16. Device-list / discovery endpoint
 
+**Landed.** **M16 — device-list / discovery endpoint (ADR 0060).** Closes ADR 0053 item 2: `GET /v1/accounts/{account_id}/devices` (optional `?user_id=`, defaulting to the account's own user) lists a user's Matrix devices live from the SDK (`client.encryption().get_user_devices()`), so a client can build a real SAS-verification device picker instead of requiring a blind id (issue #84, ADR 0028/0034). Server-only, single PR, no new storage — same consumer-owned-port + composition-root-adapter shape as 7a-6/7c (`DeviceListService`/`DeviceListEngine`/`DeviceAdapter`), read-only with an explicit `accounts.state == active` gate and no per-identity lock (same reasoning as ADR 0058's trust bundle). Independent of M14 (OAuth), which continues separately. The `axon-tui`/web-client picker UI is separate follow-on client work, not part of this milestone.
+
 ### 17. Media thumbnail proxy
 
 ### 18. Live-event ephemeral passthrough
