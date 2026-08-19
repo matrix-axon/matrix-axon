@@ -244,6 +244,18 @@ async fn purge_room_clears_stored_state_and_enqueues_search_purge() {
     .await;
     assert_eq!(n, 1, "one room-purge obligation appended");
 
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM room_summaries WHERE account_id=$1 AND room_id=$2",
+            account_id,
+            &room_id
+        )
+        .await,
+        0,
+        "room_summaries removed"
+    );
+
     common::cleanup_account(&pool, account_id).await;
 }
 

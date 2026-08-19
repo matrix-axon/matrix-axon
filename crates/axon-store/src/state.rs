@@ -18,6 +18,21 @@ use crate::{Store, StoreError};
 /// `account_data` migration.
 const GLOBAL_SCOPE: &str = "";
 
+/// Singleton state types whose current value is cached on `room_summaries`
+/// (ADR 0095). `state_key` must be `""`.
+fn summary_display_state(event_type: &str, state_key: &str) -> bool {
+    state_key.is_empty()
+        && matches!(
+            event_type,
+            "m.room.name"
+                | "m.room.topic"
+                | "m.room.avatar"
+                | "m.room.canonical_alias"
+                | "m.room.create"
+                | "m.room.tombstone"
+        )
+}
+
 /// A single piece of current room state to upsert: the latest event holding the
 /// `(room_id, event_type, state_key)` tuple for an account.
 pub struct RoomStateUpsert<'a> {
@@ -141,6 +156,25 @@ impl Store {
         .bind(&s.content)
         .execute(&self.pool)
         .await?;
+        if summary_display_state(s.event_type, s.state_key) {
+            self.refresh_room_summary_display(s.account_id, s.room_id)
+                .await?;
+        } else if s.event_type == "m.room.member" {
+            // Only the local user's membership drives hidden_left. Other
+            // members change often and must not pay a display refresh.
+            sqlx_core::query::query(
+                "SELECT refresh_room_summary_display($1, $2) \
+                 WHERE EXISTS ( \
+                     SELECT 1 FROM accounts \
+                     WHERE account_id = $1 AND user_id = $3 \
+                 )",
+            )
+            .bind(s.account_id)
+            .bind(s.room_id)
+            .bind(s.state_key)
+            .execute(&self.pool)
+            .await?;
+        }
         Ok(())
     }
 
