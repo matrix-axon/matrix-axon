@@ -332,6 +332,8 @@ Sync alone only ingests events _going forward_ (plus the shallow `sync.timeline_
 
 ### 17. Media thumbnail proxy
 
+**Landed.** **M17 — media thumbnail proxy (ADR 0063, issue #253).** `GET /v1/media/{account_id}/{server_name}/{media_id}/thumbnail?width=&height=&method=` proxies the homeserver's native thumbnail endpoint (`matrix_sdk::media::MediaFormat::Thumbnail`, via a new `SdkMediaProxy::download_thumbnail`) rather than only the full-resolution original M11 serves. Server-only, single PR — `ThumbnailMethod`/`ThumbnailSpec` live in `axon-core` (shared by the `axon-api` port and the `axon-media` cache-key input); the cache key is extended with a `"thumb:"`-namespaced hash (`etag_for_thumbnail`) so a thumbnail variant is cached independently of the original, with zero changes to the existing LRU/eviction machinery. **Encrypted media is out of scope by hard architectural necessity, not a v1 corner-cut**: the spec/SDK only honor a thumbnail request for plain (unencrypted) `MediaSource` — a homeserver never sees encrypted-media plaintext to thumbnail — so the route 400s before ever calling the proxy. No client changes in that PR (`clients/web/` didn't exist yet), and the TUI's existing client-side downscale is untouched; the web client's `MediaImage` now consumes this endpoint.
+
 ### 18. Live-event ephemeral passthrough
 
 ### 19. Matrix C-S verb batching
