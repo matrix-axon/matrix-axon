@@ -212,6 +212,13 @@ Non-obvious choices made in 5a (see ADR 0019):
 
 **Verification:** Send a message via curl, watch it round-trip through sliding sync, appear in the timeline, and arrive over WS. Redact and confirm the timeline read masks content.
 
+Non-obvious choices made in 6 (see ADR 0021):
+
+- **Consumer-owned port + composition-root adapter.** `axon-api` defines the `MessageSender` trait it needs (`send_message`/`edit`/`redact`/`react`; `AppState` holds `Arc<dyn MessageSender>`) and stays free of `axon-sync`/`matrix-sdk`. `axon-sync` exposes a concrete `SdkGateway` implementing **no foreign trait**; `axon-server` owns the `GatewayAdapter` newtype that `impl MessageSender` and maps `axon_sync::GatewayError → axon_api::SendError`. `axon-core` stays pure data. `axon-api` and `axon-sync` never depend on each other.
+- **`ClientManager` (connection) vs `SdkGateway` (message semantics).** The manager is the single owner of per-account `Client`s — build/auth/cache via `get_or_connect`, `evict`, with a per-account single-flight guard. The gateway only builds ruma content and sends. Both share the _same_ client per account (same crypto store + send queue).
+- **Lazy connect; supervisor still owns retry.** The supervised sync loop remains the always-on driver (`get_or_connect` → run sync → on failure `evict` + backoff). The gateway connects lazily through the same `get_or_connect`. A send during a homeserver outage returns `503`/`502` and is retried by the client — correct, since unreachability is a normal recurring condition the supervisor rides out.
+- **Wire shape.** Routes nest `account_id` in the path (M5a convention); every mutation returns `{ "data": { "event_id": "$…" } }` at `200`. The created event is not echoed — it round-trips through sync into the timeline read and `/v1/ws`. Edits are sent as a raw `m.replace` envelope. Redact reason is `?reason=`. The SDK mints a fresh txn id per send, so a client retry can duplicate (acceptable pre-auth; revisit M8).
+
 ### 7. Account lifecycle and auth
 
 Auth and trust, split into three subphases. **7a** brings the _Matrix_ accounts under runtime control (login, verify, recover, logout, delete) and finally closes the interactive-verification work deferred from M5 (the old "M5c"). **7b** puts the _client ↔ axon_ bearer-token gate in front of the whole API. **7c** delivers _sender-device trust_: evaluating and exposing whether the devices that **other** people sent from are cross-signed, so clients can flag messages from unverified senders. Said another way: 7a is auth between `axon` and the homeserver(s), 7b is auth between a client and `axon`, and 7c is the trust `axon` reports about the _senders_ of the events it stores.
