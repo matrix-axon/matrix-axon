@@ -863,6 +863,12 @@ pub(crate) struct App {
     pub(crate) bootstrap_tx: Option<mpsc::UnboundedSender<BootstrapOutcome>>,
     /// How far startup has got; drives the rooms-panel loading label.
     pub(crate) bootstrap: BootstrapStage,
+    /// How long each startup stage took, for the `display.debug` overlay: a
+    /// user reporting "slow start" can read the breakdown off their own screen
+    /// (#189). `None` until the stage completes.
+    pub(crate) bootstrap_timings: Vec<(&'static str, std::time::Duration)>,
+    /// When the current startup stage began.
+    pub(crate) bootstrap_stage_started: Instant,
     /// A room-list fetch is in flight, so another must not be started.
     pub(crate) rooms_fetch_inflight: bool,
     /// A room-list fetch was asked for while one was in flight; run one more
@@ -925,7 +931,7 @@ pub(crate) struct App {
     /// limits the live unknown-sender path, and suppressing *display name*
     /// refreshes for an hour because a room has no derivable title would be a
     /// different behaviour change entirely.
-    rooms_without_derived_title: HashSet<RoomKey>,
+    pub(crate) rooms_without_derived_title: HashSet<RoomKey>,
     /// Bounds concurrent `/members` reads, as `media_workers` bounds image
     /// work. A room list with thousands of unnamed rooms used to fan out one
     /// unthrottled request per room (#189).
@@ -1151,6 +1157,8 @@ impl App {
             protocol_drops: ProtocolDropCounts::default(),
             bootstrap_tx: None,
             bootstrap: BootstrapStage::Accounts,
+            bootstrap_timings: Vec::new(),
+            bootstrap_stage_started: Instant::now(),
             rooms_fetch_inflight: false,
             rooms_fetch_again: false,
             rooms_fetch_had_selection: false,

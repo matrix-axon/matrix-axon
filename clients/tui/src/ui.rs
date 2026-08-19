@@ -2464,6 +2464,25 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         app.protocol_drops.cache_saturated, app.protocol_drops.channel_unwired
     );
 
+    // Startup stage timings and the bounded background work behind the room
+    // list: enough to diagnose a "slow first connect" report from the user's
+    // own screen, since the TUI has no log file (#189).
+    let startup_line = if app.bootstrap_timings.is_empty() {
+        format!("Startup: {}…", app.bootstrap.label().unwrap_or("done"))
+    } else {
+        let stages: Vec<String> = app
+            .bootstrap_timings
+            .iter()
+            .map(|(stage, elapsed)| format!("{stage} {}ms", elapsed.as_millis()))
+            .collect();
+        format!("Startup: {}", stages.join(" · "))
+    };
+    let room_titles_line = format!(
+        "Room titles: {} cached, {} with none derivable",
+        app.room_titles.len(),
+        app.rooms_without_derived_title.len()
+    );
+
     let mut lines = vec![
         format!("Axon server: {}", app.client.base_url()),
         auth_line,
@@ -2471,6 +2490,8 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         graphics_line,
         conn_line,
         media_drops_line,
+        startup_line,
+        room_titles_line,
         "".to_owned(),
         format!("Rooms loaded: {}", app.rooms.rooms.len()),
         account_filter_line,

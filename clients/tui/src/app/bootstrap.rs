@@ -118,9 +118,19 @@ impl App {
         });
     }
 
+    /// Record how long the stage that just finished took, and start the clock
+    /// for the next one.
+    fn note_stage_elapsed(&mut self, stage: &'static str) {
+        let now = std::time::Instant::now();
+        let elapsed = now.saturating_duration_since(self.bootstrap_stage_started);
+        self.bootstrap_stage_started = now;
+        self.bootstrap_timings.push((stage, elapsed));
+    }
+
     /// Kick off stage 1. Called once, before the event loop starts drawing.
     pub(crate) fn start_bootstrap(&mut self) {
         self.bootstrap = BootstrapStage::Accounts;
+        self.bootstrap_stage_started = std::time::Instant::now();
         let client = self.client.clone();
         self.spawn_bootstrap(
             async move { BootstrapOutcome::Accounts(client.list_accounts().await) },
@@ -179,6 +189,7 @@ impl App {
                         self.status = Status::from(format!("account refresh failed: {err}"));
                     }
                 }
+                self.note_stage_elapsed("accounts");
                 // Advance even on failure: a server that cannot list accounts
                 // still has rooms worth trying, and a stuck stage would leave
                 // the panel saying "connecting" forever.
@@ -200,6 +211,7 @@ impl App {
                     self.request_rooms_refresh();
                 }
                 if self.bootstrap == BootstrapStage::Rooms {
+                    self.note_stage_elapsed("rooms");
                     self.bootstrap = BootstrapStage::DeviceState;
                     self.request_device_state();
                 } else if self.bootstrap.is_done()
@@ -216,8 +228,10 @@ impl App {
                 self.apply_read_marker_reads(markers);
                 self.apply_draft_reads(drafts);
                 if self.bootstrap == BootstrapStage::DeviceState {
+                    self.note_stage_elapsed("device state");
                     self.bootstrap = BootstrapStage::Done;
                     self.load_selected_timeline().await;
+                    self.note_stage_elapsed("first timeline");
                 }
             }
         }
