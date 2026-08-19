@@ -23,13 +23,21 @@ use super::{
 /// triggered by live messages from senders whose display name we don't yet know.
 /// Collapses bursts of unknown senders into one fetch per room per window.
 const MEMBERS_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// Concurrent `/members` reads, matching the media pool's shape. The per-room
+/// cooldown above bounds *repeats* of one room; this bounds how many rooms are
+/// in flight at once, which is what a thousand-room list needs (#189).
+pub(crate) const MEMBERS_WORKERS: usize = 4;
 const UNREAD_THREAD_PREVIEW_LIMIT: usize = 3;
 
 /// Result of a background `/members` refresh ([`App::spawn_members_refresh`]),
 /// drained by the main loop and applied via [`App::apply_members_outcome`].
 pub(crate) struct MembersOutcome {
     pub(super) room_key: RoomKey,
-    pub(super) members: Vec<MemberDto>,
+    /// `None` when the read failed. The outcome is still delivered so the
+    /// caller can tell "no members to name this room after" (a permanent
+    /// answer) from "the request did not land" (retry after the cooldown).
+    pub(super) members: Option<Vec<MemberDto>>,
 }
 
 impl App {
@@ -509,13 +517,18 @@ impl App {
         let client = self.client.clone();
         let account_id = key.account_id;
         let room_id = key.room_id.clone();
+        let workers = self.members_workers.clone();
         tokio::spawn(async move {
-            if let Ok(members) = client.room_members(account_id, &room_id).await {
-                let _ = tx.send(MembersOutcome {
-                    room_key: key,
-                    members,
-                });
-            }
+            // Hold a permit for the request: without this the room-list title
+            // sweep fans out one concurrent request per unnamed room.
+            let Ok(_permit) = workers.acquire().await else {
+                return;
+            };
+            let members = client.room_members(account_id, &room_id).await.ok();
+            let _ = tx.send(MembersOutcome {
+                room_key: key,
+                members,
+            });
         });
     }
 
@@ -524,10 +537,15 @@ impl App {
     /// away updates that room's names harmlessly and shows when they return.
     pub(crate) fn apply_members_outcome(&mut self, outcome: MembersOutcome) {
         let MembersOutcome { room_key, members } = outcome;
+        // A failed read says nothing about the room, so it must not be recorded
+        // as "has no derivable title" — the cooldown allows a retry instead.
+        let Some(members) = members else {
+            return;
+        };
         self.seed_display_names_for_key(room_key.clone(), &members);
         // For an unnamed room (e.g. a DM) derive a list title from its members so
         // it shows the other participant's name rather than the raw room id.
-        let derived = self
+        let unnamed = self
             .rooms
             .rooms
             .iter()
@@ -538,15 +556,26 @@ impl App {
                         .canonical_alias
                         .as_deref()
                         .is_none_or(|a| a.trim().is_empty())
-            })
-            .and_then(|room| {
-                super::dm_title_from_members(room.account_user_id.as_deref(), &members)
             });
-        if let Some(title) = derived {
-            self.room_titles.insert(room_key, title);
-            if matches!(self.room_sort, RoomSort::AlphaAsc | RoomSort::AlphaDesc) {
-                self.resort_rooms();
+        let derived = unnamed.and_then(|room| {
+            super::dm_title_from_members(room.account_user_id.as_deref(), &members)
+        });
+        match derived {
+            Some(title) => {
+                self.rooms_without_derived_title.remove(&room_key);
+                self.room_titles.insert(room_key, title);
+                if matches!(self.room_sort, RoomSort::AlphaAsc | RoomSort::AlphaDesc) {
+                    self.resort_rooms();
+                }
             }
+            // The read landed and there is nobody to name the room after, so
+            // asking again changes nothing until its membership does. Record
+            // that explicitly; the sweep used to re-request every cooldown for
+            // the life of the process (#189).
+            None if unnamed.is_some() => {
+                self.rooms_without_derived_title.insert(room_key);
+            }
+            None => {}
         }
     }
 

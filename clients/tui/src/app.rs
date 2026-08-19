@@ -1,6 +1,6 @@
 use ratatui::layout::{Rect, Size};
 use ratatui_image::picker::Picker;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Semaphore};
@@ -54,6 +54,7 @@ pub(crate) use room_actions::{PendingRoomAction, RoomActionOutcome};
 pub(crate) use rooms::{account_localpart, apply_edits, dm_title_from_members};
 #[cfg(test)]
 use timeline::should_show_event;
+use timeline::MEMBERS_WORKERS;
 
 /// The outcome of an [`App::request_protocol`] call.
 ///
@@ -916,6 +917,19 @@ pub(crate) struct App {
     /// Earliest instant a room may trigger another background `/members` refresh,
     /// rate-limiting the live unknown-sender path (see `spawn_members_refresh`).
     members_refresh_after: HashMap<RoomKey, std::time::Instant>,
+    /// Rooms whose `/members` read produced no derivable list title (no other
+    /// member to name them after). Without an explicit record the title sweep
+    /// asks again every cooldown, forever, on every refresh (#189).
+    ///
+    /// Deliberately separate from `members_refresh_after`: that map also rate
+    /// limits the live unknown-sender path, and suppressing *display name*
+    /// refreshes for an hour because a room has no derivable title would be a
+    /// different behaviour change entirely.
+    rooms_without_derived_title: HashSet<RoomKey>,
+    /// Bounds concurrent `/members` reads, as `media_workers` bounds image
+    /// work. A room list with thousands of unnamed rooms used to fan out one
+    /// unthrottled request per room (#189).
+    members_workers: Arc<Semaphore>,
     /// The event the next sent message replies to (ADR 0032 M4), set by `/reply`
     /// or the reply hotkey. Mutually exclusive with `pending_thread`; the status
     /// line shows it while set, and `Escape` clears it.
@@ -1151,6 +1165,8 @@ impl App {
             relations_tx: None,
             members_tx: None,
             members_refresh_after: HashMap::new(),
+            rooms_without_derived_title: HashSet::new(),
+            members_workers: Arc::new(Semaphore::new(MEMBERS_WORKERS)),
             pending_reply: None,
             pending_thread: None,
             promoted_thread_events: std::collections::HashSet::new(),
@@ -3937,10 +3953,10 @@ mod tests {
         // A background /members refresh lands and resolves the name in place.
         app.apply_members_outcome(timeline::MembersOutcome {
             room_key: RoomKey::from(&room),
-            members: vec![MemberDto {
+            members: Some(vec![MemberDto {
                 user_id: "@alice:example.com".to_owned(),
                 display_name: Some("Alice".to_owned()),
-            }],
+            }]),
         });
         assert_eq!(app.sender_label(&message), "Alice");
     }

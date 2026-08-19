@@ -10,6 +10,13 @@ use super::{
     AccountSelection, App, RoomKey, RoomSort, RoomTargetResolution, Status, TIMELINE_LIMIT,
 };
 
+/// Rows either side of the visible room-list window that still get their titles
+/// fetched, so a short scroll does not stall waiting on a request.
+const ROOM_TITLE_LOOKAHEAD: usize = 8;
+
+/// Window height assumed before the first draw has measured the panel.
+const ROOM_TITLE_DEFAULT_PAGE: usize = 32;
+
 impl App {
     pub(crate) fn apply_room_refresh(&mut self, mut rooms: Vec<RoomDto>) {
         // A logged-out (deactivated) account keeps its rows in Axon's `events`
@@ -62,7 +69,7 @@ impl App {
         } else if !self.is_mid_command() {
             self.status = Status::from(format!("refreshed {} rooms", self.rooms.rooms.len()));
         }
-        self.request_unnamed_room_titles();
+        self.sweep_visible_room_titles();
     }
 
     fn prune_room_caches(&mut self, key: &RoomKey) {
@@ -74,22 +81,51 @@ impl App {
         self.thread_summaries.remove(key);
         self.relation_refresh_latest.remove(key);
         self.members_refresh_after.remove(key);
+        self.rooms_without_derived_title.remove(key);
         self.unread_threads.remove(key);
     }
 
-    /// Kick off background `/members` fetches for rooms that have no
-    /// `m.room.name`/alias and no cached member-derived title yet (typically DMs),
-    /// so the room list can show the other participant's name. Per-room rate
-    /// limiting in `spawn_members_refresh` and the title cache keep this cheap on
-    /// repeat refreshes; once a title is cached the room is skipped.
-    fn request_unnamed_room_titles(&mut self) {
-        let keys: Vec<RoomKey> = self
+    /// Kick off background `/members` reads for the rooms **on screen** that have
+    /// no `m.room.name`/alias and no cached member-derived title yet (typically
+    /// DMs), so the room list can show the other participant's name.
+    ///
+    /// Demand-driven, matching the rule media already follows: request what the
+    /// user can see plus a small lookahead, and let scrolling pull in the rest.
+    /// This used to sweep the *entire* list on every refresh, which on a server
+    /// with thousands of unnamed rooms fanned out thousands of concurrent
+    /// requests, each of whose results ran an O(n) scan and (under alpha sort) a
+    /// full re-sort — the room-count-squared behaviour behind #189.
+    ///
+    /// Called after every room refresh and from the main loop's tick, so a
+    /// scroll or a filter change pulls in the newly visible rooms.
+    pub(crate) fn sweep_visible_room_titles(&mut self) {
+        let visible = self.visible_room_indices();
+        if visible.is_empty() {
+            return;
+        }
+        // `rooms.page_size` is zero until the first draw; the loop paints before
+        // the room list lands now, but a default keeps this correct either way.
+        let page = if self.rooms.page_size == 0 {
+            ROOM_TITLE_DEFAULT_PAGE
+        } else {
+            self.rooms.page_size
+        };
+        let start = self.rooms.scroll.saturating_sub(ROOM_TITLE_LOOKAHEAD);
+        let end = self
             .rooms
-            .rooms
+            .scroll
+            .saturating_add(page)
+            .saturating_add(ROOM_TITLE_LOOKAHEAD)
+            .min(visible.len());
+        let keys: Vec<RoomKey> = visible[start.min(end)..end]
             .iter()
+            .filter_map(|index| self.rooms.rooms.get(*index))
             .filter(|room| is_likely_dm(room))
             .map(RoomKey::from)
-            .filter(|key| !self.room_titles.contains_key(key))
+            .filter(|key| {
+                !self.room_titles.contains_key(key)
+                    && !self.rooms_without_derived_title.contains(key)
+            })
             .collect();
         for key in keys {
             self.spawn_members_refresh(key);
@@ -1292,6 +1328,75 @@ mod tests {
         apply_edits, is_likely_dm, keep_adjacent_older_tail, sort_rooms_by_pin,
         sort_rooms_by_pin_with_title,
     };
+
+    /// The title sweep asks only for the rooms on screen (plus a lookahead),
+    /// not the whole list.
+    ///
+    /// The old sweep walked every unnamed room on every refresh, so a
+    /// thousand-room list fanned out a thousand concurrent `/members` reads
+    /// whose results each ran an O(n) scan and, under alpha sort, a full
+    /// re-sort (#189).
+    #[tokio::test]
+    async fn title_sweep_is_limited_to_the_visible_window() {
+        // The sender must be wired or the sweep bails before arming anything.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let rooms: Vec<RoomDto> = (0..500)
+            .map(|i| room_with_activity(Uuid::nil(), &format!("!r{i}:x"), i as i64))
+            .collect();
+        let mut app = crate::app::App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:1".to_owned(), None),
+            None,
+            crate::config::TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+        app.set_members_sender(tx);
+        app.rooms.rooms = rooms;
+        app.rooms.page_size = 20;
+        app.rooms.scroll = 0;
+
+        app.sweep_visible_room_titles();
+
+        // The reads are spawned, so count the rooms the sweep armed a per-room
+        // cooldown for — one per request it decided to make.
+        let armed = app.members_refresh_after.len();
+        assert!(
+            armed <= 20 + super::ROOM_TITLE_LOOKAHEAD * 2,
+            "swept {armed} rooms for a 20-row window; it should track the viewport"
+        );
+        assert!(armed > 0, "the visible rooms should still be requested");
+    }
+
+    /// A room whose members yield no title is recorded, so the sweep stops
+    /// asking. Without this it re-requests every cooldown, forever.
+    #[test]
+    fn a_room_with_no_derivable_title_is_not_asked_again() {
+        let mut app = crate::app::App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:1".to_owned(), None),
+            None,
+            crate::config::TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+        let room = room_with_activity(Uuid::nil(), "!lonely:x", 0);
+        let key = RoomKey::from(&room);
+        app.rooms.rooms = vec![room];
+
+        // The read landed and named nobody: the account is its only member.
+        app.apply_members_outcome(crate::app::timeline::MembersOutcome {
+            room_key: key.clone(),
+            members: Some(Vec::new()),
+        });
+        assert!(app.rooms_without_derived_title.contains(&key));
+
+        // A *failed* read says nothing, so it must not be recorded.
+        let other = room_with_activity(Uuid::nil(), "!unknown:x", 0);
+        let other_key = RoomKey::from(&other);
+        app.rooms.rooms.push(other);
+        app.apply_members_outcome(crate::app::timeline::MembersOutcome {
+            room_key: other_key.clone(),
+            members: None,
+        });
+        assert!(!app.rooms_without_derived_title.contains(&other_key));
+    }
 
     fn room_with_activity(account_id: Uuid, room_id: &str, last_activity_ts: i64) -> RoomDto {
         RoomDto {

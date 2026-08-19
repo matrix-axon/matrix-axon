@@ -512,6 +512,10 @@ async fn run_app(
                 app.flush_due_typing(now);
                 // Expire stale inbound typing overlays (M18, ADR 0056).
                 app.prune_typing(now);
+                // Pull in list titles for rooms scrolling or filtering has just
+                // brought on screen. Bounded and idempotent — already-titled
+                // rooms are skipped (#189).
+                app.sweep_visible_room_titles();
                 if inside_tmux()
                     && app.picker.protocol_type() == ProtocolType::Sixel
                     && now >= next_sixel_inline_refresh
