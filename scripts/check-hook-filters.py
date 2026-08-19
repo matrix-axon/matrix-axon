@@ -153,6 +153,15 @@ PROSE_NAMING_HOOKS = (
 # `<` is outside the character class.
 SKIP_EXAMPLE = re.compile(r"SKIP=([a-z][a-z0-9-]*)")
 
+# Hooks carrying `fail_fast: true`, and the expensive hooks each one exists to
+# short-circuit. `fail_fast` only stops hooks that come *after* it, so the
+# guarantee is really about file order -- reorder the file and the gate keeps
+# passing while silently protecting nothing.
+FAIL_FAST_GATES = {
+    "rustfmt": ("rust-clippy", "cargo-test"),
+    "web-lint": ("web-test", "web-build"),
+}
+
 
 def skip_examples(path: str) -> set[str] | None:
     """Hook ids named in `SKIP=<id>` examples, or None if the file is missing."""
@@ -225,9 +234,31 @@ def main() -> int:
     if unknown:
         problems.append(f"CASES names hooks that do not exist: {sorted(unknown)}")
 
+    # `fail_fast` is a claim about order, so check the order.
+    ordered = [h["id"] for repo in parsed["repos"] for h in repo["hooks"]]
+    declared = {
+        h["id"] for repo in parsed["repos"] for h in repo["hooks"] if h.get("fail_fast")
+    }
+    if declared != set(FAIL_FAST_GATES):
+        problems.append(
+            f"hooks with fail_fast: {sorted(declared)} but FAIL_FAST_GATES "
+            f"describes {sorted(FAIL_FAST_GATES)} -- keep them in step"
+        )
+    for gate, gated in FAIL_FAST_GATES.items():
+        if gate not in ordered:
+            problems.append(f"FAIL_FAST_GATES names a hook that does not exist: {gate}")
+            continue
+        for other in gated:
+            if other not in ordered:
+                problems.append(f"{gate} is declared to gate {other}, which does not exist")
+            elif ordered.index(other) < ordered.index(gate):
+                problems.append(
+                    f"{gate} has fail_fast but runs after {other}, so it gates nothing"
+                )
+
     # A `SKIP=<id>` example naming a hook that no longer exists still reads like
     # a working incantation, and silently skips nothing. Remote hooks count.
-    all_ids = {h["id"] for repo in parsed["repos"] for h in repo["hooks"]}
+    all_ids = set(ordered)
     for doc in PROSE_NAMING_HOOKS:
         named = skip_examples(doc)
         if named is None:

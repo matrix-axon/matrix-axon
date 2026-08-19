@@ -127,6 +127,8 @@ repos:
         name: web lint
         language: system
         entry: pnpm --dir clients/web lint
+        # Same reasoning as rustfmt: gates web-test and web-build below.
+        fail_fast: true
         files: &web_sources '^(\.github/workflows/web-lint-and-test\.yml|clients/web/|\.pre-commit-config\.yaml)'
         pass_filenames: false
         stages: [pre-push]
@@ -175,6 +177,11 @@ repos:
         name: rustfmt (check)
         language: system
         entry: cargo fmt --all -- --check
+        # Gates the two expensive rust hooks below: a formatting violation
+        # already rejects the push, so paying for a full clippy build and the
+        # test suite behind it buys nothing. Requires rustfmt to stay ordered
+        # first among the rust hooks.
+        fail_fast: true
         files: &rust_files '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rustfmt\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|tests/fixtures/.*|(crates|clients/tui|smoke)/.*\.(rs|toml|sql))$'
         pass_filenames: false
         stages: [pre-push]
