@@ -184,6 +184,22 @@ Non-obvious choices made in 4b (see ADR 0016):
 
 **Interactive verification UX deferred to M7a.** The SAS-emoji exchange over `/v1/ws` — formerly planned here as "M5c", consuming the M4 plumbing — was never built. It now lands in **M7a**, where it belongs conceptually: verifying `axon`'s _device_ for a _Matrix account_ is part of that account's lifecycle. M5 ships the `/v1/ws` channel the exchange rides on; M7a wires the flow. See M7a.
 
+Non-obvious choices made in 5b (see ADR 0020):
+
+- **Live-event bus = `tokio::sync::broadcast`, owned by the sync engine.** `SyncEngine::live_events()` hands a `broadcast::Sender<LiveEvent>` clone to `AppState`; the `/v1/ws` handler `subscribe()`s once per connection. A slow client gets `RecvError::Lagged` (skips the backlog, stays connected) — sync is **never** back-pressured by a client. Capacity 1024; the producer skips the work entirely when `receiver_count() == 0`.
+- **`LiveEvent` lives in `axon-core`** (the only crate both sibling producers/consumers share) and is **wire-neutral**; `axon-api` owns the envelope and maps `LiveEvent → EventDto`. The WS payload is the **same `EventDto`** the read API returns.
+- **Wire envelope** `{ "type": "timeline.event", "account_id": <uuid>, "payload": <EventDto> }`. `type` is namespaced so M5c verification frames extend it without colliding. Live frames are always `redacted: false` (a redaction is a separate later event).
+- **Live tail, not replay.** `/v1/ws` delivers events arriving _after_ connect; history is the HTTP read API's job. Not in the OpenAPI doc (a WS upgrade isn't expressible in OpenAPI 3.1) — golden test unaffected. No auth yet (M8). Re-decryption back-fill of a UTD is **not** re-emitted over WS (documented scope limit).
+
+Non-obvious choices made in 5a (see ADR 0019):
+
+- **Account-nested canonical routes.** `GET /v1/rooms` is the flat cross-account aggregate (newest-activity first, optional `?account_id=` filter); detail routes nest the account: `GET /v1/accounts/{account_id}/rooms/{room_id}/timeline` and `GET /v1/accounts/{account_id}/events/{event_id}` (event under the **account, not the room** — the store keys events by `(account_id, event_id)`). A deliberate deviation from the spec's literal flat routes, consistent with M7's already-nested `/v1/media/{account_id}/…`. **Convention going forward: nest `account_id` on all account-scoped resource routes** — so M6 mutations become `/v1/accounts/{account_id}/rooms/{room_id}/send`, dropping `account_id` from the body.
+- **Response envelope.** Success is `{ "data": <T> }` (`ApiResponse<T>`), errors `{ "error": { "code", "message" } }` (`ApiError`), each with one `IntoResponse`. `StoreError` → logged `500` with a generic body. Missing event → `404`; bad cursor/param → `400`; an unknown room's timeline is an empty `200` page, not `404`.
+- **Opaque cursor.** The store's `(origin_ts, id)` `TimelineCursor` is serialized to the wire as base64url(`"{ts}.{id}"`), returned as `next_cursor` per page (`null` at the end); a malformed cursor is a `400`. Codec in `crates/axon-api/src/cursor.rs`.
+- **`AppState` + `FromRef` seam.** `axon-api::router` takes `AppState { store }` and handlers extract `State<Store>` via `FromRef`, so 5b can add a `broadcast::Sender` field with zero churn to existing handlers.
+- **OpenAPI golden file.** utoipa builds the spec from handler signatures; a DB-free test diffs it against `openapi/openapi.json` (regenerate with `UPDATE_OPENAPI=1 cargo test -p axon-api --test openapi`), making drift a CI failure. TypeScript client stubs are deferred to M11.
+- **Store reads (no new tables/migration).** `list_rooms(Option<account_id>)` aggregates `events` for activity + latest event id and pulls name/topic/avatar/alias from the `room_state` projection in one query (note avatar state is `m.room.avatar` → `content.url`). `get_event(account_id, event_id)` reuses `room_timeline`'s read-time redaction masking via a shared `TIMELINE_SELECT` projection.
+
 ### 6. Mutations
 
 - `POST /v1/rooms/{room_id}/send` (send message; payload includes `account_id`).
