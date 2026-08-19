@@ -48,9 +48,6 @@ use matrix_sdk::ruma::{
     EventId, Int, OwnedEventId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId,
     RoomOrAliasId, ServerName, UInt, UserId,
 };
-// `remove_room` is a `StateStore` trait method, reached through the
-// `&DynStateStore` the client hands out, so the trait has to be in scope.
-use matrix_sdk::store::StateStore;
 use matrix_sdk::{Client, Room, RoomState};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AsyncMutex;
@@ -1677,10 +1674,10 @@ mod tests {
 
     use super::{
         attachment_info, attachment_reply, build_create_room_request,
-        check_self_demotion_guardrail, effective_mime, leave_fallback_is_unconfirmed,
-        media_message_type, merge_power_level_changes, message_relates_to, parse_room_id_or_alias,
-        parse_server_name, parse_server_names, parse_tag_name, parse_user_id, thread_member_root,
-        validate_tag_order, MAX_TAG_NAME_BYTES,
+        check_self_demotion_guardrail, effective_mime, is_room_gone_answer,
+        leave_fallback_is_unconfirmed, media_message_type, merge_power_level_changes,
+        message_relates_to, parse_room_id_or_alias, parse_server_name, parse_server_names,
+        parse_tag_name, parse_user_id, thread_member_root, validate_tag_order, MAX_TAG_NAME_BYTES,
     };
     use crate::error::GatewayError;
 
