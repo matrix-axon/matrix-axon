@@ -98,6 +98,7 @@ export function ThreadPanel({
   roomTitles,
   threadUnread,
   mayNameRoomReceipt = false,
+  receiptCeiling = null,
   onCommand,
   roomCompletions,
   onClose,
@@ -113,13 +114,21 @@ export function ThreadPanel({
   roomTitles: ReadonlyMap<string, string>
   threadUnread: ThreadUnreadStore
   /**
-   * Whether the rest of the room is caught up, so a member of *this* thread is
-   * a legal target for the room's Matrix receipt (ADR 0096). The room page owns
+   * Whether the room stream is caught up, so a member of *this* thread is a
+   * legal target for the room's Matrix receipt (ADR 0096). The room page owns
    * that judgement; this panel adds the half only it can know — that its own
    * slice reaches the thread's newest reply. Defaults to `false`: a caller that
    * has not thought about it must not have a receipt sent on its behalf.
    */
   mayNameRoomReceipt?: boolean
+  /**
+   * Exclusive upper bound in `arrival_order` on what this panel may name: the
+   * first reply above the room's own target belonging to a thread this panel is
+   * not showing. A receipt covers everything at or below its target, so naming
+   * past that bound would acknowledge a reply the user has never opened.
+   * `null` means nothing is in the way.
+   */
+  receiptCeiling?: number | null
   onCommand?: ThreadCommandHandler
   roomCompletions?(query: string): ComposerAutocompleteOption[]
   onClose: () => void
@@ -301,9 +310,17 @@ export function ThreadPanel({
     // target from the same room's main timeline; `ephemeral-sender`'s
     // forward-only floor is what merges the two picks into one receipt, so
     // neither call site needs to know about the other (ADR 0096).
+    //
+    // The ceiling stops the pick short rather than cancelling it: a reply from
+    // another thread sitting above some of this thread's members still leaves
+    // the members below it safe to acknowledge, and reaching as far as is
+    // honest is the difference between a badge that clears and one that does
+    // not.
     const target = thread.events.value.reduce<TimelineEvent | null>(
       (best, event) =>
-        event.event_id.startsWith('local:') || (hideRedacted && event.redacted)
+        event.event_id.startsWith('local:') ||
+        (hideRedacted && event.redacted) ||
+        (receiptCeiling !== null && event.arrival_order >= receiptCeiling)
           ? best
           : best === null || event.arrival_order > best.arrival_order
             ? event
@@ -323,6 +340,7 @@ export function ThreadPanel({
     thread.events.value,
     showingNewestReplies,
     mayNameRoomReceipt,
+    receiptCeiling,
     hideRedacted,
     deviceState,
     ephemeralSender,

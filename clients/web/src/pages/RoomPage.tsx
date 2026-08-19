@@ -86,18 +86,11 @@ import {
 } from '../stores/settings'
 import type { EphemeralStore } from '../stores/ephemeral'
 import {
-  READ_MARKERS_NAMESPACE,
-  THREAD_READ_MARKERS_NAMESPACE,
-} from '../stores/device-state'
-import {
   createThreadsStore,
   threadRootId,
   type ThreadsStore,
 } from '../stores/threads'
-import {
-  threadReadVerdict,
-  type ThreadUnreadStore,
-} from '../stores/thread-unread'
+import type { ThreadUnreadStore } from '../stores/thread-unread'
 import {
   type EventDto,
   type HeadLoadOutcome,
@@ -656,6 +649,82 @@ export function RoomPage() {
     )
   }
 
+  /**
+   * The events this view has put on screen, in display order — the candidate
+   * set both read positions are picked from (ADR 0089). Memoised on what the
+   * filter actually reads: the effect below runs on it, and so does the thread
+   * receipt ceiling, and a fresh array per render would re-run both on renders
+   * that cannot change either answer.
+   */
+  const displayed = useMemo(
+    () =>
+      timeline.events.value.filter(
+        (event) =>
+          // The same predicate that decides what renders as a row. ADR 0089's
+          // contract is "among the events it has actually displayed", and under
+          // the default `stateEvents: 'important'` the events it hides include
+          // the `uk.half-shot.bridge` event from the original bug report — which
+          // would otherwise be a legal receipt target (and marker position)
+          // precisely because it is arrival-newest. Matches the TUI, whose
+          // `receipt_target_for` filters through `should_show_event`.
+          isVisibleTimelineEvent(event) &&
+          // A local echo has not been ingested, so it has no arrival position and
+          // is not a receipt candidate; it is not the room's read position either.
+          !event.event_id.startsWith('local:') &&
+          (unreadThreadCutoff === null || event.origin_ts < unreadThreadCutoff),
+      ),
+    // What `isVisibleTimelineEvent` closes over, listed for the same reason the
+    // `visible` memo lists them: the predicate is re-created every render and so
+    // can never be a dependency itself. Without these, changing a visibility
+    // setting while the room is open repaints the timeline but leaves both read
+    // positions computed under the old rule.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      timeline.events.value,
+      unreadThreadCutoff,
+      hideRedacted,
+      stateEvents,
+      settings.developerMode.value,
+    ],
+  )
+
+  /**
+   * How far past its own target a thread view may push the room's receipt
+   * (ADR 0096 § 2) — exclusive, `null` for "no bound".
+   *
+   * A receipt has no thread scope: naming an event acknowledges everything at or
+   * before it in *arrival* order. The room view has already named the
+   * arrival-max event it displayed, so everything at or below that is
+   * acknowledged either way, and extending to a thread member only adds the
+   * window above it. The question is therefore not "has the user read every
+   * thread in this room" — the first implementation asked that, and in the very
+   * room from #207 the answer is permanently no, because a room full of threads
+   * nobody has opened this session can never satisfy it. It is the much narrower
+   * "does this window contain a reply from a thread the panel is not showing".
+   *
+   * So the bound is the first such reply above the room's own target. A thread
+   * view may name any member below it, and stops there.
+   */
+  const threadReceiptCeiling = useMemo(() => {
+    const roomTarget = displayed.reduce(
+      (best, event) => Math.max(best, event.arrival_order),
+      -1,
+    )
+    return timeline.events.value.reduce<number | null>((lowest, event) => {
+      const root = threadRootId(event)
+      if (
+        root === null ||
+        root === openThread ||
+        event.arrival_order <= roomTarget
+      ) {
+        return lowest
+      }
+      return lowest === null || event.arrival_order < lowest
+        ? event.arrival_order
+        : lowest
+    }, null)
+  }, [displayed, timeline.events.value, openThread])
+
   // Advance this room's read marker to the newest event while it is open, so
   // sibling devices see it as read (M-W6 step 5c, ADR 0048). Hidden unread
   // thread replies are a hard stop: the user has opened the room, not that
@@ -699,21 +768,6 @@ export function RoomPage() {
     if (!showingNewestEvents) {
       return
     }
-    const displayed = timeline.events.value.filter(
-      (event) =>
-        // The same predicate that decides what renders as a row. ADR 0089's
-        // contract is "among the events it has actually displayed", and under
-        // the default `stateEvents: 'important'` the events it hides include
-        // the `uk.half-shot.bridge` event from the original bug report — which
-        // would otherwise be a legal receipt target (and marker position)
-        // precisely because it is arrival-newest. Matches the TUI, whose
-        // `receipt_target_for` filters through `should_show_event`.
-        isVisibleTimelineEvent(event) &&
-        // A local echo has not been ingested, so it has no arrival position and
-        // is not a receipt candidate; it is not the room's read position either.
-        !event.event_id.startsWith('local:') &&
-        (unreadThreadCutoff === null || event.origin_ts < unreadThreadCutoff),
-    )
     // Display order → cross-device marker (M-W6 step 5c, ADR 0048).
     const last = displayed.at(-1)
     if (last !== undefined) {
@@ -744,22 +798,12 @@ export function RoomPage() {
       )
     }
   }, [
-    timeline.events.value,
+    displayed,
     showingNewestEvents,
-    unreadThreadCutoff,
     accountId,
     roomId,
     deviceState,
     ephemeralSender,
-    // What `isVisibleTimelineEvent` closes over, listed for the same reason the
-    // `visible` memo lists them: the predicate is re-created every render and so
-    // can never be a dependency itself. Without these, changing a visibility
-    // setting while the room is open repaints the timeline but leaves both read
-    // positions computed under the old rule until an unrelated dep happens to
-    // fire this effect.
-    hideRedacted,
-    stateEvents,
-    settings.developerMode.value,
   ])
 
   // Clear any live typing notice when leaving this room (RoomPage does not
@@ -902,29 +946,6 @@ export function RoomPage() {
     members,
   )
   const roomReadMarker = deviceState.readMarker(accountId, roomId)
-  /**
-   * The room marker, but only where it can speak for a *thread's* read position
-   * (`threadReadVerdict`). It cannot when it points at a thread member: the
-   * summary-derived marker takes the room's `last_event_id`, which is
-   * `MAX(origin_ts)` over every event — thread replies included — so in the room
-   * from #207, where the newest event *is* a reply, opening the room parks the
-   * marker on that reply and it then answers "read" for every thread below it,
-   * including the one it came from.
-   *
-   * A marker whose event is not in the loaded slice stays admissible: it is
-   * usually one that scrolled out of a long room, and withholding it there would
-   * turn every old thread `'unknown'` — which closes the receipt gate for rooms
-   * that have nothing wrong with them.
-   */
-  const roomMarkerForThreads =
-    roomReadMarker !== null &&
-    timeline.events.value.some(
-      (event) =>
-        event.event_id === roomReadMarker.eventId &&
-        threadRootId(event) !== null,
-    )
-      ? null
-      : roomReadMarker
   const threadSummaryStates = [...threads.summaries.value.values()].map(
     (summary) => ({
       summary,
@@ -937,41 +958,25 @@ export function RoomPage() {
     }),
   )
   /**
-   * Whether a thread view in this room may name the room's Matrix receipt
-   * (ADR 0096 § 2). A receipt has no thread scope — it acknowledges everything
-   * at or before its target in *arrival* order, threads included — so a thread
-   * member is only a legal target once nothing between the receipt's floor and
-   * it is still unseen.
+   * Whether a thread view in this room may claim read state at all (ADR 0096
+   * § 2). This is the room half: the stream is showing the room's newest events,
+   * so no main-timeline message sits unrendered below the thread's tail, *and*
+   * that stream has actually loaded.
    *
-   * Every other thread must be **positively known read**, which is why this
-   * reads verdicts rather than asking `threadUnread` whether anything is
-   * flagged. Those are different questions: a thread nobody has established a
-   * read position for is `'unknown'`, the display deliberately leaves it
-   * unflagged, and "not flagged" would have read as "caught up" here — sending
-   * a receipt over replies the user has never opened. The open thread is
-   * excluded because the panel is displaying it, and the panel's own live-end
-   * check is what decides whether that display is complete.
+   * The second half is not implied by the first. `atEnd` starts `true` on a cold
+   * store — it means "nothing newer is known to exist", which is vacuously so
+   * before the first page lands — and `threadReceiptCeiling` is derived from the
+   * slice, so an empty one reports no obstruction rather than no knowledge. The
+   * panel's own endpoint can easily answer first, and a receipt sent then would
+   * name a thread member with the room's own events still in flight.
    *
-   * The stores behind all of that must have loaded first, or their emptiness
-   * answers the question by itself: an unfetched summary map looks like a room
-   * with no threads, and an unhydrated marker namespace makes every verdict
-   * `'unknown'`. ADR 0070's startup sweep made this mistake in the large — it
-   * pruned against a room list that had not loaded yet.
+   * The panel adds the half only it knows, that its own slice reaches the
+   * thread's newest reply, and `threadReceiptCeiling` bounds how far it reaches.
    */
   const mayNameRoomReceiptFromThread =
     showingNewestEvents &&
-    !threads.loading.value &&
-    threads.error.value === null &&
-    deviceState.hydrated(accountId, READ_MARKERS_NAMESPACE) &&
-    deviceState.hydrated(accountId, THREAD_READ_MARKERS_NAMESPACE) &&
-    threadSummaryStates.every(
-      ({ summary, threadMarker }) =>
-        summary.root_event_id === openThread ||
-        threadReadVerdict(summary, {
-          threadMarker,
-          roomMarker: roomMarkerForThreads,
-        }) === 'read',
-    )
+    !timeline.loading.value &&
+    timeline.events.value.length > 0
 
   useEffect(() => {
     for (const { summary, threadMarker, rootPreview } of threadSummaryStates) {
@@ -980,7 +985,7 @@ export function RoomPage() {
         roomId,
         roomTitle: title,
         rootPreview,
-        roomMarker: roomMarkerForThreads,
+        roomMarker: roomReadMarker,
         threadMarker,
       })
     }
@@ -990,7 +995,7 @@ export function RoomPage() {
     accountId,
     roomId,
     title,
-    roomMarkerForThreads,
+    roomReadMarker,
   ])
 
   /**
@@ -1877,6 +1882,7 @@ export function RoomPage() {
             ownUserId={ownUserId}
             threadUnread={threadUnread}
             mayNameRoomReceipt={mayNameRoomReceiptFromThread}
+            receiptCeiling={threadReceiptCeiling}
             onCommand={handleThreadComposerCommand}
             roomCompletions={roomCompletions}
             onClose={() => setThreadParam(null)}

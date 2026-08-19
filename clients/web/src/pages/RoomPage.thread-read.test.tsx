@@ -25,6 +25,7 @@ const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
 const ROOM = '!room:hs'
 const ROOT = '$root'
 const OTHER_ROOT = '$other-root'
+const SECOND = 1_000
 const MINUTE = 60_000
 const T0 = Date.UTC(2026, 7, 19, 12, 0, 0)
 
@@ -67,9 +68,18 @@ const ROOT_EVENT = event(ROOT, T0 - 10 * MINUTE, 2500)
 const MAIN = event('$main', T0 - 2 * MINUTE, 2585)
 const REPLY_1 = event('$reply1', T0 - MINUTE, 2598, ROOT)
 const REPLY_2 = event('$reply2', T0, 2599, ROOT)
-// A second thread, used only by the "another thread is unread" case.
+// A second thread. Its replies land on either side of `$main`, which is the
+// room view's own receipt target — the side they land on is the whole question.
+// `$other-old` is already covered by the room's receipt; `$other-new` is inside
+// the window a thread receipt would extend over.
 const OTHER_ROOT_EVENT = event(OTHER_ROOT, T0 - 9 * MINUTE, 2510)
 const OTHER_REPLY = event('$other-reply', T0 - 3 * MINUTE, 2580, OTHER_ROOT)
+const OTHER_REPLY_NEW = event(
+  '$other-reply-new',
+  T0 - 90 * SECOND,
+  2590,
+  OTHER_ROOT,
+)
 
 interface ThreadSummary {
   root_event_id: string
@@ -90,6 +100,12 @@ const OTHER_THREAD: ThreadSummary = {
   latest_reply_event_id: OTHER_REPLY.event_id,
   latest_reply_ts: OTHER_REPLY.origin_ts,
 }
+const OTHER_THREAD_NEW: ThreadSummary = {
+  ...OTHER_THREAD,
+  reply_count: 2,
+  latest_reply_event_id: OTHER_REPLY_NEW.event_id,
+  latest_reply_ts: OTHER_REPLY_NEW.origin_ts,
+}
 
 const server = setupServer()
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
@@ -105,17 +121,18 @@ function renderRoom(
     /** `?thread=` / `?event=` on the room URL. */
     query?: string
     threads?: ThreadSummary[]
-    /** Hang the thread-summary read, so the panel's gate sees "not loaded". */
-    threadsPending?: boolean
-    /** Hang device-state hydration, so read markers never arrive. */
-    deviceStatePending?: boolean
+    /** Hang the room timeline read, so the room's slice never arrives. */
+    timelinePending?: boolean
     /** Replies the thread endpoint serves, newest first. */
     replies?: EventDto[]
+    /** Add a second thread's reply *above* the room view's own target. */
+    foreignReplyInWindow?: boolean
   } = {},
 ) {
   const roomEvents = [
     REPLY_2,
     REPLY_1,
+    ...(options.foreignReplyInWindow === true ? [OTHER_REPLY_NEW] : []),
     MAIN,
     OTHER_REPLY,
     OTHER_ROOT_EVENT,
@@ -158,7 +175,11 @@ function renderRoom(
       }),
     ),
     http.get(TIMELINE_PATH, () =>
-      HttpResponse.json({ data: { events: roomEvents, next_cursor: null } }),
+      options.timelinePending === true
+        ? new Promise<Response>(() => {})
+        : HttpResponse.json({
+            data: { events: roomEvents, next_cursor: null },
+          }),
     ),
     http.get(threadTimelinePath(ROOT), () =>
       HttpResponse.json({
@@ -173,10 +194,7 @@ function renderRoom(
     ),
     http.get(
       `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads`,
-      () =>
-        options.threadsPending === true
-          ? new Promise<Response>(() => {})
-          : HttpResponse.json({ data: options.threads ?? [MAIN_THREAD] }),
+      () => HttpResponse.json({ data: options.threads ?? [MAIN_THREAD] }),
     ),
     http.get(
       `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
@@ -192,11 +210,7 @@ function renderRoom(
       },
     ),
     http.get(`${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`, () =>
-      options.deviceStatePending === true
-        ? new Promise<Response>(() => {})
-        : HttpResponse.json({
-            data: { namespace: 'read_markers', entries: {} },
-          }),
+      HttpResponse.json({ data: { namespace: 'read_markers', entries: {} } }),
     ),
     http.put(`${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`, () =>
       HttpResponse.json({ data: { updated_at: '2026-08-19T12:00:00Z' } }),
@@ -288,44 +302,51 @@ describe('a thread view names the room receipt (ADR 0096)', () => {
     expect(reads).not.toContain(REPLY_2.event_id)
   })
 
-  it('sends nothing while another thread in the room is unread', async () => {
+  it('stops below a reply from a thread this panel is not showing', async () => {
+    const { reads, findByText } = renderRoom({
+      query: `?thread=${encodeURIComponent(ROOT)}`,
+      threads: [MAIN_THREAD, OTHER_THREAD_NEW],
+      foreignReplyInWindow: true,
+    })
+    await findByText(`body of ${REPLY_2.event_id}`)
+    await settleReceipts()
+
+    // `$other-reply-new` (2590) sits above the room's own target (`$main`,
+    // 2585) and below this thread's tail (2599). Naming 2599 would acknowledge
+    // it, and nothing has displayed it — so the pick stops at 2598's neighbour
+    // below the ceiling, `$reply1`, and never reaches `$reply2`.
+    expect(reads).not.toContain(REPLY_2.event_id)
+    expect(reads).not.toContain(REPLY_1.event_id)
+    expect(reads).toContain(MAIN.event_id)
+  })
+
+  it('still sends when the room has other threads the user has never opened', async () => {
     const { reads, findByText } = renderRoom({
       query: `?thread=${encodeURIComponent(ROOT)}`,
       threads: [MAIN_THREAD, OTHER_THREAD],
     })
     await findByText(`body of ${REPLY_2.event_id}`)
-    await settleReceipts()
 
-    // `$other-reply` sits between the room's receipt floor and `$reply2` in
-    // arrival order, and the user has not opened its thread. An unthreaded
-    // receipt naming `$reply2` would acknowledge it anyway.
-    expect(reads).not.toContain(REPLY_2.event_id)
+    // The live report this route was rewritten for: a real room is full of
+    // threads nobody has opened this session, and their replies are *below* the
+    // room's own target — already acknowledged by the receipt the room view
+    // sends anyway. Requiring them all to be known-read (the first
+    // implementation) made the gate unopenable in exactly the room from #207.
+    await waitFor(() => expect(reads).toContain(REPLY_2.event_id))
   })
 
-  it('sends nothing before the thread summaries have loaded', async () => {
+  it('sends nothing before the room stream itself has loaded', async () => {
     const { reads, findByText } = renderRoom({
       query: `?thread=${encodeURIComponent(ROOT)}`,
-      threadsPending: true,
+      timelinePending: true,
     })
     await findByText(`body of ${REPLY_2.event_id}`)
     await settleReceipts()
 
-    // An empty summary map is "not fetched yet" as often as "no threads".
-    // Reading the second from the first opens the gate over threads nobody has
-    // looked at.
-    expect(reads).not.toContain(REPLY_2.event_id)
-  })
-
-  it('sends nothing before read markers have hydrated', async () => {
-    const { reads, findByText } = renderRoom({
-      query: `?thread=${encodeURIComponent(ROOT)}`,
-      deviceStatePending: true,
-    })
-    await findByText(`body of ${REPLY_2.event_id}`)
-    await settleReceipts()
-
-    // Without markers, `reconcileSummary` records nothing at all, so every
-    // thread in the room reads as read — the same absence-of-evidence trap.
+    // The panel's own endpoint answered first. The ceiling is derived from the
+    // room's slice, so an empty one reports "nothing in the way" rather than
+    // "nothing known" — and `atEnd` starts true on a cold store, so the room
+    // gate does not catch this by itself.
     expect(reads).not.toContain(REPLY_2.event_id)
   })
 })

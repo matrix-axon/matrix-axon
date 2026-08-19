@@ -94,46 +94,41 @@ It stays on the main timeline, in `origin_ts` order: it positions a "new message
 
 ### 2. The gate
 
-A thread member may be named only when all of these hold for that room:
+A thread member may be named only when all of these hold:
 
-1. **The main timeline is at its live end** — the room view is unanchored and showing the newest events (`showingNewestEvents` in the web client).
-2. **Every other thread in the room is _positively known_ read** — which is not the same as "not currently flagged unread". See § 3.
+1. **The room stream is at its live end** — unanchored, and its loaded slice reaches the present.
+2. **That stream has actually loaded.**
+   Not implied by the first: `atEnd` starts `true` on a cold store, because "nothing newer is known to exist" is vacuously true before the first page lands.
 3. **The thread view is at its live end**, so its arrival-max member is the thread's newest, not the top of a page parked in history.
-4. **The state the first three are read from has actually loaded** — thread summaries fetched, read markers hydrated.
+4. **The named member sits below the ceiling** — the first reply _above the room view's own target_ belonging to a thread this panel is not showing.
 
-Together these say: every event between the current receipt floor and the target has been displayed, either as a main-timeline row or as a member of a thread this client has a read position for.
-That is the honest version of the claim an unthreaded receipt makes.
+Conditions 1-3 say the two views have displayed what they are claiming.
+Condition 4 is the one that took two attempts, and § 3 is about why.
 
-Condition 4 is not pedantry.
-ADR 0070 records a fault of exactly this shape — a startup sweep pruned against a room list that had not loaded yet, and deleted the counts it existed to provide.
-An empty thread-summary map means "not fetched yet" just as often as it means "no threads", and reading the second from the first opens the gate on a room the user has not seen.
+When the gate is shut the receipt behaves exactly as it does today: it stops at the arrival-max **main-timeline** event.
+Condition 4 does not shut it so much as bound it — the pick stops at the last member below the ceiling rather than being abandoned, because the members below a foreign reply are still honest to acknowledge.
 
-When the gate is closed the receipt behaves exactly as it does today: it stops at the arrival-max **main-timeline** event, below the unread thread.
-That is the correct answer in that state — there is genuinely unread content in the room.
+### 3. The question is a window, not the whole room
 
-### 3. Read, unread, and unknown are three answers
+The first implementation asked "has the user read every thread in this room?", and it was wrong in a way no unit test caught and a dev server found in minutes: in the room from #207 the answer is permanently **no**, so the receipt never advanced and the badge never cleared.
 
-The first implementation read condition 2 off the existing thread-unread set: no entry for this room, so nothing is unread, so the gate opens.
-A test written from #207's own fixture failed against it, and the reason generalises past this feature.
+Two compounding reasons, both instructive.
 
-`reconcileSummary` has always had three outcomes, not two.
-A thread is read when its newest reply is at or before its read position; unread when it is after; and **unknown** when there is no read position to compare against — in which case the store is deliberately left alone, because a display that guessed "unread" there would light up every thread in a room whose markers predate them.
-An empty unread set therefore means "nothing is _known_ unread", which is what made it the wrong input for a receipt.
+A real room is full of threads nobody has opened _this session_, and a thread's read position comes from a marker that mostly does not exist yet.
+Worse, the fallback is poisoned in exactly this shape of room: a thread with no marker of its own falls back to the room's, and the room marker is seeded from `RoomDto.last_event_id` — `MAX(origin_ts)` over every event, replies included — so when the room's newest event _is_ a reply, opening the room parks the marker on that reply, and it then answers "read" for the thread it came from.
+Withholding the marker in that case (the second attempt) makes every thread's state `'unknown'` instead of falsely-read, which is more honest and equally unopenable.
 
-The two consumers want opposite defaults from `'unknown'`, so it becomes an explicit verdict (`threadReadVerdict`) rather than an absence:
+The mistake was the question.
+A receipt acknowledges everything at or below its target in arrival order, and the room view has _already_ named the arrival-max event it displayed — so everything at or below that is acknowledged whether or not a thread view does anything.
+Extending to a thread member only adds the window above it.
+Older threads sit below that window entirely: their replies were acknowledged by the room's own receipt, and asking whether the user has read them is asking about a receipt that has already been sent.
 
-- **display** treats it as "say nothing" — do not cry wolf;
-- **the receipt** treats it as "not proven" — do not acknowledge.
+So the only threads that matter are ones with a reply **inside the window**, and the client can see them directly — the room timeline it holds contains thread replies, which is what makes this checkable without any read-position model at all.
+The ceiling is the lowest such reply; the panel names the highest member below it.
 
-That distinction is load-bearing rather than theoretical, because in this ADR's own bug the fallback read position is itself poisoned.
-A thread with no marker of its own falls back to the room's, and the room's marker is seeded from `RoomDto.last_event_id` — `MAX(origin_ts)` over every event, thread replies included.
-In the room from #207 the newest event _is_ a reply, so opening the room parks the room marker on that reply, and the fallback then answers "read" for every thread below it, including the thread the marker came from.
-So the room marker is admissible as a thread's fallback **only when it does not point at a thread member**; where it does, the verdict is `'unknown'` and the gate stays shut until the user has actually opened those threads.
-A marker whose event is not in the loaded slice stays admissible — it is usually one that scrolled out of a long room, and withholding it there would close the gate on rooms that have nothing wrong with them.
-
-`unreadThreadCutoff` (`clients/web/src/pages/RoomPage.tsx`) is untouched by all of this.
-It clamps the room view's own receipt and marker below the oldest _known_ unread reply, which remains the right rule for a claim made from the main timeline.
-The gate is a second, stricter question asked only of a thread view.
+That the gate consults no marker, no summary, and no unread state is the point, not an accident.
+Every one of those is a model of what the user has read, and every model of that was wrong here in a different way.
+The window is a fact about the events in hand.
 
 ### 4. Client work, one silo per PR
 
@@ -151,14 +146,12 @@ There is no server change: no route, no DTO, no gateway, no `ClientBuilder` call
 
 ### 5. Where this is imprecise, and why that is acceptable
 
-- **Reading one thread acknowledges the others.**
-  An unthreaded receipt cannot say otherwise.
-  But condition 2 means the receipt only ever advances past thread members when no thread is unread, so nothing is acknowledged that the user has not read — this is strictly more precise than what ships today, not less.
-- **The gate trusts the thread-summary list.**
-  `Store::room_threads` orders by `latest_reply_ts DESC` and caps at `RELATION_READ_CAP` (1000).
-  A thread beyond that cap is, by construction, older than a thousand more-recently-active threads in the same room.
-  If one of those carried an unread reply, the gate would open over it.
-  Accepted: the alternative is paging every thread in a room before a receipt may advance.
+- **Reading one thread acknowledges the others below it.**
+  An unthreaded receipt cannot say otherwise, and this is true of the room view's own receipt today — extending it to a thread member changes nothing about the events below that receipt's existing floor.
+  What the ceiling protects is the window the extension actually adds.
+- **The ceiling can only see the slice the client holds.**
+  A reply paged out of the room timeline, or one backfilled with an old `origin_ts` and a high `arrival_order`, is outside it and would be acknowledged unseen.
+  That is the same coarseness the room's own receipt already has — the client names a target and the homeserver clears everything below it, loaded or not — and closing it means a read-position model per thread, which is § 6.
 - **The badge still cannot say _where_ the unread content is.**
   A room with one unread thread reply and a room with one unread main-timeline message look identical in the room list.
   That is a product gap, tracked as #9, not a correctness bug — and it is the reason § 6 exists.

@@ -204,21 +204,19 @@ before starting a milestone.
   Thread members are hidden from the main timeline, so nothing the room view can
   name ever covers them — in a room whose arrival-newest events are all replies,
   the receipt stops below them and the badge returns on every load (#207). The
-  panel may therefore name its own arrival-max member, but only when the whole
-  room is caught up: the room stream at its live end, every _other_ thread
-  positively known read, this panel at its own live end, and the stores those are
-  read from actually loaded. `RoomPage` owns all but the third and passes one
-  boolean down. **"Not flagged unread" is not "read".** `reconcileSummary` has
-  three outcomes — read, unread, and `'unknown'` when nothing has established a
-  read position — and the display deliberately renders `'unknown'` as nothing, so
-  an empty unread set means "nothing is _known_ unread". Reading the gate off
-  that set was the first implementation and it sent receipts over threads nobody
-  had opened; it reads `threadReadVerdict` instead. The trap has teeth because
-  the fallback read position is itself poisoned in this exact room: the room
-  marker is seeded from `RoomDto.last_event_id`, which is `MAX(origin_ts)` over
-  every event including replies, so it lands on a thread member and then answers
-  "read" for the thread it came from. `RoomPage` withholds it in that case; the
-  display half of the same problem is #209.
+  panel may name its own arrival-max member when the room stream is at its live
+  end **and has loaded** (`atEnd` starts `true` on a cold store, so the two are
+  not the same check), and when its own slice reaches the thread's newest reply.
+  **The bound is a window, not the room.** `threadReceiptCeiling` is the first
+  reply _above the room view's own target_ belonging to a thread the panel is not
+  showing; the panel names the highest member below it. Do not turn this back
+  into "has the user read every thread here" — that version passed seven tests
+  and never cleared a single badge on a dev server, because a real room is full
+  of threads nobody opened this session, and their replies sit _below_ the room's
+  own target where its receipt has already acknowledged them. The gate reads no
+  marker, no summary and no unread state on purpose: each of those is a model of
+  what the user has read, and each was wrong here in a different way. The window
+  is a fact about the events in hand.
 - **Async work in `RoomPage` outlives its own world.** The page does not remount
   across a room switch or an `?event=`/`?thread=` change (ADR 0085), so every
   `await` inside an effect can resolve after the user has moved on — a second
