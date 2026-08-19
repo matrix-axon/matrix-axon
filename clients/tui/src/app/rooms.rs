@@ -273,24 +273,18 @@ impl App {
                 // installed so in-slice roots aren't re-fetched.
                 let unseen_thread_roots = self.collect_unseen_thread_promotions(&key, &page.events);
                 // Opening the room reads it up to its newest loaded event (M12).
-                // Two positions, two orders: the marker names the display-last
-                // event (`page.events` is ascending by `origin_ts`), the receipt
-                // names the greatest `arrival_order` among the events actually
-                // shown (ADR 0089). Both pick from the *same* displayed-event
-                // set — the marker used to read the raw page here, so a trailing
-                // hidden state event advanced it past everything rendered
-                // (#167).
-                let receipt = super::read_markers::receipt_target_for(
-                    &page.events,
-                    &self.display,
-                    &self.promoted_thread_events,
-                );
-                if let Some(marker) = super::read_markers::marker_target_for(
+                // Two positions, two orders, one candidate set: the marker names
+                // the display-last event (`page.events` is ascending by
+                // `origin_ts`), the receipt the greatest `arrival_order` among
+                // the same displayed events (ADR 0089). The marker used to read
+                // the raw page here, so a trailing hidden state event advanced
+                // it past everything rendered (#167).
+                if let Some(targets) = super::read_markers::read_targets_for(
                     &page.events,
                     &self.display,
                     &self.promoted_thread_events,
                 ) {
-                    self.note_room_read(key.clone(), &marker.event_id, marker.origin_ts, receipt);
+                    self.note_room_read(key.clone(), targets.marker, Some(targets.receipt));
                 }
                 self.messages.events.insert(key.clone(), page.events);
                 for (account_id, root) in unseen_thread_roots {

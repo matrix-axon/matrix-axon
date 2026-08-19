@@ -71,6 +71,8 @@ shows it.
 | Room actions: invite, leave, pin (M19) | **not covered** | **not covered** | **not covered** |
 | Device verification (SAS) | **not covered** | **not covered** | **not covered** |
 | Typing indicators and read receipts (M18) | **not covered** | **not covered** | **not covered** |
+| Inline image whose terminal encode failed (placeholder) | **not covered** | **n/a** | **n/a** |
+| Debug overlay diagnostics (`display.debug`) | **not covered** | **n/a** | **n/a** |
 | State-event notices (ADR 0083) | **not covered** | **not covered** | **not covered** |
 
 ## Why the uncovered rows are uncovered
@@ -92,6 +94,16 @@ shows it.
   vacuously the second time, on the badge the first run left behind.
 - **Device verification.** Needs a second device to verify against, which the
   corpus does not stand up.
+- **Failed inline encode, and the debug overlay.** Both are states a *healthy*
+  run never reaches. The placeholder needs an image the terminal-graphics
+  encoder rejects, or a protocol cache saturated with in-flight encodes; the
+  overlay needs `display.debug = true`, which no scene sets. Covering the first
+  honestly means teaching the corpus to serve a deliberately undecodable image,
+  not writing a longer scene. The overlay is closer to a deliberate omission: it
+  is a diagnostic surface, and a demo of it would show a screen no user is meant
+  to see. Both are TUI-only — the web renders images natively with no encode
+  step (see the inline-images row) and has no equivalent overlay — hence `n/a`
+  rather than a gap.
 - **Typing indicators and read receipts.** Need a second live client acting
   concurrently; the corpus is seeded history, not a running participant.
 - **Spaces and galleries in the TUI.** The TUI has neither (see

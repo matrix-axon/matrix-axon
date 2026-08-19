@@ -80,15 +80,31 @@ pub(crate) struct ReceiptTarget {
     pub(crate) arrival_order: i64,
 }
 
-/// The greatest-`arrival_order` event among those actually shown, or `None` when
-/// nothing in `events` is displayed at all.
+/// The two read positions a loaded page settles, from one pass over one
+/// candidate set.
+///
+/// Both or neither: each is derived from the same non-empty set of displayed
+/// events, so a page with nothing on screen yields `None` rather than a marker
+/// without a receipt. Returning them together is what makes the shared
+/// candidate set structural instead of a convention two call sites have to
+/// remember (#167).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReadTargets {
+    /// Display-order: the page's display-*last* event, newest by `origin_ts`
+    /// because a page is installed in ascending order.
+    pub(crate) marker: ReadMarker,
+    /// Arrival-order: the greatest `arrival_order` among the same events.
+    pub(crate) receipt: ReceiptTarget,
+}
+
+/// The [`ReadTargets`] for `events`, or `None` when the page displays nothing.
 ///
 /// The filter matters: ADR 0089's rule is "among the events it has actually
 /// displayed", so this has to match what the main timeline renders —
 /// [`App::selected_events`]'s pair of `should_show_event` **and**
 /// `thread_visible`, not either one alone. It keeps the bug case honest: the
 /// `uk.half-shot.bridge` state event that started all this is hidden at the
-/// default settings, so it must not be a legal receipt target even when it is
+/// default settings, so it must not be a legal target even when it is
 /// arrival-max.
 ///
 /// `thread_visible` is checked with `thread_panel: None`, because this answers
@@ -106,50 +122,42 @@ pub(crate) struct ReceiptTarget {
 /// thread reply into `promoted_thread_events` before it reaches the read gate
 /// (or the panel is open on that root, which displays it), so anything that
 /// gets there is visible by construction.
-pub(crate) fn receipt_target_for(
+pub(crate) fn read_targets_for(
     events: &[crate::api::EventDto],
     display: &crate::config::DisplayOptions,
     promoted: &std::collections::HashSet<String>,
-) -> Option<ReceiptTarget> {
-    displayed_events(events, display, promoted)
-        .max_by_key(|event| event.arrival_order)
-        .map(|event| ReceiptTarget {
-            event_id: event.event_id.clone(),
-            arrival_order: event.arrival_order,
-        })
-}
-
-/// The display-order marker position for a loaded page: its display-*last*
-/// event, which is the newest by `origin_ts` because a page is installed in
-/// ascending order.
-///
-/// Same candidate set as [`receipt_target_for`], read on the other order. See
-/// [`displayed_events`] for why they must share it.
-pub(crate) fn marker_target_for(
-    events: &[crate::api::EventDto],
-    display: &crate::config::DisplayOptions,
-    promoted: &std::collections::HashSet<String>,
-) -> Option<ReadMarker> {
-    displayed_events(events, display, promoted)
-        .last()
-        .map(|event| ReadMarker {
-            event_id: event.event_id.clone(),
-            origin_ts: event.origin_ts,
-        })
+) -> Option<ReadTargets> {
+    // One pass yields both positions. `>=` keeps the *last* of equal
+    // `arrival_order` values, matching the `max_by_key` this replaced.
+    let mut found: Option<(&crate::api::EventDto, &crate::api::EventDto)> = None;
+    for event in displayed_events(events, display, promoted) {
+        found = Some(match found {
+            None => (event, event),
+            Some((_, arrival_max)) => (
+                event,
+                if event.arrival_order >= arrival_max.arrival_order {
+                    event
+                } else {
+                    arrival_max
+                },
+            ),
+        });
+    }
+    found.map(|(display_last, arrival_max)| ReadTargets {
+        marker: ReadMarker {
+            event_id: display_last.event_id.clone(),
+            origin_ts: display_last.origin_ts,
+        },
+        receipt: ReceiptTarget {
+            event_id: arrival_max.event_id.clone(),
+            arrival_order: arrival_max.arrival_order,
+        },
+    })
 }
 
 /// The events in `events` the main timeline actually displays, in page order:
 /// the pair `should_show_event` **and** `thread_visible`, matching
 /// [`App::selected_events`].
-///
-/// Both positions a room load settles are picked from this one set. They read
-/// it on different orders — the marker takes the display-last element, the
-/// receipt the `arrival_order` max — but sharing the set is the point: #167
-/// was the marker reading the raw page while the receipt filtered, one line
-/// apart, so the same room produced a different marker depending on whether
-/// its newest event arrived live or came from a page. The live path
-/// (`super::timeline`) only calls `note_room_read` for an event it showed, so
-/// this is the load-path half of the same rule.
 fn displayed_events<'a>(
     events: &'a [crate::api::EventDto],
     display: &'a crate::config::DisplayOptions,
@@ -230,8 +238,8 @@ impl App {
         roots
     }
 
-    /// The user has the room on screen read up to `(event_id, origin_ts)` in
-    /// display order and up to `receipt` in arrival order: advance whichever of
+    /// The user has the room on screen read up to `marker` in display order and
+    /// up to `receipt` in arrival order: advance whichever of
     /// the two positions actually moved, and arm the debounced PUT if either
     /// did. Backward or repeated positions are no-ops (monotonic, per key).
     /// Called from the timeline-load and live-event paths that already clear the
@@ -246,17 +254,11 @@ impl App {
     pub(crate) fn note_room_read(
         &mut self,
         room: RoomKey,
-        event_id: &str,
-        origin_ts: i64,
+        marker: ReadMarker,
         receipt: Option<ReceiptTarget>,
     ) {
-        let marker_advanced = self.apply_marker(
-            room.clone(),
-            ReadMarker {
-                event_id: event_id.to_owned(),
-                origin_ts,
-            },
-        );
+        let fallback = marker.clone();
+        let marker_advanced = self.apply_marker(room.clone(), marker);
         let receipt_advanced =
             receipt.is_some_and(|target| self.apply_receipt_target(room.clone(), target));
         if !marker_advanced && !receipt_advanced {
@@ -283,10 +285,7 @@ impl App {
             self.read_markers.contains_key(&room),
             "apply_marker must leave a marker for the room it was given"
         );
-        let marker = self.read_markers.get(&room).cloned().unwrap_or(ReadMarker {
-            event_id: event_id.to_owned(),
-            origin_ts,
-        });
+        let marker = self.read_markers.get(&room).cloned().unwrap_or(fallback);
         self.pending_marker_put = Some(PendingMarkerPut {
             room,
             marker,
@@ -582,6 +581,13 @@ mod tests {
         }
     }
 
+    fn marker(event_id: &str, origin_ts: i64) -> ReadMarker {
+        ReadMarker {
+            event_id: event_id.to_owned(),
+            origin_ts,
+        }
+    }
+
     /// A receipt target that moves in step with the marker — the ordinary case,
     /// where display and arrival order agree.
     fn in_step(event_id: &str, ts: i64) -> Option<ReceiptTarget> {
@@ -596,7 +602,7 @@ mod tests {
         let mut app = app_with(vec![test_room("!r:x", 0)]);
         let k = key("!r:x");
 
-        app.note_room_read(k.clone(), "$b", 200, in_step("$b", 200));
+        app.note_room_read(k.clone(), marker("$b", 200), in_step("$b", 200));
         assert_eq!(app.read_markers.get(&k).unwrap().origin_ts, 200);
         assert!(app.pending_marker_put.is_some());
 
@@ -604,13 +610,13 @@ mod tests {
         // Both keys move backward together here: with neither advancing, the
         // slot must stay empty.
         app.pending_marker_put = None;
-        app.note_room_read(k.clone(), "$a", 100, in_step("$a", 100));
-        app.note_room_read(k.clone(), "$b", 200, in_step("$b", 200));
+        app.note_room_read(k.clone(), marker("$a", 100), in_step("$a", 100));
+        app.note_room_read(k.clone(), marker("$b", 200), in_step("$b", 200));
         assert_eq!(app.read_markers.get(&k).unwrap().event_id, "$b");
         assert!(app.pending_marker_put.is_none());
 
         // Forward advances.
-        app.note_room_read(k.clone(), "$c", 300, in_step("$c", 300));
+        app.note_room_read(k.clone(), marker("$c", 300), in_step("$c", 300));
         assert_eq!(app.read_markers.get(&k).unwrap().origin_ts, 300);
         assert!(app.pending_marker_put.is_some());
     }
@@ -638,8 +644,7 @@ mod tests {
         // The backfilled message: older by origin_ts, newer by arrival order.
         app.note_room_read(
             k.clone(),
-            "$bridge",
-            1_785_928_309_453,
+            marker("$bridge", 1_785_928_309_453),
             Some(ReceiptTarget {
                 event_id: "$message".to_owned(),
                 arrival_order: 1_871_426,
@@ -665,8 +670,7 @@ mod tests {
         let k = key("!r:x");
         app.note_room_read(
             k.clone(),
-            "$a",
-            100,
+            marker("$a", 100),
             Some(ReceiptTarget {
                 event_id: "$a".to_owned(),
                 arrival_order: 900,
@@ -678,8 +682,7 @@ mod tests {
         // take this, the receipt must not.
         app.note_room_read(
             k.clone(),
-            "$b",
-            200,
+            marker("$b", 200),
             Some(ReceiptTarget {
                 event_id: "$b".to_owned(),
                 arrival_order: 500,
@@ -694,8 +697,7 @@ mod tests {
         app.pending_marker_put = None;
         app.note_room_read(
             k.clone(),
-            "$b",
-            200,
+            marker("$b", 200),
             Some(ReceiptTarget {
                 event_id: "$b".to_owned(),
                 arrival_order: 500,
@@ -711,7 +713,7 @@ mod tests {
         let mut app = app_with(vec![test_room("!r:x", 0)]);
         let k = key("!r:x");
 
-        app.note_room_read(k.clone(), "$a", 100, None);
+        app.note_room_read(k.clone(), marker("$a", 100), None);
         assert_eq!(app.read_markers.get(&k).unwrap().event_id, "$a");
         assert!(!app.receipt_targets.contains_key(&k));
         assert!(app.pending_marker_put.is_some());
@@ -719,8 +721,7 @@ mod tests {
         // A receipt at an arrival order already held is not an advance either.
         app.note_room_read(
             k.clone(),
-            "$b",
-            200,
+            marker("$b", 200),
             Some(ReceiptTarget {
                 event_id: "$b".to_owned(),
                 arrival_order: 700,
@@ -729,8 +730,7 @@ mod tests {
         app.pending_marker_put = None;
         app.note_room_read(
             k.clone(),
-            "$b",
-            200,
+            marker("$b", 200),
             Some(ReceiptTarget {
                 event_id: "$b-again".to_owned(),
                 arrival_order: 700,
@@ -748,7 +748,7 @@ mod tests {
     fn flush_sends_the_current_values_not_the_armed_ones() {
         let mut app = app_with(vec![test_room("!r:x", 0)]);
         let k = key("!r:x");
-        app.note_room_read(k.clone(), "$a", 100, in_step("$a", 100));
+        app.note_room_read(k.clone(), marker("$a", 100), in_step("$a", 100));
         let armed = app.pending_marker_put.as_ref().unwrap().marker.clone();
         assert_eq!(armed.event_id, "$a");
 
@@ -872,13 +872,13 @@ mod tests {
     #[test]
     fn switching_rooms_mid_debounce_flushes_the_previous_marker() {
         let mut app = app_with(vec![test_room("!a:x", 0), test_room("!b:x", 0)]);
-        app.note_room_read(key("!a:x"), "$a", 100, in_step("$a", 100));
+        app.note_room_read(key("!a:x"), marker("$a", 100), in_step("$a", 100));
         assert_eq!(app.pending_marker_put.as_ref().unwrap().room, key("!a:x"));
 
         // Reading a different room replaces the slot; the previous marker is
         // flushed (spawn is a no-op here with no channel wired) — the local
         // map keeps both.
-        app.note_room_read(key("!b:x"), "$b", 200, in_step("$b", 200));
+        app.note_room_read(key("!b:x"), marker("$b", 200), in_step("$b", 200));
         assert_eq!(app.pending_marker_put.as_ref().unwrap().room, key("!b:x"));
         assert_eq!(app.read_markers.get(&key("!a:x")).unwrap().origin_ts, 100);
         assert_eq!(app.read_markers.get(&key("!b:x")).unwrap().origin_ts, 200);
@@ -982,8 +982,9 @@ mod tests {
         // what does not cover the message in stream order.
         assert_eq!(page.last().unwrap().event_id, "$bridge");
         assert_eq!(
-            receipt_target_for(&page, &display, &nothing_promoted())
+            read_targets_for(&page, &display, &nothing_promoted())
                 .unwrap()
+                .receipt
                 .event_id,
             "$message"
         );
@@ -995,8 +996,9 @@ mod tests {
         // they are not candidates — which is also the right answer here.
         let hidden = display_with_state_events(false);
         assert_eq!(
-            receipt_target_for(&portal_page(), &hidden, &nothing_promoted())
+            read_targets_for(&portal_page(), &hidden, &nothing_promoted())
                 .unwrap()
+                .receipt
                 .event_id,
             "$message"
         );
@@ -1006,16 +1008,18 @@ mod tests {
         let mut page = vec![arrival_event("$msg", 100, 10)];
         page.push(state_event("$topic", 200, 99, "m.room.topic"));
         assert_eq!(
-            receipt_target_for(&page, &hidden, &nothing_promoted())
+            read_targets_for(&page, &hidden, &nothing_promoted())
                 .unwrap()
+                .receipt
                 .event_id,
             "$msg"
         );
         // With state events shown, that same event is a legal target.
         let shown = display_with_state_events(true);
         assert_eq!(
-            receipt_target_for(&page, &shown, &nothing_promoted())
+            read_targets_for(&page, &shown, &nothing_promoted())
                 .unwrap()
+                .receipt
                 .event_id,
             "$topic"
         );
@@ -1045,8 +1049,9 @@ mod tests {
         let page = vec![root, reply, plain];
 
         assert_eq!(
-            receipt_target_for(&page, &display, &nothing_promoted())
+            read_targets_for(&page, &display, &nothing_promoted())
                 .unwrap()
+                .receipt
                 .event_id,
             "$plain",
             "an unpromoted thread reply is hidden from the main timeline, so it \
@@ -1056,8 +1061,9 @@ mod tests {
         // Once promoted it *is* on screen, and then it is the right answer.
         let promoted: std::collections::HashSet<String> = ["$reply".to_owned()].into();
         assert_eq!(
-            receipt_target_for(&page, &display, &promoted)
+            read_targets_for(&page, &display, &promoted)
                 .unwrap()
+                .receipt
                 .event_id,
             "$reply"
         );
@@ -1077,8 +1083,9 @@ mod tests {
         // that does not render at the default settings.
         assert_eq!(page.last().unwrap().event_id, "$bridge");
         assert_eq!(
-            marker_target_for(&page, &hidden, &nothing_promoted())
+            read_targets_for(&page, &hidden, &nothing_promoted())
                 .unwrap()
+                .marker
                 .event_id,
             "$message"
         );
@@ -1086,8 +1093,9 @@ mod tests {
         // With state events shown it *is* rendered, so it is a legal marker.
         let shown = display_with_state_events(true);
         assert_eq!(
-            marker_target_for(&page, &shown, &nothing_promoted())
+            read_targets_for(&page, &shown, &nothing_promoted())
                 .unwrap()
+                .marker
                 .event_id,
             "$bridge"
         );
@@ -1105,32 +1113,35 @@ mod tests {
         let page = vec![plain, reply];
 
         assert_eq!(
-            marker_target_for(&page, &display, &nothing_promoted())
+            read_targets_for(&page, &display, &nothing_promoted())
                 .unwrap()
+                .marker
                 .event_id,
             "$plain"
         );
 
         let promoted: std::collections::HashSet<String> = ["$reply".to_owned()].into();
         assert_eq!(
-            marker_target_for(&page, &display, &promoted)
+            read_targets_for(&page, &display, &promoted)
                 .unwrap()
+                .marker
                 .event_id,
             "$reply"
         );
     }
 
     #[test]
-    fn marker_target_is_none_when_nothing_is_shown() {
+    fn read_targets_are_none_when_nothing_is_shown() {
         let hidden = display_with_state_events(false);
         let page = vec![
             state_event("$create", 100, 1, "m.room.create"),
             state_event("$topic", 200, 2, "m.room.topic"),
         ];
         // Nothing displayed → the load path advances neither position, rather
-        // than falling back to the raw newest event.
-        assert!(marker_target_for(&page, &hidden, &nothing_promoted()).is_none());
-        assert!(marker_target_for(&[], &hidden, &nothing_promoted()).is_none());
+        // than falling back to the raw newest event. Both or neither is the
+        // point of returning them together.
+        assert!(read_targets_for(&page, &hidden, &nothing_promoted()).is_none());
+        assert!(read_targets_for(&[], &hidden, &nothing_promoted()).is_none());
     }
 
     /// #167's named exposure — the reason filtering the marker is more than
@@ -1158,17 +1169,12 @@ mod tests {
             "the raw display-last is the hidden event, which is the whole bug"
         );
 
-        let marker = marker_target_for(&first_page, &hidden, &promoted).expect("a shown event");
-        assert_eq!(marker.origin_ts, 100);
+        let targets = read_targets_for(&first_page, &hidden, &promoted).expect("a shown event");
+        assert_eq!(targets.marker.origin_ts, 100);
 
         let mut app = app_with(vec![test_room("!r:x", 0)]);
         let k = key("!r:x");
-        app.note_room_read(
-            k.clone(),
-            &marker.event_id,
-            marker.origin_ts,
-            receipt_target_for(&first_page, &hidden, &promoted),
-        );
+        app.note_room_read(k.clone(), targets.marker, Some(targets.receipt));
 
         // A later load brings a thread reply stamped *between* the last visible
         // event and that hidden one. Against the filtered marker (100) it is
@@ -1177,18 +1183,6 @@ mod tests {
         let roots = app.collect_unseen_thread_promotions(&k, std::slice::from_ref(&reply));
         assert_eq!(roots, vec![(Uuid::nil(), "$root".to_owned())]);
         assert!(app.promoted_thread_events.contains("$reply"));
-    }
-
-    #[test]
-    fn receipt_target_is_none_when_nothing_is_shown() {
-        let hidden = display_with_state_events(false);
-        let page = vec![
-            state_event("$create", 100, 1, "m.room.create"),
-            state_event("$topic", 200, 2, "m.room.topic"),
-        ];
-        // Nothing displayed → nothing to name, and the caller arms no receipt.
-        assert!(receipt_target_for(&page, &hidden, &nothing_promoted()).is_none());
-        assert!(receipt_target_for(&[], &hidden, &nothing_promoted()).is_none());
     }
 
     #[test]

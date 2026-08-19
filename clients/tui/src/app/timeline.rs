@@ -304,8 +304,10 @@ impl App {
             if event_shown {
                 self.note_room_read(
                     key.clone(),
-                    &event_id,
-                    origin_ts,
+                    super::read_markers::ReadMarker {
+                        event_id: event_id.clone(),
+                        origin_ts,
+                    },
                     Some(super::read_markers::ReceiptTarget {
                         event_id: event_id.clone(),
                         arrival_order,
