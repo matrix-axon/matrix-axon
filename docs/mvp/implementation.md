@@ -320,6 +320,8 @@ Sync alone only ingests events _going forward_ (plus the shallow `sync.timeline_
 
 ### 14. OAuth authorization server
 
+**Landed.** **M14 — OAuth authorization server (ADR 0054).** Axon is its own minimal OAuth 2.0 authorization server for its own public clients (PKCE mandatory) _and_ an OIDC relying party to Google/Microsoft, purely to verify the bound owner (upstream tokens never leave the process). It preserves ADR 0029's `TokenVerifier` seam exactly — new nullable `tokens` columns, no change to the `Authorization` wire contract. Landed in two PRs, not the five originally planned — the first delivered more than its "architecture/schema" name suggested:
+
 ### 15. Media send/upload
 
 ### 16. Device-list / discovery endpoint
