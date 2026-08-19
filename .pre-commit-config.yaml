@@ -192,6 +192,9 @@ repos:
         files: &rust_files '^(Cargo\.(toml|lock)|\.cargo/config\.toml|rust-toolchain\.toml|rustfmt\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|tests/fixtures/.*|(crates|clients/tui|smoke)/.*\.(rs|toml|sql))$'
         pass_filenames: false
         stages: [pre-push]
+      # CI re-types this command rather than running the hook, unlike
+      # actionlint/adr-numbers/hook-filters above. Tracked in #200; keep the
+      # flag order in lint-and-clippy.yml matching this line until it is.
       - id: rust-clippy
         name: clippy
         language: system

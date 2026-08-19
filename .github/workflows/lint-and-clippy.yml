@@ -83,4 +83,5 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        # Flag order matches the rust-clippy hook's `entry:` verbatim.
+        run: cargo clippy --all-features --all-targets -- -D warnings
