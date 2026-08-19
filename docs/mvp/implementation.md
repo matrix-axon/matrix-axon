@@ -277,6 +277,8 @@ Sync alone only ingests events _going forward_ (plus the shallow `sync.timeline_
 
 ### 11. Media proxy
 
+**Landed.** **M11 — media proxy (PR 197, ADR 0045-media).** `axon-media` resolves `mxc://` URLs against the owning account's homeserver behind `GET /v1/media/{account_id}/{server}/{media_id}`, with range-request support and a bounded on-disk LRU cache (default 5 GB) purged on eviction and account deletion. No S3 backend — the homeserver is the durable source of truth (see "What not to build").
+
 - `axon-media` resolves MXC URLs against the upstream homeserver for the relevant account.
 - Bounded LRU cache on local disk (size configurable; default 5GB).
 - `GET /v1/media/{account_id}/{server}/{media_id}` with proper caching headers and range-request support.
