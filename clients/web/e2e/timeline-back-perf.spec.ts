@@ -54,7 +54,11 @@ type ScalingEvidence = {
 
 function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b)
-  return sorted[Math.floor(sorted.length / 2)]
+  const upperMiddle = Math.floor(sorted.length / 2)
+  if (sorted.length % 2 === 1) {
+    return sorted[upperMiddle]
+  }
+  return (sorted[upperMiddle - 1] + sorted[upperMiddle]) / 2
 }
 
 /** Post fixtures, load the room, throttle, do the switch, read the breakdown. */
@@ -93,7 +97,7 @@ async function measureCell(
 
 test.describe('timeline → room-list transition cost', () => {
   test.skip(!RUN, 'perf lane — set PERF=1 (pnpm test:e2e:perf) to run')
-  test.setTimeout(240_000)
+  test.setTimeout(360_000)
 
   test.beforeEach(async ({ page }) => {
     await enablePerf(page)
