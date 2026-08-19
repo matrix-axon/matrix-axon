@@ -48,7 +48,10 @@ use matrix_sdk::ruma::{
     EventId, Int, OwnedEventId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId,
     RoomOrAliasId, ServerName, UInt, UserId,
 };
-use matrix_sdk::{Room, RoomState};
+// `remove_room` is a `StateStore` trait method, reached through the
+// `&DynStateStore` the client hands out, so the trait has to be in scope.
+use matrix_sdk::store::StateStore;
+use matrix_sdk::{Client, Room, RoomState};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
@@ -71,12 +74,46 @@ fn map_sdk_err(err: matrix_sdk::Error) -> GatewayError {
     }
 }
 
+/// Whether this error is the homeserver positively denying that it knows the
+/// room at all (ADR 0094).
+///
+/// The evidence is the `(status, errcode)` *pair*, not the errcode alone.
+/// `M_UNKNOWN` is Matrix's catch-all — Synapse returns it for plenty of things
+/// that are not "no such room" — so keying on the kind alone would delete a
+/// user's pending invite on any unlucky upstream hiccup. A `404` carrying
+/// `M_NOT_FOUND` or `M_UNKNOWN` in reply to a request that names one room is
+/// the server saying it cannot resolve that room; both of Synapse's answers to
+/// a purged room take this shape (`Not a known room` on leave,
+/// `Can't join remote room because no servers that are in the room have been
+/// provided.` on join).
+///
+/// `M_FORBIDDEN` is deliberately excluded at any status. ADR 0091's reasoning
+/// still holds: with no local [`Room`] to corroborate against, a server ACL
+/// and "not in that room" are indistinguishable, so `M_FORBIDDEN` stays
+/// [`LeaveOutcome::Unconfirmed`] and keeps the row.
+fn denies_knowing_room(err: &matrix_sdk::Error) -> bool {
+    let Some(api_err) = err.as_client_api_error() else {
+        return false;
+    };
+    is_room_gone_answer(api_err.status_code.as_u16(), err.client_api_error_kind())
+}
+
+/// The `(status, errcode)` predicate behind [`denies_knowing_room`], split out
+/// so it can be tested without standing up an SDK error.
+fn is_room_gone_answer(status: u16, kind: Option<&ErrorKind>) -> bool {
+    status == 404 && matches!(kind, Some(ErrorKind::NotFound | ErrorKind::Unknown))
+}
+
 /// Homeserver answers that do not prove the membership is gone when we have
-/// no local [`Room`]. `M_FORBIDDEN` is "not in that room"; `M_NOT_FOUND` and
-/// `M_UNKNOWN` are what Synapse returns for a room it no longer resolves
-/// (the production reject that motivated ADR 0091). None of these distinguish
-/// "invite withdrawn" from "ACL" from "unknown room", so they are
-/// [`LeaveOutcome::Unconfirmed`], not a hard error. A transport failure
+/// no local [`Room`], yet are not a retryable failure either. `M_FORBIDDEN` is
+/// usually "not in that room", but it is also what a server ACL returns, and
+/// the two cannot be told apart without a `Room` — so it is
+/// [`LeaveOutcome::Unconfirmed`], not a hard error and not evidence.
+///
+/// `M_NOT_FOUND`/`M_UNKNOWN` used to land here too. They no longer do when
+/// they arrive on a `404`: [`denies_knowing_room`] promotes that pair to
+/// [`LeaveOutcome::Gone`], which is what lets a dead invite be cleared at all
+/// (ADR 0094). Off a `404` they remain merely unconfirmed. A transport failure
 /// (`None`) or any other kind stays a failure so the client can retry.
 fn leave_fallback_is_unconfirmed(kind: Option<&ErrorKind>) -> bool {
     matches!(
@@ -623,19 +660,26 @@ type PowerLevelLocks = Arc<Mutex<HashMap<(Uuid, String), PowerLevelLock>>>;
 
 /// What [`SdkGateway::leave`] managed to establish about the membership.
 ///
-/// Both variants are a success as far as the client is concerned — the
-/// request stands — but only [`Left`](LeaveOutcome::Left) is evidence about
-/// the room, so callers must not drive destructive local bookkeeping (such as
-/// dropping the `room_invites` row) off [`Unconfirmed`](LeaveOutcome::Unconfirmed).
+/// All three variants are a success as far as the client is concerned — the
+/// request stands — but only [`Left`](LeaveOutcome::Left) and
+/// [`Gone`](LeaveOutcome::Gone) are evidence about the room, so callers must
+/// not drive destructive local bookkeeping (such as dropping the
+/// `room_invites` row) off [`Unconfirmed`](LeaveOutcome::Unconfirmed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaveOutcome {
     /// The homeserver accepted the leave, or the SDK's own `Room::leave` did.
     Left,
-    /// The homeserver answered `M_FORBIDDEN`, `M_NOT_FOUND`, or `M_UNKNOWN`
-    /// to the no-local-`Room` fallback. Most often that means "not in that
-    /// room" — already left, invite withdrawn, or the server no longer
-    /// resolves it — but it is also what a server ACL returns, and without
-    /// a local [`Room`] there is nothing to tell them apart. Treat the
+    /// The homeserver answered `404` with `M_NOT_FOUND`/`M_UNKNOWN`: it does
+    /// not know this room. There is no membership left to confirm, so this is
+    /// positive evidence the invite is dead and callers may tear down local
+    /// bookkeeping for it — the case ADR 0091 could not clear (ADR 0094).
+    Gone,
+    /// The homeserver answered `M_FORBIDDEN` — or `M_NOT_FOUND`/`M_UNKNOWN`
+    /// on something other than a `404`, which does not identify the room the
+    /// way [`Gone`](LeaveOutcome::Gone) does. Most often that means "not in
+    /// that room" — already left, invite withdrawn, or the server no longer
+    /// resolves it — but `M_FORBIDDEN` is also what a server ACL returns, and
+    /// without a local [`Room`] there is nothing to tell them apart. Treat the
     /// membership as unknown until sync says otherwise.
     Unconfirmed,
 }
@@ -975,9 +1019,15 @@ impl SdkGateway {
     /// while Axon still lists it in `room_invites`. Reject must not depend
     /// on `get_room`: a missing local [`Room`] falls through to the same
     /// `POST /_matrix/client/v3/rooms/{roomId}/leave` the SDK would send.
-    /// A homeserver `M_FORBIDDEN` / `M_NOT_FOUND` / `M_UNKNOWN` on that
-    /// fallback reports [`LeaveOutcome::Unconfirmed`] rather than a plain
-    /// success — see that variant for why the distinction matters.
+    /// A homeserver `M_FORBIDDEN` on that fallback reports
+    /// [`LeaveOutcome::Unconfirmed`] rather than a plain success — see that
+    /// variant for why the distinction matters.
+    ///
+    /// A `404` carrying `M_NOT_FOUND`/`M_UNKNOWN` is different in kind: the
+    /// server is denying the room exists, which leaves no membership to
+    /// confirm. That reports [`LeaveOutcome::Gone`] from *either* path — the
+    /// SDK's `Room::leave` does not converge its own state on that error, so
+    /// ADR 0091's exemption for it no longer applies (ADR 0094).
     pub async fn leave(
         &self,
         account_id: Uuid,
@@ -987,11 +1037,23 @@ impl SdkGateway {
         let parsed =
             RoomId::parse(room_id).map_err(|e| GatewayError::Invalid(format!("room id: {e}")))?;
         if let Some(room) = client.get_room(&parsed) {
-            return room
-                .leave()
-                .await
-                .map(|()| LeaveOutcome::Left)
-                .map_err(map_sdk_err);
+            return match room.leave().await {
+                Ok(()) => Ok(LeaveOutcome::Left),
+                // `Room::leave` forgets an invited room for us — but only once
+                // the homeserver call succeeds. Against a room the server has
+                // disowned it logs `ignore_error=false should_forget=true` and
+                // returns before forgetting anything, so the room stays
+                // `Invited` in the SDK and the invite is unclearable. ADR 0091
+                // exempted this path from the unconfirmed treatment on the
+                // premise that the SDK converges its own state here; ADR 0094
+                // withdraws that exemption for the one answer that is
+                // unambiguous.
+                Err(err) if denies_knowing_room(&err) => {
+                    self.note_room_gone(&client, account_id, &parsed).await;
+                    Ok(LeaveOutcome::Gone)
+                }
+                Err(err) => Err(map_sdk_err(err)),
+            };
         }
         tracing::info!(
             %account_id,
@@ -1005,6 +1067,10 @@ impl SdkGateway {
             Ok(_) => Ok(LeaveOutcome::Left),
             Err(err) => {
                 let sdk_err = matrix_sdk::Error::from(err);
+                if denies_knowing_room(&sdk_err) {
+                    self.note_room_gone(&client, account_id, &parsed).await;
+                    return Ok(LeaveOutcome::Gone);
+                }
                 if leave_fallback_is_unconfirmed(sdk_err.client_api_error_kind()) {
                     tracing::info!(
                         %account_id,
@@ -1018,6 +1084,33 @@ impl SdkGateway {
                     Err(map_sdk_err(sdk_err))
                 }
             }
+        }
+    }
+
+    /// Record that the homeserver disowned this room, in both places that
+    /// would otherwise resurrect it (ADR 0094).
+    ///
+    /// The SDK offers no way to evict a room from its in-memory list, so the
+    /// manager's set is what stops the invite watcher re-persisting the row
+    /// for the life of this process; dropping the room from the state store is
+    /// what stops it coming back on the next boot. Both are best-effort: a
+    /// failure here costs a stale row, never a wrong deletion.
+    async fn note_room_gone(&self, client: &Client, account_id: Uuid, room_id: &RoomId) {
+        self.manager.mark_room_dead(account_id, room_id.to_owned());
+        if let Err(err) = client.state_store().remove_room(room_id).await {
+            tracing::warn!(
+                %account_id,
+                %room_id,
+                error = %err,
+                "homeserver disowned this room but dropping it from the SDK \
+                 state store failed; it will reappear after a restart"
+            );
+        } else {
+            tracing::info!(
+                %account_id,
+                %room_id,
+                "homeserver denies knowing this room; dropped from the SDK state store"
+            );
         }
     }
 
@@ -1104,10 +1197,23 @@ impl SdkGateway {
         let client = self.manager.get_or_connect(account_id).await?;
         let id = parse_room_id_or_alias(room_id_or_alias)?;
         let server_names = parse_server_names(server_names)?;
-        let room = client
-            .join_room_by_id_or_alias(&id, &server_names)
-            .await
-            .map_err(map_sdk_err)?;
+        let room = match client.join_room_by_id_or_alias(&id, &server_names).await {
+            Ok(room) => room,
+            Err(err) => {
+                // Accepting an invite to a room the homeserver has disowned is
+                // the same positive evidence a reject gets, so record it here
+                // too — otherwise the failed accept leaves the row in place and
+                // the user has no way to clear it (ADR 0094). Only for a room
+                // *id*: an alias that won't resolve says nothing about any room
+                // `room_invites` tracks.
+                if denies_knowing_room(&err) {
+                    if let Ok(room_id) = RoomId::parse(id.as_str()) {
+                        self.note_room_gone(&client, account_id, &room_id).await;
+                    }
+                }
+                return Err(map_sdk_err(err));
+            }
+        };
         Ok(room.room_id().to_string())
     }
 
@@ -1699,6 +1805,35 @@ mod tests {
         assert!(leave_fallback_is_unconfirmed(Some(&ErrorKind::Forbidden)));
         assert!(leave_fallback_is_unconfirmed(Some(&ErrorKind::NotFound)));
         assert!(leave_fallback_is_unconfirmed(Some(&ErrorKind::Unknown)));
+    }
+
+    #[test]
+    fn a_404_not_found_or_unknown_is_the_room_gone_answer() {
+        // Synapse's two answers for a room it cannot resolve: "Not a known
+        // room" on leave, "Can't join remote room because no servers that are
+        // in the room have been provided." on join. Both are 404 M_UNKNOWN.
+        assert!(is_room_gone_answer(404, Some(&ErrorKind::Unknown)));
+        assert!(is_room_gone_answer(404, Some(&ErrorKind::NotFound)));
+    }
+
+    #[test]
+    fn forbidden_is_never_the_room_gone_answer() {
+        // ADR 0091: a server ACL and "not in that room" are indistinguishable
+        // without a local Room, so M_FORBIDDEN must never delete an invite —
+        // it stays unconfirmed instead.
+        assert!(!is_room_gone_answer(404, Some(&ErrorKind::Forbidden)));
+        assert!(!is_room_gone_answer(403, Some(&ErrorKind::Forbidden)));
+        assert!(leave_fallback_is_unconfirmed(Some(&ErrorKind::Forbidden)));
+    }
+
+    #[test]
+    fn the_room_gone_answer_needs_the_status_not_just_the_errcode() {
+        // M_UNKNOWN is Matrix's catch-all; off a 404 it says nothing about
+        // whether the room exists, so it must not delete a pending invite.
+        assert!(!is_room_gone_answer(500, Some(&ErrorKind::Unknown)));
+        assert!(!is_room_gone_answer(400, Some(&ErrorKind::Unknown)));
+        assert!(!is_room_gone_answer(404, None));
+        assert!(!is_room_gone_answer(404, Some(&ErrorKind::BadState)));
     }
 
     #[test]

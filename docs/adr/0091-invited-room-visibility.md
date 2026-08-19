@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended by [ADR 0094](0094-disowned-rooms-are-evidence.md), which
+adds a `404` denying the room as a source of the positive per-room evidence
+this ADR requires, and withdraws the `Room::leave` exemption below.
 
 ## Context
 

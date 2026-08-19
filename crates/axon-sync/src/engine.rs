@@ -1654,6 +1654,7 @@ async fn run_account(
     let invites_handle = tokio::spawn(watch_invites(
         client.clone(),
         store.clone(),
+        manager.clone(),
         account.account_id,
         account.user_id.clone(),
         live_tx.clone(),
@@ -2548,6 +2549,7 @@ async fn watch_unread_counts(
 async fn watch_invites(
     client: Client,
     store: Store,
+    manager: ClientManager,
     account_id: Uuid,
     account_user_id: String,
     live_tx: broadcast::Sender<LiveFrame>,
@@ -2559,6 +2561,7 @@ async fn watch_invites(
     sweep_invites(
         &client,
         &store,
+        &manager,
         account_id,
         &account_user_id,
         &live_tx,
@@ -2579,6 +2582,7 @@ async fn watch_invites(
                 sweep_invites(
                     &client,
                     &store,
+                    &manager,
                     account_id,
                     &account_user_id,
                     &live_tx,
@@ -2592,6 +2596,7 @@ async fn watch_invites(
                         capture_invite(
                             &room,
                             &store,
+                            &manager,
                             account_id,
                             &account_user_id,
                             &live_tx,
@@ -2697,6 +2702,7 @@ async fn drop_invite_if_known(
 async fn capture_invite(
     room: &Room,
     store: &Store,
+    manager: &ClientManager,
     account_id: Uuid,
     account_user_id: &str,
     live_tx: &broadcast::Sender<LiveFrame>,
@@ -2704,6 +2710,17 @@ async fn capture_invite(
 ) {
     let room_id = room.room_id().to_owned();
     if room.state() != RoomState::Invited {
+        drop_invite_if_known(store, account_id, &room_id, live_tx, last).await;
+        return;
+    }
+
+    // The homeserver has told us it does not know this room (ADR 0094). The
+    // SDK offers no way to evict a room from its in-memory list, so it will
+    // keep reporting `Invited` until the process restarts — re-persisting the
+    // row every sweep and undoing the reject the user just performed. This is
+    // the one case where absence of the room upstream is *positive* evidence,
+    // established per-room by a `404`, so ADR 0091's guardrail is satisfied.
+    if manager.is_room_dead(account_id, &room_id) {
         drop_invite_if_known(store, account_id, &room_id, live_tx, last).await;
         return;
     }
@@ -2813,6 +2830,7 @@ async fn capture_invite(
 async fn sweep_invites(
     client: &Client,
     store: &Store,
+    manager: &ClientManager,
     account_id: Uuid,
     account_user_id: &str,
     live_tx: &broadcast::Sender<LiveFrame>,
@@ -2858,9 +2876,26 @@ async fn sweep_invites(
         }
     }
 
+    // Rooms the homeserver denied knowing (ADR 0094). A failed *accept* learns
+    // this without going anywhere near `room_invites`, so the drop has to
+    // happen here rather than in the join route — which is also what emits the
+    // `invite.removed` frame for it.
+    for room_id in manager.dead_rooms_for(account_id) {
+        drop_invite_if_known(store, account_id, &room_id, live_tx, last).await;
+    }
+
     stream::iter(client.invited_rooms())
         .for_each_concurrent(INVITES_SWEEP_CONCURRENCY, |room| async move {
-            capture_invite(&room, store, account_id, account_user_id, live_tx, last).await;
+            capture_invite(
+                &room,
+                store,
+                manager,
+                account_id,
+                account_user_id,
+                live_tx,
+                last,
+            )
+            .await;
         })
         .await;
 }

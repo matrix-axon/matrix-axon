@@ -61,15 +61,18 @@ pub async fn leave_room(
             // so drop the row here — otherwise reject would resurrect the
             // invite on the next GET /v1/invites.
             //
-            // Only on a confirmed leave. `Unconfirmed` is not evidence the
-            // membership is gone; deleting then would silently destroy an
-            // invite that is still pending. A successful decline via
-            // `Room::leave` is `Left` too, so this cannot be gated on "looks
-            // like an invite" — every ordinary room leave issues one
-            // indexed DELETE that matches nothing. That miss is accepted
-            // (same shape as `note_room_reachability`'s clear); a SELECT
-            // first would cost more than the no-op delete.
-            if outcome == LeaveOutcome::Left {
+            // Only on evidence. `Left` is the homeserver confirming the leave;
+            // `Gone` is it denying the room exists, which leaves no membership
+            // to confirm and is equally conclusive (ADR 0094 — the case that
+            // stranded 200 rows against a purged bridge room). `Unconfirmed`
+            // is neither; deleting then would silently destroy an invite that
+            // is still pending. A successful decline via `Room::leave` is
+            // `Left` too, so this cannot be gated on "looks like an invite" —
+            // every ordinary room leave issues one indexed DELETE that matches
+            // nothing. That miss is accepted (same shape as
+            // `note_room_reachability`'s clear); a SELECT first would cost
+            // more than the no-op delete.
+            if matches!(outcome, LeaveOutcome::Left | LeaveOutcome::Gone) {
                 match store.delete_room_invite(account_id, &room_id).await {
                     Ok(true) => {
                         let _ = live.send(LiveFrame::InviteRemoved(InviteRemovedFrame {
@@ -93,6 +96,7 @@ pub async fn leave_room(
                 room_id = %room_id,
                 elapsed_ms = started_at.elapsed().as_millis(),
                 confirmed = outcome == LeaveOutcome::Left,
+                room_gone = outcome == LeaveOutcome::Gone,
                 "membership: leave succeeded"
             );
             Ok(ApiResponse::new(serde_json::json!({})))

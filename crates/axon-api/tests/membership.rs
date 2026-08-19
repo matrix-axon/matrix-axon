@@ -368,6 +368,96 @@ async fn unconfirmed_leave_keeps_pending_invite() {
         .expect("cleanup");
 }
 
+/// The mirror image of the test above, and the case ADR 0091 could not clear:
+/// the homeserver denies knowing the room at all (`404` + `M_NOT_FOUND`/
+/// `M_UNKNOWN`). There is no membership left to confirm, so that answer *is*
+/// per-room positive evidence — the row goes and the inbox is told (ADR 0094).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn leave_of_a_disowned_room_drops_the_pending_invite() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@leave-gone-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!leave-gone-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_room_invite(
+            account_id,
+            &room_id,
+            &RoomInviteSnapshot {
+                name: Some("Purged".to_owned()),
+                avatar_url: None,
+                topic: None,
+                canonical_alias: None,
+                room_type: None,
+                inviter_user_id: "@bridgebot:localhost".to_owned(),
+                inviter_display_name: None,
+                is_direct: false,
+                encrypted: true,
+            },
+        )
+        .await
+        .expect("seed invite");
+
+    let stub = Arc::new(StubMembership::ok_room_gone());
+    let (live, mut rx) = tokio::sync::broadcast::channel(16);
+    let app = axon_api::router(
+        AppState::new(
+            store.clone(),
+            live,
+            Arc::new(StubSender::ok("$unused:localhost")),
+            Arc::new(StubLifecycle::ok(Uuid::nil())),
+            Arc::new(StubVerification::ok("$unused-flow")),
+            Arc::new(StubTrust::ok()),
+            Arc::new(StubDeviceList::ok()),
+            Arc::new(StubTokenVerifier::ok()),
+            Arc::new(StubMediaProxy),
+            None,
+        )
+        .with_membership(stub),
+    );
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/leave"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "rejecting a room the server disowned is not an error — there is \
+         nothing left to leave"
+    );
+    assert_eq!(body["data"], json!({}));
+
+    let remaining = store.list_invites(Some(account_id)).await.expect("list");
+    assert!(
+        remaining.is_empty(),
+        "a disowned room is evidence the invite is dead, got {remaining:?}"
+    );
+    match rx.try_recv() {
+        Ok(LiveFrame::InviteRemoved(frame)) => {
+            assert_eq!(frame.account_id, account_id);
+            assert_eq!(frame.room_id, room_id);
+        }
+        other => panic!("expected invite.removed for a disowned room, got {other:?}"),
+    }
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn forget_routes_to_sender_and_envelope_result() {

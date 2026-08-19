@@ -15,11 +15,12 @@
 //! Message semantics (send/edit/redact/react) deliberately live in a separate
 //! type so this one stays purely about connections (single responsibility).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use axon_core::SyncConfig;
 use axon_store::{Account, AccountState, Store};
+use matrix_sdk::ruma::{OwnedRoomId, RoomId};
 use matrix_sdk::Client;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
@@ -35,6 +36,19 @@ use crate::error::{GatewayError, SyncError};
 /// SDK client is Arc-backed).
 type Slot = Arc<AsyncMutex<Option<Client>>>;
 
+/// Rooms the homeserver has positively denied knowing (ADR 0094), keyed by the
+/// account that asked. Shared between the gateway — which learns it from a
+/// membership call's `404` — and the invite watcher, which must not re-persist
+/// a `room_invites` row for one.
+///
+/// The set only ever grows within a process. That is the same accepted
+/// tradeoff [`SdkGateway`](crate::gateway)'s power-level locks make: one small
+/// entry per room the homeserver has disowned, and nothing here owns room
+/// bookkeeping. It does not need to persist — the gateway also drops the room
+/// from the SDK's state store, so a restart rebuilds an SDK view that no longer
+/// carries the room at all.
+type DeadRooms = Arc<Mutex<HashSet<(Uuid, OwnedRoomId)>>>;
+
 /// Owns and caches one matrix-rust-sdk [`Client`] per account. Cheap to
 /// [`Clone`] — every field is a handle — so it is shared by both the sync
 /// supervisor and the message gateway.
@@ -47,6 +61,8 @@ pub struct ClientManager {
     /// mutex, so connects for different accounts never block each other and a
     /// connect never blocks the map.
     slots: Arc<Mutex<HashMap<Uuid, Slot>>>,
+    /// Rooms the homeserver says it does not know. See [`DeadRooms`].
+    dead_rooms: DeadRooms,
 }
 
 impl ClientManager {
@@ -58,7 +74,41 @@ impl ClientManager {
             store,
             config,
             slots: Arc::new(Mutex::new(HashMap::new())),
+            dead_rooms: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Record that the homeserver denied knowing `room_id` for this account
+    /// (ADR 0094). Called by the gateway when a membership verb comes back
+    /// `404 M_NOT_FOUND`/`M_UNKNOWN`.
+    pub(crate) fn mark_room_dead(&self, account_id: Uuid, room_id: OwnedRoomId) {
+        self.dead_rooms
+            .lock()
+            .expect("dead room set poisoned")
+            .insert((account_id, room_id));
+    }
+
+    /// Whether the homeserver has denied knowing this room for this account.
+    /// The invite watcher consults this before persisting a `room_invites`
+    /// row, because the SDK's in-memory room list still carries the room until
+    /// the process restarts (ADR 0094).
+    pub(crate) fn is_room_dead(&self, account_id: Uuid, room_id: &RoomId) -> bool {
+        self.dead_rooms
+            .lock()
+            .expect("dead room set poisoned")
+            .contains(&(account_id, room_id.to_owned()))
+    }
+
+    /// Every room this account's homeserver has disowned, for the invite
+    /// watcher's sweep.
+    pub(crate) fn dead_rooms_for(&self, account_id: Uuid) -> Vec<OwnedRoomId> {
+        self.dead_rooms
+            .lock()
+            .expect("dead room set poisoned")
+            .iter()
+            .filter(|(id, _)| *id == account_id)
+            .map(|(_, room_id)| room_id.clone())
+            .collect()
     }
 
     /// Fetch (or create) the connection slot for `account_id`.
