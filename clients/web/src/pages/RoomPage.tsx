@@ -91,7 +91,10 @@ import {
   type ThreadsStore,
 } from '../stores/threads'
 import type { ThreadUnreadStore } from '../stores/thread-unread'
-import { THREAD_READ_MARKERS_NAMESPACE } from '../stores/device-state'
+import {
+  READ_MARKERS_NAMESPACE,
+  THREAD_READ_MARKERS_NAMESPACE,
+} from '../stores/device-state'
 import {
   type EventDto,
   type HeadLoadOutcome,
@@ -293,6 +296,22 @@ export function RoomPage() {
   /** …and the loaded slice reaches the live end, so the newest events are shown. */
   const showingNewestEvents = unanchored && timeline.atEnd.value
   const openThread = typeof query.thread === 'string' ? query.thread : null
+  /**
+   * Whether every thread in this room is known read — the room-list badge waits
+   * on it. `threads`/`read_markers`/`thread_read_markers` must all have arrived
+   * first: an unfetched summary map looks like a room with no threads, and an
+   * unhydrated namespace makes every thread look unjudged.
+   */
+  const threadReadStateSettled =
+    !threads.loading.value &&
+    threads.error.value === null &&
+    deviceState.hydrated(accountId, READ_MARKERS_NAMESPACE) &&
+    deviceState.hydrated(accountId, THREAD_READ_MARKERS_NAMESPACE)
+  const roomHasNoKnownUnreadThreads =
+    threadReadStateSettled &&
+    !threadUnread.entries.value.some(
+      (entry) => entry.accountId === accountId && entry.roomId === roomId,
+    )
   const unreadThreadCutoff = threadUnread.entries.value
     .filter((entry) => entry.accountId === accountId && entry.roomId === roomId)
     .reduce<number | null>(
@@ -318,18 +337,6 @@ export function RoomPage() {
       // rides on the mark that is already here rather than a new one.
       warm: timeline.events.peek().length > 0,
     })
-    // Clear the badge optimistically, since opening a room normally does read
-    // it and the receipt makes that true a moment later — but *only* when this
-    // page is not anchored to a specific event. With `?event=` the view opens
-    // parked in history (a search hit, a permalink), the server correctly
-    // refuses to advance the read receipt past what was displayed (ADR 0089),
-    // and zeroing here would claim messages below the anchor as read: the
-    // badge disappears for the session and returns on the next load, which is
-    // worse than never clearing. The timeline effect below picks the room up
-    // once the view actually reaches the live end.
-    if (unanchored) {
-      rooms.noteUnreadCounts(accountId, roomId, 0, 0)
-    }
     // The room list store also feeds this page's title; populate it on a
     // hard load straight into the room URL. `ensureLoaded` rather than a
     // length test: cached rows (ADR 0085 phase 2) make the list non-empty
@@ -653,6 +660,28 @@ export function RoomPage() {
     unreadThreadCutoff,
     showingNewestEvents,
   ])
+
+  useEffect(() => {
+    // Clear the badge optimistically, since opening a room normally does read
+    // it and the receipt makes that true a moment later — but *only* when this
+    // page is not anchored to a specific event. With `?event=` the view opens
+    // parked in history (a search hit, a permalink), the server correctly
+    // refuses to advance the read receipt past what was displayed (ADR 0089),
+    // and zeroing here would claim messages below the anchor as read: the
+    // badge disappears for the session and returns on the next load, which is
+    // worse than never clearing. The timeline effect below picks the room up
+    // once the view actually reaches the live end.
+    //
+    // It also waits on this room's threads being known read. Opening a room does
+    // not read its threads, so clearing here left the user looking at a room
+    // with no badge in the list and an unread count on the Threads button —
+    // two indicators disagreeing about the same room. The wait is bounded by the
+    // thread-summary and marker reads, and it re-fires as soon as the last
+    // unread thread is opened, which is when the two agree again.
+    if (unanchored && roomHasNoKnownUnreadThreads) {
+      rooms.noteUnreadCounts(accountId, roomId, 0, 0)
+    }
+  }, [unanchored, roomHasNoKnownUnreadThreads, rooms, accountId, roomId])
 
   // Thread members live in the panel, not the main timeline (TUI parity);
   // state events are tiered behind the visibility setting, and bodyless

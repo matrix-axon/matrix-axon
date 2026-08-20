@@ -216,6 +216,8 @@ Condition 2 of the gate is a fact about client state — which threads the user 
 - A room stays badged until the user opens the thread, not merely the room.
   That is a visible behaviour change from "opening the room clears the badge until reload", and it is the honest one: before, the badge was lying in both directions.
 - No server work, so no deployment coupling — each client fixes itself, and a client that has not been updated behaves exactly as it does today.
+- **The room-list badge waits for the room's threads to be read**, rather than clearing the moment the room opens.
+  Entering a room does not read its threads, and the old optimistic clear produced a room showing no badge in the list while the Threads button showed unread — the two surfaces contradicting each other about one room.
 - **The room now tells the user which thread is unread**, which it did not before and which the receipt fix alone would not have given it.
   The summary-derived marker no longer seeds from a `last_event_id` that the loaded slice shows to be a thread member, so `reconcileSummary`'s fallback stops answering "read" for the thread it came from, and the root row's "New" chip and the Unread threads panel light up.
   Getting there took two corrections that only a live instance produced, both worth keeping:
@@ -227,6 +229,7 @@ Condition 2 of the gate is a fact about client state — which threads the user 
   Axon's own receipts are always unthreaded, so a `thread_id` on this user's own receipt can only have come from another client — there is no echo to suppress.
   It is recorded as a durable `thread_read_markers` entry rather than an in-memory clear, because receipts are live-only and never replayed: a session-scoped clear would come back on the next reload, which is the complaint it exists to answer.
   This is also a better source of truth than the marker fallback ever was — it is what the homeserver actually knows about what the user read.
+  That path is live-only — nothing backfills the receipts Synapse already holds, so a thread read in Element before the tab opened stays unread here and blocks the room until it is opened again (#213).
   What remains of #209 is the cross-room half: the unread-thread store is fed from `RoomPage` and from live frames, so on a cold load it knows only about rooms visited this session.
 - Test seams, and a caution about them:
   - Every gate condition needs a case where it is the only one false, and each such test must be checked to fail when _its_ condition alone is removed.

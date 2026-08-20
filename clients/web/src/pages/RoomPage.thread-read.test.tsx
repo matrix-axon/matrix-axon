@@ -14,7 +14,15 @@ import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import { LocationProvider, Route, Router } from 'preact-iso'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { ServicesContext } from '../services'
 import { READ_MARKERS_NAMESPACE } from '../stores/device-state'
 import { RECEIPT_DEBOUNCE_MS } from '../stores/ephemeral-sender'
@@ -142,6 +150,10 @@ function renderRoom(
     }[]
     /** Make the timeline answer *after* the room list, as a warm cache does. */
     timelineSlow?: boolean
+    /** Server-derived unread count on the room-list row. */
+    notificationCount?: number
+    /** Install a spy on `noteUnreadCounts` before mounting. */
+    spyRooms?: boolean
   } = {},
 ) {
   const roomEvents = [
@@ -185,6 +197,10 @@ function renderRoom(
             canonical_alias: null,
             last_activity_ts: REPLY_2.origin_ts,
             last_event_id: REPLY_2.event_id,
+            // Without a real count the badge is 0 whatever the page does, and
+            // any assertion about clearing it is vacuous.
+            notification_count: options.notificationCount ?? 0,
+            highlight_count: 0,
           },
         ],
       }),
@@ -274,6 +290,9 @@ function renderRoom(
     `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}${options.query ?? ''}`,
   )
   const services = testServices()
+  if (options.spyRooms === true) {
+    vi.spyOn(services.rooms, 'noteUnreadCounts')
+  }
   if (options.storedRoomMarker !== undefined) {
     // Seeded directly rather than through hydration: a `GET` that lands after
     // the first local write is discarded by `settled()`, so serving it from msw
@@ -548,6 +567,56 @@ describe('a thread view names the room receipt (ADR 0096)', () => {
     // corrects itself a moment later — visible on reload as a flash.
     expect(peak).toBe(0)
     expect(services.threadUnread.count.value).toBe(0)
+  })
+
+  it('keeps the room-list badge while a thread in it is still unread', async () => {
+    // Spied rather than read back: the optimistic clear races the room-list
+    // fetch that repopulates the count from the DTO, so the call is the
+    // deterministic signal — the same reason `RoomPage.test.tsx` spies it.
+    const cleared = (services: ReturnType<typeof testServices>) =>
+      vi
+        .spyOn(services.rooms, 'noteUnreadCounts')
+        .mock.calls.filter(
+          (call) => call[1] === ROOM && call[2] === 0 && call[3] === 0,
+        )
+    const { services, findByText } = renderRoom({
+      threads: [MAIN_THREAD],
+      notificationCount: 3,
+      spyRooms: true,
+    })
+    await findByText(`body of ${MAIN.event_id}`)
+    await settleReceipts()
+
+    // Opening a room does not read its threads. Clearing here leaves the user
+    // looking at a room with no badge and an unread count on the Threads
+    // button — two indicators disagreeing about the same room.
+    await waitFor(() =>
+      expect(services.threadUnread.isUnread(ACCOUNT, ROOM, ROOT)).toBe(true),
+    )
+    expect(cleared(services)).toHaveLength(0)
+  })
+
+  it('clears the room-list badge once every thread in it is read', async () => {
+    const { services, findByText } = renderRoom({
+      threads: [MAIN_THREAD],
+      notificationCount: 3,
+      spyRooms: true,
+      storedThreadMarkers: [
+        { root: ROOT, eventId: REPLY_2.event_id, originTs: REPLY_2.origin_ts },
+      ],
+    })
+    await findByText(`body of ${MAIN.event_id}`)
+
+    await waitFor(() =>
+      expect(
+        vi
+          .spyOn(services.rooms, 'noteUnreadCounts')
+          .mock.calls.filter(
+            (call) => call[1] === ROOM && call[2] === 0 && call[3] === 0,
+          ).length,
+      ).toBeGreaterThan(0),
+    )
+    await settleReceipts()
   })
 
   it('still sends when the room has other threads the user has never opened', async () => {

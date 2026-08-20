@@ -200,6 +200,14 @@ before starting a milestone.
   an unfiltered one lets an unrendered event become the receipt target _and_ the
   position of the "new messages" line. Caught in review on #165 — the first
   version filtered only local echoes and the thread cutoff.
+- **The room-list badge and the Threads badge must agree.** The optimistic clear
+  on room entry waits until every thread in the room is known read — opening a
+  room does not read its threads, and clearing early left a room with no badge in
+  the list _and_ an unread count on the Threads button, two indicators
+  disagreeing about the same room. It re-fires when the last unread thread is
+  opened. Same settledness rule as everything else here: unfetched summaries or
+  an unhydrated marker namespace mean "not known yet", so the clear waits rather
+  than assuming the room is clean.
 - **Reconciliation waits for the markers.** Thread summaries come back before
   device state on a fresh load, so reconciling in between judges every thread
   against the _room_ marker and flags the ones whose replies are newer than the
