@@ -14,7 +14,8 @@ name: Migrations are forward-only
 # On a pull request the base branch is already in the checkout, so there is
 # nothing to fetch and no token to arrange. It also puts the gate where the
 # merge actually happens. Branch pushes before a PR exists are covered by the
-# same script in `.githooks/pre-push`.
+# same script, run from the `migrations-immutable` pre-push hook in
+# `.pre-commit-config.yaml`.
 #
 # `pull_request` alone, deliberately: every step below is driven by the event's
 # `head.sha`/`base.ref`, which are unset for a manual dispatch, so adding

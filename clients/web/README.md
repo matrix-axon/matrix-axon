@@ -99,7 +99,7 @@ see the note in `src/stores/accounts.ts`.
    ```
 
 4. Have an axon server to talk to. By default the dev server expects one at
-   `http://localhost:8080`; see the repo's top-level README for running the
+   `http://localhost:8080`; see [CONTRIBUTING.md](../../CONTRIBUTING.md) for running the
    server, or set `AXON_SERVER_URL` (below) to point at an existing one.
 
 5. Start the dev server:
@@ -389,12 +389,19 @@ setup (`openRoom`/`expectLive`) appeared to hang. The mock now completes the
 close handshake and the CI lanes use `--fail-on-flaky-tests`, so a retry can no
 longer hide a recurrence.
 
-CI runs the schema sync check, lint, format check, tests, and the build via
-`.github/workflows/web-lint-and-test.yml` (path-filtered `pull_request` plus
-manual `workflow_dispatch`). The repo-root `.pre-commit-config.yaml` can run the
-same web checks at pre-push time for both git and jj users, and rustfmt/clippy
-when rust sources change. The web hooks use the normal web dependencies, so run
-`pnpm install --frozen-lockfile` here before relying on them locally.
+CI runs the peer-dependency check, the schema sync check, lint, format check,
+tests, and the build via `.github/workflows/web-lint-and-test.yml`
+(path-filtered `pull_request` plus manual `workflow_dispatch`). The repo-root
+`.pre-commit-config.yaml` runs the same web checks at pre-push time for both git
+and jj users, and rustfmt/clippy/`cargo test` when rust sources change — it is
+the only list of pre-push checks the repo has (ADR 0092). The web hooks use the
+normal web dependencies, and the `web-install` hook runs
+`pnpm install --frozen-lockfile` for you whenever the manifest, lockfile, or
+`pnpm-workspace.yaml` changes, so they cannot silently test a stale tree.
+
+Playwright is deliberately not in that hook (browsers and minutes);
+`web-e2e.yml` gates pull requests, and `AGENTS.md` § "Definition of done for a
+UI change" says when to run it locally.
 
 ## Demo recording
 

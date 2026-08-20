@@ -28,38 +28,39 @@ The real themes are:
 4. **Live-update gaps** left over from M-W6: threads and the room list don't
    consume the socket.
 
-| Severity | Count | Meaning |
-| -------- | ----- | ------- |
-| P1 | 4 | bug or broken gate; fix before further feature work |
-| P2 | 10 | likely bug, real perf/UX weakness, or maintainability debt |
-| P3 | 6 | polish |
+| Severity | Count | Meaning                                                    |
+| -------- | ----- | ---------------------------------------------------------- |
+| P1       | 4     | bug or broken gate; fix before further feature work        |
+| P2       | 10    | likely bug, real perf/UX weakness, or maintainability debt |
+| P3       | 6     | polish                                                     |
 
 Top five: WCR-01, WCR-02, WCR-03, WCR-04, WCR-06.
 
 ### Gate results (evidence, recorded 2026-07-10)
 
-| Gate | Result |
-| ---- | ------ |
-| `pnpm test` | **exit 1** — 301 passed, 2 skipped, but 3 unhandled MSW rejections from `RoomPage.messaging.test.tsx` (see WCR-02/WCR-04) |
-| `pnpm lint` | pass |
-| `pnpm format:check` | **exit 1** — `src/stores/members.ts` (line 58 exceeds print width) |
-| `pnpm build` (tsc + vite) | pass |
+| Gate                      | Result                                                                                                                    |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm test`               | **exit 1** — 301 passed, 2 skipped, but 3 unhandled MSW rejections from `RoomPage.messaging.test.tsx` (see WCR-02/WCR-04) |
+| `pnpm lint`               | pass                                                                                                                      |
+| `pnpm format:check`       | **exit 1** — `src/stores/members.ts` (line 58 exceeds print width)                                                        |
+| `pnpm build` (tsc + vite) | pass                                                                                                                      |
 
 ---
 
 ## P1 findings
 
 ### WCR-01 · correctness · Timeline rows render as unkeyed fragments
+
 `src/pages/RoomPage.tsx:476-507`
 
 `visible.map(...)` returns a bare `<>…</>` per event, holding an optional
 day-separator `<li>` plus the keyed `<EventRow>`. The keys sit on the
-fragment's *children*; the fragments themselves — the actual list children —
+fragment's _children_; the fragments themselves — the actual list children —
 have none, so Preact reconciles the list **by index**. Two consequences:
 
 - `loadOlder()` prepends a page, shifting every index: per-row `useState`
   (open reaction picker, **"Confirm delete"**, open edit-history modal)
-  stays at its position and attaches to a *different message*. Concretely:
+  stays at its position and attaches to a _different message_. Concretely:
   click Delete on a message, scroll up so a page prepends, and the
   confirm-delete now sits on whatever message landed at that index.
 - Every prepend (and every live append that reorders separators) rebuilds
@@ -73,6 +74,7 @@ position…") — the room list fixed it; the timeline didn't.
 keeping the inner keys or dropping them.
 
 ### WCR-02 · robustness · Fire-and-forget API calls have no rejection path
+
 Systemic; the pattern is `void api.GET(...).then(({data}) => …)` or an
 un-try/caught `await api.GET(...)` on a path outside `mutate()`:
 
@@ -102,14 +104,15 @@ helper (e.g. `swallowNetwork(promise)` or a `fetchOrNull` wrapper) so every
 background read/write funnels through a single rejection policy.
 
 ### WCR-03 · correctness · Timeline pagination races the reconnect gap-fill
+
 `src/stores/timeline.ts:219-241 (replaceSlice), 560-574 (loadOlder)`
 
 No request-generation guard exists, so two interleavings corrupt the slice:
 
 1. **`loadOlder` in flight when `loadLatest` (reconnect gap-fill,
    RoomPage.tsx:181-186) replaces the slice.** The older page was fetched
-   against the *old* cursor; its `events.value = [...page.events, ...]`
-   prepend lands on the *new* newest-page slice — old events sit directly
+   against the _old_ cursor; its `events.value = [...page.events, ...]`
+   prepend lands on the _new_ newest-page slice — old events sit directly
    above the newest 50 with a silent gap, and `nextCursor` now points at
    the old walk. Reproduce: scroll back two pages, drop the socket, click
    "Load older messages" while the reconnect fires.
@@ -120,6 +123,7 @@ No request-generation guard exists, so two interleavings corrupt the slice:
 discard results whose generation is stale. (~10 lines, fixes both.)
 
 ### WCR-04 · process · The definition-of-done gates are red on the branch tip
+
 `pnpm test` exits 1 (unhandled rejections, WCR-02's symptom — the suite
 itself is green) and `pnpm format:check` fails on `src/stores/members.ts:58`.
 AGENTS.md's definition of done requires all four gates green; CI on this
@@ -132,16 +136,18 @@ work in the messaging tests' teardown).
 ## P2 findings
 
 ### WCR-05 · UX-correctness · Reconnect gap-fill discards scroll-back
+
 `src/stores/timeline.ts:219-241`, `src/pages/RoomPage.tsx:181-186`
 
 `loadLatest()` on reconnect replaces the whole slice with the newest page.
 A user reading three pages back is silently teleported to the newest 50
-events (the quiet-gapfill fix stopped the *blanking*, not the truncation).
+events (the quiet-gapfill fix stopped the _blanking_, not the truncation).
 Consider: keep the loaded slice and refetch only the head page, merging by
 event id (the `ingestLive` reconcile shape), falling back to replace only
 when the head page doesn't overlap the loaded slice.
 
 ### WCR-06 · feature gap · Open threads never update live
+
 `src/components/ThreadPanel.tsx` (whole file)
 
 Only RoomPage subscribes to the socket, and it filters thread members out of
@@ -152,6 +158,7 @@ reopened — the one surface where a user is most likely waiting on a reply.
 Mirror RoomPage's two effects (subscribe + gap-fill) inside ThreadPanel.
 
 ### WCR-07 · correctness · Echo reconciliation can drop or duplicate a send
+
 `src/stores/timeline.ts:294-298, 437-445`
 
 Two related weaknesses in the own-send race:
@@ -166,9 +173,10 @@ Two related weaknesses in the own-send race:
   frame when `confirmsEcho` failed to match — e.g. `senderId` was undefined
   because rooms hadn't loaded, so the echo's sender is `''`). Result: two
   rows with the same `event_id`/key. Guard: if the confirmed id already
-  exists, *remove* the echo instead of replacing it.
+  exists, _remove_ the echo instead of replacing it.
 
 ### WCR-08 · feature gap · The room list never updates during a session
+
 `src/stores/rooms.ts`, `src/components/RoomList.tsx:98-100`
 
 `rooms.refresh()` runs once when RoomList mounts (and RoomList stays mounted
@@ -180,19 +188,21 @@ Cheapest fix: bump the matching room's `last_activity_ts` on each
 `timeline.event` frame and re-`refresh()` on `reconnects` changes.
 
 ### WCR-09 · correctness · `?event=` deep links: no reaction in-room, no reveal
+
 `src/pages/RoomPage.tsx:104-128, 431-436`
 
 - The load effect deliberately depends on `[timeline]` only, so navigating to
   `?event=<id>` while the room is already open changes `highlighted` but
   never jumps. M-W10's search results will hit this constantly.
 - Even on a cold deep link, after `jumpTo` the Timeline's mount effect
-  scrolls to the *bottom* of the page; nothing scrolls the highlighted row
+  scrolls to the _bottom_ of the page; nothing scrolls the highlighted row
   into view, so the target event is usually off-screen.
 
 Fix together: react to `highlighted` changes (jump when the id isn't in the
 loaded slice), and after load, `scrollIntoView` the `[data-event-id]` row.
 
 ### WCR-10 · UX-correctness · A failed edit loses the user's text
+
 `src/pages/RoomPage.tsx:341-357`, `src/components/Composer.tsx:94-102`
 
 `onSubmit` clears the action (banner) immediately and the composer clears its
@@ -203,6 +213,7 @@ and the edited text is unrecoverable. Either keep edit mode on failure
 pattern for edits.
 
 ### WCR-11 · consistency · Composite-key separators disagree with their comments
+
 `src/stores/device-state.ts:15` — `SEP = ' '` under a comment saying "NUL
 never appears in ids/namespaces"; the code uses a **space**, not NUL.
 `media-service.ts:96` uses `'\0'`; `room-list.ts` uses `'/'` (justified).
@@ -211,6 +222,7 @@ documents a guarantee the code doesn't implement. Use `'\0'` (and note that
 `scopeKey`'s `split(SEP)` in the reconnect effect must keep working).
 
 ### WCR-12 · robustness · A failed device-state PUT silently loses the batch
+
 `src/stores/device-state.ts:159-176`
 
 `flush()` removes the batch from `pending` before the PUT settles and never
@@ -220,10 +232,11 @@ on the next device/session). Re-queue the batch (merging with any newer
 writes) on rejection or non-2xx, with the debounce as natural retry pacing.
 
 ### WCR-13 · performance · `sortRooms` does per-comparison work on a hot path
+
 `src/stores/room-list.ts:126-149`, `src/components/RoomList.tsx:580-616`
 
 The comparator calls `roomKey` + `pinned.indexOf` (O(pins)) and
-`title().toLowerCase()` per *comparison* — O(n log n) string builds and
+`title().toLowerCase()` per _comparison_ — O(n log n) string builds and
 linear pin scans on ~1,600 rooms, re-run on every RoomList render, which
 includes each incremental DM-title arrival during `resolveUnnamedTitles`
 (dozens of full sorts right after load). Decorate once (key, rank, lowered
@@ -231,6 +244,7 @@ title), sort the decorated array, unwrap. The unread work is already kept
 off this path; this closes the remaining gap.
 
 ### WCR-14 · a11y · EditHistory lacks the modal focus contract Lightbox has
+
 `src/components/EditHistory.tsx`
 
 Lightbox's comment says it follows "the existing modal focus/Escape pattern
@@ -246,7 +260,7 @@ it in both (ShortcutsHelp too).
 
 - **WCR-15 · outgoing HTML honesty** — `src/markdown/markdown.ts`: marked
   passes `[x](javascript:alert(1))` through as a live href in the
-  `formatted_body` we *send*. Our own renderer (DOMPurify) blocks it and
+  `formatted_body` we _send_. Our own renderer (DOMPurify) blocks it and
   receiving clients must sanitize, but "keeps our own output honest" (the
   module's words) argues for running our own sanitizer over outgoing HTML.
 - **WCR-16 · duplication** — the failed-echo status block (Retry/Discard)
@@ -260,7 +274,7 @@ it in both (ShortcutsHelp too).
   exactly this kind of shared layout knowledge).
 - **WCR-18 · thumbnail failure hides a loadable image** —
   `MediaImage.tsx:37`: `displayUrl = thumbnailUrl ?? url`; a malformed or
-  non-mxc *thumbnail* shows "Could not load image" even though the full
+  non-mxc _thumbnail_ shows "Could not load image" even though the full
   image would fetch fine. Fall back to `media.url` when the thumbnail
   acquire fails.
 - **WCR-19 · emote sender** — `EventBody.tsx:46` renders raw `event.sender`

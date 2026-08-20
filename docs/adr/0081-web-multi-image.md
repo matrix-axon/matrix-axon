@@ -367,7 +367,7 @@ So `useModalFocus` gains an optional `restoreTo?: () => HTMLElement | null`,
 resolved **at unmount** rather than captured at mount. The viewer points it at
 the current cursor's cell via `[data-event-id]`, falling back to the gallery
 row and then the timeline scroller — never a detached node, never nothing.
-Callers that pass nothing keep today's behaviour exactly, so this stays one
+Callers that pass nothing keep today's behavior exactly, so this stays one
 contract rather than becoming two.
 
 **Paging is keyboard-first, and its state is announced.** Arrow keys page, and
@@ -403,7 +403,7 @@ cannot see.
 The controls also need to outrank `button.ghost`, whose `background:
 transparent` is more specific than a bare `.lightbox-page` class and silently
 won — which is why the paging arrows (and, it turned out, the pre-existing ✕)
-rendered nearly invisible against a photo. `disabled` is styled by colour
+rendered nearly invisible against a photo. `disabled` is styled by color
 rather than opacity, so it cannot fight the hidden state.
 
 **A gallery must not become a wall of unlabelled buttons.**
@@ -478,7 +478,7 @@ removal are announced through the same polite-status pattern.
   a contract every overlay depends on. It is opt-in and the default path is
   unchanged, but it is shared code touched for one caller's benefit, and a
   regression there would affect every modal — so PR 2 pins the existing
-  restore behaviour with a test before adding the option.
+  restore behavior with a test before adding the option.
 - **Gallery cells navigate differently from the rest of the timeline.** A
   roving tabindex means Tab leaves a gallery in one press while arrows move
   inside it, which is correct per APG and consistent with the reaction picker,

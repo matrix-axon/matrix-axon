@@ -20,17 +20,49 @@ jobs:
       - name: check-environment
         uses: ./.github/actions/check-environment
 
+      # CI runs the *hooks*, not second copies of the same checks: the commands
+      # and pinned versions are whatever .pre-commit-config.yaml says, so the
+      # local gate and CI cannot drift. Placed before the toolchain install --
+      # a malformed workflow file or a duplicate ADR number should fail in
+      # seconds, not after a cargo build.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+          # Without this, `pip install pre-commit` re-resolves and re-downloads
+          # from PyPI on every run of a job that has no path filter.
+          cache: pip
+          # The repo has no requirements.txt or pyproject.toml, and `cache: pip`
+          # fails outright ("No file matched to ...") rather than degrading when
+          # it finds none. Any tracked file serves as the cache key; this is the
+          # one whose change should invalidate it.
+          cache-dependency-path: .pre-commit-config.yaml
+
+      - name: Cache pre-commit environments
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Install pre-commit
+        shell: bash
+        run: python -m pip install --disable-pip-version-check pre-commit
+
+      - name: actionlint
+        shell: bash
+        run: pre-commit run actionlint --all-files --hook-stage pre-push
+
       - name: check-duplicate-adrs
         shell: bash
-        run: |
-          echo "Checking for duplicate ADR numbers..."
-          adr_dupe=$(ls -1 docs/adr/ | sed -E 's/([0-9]{4})-.*/\1/g' | sort | uniq -c | awk '$1 > 1 {print $2}')
-          if [ -n "${adr_dupe}" ]; then
-            echo "Duplicate ADR number ${adr_dupe} detected, renumber before submitting PR"
-            exit 1
-          else
-            echo 'ADR numbers clear.'
-          fi
+        run: pre-commit run adr-numbers --all-files --hook-stage pre-push
+
+      # The #180 regression guard. Without a CI step it only runs for people
+      # who installed the hook, so a filter broken by --no-verify or from an
+      # un-set-up clone would merge unnoticed -- and no other job would catch
+      # it, because a filter that selects nothing looks exactly like one that
+      # selects correctly.
+      - name: check-hook-filters
+        shell: bash
+        run: pre-commit run hook-filters --all-files --hook-stage pre-push
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -51,4 +83,5 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        # Flag order matches the rust-clippy hook's `entry:` verbatim.
+        run: cargo clippy --all-features --all-targets -- -D warnings

@@ -45,6 +45,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The install above only warns about unmet peers. Mirrors the web-peers
+      # pre-push hook; deliberate exceptions live in pnpm-workspace.yaml's
+      # peerDependencyRules.
+      - name: Check peer dependencies
+        run: pnpm peers check
+
       - name: Check generated API client is in sync with openapi/openapi.json
         run: pnpm check:api
 

@@ -29,7 +29,7 @@ Rejected alternatives:
 
 - **Shiki** produces better output — real TextMate grammars, VS Code themes —
   but carries a WASM regex engine and large grammar payloads. Wrong trade for
-  colouring a shell script in a chat client.
+  coloring a shell script in a chat client.
 - **Prism** is comparable in output but tree-shakes worse.
 
 ### One chunk per grammar, loaded on use
@@ -67,7 +67,7 @@ would put a readable file behind a network round trip.
 
 A **128 KB source cap** applies: `highlight.js` tokenises synchronously on the
 main thread, so a large log would be a visible stall — and nobody reads a 200 KB
-log in colour anyway. Above the cap, plain text.
+log in color anyway. Above the cap, plain text.
 
 ### Output is sanitized even though it does not have to be
 

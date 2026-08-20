@@ -214,10 +214,10 @@ jobs:
     steps:
       - name: Add rustup/cargo home and local binaries to PATH
         run: |
-          echo "RUSTUP_HOME=$HOME/.rustup-macos" >> $GITHUB_ENV
-          echo "CARGO_HOME=$HOME/.cargo-macos" >> $GITHUB_ENV
-          echo "$HOME/.rustup-macos/bin" >> $GITHUB_PATH
-          echo "$HOME/.cargo-macos/bin" >> $GITHUB_PATH
+          echo "RUSTUP_HOME=$HOME/.rustup-macos" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$HOME/.cargo-macos" >> "$GITHUB_ENV"
+          echo "$HOME/.rustup-macos/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo-macos/bin" >> "$GITHUB_PATH"
 
       - name: checkout source code
         uses: actions/checkout@v7
@@ -288,10 +288,10 @@ jobs:
     steps:
       - name: Add rustup/cargo home and local binaries to PATH
         run: |
-          echo "RUSTUP_HOME=$HOME/.rustup-linux" >> $GITHUB_ENV
-          echo "CARGO_HOME=$HOME/.cargo-linux" >> $GITHUB_ENV
-          echo "$HOME/.rustup-linux/bin" >> $GITHUB_PATH
-          echo "$HOME/.cargo-linux/bin" >> $GITHUB_PATH
+          echo "RUSTUP_HOME=$HOME/.rustup-linux" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$HOME/.cargo-linux" >> "$GITHUB_ENV"
+          echo "$HOME/.rustup-linux/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo-linux/bin" >> "$GITHUB_PATH"
 
       - name: checkout source code
         uses: actions/checkout@v7

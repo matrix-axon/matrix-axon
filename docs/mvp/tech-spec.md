@@ -82,7 +82,7 @@ Multi-human-within-one-process is a non-goal (see [`prd.md`](./prd.md)). Operato
 
 ### Account lifecycle and active-account gating
 
-Because the data model is N-account from day one, accounts need a real lifecycle rather than a one-shot config provision. Provisioning an account only from config strands the previous row when the config changes, and any row with a decryptable token would otherwise keep syncing and *sending* — a stale, deconfigured account acting on the user's behalf. (Observed in practice; tracked in GH #14 and #24.)
+Because the data model is N-account from day one, accounts need a real lifecycle rather than a one-shot config provision. Provisioning an account only from config strands the previous row when the config changes, and any row with a decryptable token would otherwise keep syncing and _sending_ — a stale, deconfigured account acting on the user's behalf. (Observed in practice; tracked in GH #14 and #24.)
 
 - Each account carries an explicit lifecycle `state` (`active` / `deactivated`), orthogonal to verification status. The sync engine and the mutations gateway connect and serve **only `active` accounts** — never "anything with a stored token." `deactivated` is a reversible pause that retains data; this is not a soft-delete model.
 - Accounts are added at runtime via an account-lifecycle API (`POST /v1/accounts/login`) rather than only at boot, so adding account #2…N never requires swapping config.
@@ -93,9 +93,9 @@ The single `store_key` that encrypts every account's access token at rest is a k
 
 ### Relation aggregation: server-side, read-time, over stored relations
 
-Edits (`m.replace`), reactions (`m.annotation`), replies (`m.in_reply_to`), and threads (`m.thread`) are all *relation* events. Axon stores them as ordinary events with the relation in the `relates_to` hot column. Leaving aggregation to clients breaks down because a client only holds a timeline window: a reaction or edit that lands outside that window (e.g. long after the original message) is silently missed, producing wrong reaction counts and stale message bodies (GH #22).
+Edits (`m.replace`), reactions (`m.annotation`), replies (`m.in_reply_to`), and threads (`m.thread`) are all _relation_ events. Axon stores them as ordinary events with the relation in the `relates_to` hot column. Leaving aggregation to clients breaks down because a client only holds a timeline window: a reaction or edit that lands outside that window (e.g. long after the original message) is silently missed, producing wrong reaction counts and stale message bodies (GH #22).
 
-We aggregate server-side instead. The store resolves the latest edit per target, groups reactions by target and emoji, and lists replies and thread members — all via expression/partial indexes over `relates_to`, computed at read time (cheap at Riley scale; materialized counters are a later optimization). Raw relation events stay on disk (append-mostly, provenance preserved — the same philosophy as redaction masking); the timeline read *collapses* edits into their target rather than rewriting rows. Threads are simply the `m.thread` case of this machinery, so they ship in the MVP as part of aggregation rather than as a separate later feature.
+We aggregate server-side instead. The store resolves the latest edit per target, groups reactions by target and emoji, and lists replies and thread members — all via expression/partial indexes over `relates_to`, computed at read time (cheap at Riley scale; materialized counters are a later optimization). Raw relation events stay on disk (append-mostly, provenance preserved — the same philosophy as redaction masking); the timeline read _collapses_ edits into their target rather than rewriting rows. Threads are simply the `m.thread` case of this machinery, so they ship in the MVP as part of aggregation rather than as a separate later feature.
 
 ### Event provenance
 
@@ -187,22 +187,22 @@ No APNs / FCM / web push code paths in MVP. The event store schema and the event
 
 Almost every architectural question was resolved during planning. The table below maps each resolution. One question remains genuinely open and is called out separately.
 
-| Question | Decision |
-|----------|----------|
-| Multi-tenancy model | One human per Axon; N Matrix accounts inside, `account_id`-scoped tables. Multi-human-per-process is a non-goal. |
-| Sliding sync vs legacy sync fallback | Simplified Sliding Sync only. |
-| Event store schema | Hybrid hot-columns + JSONB. |
-| Search analyzer defaults | Single language-agnostic analyzer for MVP. |
-| Push payload format | Push deferred entirely; revisit as a P0 post-MVP track. |
-| OAuth implementation | Bearer tokens for MVP; OAuth 2.0 + PKCE was planned post-MVP but shipped ahead of freeze (M14, ADR 0054). |
-| Live-update transport | WebSocket with custom envelope. |
-| API versioning policy | Path-prefix `/v1/`, SemVer; previous major supported two minor releases after next major GA. |
-| Migration story | Fresh sync only for MVP. |
-| Bridge event handling | Treated as ordinary Matrix events; no normalization. |
-| Media storage backend | Local disk LRU cache for MVP. S3-compatible storage deferred until a hosted deployment needs it. |
-| Account lifecycle | Explicit account states + active-account gating + runtime login/verify/recover/logout/delete (logout retains the archive; delete purges). In MVP (resolves GH #14, #24). |
-| Relation aggregation | Server-side, read-time aggregation of edits/reactions/replies/threads over stored relations. In MVP (resolves GH #22). |
-| Threads | In MVP, as the `m.thread` case of relation aggregation (no separate milestone). |
+| Question                             | Decision                                                                                                                                                                 |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Multi-tenancy model                  | One human per Axon; N Matrix accounts inside, `account_id`-scoped tables. Multi-human-per-process is a non-goal.                                                         |
+| Sliding sync vs legacy sync fallback | Simplified Sliding Sync only.                                                                                                                                            |
+| Event store schema                   | Hybrid hot-columns + JSONB.                                                                                                                                              |
+| Search analyzer defaults             | Single language-agnostic analyzer for MVP.                                                                                                                               |
+| Push payload format                  | Push deferred entirely; revisit as a P0 post-MVP track.                                                                                                                  |
+| OAuth implementation                 | Bearer tokens for MVP; OAuth 2.0 + PKCE was planned post-MVP but shipped ahead of freeze (M14, ADR 0054).                                                                |
+| Live-update transport                | WebSocket with custom envelope.                                                                                                                                          |
+| API versioning policy                | Path-prefix `/v1/`, SemVer; previous major supported two minor releases after next major GA.                                                                             |
+| Migration story                      | Fresh sync only for MVP.                                                                                                                                                 |
+| Bridge event handling                | Treated as ordinary Matrix events; no normalization.                                                                                                                     |
+| Media storage backend                | Local disk LRU cache for MVP. S3-compatible storage deferred until a hosted deployment needs it.                                                                         |
+| Account lifecycle                    | Explicit account states + active-account gating + runtime login/verify/recover/logout/delete (logout retains the archive; delete purges). In MVP (resolves GH #14, #24). |
+| Relation aggregation                 | Server-side, read-time aggregation of edits/reactions/replies/threads over stored relations. In MVP (resolves GH #22).                                                   |
+| Threads                              | In MVP, as the `m.thread` case of relation aggregation (no separate milestone).                                                                                          |
 
 **Open: how to handle redacted events?** Should Axon expose and index redacted events or hide them from its user? This depends on how we view the purpose of redactions: are they to get rid of bad content that no one should see, or, e.g., moderation decisions that may want to be reviewed/reverted later?
 
@@ -235,14 +235,14 @@ We do not build any federation code in v1.
 
 Originally post-MVP, roughly in priority order — several of these have since shipped or begun ahead of MVP freeze, noted inline:
 
-1. **Push** (APNs first, then FCM and web push). P0 immediately after MVP. *(Not started.)*
-2. ~~Full OAuth 2.0 + PKCE.~~ *(Shipped ahead of freeze — M14, ADR 0054.)*
-3. **Bridge metadata normalization.** *(Not started.)*
-4. **Import-from-existing-client onboarding** (Element X store reader, maybe gomuks). *(Not started.)*
-5. **Durable media storage** (S3-compatible backend) when a hosted Axon deployment needs it. *(Not started; still explicitly out of scope — see "What not to build" in `implementation.md`.)*
-6. **Per-room / per-language search analyzers.** *(Not started.)*
-7. **Spaces as first-class API resources.** *(Not started.)*
-8. **Native clients** (iOS first, then desktop) and a web client. See [ADR 0031](../adr/0031-client-strategy.md) for the client strategy. *(Web client (`axon-web`) pulled forward and under active parallel development, well beyond the original alpha scope — see `docs/client-parity.md`. iOS/Android/macOS native clients have not started.)*
-9. **Federation of agents v2.** *(Not started.)*
+1. **Push** (APNs first, then FCM and web push). P0 immediately after MVP. _(Not started.)_
+2. ~~Full OAuth 2.0 + PKCE.~~ _(Shipped ahead of freeze — M14, ADR 0054.)_
+3. **Bridge metadata normalization.** _(Not started.)_
+4. **Import-from-existing-client onboarding** (Element X store reader, maybe gomuks). _(Not started.)_
+5. **Durable media storage** (S3-compatible backend) when a hosted Axon deployment needs it. _(Not started; still explicitly out of scope — see "What not to build" in `implementation.md`.)_
+6. **Per-room / per-language search analyzers.** _(Not started.)_
+7. **Spaces as first-class API resources.** _(Not started.)_
+8. **Native clients** (iOS first, then desktop) and a web client. See [ADR 0031](../adr/0031-client-strategy.md) for the client strategy. _(Web client (`axon-web`) pulled forward and under active parallel development, well beyond the original alpha scope — see `docs/client-parity.md`. iOS/Android/macOS native clients have not started.)_
+9. **Federation of agents v2.** _(Not started.)_
 
-(Threads moved *into* the MVP as part of relation aggregation; they are no longer a post-MVP track.)
+(Threads moved _into_ the MVP as part of relation aggregation; they are no longer a post-MVP track.)

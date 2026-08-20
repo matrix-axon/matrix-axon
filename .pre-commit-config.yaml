@@ -1,46 +1,136 @@
-# Shared git-hook config for the repo, run at push time.
+# The pre-push gate. This file is the only list of what must pass before a
+# push, for both VCS front-ends (ADR 0092).
 #
-# Purpose: stop cheap, path-filtered CI failures from reaching CI. Web hooks
-# mirror web-lint-and-test.yml. Rust hooks run rustfmt and clippy (the same
-# commands as lint-and-test.yml / lint-and-clippy.yml) when rust sources
-# change. `cargo test --all` stays in `.githooks/pre-push` — it is the
-# expensive gate, not a cheap pre-push check.
+#   git users:  ./scripts/setup-hooks.sh   (runs `pre-commit install --hook-type pre-push`)
+#   jj users:   `jj push`                  (through the jj-hooks alias in AGENTS.md;
+#                                           git hooks do not fire under jj)
 #
-# Works for both VCS front-ends the team uses:
-#   * git users:  `pre-commit install --hook-type pre-push`   (fires on `git push`)
-#   * jj users:   `jj-hooks --runner pre-commit push`         (git hooks don't fire under jj)
-# Both read THIS file; only the driver differs.
+# There is no second list. `.githooks/` used to hold one, it fired for git
+# only, and the two could not be installed together — `pre-commit install`
+# refuses while `core.hooksPath` is set. That is why a rust-only `jj push`
+# once skipped rustfmt entirely (#173) and why `cargo test --all` used to run
+# for one front-end and not the other (#172).
 #
-# These two hook systems do not run together. `./scripts/setup-hooks.sh`
-# sets `core.hooksPath = .githooks`, and pre-commit's installer refuses
-# to install when that is set (`Cowardly refusing to install hooks with
-# core.hooksPath set`). Reverse the order and `setup-hooks.sh` orphans
-# the pre-commit hook by taking over hooksPath. jj users are unaffected:
-# they push through `jj-hooks`, which reads this file directly. Skipping
-# rust here would leave that path with no rustfmt.
+# Hooks are ordered cheapest-first and path-filtered, so a web-only push does
+# not build rust and a rust-only push does not run pnpm. `hook-filters` tests
+# the filters themselves: one that matches nothing reports success forever,
+# which is what #180 was.
 #
-# The prettier hook is self-contained (`language: node` + pinned
-# `additional_dependencies`), so it needs neither the repo's `node_modules`
-# nor a global prettier. The pnpm-backed hooks below use the repo's normal
-# clients/web dependencies so they match CI; run `pnpm install --frozen-lockfile`
-# in clients/web before relying on them locally or through jj-hooks. The
-# rust hooks use the repo toolchain (`rust-toolchain.toml`).
+# Everything here is check-only, and a failure prints the command that fixes
+# it. Escapes, in increasing order of bluntness:
 #
-# Check-only: failures print the same command CI expects locally.
+#   SKIP=cargo-test jj push      skip one hook
+#   git push --no-verify         skip all of them
+#   RUN_SMOKE=tui jj push        additionally run a Docker smoke lane
+#
+# Tooling: `prettier` and `actionlint` vendor their own binaries, so they
+# need nothing installed. `web-install` keeps clients/web/node_modules matching
+# the lockfile for the pnpm-backed hooks. The rust hooks use the repo toolchain
+# (`rust-toolchain.toml`).
+#
+# Not here on purpose: Playwright (browsers and minutes — `web-e2e.yml` gates
+# PRs, and clients/web/AGENTS.md says when to run it locally).
 minimum_pre_commit_version: "3.2.0"
+# So a bare `pre-commit install` picks up pre-push, matching setup-hooks.sh.
+default_install_hook_types: [pre-push]
 repos:
+  # actionlint vendors its own binary, so it needs nothing installed -- the same
+  # property that makes the prettier hook work everywhere. `.github/actionlint.yaml`
+  # (the self-hosted runner labels) is picked up from the repo root.
+  #
+  # One caveat it does NOT vendor: actionlint shells out to `shellcheck` to
+  # analyze `run:` blocks, and silently drops that analysis when shellcheck is
+  # absent -- no warning, just a smaller check. GitHub runners ship shellcheck,
+  # so CI is always the strict version and a machine without it is not. Install
+  # shellcheck locally (CONTRIBUTING.md) or expect CI to find things your push
+  # did not: that is how the SC2086s in cross-build.yml surfaced.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+        stages: [pre-push]
   - repo: local
     hooks:
-      - id: prettier-web
-        name: prettier (web, check)
+      # Cheapest first: these three are git plumbing and shell, seconds at most,
+      # and they fail before anything spends a build on the same push.
+      - id: adr-numbers
+        name: ADR numbers are unique
+        language: system
+        entry: scripts/check-adr-numbers.sh
+        files: "^docs/adr/"
+        pass_filenames: false
+        stages: [pre-push]
+      # A hook whose filter matches nothing passes forever without running --
+      # #180. This asserts the filters below select what they claim, and that
+      # every `SKIP=<id>` example in the docs still names a hook that exists.
+      # (The docs point here for the list rather than copying it; a stale
+      # SKIP= is the one way prose can name a hook and be silently wrong.)
+      - id: hook-filters
+        name: pre-push filters select what they claim
+        language: python
+        additional_dependencies: ["pyyaml"]
+        entry: scripts/check-hook-filters.py
+        files: '^(\.pre-commit-config\.yaml|scripts/(check-hook-filters\.py|setup-hooks\.sh)|AGENTS\.md|CONTRIBUTING\.md)$'
+        pass_filenames: false
+        stages: [pre-push]
+      - id: migrations-immutable
+        name: applied migrations are immutable
+        language: system
+        # No base ref: the script searches base/main, upstream/main,
+        # origin/main, main. `git fetch upstream main` before trusting a clean
+        # result -- a lagging fork's main reads as though this branch changed a
+        # published migration (AGENTS.md, ADR 0004).
+        entry: scripts/check-migrations-immutable.sh
+        # Deliberately unfiltered. A files: filter here would be decided from
+        # the push's two-ref diff, but the script walks the range commit by
+        # commit precisely so it catches a published migration edited and then
+        # reverted within one push -- whose net diff under migrations/ is
+        # empty. The filter would skip exactly the case the script exists for.
+        # Sub-second git plumbing with no build behind it, so it costs nothing
+        # to run every push.
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
+      - id: prettier
+        name: prettier (check)
         language: node
         additional_dependencies: ["prettier@3.9.4"]
         entry: prettier --check
-        # Config (.prettierrc.json) resolves by walking up from each path.
-        files: '^(.pre-commit-config.yaml|clients/web/README.md|clients/web/.*\.(ts|tsx|mjs|cjs|js|css|json|md|html|yml|yaml))$'
-        # Mirror clients/web/.prettierignore (generated / vendored files).
-        exclude: '^clients/web/(dist/|pnpm-lock\.yaml|src/api/schema\.d\.ts|public/emoji-picker-data-en\.json)'
+        # Config resolves by walking up from each path: clients/web has its own
+        # .prettierrc.json (semi/singleQuote), everything else gets the root one.
+        # `proseWrap: preserve` there means prose line breaks are never touched --
+        # this hook normalizes tables, lists and emphasis, not wrapping. Line
+        # length is a convention, not a check (AGENTS.md § Docs and prose).
+        files: '^(\.pre-commit-config\.yaml|[^/]+\.md|docs/.*\.md|(clients|crates|smoke|deploy)/.*\.md|clients/web/.*\.(ts|tsx|mjs|cjs|js|css|json|html|yml|yaml))$'
+        # Generated or not-ours, in both trees:
+        #   THIRDPARTY.md   scripts/generate-thirdparty.sh rewrites it wholesale
+        #   LICENSE.md      license text is not ours to reflow
+        #   docs/adr/       historical records; reformatting costs blame and
+        #                   buys consistency in files nobody edits after merge
+        #   clients/web/*   mirror of clients/web/.prettierignore
+        exclude: '^(THIRDPARTY\.md|LICENSE\.md|docs/adr/|clients/web/(dist/|pnpm-lock\.yaml|src/api/schema\.d\.ts|public/emoji-picker-data-en\.json))'
         pass_filenames: true
+        stages: [pre-push]
+      # Before any pnpm-backed hook: the web hooks use the repo's real
+      # node_modules, so a lockfile change that has not been installed makes
+      # them test a different tree than CI does. --frozen-lockfile can never
+      # rewrite the lockfile, so this only ever brings the tree up to it.
+      - id: web-install
+        name: web deps match the lockfile
+        language: system
+        entry: pnpm --dir clients/web install --frozen-lockfile
+        files: &web_manifest '^clients/web/(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml)$'
+        pass_filenames: false
+        stages: [pre-push]
+      # pnpm reports unmet peers as an install-time warning nobody reads.
+      # Deliberate exceptions belong in pnpm-workspace.yaml's
+      # peerDependencyRules, where they are reviewable.
+      - id: web-peers
+        name: pnpm peers check
+        language: system
+        entry: pnpm --dir clients/web peers check
+        files: *web_manifest
+        pass_filenames: false
         stages: [pre-push]
       - id: web-api-schema
         name: web API schema is current
@@ -53,36 +143,90 @@ repos:
         name: web lint
         language: system
         entry: pnpm --dir clients/web lint
-        files: '^(\.github/workflows/web-lint-and-test\.yml|clients/web/|\.pre-commit-config\.yaml)$'
+        # Same reasoning as rustfmt: gates web-test and web-build below.
+        fail_fast: true
+        files: &web_sources '^(\.github/workflows/web-lint-and-test\.yml|clients/web/|\.pre-commit-config\.yaml)'
         pass_filenames: false
         stages: [pre-push]
       - id: web-test
         name: web test
         language: system
         entry: pnpm --dir clients/web test
-        files: '^(\.github/workflows/web-lint-and-test\.yml|clients/web/|\.pre-commit-config\.yaml)$'
+        files: *web_sources
         pass_filenames: false
         stages: [pre-push]
       - id: web-build
         name: web build
         language: system
         entry: pnpm --dir clients/web build
-        files: '^(\.github/workflows/web-lint-and-test\.yml|openapi/openapi\.json|clients/web/|\.pre-commit-config\.yaml)$'
+        # Deliberately not *web_sources: the build additionally consumes
+        # openapi/openapi.json (via the generated client), which lint and the
+        # unit tests do not. A YAML alias cannot extend a scalar, so this one
+        # is spelled out -- scripts/check-hook-filters.py pins both shapes.
+        files: '^(\.github/workflows/web-lint-and-test\.yml|openapi/openapi\.json|clients/web/|\.pre-commit-config\.yaml)'
         pass_filenames: false
         stages: [pre-push]
       # Workspace members: crates/*, clients/tui, smoke/{tui,server,local-stack}.
       # rustfmt is seconds; clippy matches CI and is the next-cheapest catch.
+      #
+      # The filter is *.rs, *.toml and *.sql under those trees, not the bare
+      # directory prefixes: a full `cargo clippy --all-features --all-targets`
+      # is minutes, and a README or a corpus fixture cannot change a
+      # compilation unit.
+      #
+      # Two things here are compile-time file inputs and are in the filter for
+      # that reason, not by accident:
+      #   * tests/fixtures/ -- axon-sync's redecrypt.rs and backfill.rs
+      #     `include_str!` from it, and it lives outside crates/, so the old
+      #     directory-prefix filter missed it entirely.
+      #   * crates/axon-store/migrations/*.sql -- migrations.rs embeds the
+      #     directory with `include_dir!` (NOT sqlx::migrate!, which would drag
+      #     sqlx-sqlite in and collide with matrix-sdk's rusqlite). A .sql edit
+      #     changes the embedded checksums that axon-server reads and that
+      #     axon-store's tests assert on. Grepping only for include_str!/
+      #     migrate! misses this; check for include_dir! too.
+      # Beyond those: no sqlx::query! macros, no .sqlx offline data, and both
+      # build.rs files read only env vars and git/jj output. If that changes,
+      # widen this in the same commit -- scripts/check-hook-filters.py pins the
+      # intended selection, so it will tell you.
       - id: rustfmt
         name: rustfmt (check)
         language: system
         entry: cargo fmt --all -- --check
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rustfmt\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|crates/|clients/tui/|smoke/)'
+        # Gates the two expensive rust hooks below: a formatting violation
+        # already rejects the push, so paying for a full clippy build and the
+        # test suite behind it buys nothing. Requires rustfmt to stay ordered
+        # first among the rust hooks.
+        fail_fast: true
+        files: &rust_files '^(Cargo\.(toml|lock)|\.cargo/config\.toml|rust-toolchain\.toml|rustfmt\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|tests/fixtures/.*|(crates|clients/tui|smoke)/.*\.(rs|toml|sql))$'
         pass_filenames: false
         stages: [pre-push]
+      # CI re-types this command rather than running the hook, unlike
+      # actionlint/adr-numbers/hook-filters above. Tracked in #200; keep the
+      # flag order in lint-and-clippy.yml matching this line until it is.
       - id: rust-clippy
         name: clippy
         language: system
         entry: cargo clippy --all-features --all-targets -- -D warnings
-        files: '^(Cargo\.(toml|lock)|rust-toolchain\.toml|\.pre-commit-config\.yaml|\.github/workflows/lint-and-(test|clippy)\.yml|crates/|clients/tui/|smoke/)'
+        files: *rust_files
+        pass_filenames: false
+        stages: [pre-push]
+      # The expensive gate, and the only thing in this file that is not also a
+      # push-triggered CI job: lint-and-test.yml is workflow_dispatch-only and
+      # lint-and-clippy.yml has no test step, so nothing else runs the suite
+      # before review. `SKIP=cargo-test` to skip it deliberately.
+      - id: cargo-test
+        name: cargo test --all
+        language: system
+        entry: cargo test --all
+        files: *rust_files
+        pass_filenames: false
+        stages: [pre-push]
+      # Last, and a no-op unless RUN_SMOKE names a lane. Docker + minutes.
+      - id: smoke-gate
+        name: smoke gate (opt in with RUN_SMOKE=<lane>)
+        language: system
+        entry: scripts/smoke-gate-hook.sh
+        always_run: true
         pass_filenames: false
         stages: [pre-push]

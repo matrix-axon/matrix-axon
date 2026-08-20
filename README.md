@@ -2,9 +2,9 @@
 
 Axon is a self-hosted personal agent for [Matrix](https://matrix.org). It sits between your homeserver(s) and your clients, providing the persistent state, full-text search index, and per-device coherence that Matrix clients otherwise have to reinvent on every install.
 
-Matrix's encrypted and decentralized architecture can make full client usability challenging. This "middle" layer aims to solve that challenge. It is similar to the [back-end for front-end](https://philcalcado.com/2015/09/18/the_back_end_for_front_end_pattern_bff.html) concept, with the added wrinkle that it is intended to run as a separate instance per user. Old-timers may find a familiar with analogy with [ZNC Bouncer](https://en.wikipedia.org/wiki/ZNC), an agent that sits between an IRC client and an IRC server.
+Matrix's encrypted and decentralized architecture makes full client usability challenging. This "middle" layer aims to solve that challenge. It is similar to the [back-end for front-end](https://philcalcado.com/2015/09/18/the_back_end_for_front_end_pattern_bff.html) concept, with the added wrinkle that it is intended to run as a separate instance per user. Old-timers may find a familiar with analogy with [ZNC Bouncer](https://en.wikipedia.org/wiki/ZNC), an agent that sits between an IRC client and an IRC server.
 
-What sets Axon apart is where the hard work happens. Sync, E2EE decryption, and a full-history search index all live in Axon itself, not duplicated in every client — so a client can be wiped and reinstalled and be back to full functionality in seconds, with no history to re-sync and no on-device index to rebuild. That one persistent brain also covers multiple Matrix accounts (personal and work, even on different homeservers) under a single search index and API, and resolves edits, reactions, and threads server-side so a late reaction to an old message is never silently dropped just because a client's timeline window has moved on. Start composing a message on the mobile web app and continue that same draft instantly via the TUI on desktop. No saving required.
+Axon differs from most clients by cleanly separating the end-user interface from the "hard" parts of the Matrix ecosystem: sync, E2EE decryption, and a full-history search index all live in Axon itself, not duplicated in every client — so a client can be wiped and reinstalled and be back to full functionality immediately, with no history to re-sync and no on-device index to rebuild. That one persistent brain also covers multiple Matrix accounts (personal and work, even on different homeservers) under a single search index and open API, and resolves edits, reactions, and threads server-side so a late reaction to an old message is never silently dropped just because a client's timeline window has moved on. Start composing a message on the mobile web app and continue that same draft instantly via the TUI on desktop. No saving required.
 
 Two reference clients consume that same open, versioned `/v1/` API today — [`axon-tui`](clients/tui/README.md), a keyboard-first terminal client, and [`axon-web`](clients/web/README.md), a desktop/mobile browser and (soon to be packaged) Tauri desktop client — proof that building a third is a client-only project, not a fork. Check out our [client parity](docs/client-parity.md) document for the current implementation status of these clients and future roadmap. And because Axon can be self-hosted on your own hardware or cloud instance rather than a SaaS holding your decrypted history, it's working toward a single-command setup that works painlessly on Linux, MacOS, or Windows: a Docker Compose stack that brings up Postgres, Axon, and the web client behind one front door, with Caddy handling TLS and a Tailscale profile for private remote access already built in.
 
@@ -26,7 +26,7 @@ See [`docs/mvp/prd.md`](docs/mvp/prd.md) for a more complete product description
 
 ## User quick start with Docker
 
-Run the full Axon stack — server **and** the web client — from prebuilt images, with **no clone and no build**. Images are public on GHCR, so no `docker login` or credentials are required.
+Run the full Axon stack — server **and** the web client — from prebuilt images, with **no clone and no build**. Images are public, so no `docker login` or credentials required.
 
 **Prereqs:** [Docker](https://www.docker.com/products/docker-desktop/)
 
@@ -68,200 +68,47 @@ One Rust binary, one Postgres database, media cached to local disk. See the [arc
 
 ## Clients
 
-| Client | Platform | Status |
-| --- | --- | --- |
-| [`axon-tui`](clients/tui/README.md) | Terminal | Active (MVP reference client) |
-| [`axon-web`](clients/web/README.md) | Web browser + Windows/Linux/Mac desktop (Tauri) | Active (nearing MVP) |
-| `axon-apple` | iOS + macOS (shared Swift Package) | Planned |
-| `axon-android` | Android | Planned |
+| Client                              | Platform                                        | Status                        |
+| ----------------------------------- | ----------------------------------------------- | ----------------------------- |
+| [`axon-tui`](clients/tui/README.md) | Terminal                                        | Active (MVP reference client) |
+| [`axon-web`](clients/web/README.md) | Web browser + Windows/Linux/Mac desktop (Tauri) | Active (nearing MVP)          |
+| `axon-apple`                        | iOS + macOS (shared Swift Package)              | Planned                       |
+| `axon-android`                      | Android                                         | Planned                       |
 
 See [ADR 0031](docs/adr/0031-client-strategy.md) for the client strategy and sequencing.
 
-## Developer quick-start
+## Build it from source
 
-Prerequisites: Rust (stable). Docker is only needed if you don't have a local Postgres instance.
-
-Once prerequisites are installed, generate a starter config once:
-
-```bash
-cargo run -p axon-server -- init
-```
-
-`axon init` writes a minimal config with a generated `store_key` and Postgres URL.
-After that, run from the source checkout with:
+Prerequisites are Rust (via rustup) and, if you don't already have Postgres
+running locally, Docker.
 
 ```bash
-./run.sh          # macOS / Linux / WSL  — starts axon-server (default)
-./run.sh tui      # starts axon-tui instead
-./run.sh clean    # destroys Postgres data volume and exits (no rebuild)
-.\run.ps1         # Windows (PowerShell) — starts axon-server (default)
-.\run.ps1 tui     # axon-tui
-.\run.ps1 clean   # destroys Postgres data volume and exits (no rebuild)
+git clone https://github.com/matrix-axon/matrix-axon
+cd matrix-axon
+cargo run -p axon-server -- init   # generates a config + store_key, once
+./run.sh                           # axon-server  (.\run.ps1 on Windows)
+./run.sh tui                       # axon-tui
 ```
 
-The run script is source-checkout developer scaffolding: it loads `.env` if one
-exists, runs the chosen target, and tears down any containers it started on exit
-— whether by Ctrl-C, SIGTERM, or any other cause. First-run config and secret
-generation live in `axon init`, not in the shell scripts.
+`run.sh` uses a local Postgres if one is already listening on
+`127.0.0.1:5432`, and otherwise starts one via Docker Compose, tearing down
+whatever it started on exit.
 
-**Postgres:** if a Postgres instance is already reachable at
-`POSTGRES_HOST:POSTGRES_PORT` (defaulting to `127.0.0.1:5432`) when the
-script starts, it uses that directly and Docker is not required at all.
-Otherwise it starts Postgres via Docker Compose automatically.
-
-The steps below explain what the run scripts do and how to configure the pieces
-individually.
-
-### 1. Install Prerequisites
-
-#### Ubuntu
-
-This should work on a native Linux box or in a WSL environment on Windows.
-
-```bash
-sudo apt install docker.io docker-compose-v2
-sudo snap install --classic rustup
-```
-#### macOS
-
-If you don't yet have Homebrew, Rust, or Docker, these commmands will install all three:
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-brew install rust
-brew install --cask docker
-```
-
-You likely need to start Docker from the MacOS desktop the first time and grant it administrative privileges to run.
-
-#### Windows (PowerShell)
-
-> WSL2 users should follow the Ubuntu path above instead.
-
-Install Rust and Docker Desktop via [winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/):
-
-```powershell
-winget install Rustlang.Rustup
-winget install Docker.DockerDesktop
-```
-
-You likely need to start Docker Desktop from the Start menu the first time and grant it administrative privileges to run.
-
-PowerShell restricts running local scripts by default. Allow it for your user account once:
-
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
-
-### 2. Install and Start Postgres
-
-Run these commands from the top-level matrix-axon directory.
-
-**With Docker (easiest, optional):**
-```bash
-docker compose up -d postgres
-```
-
-**Without Docker** — create the role and database in your local Postgres instance:
-```bash
-psql postgres <<SQL
-CREATE ROLE axon LOGIN PASSWORD 'axon';
-CREATE DATABASE axon OWNER axon;
-SQL
-```
-
-### 3. Configure
-
-```bash
-cargo run -p axon-server -- init
-```
-
-`axon init` writes the generated config to the platform config directory by
-default (or to `--config <PATH>` if you pass one). It generates a real
-`sync.store_key`; do not use the `change-me` placeholder from the example file
-for a live instance.
-
-The server also loads `.env` automatically on startup. `.env.example` remains a
-manual reference for development or CI environments that prefer environment
-variables; if you copy it, replace `AXON_SYNC__STORE_KEY=change-me` with a real
-secret and adjust `DATABASE_URL` if your Postgres is configured differently.
-
-> **Local Postgres detected automatically.** If you already have Postgres running on `127.0.0.1:5432` (Homebrew, Postgres.app, a system package, etc.), `run.sh`/`run.ps1` will detect it and skip Docker entirely. Just make sure the role and database exist (see the "Without Docker" step above) and that `database.url` in your generated config points to it. For the manual env-var path, set `DATABASE_URL` in `.env`; to use a different host or port for launcher detection, set `POSTGRES_HOST` and `POSTGRES_PORT` in `.env` or your shell.
->
-> **macOS + Docker note:** `localhost` can resolve to IPv6 (`::1`) on macOS, but Docker only binds to IPv4. The examples use `127.0.0.1` explicitly to avoid this.
-
-### 4. Build and run
-
-```bash
-# Enable the git pre-commit hook (fmt + clippy) — once per clone
-./scripts/setup-hooks.sh
-
-# Quick path — auto-detects local Postgres or starts one via Docker, tears down on exit:
-./run.sh          # macOS / Linux / WSL  — axon-server (default)
-./run.sh tui      # axon-tui
-./run.sh clean    # destroys Postgres data volume and exits (no rebuild)
-.\run.ps1         # Windows (PowerShell) — axon-server (default)
-.\run.ps1 tui     # axon-tui
-.\run.ps1 clean   # destroys Postgres data volume and exits (no rebuild)
-
-# Or run directly if Postgres is already up:
-cargo run -p axon-server
-cargo run -p axon-tui
-```
-
-In another shell:
-```bash
-curl localhost:8080/healthz     # -> {"status":"ok"}
-curl -H "Authorization: Bearer <token>" localhost:8080/v1/status  # backfill/sync/build status, once a token exists
-```
-
-If the server starts interactively against a database with no Matrix accounts
-and no existing client credentials, it offers to arm a one-time web bootstrap.
-Accepting that prompt prints a per-boot `/bootstrap/<code>` URL, where you can
-create the first bearer token or, when OAuth is configured, bind and mint the
-first SSO-backed credential. The code is six unambiguous characters, and the
-web bootstrap locks for the rest of that process after six wrong bootstrap
-URLs. After any account, token, or OAuth identity exists, the web bootstrap
-closes permanently; use the backend CLI/admin paths for later credentials.
-
-CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push. Locally, rustfmt and clippy also run from the shared `.pre-commit-config.yaml` at pre-push time when rust files change (git: `pre-commit install --hook-type pre-push`; jj: `jj push` through the `jj-hooks` alias in `AGENTS.md`). `./scripts/setup-hooks.sh` still enables `.githooks/` (`cargo test --all` on push). Bypass a single git commit with `git commit --no-verify`.
-
-### 5. Start over
-
-If you want to restart with a fresh instance and fresh data, just destroy and restart the postgres Docker instance per below.
-
-```bash
-docker compose down -v postgres
-docker compose up -d postgres
-```
-
-### 6. Troubleshooting
-
-While we are still "pre-release," there may be some breaking updates. If you get an error like `Error: connecting to database` after `cargo run -p axon-server`, try starting a fresh postgres docker instance per the instructions directly above.
-
-If startup fails because `sqlx` says an already-applied migration "has been modified", you can repair the local metadata without dropping your database:
-
-```bash
-cargo run -p axon-server --features dev-tools -- db repair-migrations
-cargo run -p axon-server --features dev-tools -- db repair-migrations --apply
-```
-
-The command compares the current embedded migration checksums against
-`_sqlx_migrations` and rewrites only the metadata rows for matching versions. It
-does not touch your application tables or Matrix history. This is intended for
-local developer databases after rebases or edited historical migration files, not
-for production remediation, so it is only compiled into `axon-server` when the
-`dev-tools` Cargo feature is enabled.
+**Planning to send a pull request?** [CONTRIBUTING.md](CONTRIBUTING.md) has the
+full prerequisite list (Node and pnpm for the web client, `pre-commit` for the
+push gate, jj), first-time setup, what the pre-push gate runs, and
+troubleshooting.
 
 ## Docs
 
-|                                                   |                                                  |
-| ------------------------------------------------- | ------------------------------------------------ |
-| [PRD](docs/mvp/prd.md)                            | What we're building and why                      |
-| [Tech spec](docs/mvp/tech-spec.md)                | Architecture decisions                           |
-| [Implementation spec](docs/mvp/implementation.md) | Milestone-by-milestone build plan                |
-| [AGENTS.md](AGENTS.md)                            | Orientation for contributors (human and agentic) |
-| [ADRs](docs/adr/)                                 | Decisions made during implementation             |
+|                                                   |                                                              |
+| ------------------------------------------------- | ------------------------------------------------------------ |
+| [CONTRIBUTING.md](CONTRIBUTING.md)                | Setup, the pre-push gate, and conventions                    |
+| [PRD](docs/mvp/prd.md)                            | What we're building and why                                  |
+| [Tech spec](docs/mvp/tech-spec.md)                | Architecture decisions                                       |
+| [Implementation spec](docs/mvp/implementation.md) | Milestone-by-milestone build plan                            |
+| [AGENTS.md](AGENTS.md)                            | Working conventions and current state, for humans and agents |
+| [ADRs](docs/adr/)                                 | Decisions made during implementation                         |
 
 ## Environment variables
 
@@ -269,13 +116,13 @@ Two kinds of `AXON_`-prefixed environment variables exist:
 
 **Standalone vars** — not tied to any config field, used by the CLI directly:
 
-| Variable         | Used by                              | Meaning                                                                                          |
-| ---------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `AXON_CONFIG`    | server, all CLI subcommands           | Path to `axon.toml`, when not passed via `--config`. Falls back to `./axon.toml`, then the platform config dir. |
-| `DATABASE_URL`   | server, all CLI subcommands           | Postgres connection string. Also settable as `AXON_DATABASE__URL` or `[database].url`.             |
-| `AXON_BASE_URL`  | `axon utd redecrypt` (HTTP CLI calls), TUI | Base URL of the running axon-server to call. **Defaults to `http://127.0.0.1:8080` — set explicitly for any non-local server.** |
-| `AXON_TOKEN`     | `axon utd redecrypt`, TUI             | Bearer token sent with the request, in place of `--token` (web does not consume token from env)     |
-| `RUST_LOG`       | server                                | Overrides `log.level` / `AXON_LOG__LEVEL` with a raw `tracing` filter directive.                    |
+| Variable        | Used by                                    | Meaning                                                                                                                         |
+| --------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `AXON_CONFIG`   | server, all CLI subcommands                | Path to `axon.toml`, when not passed via `--config`. Falls back to `./axon.toml`, then the platform config dir.                 |
+| `DATABASE_URL`  | server, all CLI subcommands                | Postgres connection string. Also settable as `AXON_DATABASE__URL` or `[database].url`.                                          |
+| `AXON_BASE_URL` | `axon utd redecrypt` (HTTP CLI calls), TUI | Base URL of the running axon-server to call. **Defaults to `http://127.0.0.1:8080` — set explicitly for any non-local server.** |
+| `AXON_TOKEN`    | `axon utd redecrypt`, TUI                  | Bearer token sent with the request, in place of `--token` (web does not consume token from env)                                 |
+| `RUST_LOG`      | server                                     | Overrides `log.level` / `AXON_LOG__LEVEL` with a raw `tracing` filter directive.                                                |
 
 TUI-specific display vars (`AXON_FONT_SIZE`, `AXON_IMAGE_PROTOCOL`, `AXON_NO_IMAGE_QUERY`) are documented in [`clients/tui/README.md`](clients/tui/README.md).
 

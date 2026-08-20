@@ -101,7 +101,7 @@ These are deliberately deferred. Many appear on the post-MVP roadmap.
 - **Migration tooling from existing clients.** Onboarding is fresh sync only.
 - **QR-code device verification.** Interactive SAS (emoji) verification and recovery-key device verification ship as a first-class account-lifecycle API (and `axon-tui` can drive them); QR-code verification is a follow-up.
 - **Native desktop / iOS clients.** A reference iOS app is a separate future project; the MVP ships generated Swift stubs only.
-- **Full OAuth 2.0 server.** Bearer tokens for MVP; OAuth + PKCE later. *(Post-MVP, shipped ahead of MVP freeze: M14 landed — axon is its own minimal OAuth 2.0 authorization server and an OIDC relying party to Google/Microsoft, ADR 0054. Bearer tokens remain the wire protocol; OAuth is an additional way to mint one.)*
+- **Full OAuth 2.0 server.** Bearer tokens for MVP; OAuth + PKCE later. _(Post-MVP, shipped ahead of MVP freeze: M14 landed — axon is its own minimal OAuth 2.0 authorization server and an OIDC relying party to Google/Microsoft, ADR 0054. Bearer tokens remain the wire protocol; OAuth is an additional way to mint one.)_
 - **Bridge metadata normalization.** Bridged events flow as ordinary Matrix events; clients render whatever the bridge places in event content.
 - **Per-room or per-language search analyzers.** One default language-agnostic analyzer for MVP.
 - **Durable media storage backend (S3-compatible).** MVP uses local disk cache only.

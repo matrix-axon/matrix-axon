@@ -66,7 +66,7 @@ Two other findings from the same capture, both ruling things out:
 - The `content-visibility: auto` fix on `.event-row` was **already deployed**
   when this trace was taken (verified in the served CSS bundle). It is not the
   answer to this particular delay.
-- The reporter sees the same behaviour in the installed PWA and in a Safari tab,
+- The reporter sees the same behavior in the installed PWA and in a Safari tab,
   so this is not a standalone-display-mode quirk.
 
 ## Decision
@@ -119,7 +119,7 @@ scrolling and text selection fighting the pan — but not for the reason given.
   harness measures main-thread marks under Chromium CPU throttling; this defect
   costs zero main-thread time and needs a UIKit gesture. Unit tests cover the
   guard (an edge-origin swipe must not navigate, and must leave the `touchmove`
-  unclaimed); the behaviour itself was verified on-device. A green harness run
+  unclaimed); the behavior itself was verified on-device. A green harness run
   is not evidence about this class of bug.
 - **ADR 0071's windowing follow-up still stands on its own merits.** This ADR
   explains the six-room report, not the timeline-length scaling the harness

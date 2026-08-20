@@ -1,6 +1,6 @@
 # Smoke Testing Plan
 
-> **Status:** S1 has shipped, and the stub lane is now the required PR job this plan originally called for — `smoke.yml` runs `scripts/smoke-gate.sh tui` on every pull request (no Docker, ~90s). The Docker-backed lanes remain off the PR path and run on push to `main` and nightly; `scripts/smoke-gate.sh all` also runs locally via the pre-push hook's `RUN_SMOKE=` opt-in. The lanes were split once measured: keeping all of them manual meant nothing ran automatically, and `scroll_pin_on_relation_refresh` sat broken on `main` undetected (#190). Most of S2's journey coverage (login, the full mutation set, live updates/resilience, the live-stack journey) is also built out under the same harness. S3 (dedicated Windows/macOS PTY runners) and S4 (external-homeserver profile) have not started. This plan predates 7b bearer-token auth landing — see the note under "Assumptions" below, which is now stale in one respect.
+> **Status:** S1 has shipped, and the stub lane is now the required PR job this plan originally called for — `smoke.yml` runs `scripts/smoke-gate.sh tui` on every pull request (no Docker, ~90s). The Docker-backed lanes remain off the PR path and run on push to `main` and nightly; `scripts/smoke-gate.sh all` also runs locally via the pre-push hook's `RUN_SMOKE=` opt-in (the `smoke-gate` hook in `.pre-commit-config.yaml`, which fires for git and jj alike — ADR 0092). The lanes were split once measured: keeping all of them manual meant nothing ran automatically, and `scroll_pin_on_relation_refresh` sat broken on `main` undetected (#190). Most of S2's journey coverage (login, the full mutation set, live updates/resilience, the live-stack journey) is also built out under the same harness. S3 (dedicated Windows/macOS PTY runners) and S4 (external-homeserver profile) have not started. This plan predates 7b bearer-token auth landing — see the note under "Assumptions" below, which is now stale in one respect.
 
 ## Summary
 
@@ -61,7 +61,7 @@ tests; contract details stay in the `axon-api` tests; deep E2EE stays in
 The first draft proposed Python (pytest + pexpect + pyte + pywinpty) on the
 rationale that a non-Rust harness guarantees black-box discipline and survives
 a future repo split. That rationale does not hold up: black-boxness is a
-*dependency* property, not a language property. A Rust crate that depends on
+_dependency_ property, not a language property. A Rust crate that depends on
 no `axon-*` crate and only spawns released binaries is exactly as black-box as
 a Python package, and each harness moves intact in a split (`smoke/server`
 with the server, `smoke/tui` with the client).
@@ -115,7 +115,7 @@ artifacts — no JUnit machinery.
 - Every run mints a run ID; mutating scenarios embed it in message bodies so
   observations match only their own writes.
 - Waiting is condition-based polling with bounded deadlines. Eventually
-  consistent *observations* are retried; failed *scenarios* are not.
+  consistent _observations_ are retried; failed _scenarios_ are not.
 - On failure the runner captures: server log tail, HTTP request/response
   journal, WS frames, PTY transcript and final rendered screen, with
   configured secrets redacted.
@@ -144,7 +144,7 @@ artifacts — no JUnit machinery.
   activates an account that then appears in `GET /v1/accounts` /
   `GET /v1/accounts/{id}`; logout transitions state; re-login reactivates.
 - **Inbound flow** (S1): a peer — a plain Matrix Client-Server API client
-  over reqwest, in an *unencrypted* room — invites the Axon account and sends
+  over reqwest, in an _unencrypted_ room — invites the Axon account and sends
   a marked message; assert the room appears in `/v1/rooms`, the event in the
   timeline and in event lookup, and a `timeline.event` frame arrives on
   `/v1/ws`.
