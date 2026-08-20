@@ -51,6 +51,9 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || inputs.lane == 'tui' || inputs.lane == 'all'
     runs-on: ubuntu-latest
     steps:
+      - name: Deliberate ruleset test failure
+        run: echo "test"
+
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
