@@ -28,6 +28,13 @@ function invite(roomId: string, name: string): InviteDto {
   }
 }
 
+function directInvite(roomId: string): InviteDto {
+  return {
+    ...invite(roomId, roomId),
+    is_direct: true,
+  }
+}
+
 const server = setupServer(
   http.get(`${TEST_BASE_URL}/v1/invites`, () =>
     HttpResponse.json({ data: [] }),
@@ -82,6 +89,21 @@ describe('InvitesPage', () => {
     expect(getByRole('button', { name: 'Reject' })).toBeTruthy()
     expect(getByRole('button', { name: 'Accept all' })).toBeTruthy()
     expect(getByRole('button', { name: 'Reject all' })).toBeTruthy()
+  })
+
+  it('uses a human-readable title when an unnamed DM has a room-ID fallback name', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+        HttpResponse.json({ data: [directInvite('!opaque-room-id:hs')] }),
+      ),
+    )
+    const { findByText, queryByText } = renderInbox()
+
+    expect(await findByText('Direct message')).toBeTruthy()
+    expect(
+      await findByText(/Invited by Alice \(@alice:hs\) · Direct message/),
+    ).toBeTruthy()
+    expect(queryByText('!opaque-room-id:hs')).toBeNull()
   })
 
   it('reject posts leave and removes the row', async () => {
