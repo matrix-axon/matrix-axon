@@ -91,6 +91,7 @@ import {
   type ThreadsStore,
 } from '../stores/threads'
 import type { ThreadUnreadStore } from '../stores/thread-unread'
+import { THREAD_READ_MARKERS_NAMESPACE } from '../stores/device-state'
 import {
   type EventDto,
   type HeadLoadOutcome,
@@ -1030,6 +1031,10 @@ export function RoomPage() {
     ephemeral.typingUsers(accountId, roomId, ownUserId),
     members,
   )
+  const markersHydrated = deviceState.hydrated(
+    accountId,
+    THREAD_READ_MARKERS_NAMESPACE,
+  )
   const roomReadMarker = deviceState.readMarker(accountId, roomId)
   /**
    * The room marker, but only where it can speak for a *thread's* read position.
@@ -1118,6 +1123,15 @@ export function RoomPage() {
     timeline.events.value.length > 0
 
   useEffect(() => {
+    // Not before the per-thread markers have arrived. Thread summaries come back
+    // first on a fresh load, and judging them against the *room* marker in the
+    // meantime flags every thread whose replies are newer than the main
+    // timeline — a badge on the Threads button that corrects itself a moment
+    // later, seen as a flash on every reload. An unhydrated namespace is "not
+    // known yet", not "no marker", the same distinction the receipt gate makes.
+    if (!deviceState.hydrated(accountId, THREAD_READ_MARKERS_NAMESPACE)) {
+      return
+    }
     for (const { summary, threadMarker, rootPreview } of threadSummaryStates) {
       threadUnread.reconcileSummary(summary, {
         accountId,
@@ -1135,6 +1149,8 @@ export function RoomPage() {
     roomId,
     title,
     roomMarkerForThreads,
+    deviceState,
+    markersHydrated,
   ])
 
   /**

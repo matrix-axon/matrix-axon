@@ -133,6 +133,13 @@ function renderRoom(
     storedRoomMarker?: { event_id: string; origin_ts: number }
     /** `thread_read_markers` entries already stored, as reading a thread leaves. */
     storedThreadMarkers?: { root: string; eventId: string; originTs: number }[]
+    /** The same, but delivered through hydration and *after* the summaries —
+     *  the live ordering on a fresh load. */
+    hydratedThreadMarkers?: {
+      root: string
+      eventId: string
+      originTs: number
+    }[]
     /** Make the timeline answer *after* the room list, as a warm cache does. */
     timelineSlow?: boolean
   } = {},
@@ -219,8 +226,33 @@ function renderRoom(
     ),
     http.get(
       `${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`,
-      ({ params }) =>
-        HttpResponse.json({
+      async ({ params }) => {
+        if (
+          params.namespace === 'thread_read_markers' &&
+          options.hydratedThreadMarkers !== undefined
+        ) {
+          // Device state answers after the thread summaries, as it does live.
+          await new Promise((resolve) => setTimeout(resolve, 80))
+          return HttpResponse.json({
+            data: {
+              namespace: 'thread_read_markers',
+              entries: Object.fromEntries(
+                options.hydratedThreadMarkers.map((m) => [
+                  `${encodeURIComponent(ROOM)}:${encodeURIComponent(m.root)}`,
+                  {
+                    value: {
+                      room_id: ROOM,
+                      root_event_id: m.root,
+                      event_id: m.eventId,
+                      origin_ts: m.originTs,
+                    },
+                  },
+                ]),
+              ),
+            },
+          })
+        }
+        return HttpResponse.json({
           data: {
             namespace: params.namespace,
             entries:
@@ -229,7 +261,8 @@ function renderRoom(
                 ? { [ROOM]: { value: options.storedRoomMarker } }
                 : {},
           },
-        }),
+        })
+      },
     ),
     http.put(`${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`, () =>
       HttpResponse.json({ data: { updated_at: '2026-08-19T12:00:00Z' } }),
@@ -490,6 +523,31 @@ describe('a thread view names the room receipt (ADR 0096)', () => {
 
     expect(reads).toContain(MAIN.event_id)
     expect(reads).not.toContain(REPLY_2.event_id)
+  })
+
+  it('never flashes a false unread while markers are still hydrating', async () => {
+    const { services, findByText } = renderRoom({
+      threads: [MAIN_THREAD],
+      hydratedThreadMarkers: [
+        { root: ROOT, eventId: REPLY_2.event_id, originTs: REPLY_2.origin_ts },
+      ],
+    })
+    let peak = 0
+    const watch = setInterval(() => {
+      peak = Math.max(peak, services.threadUnread.count.value)
+    }, 5)
+    await findByText(`body of ${MAIN.event_id}`)
+    // Past this test's own receipt debounce as well as the hydration delay: the
+    // sender's timer outlives `cleanup()`, so a receipt left in flight lands in
+    // the *next* test's handler (the hazard `RoomPage.test.tsx` documents).
+    await settleReceipts()
+    clearInterval(watch)
+
+    // The thread is read; its marker just arrives after the summaries. Judging
+    // it against the room marker in the meantime shows an unread badge that
+    // corrects itself a moment later — visible on reload as a flash.
+    expect(peak).toBe(0)
+    expect(services.threadUnread.count.value).toBe(0)
   })
 
   it('still sends when the room has other threads the user has never opened', async () => {

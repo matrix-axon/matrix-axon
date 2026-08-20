@@ -200,6 +200,12 @@ before starting a milestone.
   an unfiltered one lets an unrendered event become the receipt target _and_ the
   position of the "new messages" line. Caught in review on #165 — the first
   version filtered only local echoes and the thread cutoff.
+- **Reconciliation waits for the markers.** Thread summaries come back before
+  device state on a fresh load, so reconciling in between judges every thread
+  against the _room_ marker and flags the ones whose replies are newer than the
+  main timeline — a Threads badge that corrects itself a moment later, visible as
+  a flash on every reload. An unhydrated namespace is "not known yet", not "no
+  marker".
 - **A thread member can be the room's receipt target, behind a gate** (ADR 0096).
   Thread members are hidden from the main timeline, so nothing the room view can
   name ever covers them — in a room whose arrival-newest events are all replies,
