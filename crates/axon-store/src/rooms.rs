@@ -187,8 +187,11 @@ impl Store {
     /// Deletes the account's existing summary rows and re-inserts them with
     /// the same `DISTINCT ON` shape the migration used, so a drifted row
     /// (or a forgotten write-path hook) can be repaired without restarting.
-    /// Not on the request path — `list_rooms` reads whatever is already
-    /// persisted. Returns the number of summary rows written.
+    /// Display and visibility are refreshed from `room_state` in the **same
+    /// transaction** (issue #211) so a concurrent `list_rooms` cannot observe
+    /// rebuilt rows with the column defaults. Not on the request path —
+    /// `list_rooms` reads whatever is already persisted. Returns the number of
+    /// summary rows written.
     pub async fn rebuild_room_summaries(&self, account_id: Uuid) -> Result<u64, StoreError> {
         let mut tx: Transaction<'_, Postgres> = self.pool.begin().await?;
         sqlx_core::query::query("DELETE FROM room_summaries WHERE account_id = $1")
@@ -227,16 +230,26 @@ impl Store {
         .bind(account_id)
         .execute(&mut *tx)
         .await?;
+        // Same plpgsql function the live write path uses, so display /
+        // visibility cannot drift from a second SQL copy. Inside this
+        // transaction so a concurrent list_rooms cannot observe rebuilt
+        // rows with the column defaults (hidden_left / hidden_tombstoned
+        // false) before refresh runs (issue #211).
+        sqlx_core::query::query(
+            "SELECT refresh_room_summary_display(account_id, room_id) \
+             FROM room_summaries WHERE account_id = $1",
+        )
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
-        self.refresh_account_room_summary_display(account_id)
-            .await?;
         Ok(content.rows_affected() + fallback.rows_affected())
     }
 
     /// Copy current `room_state` display / visibility onto one summary row.
     /// No-op if the room has no summary yet (no events). Used after a watched
     /// state write and after inserting a brand-new summary.
-    pub(crate) async fn refresh_room_summary_display(
+    pub async fn refresh_room_summary_display(
         &self,
         account_id: Uuid,
         room_id: &str,
@@ -246,62 +259,6 @@ impl Store {
             .bind(room_id)
             .execute(&self.pool)
             .await?;
-        Ok(())
-    }
-
-    async fn refresh_account_room_summary_display(
-        &self,
-        account_id: Uuid,
-    ) -> Result<(), StoreError> {
-        sqlx_core::query::query(
-            "UPDATE room_summaries s \
-             SET name = src.name, \
-                 topic = src.topic, \
-                 avatar_url = src.avatar_url, \
-                 canonical_alias = src.canonical_alias, \
-                 room_type = src.room_type, \
-                 hidden_left = src.hidden_left, \
-                 hidden_tombstoned = src.hidden_tombstoned \
-             FROM ( \
-                 SELECT s2.account_id, s2.room_id, \
-                        name_rs.content->>'name' AS name, \
-                        topic_rs.content->>'topic' AS topic, \
-                        avatar_rs.content->>'url' AS avatar_url, \
-                        alias_rs.content->>'alias' AS canonical_alias, \
-                        create_rs.content->>'type' AS room_type, \
-                        COALESCE(mem_rs.content->>'membership' IN ('leave', 'ban'), FALSE) \
-                            AS hidden_left, \
-                        tomb_rs.event_id IS NOT NULL AS hidden_tombstoned \
-                 FROM room_summaries s2 \
-                 JOIN accounts ac ON ac.account_id = s2.account_id \
-                 LEFT JOIN room_state name_rs \
-                   ON name_rs.account_id = s2.account_id AND name_rs.room_id = s2.room_id \
-                  AND name_rs.event_type = 'm.room.name' AND name_rs.state_key = '' \
-                 LEFT JOIN room_state topic_rs \
-                   ON topic_rs.account_id = s2.account_id AND topic_rs.room_id = s2.room_id \
-                  AND topic_rs.event_type = 'm.room.topic' AND topic_rs.state_key = '' \
-                 LEFT JOIN room_state avatar_rs \
-                   ON avatar_rs.account_id = s2.account_id AND avatar_rs.room_id = s2.room_id \
-                  AND avatar_rs.event_type = 'm.room.avatar' AND avatar_rs.state_key = '' \
-                 LEFT JOIN room_state alias_rs \
-                   ON alias_rs.account_id = s2.account_id AND alias_rs.room_id = s2.room_id \
-                  AND alias_rs.event_type = 'm.room.canonical_alias' AND alias_rs.state_key = '' \
-                 LEFT JOIN room_state create_rs \
-                   ON create_rs.account_id = s2.account_id AND create_rs.room_id = s2.room_id \
-                  AND create_rs.event_type = 'm.room.create' AND create_rs.state_key = '' \
-                 LEFT JOIN room_state mem_rs \
-                   ON mem_rs.account_id = s2.account_id AND mem_rs.room_id = s2.room_id \
-                  AND mem_rs.event_type = 'm.room.member' AND mem_rs.state_key = ac.user_id \
-                 LEFT JOIN room_state tomb_rs \
-                   ON tomb_rs.account_id = s2.account_id AND tomb_rs.room_id = s2.room_id \
-                  AND tomb_rs.event_type = 'm.room.tombstone' AND tomb_rs.state_key = '' \
-                 WHERE s2.account_id = $1 \
-             ) src \
-             WHERE s.account_id = src.account_id AND s.room_id = src.room_id",
-        )
-        .bind(account_id)
-        .execute(&self.pool)
-        .await?;
         Ok(())
     }
 }

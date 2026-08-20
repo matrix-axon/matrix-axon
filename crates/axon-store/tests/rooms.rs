@@ -275,16 +275,19 @@ async fn set_membership(
     membership: &str,
 ) {
     store
-        .upsert_room_state(&RoomStateUpsert {
-            account_id,
-            room_id,
-            event_type: "m.room.member",
-            state_key: account_user_id,
-            event_id: &format!("$mem-{}:localhost", Uuid::new_v4()),
-            sender: account_user_id,
-            origin_ts: 2_000,
-            content: Some(json!({ "membership": membership })),
-        })
+        .upsert_room_state_for_local_user(
+            &RoomStateUpsert {
+                account_id,
+                room_id,
+                event_type: "m.room.member",
+                state_key: account_user_id,
+                event_id: &format!("$mem-{}:localhost", Uuid::new_v4()),
+                sender: account_user_id,
+                origin_ts: 2_000,
+                content: Some(json!({ "membership": membership })),
+            },
+            Some(account_user_id),
+        )
         .await
         .expect("set membership");
 }
@@ -332,6 +335,47 @@ async fn list_rooms_excludes_left_and_banned_rooms() {
     );
     assert!(!ids.contains(&left.as_str()), "left room hidden");
     assert!(!ids.contains(&banned.as_str()), "banned room hidden");
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// Another user's leave/ban is not the local membership signal and must not
+/// hide the room or pay a display refresh (PR 206 review).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn list_rooms_ignores_other_members_leave() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "other-leave").await;
+    let user_id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT user_id FROM accounts WHERE account_id = $1")
+            .bind(account_id)
+            .fetch_one(&pool)
+            .await
+            .expect("user id");
+    let room_id = format!("!other-{}:localhost", Uuid::new_v4());
+    insert_message(&store, account_id, &room_id, 1_000, "hi").await;
+    set_membership(&store, account_id, &user_id, &room_id, "join").await;
+
+    store
+        .upsert_room_state(&RoomStateUpsert {
+            account_id,
+            room_id: &room_id,
+            event_type: "m.room.member",
+            state_key: "@someone-else:localhost",
+            event_id: &format!("$other-{}:localhost", Uuid::new_v4()),
+            sender: "@someone-else:localhost",
+            origin_ts: 3_000,
+            content: Some(json!({ "membership": "leave" })),
+        })
+        .await
+        .expect("other leave");
+
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    assert!(
+        rooms.iter().any(|r| r.room_id == room_id),
+        "another member leaving must not hide the room"
+    );
 
     common::cleanup_account(&pool, account_id).await;
 }

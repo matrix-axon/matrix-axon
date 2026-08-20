@@ -918,7 +918,11 @@ async fn persist_room_state_event(
         origin_ts,
         content,
     };
-    if let Err(err) = ctx.store.upsert_room_state(&upsert).await {
+    if let Err(err) = ctx
+        .store
+        .upsert_room_state_for_local_user(&upsert, Some(ctx.local_user_id.as_ref()))
+        .await
+    {
         tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), error = %err, "failed to persist room state");
     } else {
         tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), state_key = state_key.as_str(), "persisted room state");

@@ -134,7 +134,25 @@ impl Store {
     /// `origin_ts` older than the stored one is ignored, so a replay of historical
     /// state can never clobber newer state. Equal timestamps overwrite (harmless;
     /// they carry the same resolved value). `updated_at` is maintained by trigger.
+    ///
+    /// Callers that already know the account MXID should use
+    /// [`Self::upsert_room_state_for_local_user`] so a busy room's other
+    /// members do not each pay a `room_summaries` refresh (ADR 0095).
     pub async fn upsert_room_state(&self, s: &RoomStateUpsert<'_>) -> Result<(), StoreError> {
+        self.upsert_room_state_for_local_user(s, None).await
+    }
+
+    /// [`Self::upsert_room_state`] with the account's MXID, when the caller
+    /// already has it (the sync engine's `PersistContext::local_user_id`).
+    ///
+    /// `m.room.member` refreshes `hidden_left` only when `state_key` equals
+    /// that id. Passing `None` never refreshes on member events — tests that
+    /// drive leave/ban through this type pass `Some(account_user_id)`.
+    pub async fn upsert_room_state_for_local_user(
+        &self,
+        s: &RoomStateUpsert<'_>,
+        local_user_id: Option<&str>,
+    ) -> Result<(), StoreError> {
         sqlx_core::query::query(
             "INSERT INTO room_state \
              (account_id, room_id, event_type, state_key, event_id, sender, origin_ts, content) \
@@ -156,24 +174,11 @@ impl Store {
         .bind(&s.content)
         .execute(&self.pool)
         .await?;
-        if summary_display_state(s.event_type, s.state_key) {
+        if summary_display_state(s.event_type, s.state_key)
+            || (s.event_type == "m.room.member" && local_user_id == Some(s.state_key))
+        {
             self.refresh_room_summary_display(s.account_id, s.room_id)
                 .await?;
-        } else if s.event_type == "m.room.member" {
-            // Only the local user's membership drives hidden_left. Other
-            // members change often and must not pay a display refresh.
-            sqlx_core::query::query(
-                "SELECT refresh_room_summary_display($1, $2) \
-                 WHERE EXISTS ( \
-                     SELECT 1 FROM accounts \
-                     WHERE account_id = $1 AND user_id = $3 \
-                 )",
-            )
-            .bind(s.account_id)
-            .bind(s.room_id)
-            .bind(s.state_key)
-            .execute(&self.pool)
-            .await?;
         }
         Ok(())
     }
