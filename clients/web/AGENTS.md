@@ -248,6 +248,15 @@ before starting a milestone.
   undone by the next reload. `thread_id: "main"` is the room stream, not a
   thread, and is ignored — acting on it would be a claim about a read position
   that has its own owner.
+- **Debounced device-state writes need an unload flush.** Every write — draft,
+  read marker, thread read marker — sits behind an 800 ms debounce, and
+  `flushPending` was wired only into the auto-refresh path (ADR 0087), which
+  additionally returns early in dev. A reload inside that window silently
+  dropped the write, which presented as a thread the user had just opened coming
+  back unread. `connectDeviceStateFlush` listens on `visibilitychange` and
+  `pagehide`. When testing this, note that a default 1 s `vi.waitFor` is
+  satisfied by the debounce firing on its own — the assertion has to land well
+  inside 800 ms or it passes with the listener removed.
 - **Async work in `RoomPage` outlives its own world.** The page does not remount
   across a room switch or an `?event=`/`?thread=` change (ADR 0085), so every
   `await` inside an effect can resolve after the user has moved on — a second

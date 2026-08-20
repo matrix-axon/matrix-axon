@@ -368,6 +368,39 @@ function ownThreadedReceipts(
   return found
 }
 
+/**
+ * Send debounced device-state writes before the page goes away.
+ *
+ * Every write — a draft, a read marker, a thread read marker — sits behind an
+ * 800 ms debounce, and nothing flushed it on unload: `flushPending` was wired
+ * only into the auto-refresh path (ADR 0087), which additionally does not
+ * install in dev. So a reload within the debounce window silently dropped the
+ * write, and the user saw a thread they had just opened come back unread.
+ *
+ * `visibilitychange` is the primary hook rather than `beforeunload`: it fires on
+ * reload, navigation, and tab switches, it is the one signal mobile browsers
+ * reliably deliver before discarding a page, and a `fetch` issued there still
+ * goes out. `pagehide` is a belt for desktop paths that skip it. Neither is
+ * filtered on the new visibility state: flushing when a tab is *revealed* is a
+ * no-op when nothing is pending, and a branch no test can distinguish is worse
+ * than the call it saves.
+ */
+export function connectDeviceStateFlush(
+  deviceState: DeviceStateStore,
+  doc: Document = document,
+  win: Window = window,
+): () => void {
+  const flush = () => {
+    void deviceState.flushPending()
+  }
+  doc.addEventListener('visibilitychange', flush)
+  win.addEventListener('pagehide', flush)
+  return () => {
+    doc.removeEventListener('visibilitychange', flush)
+    win.removeEventListener('pagehide', flush)
+  }
+}
+
 /** Apply sibling devices' thread-read markers to local unread-thread state. */
 export function connectThreadReadMarkers(
   live: LiveConnection,
@@ -706,6 +739,7 @@ export function createServices(
   connectReadMarkers(live, deviceState, rooms)
   connectThreadReadMarkers(live, threadUnread, deviceState)
   connectThreadReceipts(api, live, rooms, accounts, deviceState, threadUnread)
+  connectDeviceStateFlush(deviceState)
   connectTimelineCacheReset(auth, timelines)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
