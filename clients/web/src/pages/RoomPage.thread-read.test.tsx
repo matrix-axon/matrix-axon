@@ -16,6 +16,7 @@ import { setupServer } from 'msw/node'
 import { LocationProvider, Route, Router } from 'preact-iso'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { ServicesContext } from '../services'
+import { READ_MARKERS_NAMESPACE } from '../stores/device-state'
 import { RECEIPT_DEBOUNCE_MS } from '../stores/ephemeral-sender'
 import type { EventDto } from '../stores/timeline'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -127,6 +128,9 @@ function renderRoom(
     replies?: EventDto[]
     /** Add a second thread's reply *above* the room view's own target. */
     foreignReplyInWindow?: boolean
+    /** A `read_markers` entry already stored for this room, as a real account
+     *  has after any earlier session. */
+    storedRoomMarker?: { event_id: string; origin_ts: number }
     /** Make the timeline answer *after* the room list, as a warm cache does. */
     timelineSlow?: boolean
   } = {},
@@ -211,8 +215,19 @@ function renderRoom(
           : HttpResponse.json({ data: found })
       },
     ),
-    http.get(`${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`, () =>
-      HttpResponse.json({ data: { namespace: 'read_markers', entries: {} } }),
+    http.get(
+      `${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`,
+      ({ params }) =>
+        HttpResponse.json({
+          data: {
+            namespace: params.namespace,
+            entries:
+              params.namespace === 'read_markers' &&
+              options.storedRoomMarker !== undefined
+                ? { [ROOM]: { value: options.storedRoomMarker } }
+                : {},
+          },
+        }),
     ),
     http.put(`${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`, () =>
       HttpResponse.json({ data: { updated_at: '2026-08-19T12:00:00Z' } }),
@@ -224,6 +239,18 @@ function renderRoom(
     `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}${options.query ?? ''}`,
   )
   const services = testServices()
+  if (options.storedRoomMarker !== undefined) {
+    // Seeded directly rather than through hydration: a `GET` that lands after
+    // the first local write is discarded by `settled()`, so serving it from msw
+    // models the timing, not the state. What matters here is only that a marker
+    // already exists when the page mounts.
+    services.deviceState.set(
+      ACCOUNT,
+      READ_MARKERS_NAMESPACE,
+      ROOM,
+      options.storedRoomMarker,
+    )
+  }
   const utils = render(
     <ServicesContext.Provider value={services}>
       <LocationProvider>
@@ -359,6 +386,28 @@ describe('a thread view names the room receipt (ADR 0096)', () => {
     // main-timeline position, and the thread reads as read forever.
     expect(services.deviceState.readMarker(ACCOUNT, ROOM)?.eventId).not.toBe(
       REPLY_2.event_id,
+    )
+  })
+
+  it('flags the thread even when the stored room marker already points at it', async () => {
+    // The state a real account is left in by any earlier session: the marker was
+    // seeded from the reply before the fix existed, and `advanceReadMarker` is
+    // forward-only, so nothing walks it back. Preventing new poisoning does not
+    // heal this — and `reconcileSummary` still falls back to it.
+    const { services, findByText } = renderRoom({
+      threads: [MAIN_THREAD],
+      storedRoomMarker: {
+        event_id: REPLY_2.event_id,
+        origin_ts: REPLY_2.origin_ts,
+      },
+    })
+    await findByText(`body of ${MAIN.event_id}`)
+    expect(services.deviceState.readMarker(ACCOUNT, ROOM)?.eventId).toBe(
+      REPLY_2.event_id,
+    )
+
+    await waitFor(() =>
+      expect(services.threadUnread.isUnread(ACCOUNT, ROOM, ROOT)).toBe(true),
     )
   })
 

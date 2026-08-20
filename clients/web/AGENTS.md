@@ -226,9 +226,17 @@ before starting a milestone.
   `reconcileSummary` falls back to the room marker for a thread with no marker
   of its own — the fallback answers "read" for the very thread it came from, so
   the room badges while reporting no unread thread (#209). Only skippable when
-  the slice can _show_ the event is a reply, which is exactly when the timeline
-  effect has what it needs; an unloaded slice keeps the old behaviour, which is
-  that effect's whole reason for existing.
+  the slice can _show_ the event is a reply — so the effect is gated on
+  `timeline.loading` (which starts `true` on a cold store), because the room list
+  comes back from IndexedDB before the first timeline page and the check
+  otherwise runs against an empty slice and seeds from the reply anyway. Gate on
+  `loading`, **not** on emptiness: a loaded-but-empty or gap-filled slice is what
+  this effect exists to serve. And because `advanceReadMarker` is forward-only,
+  every account that opened such a room before this landed still carries the bad
+  marker in device state — so `reconcileSummary`'s fallback withholds a room
+  marker pointing at a thread member and substitutes the display-last
+  main-timeline event. Withholding alone is not enough: no read position means
+  `reconcileSummary` records nothing, which is silent in a different way.
 - **A thread read in another client comes back as a receipt, not as device
   state** (`connectThreadReceipts`). Element sends a thread-scoped `m.read`
   (MSC3771) and it reaches us verbatim through ADR 0056's passthrough; axon's

@@ -980,6 +980,44 @@ export function RoomPage() {
     members,
   )
   const roomReadMarker = deviceState.readMarker(accountId, roomId)
+  /**
+   * The room marker, but only where it can speak for a *thread's* read position.
+   * It cannot when it points at a thread member, and this is not hypothetical
+   * history: `advanceReadMarker` is forward-only on `origin_ts`, and every
+   * session before the guard above seeded the marker from `last_event_id` —
+   * `MAX(origin_ts)` over every event, replies included. So a real account
+   * carries a marker parked on a reply, durably, and `reconcileSummary`'s
+   * fallback would answer "read" for the very thread it came from. Preventing
+   * new poisoning does not heal that; withholding the marker does, on the next
+   * load, with no migration.
+   *
+   * A marker whose event is not in the loaded slice stays admissible — it is
+   * usually one that scrolled out of a long room, and withholding it there would
+   * flag every old thread in rooms that have nothing wrong with them.
+   *
+   * Withholding alone is not enough, because "no read position" is not "unread":
+   * `reconcileSummary` deliberately records nothing when it has nothing to
+   * compare against, so a withheld marker leaves the thread unflagged — silent
+   * in a different way. What replaces it is the position the marker should have
+   * held: the display-last event the main timeline actually rendered. That reads
+   * as "you are caught up on the room stream to here", which is true, and makes
+   * a reply newer than it unread, which is also true.
+   */
+  const mainTimelineRead = displayed.at(-1)
+  const roomMarkerForThreads =
+    roomReadMarker !== null &&
+    timeline.events.value.some(
+      (event) =>
+        event.event_id === roomReadMarker.eventId &&
+        threadRootId(event) !== null,
+    )
+      ? mainTimelineRead === undefined
+        ? null
+        : {
+            eventId: mainTimelineRead.event_id,
+            originTs: mainTimelineRead.origin_ts,
+          }
+      : roomReadMarker
   const threadSummaryStates = [...threads.summaries.value.values()].map(
     (summary) => ({
       summary,
@@ -1019,7 +1057,7 @@ export function RoomPage() {
         roomId,
         roomTitle: title,
         rootPreview,
-        roomMarker: roomReadMarker,
+        roomMarker: roomMarkerForThreads,
         threadMarker,
       })
     }
@@ -1029,7 +1067,7 @@ export function RoomPage() {
     accountId,
     roomId,
     title,
-    roomReadMarker,
+    roomMarkerForThreads,
   ])
 
   /**
