@@ -1,0 +1,57 @@
+name: Notify opened issues and pull requests
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+# This workflow deliberately does not check out or execute repository code.
+# pull_request_target is needed so fork PRs can use the repository secret safely.
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify axon-developer room
+        env:
+          HOMESERVER: ${{ secrets.NOTIFY_HOMESERVER }}
+          ROOM: ${{ secrets.NOTIFY_ROOM }}
+          TOKEN: ${{ secrets.NOTIFY_TOKEN }}
+          KIND: ${{ github.event_name == 'issues' && 'issue' || 'pull request' }}
+          TITLE: ${{ github.event_name == 'issues' && github.event.issue.title || github.event.pull_request.title }}
+          BODY: ${{ github.event_name == 'issues' && github.event.issue.body || github.event.pull_request.body }}
+          URL: ${{ github.event_name == 'issues' && github.event.issue.html_url || github.event.pull_request.html_url }}
+          AUTHOR: ${{ github.event_name == 'issues' && github.event.issue.user.login || github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+
+          test -n "$HOMESERVER" || { echo "NOTIFY_HOMESERVER is empty"; exit 1; }
+          test -n "$ROOM" || { echo "NOTIFY_ROOM is empty"; exit 1; }
+          test -n "$TOKEN" || { echo "NOTIFY_TOKEN is empty"; exit 1; }
+
+          HOMESERVER="${HOMESERVER%/}"
+
+          MESSAGE="$(jq -n \
+            --arg kind "$KIND" \
+            --arg author "$AUTHOR" \
+            --arg title "$TITLE" \
+            --arg body "$BODY" \
+            --arg url "$URL" \
+            '{
+              msgtype: "m.text",
+              body: (
+                ("New " + $kind + " opened by @" + $author + ": " + $title)
+                + "\n" + $url
+                + "\n\n"
+                + ($body | .[0:4000])
+              )
+            }')"
+
+          curl --fail-with-body --silent --show-error --max-time 15 \
+            -X PUT \
+            "$HOMESERVER/_matrix/client/v3/rooms/$ROOM/send/m.room.message/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "$MESSAGE"
