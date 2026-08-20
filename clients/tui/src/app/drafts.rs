@@ -12,7 +12,7 @@
 //!   sent, or text deleted) flushes as a `null` tombstone, so the clear wins
 //!   the cross-device merge.
 //! - Startup hydrates the local draft map from the server's merged view
-//!   ([`App::refresh_drafts`]). The buffer mirrors exactly one room's draft at
+//!   ([`App::apply_draft_reads`]). The buffer mirrors exactly one room's draft at
 //!   a time ([`App::compose_room`]): switching rooms settles the outgoing
 //!   room's draft and swaps in the newly-selected room's
 //!   ([`App::sync_draft_on_room_change`]), and returning to compose from a

@@ -82,7 +82,7 @@ impl BootstrapStage {
 /// Read one device-state namespace for every account, concurrently.
 ///
 /// Sequential would cost `accounts × RTT` on a path that used to block the
-/// event loop; this is the shape `refresh_drafts` already used.
+/// event loop; this is the shape the draft read already used.
 async fn read_namespace(
     client: &AxonClient,
     device_id: Uuid,
@@ -206,6 +206,16 @@ impl App {
                         }
                     }
                 }
+                // Decide this before any coalesced re-request goes out:
+                // `request_rooms_refresh` re-reads the selection into
+                // `rooms_fetch_had_selection` for the fetch it dispatches, and
+                // the fetch that just landed is the one whose flag this needs.
+                // Reading it after the re-dispatch sees the *new* fetch's value
+                // — `true`, because this refresh just made a selection — and
+                // silently skips the timeline load (#201 review).
+                let revealed_first_selection = self.bootstrap.is_done()
+                    && !self.rooms_fetch_had_selection
+                    && self.selected_room().is_some();
                 if self.rooms_fetch_again {
                     self.rooms_fetch_again = false;
                     self.request_rooms_refresh();
@@ -214,10 +224,7 @@ impl App {
                     self.note_stage_elapsed("rooms");
                     self.bootstrap = BootstrapStage::DeviceState;
                     self.request_device_state();
-                } else if self.bootstrap.is_done()
-                    && !self.rooms_fetch_had_selection
-                    && self.selected_room().is_some()
-                {
+                } else if revealed_first_selection {
                     // A refresh revealed the first room this session: open it,
                     // as the inline refresh path used to.
                     self.load_selected_timeline().await;
@@ -333,6 +340,66 @@ mod tests {
             .await;
         assert!(!app.rooms_fetch_inflight);
         assert!(!app.rooms_fetch_again);
+    }
+
+    fn test_room(room_id: &str) -> RoomDto {
+        RoomDto {
+            account_id: Uuid::new_v4(),
+            account_user_id: Some("@alice:example.com".to_owned()),
+            room_id: room_id.to_owned(),
+            name: Some("Room".to_owned()),
+            topic: None,
+            avatar_url: None,
+            canonical_alias: None,
+            last_activity_ts: 0,
+            last_event_id: None,
+        }
+    }
+
+    /// A refresh that both reveals the session's first room *and* has a
+    /// coalesced follow-up queued behind it must still open that room.
+    ///
+    /// `request_rooms_refresh` re-reads the selection into
+    /// `rooms_fetch_had_selection` for whatever fetch it dispatches. Deciding
+    /// the timeline load after the coalesced re-dispatch therefore read the
+    /// *follow-up's* flag — `true`, because the refresh that just landed made
+    /// the selection — and the message pane stayed empty under a selected
+    /// room. Two live frames for unknown rooms arriving together is exactly
+    /// the WS-backlog case this module's coalescing exists for.
+    #[tokio::test]
+    async fn a_coalesced_refresh_still_opens_the_first_room() {
+        let (mut app, _rx) = app();
+        app.bootstrap = BootstrapStage::Done;
+
+        app.request_rooms_refresh();
+        app.request_rooms_refresh();
+        assert!(app.rooms_fetch_again, "the second request coalesces");
+        assert!(
+            !app.rooms_fetch_had_selection,
+            "nothing is selected when the first fetch goes out"
+        );
+
+        // `load_selected_timeline` sets this before it awaits, and nothing else
+        // on this path does, so it witnesses the call without a live server.
+        app.force_terminal_clear = false;
+        app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(vec![test_room(
+            "!revealed:example.com",
+        )])))
+        .await;
+
+        assert!(
+            app.selected_room().is_some(),
+            "the landed refresh reveals and selects the first room"
+        );
+        assert!(
+            app.rooms_fetch_inflight,
+            "and the coalesced follow-up still goes out"
+        );
+        assert!(
+            app.force_terminal_clear,
+            "the revealed room's timeline must load even though the coalesced \
+             follow-up overwrote rooms_fetch_had_selection"
+        );
     }
 
     /// Every stage before `Done` names itself for the rooms-panel title.
