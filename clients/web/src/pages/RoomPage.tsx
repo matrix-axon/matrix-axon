@@ -590,7 +590,20 @@ export function RoomPage() {
   // (`connectReadMarkers`). Advancing it from either view would mark a room read
   // *everywhere* from a view that never showed the summary's newest event.
   useEffect(() => {
-    if (!showingNewestEvents) {
+    // The slice must have *loaded*, not merely be at its live end. The room list
+    // is restored from IndexedDB (ADR 0085 phase 2) and is on screen before the
+    // first timeline page exists, so this effect otherwise runs against an empty
+    // slice — where the thread-member check below cannot see anything, seeds the
+    // marker from the reply, and (being forward-only on `origin_ts`) can never
+    // be walked back. Measured on a live instance as `loadedEvents: 0,
+    // timelineLoading: true` with the summary already present.
+    //
+    // Gating on `loading` alone, not on emptiness: this effect exists for a slice
+    // that has loaded but is *missing the newest event* — a quick mobile switch,
+    // a gap-filled head, a room whose page came back empty — and those must
+    // still advance. `loading` starts `true` on a cold store, so it is precisely
+    // the pre-first-page window that closes.
+    if (!showingNewestEvents || timeline.loading.value) {
       return
     }
     const room = rooms.rooms.value.find(
@@ -634,6 +647,7 @@ export function RoomPage() {
     roomId,
     rooms.rooms.value,
     timeline.events.value,
+    timeline.loading.value,
     deviceState,
     unreadThreadCutoff,
     showingNewestEvents,

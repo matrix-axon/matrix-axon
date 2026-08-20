@@ -127,6 +127,8 @@ function renderRoom(
     replies?: EventDto[]
     /** Add a second thread's reply *above* the room view's own target. */
     foreignReplyInWindow?: boolean
+    /** Make the timeline answer *after* the room list, as a warm cache does. */
+    timelineSlow?: boolean
   } = {},
 ) {
   const roomEvents = [
@@ -336,6 +338,28 @@ describe('a thread view names the room receipt (ADR 0096)', () => {
       eventId: MAIN.event_id,
       originTs: MAIN.origin_ts,
     })
+  })
+
+  it('does not seed the marker from the summary before the timeline lands', async () => {
+    // The live ordering, which a plain delay does not reproduce: the room list
+    // is restored from IndexedDB (ADR 0085 phase 2) and is on screen before the
+    // first timeline page exists, so the summary effect runs against an *empty*
+    // slice — where it cannot see that `last_event_id` is a thread member.
+    // Observed on a dev instance as `loadedEvents: 0, timelineLoading: true`
+    // with the summary already present.
+    const { services, findByText } = renderRoom({
+      threads: [MAIN_THREAD],
+      timelinePending: true,
+    })
+    await findByText('Ops')
+    await settleReceipts()
+
+    // `advanceReadMarker` is forward-only on `origin_ts`, so seeding it from the
+    // reply here is permanent: the timeline effect can never walk it back to a
+    // main-timeline position, and the thread reads as read forever.
+    expect(services.deviceState.readMarker(ACCOUNT, ROOM)?.eventId).not.toBe(
+      REPLY_2.event_id,
+    )
   })
 
   it('still sends when the room has other threads the user has never opened', async () => {
