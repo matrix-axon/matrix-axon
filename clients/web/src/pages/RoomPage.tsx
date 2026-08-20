@@ -739,25 +739,37 @@ export function RoomPage() {
    * So the bound is the first such reply above the room's own target. A thread
    * view may name any member below it, and stops there.
    */
-  const threadReceiptCeiling = useMemo(() => {
+  const threadReceiptCeiling = (() => {
     const roomTarget = displayed.reduce(
       (best, event) => Math.max(best, event.arrival_order),
       -1,
     )
     return timeline.events.value.reduce<number | null>((lowest, event) => {
+      if (event.arrival_order <= roomTarget) {
+        return lowest
+      }
       const root = threadRootId(event)
-      if (
-        root === null ||
-        root === openThread ||
-        event.arrival_order <= roomTarget
-      ) {
+      if (root === null || root === openThread) {
+        return lowest
+      }
+      // A reply the user has already read is not an obstruction. Without this
+      // the bound is permanent in any room with two interleaved threads:
+      // whichever panel is open, the others' replies sit in the window, and
+      // reading them all changes nothing — so the badge can never clear.
+      // "Unknown" still blocks, which is the never-opened case.
+      const marker = deviceState.threadReadMarker(accountId, roomId, root)
+      if (marker !== null && marker.originTs >= event.origin_ts) {
         return lowest
       }
       return lowest === null || event.arrival_order < lowest
         ? event.arrival_order
         : lowest
     }, null)
-  }, [displayed, timeline.events.value, openThread])
+    // Not memoised: it reads per-thread markers, and a `useMemo` would have to
+    // list a device-state snapshot as a dependency to notice one changing. The
+    // pass is one skip-test per loaded event, nearly all of which exit on the
+    // first comparison.
+  })()
 
   // Advance this room's read marker to the newest event while it is open, so
   // sibling devices see it as read (M-W6 step 5c, ADR 0048). Hidden unread
@@ -1004,20 +1016,36 @@ export function RoomPage() {
    * a reply newer than it unread, which is also true.
    */
   const mainTimelineRead = displayed.at(-1)
-  const roomMarkerForThreads =
+  const markerIsThreadMember =
     roomReadMarker !== null &&
     timeline.events.value.some(
       (event) =>
         event.event_id === roomReadMarker.eventId &&
         threadRootId(event) !== null,
     )
-      ? mainTimelineRead === undefined
-        ? null
-        : {
-            eventId: mainTimelineRead.event_id,
-            originTs: mainTimelineRead.origin_ts,
-          }
-      : roomReadMarker
+  // Memoised on the values rather than the objects: `readMarker()` parses a
+  // fresh object on every call, so an unmemoised result re-runs the reconcile
+  // effect below on every render of the page.
+  const roomMarkerForThreads = useMemo(
+    () =>
+      markerIsThreadMember
+        ? mainTimelineRead === undefined
+          ? null
+          : {
+              eventId: mainTimelineRead.event_id,
+              originTs: mainTimelineRead.origin_ts,
+            }
+        : roomReadMarker,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      markerIsThreadMember,
+      mainTimelineRead?.event_id,
+      mainTimelineRead?.origin_ts,
+      roomReadMarker?.eventId,
+      roomReadMarker?.originTs,
+    ],
+  )
+
   const threadSummaryStates = [...threads.summaries.value.values()].map(
     (summary) => ({
       summary,

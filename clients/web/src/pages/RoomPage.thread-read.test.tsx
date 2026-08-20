@@ -131,6 +131,8 @@ function renderRoom(
     /** A `read_markers` entry already stored for this room, as a real account
      *  has after any earlier session. */
     storedRoomMarker?: { event_id: string; origin_ts: number }
+    /** `thread_read_markers` entries already stored, as reading a thread leaves. */
+    storedThreadMarkers?: { root: string; eventId: string; originTs: number }[]
     /** Make the timeline answer *after* the room list, as a warm cache does. */
     timelineSlow?: boolean
   } = {},
@@ -249,6 +251,15 @@ function renderRoom(
       READ_MARKERS_NAMESPACE,
       ROOM,
       options.storedRoomMarker,
+    )
+  }
+  for (const m of options.storedThreadMarkers ?? []) {
+    services.deviceState.advanceThreadReadMarker(
+      ACCOUNT,
+      ROOM,
+      m.root,
+      m.eventId,
+      m.originTs,
     )
   }
   const utils = render(
@@ -409,6 +420,28 @@ describe('a thread view names the room receipt (ADR 0096)', () => {
     await waitFor(() =>
       expect(services.threadUnread.isUnread(ACCOUNT, ROOM, ROOT)).toBe(true),
     )
+  })
+
+  it('sends once every thread in the window has been read', async () => {
+    const { reads, findByText } = renderRoom({
+      query: `?thread=${encodeURIComponent(ROOT)}`,
+      threads: [MAIN_THREAD, OTHER_THREAD_NEW],
+      foreignReplyInWindow: true,
+      // The other thread has been read — its marker covers its newest reply.
+      storedThreadMarkers: [
+        {
+          root: OTHER_ROOT,
+          eventId: OTHER_REPLY_NEW.event_id,
+          originTs: OTHER_REPLY_NEW.origin_ts,
+        },
+      ],
+    })
+    await findByText(`body of ${REPLY_2.event_id}`)
+
+    // A reply the user *has* read must not hold the room's receipt back
+    // forever. Otherwise a room with two interleaved threads can never clear:
+    // whichever panel is open, the other thread's replies sit in the window.
+    await waitFor(() => expect(reads).toContain(REPLY_2.event_id))
   })
 
   it('still sends when the room has other threads the user has never opened', async () => {

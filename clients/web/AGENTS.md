@@ -208,8 +208,12 @@ before starting a milestone.
   end **and has loaded** (`atEnd` starts `true` on a cold store, so the two are
   not the same check), and when its own slice reaches the thread's newest reply.
   **The bound is a window, not the room.** `threadReceiptCeiling` is the first
-  reply _above the room view's own target_ belonging to a thread the panel is not
-  showing; the panel names the highest member below it. Do not turn this back
+  _unread_ reply above the room view's own target belonging to a thread the panel
+  is not showing; the panel names the highest member below it. **Read replies are
+  exempt** — a thread marker covering one means it is not an obstruction, and
+  without that exemption a room with two interleaved threads can never clear:
+  whichever panel is open, the other's replies sit in the window, so reading them
+  all changes nothing. No marker still blocks. Do not turn this back
   into "has the user read every thread here" — that version passed seven tests
   and never cleared a single badge on a dev server, because a real room is full
   of threads nobody opened this session, and their replies sit _below_ the room's

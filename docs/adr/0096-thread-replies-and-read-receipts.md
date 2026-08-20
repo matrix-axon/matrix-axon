@@ -100,7 +100,9 @@ A thread member may be named only when all of these hold:
 2. **That stream has actually loaded.**
    Not implied by the first: `atEnd` starts `true` on a cold store, because "nothing newer is known to exist" is vacuously true before the first page lands.
 3. **The thread view is at its live end**, so its arrival-max member is the thread's newest, not the top of a page parked in history.
-4. **The named member sits below the ceiling** — the first reply _above the room view's own target_ belonging to a thread this panel is not showing.
+4. **The named member sits below the ceiling** — the first _unread_ reply above the room view's own target belonging to a thread this panel is not showing.
+   A reply the user has already read (a thread marker covers it) is not an obstruction; one with no marker still is, which is the never-opened case.
+   Without that exemption the bound is permanent in any room with two interleaved threads: whichever panel is open, the others' replies sit in the window, and reading them all changes nothing — so the badge can never clear, which is exactly what a live test room did.
 
 Conditions 1-3 say the two views have displayed what they are claiming.
 Condition 4 is the one that took two attempts, and § 3 is about why.
