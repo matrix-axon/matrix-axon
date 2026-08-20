@@ -444,6 +444,54 @@ describe('a thread view names the room receipt (ADR 0096)', () => {
     await waitFor(() => expect(reads).toContain(REPLY_2.event_id))
   })
 
+  it('acknowledges the whole room once every thread in it is read', async () => {
+    // The live sequence from #207's test room: two threads, read in the wrong
+    // order. Opening the newest thread first names nothing (the older thread's
+    // reply is still unread and holds the ceiling down); opening the older one
+    // then names *its* reply. The newest thread is eligible by then, but its
+    // panel is closed and nothing revisits it — so the room stays one event
+    // short forever. The room view has to be able to close that gap itself.
+    const { reads, findByText } = renderRoom({
+      threads: [MAIN_THREAD, OTHER_THREAD_NEW],
+      foreignReplyInWindow: true,
+      storedThreadMarkers: [
+        {
+          root: ROOT,
+          eventId: REPLY_2.event_id,
+          originTs: REPLY_2.origin_ts,
+        },
+        {
+          root: OTHER_ROOT,
+          eventId: OTHER_REPLY_NEW.event_id,
+          originTs: OTHER_REPLY_NEW.origin_ts,
+        },
+      ],
+    })
+    await findByText(`body of ${MAIN.event_id}`)
+
+    // No panel is open. Every thread reply in the room is covered by a marker,
+    // so the arrival-max event the client can honestly claim is `$reply2`.
+    await waitFor(() => expect(reads).toContain(REPLY_2.event_id))
+  })
+
+  it('does not extend over a read reply that sits above an unread one', async () => {
+    // `$reply2` (2599) is read; `$other-reply-new` (2590) is not, and sits below
+    // it. Naming 2599 would acknowledge 2590 — the exact over-claim the bound
+    // exists to prevent, now reachable from the room view rather than a panel.
+    const { reads, findByText } = renderRoom({
+      threads: [MAIN_THREAD, OTHER_THREAD_NEW],
+      foreignReplyInWindow: true,
+      storedThreadMarkers: [
+        { root: ROOT, eventId: REPLY_2.event_id, originTs: REPLY_2.origin_ts },
+      ],
+    })
+    await findByText(`body of ${MAIN.event_id}`)
+    await settleReceipts()
+
+    expect(reads).toContain(MAIN.event_id)
+    expect(reads).not.toContain(REPLY_2.event_id)
+  })
+
   it('still sends when the room has other threads the user has never opened', async () => {
     const { reads, findByText } = renderRoom({
       query: `?thread=${encodeURIComponent(ROOT)}`,

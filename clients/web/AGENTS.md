@@ -209,7 +209,12 @@ before starting a milestone.
   not the same check), and when its own slice reaches the thread's newest reply.
   **The bound is a window, not the room.** `threadReceiptCeiling` is the first
   _unread_ reply above the room view's own target belonging to a thread the panel
-  is not showing; the panel names the highest member below it. **Read replies are
+  is not showing; the panel names the highest member below it, **and so does the room
+  view** — its target extends over read thread replies up to the same bound,
+  which is the only thing that closes out a room whose newest events are all in
+  threads. A panel names only its own thread and only while open, so reading two
+  threads in the wrong order otherwise leaves the room one event short forever.
+  **Read replies are
   exempt** — a thread marker covering one means it is not an obstruction, and
   without that exemption a room with two interleaved threads can never clear:
   whichever panel is open, the other's replies sit in the window, so reading them

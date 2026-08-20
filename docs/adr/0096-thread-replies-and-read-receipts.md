@@ -110,6 +110,18 @@ Condition 4 is the one that took two attempts, and § 3 is about why.
 When the gate is shut the receipt behaves exactly as it does today: it stops at the arrival-max **main-timeline** event.
 Condition 4 does not shut it so much as bound it — the pick stops at the last member below the ceiling rather than being abandoned, because the members below a foreign reply are still honest to acknowledge.
 
+### 2b. The room view closes the room out, not just the panel
+
+A thread panel names only its own thread's members, and only while it is open.
+That is not enough on its own, and the gap is a sequencing one that a live account found (#207).
+
+Two threads, read in the wrong order: opening the newest first names nothing, because the older thread's reply still holds the bound down; opening the older one next names only _its_ reply.
+The newest thread is eligible by then — but its panel is closed, and nothing revisits it.
+The room stays one event short of clear, permanently, with every thread in it read and the unread-threads list correctly empty.
+
+So the **room view's** own target extends past the main timeline too: over thread replies it knows are read, up to the same bound.
+That claim keeps ADR 0089's rule rather than bending it — a thread marker exists because some client of this user displayed those replies, this panel earlier or Element via `connectThreadReceipts`.
+
 ### 3. The question is a window, not the whole room
 
 The first implementation asked "has the user read every thread in this room?", and it was wrong in a way no unit test caught and a dev server found in minutes: in the room from #207 the answer is permanently **no**, so the receipt never advanced and the badge never cleared.

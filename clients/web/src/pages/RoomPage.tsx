@@ -739,37 +739,78 @@ export function RoomPage() {
    * So the bound is the first such reply above the room's own target. A thread
    * view may name any member below it, and stops there.
    */
-  const threadReceiptCeiling = (() => {
-    const roomTarget = displayed.reduce(
-      (best, event) => Math.max(best, event.arrival_order),
-      -1,
+  /**
+   * What this view may acknowledge in the room, in arrival order.
+   *
+   * `blocker` is the first reply *above the main timeline's own target* that
+   * belongs to another thread and is not known read — the exclusive bound a
+   * thread panel may name up to. A reply covered by a thread marker is not an
+   * obstruction; one with no marker is, which is the never-opened case.
+   *
+   * `target` is the arrival-max event the *room view* may name: main-timeline
+   * rows as before, extended over thread replies already known read, up to the
+   * blocker. That extension is what closes the room out. Without it the receipt
+   * depends on which panel happened to be open when a thread became eligible:
+   * read the newest thread first and its panel names nothing (an older thread
+   * still holds the bound down), read the older one next and its panel names
+   * only its own reply — the newest thread is eligible by then, but its panel is
+   * closed and nothing revisits it, so the room stays one event short forever.
+   * Observed exactly that way on a live account (#207).
+   *
+   * Claiming a read thread's reply keeps ADR 0089's rule: a thread marker exists
+   * because some client of this user displayed those replies — this panel
+   * earlier, or Element, whose threaded receipts arrive through
+   * `connectThreadReceipts`.
+   *
+   * Not memoised: it reads per-thread markers, and a `useMemo` would have to
+   * list a device-state snapshot as a dependency to notice one changing. The
+   * passes are one skip-test per loaded event, nearly all exiting on the first
+   * comparison.
+   */
+  const roomReceipt = (() => {
+    const base = displayed.reduce<TimelineEvent | null>(
+      (best, event) =>
+        best === null || event.arrival_order > best.arrival_order
+          ? event
+          : best,
+      null,
     )
-    return timeline.events.value.reduce<number | null>((lowest, event) => {
-      if (event.arrival_order <= roomTarget) {
-        return lowest
+    const baseOrder = base?.arrival_order ?? -1
+    /** Replies above the base, paired with whether they are known read. */
+    const above = timeline.events.value.filter((event) => {
+      if (event.arrival_order <= baseOrder) {
+        return false
       }
       const root = threadRootId(event)
-      if (root === null || root === openThread) {
-        return lowest
+      return root !== null && root !== openThread
+    })
+    const isRead = (event: TimelineEvent): boolean => {
+      const root = threadRootId(event)
+      if (root === null) {
+        return false
       }
-      // A reply the user has already read is not an obstruction. Without this
-      // the bound is permanent in any room with two interleaved threads:
-      // whichever panel is open, the others' replies sit in the window, and
-      // reading them all changes nothing — so the badge can never clear.
-      // "Unknown" still blocks, which is the never-opened case.
       const marker = deviceState.threadReadMarker(accountId, roomId, root)
-      if (marker !== null && marker.originTs >= event.origin_ts) {
-        return lowest
-      }
-      return lowest === null || event.arrival_order < lowest
-        ? event.arrival_order
-        : lowest
-    }, null)
-    // Not memoised: it reads per-thread markers, and a `useMemo` would have to
-    // list a device-state snapshot as a dependency to notice one changing. The
-    // pass is one skip-test per loaded event, nearly all of which exit on the
-    // first comparison.
+      return marker !== null && marker.originTs >= event.origin_ts
+    }
+    const blocker = above.reduce<number | null>(
+      (lowest, event) =>
+        isRead(event) || (lowest !== null && event.arrival_order >= lowest)
+          ? lowest
+          : event.arrival_order,
+      null,
+    )
+    const target = above.reduce<TimelineEvent | null>(
+      (best, event) =>
+        !isRead(event) ||
+        (blocker !== null && event.arrival_order >= blocker) ||
+        (best !== null && event.arrival_order <= best.arrival_order)
+          ? best
+          : event,
+      base,
+    )
+    return { blocker, target }
   })()
+  const threadReceiptCeiling = roomReceipt.blocker
 
   // Advance this room's read marker to the newest event while it is open, so
   // sibling devices see it as read (M-W6 step 5c, ADR 0048). Hidden unread
@@ -828,13 +869,10 @@ export function RoomPage() {
     // alongside the cross-device marker (ADR 0067): tell the homeserver too, so
     // third-party Matrix clients see the room as read. Forward-only (on
     // `arrival_order`) + debounced inside the sender.
-    const target = displayed.reduce<(typeof displayed)[number] | null>(
-      (best, event) =>
-        best === null || event.arrival_order > best.arrival_order
-          ? event
-          : best,
-      null,
-    )
+    // `roomReceipt.target`, not the display-last row: the room view may also
+    // claim thread replies it knows are read, which is the only thing that ever
+    // closes out a room whose newest events are all in threads (#207).
+    const target = roomReceipt.target
     if (target !== null) {
       ephemeralSender.noteRead(
         accountId,
@@ -845,6 +883,7 @@ export function RoomPage() {
     }
   }, [
     displayed,
+    roomReceipt.target,
     showingNewestEvents,
     accountId,
     roomId,
