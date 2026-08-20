@@ -608,7 +608,13 @@ async fn run_app(
                 // The first Connected arrives while startup is still fetching
                 // this exact state, so re-reading it then is pure duplicate
                 // work; later ones are real reconnects.
-                if reconnected && app.bootstrap.is_done() {
+                //
+                // Keyed on having seen that first frame rather than on startup
+                // being finished: a slow server can take long enough to load
+                // rooms that the socket drops and reconnects before the
+                // DeviceState stage lands, and those reconnects need the
+                // re-read exactly as much as later ones do (#210).
+                if reconnected && app.note_connected_frame() {
                     app.request_device_state();
                 }
             }

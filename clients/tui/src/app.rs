@@ -869,6 +869,11 @@ pub(crate) struct App {
     pub(crate) bootstrap_timings: Vec<(&'static str, std::time::Duration)>,
     /// When the current startup stage began.
     pub(crate) bootstrap_stage_started: Instant,
+    /// Whether a `Connected` live frame has already been seen. Exactly the
+    /// first one is redundant with startup's own device-state fetch; every
+    /// later one is a genuine reconnect whose dropped frames must be re-read,
+    /// whether or not startup has finished by then (#210).
+    pub(crate) seen_first_connect: bool,
     /// A room-list fetch is in flight, so another must not be started.
     pub(crate) rooms_fetch_inflight: bool,
     /// A room-list fetch was asked for while one was in flight; run one more
@@ -1159,6 +1164,7 @@ impl App {
             bootstrap: BootstrapStage::Accounts,
             bootstrap_timings: Vec::new(),
             bootstrap_stage_started: Instant::now(),
+            seen_first_connect: false,
             rooms_fetch_inflight: false,
             rooms_fetch_again: false,
             rooms_fetch_had_selection: false,

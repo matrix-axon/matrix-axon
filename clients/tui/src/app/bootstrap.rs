@@ -157,6 +157,24 @@ impl App {
         });
     }
 
+    /// Record a `Connected` live frame, returning whether it warrants a
+    /// device-state re-read.
+    ///
+    /// Exactly the first frame is skipped: startup's own device-state fetch is
+    /// already covering that state, so re-reading it there is duplicate work.
+    /// Every later frame is a genuine reconnect, and the lossy bus may have
+    /// dropped `device_state` frames while the socket was down (ADR 0048).
+    ///
+    /// This deliberately does not key on startup being finished. On a slow
+    /// server the room stage alone can run for tens of seconds, long enough for
+    /// the socket to drop and reconnect before the DeviceState stage lands, and
+    /// those reconnects need the re-read exactly as much as later ones (#210).
+    pub(crate) fn note_connected_frame(&mut self) -> bool {
+        let warrants_reread = self.seen_first_connect;
+        self.seen_first_connect = true;
+        warrants_reread
+    }
+
     /// Re-read both device-state namespaces for every known account.
     ///
     /// Used by startup and by every WS (re)connect — the lossy bus may have
@@ -399,6 +417,34 @@ mod tests {
             app.force_terminal_clear,
             "the revealed room's timeline must load even though the coalesced \
              follow-up overwrote rooms_fetch_had_selection"
+        );
+    }
+
+    /// Only the *first* `Connected` frame is redundant with startup's own
+    /// device-state fetch. A reconnect that lands mid-bootstrap — which a
+    /// server slow enough to spend tens of seconds on the room stage makes
+    /// reachable — must still re-read, or `device_state` frames the lossy bus
+    /// dropped while the socket was down are never recovered (#210).
+    #[test]
+    fn only_the_first_connected_frame_skips_the_device_state_reread() {
+        let (mut app, _rx) = app();
+
+        assert!(
+            !app.note_connected_frame(),
+            "the first connect is covered by startup's own fetch"
+        );
+
+        // Still mid-bootstrap: the old `is_done()` guard skipped these.
+        app.bootstrap = BootstrapStage::Rooms;
+        assert!(
+            app.note_connected_frame(),
+            "a reconnect during startup still has to re-read"
+        );
+
+        app.bootstrap = BootstrapStage::Done;
+        assert!(
+            app.note_connected_frame(),
+            "and so does every reconnect after startup"
         );
     }
 
