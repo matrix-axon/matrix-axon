@@ -41,13 +41,24 @@ type Slot = Arc<AsyncMutex<Option<Client>>>;
 /// membership call's `404` — and the invite watcher, which must not re-persist
 /// a `room_invites` row for one.
 ///
-/// The set only ever grows within a process. That is the same accepted
-/// tradeoff [`SdkGateway`](crate::gateway)'s power-level locks make: one small
-/// entry per room the homeserver has disowned, and nothing here owns room
-/// bookkeeping. It does not need to persist — the gateway also drops the room
-/// from the SDK's state store, so a restart rebuilds an SDK view that no longer
-/// carries the room at all.
-type DeadRooms = Arc<Mutex<HashSet<(Uuid, OwnedRoomId)>>>;
+/// Keyed `account_id → rooms` rather than as a flat set of pairs: the invite
+/// watcher asks "every dead room for *this* account" once per sweep tick, and
+/// a flat set makes that a scan-and-clone over every account's entries
+/// combined.
+///
+/// This exists only to shadow one live [`Client`]'s in-memory room list, which
+/// keeps reporting a disowned room as `Invited` because matrix-sdk offers no
+/// way to evict one. So its lifetime is the client's, not the process's:
+/// [`evict`](ClientManager::evict) drops the account's entries along with the
+/// client, and the durable half of the evidence — the gateway's
+/// `StateStore::remove_room` — is what a rebuilt client reads instead. That
+/// bounds the map by *live* accounts rather than by accumulated disowned rooms
+/// over uptime.
+///
+/// If that state-store removal had failed, a rebuilt client resurrects the
+/// room and the row returns. That is the direction ADR 0091 chose: a stale row
+/// is visible and the user can clear it; a wrongly-deleted one is silent.
+type DeadRooms = Arc<Mutex<HashMap<Uuid, HashSet<OwnedRoomId>>>>;
 
 /// Owns and caches one matrix-rust-sdk [`Client`] per account. Cheap to
 /// [`Clone`] — every field is a handle — so it is shared by both the sync
@@ -74,7 +85,7 @@ impl ClientManager {
             store,
             config,
             slots: Arc::new(Mutex::new(HashMap::new())),
-            dead_rooms: Arc::new(Mutex::new(HashSet::new())),
+            dead_rooms: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -85,7 +96,9 @@ impl ClientManager {
         self.dead_rooms
             .lock()
             .expect("dead room set poisoned")
-            .insert((account_id, room_id));
+            .entry(account_id)
+            .or_default()
+            .insert(room_id);
     }
 
     /// Whether the homeserver has denied knowing this room for this account.
@@ -96,19 +109,24 @@ impl ClientManager {
         self.dead_rooms
             .lock()
             .expect("dead room set poisoned")
-            .contains(&(account_id, room_id.to_owned()))
+            .get(&account_id)
+            .is_some_and(|rooms| rooms.contains(room_id))
     }
 
     /// Every room this account's homeserver has disowned, for the invite
     /// watcher's sweep.
+    ///
+    /// Reads the set; it is not drained. A dead room must keep suppressing the
+    /// `room_invites` row for as long as this client's in-memory list still
+    /// reports it as invited, which is until the client is evicted or the
+    /// process restarts.
     pub(crate) fn dead_rooms_for(&self, account_id: Uuid) -> Vec<OwnedRoomId> {
         self.dead_rooms
             .lock()
             .expect("dead room set poisoned")
-            .iter()
-            .filter(|(id, _)| *id == account_id)
-            .map(|(_, room_id)| room_id.clone())
-            .collect()
+            .get(&account_id)
+            .map(|rooms| rooms.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Fetch (or create) the connection slot for `account_id`.
@@ -228,6 +246,12 @@ impl ClientManager {
     /// win the race and leave the stale, about-to-be-replaced client cached —
     /// the next supervised run would then reuse it and pile a second set of
     /// event handlers onto it; see issue #289).
+    ///
+    /// Also drops the account's [`DeadRooms`] entries. They only ever existed
+    /// to shadow the evicted client's stale in-memory room list; the rebuilt
+    /// client reads the SDK state store the gateway already removed the room
+    /// from, so re-deriving from scratch is both correct and what keeps the
+    /// map bounded by live accounts instead of by process uptime.
     pub async fn evict(&self, account_id: Uuid) {
         let slot = {
             let map = self.slots.lock().expect("client slot map poisoned");
@@ -236,6 +260,10 @@ impl ClientManager {
         if let Some(slot) = slot {
             *slot.lock().await = None;
         }
+        self.dead_rooms
+            .lock()
+            .expect("dead room set poisoned")
+            .remove(&account_id);
     }
 
     /// Expose an account's raw connection slot, so a test can hold its lock
@@ -317,5 +345,47 @@ mod tests {
             manager.take(account_id).await.is_none(),
             "evict must clear the slot once the lock is released"
         );
+    }
+
+    /// The dead-room set (ADR 0094) is per-account and per-client: one
+    /// account's disowned room must not be visible to another, and evicting a
+    /// client must take its shadow of that client's in-memory room list with
+    /// it. Without the purge in `evict` the map would grow with account churn
+    /// for the life of the process.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dead_rooms_are_scoped_to_one_account_and_die_with_its_client() {
+        let manager = manager().await;
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let disowned = RoomId::parse("!disowned:example.org").expect("valid room id");
+        let live = RoomId::parse("!live:example.org").expect("valid room id");
+
+        manager.inject_for_test(first, offline_client().await).await;
+        manager.mark_room_dead(first, disowned.to_owned());
+
+        assert!(manager.is_room_dead(first, &disowned));
+        assert!(
+            !manager.is_room_dead(first, &live),
+            "only the room the homeserver disowned is dead"
+        );
+        assert!(
+            !manager.is_room_dead(second, &disowned),
+            "one account's 404 says nothing about another account's room"
+        );
+        assert_eq!(manager.dead_rooms_for(first), vec![disowned.to_owned()]);
+        assert!(manager.dead_rooms_for(second).is_empty());
+
+        // Reading the set must not drain it: the SDK keeps reporting the room
+        // as invited until the client goes away, so every sweep tick needs the
+        // same answer.
+        assert_eq!(manager.dead_rooms_for(first), vec![disowned.to_owned()]);
+
+        manager.evict(first).await;
+        assert!(
+            !manager.is_room_dead(first, &disowned),
+            "evict must drop the shadow along with the client it shadowed"
+        );
+        assert!(manager.dead_rooms_for(first).is_empty());
     }
 }

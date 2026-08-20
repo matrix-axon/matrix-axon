@@ -54,6 +54,19 @@ looked for evidence in the SDK's room state.
 the `Room::leave` path and the no-local-`Room` fallback classify; ADR 0091's
 carve-out for the former is withdrawn, since its premise does not hold.
 
+### Membership state does not enter into it
+
+`LeaveOutcome::Gone` is reported whatever state the room is in locally, joined
+included. You cannot be joined to a room the homeserver cannot resolve, so `200`
+is the honest answer and dropping the room from the SDK's view is convergence,
+not loss.
+
+The joined case is also the more forgiving of the two if a `404` were somehow
+spurious: Axon's own `events`/`room_state` projections are untouched either way,
+the dead-room set is only ever consulted by the invite watcher, and sync
+re-delivers a joined room the server does still have. Only the invite path acts
+destructively on this evidence, which is why the pair below is narrow.
+
 ### The evidence is the `(status, errcode)` pair, not the errcode
 
 `M_UNKNOWN` is Matrix's catch-all and arrives on plenty of answers that say
@@ -79,12 +92,18 @@ Deleting the `room_invites` row is not sufficient. The watcher re-derives from
 `Client::invited_rooms()`, so the row returns on the next sweep, and the SDK's
 persisted state brings it back after a restart. On `Gone` the gateway therefore:
 
-- records `(account_id, room_id)` in a process-lifetime set on `ClientManager` —
-  already shared by the sync supervisor and the gateway — which `capture_invite`
-  consults and `sweep_invites` drains. matrix-sdk exposes no way to evict a room
-  from its in-memory list, so this is what holds until restart;
+- records `(account_id, room_id)` in a set on `ClientManager` — already shared by
+  the sync supervisor and the gateway — which `capture_invite` and
+  `sweep_invites` both *read*. Neither drains it: matrix-sdk exposes no way to
+  evict a room from its in-memory list, so it must keep answering for as long as
+  that client keeps reporting the room as `Invited`;
 - calls `StateStore::remove_room`, so the room is gone from the SDK's view on
   the next boot and the set does not need to persist.
+
+The set therefore lives exactly as long as the client it shadows, not as long as
+the process: `ClientManager::evict` drops an account's entries along with its
+client, and the rebuilt client re-derives from the state store the room has
+already been removed from.
 
 Both are best-effort. A failure costs a stale row, never a wrong deletion —
 the same direction ADR 0091 chose.
@@ -97,8 +116,9 @@ the same direction ADR 0091 chose.
   nothing left to leave.
 - `M_FORBIDDEN` behaviour is unchanged, so an ACL still cannot silently destroy
   a pending invite.
-- The dead-room set grows one entry per disowned room for the life of a process,
-  the same accepted leak as the gateway's power-level locks.
+- The dead-room set is bounded by live accounts rather than by disowned rooms
+  accumulated over uptime, since `evict` clears an account's entries. Unlike the
+  gateway's power-level locks, it is not an accepted leak.
 - Rows stranded before this change are cleared by one reject pass after deploy;
   no migration or manual SQL is involved, and `DELETE FROM room_invites` alone
   would not have worked, since the watcher re-derives from the SDK.

@@ -1025,6 +1025,17 @@ impl SdkGateway {
     /// confirm. That reports [`LeaveOutcome::Gone`] from *either* path — the
     /// SDK's `Room::leave` does not converge its own state on that error, so
     /// ADR 0091's exemption for it no longer applies (ADR 0094).
+    ///
+    /// That classification is deliberately independent of the room's state:
+    /// leaving a *joined* room the server has disowned reports `Gone` too. You
+    /// cannot be joined to a room the homeserver cannot resolve, so `200` is
+    /// the honest answer and dropping it from the SDK's view is convergence,
+    /// not loss — and the joined case is the more forgiving of the two if the
+    /// `404` were somehow spurious. Axon's own `events`/`room_state`
+    /// projections are untouched either way, the dead-room set is only ever
+    /// consulted by the invite watcher, and sync re-delivers a joined room the
+    /// server does still have. Only the invite path can act destructively on
+    /// this, which is why the `(status, errcode)` pair is narrow.
     pub async fn leave(
         &self,
         account_id: Uuid,
@@ -1664,17 +1675,21 @@ mod tests {
     use matrix_sdk::attachment::{AttachmentInfo, BaseFileInfo, BaseImageInfo};
     use matrix_sdk::room::reply::EnforceThread;
     use matrix_sdk::ruma::api::client::room::Visibility;
-    use matrix_sdk::ruma::api::error::ErrorKind;
+    use matrix_sdk::ruma::api::error::{
+        Error as MatrixApiError, ErrorBody, ErrorKind, FromHttpResponseError, StandardErrorBody,
+    };
     use matrix_sdk::ruma::events::room::message::{AddMentions, MessageType, ReplyWithinThread};
     use matrix_sdk::ruma::events::room::power_levels::{RoomPowerLevels, RoomPowerLevelsSource};
     use matrix_sdk::ruma::events::room::MediaSource;
     use matrix_sdk::ruma::events::tag::TagName;
+    use matrix_sdk::ruma::exports::http::StatusCode as HttpStatus;
     use matrix_sdk::ruma::{Int, OwnedMxcUri, RoomVersionId, UserId};
+    use matrix_sdk::{HttpError, RumaApiError};
     use serde_json::json;
 
     use super::{
         attachment_info, attachment_reply, build_create_room_request,
-        check_self_demotion_guardrail, effective_mime, is_room_gone_answer,
+        check_self_demotion_guardrail, denies_knowing_room, effective_mime, is_room_gone_answer,
         leave_fallback_is_unconfirmed, media_message_type, merge_power_level_changes,
         message_relates_to, parse_room_id_or_alias, parse_server_name, parse_server_names,
         parse_tag_name, parse_user_id, thread_member_root, validate_tag_order, MAX_TAG_NAME_BYTES,
@@ -2395,5 +2410,281 @@ mod tests {
 
         check_self_demotion_guardrail(&before, &merged, &own_user_id, false)
             .expect("caller's own level (100) stays at/above state_default (50)");
+    }
+
+    /// The `matrix_sdk::Error` a homeserver answering `status` with `body`
+    /// produces, so [`denies_knowing_room`] is exercised over its real
+    /// extraction path — `Error` → `HttpError::Api` → the ruma client-API
+    /// error, then status *and* errcode off that — rather than only through
+    /// [`is_room_gone_answer`], which is handed both values already unpacked.
+    fn sdk_error(status: u16, body: ErrorBody) -> matrix_sdk::Error {
+        let status = HttpStatus::from_u16(status).expect("valid status code");
+        HttpError::Api(Box::new(FromHttpResponseError::Server(
+            RumaApiError::MatrixError(MatrixApiError::new(status, body)),
+        )))
+        .into()
+    }
+
+    /// The `errcode` + `error` shape a Matrix endpoint answers with.
+    fn matrix_body(kind: ErrorKind, message: &str) -> ErrorBody {
+        ErrorBody::Standard(StandardErrorBody::new(kind, message.to_owned()))
+    }
+
+    /// Both of Synapse's real answers for a room it has purged, verbatim.
+    #[test]
+    fn a_404_denying_the_room_is_evidence() {
+        assert!(denies_knowing_room(&sdk_error(
+            404,
+            matrix_body(ErrorKind::Unknown, "Not a known room")
+        )));
+        assert!(denies_knowing_room(&sdk_error(
+            404,
+            matrix_body(
+                ErrorKind::Unknown,
+                "Can't join remote room because no servers that are in the room have been provided."
+            )
+        )));
+        assert!(denies_knowing_room(&sdk_error(
+            404,
+            matrix_body(ErrorKind::NotFound, "Room not found")
+        )));
+    }
+
+    /// The guardrail, at the level that actually runs in production: nothing
+    /// but a `404` denying the room may reach [`LeaveOutcome::Gone`] and delete
+    /// a user's pending invite.
+    #[test]
+    fn nothing_but_a_404_denying_the_room_is_evidence() {
+        // A server ACL and "not in that room" are indistinguishable, at any
+        // status — this is the case ADR 0091 refused to act on and ADR 0094
+        // still refuses.
+        assert!(!denies_knowing_room(&sdk_error(
+            403,
+            matrix_body(ErrorKind::Forbidden, "You are not invited to this room.")
+        )));
+        assert!(!denies_knowing_room(&sdk_error(
+            404,
+            matrix_body(ErrorKind::Forbidden, "banned by server ACL")
+        )));
+        // `M_UNKNOWN` is Matrix's catch-all; off a 404 it says nothing about
+        // whether the room exists.
+        assert!(!denies_knowing_room(&sdk_error(
+            500,
+            matrix_body(ErrorKind::Unknown, "Internal server error")
+        )));
+        assert!(!denies_knowing_room(&sdk_error(
+            502,
+            matrix_body(ErrorKind::Unknown, "bad gateway")
+        )));
+        // A 404 whose body is not the `errcode` shape carries no errcode at
+        // all — a reverse proxy answering for the homeserver, say.
+        assert!(!denies_knowing_room(&sdk_error(
+            404,
+            ErrorBody::Json(json!({ "nginx": "not found" }))
+        )));
+    }
+}
+
+/// End-to-end coverage for the [`denies_knowing_room`] *callers* (ADR 0094):
+/// a real [`SdkGateway`] against a stand-in homeserver, so the classification,
+/// the outcome it produces, and the dead-room record it leaves behind are all
+/// exercised through [`SdkGateway::leave`] itself rather than stubbed.
+#[cfg(test)]
+mod disowned_room_tests {
+    use std::net::SocketAddr;
+
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use matrix_sdk::authentication::matrix::MatrixSession;
+    use matrix_sdk::ruma::OwnedRoomId;
+    use matrix_sdk::store::RoomLoadSettings;
+    use matrix_sdk::{SessionMeta, SessionTokens};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::*;
+
+    /// Serve `router` on an ephemeral loopback port, mirroring `discovery.rs`'s
+    /// and `engine.rs`'s harnesses.
+    async fn serve(router: Router) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        addr
+    }
+
+    /// A homeserver that answers `status` + `body` to a leave.
+    fn leave_router(status: StatusCode, body: serde_json::Value) -> Router {
+        Router::new().route(
+            "/_matrix/client/v3/rooms/{room_id}/leave",
+            post(move || {
+                let body = body.clone();
+                async move { (status, Json(body)) }
+            }),
+        )
+    }
+
+    /// A gateway whose client points at `addr`.
+    ///
+    /// The session restore is load-bearing rather than ceremony: leave requires
+    /// authentication, so an anonymous client fails locally with "no access
+    /// token provided" and never opens a connection — an error that carries no
+    /// status, and so would classify as a plain failure no matter what the
+    /// stand-in homeserver was configured to say.
+    ///
+    /// The client is injected rather than connected, so no account row, no
+    /// login and no SDK store directory are involved. It knows no rooms, which
+    /// is exactly the production shape here: Sliding Sync had evicted these
+    /// rooms from the SDK's map, so `leave` takes the raw client-server
+    /// fallback.
+    async fn gateway_for(addr: SocketAddr, account_id: Uuid) -> (SdkGateway, ClientManager) {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for these tests");
+        let store = Store::connect(&url, 5).await.expect("connect + migrate");
+        let manager = ClientManager::new(store.clone(), axon_core::SyncConfig::default());
+
+        let client = Client::builder()
+            .homeserver_url(format!("http://{addr}"))
+            .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11])
+            // Without this the SDK retries a 5xx for the whole default retry
+            // window, so the two tests below that answer 5xx would spend it
+            // before asserting anything.
+            .request_config(matrix_sdk::config::RequestConfig::new().disable_retry())
+            .build()
+            .await
+            .expect("client against the stand-in homeserver");
+        client
+            .matrix_auth()
+            .restore_session(
+                MatrixSession {
+                    meta: SessionMeta {
+                        user_id: matrix_sdk::ruma::UserId::parse("@leaver:localhost")
+                            .expect("test user id"),
+                        device_id: "LEAVEDEV".into(),
+                    },
+                    tokens: SessionTokens {
+                        access_token: "leave-token".to_owned(),
+                        refresh_token: None,
+                    },
+                },
+                RoomLoadSettings::default(),
+            )
+            .await
+            .expect("restore a session so the leave is actually sent");
+        manager.inject_for_test(account_id, client).await;
+
+        (SdkGateway::new(manager.clone(), store), manager)
+    }
+
+    const DEAD_ROOM: &str = "!disowned:localhost";
+
+    fn dead_room_id() -> OwnedRoomId {
+        RoomId::parse(DEAD_ROOM).expect("test room id")
+    }
+
+    /// The production case (ADR 0094): Synapse answers a reject with
+    /// `404 M_UNKNOWN`, and that must come back as `Gone` — a `200` to the
+    /// user, and a record the invite watcher can act on. Before this change
+    /// the same answer was a `502` and the invite was unclearable by any
+    /// route the API exposes.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_404_denying_the_room_leaves_it_gone() {
+        let account_id = Uuid::new_v4();
+        let addr = serve(leave_router(
+            StatusCode::NOT_FOUND,
+            json!({ "errcode": "M_UNKNOWN", "error": "Not a known room" }),
+        ))
+        .await;
+        let (gateway, manager) = gateway_for(addr, account_id).await;
+
+        let outcome = gateway.leave(account_id, DEAD_ROOM).await;
+        assert!(
+            matches!(outcome, Ok(LeaveOutcome::Gone)),
+            "a homeserver denying the room is evidence the membership is gone, got {outcome:?}"
+        );
+        assert!(
+            manager.is_room_dead(account_id, &dead_room_id()),
+            "`Gone` must record the room too, or the invite watcher re-persists the \
+             row on its next sweep and undoes the reject"
+        );
+    }
+
+    /// `M_FORBIDDEN` stays [`LeaveOutcome::Unconfirmed`]: with no local `Room`
+    /// to corroborate against, a server ACL and "not in that room" look the
+    /// same, so the row survives. This is the guardrail that keeps a
+    /// misbehaving ACL from silently destroying a live invite.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_forbidden_leave_is_unconfirmed_and_records_nothing() {
+        let account_id = Uuid::new_v4();
+        let addr = serve(leave_router(
+            StatusCode::FORBIDDEN,
+            json!({ "errcode": "M_FORBIDDEN", "error": "You are not in that room" }),
+        ))
+        .await;
+        let (gateway, manager) = gateway_for(addr, account_id).await;
+
+        let outcome = gateway.leave(account_id, DEAD_ROOM).await;
+        assert!(
+            matches!(outcome, Ok(LeaveOutcome::Unconfirmed)),
+            "M_FORBIDDEN is not evidence about the room, got {outcome:?}"
+        );
+        assert!(
+            !manager.is_room_dead(account_id, &dead_room_id()),
+            "an unconfirmed leave must not mark the room dead"
+        );
+    }
+
+    /// The status half of the pair, isolated. A `502 M_UNKNOWN` carries the
+    /// *same errcode* as the production case and differs only in status, so a
+    /// classifier keyed on the errcode alone would read an upstream outage as
+    /// proof the room is gone and delete the user's invite. It must stay
+    /// [`LeaveOutcome::Unconfirmed`] (ADR 0091's behaviour, unchanged) and
+    /// leave no dead-room record behind.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn the_same_errcode_off_a_404_is_not_evidence() {
+        let account_id = Uuid::new_v4();
+        let addr = serve(leave_router(
+            StatusCode::BAD_GATEWAY,
+            json!({ "errcode": "M_UNKNOWN", "error": "bad gateway" }),
+        ))
+        .await;
+        let (gateway, manager) = gateway_for(addr, account_id).await;
+
+        let outcome = gateway.leave(account_id, DEAD_ROOM).await;
+        assert!(
+            matches!(outcome, Ok(LeaveOutcome::Unconfirmed)),
+            "M_UNKNOWN off a 404 says nothing about the room, got {outcome:?}"
+        );
+        assert!(
+            !manager.is_room_dead(account_id, &dead_room_id()),
+            "an outage must not mark the room dead"
+        );
+    }
+
+    /// Anything outside both sets is still a plain failure the client can
+    /// retry — the new outcome did not widen what counts as success.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn an_unrelated_failure_is_still_an_error() {
+        let account_id = Uuid::new_v4();
+        let addr = serve(leave_router(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({ "errcode": "M_BAD_JSON", "error": "malformed" }),
+        ))
+        .await;
+        let (gateway, manager) = gateway_for(addr, account_id).await;
+
+        let outcome = gateway.leave(account_id, DEAD_ROOM).await;
+        assert!(
+            matches!(outcome, Err(GatewayError::Upstream(_))),
+            "an unclassified failure must stay retryable, got {outcome:?}"
+        );
+        assert!(
+            !manager.is_room_dead(account_id, &dead_room_id()),
+            "a failure must not mark the room dead"
+        );
     }
 }
