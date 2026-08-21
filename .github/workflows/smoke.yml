@@ -97,56 +97,55 @@ jobs:
           key: ${{ runner.os }}-cargo-smoke-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-smoke-
 
+      - name: Resolve smoke lane
+        id: lane
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_LANE: ${{ inputs.lane }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            lane="$DISPATCH_LANE"
+          else
+            lane="all"
+          fi
+          echo "lane=$lane" >> "$GITHUB_OUTPUT"
+
       - name: Run the requested lane
         # A dispatch names its lane; a push or a schedule runs everything, which
         # re-runs the stub lane too. That overlap is deliberate: `all` is the
         # documented S1 gate, and carving it up here would create a second
         # definition of what S1 means.
-        run: |
-          set -o pipefail
-          ./scripts/smoke-gate.sh "${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'all' }}" \
-            2>&1 | tee smoke-run.log
+        env:
+          SMOKE_LANE: ${{ steps.lane.outputs.lane }}
+        run: ./scripts/smoke-gate.sh "$SMOKE_LANE"
 
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: smoke-artifacts-true-local
-          path: |
-            smoke-artifacts/
-            smoke-run.log
+          path: smoke-artifacts/
           if-no-files-found: ignore
 
-      - name: Notify axon-developer room of failed result
-        if: ${{ failure() }}
+      - name: Notify axon-developer room of result
+        if: ${{ always() }}
         continue-on-error: true
         env:
-          HOMESERVER: ${{ secrets.NOTIFY_HOMESERVER }}
-          ROOM: ${{ secrets.NOTIFY_ROOM }}
-          TOKEN: ${{ secrets.NOTIFY_TOKEN }}
+          NOTIFY_HOMESERVER: ${{ secrets.NOTIFY_HOMESERVER }}
+          NOTIFY_ROOM: ${{ secrets.NOTIFY_ROOM }}
+          NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
           BRANCH: ${{ github.ref_name }}
           TRIGGER: ${{ github.event_name }}
-          LANE: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'all' }}
+          LANE: ${{ steps.lane.outputs.lane }}
           COMMIT: ${{ github.sha }}
           ACTOR: ${{ github.actor }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           ATTEMPT: ${{ github.run_attempt }}
+          STATUS: ${{ job.status }}
         run: |
           set -euo pipefail
 
-          test -n "$HOMESERVER" || { echo "NOTIFY_HOMESERVER is empty"; exit 1; }
-          test -n "$ROOM" || { echo "NOTIFY_ROOM is empty"; exit 1; }
-          test -n "$TOKEN" || { echo "NOTIFY_TOKEN is empty"; exit 1; }
-
-          excerpt="$(tail -n 60 smoke-run.log 2>/dev/null || true)"
-          for secret in "$HOMESERVER" "$ROOM" "$TOKEN"; do
-            if [ -n "$secret" ] && [[ "$excerpt" == *"$secret"* ]]; then
-              excerpt="[log excerpt omitted because it contained a configured secret]"
-              break
-            fi
-          done
-
-          MESSAGE="$(jq -n \
+          fields="$(jq -n \
             --arg branch "$BRANCH" \
             --arg trigger "$TRIGGER" \
             --arg lane "$LANE" \
@@ -154,86 +153,11 @@ jobs:
             --arg actor "$ACTOR" \
             --arg run_url "$RUN_URL" \
             --arg attempt "$ATTEMPT" \
-            --arg excerpt "$excerpt" \
+            --arg status "$STATUS" \
             '{
-              msgtype: "m.text",
-              format: "org.matrix.custom.html",
               body: (
                 "Smoke Test Run"
-                + "\n\ntrue-local failed"
-                + "\n\nBranch: " + $branch
-                + "\nTrigger: " + $trigger
-                + "\nLane: " + $lane
-                + "\nCommit: " + $commit
-                + "\nActor: " + $actor
-                + "\nAttempt: " + $attempt
-                + "\nRun: " + $run_url
-                + "\n\nLast 60 log lines:\n" + $excerpt
-              ),
-              formatted_body: (
-                def html_escape:
-                  gsub("&"; "&amp;")
-                  | gsub("<"; "&lt;")
-                  | gsub(">"; "&gt;")
-                  | gsub("\u0022"; "&quot;")
-                  | gsub("\u0027"; "&#39;");
-                "<h1>Smoke Test Run</h1>"
-                + "<h2>true-local <strong>failed</strong></h2>"
-                + "<p><strong>Branch:</strong> " + ($branch | html_escape)
-                + "<br><strong>Trigger:</strong> " + ($trigger | html_escape)
-                + "<br><strong>Lane:</strong> " + ($lane | html_escape)
-                + "<br><strong>Commit:</strong> " + ($commit | html_escape)
-                + "<br><strong>Actor:</strong> " + ($actor | html_escape)
-                + "<br><strong>Attempt:</strong> " + ($attempt | html_escape)
-                + "<br><strong>Run:</strong> <a href=\"" + ($run_url | html_escape) + "\">"
-                + ($run_url | html_escape) + "</a></p>"
-                + "<p><strong>Last 60 log lines:</strong></p><pre>"
-                + ($excerpt | html_escape) + "</pre>"
-              )
-            }')"
-
-          curl --fail-with-body --silent --show-error --max-time 15 \
-            -X PUT \
-            "$HOMESERVER/_matrix/client/v3/rooms/$ROOM/send/m.room.message/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            --data "$MESSAGE"
-
-      - name: Notify axon-developer room of successful result
-        if: ${{ success() }}
-        continue-on-error: true
-        env:
-          HOMESERVER: ${{ secrets.NOTIFY_HOMESERVER }}
-          ROOM: ${{ secrets.NOTIFY_ROOM }}
-          TOKEN: ${{ secrets.NOTIFY_TOKEN }}
-          BRANCH: ${{ github.ref_name }}
-          TRIGGER: ${{ github.event_name }}
-          LANE: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'all' }}
-          COMMIT: ${{ github.sha }}
-          ACTOR: ${{ github.actor }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-
-          test -n "$HOMESERVER" || { echo "NOTIFY_HOMESERVER is empty"; exit 1; }
-          test -n "$ROOM" || { echo "NOTIFY_ROOM is empty"; exit 1; }
-          test -n "$TOKEN" || { echo "NOTIFY_TOKEN is empty"; exit 1; }
-
-          MESSAGE="$(jq -n \
-            --arg branch "$BRANCH" \
-            --arg trigger "$TRIGGER" \
-            --arg lane "$LANE" \
-            --arg commit "$COMMIT" \
-            --arg actor "$ACTOR" \
-            --arg run_url "$RUN_URL" \
-            --arg attempt "$ATTEMPT" \
-            '{
-              msgtype: "m.text",
-              format: "org.matrix.custom.html",
-              body: (
-                "Smoke Test Run"
-                + "\n\ntrue-local succeeded"
+                + "\n\ntrue-local " + $status
                 + "\n\nBranch: " + $branch
                 + "\nTrigger: " + $trigger
                 + "\nLane: " + $lane
@@ -250,7 +174,7 @@ jobs:
                   | gsub("\u0022"; "&quot;")
                   | gsub("\u0027"; "&#39;");
                 "<h1>Smoke Test Run</h1>"
-                + "<h2>true-local <strong>succeeded</strong></h2>"
+                + "<h2>true-local <strong>" + ($status | html_escape) + "</strong></h2>"
                 + "<p><strong>Branch:</strong> " + ($branch | html_escape)
                 + "<br><strong>Trigger:</strong> " + ($trigger | html_escape)
                 + "<br><strong>Lane:</strong> " + ($lane | html_escape)
@@ -262,9 +186,7 @@ jobs:
               )
             }')"
 
-          curl --fail-with-body --silent --show-error --max-time 15 \
-            -X PUT \
-            "$HOMESERVER/_matrix/client/v3/rooms/$ROOM/send/m.room.message/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            --data "$MESSAGE"
+          MATRIX_BODY="$(jq -r .body <<<"$fields")"
+          MATRIX_FORMATTED_BODY="$(jq -r .formatted_body <<<"$fields")"
+          export MATRIX_BODY MATRIX_FORMATTED_BODY
+          ./scripts/send-matrix-notification.sh
