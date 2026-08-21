@@ -211,6 +211,7 @@ impl App {
             let own_user_id = self.live.own_senders.get(&event.account_id).cloned();
             self.apply_remote_reaction(
                 &key,
+                &event.event_id,
                 target_id,
                 reaction_key,
                 &event.sender,

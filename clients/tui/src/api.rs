@@ -1314,7 +1314,7 @@ pub struct EventDto {
 /// One emoji's aggregated tally on an [`EventDto`], mirroring the API's
 /// `ReactionDto`. `my_event_ids` are the account user's own reaction events for
 /// the key — the ids redacted to withdraw the reaction.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ReactionTally {
     pub count: i64,
     pub me: bool,

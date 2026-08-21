@@ -170,12 +170,7 @@ impl App {
         let reactions = event.reactions.get_or_insert_with(HashMap::new);
         let tally = reactions
             .entry(key.to_owned())
-            .or_insert_with(|| crate::api::ReactionTally {
-                count: 0,
-                me: false,
-                senders: Vec::new(),
-                my_event_ids: Vec::new(),
-            });
+            .or_insert_with(crate::api::ReactionTally::default);
         if !tally.me {
             tally.count += 1;
             tally.me = true;
@@ -207,6 +202,7 @@ impl App {
     pub(super) fn apply_remote_reaction(
         &mut self,
         room: &RoomKey,
+        reaction_event_id: &str,
         target_event_id: &str,
         key: &str,
         sender: &str,
@@ -224,12 +220,17 @@ impl App {
         let reactions = event.reactions.get_or_insert_with(HashMap::new);
         let tally = reactions
             .entry(key.to_owned())
-            .or_insert_with(|| crate::api::ReactionTally {
-                count: 0,
-                me: false,
-                senders: Vec::new(),
-                my_event_ids: Vec::new(),
-            });
+            .or_insert_with(crate::api::ReactionTally::default);
+        // Our own reaction echoing back. Keyed on the reaction event id rather
+        // than on the sender, because `own_user_id` is only known once the
+        // account's user id has been resolved — an older server without
+        // `RoomDto.account_user_id`, or a session where the user has not yet
+        // sent a plain message, leaves it `None`. `apply_local_reaction` already
+        // counted this and recorded the id, so a sender-only check would miss
+        // the echo in exactly those cases and count one reaction twice.
+        if tally.my_event_ids.iter().any(|id| id == reaction_event_id) {
+            return;
+        }
         if tally.senders.iter().any(|known| known == sender) {
             return;
         }

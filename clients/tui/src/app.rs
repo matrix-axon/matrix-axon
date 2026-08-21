@@ -3418,6 +3418,53 @@ mod tests {
     /// so the raw `m.reaction` row was appended (and filtered out of the
     /// rendered timeline) while the target's aggregate — which the badge
     /// actually renders from — went untouched until a room switch refetched it.
+    /// Our own reaction, echoed back over the WS, must not be counted twice —
+    /// including when the account's user id was never resolved.
+    ///
+    /// `apply_local_reaction` counts the reaction optimistically and records its
+    /// event id, but can only add us to `senders` when `own_user_id` is known.
+    /// An older server without `RoomDto.account_user_id`, or a session where the
+    /// user has not yet sent a plain message, leaves it `None` — so a
+    /// sender-only dedup misses the echo and the badge reads 2 for one person's
+    /// reaction until the next full reload.
+    #[test]
+    fn an_own_reaction_echo_is_not_double_counted_without_a_known_user_id() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![message_with_reactions("$target:example.com", Vec::new())],
+        );
+        // The premise: this account's user id is unknown.
+        app.live.own_senders.clear();
+
+        app.apply_local_reaction(
+            "$target:example.com",
+            "\u{1f44d}",
+            "$mine:example.com".to_owned(),
+        );
+        assert_eq!(
+            app.selected_reactions().get("$target:example.com"),
+            Some(&vec![("\u{1f44d}".to_owned(), 1)]),
+            "the optimistic patch counts it once"
+        );
+
+        // The same reaction comes back over the WS.
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+            "$mine:example.com",
+            "$target:example.com",
+            "\u{1f44d}",
+            "@alice:example.com",
+        ))));
+
+        assert_eq!(
+            app.selected_reactions().get("$target:example.com"),
+            Some(&vec![("\u{1f44d}".to_owned(), 1)]),
+            "the echo is recognised by its event id, not by its sender"
+        );
+    }
+
     #[test]
     fn a_remote_reaction_updates_the_target_tally_live() {
         let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
