@@ -4713,6 +4713,41 @@ mod tests {
         );
     }
 
+    /// Reacting from inside the TUI patches the target message's aggregate in
+    /// place (`apply_local_reaction`), so the digest must notice. Remote
+    /// reactions are a different path — they arrive as raw `m.reaction` rows
+    /// that never touch the target's aggregate — and are not covered here.
+    #[test]
+    fn a_local_reaction_recomputes_the_layout() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![event_with_id(
+                "$one:example.com",
+                "m.room.message",
+                Some("hello"),
+                serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
+            )],
+        );
+
+        app.ensure_message_layout();
+        let before = app.messages.layout_key;
+
+        app.apply_local_reaction(
+            "$one:example.com",
+            "\u{1f44d}",
+            "$react:example.com".to_owned(),
+        );
+        app.ensure_message_layout();
+
+        assert_ne!(
+            app.messages.layout_key, before,
+            "a reaction the client applied itself must invalidate the layout"
+        );
+    }
+
     #[test]
     fn message_navigation_uses_rendered_image_ranges() {
         let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
