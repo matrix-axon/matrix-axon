@@ -1070,6 +1070,15 @@ pub(crate) struct MessagePane {
     /// Digest of everything the cached `layout` was computed from (#54).
     /// `None` until the first layout runs.
     pub(crate) layout_key: Option<u64>,
+    /// How many times `ensure_message_layout` has been asked for a layout, and
+    /// how many of those actually re-ran it.
+    ///
+    /// Surfaced in the `display.debug` overlay because a cache that never hits
+    /// is invisible: it renders identically and only costs more. Without these
+    /// two numbers a broken digest and a working one look exactly the same on
+    /// screen (#54).
+    pub(crate) layout_checks: u64,
+    pub(crate) layout_recomputes: u64,
     /// The layout `draw` renders and the nav math measures against. One per
     /// change rather than two per frame; see `app::layout_cache`.
     pub(crate) layout: Option<crate::app::render::MessageLayout>,
@@ -1091,6 +1100,8 @@ impl Default for MessagePane {
             line_ranges: Vec::new(),
             layout_event_ids: Vec::new(),
             layout_key: None,
+            layout_checks: 0,
+            layout_recomputes: 0,
             layout: None,
             history_cursors: HashMap::new(),
             loading_history: false,
@@ -4609,6 +4620,48 @@ mod tests {
             app.messages.line_ranges,
             vec![99..100, 100..101],
             "a cache hit must not recompute"
+        );
+    }
+
+    /// The overlay counters must distinguish a hit from a recompute — that is
+    /// their entire purpose, since a cache that never hits looks identical on
+    /// screen and only costs more.
+    #[test]
+    fn the_layout_counters_separate_hits_from_recomputes() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![event_with_id(
+                "$one:example.com",
+                "m.room.message",
+                Some("hello"),
+                serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
+            )],
+        );
+
+        app.ensure_message_layout();
+        assert_eq!(
+            (app.messages.layout_checks, app.messages.layout_recomputes),
+            (1, 1)
+        );
+
+        // Three hits: checked each time, recomputed none of them.
+        for _ in 0..3 {
+            app.ensure_message_layout();
+        }
+        assert_eq!(
+            (app.messages.layout_checks, app.messages.layout_recomputes),
+            (4, 1)
+        );
+
+        // A real change recomputes once more.
+        app.messages.width = 20;
+        app.ensure_message_layout();
+        assert_eq!(
+            (app.messages.layout_checks, app.messages.layout_recomputes),
+            (5, 2)
         );
     }
 

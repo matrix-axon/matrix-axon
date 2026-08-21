@@ -2446,6 +2446,22 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         app.rooms_without_derived_title.len()
     );
 
+    // A cache that never hits looks identical on screen, so the overlay reports
+    // the hit rate rather than leaving "is it working?" unanswerable (#54).
+    let layout_line = {
+        let checks = app.messages.layout_checks;
+        let recomputes = app.messages.layout_recomputes;
+        let hits = checks.saturating_sub(recomputes);
+        let hit_rate = if checks == 0 {
+            0.0
+        } else {
+            (hits as f64 / checks as f64) * 100.0
+        };
+        format!(
+            "Message layout: {recomputes} recomputed / {checks} checked ({hit_rate:.1}% cached)"
+        )
+    };
+
     let mut lines = vec![
         format!("Axon server: {}", app.client.base_url()),
         auth_line,
@@ -2455,6 +2471,7 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         media_drops_line,
         startup_line,
         room_titles_line,
+        layout_line,
         "".to_owned(),
         format!("Rooms loaded: {}", app.rooms.rooms.len()),
         account_filter_line,
