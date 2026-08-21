@@ -199,6 +199,24 @@ impl App {
             }
             return LiveFrameAction::None;
         }
+        // Same shape as the edit branch above, and for the same reason: the
+        // badge renders from the target's aggregate, not from this raw row.
+        // Placed before the dedup and historical-view guards because it is
+        // idempotent — a sender already in the tally is a no-op — so a repeated
+        // frame cannot double-count, and a reaction arriving while the user is
+        // browsing history still belongs in the tally they will scroll back to.
+        // The raw row still falls through to the normal append, which
+        // `should_show_event` filters out of the rendered timeline as before.
+        if let Some((target_id, reaction_key)) = event.reaction_relation() {
+            let own_user_id = self.live.own_senders.get(&event.account_id).cloned();
+            self.apply_remote_reaction(
+                &key,
+                target_id,
+                reaction_key,
+                &event.sender,
+                own_user_id.as_deref(),
+            );
+        }
         let known_room = self
             .rooms
             .rooms

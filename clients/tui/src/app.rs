@@ -2872,6 +2872,9 @@ mod tests {
         crate::api::ReactionTally {
             count,
             me,
+            // These fixtures predate `senders` and exercise paths that do not
+            // read it. Tests for the live-reaction merge populate it directly.
+            senders: Vec::new(),
             my_event_ids: my_event_ids.iter().map(|s| (*s).to_owned()).collect(),
         }
     }
@@ -3395,6 +3398,107 @@ mod tests {
 
         assert_eq!(app.rooms.selected, None);
         assert!(app.selected_room().is_none());
+    }
+
+    /// Build a live `m.reaction` frame annotating `target` with `key`.
+    fn reaction_frame(event_id: &str, target: &str, key: &str, sender: &str) -> EventDto {
+        let mut event = event_with_id(event_id, "m.reaction", None, serde_json::json!({}));
+        event.sender = sender.to_owned();
+        event.relates_to = Some(serde_json::json!({
+            "rel_type": "m.annotation",
+            "event_id": target,
+            "key": key,
+        }));
+        event
+    }
+
+    /// A reaction from someone else must reach the badge as it arrives.
+    ///
+    /// `append_live_event` had a merge branch for edits and none for reactions,
+    /// so the raw `m.reaction` row was appended (and filtered out of the
+    /// rendered timeline) while the target's aggregate — which the badge
+    /// actually renders from — went untouched until a room switch refetched it.
+    #[test]
+    fn a_remote_reaction_updates_the_target_tally_live() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![message_with_reactions("$target:example.com", Vec::new())],
+        );
+
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+            "$react:example.com",
+            "$target:example.com",
+            "\u{1f44d}",
+            "@bob:example.com",
+        ))));
+
+        let tallies = app.selected_reactions();
+        let target = tallies
+            .get("$target:example.com")
+            .expect("the target message carries a tally");
+        assert_eq!(target, &vec![("\u{1f44d}".to_owned(), 1)]);
+    }
+
+    /// The same frame twice — a duplicate delivery, or our own reaction echoed
+    /// back over the WS after the optimistic patch — must not double-count.
+    #[test]
+    fn a_repeated_reaction_from_one_sender_counts_once() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![message_with_reactions("$target:example.com", Vec::new())],
+        );
+
+        for id in ["$react:example.com", "$again:example.com"] {
+            app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+                id,
+                "$target:example.com",
+                "\u{1f44d}",
+                "@bob:example.com",
+            ))));
+        }
+
+        let tallies = app.selected_reactions();
+        assert_eq!(
+            tallies.get("$target:example.com"),
+            Some(&vec![("\u{1f44d}".to_owned(), 1)]),
+            "one sender is one distinct-sender contribution however many frames arrive"
+        );
+    }
+
+    /// Two different senders on the same key each contribute once.
+    #[test]
+    fn two_senders_on_one_key_both_count() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![message_with_reactions("$target:example.com", Vec::new())],
+        );
+
+        for (id, sender) in [
+            ("$one:example.com", "@bob:example.com"),
+            ("$two:example.com", "@carol:example.com"),
+        ] {
+            app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+                id,
+                "$target:example.com",
+                "\u{1f44d}",
+                sender,
+            ))));
+        }
+
+        let tallies = app.selected_reactions();
+        assert_eq!(
+            tallies.get("$target:example.com"),
+            Some(&vec![("\u{1f44d}".to_owned(), 2)])
+        );
     }
 
     #[test]

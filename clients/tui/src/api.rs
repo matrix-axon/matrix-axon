@@ -1318,8 +1318,17 @@ pub struct EventDto {
 pub struct ReactionTally {
     pub count: i64,
     pub me: bool,
-    // `senders` is part of the wire shape but unused by the TUI, so it is left
-    // out here — serde ignores the extra key.
+    /// The distinct Matrix user ids that reacted with this key.
+    ///
+    /// Deserialized so a live `m.reaction` frame can tell a sender already in
+    /// the tally from a new one and patch it idempotently, rather than waiting
+    /// for the next timeline reload to re-derive the aggregate. `count` is this
+    /// list's cardinality server-side, but is incremented alongside rather than
+    /// recomputed from it: the store caps a pathological event at its oldest
+    /// 1000 distinct `(sender, key)` pairs, and a truncated `senders` must not
+    /// silently rewrite an authoritative `count`.
+    #[serde(default)]
+    pub senders: Vec<String>,
     #[serde(default)]
     pub my_event_ids: Vec<String>,
 }
@@ -1496,6 +1505,18 @@ impl EventDto {
         let new_content = self.content.as_ref()?.get("m.new_content")?;
         let new_body = new_content.get("body")?.as_str()?;
         Some((target, new_body, new_content))
+    }
+
+    /// The `(target event id, key)` an `m.reaction` annotates
+    /// (`m.relates_to` with `rel_type: m.annotation`).
+    pub fn reaction_relation(&self) -> Option<(&str, &str)> {
+        let relates_to = self.relates_to.as_ref()?;
+        if relates_to.get("rel_type")?.as_str()? != "m.annotation" {
+            return None;
+        }
+        let target = relates_to.get("event_id")?.as_str()?;
+        let key = relates_to.get("key")?.as_str()?;
+        Some((target, key))
     }
 
     /// The `event_id` this event is a reply to (`m.relates_to.m.in_reply_to`),

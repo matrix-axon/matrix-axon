@@ -115,6 +115,7 @@ impl App {
         let Some(room) = self.selected_room().cloned() else {
             return;
         };
+        let own_user_id = self.live.own_senders.get(&room.account_id).cloned();
         let room_key = RoomKey::from(&room);
         let Some(events) = self.messages.events.get_mut(&room_key) else {
             return;
@@ -130,6 +131,9 @@ impl App {
             if tally.my_event_ids.is_empty() && tally.me {
                 tally.me = false;
                 tally.count = tally.count.saturating_sub(1);
+                if let Some(own) = own_user_id.as_deref() {
+                    tally.senders.retain(|sender| sender != own);
+                }
             }
             if tally.count <= 0 {
                 reactions.remove(key);
@@ -155,6 +159,7 @@ impl App {
         let Some(room) = self.selected_room().cloned() else {
             return;
         };
+        let own_user_id = self.live.own_senders.get(&room.account_id).cloned();
         let room_key = RoomKey::from(&room);
         let Some(events) = self.messages.events.get_mut(&room_key) else {
             return;
@@ -168,14 +173,70 @@ impl App {
             .or_insert_with(|| crate::api::ReactionTally {
                 count: 0,
                 me: false,
+                senders: Vec::new(),
                 my_event_ids: Vec::new(),
             });
         if !tally.me {
             tally.count += 1;
             tally.me = true;
         }
+        // Record ourselves among the senders too, so this reaction echoing back
+        // over the WS is recognised as already counted rather than added twice.
+        if let Some(own) = own_user_id {
+            if !tally.senders.iter().any(|sender| sender == &own) {
+                tally.senders.push(own);
+            }
+        }
         if !tally.my_event_ids.contains(&reaction_event_id) {
             tally.my_event_ids.push(reaction_event_id);
+        }
+    }
+
+    /// Fold a live `m.reaction` from any sender into the target message's
+    /// server-aggregated tally.
+    ///
+    /// `append_live_event` has had a merge branch for edits since M8 — an
+    /// `m.replace` frame patches the body of the event it edits — but none for
+    /// reactions. A reaction frame appended a raw `m.reaction` row that
+    /// `should_show_event` filters out, while the badge renders from the
+    /// *target's* `reactions` aggregate, which nothing updated. The badge
+    /// therefore only appeared after a room switch refetched the timeline.
+    ///
+    /// Idempotent: a sender already in the tally is a no-op, so a duplicate or
+    /// echoed frame cannot double-count.
+    pub(super) fn apply_remote_reaction(
+        &mut self,
+        room: &RoomKey,
+        target_event_id: &str,
+        key: &str,
+        sender: &str,
+        own_user_id: Option<&str>,
+    ) {
+        let Some(events) = self.messages.events.get_mut(room) else {
+            return;
+        };
+        let Some(event) = events
+            .iter_mut()
+            .find(|item| item.event_id == target_event_id)
+        else {
+            return;
+        };
+        let reactions = event.reactions.get_or_insert_with(HashMap::new);
+        let tally = reactions
+            .entry(key.to_owned())
+            .or_insert_with(|| crate::api::ReactionTally {
+                count: 0,
+                me: false,
+                senders: Vec::new(),
+                my_event_ids: Vec::new(),
+            });
+        if tally.senders.iter().any(|known| known == sender) {
+            return;
+        }
+        tally.senders.push(sender.to_owned());
+        tally.count += 1;
+        if own_user_id == Some(sender) {
+            tally.me = true;
         }
     }
 
