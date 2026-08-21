@@ -378,8 +378,10 @@ does nothing at all unless retries are enabled, and `playwright.config.ts` sets
 The practical consequence is that both environments reject a first-attempt
 failure, while CI still retries to capture a trace and distinguish a flaky test
 from a persistent failure. To reproduce the gate exactly, set `CI=1` and pass
-`--fail-on-flaky-tests`; `CI=1` also makes Playwright require a fresh mock server
-rather than reusing one already listening on port 4599.
+`--fail-on-flaky-tests`. Every run requires a fresh mock server: an existing
+listener on the default port 4599 is an error rather than a server Playwright
+can silently reuse from another workspace. Set `AXON_WEB_E2E_PORT` to an unused
+port when another workspace or a manually driven mock needs 4599.
 
 **A local full-suite Firefox run should pass.** #157 traced its former
 order-dependent failures to the mock backend leaving every client-initiated

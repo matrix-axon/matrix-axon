@@ -7,6 +7,7 @@ import {
   type EmojiEntry,
 } from '../emoji'
 import { useAttachments, type AttachmentBatch } from '../media/use-attachments'
+import type { AttachmentStaging } from '../media/attachment-staging'
 import { useFileDrop } from '../media/use-file-drop'
 import {
   formatMessageBody,
@@ -39,6 +40,12 @@ export interface MessageComposerOptions {
   attachmentScope: string
   /** Called after a message, edit, or media batch successfully mutates room state. */
   onMutation?: () => void
+  /**
+   * Where staged files live (issue #89). From the service graph, not this
+   * hook: the surfaces that own a composer unmount on a route change, and the
+   * files have to outlive that.
+   */
+  staging: AttachmentStaging
 }
 
 /**
@@ -86,7 +93,7 @@ export function useMessageComposer(options: MessageComposerOptions): {
     stage,
     remove: removeAttachment,
     clear: clearAttachment,
-  } = useAttachments(options.attachmentScope)
+  } = useAttachments(options.attachmentScope, options.staging)
   const { dragging, handlers: dropHandlers } = useFileDrop(stage)
 
   useEffect(() => {

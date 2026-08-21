@@ -17,12 +17,18 @@ import { openRoom, ROOM_URL, signIn } from './helpers'
  * 3 of 3" would be pinning that inconsistency rather than this feature.
  */
 
-/** The `data-event-id`s of the image rows, in the order the timeline draws. */
-function imageRowIds(page: Page): Promise<string[]> {
-  return page.evaluate(() =>
-    [...document.querySelectorAll('[data-event-id]')]
-      .filter((row) => row.querySelector('.media-figure') !== null)
-      .map((row) => row.getAttribute('data-event-id') ?? ''),
+/**
+ * The seeded image row ids, in rendered order. Socket readiness and timeline
+ * paint are independent; wait on the rows instead of snapshotting an empty DOM
+ * after `openRoom` has only proved the socket is live (#177).
+ */
+async function imageRowIds(page: Page): Promise<string[]> {
+  const rows = page.locator('[data-event-id]').filter({
+    has: page.locator('.media-figure'),
+  })
+  await expect(rows).toHaveCount(3)
+  return rows.evaluateAll((elements) =>
+    elements.map((row) => row.getAttribute('data-event-id') ?? ''),
   )
 }
 

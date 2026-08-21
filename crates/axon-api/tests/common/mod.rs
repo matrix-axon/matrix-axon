@@ -439,6 +439,16 @@ impl StubMembership {
         }
     }
 
+    /// A stub whose `leave` reports that the homeserver denies knowing the
+    /// room — what the gateway reports for a `404` carrying
+    /// `M_NOT_FOUND`/`M_UNKNOWN` (ADR 0094).
+    pub fn ok_room_gone() -> Self {
+        Self {
+            leave_outcome: LeaveOutcome::Gone,
+            ..Self::ok()
+        }
+    }
+
     /// A stub that returns the given failure for every call.
     pub fn failing(outcome: MembershipOutcome) -> Self {
         Self {

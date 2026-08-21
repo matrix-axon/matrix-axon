@@ -9,5 +9,18 @@
 # entry, because it silently ignores nothing while still claiming to. A commit
 # that changes prose, code, or behavior must never be listed, however small.
 #
-# Add the "style: prettier pass over repo markdown" commit here once it has
-# landed on `main` and its SHA is stable.
+# No entries yet, deliberately.
+#
+# The repo squash-merges, which means a pull request lands as one commit and
+# the commits inside it stop existing. So a reformat only keeps its
+# blame-ignore value if it lands as its **own pull request** — bundled with
+# anything else, the squash fuses mechanical and real changes into a single
+# SHA that this file may not list.
+#
+# That already happened once. The markdown reformat in #187 was a clean
+# mechanical commit on the branch, but the squash (92596315) also carries
+# `.prettierrc.json`, the prettier hook widening, `check-hook-filters.py`, and
+# the semantic-line-breaks convention prose — roughly a hundred lines of real
+# authorship. Listing it would blame-skip all of that, so it is not listed and
+# that reformat is simply not ignorable. Next time: reformat alone, in its own
+# PR, then add its SHA here.

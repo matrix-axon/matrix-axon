@@ -13,6 +13,7 @@ use sqlx_core::row::Row;
 use sqlx_postgres::{PgRow, Postgres};
 use uuid::Uuid;
 
+use crate::rooms::ROOM_SUMMARY_TOUCH_TAIL;
 use crate::{Store, StoreError};
 
 /// Data required to insert a single Matrix event into the store.
@@ -444,13 +445,15 @@ impl Store {
     /// Insert a Matrix event. Idempotent: if `(account_id, event_id)` already
     /// exists the existing row is left unchanged and no error is returned.
     ///
-    /// Appends the search-index obligations in the **same statement** (ADR 0039):
-    /// the event's own document, plus the *target* of any relation
-    /// (`relates_to->>'event_id'` — an edit or annotation folds into its target)
-    /// or redaction (`redacts`). Because the `INSERT … RETURNING` feeds the
-    /// outbox insert, an event change and its indexing obligation commit
-    /// atomically, and a no-op (`ON CONFLICT DO NOTHING`) appends nothing — a
-    /// duplicate delivery does no redundant indexing. See [`SEARCH_FANOUT_TAIL`].
+    /// Appends the search-index obligations and the room-summary touch in the
+    /// **same statement** (ADR 0039, ADR 0095): the event's own document, plus
+    /// the *target* of any relation (`relates_to->>'event_id'` — an edit or
+    /// annotation folds into its target) or redaction (`redacts`), plus the
+    /// `room_summaries` row `list_rooms` reads. Because the `INSERT … RETURNING`
+    /// feeds both follow-on writes, an event change, its indexing obligation,
+    /// and its activity marker commit atomically, and a no-op
+    /// (`ON CONFLICT DO NOTHING`) writes nothing — a duplicate delivery does
+    /// no redundant indexing or summary work. See [`SEARCH_FANOUT_TAIL`].
     ///
     /// Returns the row's `id` — its **arrival order**, the monotonic sequence in
     /// which this account ingested events. Callers hand it to clients (ADR 0089)
@@ -467,9 +470,15 @@ impl Store {
                   decrypted_body_text) \
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
                ON CONFLICT (account_id, event_id) DO NOTHING \
-               RETURNING id, account_id, event_id, relates_to, redacts \
-             ), outbox AS ( {SEARCH_FANOUT_TAIL} ) \
-             SELECT id FROM ins"
+               RETURNING id, account_id, event_id, room_id, origin_ts, \
+                         relates_to, redacts, decrypted_body_text \
+             ), summaries AS ( {ROOM_SUMMARY_TOUCH_TAIL} ), \
+             display AS ( \
+               SELECT refresh_room_summary_display(account_id, room_id) \
+               FROM summaries WHERE inserted \
+             ), \
+             outbox AS ( {SEARCH_FANOUT_TAIL} ) \
+             SELECT ins.id FROM ins LEFT JOIN display ON TRUE"
         );
         let inserted: Option<(i64,)> = sqlx_core::query_as::query_as::<Postgres, (i64,)>(&sql)
             .bind(ev.event_id)
@@ -701,13 +710,18 @@ impl Store {
         // durable signal that this row (and any relation/redaction target the now-
         // decrypted body reveals) needs re-indexing — appended atomically, and only
         // when the guarded UPDATE actually decrypts a still-UTD row (ADR 0039).
+        // The same RETURNING feeds the room-summary touch (ADR 0095): a UTD that
+        // just gained a body may become the room's activity marker even if a
+        // later non-content event is already stored.
         let sql = format!(
             "WITH ins AS ( \
                UPDATE events \
                SET content = $3, event_type = $4, decrypted_body_text = $5, relates_to = $6 \
                WHERE account_id = $1 AND event_id = $2 AND content IS NULL \
-               RETURNING account_id, event_id, relates_to, redacts \
-             ) {SEARCH_FANOUT_TAIL}"
+               RETURNING account_id, event_id, room_id, origin_ts, id, \
+                         relates_to, redacts, decrypted_body_text \
+             ), summaries AS ( {ROOM_SUMMARY_TOUCH_TAIL} ) \
+             {SEARCH_FANOUT_TAIL}"
         );
         sqlx_core::query::query(&sql)
             .bind(account_id)

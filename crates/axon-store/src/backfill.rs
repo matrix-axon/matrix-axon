@@ -8,7 +8,9 @@
 //!   See ADR 0043.
 //! * [`Store::purge_room`] — the destructive "forget this room" path used by the
 //!   optional purge-on-leave behavior (ADR 0044): delete every stored trace of a
-//!   room for one account and enqueue the room's search documents for removal.
+//!   room for one account (events, state, room account-data, backfill cursor,
+//!   and the ADR 0095 `room_summaries` row) and enqueue the room's search
+//!   documents for removal.
 
 use sqlx_core::row::Row;
 use sqlx_postgres::{PgRow, Postgres};
@@ -208,7 +210,9 @@ impl Store {
     /// Idempotent and cheap to re-run: the search-purge obligation is enqueued
     /// **only when an event was actually deleted**, so re-triggering a purge on an
     /// already-empty room (e.g. the leave state re-observed on a later sync) adds
-    /// no `search_outbox` rows and does no indexing work.
+    /// no `search_outbox` rows and does no indexing work. The matching
+    /// `room_summaries` row (ADR 0095) is deleted in the same statement so the
+    /// room disappears from `list_rooms` the way deleting its events used to.
     pub async fn purge_room(&self, account_id: Uuid, room_id: &str) -> Result<(), StoreError> {
         sqlx_core::query::query(
             "WITH \
@@ -223,6 +227,10 @@ impl Store {
                  ), \
                  del_backfill AS ( \
                      DELETE FROM room_backfill WHERE account_id = $1 AND room_id = $2 \
+                 ), \
+                 del_summaries AS ( \
+                     DELETE FROM room_summaries \
+                     WHERE account_id = $1 AND room_id = $2 \
                  ) \
              INSERT INTO search_outbox (account_id, event_id) \
              SELECT $1, $3 WHERE EXISTS (SELECT 1 FROM del_events)",

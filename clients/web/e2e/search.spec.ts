@@ -13,9 +13,9 @@ import { openRoom, ROOM_URL, shortcutForProject } from './helpers'
  * from jsdom by design — drives the auto-paging, and the hit link lands on
  * the room's jump-and-reveal path end to end.
  *
- * Bodies carry a per-run nonce: the mock backend's timeline is shared state
- * that outlives a local rerun (`reuseExistingServer`), and a repeated body
- * would double the hit counts the second time around.
+ * Bodies carry a per-run nonce: one mock backend serves every project in a
+ * Playwright invocation, so repeated bodies would make search hits from one
+ * project indistinguishable from another project's fixture traffic.
  */
 test.describe.configure({ mode: 'serial' })
 

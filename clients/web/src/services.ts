@@ -64,6 +64,10 @@ import {
   type UpdateChecker,
 } from './stores/update-check'
 import { BUILD_INFO } from './build-info'
+import {
+  createAttachmentStaging,
+  type AttachmentStaging,
+} from './media/attachment-staging'
 
 /**
  * The app's service graph — auth seam, API client, and stores — built once at
@@ -102,6 +106,12 @@ export interface AppServices {
    * lifecycle wiring — the sign-out wipe and the setting — and for phase 3.
    */
   cache: CacheStore
+  /**
+   * Files staged in a composer but not sent (issue #89). Out here rather than
+   * in the composer because `RoomPage` unmounts whenever the route leaves a
+   * room — on a phone, every room change.
+   */
+  attachments: AttachmentStaging
   /**
    * The room the user is currently viewing (`accountId/roomId`), or `null`.
    * Set by `RoomPage`; `RoomList` reads it to mark the open row.
@@ -465,6 +475,32 @@ export function connectCacheSetting(
   })
 }
 
+/**
+ * Drop every staged file when the session ends (issue #89).
+ *
+ * Same reasoning as `connectTimelineCacheReset`, and a stronger form of it:
+ * these are the user's own files, held in memory with live object urls, and the
+ * graph outlives a sign-out. Before retention they died with the composer's
+ * unmount; now they need saying so.
+ */
+export function connectAttachmentReset(
+  auth: CompositeAuthProvider,
+  attachments: AttachmentStaging,
+): () => void {
+  return effect(() => {
+    if (auth.signedIn.value) {
+      return
+    }
+    // Idempotent for the same reason as the timeline wipe above, and this is
+    // where the rule was learned: `clearAll()` used to bump the staging
+    // revision unconditionally, so every pass of this effect within one flush
+    // wrote again, the flush never reached a fixed point, and @preact/signals
+    // aborted it after 100 iterations with "Cycle detected". It now bumps only
+    // when it actually dropped something.
+    attachments.clearAll()
+  })
+}
+
 /** Route raw Matrix ephemeral passthrough frames into the web overlay store. */
 export function connectEphemeralPassthrough(
   live: LiveConnection,
@@ -510,6 +546,7 @@ export function createServices(
     isVisible: () => !document.hidden,
   })
   const timelines = createTimelineStoreCache(api, media)
+  const attachments = createAttachmentStaging()
   const settings = createSettingsStore(storage)
   // Instrumentation has to be live *before* anything worth measuring happens.
   // The room-list cache marks its read during this function, and `App`'s
@@ -582,6 +619,7 @@ export function createServices(
   connectRoomsSessionReset(auth, rooms)
   connectCacheSetting(settings, cache)
   connectUpdateChecks(live, updates)
+  connectAttachmentReset(auth, attachments)
   return {
     auth,
     api,
@@ -589,6 +627,7 @@ export function createServices(
     updates,
     timelines,
     cache,
+    attachments,
     settings,
     accounts,
     rooms,

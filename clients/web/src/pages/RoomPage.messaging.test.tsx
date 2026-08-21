@@ -3188,4 +3188,66 @@ describe('sending media (M-W8.5, ADR 0065)', () => {
       }),
     )
   })
+
+  it('keeps a staged file for the room you staged it in (issue #89)', async () => {
+    // The composer's text draft has always survived a room switch (ADR 0048);
+    // the file did not, and it is the half that cannot be retyped.
+    const { getByText, queryByText, container } = renderRoom([event('$a', 100)])
+    await waitFor(() => getByText('body of $a'))
+    fireEvent.drop(container.querySelector('.room-stream')!, {
+      dataTransfer: { files: [png()], types: ['Files'] },
+    })
+    await waitFor(() => getByText('cat.png'))
+
+    const go = (roomId: string) => {
+      window.history.pushState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(roomId)}`,
+      )
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    }
+
+    go('!other:hs')
+
+    // Not in the other room: `scope` is what keeps a send from picking up a
+    // file staged somewhere else, and it is resolved during render, so there is
+    // no frame in which this room could submit it.
+    await waitFor(() => expect(queryByText('cat.png')).toBeNull())
+
+    go(ROOM)
+
+    expect(await waitFor(() => getByText('cat.png'))).toBeTruthy()
+  })
+
+  it('keeps a staged file across the mobile back-to-list route', async () => {
+    // How a phone changes rooms: there is no sidebar to click, so the trip is
+    // room -> `/` -> room, and `/` unmounts RoomPage entirely. Retention that
+    // lives inside the component dies here while surviving the desktop
+    // room-to-room switch — which is exactly how this reached a device.
+    // A default route that is *not* RoomPage, so `/` unmounts it as the shell
+    // does (`app.tsx` routes `/` to RoomsIndex).
+    const { getByText, queryByText, container } = renderRoom(
+      [event('$a', 100)],
+      undefined,
+      () => <p>room list</p>,
+    )
+    await waitFor(() => getByText('body of $a'))
+    fireEvent.drop(container.querySelector('.room-stream')!, {
+      dataTransfer: { files: [png()], types: ['Files'] },
+    })
+    await waitFor(() => getByText('cat.png'))
+
+    const go = (path: string) => {
+      window.history.pushState(null, '', path)
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    }
+
+    go('/')
+    await waitFor(() => getByText('room list'))
+    await waitFor(() => expect(queryByText('cat.png')).toBeNull())
+    go(`/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`)
+
+    expect(await waitFor(() => getByText('cat.png'))).toBeTruthy()
+  })
 })
