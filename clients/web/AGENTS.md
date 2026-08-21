@@ -55,6 +55,27 @@ before starting a milestone.
   (retryable via `retrySend`/discardable via `discardSend`) on error;
   edit/redact/react use the same re-fetch-and-patch shape against a real
   event id (scroll position survives throughout — no full reload).
+- **Staged attachments outlive the room switch too**
+  (`src/media/attachment-staging.ts`, issue #89): staging is retained per scope
+  (`accountId\0roomId`, plus the thread root in `ThreadPanel`) with an LRU cap of
+  3 — real file bytes, unlike the ~1 KB events the timeline cache holds. Three
+  rules, each of which a plausible refactor undoes:
+  - **It lives in the service graph, never in the component.** `RoomPage`
+    unmounts whenever the route leaves a room, and on a phone that is _every_
+    room change (back to `/`, then into the next room). A first version kept the
+    buckets in `useAttachments`; it passed every desktop test, survived
+    room-to-room switching, and did nothing at all on a phone.
+  - The active batch is resolved **during render** from `scope`, never swapped in
+    by an effect — an effect runs after the new room paints, leaving one frame in
+    which the composer shows, and `Enter` sends, the previous room's files.
+  - `shrink()`'s downscale resolves its item **by id across every scope**,
+    because a decode outlives the room it started in; resolving against the
+    active scope drops the result and leaks the full-size object url.
+
+  Unmount is therefore _not_ a release point. The release paths are remove,
+  send, LRU eviction, and `clearAll()` on sign-out
+  (`connectAttachmentReset`).
+
 - **Timeline stores outlive their mount** (`src/stores/timeline-cache.ts`, ADR
   0085 phase 1): `RoomPage` acquires from an account+room-keyed LRU instead of
   building a store per mount, so a room re-entered in one session paints its
@@ -530,11 +551,14 @@ the most time in the ADR 0076 investigation:
   the specific risk to watch for. Weigh it against the fact that the residual is
   motion _during_ the keyboard animation, when motion is expected — unlike the
   jitter while scrolling, which is what actually read as broken.
-- **A long-lived `e2e/mock-server.mjs` will fail the suite.** `reuseExistingServer`
-  hands Playwright whatever is already on 4599, and that process accumulates
-  state — a mock left running for device testing collected four copies of one
-  message and broke a strict-mode locator in `shortcuts.spec.ts`, twice, looking
-  exactly like a real regression. Kill it before running the suite.
+- **A long-lived `e2e/mock-server.mjs` must never be reused by the suite.** An
+  old process accumulates state, and one left running for device testing once
+  collected four copies of a message and broke a strict-mode locator in
+  `shortcuts.spec.ts`, twice, looking exactly like a real regression. Worse, a
+  process on the shared port can belong to another jj workspace and serve that
+  workspace's `dist/`. Playwright therefore requires a fresh server and fails
+  when 4599 is occupied. Set `AXON_WEB_E2E_PORT` to an unused port when the
+  existing process must stay up.
 
 ## Driving a real iOS Simulator by hand
 
@@ -629,9 +653,10 @@ TimelineEvent`).
   runs again, and a stale bundle reports a fix as broken or a break as fixed,
   silently. `test:e2e` therefore builds first; if you invoke `playwright test`
   directly, build first yourself.
-- **The e2e mock server outlives a single spec file** (`reuseExistingServer`).
-  A spec that appends to its seeded `timeline` array pollutes every later spec;
-  `send-media` deliberately only broadcasts and records for `/events/:id`.
+- **One e2e mock server serves the whole Playwright invocation.** It is fresh at
+  the start, but still outlives each individual spec file. A spec that appends
+  to its seeded `timeline` array pollutes every later spec; `send-media`
+  deliberately only broadcasts and records for `/events/:id`.
 - **A fixture that uses the same helper as the code agrees with it by
   construction.** A URL check compared `window.location.pathname` against
   `localRoomHref`, which runs the room id through `encodeURIComponent` — but a

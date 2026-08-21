@@ -259,6 +259,7 @@ impl MembershipSender for GatewayAdapter {
         .map_err(|_| timed_out("leave", self.membership_mutation_timeout))?
         .map(|outcome| match outcome {
             GatewayLeaveOutcome::Left => LeaveOutcome::Left,
+            GatewayLeaveOutcome::Gone => LeaveOutcome::Gone,
             GatewayLeaveOutcome::Unconfirmed => LeaveOutcome::Unconfirmed,
         })
         .map_err(map_err)

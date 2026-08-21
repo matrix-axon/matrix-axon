@@ -1,12 +1,14 @@
 import { computed, signal } from '@preact/signals'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApiClient } from './api/client'
+import { createAttachmentStaging } from './media/attachment-staging'
 import { createMediaService } from './media/media-service'
 import { TIMELINE_EVENT, UNREAD_COUNTS_CHANGED } from './api/frames'
 import {
   connectCacheReset,
   connectCacheSetting,
   connectRoomsSessionReset,
+  connectAttachmentReset,
   connectLiveRooms,
   connectReadMarkers,
   connectTimelineCacheReset,
@@ -559,5 +561,57 @@ describe('connectRoomsSessionReset', () => {
     expect(storage.getItem('axon.room_titles.v1')).toBeNull()
     // Sign-out is targeted: unrelated device-local state survives.
     expect(storage.getItem('axon.device_id')).not.toBeNull()
+  })
+})
+
+describe('connectAttachmentReset', () => {
+  it('drops staged files when the session ends', async () => {
+    // The user's own files, held in memory with live object urls, in a graph
+    // that outlives a sign-out (issue #89). Before retention they died with the
+    // composer's unmount and needed nothing said.
+    const flag = signal(true)
+    let cleared = 0
+    const dispose = connectAttachmentReset(
+      { signedIn: computed(() => flag.value) } as Parameters<
+        typeof connectAttachmentReset
+      >[0],
+      {
+        clearAll: () => {
+          cleared += 1
+        },
+      } as unknown as Parameters<typeof connectAttachmentReset>[1],
+    )
+
+    flag.value = false
+
+    expect(cleared).toBe(1)
+    dispose()
+  })
+
+  it('settles the flush when signing out with files staged', () => {
+    // The wipe runs inside the reactive flush, so it must be idempotent:
+    // `clearAll()` bumps the staging revision, and a bump that fires even when
+    // there was nothing to drop re-triggers this effect, which wipes and bumps
+    // again. That flush never reaches a fixed point and @preact/signals aborts
+    // it after 100 iterations with "Cycle detected" — which is what an
+    // unconditional bump here actually did, in every test that renders the
+    // signed-in shell. Staging real files is what makes the wipe write at all.
+    const staging = createAttachmentStaging()
+    staging.stage('scope', [new File(['x'], 'a.txt', { type: 'text/plain' })])
+    expect(staging.batch('scope').items).toHaveLength(1)
+
+    const flag = signal(true)
+    const dispose = connectAttachmentReset(
+      { signedIn: computed(() => flag.value) } as Parameters<
+        typeof connectAttachmentReset
+      >[0],
+      staging,
+    )
+
+    expect(() => {
+      flag.value = false
+    }).not.toThrow()
+    expect(staging.batch('scope').items).toHaveLength(0)
+    dispose()
   })
 })

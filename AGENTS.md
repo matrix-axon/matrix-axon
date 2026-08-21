@@ -316,7 +316,7 @@ Non-obvious choices made in 5a (see ADR 0019):
 - **Opaque cursor.** The store's `(origin_ts, id)` `TimelineCursor` is serialized to the wire as base64url(`"{ts}.{id}"`), returned as `next_cursor` per page (`null` at the end); a malformed cursor is a `400`. Codec in `crates/axon-api/src/cursor.rs`.
 - **`AppState` + `FromRef` seam.** `axon-api::router` takes `AppState { store }` and handlers extract `State<Store>` via `FromRef`, so 5b can add a `broadcast::Sender` field with zero churn to existing handlers.
 - **OpenAPI golden file.** utoipa builds the spec from handler signatures; a DB-free test diffs it against `openapi/openapi.json` (regenerate with `UPDATE_OPENAPI=1 cargo test -p axon-api --test openapi`), making drift a CI failure. TypeScript client stubs are deferred to M11.
-- **Store reads (no new tables/migration).** `list_rooms(Option<account_id>)` aggregates `events` for activity + latest event id and pulls name/topic/avatar/alias from the `room_state` projection in one query (note avatar state is `m.room.avatar` → `content.url`). `get_event(account_id, event_id)` reuses `room_timeline`'s read-time redaction masking via a shared `TIMELINE_SELECT` projection.
+- **Store reads.** `list_rooms(Option<account_id>)` reads activity, latest event id, and display/visibility from the `room_summaries` projection (ADR 0095; one row per room, maintained incrementally by `upsert_event` / `update_decrypted_event` / `upsert_room_state`) and joins `room_unread_counts` for badges. `get_event(account_id, event_id)` reuses `room_timeline`'s read-time redaction masking via a shared `TIMELINE_SELECT` projection.
 
 Non-obvious choices made in 4a (see ADR 0015):
 

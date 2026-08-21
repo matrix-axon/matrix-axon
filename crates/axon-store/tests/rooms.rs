@@ -15,6 +15,7 @@ mod common;
 use axon_store::{AccountState, NewEvent, RoomStateUpsert, Store};
 use common::{insert_message, test_account};
 use serde_json::{json, Value};
+use sqlx_postgres::Postgres;
 use uuid::Uuid;
 
 /// Redact `target` with an `m.room.redaction` event, returning the redaction's
@@ -274,16 +275,19 @@ async fn set_membership(
     membership: &str,
 ) {
     store
-        .upsert_room_state(&RoomStateUpsert {
-            account_id,
-            room_id,
-            event_type: "m.room.member",
-            state_key: account_user_id,
-            event_id: &format!("$mem-{}:localhost", Uuid::new_v4()),
-            sender: account_user_id,
-            origin_ts: 2_000,
-            content: Some(json!({ "membership": membership })),
-        })
+        .upsert_room_state_for_local_user(
+            &RoomStateUpsert {
+                account_id,
+                room_id,
+                event_type: "m.room.member",
+                state_key: account_user_id,
+                event_id: &format!("$mem-{}:localhost", Uuid::new_v4()),
+                sender: account_user_id,
+                origin_ts: 2_000,
+                content: Some(json!({ "membership": membership })),
+            },
+            Some(account_user_id),
+        )
         .await
         .expect("set membership");
 }
@@ -331,6 +335,47 @@ async fn list_rooms_excludes_left_and_banned_rooms() {
     );
     assert!(!ids.contains(&left.as_str()), "left room hidden");
     assert!(!ids.contains(&banned.as_str()), "banned room hidden");
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// Another user's leave/ban is not the local membership signal and must not
+/// hide the room or pay a display refresh (PR 206 review).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn list_rooms_ignores_other_members_leave() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "other-leave").await;
+    let user_id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT user_id FROM accounts WHERE account_id = $1")
+            .bind(account_id)
+            .fetch_one(&pool)
+            .await
+            .expect("user id");
+    let room_id = format!("!other-{}:localhost", Uuid::new_v4());
+    insert_message(&store, account_id, &room_id, 1_000, "hi").await;
+    set_membership(&store, account_id, &user_id, &room_id, "join").await;
+
+    store
+        .upsert_room_state(&RoomStateUpsert {
+            account_id,
+            room_id: &room_id,
+            event_type: "m.room.member",
+            state_key: "@someone-else:localhost",
+            event_id: &format!("$other-{}:localhost", Uuid::new_v4()),
+            sender: "@someone-else:localhost",
+            origin_ts: 3_000,
+            content: Some(json!({ "membership": "leave" })),
+        })
+        .await
+        .expect("other leave");
+
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    assert!(
+        rooms.iter().any(|r| r.room_id == room_id),
+        "another member leaving must not hide the room"
+    );
 
     common::cleanup_account(&pool, account_id).await;
 }
@@ -444,6 +489,315 @@ async fn list_rooms_excludes_deactivated_accounts() {
 
     common::cleanup_account(&pool, acc1).await;
     common::cleanup_account(&pool, acc2).await;
+}
+
+async fn insert_utd(store: &Store, account_id: Uuid, room_id: &str, origin_ts: i64) -> String {
+    let event_id = format!("$utd-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_event(&NewEvent {
+            event_id: &event_id,
+            room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts,
+            event_type: "m.room.encrypted",
+            content: None,
+            raw_event: json!({ "type": "m.room.encrypted" }),
+            megolm_session_id: Some("sess"),
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .expect("insert utd");
+    event_id
+}
+
+async fn summary_row(
+    pool: &sqlx_postgres::PgPool,
+    account_id: Uuid,
+    room_id: &str,
+) -> Option<(i64, String, bool)> {
+    sqlx_core::query_as::query_as::<Postgres, (i64, String, bool)>(
+        "SELECT last_activity_ts, last_event_id, last_activity_is_content \
+         FROM room_summaries WHERE account_id = $1 AND room_id = $2",
+    )
+    .bind(account_id)
+    .bind(room_id)
+    .fetch_optional(pool)
+    .await
+    .expect("read summary")
+}
+
+/// State written before the first event is copied onto the summary when the
+/// room is created, so a name set first still appears.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_summary_picks_up_state_written_before_first_event() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "sum-pre").await;
+    let room_id = format!("!pre-{}:localhost", Uuid::new_v4());
+
+    set_state(
+        &store,
+        account_id,
+        &room_id,
+        "m.room.name",
+        json!({ "name": "Ahead" }),
+    )
+    .await;
+    assert!(
+        store
+            .list_rooms(Some(account_id))
+            .await
+            .expect("list")
+            .is_empty(),
+        "state alone does not create a list entry"
+    );
+
+    insert_message(&store, account_id, &room_id, 1_000, "hi").await;
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    assert_eq!(rooms.len(), 1);
+    assert_eq!(rooms[0].name.as_deref(), Some("Ahead"));
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// A newer content event bumps the summary; an older backfilled content event
+/// does not.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_summary_newer_content_bumps_older_does_not() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "sum-bump").await;
+    let room_id = format!("!bump-{}:localhost", Uuid::new_v4());
+
+    let first = insert_message(&store, account_id, &room_id, 2_000, "newer").await;
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    assert_eq!(rooms[0].last_activity_ts, 2_000);
+    assert_eq!(rooms[0].last_event_id.as_deref(), Some(first.as_str()));
+
+    insert_message(&store, account_id, &room_id, 1_000, "older").await;
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    assert_eq!(
+        rooms[0].last_activity_ts, 2_000,
+        "older backfilled content must not become the marker"
+    );
+    assert_eq!(rooms[0].last_event_id.as_deref(), Some(first.as_str()));
+
+    let newer = insert_message(&store, account_id, &room_id, 3_000, "newest").await;
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    assert_eq!(rooms[0].last_activity_ts, 3_000);
+    assert_eq!(rooms[0].last_event_id.as_deref(), Some(newer.as_str()));
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// The first content-bearing event replaces a newer non-content marker, even
+/// when its `origin_ts` is older — the same COALESCE(content, any) rule the
+/// request-time aggregate used.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_summary_first_content_replaces_newer_non_content() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "sum-first").await;
+    let room_id = format!("!first-{}:localhost", Uuid::new_v4());
+
+    let redaction = insert_redaction(&store, account_id, &room_id, 5_000, "$x:localhost").await;
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    assert_eq!(rooms[0].last_activity_ts, 5_000);
+    assert_eq!(rooms[0].last_event_id.as_deref(), Some(redaction.as_str()));
+    let row = summary_row(&pool, account_id, &room_id)
+        .await
+        .expect("summary");
+    assert!(!row.2, "redaction is not content-bearing");
+
+    let msg = insert_message(&store, account_id, &room_id, 1_000, "hi").await;
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    assert_eq!(
+        rooms[0].last_activity_ts, 1_000,
+        "first content replaces a newer non-content marker"
+    );
+    assert_eq!(rooms[0].last_event_id.as_deref(), Some(msg.as_str()));
+    let row = summary_row(&pool, account_id, &room_id)
+        .await
+        .expect("summary");
+    assert!(row.2);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// Decrypting a UTD so it gains a body is the same rule as inserting content:
+/// it becomes the marker even if a later non-content event is already stored.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_summary_decrypt_promotes_like_inserting_content() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "sum-dec").await;
+    let room_id = format!("!dec-{}:localhost", Uuid::new_v4());
+
+    let utd = insert_utd(&store, account_id, &room_id, 1_000).await;
+    insert_redaction(&store, account_id, &room_id, 5_000, "$x:localhost").await;
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    assert_eq!(
+        rooms[0].last_activity_ts, 5_000,
+        "UTD then later redaction: unfiltered latest wins"
+    );
+
+    store
+        .update_decrypted_event(
+            account_id,
+            &utd,
+            &json!({ "msgtype": "m.text", "body": "hi" }),
+            "m.room.message",
+            Some("hi"),
+            None,
+        )
+        .await
+        .expect("decrypt");
+
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    assert_eq!(rooms[0].last_activity_ts, 1_000);
+    assert_eq!(rooms[0].last_event_id.as_deref(), Some(utd.as_str()));
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// Re-delivering an already-stored event is a no-op for the summary, even if
+/// the payload claims a newer timestamp.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_summary_duplicate_upsert_does_not_change_marker() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "sum-dup").await;
+    let room_id = format!("!dup-{}:localhost", Uuid::new_v4());
+
+    let event_id = insert_message(&store, account_id, &room_id, 1_000, "hi").await;
+    let before = summary_row(&pool, account_id, &room_id)
+        .await
+        .expect("summary");
+
+    store
+        .upsert_event(&NewEvent {
+            event_id: &event_id,
+            room_id: &room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: 9_000,
+            event_type: "m.room.message",
+            content: Some(json!({ "msgtype": "m.text", "body": "hi" })),
+            raw_event: json!({ "type": "m.room.message" }),
+            megolm_session_id: None,
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: Some("hi"),
+        })
+        .await
+        .expect("re-upsert");
+
+    let after = summary_row(&pool, account_id, &room_id)
+        .await
+        .expect("summary after dup");
+    assert_eq!(after, before);
+    assert_eq!(after.0, 1_000);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// `purge_room` deletes the summary, so the room disappears from `list_rooms`.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn purge_room_removes_summary_and_list_entry() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "sum-purge").await;
+    let room_id = format!("!purge-{}:localhost", Uuid::new_v4());
+
+    insert_message(&store, account_id, &room_id, 1_000, "hi").await;
+    assert!(summary_row(&pool, account_id, &room_id).await.is_some());
+    assert_eq!(
+        store
+            .list_rooms(Some(account_id))
+            .await
+            .expect("list")
+            .len(),
+        1
+    );
+
+    store.purge_room(account_id, &room_id).await.expect("purge");
+
+    assert!(
+        summary_row(&pool, account_id, &room_id).await.is_none(),
+        "summary row gone"
+    );
+    assert!(
+        store
+            .list_rooms(Some(account_id))
+            .await
+            .expect("list")
+            .is_empty(),
+        "purged room leaves the list"
+    );
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// `rebuild_room_summaries` restores the aggregate answer after a drifted row
+/// and does not touch another account's summaries.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn rebuild_room_summaries_repairs_drift() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "sum-rb").await;
+    let other = test_account(&store, "sum-rb-o").await;
+    let room_a = format!("!a-{}:localhost", Uuid::new_v4());
+    let room_b = format!("!b-{}:localhost", Uuid::new_v4());
+    let other_room = format!("!o-{}:localhost", Uuid::new_v4());
+
+    let a_msg = insert_message(&store, account_id, &room_a, 1_000, "a").await;
+    insert_message(&store, account_id, &room_b, 2_000, "b").await;
+    insert_redaction(&store, account_id, &room_b, 9_000, "$x:localhost").await;
+    let other_msg = insert_message(&store, other, &other_room, 3_000, "o").await;
+
+    sqlx_core::query::query(
+        "UPDATE room_summaries SET last_activity_ts = 99, last_event_id = '$drift' \
+         WHERE account_id = $1 AND room_id = $2",
+    )
+    .bind(account_id)
+    .bind(&room_a)
+    .execute(&pool)
+    .await
+    .expect("drift");
+
+    let n = store
+        .rebuild_room_summaries(account_id)
+        .await
+        .expect("rebuild");
+    assert_eq!(n, 2, "two rooms for this account");
+
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    assert_eq!(rooms.len(), 2);
+    assert_eq!(rooms[0].room_id, room_b);
+    assert_eq!(
+        rooms[0].last_activity_ts, 2_000,
+        "rebuild must prefer content over the later redaction"
+    );
+    assert_eq!(rooms[1].last_event_id.as_deref(), Some(a_msg.as_str()));
+    assert_eq!(rooms[1].last_activity_ts, 1_000);
+
+    let other_row = summary_row(&pool, other, &other_room)
+        .await
+        .expect("other account untouched");
+    assert_eq!(other_row.1, other_msg);
+
+    common::cleanup_account(&pool, account_id).await;
+    common::cleanup_account(&pool, other).await;
 }
 
 /// `get_event` returns a present event, `None` for a miss, and masks a redacted

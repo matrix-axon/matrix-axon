@@ -144,6 +144,11 @@ pub enum LeaveOutcome {
     /// The homeserver accepted the leave. The account is no longer a member,
     /// so local bookkeeping for that membership can be torn down.
     Left,
+    /// The homeserver denied knowing the room (`404` with
+    /// `M_NOT_FOUND`/`M_UNKNOWN`). There is no membership to confirm, which is
+    /// itself evidence the invite is dead: callers may tear down local
+    /// bookkeeping exactly as for [`Left`](LeaveOutcome::Left). See ADR 0094.
+    Gone,
     /// The request stands, but the homeserver's answer did not establish that
     /// the membership is gone. Callers must leave locally-persisted
     /// membership state (notably `room_invites`) in place and let sync

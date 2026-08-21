@@ -18,6 +18,21 @@ use crate::{Store, StoreError};
 /// `account_data` migration.
 const GLOBAL_SCOPE: &str = "";
 
+/// Singleton state types whose current value is cached on `room_summaries`
+/// (ADR 0095). `state_key` must be `""`.
+fn summary_display_state(event_type: &str, state_key: &str) -> bool {
+    state_key.is_empty()
+        && matches!(
+            event_type,
+            "m.room.name"
+                | "m.room.topic"
+                | "m.room.avatar"
+                | "m.room.canonical_alias"
+                | "m.room.create"
+                | "m.room.tombstone"
+        )
+}
+
 /// A single piece of current room state to upsert: the latest event holding the
 /// `(room_id, event_type, state_key)` tuple for an account.
 pub struct RoomStateUpsert<'a> {
@@ -119,7 +134,25 @@ impl Store {
     /// `origin_ts` older than the stored one is ignored, so a replay of historical
     /// state can never clobber newer state. Equal timestamps overwrite (harmless;
     /// they carry the same resolved value). `updated_at` is maintained by trigger.
+    ///
+    /// Callers that already know the account MXID should use
+    /// [`Self::upsert_room_state_for_local_user`] so a busy room's other
+    /// members do not each pay a `room_summaries` refresh (ADR 0095).
     pub async fn upsert_room_state(&self, s: &RoomStateUpsert<'_>) -> Result<(), StoreError> {
+        self.upsert_room_state_for_local_user(s, None).await
+    }
+
+    /// [`Self::upsert_room_state`] with the account's MXID, when the caller
+    /// already has it (the sync engine's `PersistContext::local_user_id`).
+    ///
+    /// `m.room.member` refreshes `hidden_left` only when `state_key` equals
+    /// that id. Passing `None` never refreshes on member events — tests that
+    /// drive leave/ban through this type pass `Some(account_user_id)`.
+    pub async fn upsert_room_state_for_local_user(
+        &self,
+        s: &RoomStateUpsert<'_>,
+        local_user_id: Option<&str>,
+    ) -> Result<(), StoreError> {
         sqlx_core::query::query(
             "INSERT INTO room_state \
              (account_id, room_id, event_type, state_key, event_id, sender, origin_ts, content) \
@@ -141,6 +174,12 @@ impl Store {
         .bind(&s.content)
         .execute(&self.pool)
         .await?;
+        if summary_display_state(s.event_type, s.state_key)
+            || (s.event_type == "m.room.member" && local_user_id == Some(s.state_key))
+        {
+            self.refresh_room_summary_display(s.account_id, s.room_id)
+                .await?;
+        }
         Ok(())
     }
 

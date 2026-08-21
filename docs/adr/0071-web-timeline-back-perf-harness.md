@@ -51,6 +51,11 @@ previews off, and reads the app's own marks back into a phase breakdown.
 The lane asserts the hypothesis _directionally_ (never on absolute ms): at the
 slowest CPU, `total` grows materially with timeline length while the room-list
 phase grows far less — leaving `RoomPage` teardown as the cost that scaled.
+The two endpoint cells used for those assertions are sampled three times and
+compared by median. The room-list check uses its absolute share of the total
+increase rather than a ratio between near-zero phase timings, so sub-millisecond
+jitter cannot dominate the result. The timing matrix is attached before the
+assertions run so a failure retains all of its diagnostic evidence.
 
 ### What the harness found
 
