@@ -106,6 +106,25 @@ describe('InvitesPage', () => {
     expect(queryByText('!opaque-room-id:hs')).toBeNull()
   })
 
+  it('falls through an opaque non-DM name to the canonical alias', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+        HttpResponse.json({
+          data: [
+            {
+              ...invite('!opaque-group-id:hs', '!opaque-group-id:hs'),
+              canonical_alias: '#ops:hs',
+            },
+          ],
+        }),
+      ),
+    )
+    const { findByText, queryByText } = renderInbox()
+
+    expect(await findByText('#ops:hs')).toBeTruthy()
+    expect(queryByText('!opaque-group-id:hs')).toBeNull()
+  })
+
   it('reject posts leave and removes the row', async () => {
     const left: string[] = []
     server.use(

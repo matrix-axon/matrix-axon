@@ -11,13 +11,7 @@ import {
 
 function inviteTitle(invite: InviteDto): string {
   const name = invite.name?.trim()
-  // matrix-rust-sdk uses the room ID as the fallback name when an invite has
-  // no explicit room name. Do not let that opaque fallback hide a DM label.
-  if (
-    name !== undefined &&
-    name !== '' &&
-    (!invite.is_direct || name !== invite.room_id)
-  ) {
+  if (name !== undefined && name !== '' && name !== invite.room_id) {
     return name
   }
   const alias = invite.canonical_alias?.trim()
