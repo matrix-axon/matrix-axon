@@ -1,0 +1,209 @@
+//! One message layout per change, instead of two per frame (issues #54, #52).
+//!
+//! [`message_layout`] runs an HTML parse and a rich-text wrap for *every* event
+//! in the selected timeline, not just the visible page. It used to run twice per
+//! frame: once in `ui::draw` for the rendered lines, and once in
+//! `App::selected_message_ranges` for the nav ranges — each independently
+//! rebuilding the same twelve arguments, including a copy-pasted
+//! `image_thumb_rows` derivation. On a busy room that is hundreds of
+//! parse-and-wrap operations per 100 ms tick, including idle ticks where
+//! nothing changed at all.
+//!
+//! Both callers now read one cached [`MessageLayout`], recomputed only when the
+//! digest of its inputs changes.
+//!
+//! # Why a digest rather than dirty flags
+//!
+//! ADR 0093 rejected scattered invalidation for `visible_room_indices`, on the
+//! grounds that a stale room list is a visible correctness bug and the mutators
+//! that would have to remember to invalidate are spread across six modules. A
+//! stale *layout* is a scroll desync — the same class of bug — so it gets the
+//! same self-validating treatment: hash what the layout reads, and a mutation
+//! anybody forgets to announce still changes the hash.
+//!
+//! The exception is config-level input (colors, density, time format,
+//! highlight). Those change only on a config reload, and hashing a whole
+//! `ColorScheme` on every tick would cost more than it saves, so they are
+//! covered by [`App::config_generation`] — one counter, bumped in one place.
+//!
+//! # Ordering
+//!
+//! Every map here is hashed through [`hash_sorted_map`]. `HashMap` iteration
+//! order is unspecified and varies run to run, so hashing entries in iteration
+//! order would produce a different digest for identical data and defeat the
+//! cache. Sorting by key first is what makes the digest a function of the
+//! content.
+
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+
+use uuid::Uuid;
+
+use crate::api::EventDto;
+use crate::app::render::{message_layout, ImageThumbRows, MessageLayout, RelationContext};
+
+use super::App;
+
+/// Feed a map into `state` in key order.
+///
+/// The length is hashed first so that `{a: 1}` and `{a: 1, b: 2}` cannot
+/// collide through a prefix.
+fn hash_sorted_map<K, V, S>(map: &HashMap<K, V, S>, state: &mut impl Hasher)
+where
+    K: Ord + Hash,
+    V: Hash,
+{
+    let mut entries: Vec<(&K, &V)> = map.iter().collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    entries.len().hash(state);
+    for (key, value) in entries {
+        key.hash(state);
+        value.hash(state);
+    }
+}
+
+/// Everything [`message_layout`] reads, reduced to one value.
+///
+/// A miss costs a full re-layout, so this errs towards over-hashing: it is
+/// cheaper to recompute a layout that did not need it than to render lines that
+/// disagree with the ranges the nav math is using.
+#[allow(clippy::too_many_arguments)]
+fn layout_digest(
+    events: &[&EventDto],
+    sender_labels: &[String],
+    selected_message: Option<&str>,
+    width: usize,
+    reactions: &HashMap<String, Vec<(String, usize)>>,
+    own_senders: &HashMap<Uuid, String>,
+    image_thumb_rows: &ImageThumbRows,
+    relations: &RelationContext,
+    config_generation: u64,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+
+    events.len().hash(&mut hasher);
+    for event in events {
+        // Identity plus the fields the layout renders: an edit replaces the
+        // body in place without changing the event id, so hashing the id alone
+        // would leave the edited text uncached behind a matching digest.
+        event.event_id.hash(&mut hasher);
+        event.body.hash(&mut hasher);
+        // `content` is a `serde_json::Value`, which is not `Hash` (it can hold
+        // an f64). The layout only ever reads one field out of it, so hash that
+        // rather than a serialization of the whole value.
+        event.formatted_body().hash(&mut hasher);
+        event.event_type.hash(&mut hasher);
+        event.sender.hash(&mut hasher);
+        event.origin_ts.hash(&mut hasher);
+        event.redacted.hash(&mut hasher);
+        event.redaction_event_id.hash(&mut hasher);
+    }
+    sender_labels.hash(&mut hasher);
+    selected_message.hash(&mut hasher);
+    width.hash(&mut hasher);
+    hash_sorted_map(reactions, &mut hasher);
+    hash_sorted_map(own_senders, &mut hasher);
+    hash_sorted_map(image_thumb_rows, &mut hasher);
+
+    // RelationContext holds maps, so it cannot derive Hash. Its leaf types do,
+    // which is what keeps a newly added ReplyPreview/ThreadBadge field covered
+    // without an edit here. A new *map* on RelationContext does need adding.
+    hash_sorted_map(&relations.replies, &mut hasher);
+    hash_sorted_map(&relations.thread_badges, &mut hasher);
+    hash_sorted_map(&relations.thread_contexts, &mut hasher);
+    relations.thread_root.hash(&mut hasher);
+
+    config_generation.hash(&mut hasher);
+    hasher.finish()
+}
+
+impl App {
+    /// Recompute the message layout if anything it reads has changed.
+    ///
+    /// Call this in the update step, before anything reads
+    /// `messages.line_ranges` or the cached lines. It is idempotent and cheap
+    /// on a hit — one pass over the inputs to hash them.
+    pub(crate) fn ensure_message_layout(&mut self) {
+        // Derive once and hold the result: on a miss the same values feed the
+        // layout, so a miss must not pay for deriving them twice.
+        let recomputed = {
+            let events = self.selected_events();
+            let sender_labels = self.sender_labels(events.as_slice());
+            let reactions = self.selected_reactions();
+            let image_thumb_rows = self.image_thumb_rows(events.as_slice());
+            let relations = self.relation_context(events.as_slice());
+            let key = layout_digest(
+                events.as_slice(),
+                sender_labels.as_slice(),
+                self.messages.selection.as_deref(),
+                self.messages.width,
+                &reactions,
+                &self.live.own_senders,
+                &image_thumb_rows,
+                &relations,
+                self.config_generation,
+            );
+            if self.messages.layout_key == Some(key) {
+                None
+            } else {
+                let layout = message_layout(
+                    events.as_slice(),
+                    sender_labels.as_slice(),
+                    self.messages.selection.as_deref(),
+                    &self.colors,
+                    self.messages.width,
+                    &reactions,
+                    &self.live.own_senders,
+                    &image_thumb_rows,
+                    &relations,
+                    self.display.message_density,
+                    self.display.time_format,
+                    self.display.highlight_selected_line,
+                );
+                let event_ids: Vec<String> =
+                    events.iter().map(|event| event.event_id.clone()).collect();
+                Some((key, event_ids, layout))
+            }
+        };
+
+        if let Some((key, event_ids, layout)) = recomputed {
+            self.messages.layout_key = Some(key);
+            self.messages.line_ranges = layout.ranges.clone();
+            self.messages.layout_event_ids = event_ids;
+            self.messages.layout = Some(layout);
+        }
+        // Always, not just on a miss. `set_message_layout` used to run on every
+        // frame, so any code reading `messages.scroll` between frames saw a
+        // resolved offset. Scroll is deliberately not part of the digest — the
+        // layout does not depend on it — so a cache hit must still settle the
+        // pin-to-bottom sentinel, or a `scroll = usize::MAX` set after the last
+        // recompute would survive into the next keypress.
+        self.resolve_message_scroll();
+    }
+
+    /// Settle the pin-to-bottom sentinel and clamp the scroll offset against
+    /// the current ranges.
+    ///
+    /// Same arithmetic the old `set_message_layout` performed; split out so it
+    /// can run on a cache hit, where no layout is recomputed.
+    fn resolve_message_scroll(&mut self) {
+        let line_count = self
+            .messages
+            .line_ranges
+            .last()
+            .map(|range| range.end)
+            .unwrap_or_default();
+        let max_scroll = line_count.saturating_sub(self.messages.page_size);
+        self.messages.scroll = if self.messages.scroll == usize::MAX {
+            max_scroll
+        } else {
+            self.messages.scroll.min(max_scroll)
+        };
+    }
+
+    /// The cached layout, if one has been computed for the current inputs.
+    pub(crate) fn cached_message_layout(&self) -> Option<&MessageLayout> {
+        self.messages.layout.as_ref()
+    }
+}
