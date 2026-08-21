@@ -125,6 +125,7 @@ impl App {
     /// `messages.line_ranges` or the cached lines. It is idempotent and cheap
     /// on a hit — one pass over the inputs to hash them.
     pub(crate) fn ensure_message_layout(&mut self) {
+        self.messages.layout_checks = self.messages.layout_checks.saturating_add(1);
         // Derive once and hold the result: on a miss the same values feed the
         // layout, so a miss must not pay for deriving them twice.
         let recomputed = {
@@ -168,6 +169,7 @@ impl App {
         };
 
         if let Some((key, event_ids, layout)) = recomputed {
+            self.messages.layout_recomputes = self.messages.layout_recomputes.saturating_add(1);
             self.messages.layout_key = Some(key);
             self.messages.line_ranges = layout.ranges.clone();
             self.messages.layout_event_ids = event_ids;

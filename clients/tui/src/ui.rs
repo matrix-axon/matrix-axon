@@ -2518,11 +2518,30 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
             app.room_titles.len(),
             app.rooms_without_derived_title.len()
         );
+        // A cache that never hits looks identical on screen: same pixels, just
+        // slower. Without these counts a broken digest and a working one are
+        // indistinguishable from the UI, so the overlay reports the hit rate
+        // (#54). The reading that matters is whether `recomputed` climbs while
+        // the client sits idle — it should not.
+        let layout_line = {
+            let checks = app.messages.layout_checks;
+            let recomputes = app.messages.layout_recomputes;
+            let hits = checks.saturating_sub(recomputes);
+            let hit_rate = if checks == 0 {
+                0.0
+            } else {
+                (hits as f64 / checks as f64) * 100.0
+            };
+            format!(
+                "Message layout: {recomputes} recomputed / {checks} checked ({hit_rate:.1}% cached)"
+            )
+        };
         lines.push("".to_owned());
         lines.push("Diagnostics (display.debug):".to_owned());
         lines.push(media_drops_line);
         lines.push(startup_line);
         lines.push(room_titles_line);
+        lines.push(layout_line);
     }
 
     lines
