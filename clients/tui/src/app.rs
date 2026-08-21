@@ -874,6 +874,18 @@ pub(crate) struct App {
     /// later one is a genuine reconnect whose dropped frames must be re-read,
     /// whether or not startup has finished by then (#210).
     pub(crate) seen_first_connect: bool,
+    /// A device-state read is in flight, so another must not be started: two
+    /// overlapping reads landing out of order would let the older view delete a
+    /// draft the newer one installed. See `App::request_device_state`.
+    pub(crate) device_state_inflight: bool,
+    /// A device-state read was asked for while one was in flight; run one more
+    /// when it lands rather than one per request.
+    pub(crate) device_state_again: bool,
+    /// Draft keys written by a live `device_state` frame since the in-flight
+    /// read was dispatched. Those writes are newer than the view that read will
+    /// return, so `apply_draft_reads` must not mistake them for keys the server
+    /// tombstoned.
+    pub(crate) drafts_written_since_fetch: std::collections::HashSet<RoomKey>,
     /// A room-list fetch is in flight, so another must not be started.
     pub(crate) rooms_fetch_inflight: bool,
     /// A room-list fetch was asked for while one was in flight; run one more
@@ -1165,6 +1177,9 @@ impl App {
             bootstrap_timings: Vec::new(),
             bootstrap_stage_started: Instant::now(),
             seen_first_connect: false,
+            device_state_inflight: false,
+            device_state_again: false,
+            drafts_written_since_fetch: std::collections::HashSet::new(),
             rooms_fetch_inflight: false,
             rooms_fetch_again: false,
             rooms_fetch_had_selection: false,

@@ -1133,10 +1133,15 @@ fn message_matches_search(event: &EventDto, query: &str) -> bool {
     if event.redacted {
         return false;
     }
+    // Both callers pass an already-lowercased query, so this is the same match
+    // the `to_ascii_lowercase().contains(..)` form made — without allocating a
+    // lowercased copy of every message body on each `/n`, `/N` and search
+    // commit, which is the allocation `room_matches_search` above already
+    // stopped making.
     event
         .body
         .as_deref()
-        .is_some_and(|body| body.to_ascii_lowercase().contains(query))
+        .is_some_and(|body| contains_ascii_case_insensitive(body, query))
 }
 
 #[cfg(test)]

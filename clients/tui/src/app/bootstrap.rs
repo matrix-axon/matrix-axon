@@ -179,7 +179,25 @@ impl App {
     ///
     /// Used by startup and by every WS (re)connect — the lossy bus may have
     /// dropped `device_state` frames while the socket was down (ADR 0048).
+    ///
+    /// Coalesced like [`Self::request_rooms_refresh`], and for a sharper reason
+    /// than saving a request. `apply_draft_reads` treats the merged view as
+    /// authoritative and drops local keys the fetch omits, so two overlapping
+    /// reads whose outcomes land out of order would let the *older* view delete
+    /// a draft the newer one had just installed — silent data loss. The old
+    /// code awaited this on the main task, which serialised it for free; making
+    /// it a spawn (#189) removed that guarantee, and allowing reconnect
+    /// re-reads during bootstrap (#210) made overlap reachable. One in flight,
+    /// at most one remembered behind it, so outcomes arrive in dispatch order.
     pub(crate) fn request_device_state(&mut self) {
+        if self.device_state_inflight {
+            self.device_state_again = true;
+            return;
+        }
+        self.device_state_inflight = true;
+        // Writes from here on are newer than the view this fetch will return,
+        // so the merge must not treat them as keys the server tombstoned.
+        self.drafts_written_since_fetch.clear();
         let client = self.client.clone();
         let device_id = self.device_id;
         let account_ids: Vec<Uuid> = self
@@ -249,9 +267,14 @@ impl App {
                 }
             }
             BootstrapOutcome::DeviceState { markers, drafts } => {
+                self.device_state_inflight = false;
                 // Markers before the first timeline load: see the module docs.
                 self.apply_read_marker_reads(markers);
                 self.apply_draft_reads(drafts);
+                if self.device_state_again {
+                    self.device_state_again = false;
+                    self.request_device_state();
+                }
                 if self.bootstrap == BootstrapStage::DeviceState {
                     self.note_stage_elapsed("device state");
                     self.bootstrap = BootstrapStage::Done;
@@ -446,6 +469,47 @@ mod tests {
             app.note_connected_frame(),
             "and so does every reconnect after startup"
         );
+    }
+
+    /// Two device-state reads must never be in flight at once.
+    ///
+    /// `apply_draft_reads` treats the merged view as authoritative and drops
+    /// local keys it omits, so an older outcome landing after a newer one would
+    /// delete a draft the newer view had just installed. Coalescing keeps
+    /// outcomes in dispatch order, which is the property the old awaited call
+    /// had for free.
+    #[tokio::test]
+    async fn concurrent_device_state_requests_coalesce() {
+        let (mut app, _rx) = app();
+        app.bootstrap = BootstrapStage::Done;
+
+        app.request_device_state();
+        assert!(app.device_state_inflight);
+        assert!(!app.device_state_again);
+
+        for _ in 0..4 {
+            app.request_device_state();
+        }
+        assert!(
+            app.device_state_again,
+            "further reads are remembered, not spawned alongside"
+        );
+
+        app.handle_bootstrap_outcome(BootstrapOutcome::DeviceState {
+            markers: Vec::new(),
+            drafts: Vec::new(),
+        })
+        .await;
+        assert!(app.device_state_inflight, "exactly one follow-up goes out");
+        assert!(!app.device_state_again);
+
+        app.handle_bootstrap_outcome(BootstrapOutcome::DeviceState {
+            markers: Vec::new(),
+            drafts: Vec::new(),
+        })
+        .await;
+        assert!(!app.device_state_inflight);
+        assert!(!app.device_state_again);
     }
 
     /// Every stage before `Done` names itself for the rooms-panel title.
