@@ -83,6 +83,9 @@ const REPLY_2 = event('$reply2', T0, 2599, ROOT)
 // the window a thread receipt would extend over.
 const OTHER_ROOT_EVENT = event(OTHER_ROOT, T0 - 9 * MINUTE, 2510)
 const OTHER_REPLY = event('$other-reply', T0 - 3 * MINUTE, 2580, OTHER_ROOT)
+// A bridge backfill into the *other* thread: stamped before that thread was last
+// read, but ingested after everything else in the room.
+const BACKFILLED_REPLY = event('$backfilled', T0 - 8 * MINUTE, 2605, OTHER_ROOT)
 const OTHER_REPLY_NEW = event(
   '$other-reply-new',
   T0 - 90 * SECOND,
@@ -108,6 +111,13 @@ const OTHER_THREAD: ThreadSummary = {
   reply_count: 1,
   latest_reply_event_id: OTHER_REPLY.event_id,
   latest_reply_ts: OTHER_REPLY.origin_ts,
+}
+/** A thread whose newest reply is *not* in the loaded slice. */
+const GHOST_THREAD: ThreadSummary = {
+  root_event_id: '$ghost-root',
+  reply_count: 1,
+  latest_reply_event_id: '$ghost-reply',
+  latest_reply_ts: T0 + MINUTE,
 }
 const OTHER_THREAD_NEW: ThreadSummary = {
   ...OTHER_THREAD,
@@ -154,9 +164,16 @@ function renderRoom(
     notificationCount?: number
     /** Install a spy on `noteUnreadCounts` before mounting. */
     spyRooms?: boolean
+    /** Fail the thread-summary fetch, as a transient 5xx does. */
+    threadsFail?: boolean
+    /** Answer the thread-summary fetch after the receipt debounce. */
+    threadsSlow?: boolean
+    /** A backfilled reply: old `origin_ts`, high `arrival_order`. */
+    backfilledForeignReply?: boolean
   } = {},
 ) {
   const roomEvents = [
+    ...(options.backfilledForeignReply === true ? [BACKFILLED_REPLY] : []),
     REPLY_2,
     REPLY_1,
     ...(options.foreignReplyInWindow === true ? [OTHER_REPLY_NEW] : []),
@@ -225,7 +242,17 @@ function renderRoom(
     ),
     http.get(
       `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads`,
-      () => HttpResponse.json({ data: options.threads ?? [MAIN_THREAD] }),
+      async () => {
+        if (options.threadsFail === true) {
+          return new HttpResponse(null, { status: 502 })
+        }
+        if (options.threadsSlow === true) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, RECEIPT_DEBOUNCE_MS + 700),
+          )
+        }
+        return HttpResponse.json({ data: options.threads ?? [MAIN_THREAD] })
+      },
     ),
     http.get(
       `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
@@ -617,6 +644,89 @@ describe('a thread view names the room receipt (ADR 0096)', () => {
       ).toBeGreaterThan(0),
     )
     await settleReceipts()
+  })
+
+  it('does not treat a backfilled reply as read on an origin_ts comparison', async () => {
+    // The other thread's marker covers its newest reply *by timestamp*, and the
+    // backfilled reply is stamped older still — so an `origin_ts` comparison
+    // calls it read. Nobody displayed it: it arrived after everything else
+    // (arrival 2605), which is the only order a receipt is interpreted in.
+    const { reads, findByText } = renderRoom({
+      threads: [MAIN_THREAD, OTHER_THREAD],
+      backfilledForeignReply: true,
+      storedThreadMarkers: [
+        { root: ROOT, eventId: REPLY_2.event_id, originTs: REPLY_2.origin_ts },
+        {
+          root: OTHER_ROOT,
+          eventId: OTHER_REPLY.event_id,
+          originTs: OTHER_REPLY.origin_ts,
+        },
+      ],
+    })
+    await findByText(`body of ${MAIN.event_id}`)
+    await settleReceipts()
+
+    // `$reply2` (2599) stays claimable — it sits *below* the backfilled reply in
+    // arrival order, so naming it acknowledges nothing unseen.
+    expect(reads).not.toContain(BACKFILLED_REPLY.event_id)
+  })
+
+  it('still clears the room-list badge when the thread fetch failed', async () => {
+    // A transient 5xx retries only when a new thread reply arrives. Waiting for
+    // success meant one failure froze the badge for good.
+    const { services, findByText } = renderRoom({
+      notificationCount: 3,
+      spyRooms: true,
+      threadsFail: true,
+    })
+    await findByText(`body of ${MAIN.event_id}`)
+
+    await waitFor(() =>
+      expect(
+        vi
+          .spyOn(services.rooms, 'noteUnreadCounts')
+          .mock.calls.filter(
+            (call) => call[1] === ROOM && call[2] === 0 && call[3] === 0,
+          ).length,
+      ).toBeGreaterThan(0),
+    )
+    await settleReceipts()
+  })
+
+  it('does not extend while an unread thread sits outside the loaded slice', async () => {
+    // The arrival-order bound can only see replies the client holds. This
+    // thread's reply is known from the summary and absent from the slice, so
+    // nothing below stops the extension from claiming past it — only the cutoff
+    // does. Naming `$reply2` here acknowledges every arrival below it, and the
+    // ghost reply's position is unknown.
+    const { reads, findByText } = renderRoom({
+      threads: [MAIN_THREAD, GHOST_THREAD],
+      storedThreadMarkers: [
+        { root: ROOT, eventId: REPLY_2.event_id, originTs: REPLY_2.origin_ts },
+      ],
+    })
+    await findByText(`body of ${MAIN.event_id}`)
+    await settleReceipts()
+
+    expect(reads).toContain(MAIN.event_id)
+    expect(reads).not.toContain(REPLY_2.event_id)
+  })
+
+  it('does not extend before the thread summaries have arrived', async () => {
+    // The summaries answer after the receipt debounce would have fired. Until
+    // they do, this room might hold any number of unread threads, and a receipt
+    // sent on that assumption cannot be recalled.
+    const { reads, findByText } = renderRoom({
+      threads: [MAIN_THREAD],
+      threadsSlow: true,
+      storedThreadMarkers: [
+        { root: ROOT, eventId: REPLY_2.event_id, originTs: REPLY_2.origin_ts },
+      ],
+    })
+    await findByText(`body of ${MAIN.event_id}`)
+    await settleReceipts()
+
+    expect(reads).not.toContain(REPLY_2.event_id)
   })
 
   it('still sends when the room has other threads the user has never opened', async () => {

@@ -25,7 +25,11 @@ import {
   THREAD_READ_MARKERS_NAMESPACE,
   type DeviceStateStore,
 } from './stores/device-state'
-import { createEphemeralStore, type EphemeralStore } from './stores/ephemeral'
+import {
+  createEphemeralStore,
+  walkReceiptContent,
+  type EphemeralStore,
+} from './stores/ephemeral'
 import {
   createEphemeralSender,
   type EphemeralSender,
@@ -320,21 +324,33 @@ export function connectThreadReceipts(
               path: { account_id: frame.accountId, event_id: eventId },
             },
           })
-          .then(({ data }) => {
-            if (data === undefined) {
-              // A miss is not retried: the marker stays unset and the thread
-              // stays flagged, which is the safe direction to be wrong in.
-              return
-            }
-            deviceState.advanceThreadReadMarker(
-              frame.accountId,
-              roomId,
-              threadRootId,
-              eventId,
-              data.data.origin_ts,
-            )
-            threadUnread.markThreadRead(frame.accountId, roomId, threadRootId)
-          }),
+          .then(
+            ({ data }) => {
+              if (data === undefined) {
+                // A 404 is final: the event is gone, and retrying the same
+                // lookup on every rebroadcast would be pure noise. The marker
+                // stays unset and the thread stays flagged, which is the safe
+                // direction to be wrong in.
+                return
+              }
+              deviceState.advanceThreadReadMarker(
+                frame.accountId,
+                roomId,
+                threadRootId,
+                eventId,
+                data.data.origin_ts,
+              )
+              threadUnread.markThreadRead(frame.accountId, roomId, threadRootId)
+            },
+            () => {
+              // The request never got an answer (offline, a dropped
+              // connection). Unlike a 404 that is not a verdict about the
+              // event, so release the dedup key: otherwise one network hiccup
+              // silently discards this thread's read signal for the rest of the
+              // session, and receipts are never replayed (review, non-blocking).
+              seen.delete(key)
+            },
+          ),
       )
     }
   })
@@ -342,37 +358,26 @@ export function connectThreadReceipts(
 
 /**
  * The `(event id, thread root)` pairs in one `m.receipt` content that are this
- * user's own thread-scoped receipts. `thread_id: "main"` is the main timeline,
- * not a thread, and is deliberately ignored — acting on it would be a claim
- * about the room stream, which has its own read position.
+ * user's own thread-scoped receipts.
+ *
+ * `thread_id: "main"` is the main timeline, not a thread, and is deliberately
+ * ignored — acting on it would be a claim about the room stream, which has its
+ * own read position. The wire shape itself is walked by
+ * [`walkReceiptContent`](./stores/ephemeral.ts), shared with the ephemeral
+ * overlay so one parser knows it.
  */
 function ownThreadedReceipts(
   content: unknown,
   ownUserId: string,
 ): [string, string][] {
-  if (typeof content !== 'object' || content === null) {
-    return []
-  }
   const found: [string, string][] = []
-  for (const [eventId, receiptTypes] of Object.entries(
-    content as Record<string, unknown>,
-  )) {
-    if (typeof receiptTypes !== 'object' || receiptTypes === null) {
-      continue
-    }
-    for (const type of ['m.read', 'm.read.private']) {
-      const byUser = (receiptTypes as Record<string, unknown>)[type]
-      if (typeof byUser !== 'object' || byUser === null) {
-        continue
-      }
-      const receipt = (byUser as Record<string, unknown>)[ownUserId]
-      if (typeof receipt !== 'object' || receipt === null) {
-        continue
-      }
-      const threadId = (receipt as Record<string, unknown>)['thread_id']
-      if (typeof threadId === 'string' && threadId !== 'main') {
-        found.push([eventId, threadId])
-      }
+  for (const record of walkReceiptContent(content)) {
+    if (
+      record.userId === ownUserId &&
+      record.threadId !== null &&
+      record.threadId !== 'main'
+    ) {
+      found.push([record.eventId, record.threadId])
     }
   }
   return found

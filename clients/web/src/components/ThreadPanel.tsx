@@ -17,6 +17,7 @@ import { threadRootId } from '../stores/threads'
 import { localThreadEventHref } from '../matrix-to'
 import { createTimelineStore, type EventDto } from '../stores/timeline'
 import type { TimelineEvent, TimelineStore } from '../stores/timeline'
+import { maxByArrivalOrder } from '../timeline/arrival-order'
 import { Composer, type ComposerAutocompleteOption } from './Composer'
 import { ErrorBanner } from './ErrorBanner'
 import { Fragment } from 'preact'
@@ -325,16 +326,13 @@ export function ThreadPanel({
     // the members below it safe to acknowledge, and reaching as far as is
     // honest is the difference between a badge that clears and one that does
     // not.
-    const target = thread.events.value.reduce<TimelineEvent | null>(
-      (best, event) =>
-        event.event_id.startsWith('local:') ||
-        (hideRedacted && event.redacted) ||
-        (receiptCeiling !== null && event.arrival_order >= receiptCeiling)
-          ? best
-          : best === null || event.arrival_order > best.arrival_order
-            ? event
-            : best,
-      null,
+    const target = maxByArrivalOrder(
+      thread.events.value.filter(
+        (event) =>
+          !event.event_id.startsWith('local:') &&
+          !(hideRedacted && event.redacted) &&
+          (receiptCeiling === null || event.arrival_order < receiptCeiling),
+      ),
     )
     if (target !== null) {
       ephemeralSender.noteRead(

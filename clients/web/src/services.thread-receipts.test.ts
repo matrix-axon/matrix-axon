@@ -150,6 +150,48 @@ describe('connectThreadReceipts', () => {
     expect(threadUnread.isUnread(ACCT, ROOM, ROOT)).toBe(false)
   })
 
+  it('retries after a lookup that never got an answer', async () => {
+    const { deviceState, threadUnread, socket } = harness()
+    let attempts = 0
+    server.use(
+      http.get(`${BASE}/v1/accounts/:accountId/events/:eventId`, () => {
+        attempts += 1
+        return attempts === 1
+          ? HttpResponse.error()
+          : HttpResponse.json({
+              data: {
+                account_id: ACCT,
+                event_id: REPLY,
+                room_id: ROOM,
+                sender: '@alice:hs',
+                origin_ts: REPLY_TS,
+                arrival_order: 42,
+                type: 'm.room.message',
+                body: 'a reply',
+                content: {},
+                redacted: false,
+                edited: false,
+                edit_count: 0,
+                state_key: null,
+                reactions: null,
+              },
+            })
+      }),
+    )
+
+    socket().emitMessage(receiptFrame({ ts: 1, thread_id: ROOT }))
+    await vi.waitFor(() => expect(attempts).toBe(1))
+
+    // A dropped connection is not a verdict about the event. Holding the dedup
+    // key would discard this thread's read signal for the whole session, and
+    // receipts are never replayed.
+    socket().emitMessage(receiptFrame({ ts: 2, thread_id: ROOT }))
+    await vi.waitFor(() =>
+      expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).not.toBeNull(),
+    )
+    expect(threadUnread.isUnread(ACCT, ROOM, ROOT)).toBe(false)
+  })
+
   it('ignores a main-timeline receipt', async () => {
     const { deviceState, threadUnread, socket } = harness()
 

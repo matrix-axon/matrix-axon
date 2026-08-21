@@ -53,6 +53,7 @@ import {
   runPosition,
   type TimelineRow,
 } from '../timeline/group-media-runs'
+import { maxByArrivalOrder } from '../timeline/arrival-order'
 import {
   NATIVE_BACK_EDGE_PX,
   SWIPE_AXIS_RATIO,
@@ -305,7 +306,11 @@ export function RoomPage() {
    */
   const threadReadStateSettled =
     !threads.loading.value &&
-    threads.error.value === null &&
+    // Deliberately not `threads.error === null`. A failed summary fetch retries
+    // only when a new thread reply arrives, so requiring success meant one
+    // transient 5xx froze a room's badge for good — worse than the unconditional
+    // clear this replaced (review, blocking 3). With no summaries there is no
+    // evidence of an unread thread, and the pre-existing behaviour applies.
     deviceState.hydrated(accountId, READ_MARKERS_NAMESPACE) &&
     deviceState.hydrated(accountId, THREAD_READ_MARKERS_NAMESPACE)
   const roomHasNoKnownUnreadThreads =
@@ -629,18 +634,23 @@ export function RoomPage() {
     // for the very thread it came from, and the room reports no unread thread
     // while badging for one (#209).
     //
-    // Only skippable when the slice can *show* that the summary event is a
-    // reply, which is exactly when the timeline effect below has the events to
-    // name a main-timeline position itself — so nothing is left unmarked. An
-    // unloaded slice keeps today's behaviour, which is this effect's whole
-    // reason for existing.
+    // The summary event must therefore be *classifiable*: present in the loaded
+    // slice and not a thread member. Treating "absent" as "not a thread reply"
+    // was the same inference under a different race — `rooms` and `timeline` are
+    // independently live-updated, so a reply can reach the summary before the
+    // slice and get seeded exactly as it did on a cold start (review, blocking
+    // 4). When it cannot be classified this effect stands down and the timeline
+    // effect below owns the marker; that costs the marker a beat in the case
+    // this effect was written for (a slice missing the newest event), which is
+    // cheap next to seeding a read position from an event nobody can identify.
     const summaryEvent = timeline.events.value.find(
       (event) => event.event_id === room?.last_event_id,
     )
     if (
+      summaryEvent !== undefined &&
+      threadRootId(summaryEvent) === null &&
       room?.last_event_id !== null &&
       room?.last_event_id !== undefined &&
-      (summaryEvent === undefined || threadRootId(summaryEvent) === null) &&
       (unreadThreadCutoff === null ||
         room.last_activity_ts < unreadThreadCutoff)
     ) {
@@ -791,16 +801,81 @@ export function RoomPage() {
    * passes are one skip-test per loaded event, nearly all exiting on the first
    * comparison.
    */
-  const roomReceipt = (() => {
-    const base = displayed.reduce<TimelineEvent | null>(
-      (best, event) =>
-        best === null || event.arrival_order > best.arrival_order
-          ? event
-          : best,
-      null,
+  const markersHydrated = deviceState.hydrated(
+    accountId,
+    THREAD_READ_MARKERS_NAMESPACE,
+  )
+  const roomReadMarker = deviceState.readMarker(accountId, roomId)
+  /**
+   * The room marker, but only where it can speak for a *thread's* read position.
+   * It cannot when it points at a thread member, and this is not hypothetical
+   * history: `advanceReadMarker` is forward-only on `origin_ts`, and every
+   * session before the guard above seeded the marker from `last_event_id` —
+   * `MAX(origin_ts)` over every event, replies included. So a real account
+   * carries a marker parked on a reply, durably, and `reconcileSummary`'s
+   * fallback would answer "read" for the very thread it came from. Preventing
+   * new poisoning does not heal that; withholding the marker does, on the next
+   * load, with no migration.
+   *
+   * A marker whose event is not in the loaded slice stays admissible — it is
+   * usually one that scrolled out of a long room, and withholding it there would
+   * flag every old thread in rooms that have nothing wrong with them.
+   *
+   * Withholding alone is not enough, because "no read position" is not "unread":
+   * `reconcileSummary` deliberately records nothing when it has nothing to
+   * compare against, so a withheld marker leaves the thread unflagged — silent
+   * in a different way. What replaces it is the position the marker should have
+   * held: the display-last event the main timeline actually rendered. That reads
+   * as "you are caught up on the room stream to here", which is true, and makes
+   * a reply newer than it unread, which is also true.
+   */
+  const mainTimelineRead = displayed.at(-1)
+  const markerIsThreadMember =
+    roomReadMarker !== null &&
+    timeline.events.value.some(
+      (event) =>
+        event.event_id === roomReadMarker.eventId &&
+        threadRootId(event) !== null,
     )
+  // Memoised on the values rather than the objects: `readMarker()` parses a
+  // fresh object on every call, so an unmemoised result re-runs the reconcile
+  // effect below on every render of the page.
+  const roomMarkerForThreads = useMemo(
+    () =>
+      markerIsThreadMember
+        ? mainTimelineRead === undefined
+          ? null
+          : {
+              eventId: mainTimelineRead.event_id,
+              originTs: mainTimelineRead.origin_ts,
+            }
+        : roomReadMarker,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      markerIsThreadMember,
+      mainTimelineRead?.event_id,
+      mainTimelineRead?.origin_ts,
+      roomReadMarker?.eventId,
+      roomReadMarker?.originTs,
+    ],
+  )
+
+  const threadSummaryStates = [...threads.summaries.value.values()].map(
+    (summary) => ({
+      summary,
+      threadMarker: deviceState.threadReadMarker(
+        accountId,
+        roomId,
+        summary.root_event_id,
+      ),
+      rootPreview: eventPreview(threads.roots.value.get(summary.root_event_id)),
+    }),
+  )
+
+  const roomReceipt = (() => {
+    const base = maxByArrivalOrder(displayed)
     const baseOrder = base?.arrival_order ?? -1
-    /** Replies above the base, paired with whether they are known read. */
+    /** Thread replies above the room's own target, from threads not on screen. */
     const above = timeline.events.value.filter((event) => {
       if (event.arrival_order <= baseOrder) {
         return false
@@ -808,29 +883,90 @@ export function RoomPage() {
       const root = threadRootId(event)
       return root !== null && root !== openThread
     })
+
+    /**
+     * While anything here is unread — or merely unknown — nothing above the main
+     * timeline is claimable, by this view or by a panel.
+     *
+     * The bound below can only see replies the client has *loaded*, while thread
+     * summaries know about unread replies sitting outside the loaded page.
+     * Extending past one of those acknowledges it in arrival order without ever
+     * having seen it (review, blocking 2).
+     *
+     * Read straight off the summaries rather than off `unreadThreadCutoff`,
+     * which the reconcile *effect* populates: effects run after the render that
+     * computes this, and in definition order, so on the render where summaries
+     * first arrive the cutoff is still empty and the extension fires against a
+     * room it has not yet judged. A receipt sent then cannot be recalled. A
+     * thread with no read position at all counts as unread here — for a claim
+     * this size, unknown is not read.
+     */
+    const anythingUnread =
+      threads.loading.value ||
+      threads.error.value !== null ||
+      !markersHydrated ||
+      !deviceState.hydrated(accountId, READ_MARKERS_NAMESPACE) ||
+      unreadThreadCutoff !== null ||
+      threadSummaryStates.some(({ summary, threadMarker }) => {
+        const latestTs = summary.latest_reply_ts ?? null
+        if (latestTs === null) {
+          return false
+        }
+        const markerTs =
+          threadMarker?.originTs ?? roomMarkerForThreads?.originTs ?? null
+        return markerTs === null || latestTs > markerTs
+      })
+    if (anythingUnread) {
+      return { blocker: baseOrder + 1, target: base }
+    }
+
+    /**
+     * Arrival position of each loaded event, so "has this reply been read" is
+     * answered in the key a receipt is interpreted in.
+     *
+     * Comparing the thread marker's `origin_ts` to the candidate's was wrong for
+     * the reason ADR 0089 exists: a bridge backfilling an older-stamped reply
+     * into a thread the user has read yields `marker.originTs >=
+     * reply.origin_ts` for a reply nobody displayed, and a forward-only receipt
+     * covering it cannot be walked back (review, blocking 1). The marker names an
+     * event; that event's arrival position bounds the claim, and a marker whose
+     * event is not loaded proves nothing.
+     */
+    const arrivalOf = new Map(
+      timeline.events.value.map((event) => [
+        event.event_id,
+        event.arrival_order,
+      ]),
+    )
+    const readThrough = new Map<string, number>()
     const isRead = (event: TimelineEvent): boolean => {
       const root = threadRootId(event)
       if (root === null) {
         return false
       }
-      const marker = deviceState.threadReadMarker(accountId, roomId, root)
-      return marker !== null && marker.originTs >= event.origin_ts
+      let through = readThrough.get(root)
+      if (through === undefined) {
+        const marker = deviceState.threadReadMarker(accountId, roomId, root)
+        through = marker === null ? -1 : (arrivalOf.get(marker.eventId) ?? -1)
+        readThrough.set(root, through)
+      }
+      return through >= event.arrival_order
     }
-    const blocker = above.reduce<number | null>(
+
+    const unread = above.filter((event) => !isRead(event))
+    const blocker = unread.reduce<number | null>(
       (lowest, event) =>
-        isRead(event) || (lowest !== null && event.arrival_order >= lowest)
-          ? lowest
-          : event.arrival_order,
+        lowest === null || event.arrival_order < lowest
+          ? event.arrival_order
+          : lowest,
       null,
     )
-    const target = above.reduce<TimelineEvent | null>(
-      (best, event) =>
-        !isRead(event) ||
-        (blocker !== null && event.arrival_order >= blocker) ||
-        (best !== null && event.arrival_order <= best.arrival_order)
-          ? best
-          : event,
-      base,
+    const claimable = above.filter(
+      (event) =>
+        isRead(event) && (blocker === null || event.arrival_order < blocker),
+    )
+    const target = maxByArrivalOrder(
+      base === null ? claimable : [base, ...claimable],
     )
     return { blocker, target }
   })()
@@ -1057,76 +1193,6 @@ export function RoomPage() {
   const typingText = formatTypingIndicator(
     ephemeral.typingUsers(accountId, roomId, ownUserId),
     members,
-  )
-  const markersHydrated = deviceState.hydrated(
-    accountId,
-    THREAD_READ_MARKERS_NAMESPACE,
-  )
-  const roomReadMarker = deviceState.readMarker(accountId, roomId)
-  /**
-   * The room marker, but only where it can speak for a *thread's* read position.
-   * It cannot when it points at a thread member, and this is not hypothetical
-   * history: `advanceReadMarker` is forward-only on `origin_ts`, and every
-   * session before the guard above seeded the marker from `last_event_id` —
-   * `MAX(origin_ts)` over every event, replies included. So a real account
-   * carries a marker parked on a reply, durably, and `reconcileSummary`'s
-   * fallback would answer "read" for the very thread it came from. Preventing
-   * new poisoning does not heal that; withholding the marker does, on the next
-   * load, with no migration.
-   *
-   * A marker whose event is not in the loaded slice stays admissible — it is
-   * usually one that scrolled out of a long room, and withholding it there would
-   * flag every old thread in rooms that have nothing wrong with them.
-   *
-   * Withholding alone is not enough, because "no read position" is not "unread":
-   * `reconcileSummary` deliberately records nothing when it has nothing to
-   * compare against, so a withheld marker leaves the thread unflagged — silent
-   * in a different way. What replaces it is the position the marker should have
-   * held: the display-last event the main timeline actually rendered. That reads
-   * as "you are caught up on the room stream to here", which is true, and makes
-   * a reply newer than it unread, which is also true.
-   */
-  const mainTimelineRead = displayed.at(-1)
-  const markerIsThreadMember =
-    roomReadMarker !== null &&
-    timeline.events.value.some(
-      (event) =>
-        event.event_id === roomReadMarker.eventId &&
-        threadRootId(event) !== null,
-    )
-  // Memoised on the values rather than the objects: `readMarker()` parses a
-  // fresh object on every call, so an unmemoised result re-runs the reconcile
-  // effect below on every render of the page.
-  const roomMarkerForThreads = useMemo(
-    () =>
-      markerIsThreadMember
-        ? mainTimelineRead === undefined
-          ? null
-          : {
-              eventId: mainTimelineRead.event_id,
-              originTs: mainTimelineRead.origin_ts,
-            }
-        : roomReadMarker,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [
-      markerIsThreadMember,
-      mainTimelineRead?.event_id,
-      mainTimelineRead?.origin_ts,
-      roomReadMarker?.eventId,
-      roomReadMarker?.originTs,
-    ],
-  )
-
-  const threadSummaryStates = [...threads.summaries.value.values()].map(
-    (summary) => ({
-      summary,
-      threadMarker: deviceState.threadReadMarker(
-        accountId,
-        roomId,
-        summary.root_event_id,
-      ),
-      rootPreview: eventPreview(threads.roots.value.get(summary.root_event_id)),
-    }),
   )
   /**
    * Whether a thread view in this room may claim read state at all (ADR 0096
