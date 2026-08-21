@@ -231,6 +231,13 @@ Condition 2 of the gate is a fact about client state — which threads the user 
   This is also a better source of truth than the marker fallback ever was — it is what the homeserver actually knows about what the user read.
   That path is live-only — nothing backfills the receipts Synapse already holds, so a thread read in Element before the tab opened stays unread here and blocks the room until it is opened again (#213).
   What remains of #209 is the cross-room half: the unread-thread store is fed from `RoomPage` and from live frames, so on a cold load it knows only about rooms visited this session.
+- **Flushing device state on `visibilitychange` changes timing elsewhere, not just durability.**
+  Debounced writes had no unload flush at all, so a reload inside the 800 ms window dropped them — a thread just opened came back unread, and drafts had always had the same exposure.
+  `connectDeviceStateFlush` closes that, and in doing so it usually leaves ADR 0087's pre-reload flush with nothing pending.
+  That flush used to await a network round trip; now it resolves immediately, so an auto-refresh reload can begin _synchronously_ inside the `visibilitychange` handler.
+  Nothing user-visible depends on the delay, but anything driving that event has to tolerate the navigation starting at once — `e2e/update-refresh.spec.ts`'s away/return helper did not, and failed on CI while passing locally.
+  `visibilitychange` is shared infrastructure; a listener added to it is not local in effect.
+
 - Test seams, and a caution about them:
   - Every gate condition needs a case where it is the only one false, and each such test must be checked to fail when _its_ condition alone is removed.
     Verifying against the unfixed code is not enough: the first five tests written here all passed against the unfixed client, because with no thread receipt implemented at all, "sends nothing" is true for every reason at once.
