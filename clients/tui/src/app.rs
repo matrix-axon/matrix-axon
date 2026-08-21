@@ -26,6 +26,7 @@ mod completion;
 mod drafts;
 mod ephemeral;
 pub(crate) use drafts::{load_or_create_device_id, DraftOutcome};
+mod layout_cache;
 mod lifecycle;
 mod read_markers;
 pub(crate) use bootstrap::{BootstrapOutcome, BootstrapStage};
@@ -47,8 +48,8 @@ mod typing;
 pub(crate) use reactions::{collect_reactions, emoji_matches, unreact_selection_status};
 pub(crate) use render::{
     date_separator_line, display_body_with_sender, format_date, format_time, message_index_at_line,
-    message_layout, selected_line_style, ImageThumbRows, RelationContext, ReplyPreview,
-    ThreadBadge, IMAGE_THUMB_ROWS,
+    selected_line_style, ImageThumbRows, RelationContext, ReplyPreview, ThreadBadge,
+    IMAGE_THUMB_ROWS,
 };
 pub(crate) use room_actions::{PendingRoomAction, RoomActionOutcome};
 pub(crate) use rooms::{account_localpart, apply_edits, dm_title_from_members};
@@ -886,6 +887,9 @@ pub(crate) struct App {
     /// return, so `apply_draft_reads` must not mistake them for keys the server
     /// tombstoned.
     pub(crate) drafts_written_since_fetch: std::collections::HashSet<RoomKey>,
+    /// Bumped on config reload. Stands in for the config-level inputs to the
+    /// message layout (`app::layout_cache`).
+    pub(crate) config_generation: u64,
     /// A room-list fetch is in flight, so another must not be started.
     pub(crate) rooms_fetch_inflight: bool,
     /// A room-list fetch was asked for while one was in flight; run one more
@@ -1063,6 +1067,12 @@ pub(crate) struct MessagePane {
     pub(crate) width: usize,
     pub(crate) line_ranges: Vec<std::ops::Range<usize>>,
     pub(crate) layout_event_ids: Vec<String>,
+    /// Digest of everything the cached `layout` was computed from (#54).
+    /// `None` until the first layout runs.
+    pub(crate) layout_key: Option<u64>,
+    /// The layout `draw` renders and the nav math measures against. One per
+    /// change rather than two per frame; see `app::layout_cache`.
+    pub(crate) layout: Option<crate::app::render::MessageLayout>,
     /// Per-room opaque cursor for the next older page of history (`next_cursor`
     /// from the server). Absent when the room is at the beginning of history.
     pub(crate) history_cursors: HashMap<RoomKey, String>,
@@ -1080,6 +1090,8 @@ impl Default for MessagePane {
             width: 80,
             line_ranges: Vec::new(),
             layout_event_ids: Vec::new(),
+            layout_key: None,
+            layout: None,
             history_cursors: HashMap::new(),
             loading_history: false,
         }
@@ -1180,6 +1192,7 @@ impl App {
             device_state_inflight: false,
             device_state_again: false,
             drafts_written_since_fetch: std::collections::HashSet::new(),
+            config_generation: 0,
             rooms_fetch_inflight: false,
             rooms_fetch_again: false,
             rooms_fetch_had_selection: false,
@@ -1424,6 +1437,12 @@ impl App {
                 self.shortcuts = config.shortcuts;
                 self.colors = config.colors;
                 self.display = config.display;
+                // Colors, density, time format and highlight feed the message
+                // layout but are too expensive to hash on every tick, so the
+                // layout digest keys on this counter instead. This is the only
+                // place they change (pane-width tweaks move `messages.width`,
+                // which the digest hashes directly). See `app::layout_cache`.
+                self.config_generation = self.config_generation.wrapping_add(1);
                 self.status = Status::Info("config reloaded".to_owned());
             }
             Err(e) => self.status = Status::Info(format!("config reload failed: {e}")),
@@ -2659,6 +2678,7 @@ mod tests {
         AccountDto, AccountState, EmojiDto, MemberDto, TimelinePage, VerificationFrame,
         VerificationFrameDto,
     };
+    use crate::app::render::message_layout;
     use crate::app::search_flow::{SearchJumpAction, SearchJumpThreadLoad, SearchOutcome};
     use crate::command::HELP_COMMANDS;
     use crate::config::TimeFormat;
@@ -4559,6 +4579,103 @@ mod tests {
         assert_eq!(layout.lines.len(), 7);
     }
 
+    /// Two `ensure_message_layout` calls with nothing changed in between must
+    /// not recompute. Proven by corrupting the stored ranges and checking the
+    /// corruption survives: a recompute would overwrite it.
+    #[test]
+    fn unchanged_inputs_do_not_recompute_the_layout() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![event_with_id(
+                "$one:example.com",
+                "m.room.message",
+                Some("hello"),
+                serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
+            )],
+        );
+
+        app.ensure_message_layout();
+        let key = app.messages.layout_key;
+        assert!(key.is_some(), "the first call computes a layout");
+
+        app.messages.line_ranges = vec![99..100, 100..101];
+        app.ensure_message_layout();
+
+        assert_eq!(app.messages.layout_key, key, "the digest is stable");
+        assert_eq!(
+            app.messages.line_ranges,
+            vec![99..100, 100..101],
+            "a cache hit must not recompute"
+        );
+    }
+
+    /// The pane getting narrower re-wraps, so it must invalidate. Width is a
+    /// layout input that the old event-id-keyed cache did not cover.
+    #[test]
+    fn a_width_change_recomputes_the_layout() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![event_with_id(
+                "$one:example.com",
+                "m.room.message",
+                Some("a rather long message that will wrap differently when narrowed"),
+                serde_json::json!({
+                    "msgtype": "m.text",
+                    "body": "a rather long message that will wrap differently when narrowed"
+                }),
+            )],
+        );
+
+        app.messages.width = 80;
+        app.ensure_message_layout();
+        let wide = app.messages.layout_key;
+
+        app.messages.width = 20;
+        app.ensure_message_layout();
+
+        assert_ne!(app.messages.layout_key, wide, "width must invalidate");
+    }
+
+    /// An edit replaces a message body in place, keeping its event id. The
+    /// previous cache keyed on event ids alone, so this was a false hit: the
+    /// ranges kept describing the pre-edit text while `draw` rendered the new
+    /// text, which is how a scroll desync starts.
+    #[test]
+    fn an_edited_body_recomputes_the_layout() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let key = RoomKey::from(&room);
+        app.messages.events.insert(
+            key.clone(),
+            vec![event_with_id(
+                "$one:example.com",
+                "m.room.message",
+                Some("short"),
+                serde_json::json!({ "msgtype": "m.text", "body": "short" }),
+            )],
+        );
+
+        app.ensure_message_layout();
+        let before = app.messages.layout_key;
+
+        if let Some(events) = app.messages.events.get_mut(&key) {
+            events[0].body = Some("a much longer body after the edit".to_owned());
+        }
+        app.ensure_message_layout();
+
+        assert_ne!(
+            app.messages.layout_key, before,
+            "an edit keeps the event id, so the digest must cover the body"
+        );
+    }
+
     #[test]
     fn message_navigation_uses_rendered_image_ranges() {
         let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
@@ -4588,18 +4705,22 @@ mod tests {
                 ),
             ],
         );
-        app.set_message_layout(
-            vec![
-                "$image:example.com".to_owned(),
-                "$next:example.com".to_owned(),
-            ],
-            vec![0..4, 4..5],
-        );
-
         app.messages.selection = Some("$next:example.com".to_owned());
         app.ensure_message_index_visible(1);
 
-        assert_eq!(app.messages.scroll, 2);
+        // Nav now measures against the same cached layout `draw` renders, so
+        // the property to assert is the one that matters — the target message
+        // is fully on screen — rather than a hand-seeded offset. An image
+        // inflates its own range, so a nav path using un-inflated ranges lands
+        // short and fails here.
+        let range = app.messages.line_ranges[1].clone();
+        let page = app.messages.page_size;
+        assert!(
+            range.start >= app.messages.scroll && range.end <= app.messages.scroll + page,
+            "message 1 ({range:?}) must be visible in scroll {}..{}",
+            app.messages.scroll,
+            app.messages.scroll + page,
+        );
     }
 
     #[test]
