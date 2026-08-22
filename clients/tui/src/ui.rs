@@ -2489,9 +2489,6 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         version,
         graphics_line,
         conn_line,
-        media_drops_line,
-        startup_line,
-        room_titles_line,
         "".to_owned(),
         format!("Rooms loaded: {}", app.rooms.rooms.len()),
         account_filter_line,
@@ -2539,6 +2536,20 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
             ));
             lines.push(format!("      device: {device_str}  [{verified_str}]",));
         }
+    }
+
+    // Diagnostics, behind `display.debug`. These are internal counters and
+    // timings — nothing a user acts on, and noise in the summary `/status` is
+    // otherwise meant to be. Three things already described this as gated while
+    // it was not: `App::protocol_drops`' own doc comment, #189's overlay work,
+    // and the `Debug overlay diagnostics (display.debug)` row in
+    // docs/demo-coverage.md. One switch, and new telemetry joins it here.
+    if app.display.debug {
+        lines.push("".to_owned());
+        lines.push("Diagnostics (display.debug):".to_owned());
+        lines.push(media_drops_line);
+        lines.push(startup_line);
+        lines.push(room_titles_line);
     }
 
     lines

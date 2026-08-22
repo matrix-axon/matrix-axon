@@ -3415,6 +3415,43 @@ mod tests {
         assert!(status.contains("@bob:example.com  (logged out, 0 rooms)"));
     }
 
+    /// `/status` is a user-facing summary; the internal counters and timings
+    /// belong behind `display.debug`.
+    ///
+    /// Three places already described them as gated while they were not
+    /// (`App::protocol_drops`' doc comment, #189's overlay work, and the
+    /// `Debug overlay diagnostics (display.debug)` row in
+    /// docs/demo-coverage.md), so this pins the behaviour those claims assume.
+    #[test]
+    fn diagnostics_appear_in_status_only_when_debug_is_set() {
+        let mut app = app_with_rooms(Vec::new());
+
+        app.display.debug = false;
+        let plain = popup_status_lines(&app).join("\n");
+        for marker in ["Diagnostics", "Startup:", "Room titles:", "Encode drops:"] {
+            assert!(
+                !plain.contains(marker),
+                "{marker} must stay out of /status when debug is off"
+            );
+        }
+        // The user-facing summary is unaffected.
+        assert!(plain.contains("Axon server:"));
+        assert!(plain.contains("Rooms loaded:"));
+
+        app.display.debug = true;
+        let debug = popup_status_lines(&app).join("\n");
+        for marker in ["Diagnostics", "Startup:", "Room titles:", "Encode drops:"] {
+            assert!(
+                debug.contains(marker),
+                "{marker} must appear when debug is on"
+            );
+        }
+        assert!(
+            debug.contains("Axon server:"),
+            "and the summary is still there"
+        );
+    }
+
     #[test]
     fn status_disambiguates_duplicate_matrix_ids_with_account_ids() {
         let first_id = Uuid::from_u128(1);
