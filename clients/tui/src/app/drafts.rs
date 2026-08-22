@@ -273,14 +273,20 @@ impl App {
                     || protected.contains(&key)
             });
             for (room_id, entry) in state.entries {
+                let key = RoomKey {
+                    account_id,
+                    room_id,
+                };
+                // `retain` above stops a stale view *deleting* a protected key;
+                // without this the insert below would overwrite it instead,
+                // which loses exactly the same write by the other door. Applies
+                // to all three protected kinds: a live frame's newer text, the
+                // compose room, and a draft whose PUT has not round-tripped.
+                if protected.contains(&&key) {
+                    continue;
+                }
                 if let Some(text) = draft_text(&entry.value) {
-                    self.drafts.insert(
-                        RoomKey {
-                            account_id,
-                            room_id,
-                        },
-                        text.to_owned(),
-                    );
+                    self.drafts.insert(key, text.to_owned());
                 }
             }
         }
@@ -478,6 +484,49 @@ mod tests {
                 .map(|(k, v)| (k.to_owned(), v))
                 .collect(),
         }
+    }
+
+    /// The same protection, against the other door.
+    ///
+    /// When the stale view *omits* the room, `retain` keeps the newer local
+    /// value. When it *contains* the room with older text, `retain` keeps it
+    /// too — and the insert loop then has to not overwrite it. Protecting only
+    /// the delete path loses the identical write via `insert`.
+    #[test]
+    fn a_live_draft_is_not_overwritten_by_older_text_in_the_same_fetch() {
+        let room = test_room(Uuid::nil(), "!r:example.com");
+        let key = RoomKey::from(&room);
+        let mut app = compose_app(&room);
+        app.compose_room = None;
+
+        // The read goes out; at that moment the server has "v1" for this room.
+        app.request_device_state();
+
+        // While it is in flight, a sibling device moves it to "v2".
+        let other_device = Uuid::new_v4();
+        app.handle_device_state_frame(
+            Uuid::nil(),
+            frame(other_device, vec![("!r:example.com", draft_value("v2"))]),
+        );
+
+        // The older read lands, carrying "v1" for that very room.
+        let mut entries = HashMap::new();
+        entries.insert(
+            "!r:example.com".to_owned(),
+            crate::api::DeviceStateEntryDto {
+                value: draft_value("v1"),
+            },
+        );
+        app.apply_draft_reads(vec![(
+            Uuid::nil(),
+            Ok(crate::api::DeviceStateDto { entries }),
+        )]);
+
+        assert_eq!(
+            app.drafts.get(&key).map(String::as_str),
+            Some("v2"),
+            "a write newer than the fetch must survive the fetch's own older text"
+        );
     }
 
     /// A draft a live frame installed while a device-state read was in flight
