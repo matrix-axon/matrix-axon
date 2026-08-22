@@ -238,6 +238,13 @@ impl App {
         tally.count += 1;
         if own_user_id == Some(sender) {
             tally.me = true;
+            // `own_reactions_for` gates on `me && !my_event_ids.is_empty()`,
+            // because withdrawing needs an id to redact. Setting `me` alone
+            // would render the badge as ours while Shift-U reported nothing to
+            // remove. This frame *is* our reaction — sent from another device or
+            // client — and its event id is exactly what a withdrawal redacts.
+            // The `my_event_ids` early return above guarantees no duplicate.
+            tally.my_event_ids.push(reaction_event_id.to_owned());
         }
     }
 

@@ -3418,6 +3418,48 @@ mod tests {
     /// so the raw `m.reaction` row was appended (and filtered out of the
     /// rendered timeline) while the target's aggregate — which the badge
     /// actually renders from — went untouched until a room switch refetched it.
+    /// A reaction we sent from another device must arrive withdrawable.
+    ///
+    /// `own_reactions_for` gates on `me && !my_event_ids.is_empty()`, because a
+    /// withdrawal redacts an id. Setting `me` alone renders the badge as ours
+    /// while Shift-U reports nothing to remove — until a full room reload.
+    #[test]
+    fn a_reaction_from_our_other_device_is_withdrawable() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![message_with_reactions("$target:example.com", Vec::new())],
+        );
+        // This client knows who it is; the reaction was simply not sent here.
+        app.live
+            .own_senders
+            .insert(room.account_id, "@alice:example.com".to_owned());
+
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+            "$from-phone:example.com",
+            "$target:example.com",
+            "\u{1f44d}",
+            "@alice:example.com",
+        ))));
+
+        let own = app
+            .own_reactions_for("$target:example.com")
+            .expect("the target message is loaded");
+        assert_eq!(
+            own.len(),
+            1,
+            "the badge is ours, so it must be withdrawable"
+        );
+        assert_eq!(own[0].key, "\u{1f44d}");
+        assert_eq!(
+            own[0].event_ids,
+            vec!["$from-phone:example.com".to_owned()],
+            "withdrawing redacts the reaction event that actually arrived"
+        );
+    }
+
     /// Our own reaction, echoed back over the WS, must not be counted twice —
     /// including when the account's user id was never resolved.
     ///
