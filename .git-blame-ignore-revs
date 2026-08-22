@@ -9,8 +9,6 @@
 # entry, because it silently ignores nothing while still claiming to. A commit
 # that changes prose, code, or behavior must never be listed, however small.
 #
-# No entries yet, deliberately.
-#
 # The repo squash-merges, which means a pull request lands as one commit and
 # the commits inside it stop existing. So a reformat only keeps its
 # blame-ignore value if it lands as its **own pull request** — bundled with
@@ -24,3 +22,10 @@
 # authorship. Listing it would blame-skip all of that, so it is not listed and
 # that reformat is simply not ignorable. Next time: reformat alone, in its own
 # PR, then add its SHA here.
+#
+# That is what #225 does: it reflows `AGENTS.md` and `README.md` to semantic
+# line breaks and contains nothing else — no prose, no config, no script — so
+# its squash SHA is listable. Adding that SHA is the last commit of the PR
+# stacked on it, once `main` actually has it. No entry is written before then:
+# a placeholder here is indistinguishable from a real entry that ignores
+# nothing, which is the failure this file's second paragraph warns about.
