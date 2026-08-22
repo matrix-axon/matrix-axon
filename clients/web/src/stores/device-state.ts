@@ -1,4 +1,4 @@
-import { effect, signal } from '@preact/signals'
+import { computed, effect, signal, type ReadonlySignal } from '@preact/signals'
 import type { ApiClient } from '../api/client'
 import { deviceStateChange } from '../api/frames'
 import type { LiveConnection } from './live-connection'
@@ -46,6 +46,22 @@ export interface DeviceStateStore {
   flushPending(): Promise<void>
   /** Whether a `(accountId, namespace)` merged view has successfully loaded. */
   hydrated(accountId: string, namespace: string): boolean
+  /**
+   * Whether a `(accountId, namespace)` fetch has *finished*, successfully or
+   * not.
+   *
+   * A caller that must not act on absent data waits for [`hydrated`]; one that
+   * only needs to stop waiting uses this. The distinction is the difference
+   * between a read receipt (never claim on missing evidence) and a room badge
+   * (a repeating HTTP failure must not freeze it forever, since there is no
+   * retry until the socket drops and reconnects).
+   */
+  hydrateSettled(accountId: string, namespace: string): boolean
+  /**
+   * Bumped on every change to the merged cache — a stable scalar for a
+   * `useMemo` that reads markers, which otherwise has no dependency to name.
+   */
+  readonly revision: ReadonlySignal<number>
 
   /** Draft text for a room (`''` when none) — the `drafts` namespace. */
   draft(accountId: string, roomId: string): string
@@ -93,6 +109,7 @@ export interface DeviceStateStore {
     rootEventId: string,
     eventId: string,
     originTs: number,
+    arrivalThrough?: number,
   ): void
   /** Fetch an account's thread read markers once. */
   hydrateThreadReadMarkers(accountId: string): void
@@ -108,6 +125,18 @@ export interface ReadMarker {
 export interface ThreadReadMarker extends ReadMarker {
   roomId: string
   rootEventId: string
+  /**
+   * The greatest `arrival_order` the panel had displayed when this was written,
+   * or `null` for a marker written before this field existed.
+   *
+   * `eventId`/`originTs` are a *display* position — where the thread's "read to
+   * here" line sits — and display order is not arrival order (ADR 0089). A
+   * receipt decision needs the second, and resolving it by looking `eventId` up
+   * in a loaded slice both understates it (a backfilled reply can be display-
+   * earlier and arrival-later than the display-last event) and fails outright
+   * once that event pages out. Recording it at write time removes both.
+   */
+  arrivalThrough: number | null
 }
 
 /**
@@ -144,12 +173,20 @@ export function parseThreadReadMarker(value: unknown): ThreadReadMarker | null {
     root_event_id: rootEventId,
     event_id: eventId,
     origin_ts: originTs,
+    arrival_through: arrivalThrough,
   } = value as Record<string, unknown>
   return typeof roomId === 'string' &&
     typeof rootEventId === 'string' &&
     typeof eventId === 'string' &&
     typeof originTs === 'number'
-    ? { roomId, rootEventId, eventId, originTs }
+    ? {
+        roomId,
+        rootEventId,
+        eventId,
+        originTs,
+        arrivalThrough:
+          typeof arrivalThrough === 'number' ? arrivalThrough : null,
+      }
     : null
 }
 
@@ -201,6 +238,8 @@ export function createDeviceStateStore(
   const deviceId = loadDeviceId(storage)
   const entries = signal<ReadonlyMap<string, unknown>>(new Map())
   const hydratedScopes = signal<ReadonlySet<string>>(new Set())
+  const settledScopes = signal<ReadonlySet<string>>(new Set())
+  const revision = signal(0)
   /** `(account, namespace)` scopes already fetched (or in flight). */
   const hydrated = new Set<string>()
   /** Debounced pending writes per scope: `key -> value | null`. */
@@ -296,6 +335,13 @@ export function createDeviceStateStore(
       next.set(ck, value)
     }
     entries.value = next
+    revision.value += 1
+  }
+
+  function noteSettled(accountId: string, namespace: string): void {
+    settledScopes.value = new Set(settledScopes.value).add(
+      scopeKey(accountId, namespace),
+    )
   }
 
   async function fetchScope(
@@ -315,9 +361,11 @@ export function createDeviceStateStore(
         },
       }))
     } catch {
+      noteSettled(accountId, namespace)
       return
     }
     if (data === undefined) {
+      noteSettled(accountId, namespace)
       return
     }
     const next = new Map(entries.value)
@@ -329,9 +377,11 @@ export function createDeviceStateStore(
       }
     }
     entries.value = next
+    revision.value += 1
     hydratedScopes.value = new Set(hydratedScopes.value).add(
       scopeKey(accountId, namespace),
     )
+    noteSettled(accountId, namespace)
   }
 
   async function putEntries(
@@ -491,6 +541,7 @@ export function createDeviceStateStore(
       }
     }
     entries.value = next
+    revision.value += 1
   })
 
   // Re-read every hydrated scope on reconnect — the lossy bus may have dropped
@@ -562,6 +613,10 @@ export function createDeviceStateStore(
     hydrated(accountId, namespace) {
       return hydratedScopes.value.has(scopeKey(accountId, namespace))
     },
+    hydrateSettled(accountId, namespace) {
+      return settledScopes.value.has(scopeKey(accountId, namespace))
+    },
+    revision: computed(() => revision.value),
     draft(accountId, roomId) {
       return draftText(
         entries.value.get(cacheKey(accountId, DRAFTS_NAMESPACE, roomId)),
@@ -661,21 +716,46 @@ export function createDeviceStateStore(
         ),
       )
     },
-    advanceThreadReadMarker(accountId, roomId, rootEventId, eventId, originTs) {
+    advanceThreadReadMarker(
+      accountId,
+      roomId,
+      rootEventId,
+      eventId,
+      originTs,
+      arrivalThrough,
+    ) {
       const key = threadReadMarkerKey(roomId, rootEventId)
       const current = parseThreadReadMarker(
         entries.value.get(
           cacheKey(accountId, THREAD_READ_MARKERS_NAMESPACE, key),
         ),
       )
-      if (current !== null && current.originTs >= originTs) {
+      // Both positions move forward only, and they move independently: a
+      // backfilled reply raises how far the panel has read in *arrival* order
+      // while leaving the display position where it was.
+      const nextArrival = Math.max(
+        arrivalThrough ?? -1,
+        current?.arrivalThrough ?? -1,
+      )
+      if (
+        current !== null &&
+        current.originTs >= originTs &&
+        nextArrival <= (current.arrivalThrough ?? -1)
+      ) {
         return
       }
       const value = {
         room_id: roomId,
         root_event_id: rootEventId,
-        event_id: eventId,
-        origin_ts: originTs,
+        event_id:
+          current !== null && current.originTs >= originTs
+            ? current.eventId
+            : eventId,
+        origin_ts:
+          current !== null && current.originTs >= originTs
+            ? current.originTs
+            : originTs,
+        ...(nextArrival >= 0 && { arrival_through: nextArrival }),
       }
       writeCache(accountId, THREAD_READ_MARKERS_NAMESPACE, key, value)
       schedulePut(accountId, THREAD_READ_MARKERS_NAMESPACE, key, value)

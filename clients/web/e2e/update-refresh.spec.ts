@@ -36,22 +36,41 @@ async function clearDeploy(page: Page): Promise<void> {
  * measures absence with `Date.now()`, so faking the clock is what lets the test
  * cross the one-minute "the user was away" threshold without waiting a minute.
  */
+/**
+ * Hide the tab, let `awayMs` appear to pass, and return to it.
+ *
+ * The two dispatches are deliberately in separate `evaluate` calls, and the
+ * return is fired from a timer: the reload this provokes can now begin
+ * *synchronously* inside the handler, which destroys the execution context of
+ * the `evaluate` that dispatched it ("Execution context was destroyed, most
+ * likely because of a navigation"). It could not before ADR 0096, because the
+ * pre-reload draft flush always awaited a network round trip; the same flush now
+ * usually finds nothing pending, since `connectDeviceStateFlush` already sent it
+ * on the way out.
+ *
+ * State lives on `window` because it has to survive between the two calls.
+ */
 async function returnAfterAway(page: Page, awayMs: number): Promise<void> {
-  await page.evaluate((ms) => {
+  await page.evaluate(() => {
     const realNow = Date.now.bind(Date)
-    let skew = 0
-    Date.now = () => realNow() + skew
+    const state = { skew: 0, hidden: true }
+    ;(window as unknown as { __away: typeof state }).__away = state
+    Date.now = () => realNow() + state.skew
 
     Object.defineProperty(document, 'hidden', {
       configurable: true,
-      get: () => hidden,
+      get: () => state.hidden,
     })
-    let hidden = true
     document.dispatchEvent(new Event('visibilitychange'))
+  })
 
-    skew = ms
-    hidden = false
-    document.dispatchEvent(new Event('visibilitychange'))
+  await page.evaluate((ms) => {
+    const state = (
+      window as unknown as { __away: { skew: number; hidden: boolean } }
+    ).__away
+    state.skew = ms
+    state.hidden = false
+    setTimeout(() => document.dispatchEvent(new Event('visibilitychange')), 0)
   }, awayMs)
 }
 
