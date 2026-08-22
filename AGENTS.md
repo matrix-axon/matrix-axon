@@ -200,7 +200,10 @@ this table is the orientation copy.
   a hard wrap at a column makes a one-word edit rewrap the whole paragraph, so a typo fix arrives as a ten-line diff.
   A break per sentence gives a diff that names the sentence that changed, and never rewraps.
   Column wrapping was measured and rejected: `proseWrap: "always"` on `README.md` rewrote 62 lines into 162 and _still_ left lines of 226, 218 and 194 characters, because tables and long links cannot be broken.
-  Existing files are not being reflowed — this applies to prose you write, and to paragraphs you are already rewriting for other reasons.
+  This applies to prose you write, and to paragraphs you are already rewriting for other reasons.
+  `AGENTS.md`, `README.md` and `CONTRIBUTING.md` are reflowed;
+  nothing else is being reflowed on sight, because a reformat mixed into an ordinary PR is a diff nobody can review and a blame nobody can skip.
+  To reflow another file, do it **alone, in its own PR** with no other change of any kind, then add that PR's squash SHA to `.git-blame-ignore-revs` — see the note in that file for why a commit-level split cannot substitute.
 - **A code span must not cross a newline** inside a list item or a blockquote.
   Whitespace inside `` `backticks` `` is content, so `prettier` cannot re-indent the continuation line and dedents it to column 0 instead — dropping the list indentation, or the blockquote's `>`.
   CommonMark's lazy continuation means it still renders correctly, so the damage never shows in the output and only shows in the source.
