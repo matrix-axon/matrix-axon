@@ -339,6 +339,11 @@ export function connectThreadReceipts(
                 threadRootId,
                 eventId,
                 data.data.origin_ts,
+                // The other client read this thread through this event, and the
+                // lookup already carries its arrival position — so a thread read
+                // in Element contributes real arrival evidence here rather than
+                // a marker the receipt path has to guess at.
+                data.data.arrival_order,
               )
               threadUnread.markThreadRead(frame.accountId, roomId, threadRootId)
             },

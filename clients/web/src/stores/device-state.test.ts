@@ -421,16 +421,32 @@ describe('createDeviceStateStore', () => {
       rootEventId: ROOT,
       eventId: '$reply1',
       originTs: 100,
+      // A marker written before the field existed parses as `null`, which the
+      // receipt path treats as "no arrival evidence" rather than zero.
+      arrivalThrough: null,
     })
 
     store.advanceThreadReadMarker(ACCT, ROOM, ROOT, '$older', 50)
     expect(store.threadReadMarker(ACCT, ROOM, ROOT)?.eventId).toBe('$reply1')
-    store.advanceThreadReadMarker(ACCT, ROOM, ROOT, '$reply2', 200)
+    store.advanceThreadReadMarker(ACCT, ROOM, ROOT, '$reply2', 200, 7)
     expect(store.threadReadMarker(ACCT, ROOM, ROOT)).toEqual({
       roomId: ROOM,
       rootEventId: ROOT,
       eventId: '$reply2',
       originTs: 200,
+      arrivalThrough: 7,
+    })
+
+    // The two positions advance independently: a backfilled reply raises how far
+    // the panel has read in arrival order while leaving the display position
+    // where it is.
+    store.advanceThreadReadMarker(ACCT, ROOM, ROOT, '$backfilled', 150, 9)
+    expect(store.threadReadMarker(ACCT, ROOM, ROOT)).toEqual({
+      roomId: ROOM,
+      rootEventId: ROOT,
+      eventId: '$reply2',
+      originTs: 200,
+      arrivalThrough: 9,
     })
 
     await vi.advanceTimersByTimeAsync(800)
@@ -441,6 +457,7 @@ describe('createDeviceStateStore', () => {
           root_event_id: ROOT,
           event_id: '$reply2',
           origin_ts: 200,
+          arrival_through: 9,
         },
       },
     })

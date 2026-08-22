@@ -227,6 +227,16 @@ before starting a milestone.
   It re-fires when the last unread thread is opened.
   The settledness rule is the same as everywhere else here: unfetched summaries or an unhydrated marker namespace mean "not known yet", so the clear waits rather than assuming the room is clean.
   The one exception is a summary fetch that _failed_ — waiting on success froze a room's badge for good after a single transient 5xx, so an error falls back to clearing.
+- **A thread read marker carries two positions, and they are not interchangeable.**
+  `eventId`/`originTs` is a display position — where the thread's "read to here" line sits — and `arrivalThrough` is how far the panel had read in _arrival_ order.
+  Display order is not arrival order (ADR 0089), so a backfilled reply is display-early and arrival-late, and deriving one from the other understates it: the receipt path then treats a reply the panel rendered as still unread, makes it a blocker, and the room badge never clears.
+  Write both from one filtered set of shown replies, and never re-derive either by looking the other's event up in a slice — that also fails outright once the event pages out.
+  A marker written before the field existed parses `arrivalThrough` as `null`, which reads as "no arrival evidence", not zero.
+- **"Loaded" and "settled" are different questions to ask a fetch.**
+  `deviceState.hydrated()` means the data arrived; `hydrateSettled()` means the request finished, successfully or not.
+  A read receipt waits for the first — a claim made on missing evidence is sent to the homeserver and cannot be withdrawn.
+  A room badge waits for the second, because a repeating HTTP failure has no retry until the socket drops, and a badge frozen forever is worse than one cleared early.
+  Two separate review findings were the same shape (`threads.error`, then device-state hydration); the terms are now shared between the two gates so a third namespace cannot be added to one and missed by the other.
 - **Reconciliation waits for the markers.** Thread summaries come back before
   device state on a fresh load, so reconciling in between judges every thread
   against the _room_ marker and flags the ones whose replies are newer than the

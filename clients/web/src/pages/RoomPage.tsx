@@ -53,7 +53,10 @@ import {
   runPosition,
   type TimelineRow,
 } from '../timeline/group-media-runs'
-import { maxByArrivalOrder } from '../timeline/arrival-order'
+import {
+  maxByArrivalOrder,
+  viewMayClaimReadState,
+} from '../timeline/arrival-order'
 import {
   NATIVE_BACK_EDGE_PX,
   SWIPE_AXIS_RATIO,
@@ -296,7 +299,14 @@ export function RoomPage() {
   /** Not parked on a permalink or a search hit. */
   const unanchored = highlighted === null
   /** …and the loaded slice reaches the live end, so the newest events are shown. */
-  const showingNewestEvents = unanchored && timeline.atEnd.value
+  const showingNewestEvents = viewMayClaimReadState({
+    anchoredTo: highlighted,
+    atEnd: timeline.atEnd.value,
+    // The room stream's own loading term stays with each claim site rather than
+    // here: the summary-derived marker deliberately fires for a slice that has
+    // loaded but is missing the newest event, which is not the same question.
+    loading: false,
+  })
   const openThread = typeof query.thread === 'string' ? query.thread : null
   /**
    * Whether every thread in this room is known read — the room-list badge waits
@@ -304,15 +314,35 @@ export function RoomPage() {
    * first: an unfetched summary map looks like a room with no threads, and an
    * unhydrated namespace makes every thread look unjudged.
    */
-  const threadReadStateSettled =
+  /**
+   * The two read-state gates, sharing their loading/hydration terms so a future
+   * namespace cannot be added to one and missed by the other, and diverging
+   * only where they must.
+   *
+   * `Loaded` is for the **receipt**: it demands the data actually arrived, since
+   * a claim made on missing evidence is sent to the homeserver and cannot be
+   * withdrawn. `Settled` is for the **room-list badge**: it only demands that
+   * the fetches finished, because a failure has no retry until the socket drops
+   * and reconnects, and a badge frozen forever is worse than one cleared early —
+   * the badge self-corrects on the next load, and this is the second finding of
+   * that exact shape (review: `threads.error`, then device-state hydration).
+   */
+  /**
+   * One scalar standing in for every marker this page reads. `threadReadMarker`
+   * reaches them behind a method call, so a memo depending on them has nothing
+   * else to name — and listing `deviceState.revision.value` directly reads to
+   * the dependency rule as a redundant property of `deviceState`.
+   */
+  const deviceStateRevision = deviceState.revision.value
+  const threadStoresLoaded =
     !threads.loading.value &&
-    // Deliberately not `threads.error === null`. A failed summary fetch retries
-    // only when a new thread reply arrives, so requiring success meant one
-    // transient 5xx froze a room's badge for good — worse than the unconditional
-    // clear this replaced (review, blocking 3). With no summaries there is no
-    // evidence of an unread thread, and the pre-existing behaviour applies.
+    threads.error.value === null &&
     deviceState.hydrated(accountId, READ_MARKERS_NAMESPACE) &&
     deviceState.hydrated(accountId, THREAD_READ_MARKERS_NAMESPACE)
+  const threadReadStateSettled =
+    !threads.loading.value &&
+    deviceState.hydrateSettled(accountId, READ_MARKERS_NAMESPACE) &&
+    deviceState.hydrateSettled(accountId, THREAD_READ_MARKERS_NAMESPACE)
   const roomHasNoKnownUnreadThreads =
     threadReadStateSettled &&
     !threadUnread.entries.value.some(
@@ -860,8 +890,18 @@ export function RoomPage() {
     ],
   )
 
-  const threadSummaryStates = [...threads.summaries.value.values()].map(
-    (summary) => ({
+  /**
+   * Memoised on `deviceState.revision` rather than left to rebuild per render:
+   * it is a dependency of the reconcile effect, and a fresh array of fresh
+   * objects re-fired that effect on every render of the page — reaction picker,
+   * typing indicator, anything (review, non-blocking).
+   */
+  const threadSummaryStates = useMemo(() => {
+    // Subscribes the memo to marker writes; `threadReadMarker` reads them
+    // behind a method call, which the dependency rule cannot see (same idiom as
+    // `ephemeral.revision` below).
+    void deviceStateRevision
+    return [...threads.summaries.value.values()].map((summary) => ({
       summary,
       threadMarker: deviceState.threadReadMarker(
         accountId,
@@ -869,15 +909,31 @@ export function RoomPage() {
         summary.root_event_id,
       ),
       rootPreview: eventPreview(threads.roots.value.get(summary.root_event_id)),
-    }),
-  )
+    }))
+  }, [
+    threads.summaries.value,
+    threads.roots.value,
+    deviceState,
+    deviceStateRevision,
+    accountId,
+    roomId,
+  ])
 
-  const roomReceipt = (() => {
+  const roomReceipt = useMemo(() => {
+    void deviceStateRevision
     const base = maxByArrivalOrder(displayed)
     const baseOrder = base?.arrival_order ?? -1
     /** Thread replies above the room's own target, from threads not on screen. */
     const above = timeline.events.value.filter((event) => {
       if (event.arrival_order <= baseOrder) {
+        return false
+      }
+      // Redacted replies are excluded for the same reason `displayed` excludes
+      // them: with the setting on, the UI never rendered them, and ADR 0089's
+      // contract is that a receipt names something that was shown. Left in, the
+      // arrival-max reply of an already-read thread could be a redacted one and
+      // still become the target (review, blocking).
+      if (hideRedacted && event.redacted) {
         return false
       }
       const root = threadRootId(event)
@@ -902,10 +958,7 @@ export function RoomPage() {
      * this size, unknown is not read.
      */
     const anythingUnread =
-      threads.loading.value ||
-      threads.error.value !== null ||
-      !markersHydrated ||
-      !deviceState.hydrated(accountId, READ_MARKERS_NAMESPACE) ||
+      !threadStoresLoaded ||
       unreadThreadCutoff !== null ||
       threadSummaryStates.some(({ summary, threadMarker }) => {
         const latestTs = summary.latest_reply_ts ?? null
@@ -947,7 +1000,15 @@ export function RoomPage() {
       let through = readThrough.get(root)
       if (through === undefined) {
         const marker = deviceState.threadReadMarker(accountId, roomId, root)
-        through = marker === null ? -1 : (arrivalOf.get(marker.eventId) ?? -1)
+        // `arrivalThrough` is what the panel recorded having displayed. Falling
+        // back to resolving the marker's event in the slice is for markers
+        // written before that field existed, and it is strictly weaker: it
+        // understates a thread whose display-last event is not its arrival-max,
+        // and answers nothing once the event pages out.
+        through =
+          marker === null
+            ? -1
+            : (marker.arrivalThrough ?? arrivalOf.get(marker.eventId) ?? -1)
         readThrough.set(root, through)
       }
       return through >= event.arrival_order
@@ -968,8 +1029,41 @@ export function RoomPage() {
     const target = maxByArrivalOrder(
       base === null ? claimable : [base, ...claimable],
     )
+    console.log(
+      'ROOMRECEIPT',
+      JSON.stringify({
+        slice: timeline.events.value.map((e) => [
+          e.event_id,
+          e.arrival_order,
+          threadRootId(e),
+          e.redacted,
+        ]),
+        baseOrder,
+        base: base?.event_id,
+        above: above.map((e) => e.event_id),
+        claimable: claimable.map((e) => e.event_id),
+        blocker,
+        target: target?.event_id,
+      }),
+    )
     return { blocker, target }
-  })()
+    // `deviceState.revision` is the scalar that stands in for the per-thread
+    // markers this reads — the dependency the first version said it could not
+    // name (review, non-blocking, raised twice).
+  }, [
+    displayed,
+    timeline.events.value,
+    threadStoresLoaded,
+    threadSummaryStates,
+    roomMarkerForThreads,
+    unreadThreadCutoff,
+    openThread,
+    hideRedacted,
+    deviceState,
+    deviceStateRevision,
+    accountId,
+    roomId,
+  ])
   const threadReceiptCeiling = roomReceipt.blocker
 
   // Advance this room's read marker to the newest event while it is open, so

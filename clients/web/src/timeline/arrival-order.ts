@@ -29,3 +29,24 @@ export function maxByArrivalOrder<T extends HasArrivalOrder>(
   }
   return best
 }
+
+/**
+ * Whether a view may claim read state at all: it is not parked on an anchor,
+ * its slice reaches the live end, and that slice has actually loaded.
+ *
+ * The room stream and a thread panel each answer this for themselves — one from
+ * `?event=` and the room timeline, the other from its highlight and the thread
+ * timeline — and they had derived it independently, so a future condition could
+ * be added to one and missed in the other (review, non-blocking). The inputs
+ * differ; the rule does not.
+ *
+ * `atEnd` starts `true` on a cold store, which is why `loading` is a separate
+ * term rather than an implication of it.
+ */
+export function viewMayClaimReadState(view: {
+  anchoredTo: string | null
+  atEnd: boolean
+  loading: boolean
+}): boolean {
+  return view.anchoredTo === null && view.atEnd && !view.loading
+}

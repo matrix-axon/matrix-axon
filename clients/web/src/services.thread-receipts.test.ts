@@ -145,6 +145,9 @@ describe('connectThreadReceipts', () => {
         rootEventId: ROOT,
         eventId: REPLY,
         originTs: REPLY_TS,
+        // Carried from the looked-up event: a thread read in Element gives the
+        // receipt path real arrival evidence, not just a display position.
+        arrivalThrough: 42,
       }),
     )
     expect(threadUnread.isUnread(ACCT, ROOM, ROOT)).toBe(false)

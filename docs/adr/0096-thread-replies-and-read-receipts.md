@@ -238,6 +238,11 @@ Condition 2 of the gate is a fact about client state — which threads the user 
   Nothing user-visible depends on the delay, but anything driving that event has to tolerate the navigation starting at once — `e2e/update-refresh.spec.ts`'s away/return helper did not, and failed on CI while passing locally.
   `visibilitychange` is shared infrastructure; a listener added to it is not local in effect.
 
+- **A thread read marker records two positions.**
+  Review found that deriving the arrival one from the display one reproduces this ADR's own bug through a second door: a backfilled reply is display-early and arrival-late, so the marker understated what the panel had shown, the receipt path read that as "still unread", and the room could never be claimed past it.
+  `arrivalThrough` is now written alongside `eventId`/`originTs` from one filtered set of shown replies, and the two advance independently.
+  Markers written before the field parse it as `null` — no arrival evidence, which blocks rather than claims.
+
 - Test seams, and a caution about them:
   - Every gate condition needs a case where it is the only one false, and each such test must be checked to fail when _its_ condition alone is removed.
     Verifying against the unfixed code is not enough: the first five tests written here all passed against the unfixed client, because with no thread receipt implemented at all, "sends nothing" is true for every reason at once.

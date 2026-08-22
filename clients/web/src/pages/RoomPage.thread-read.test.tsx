@@ -81,11 +81,25 @@ const REPLY_2 = event('$reply2', T0, 2599, ROOT)
 // room view's own receipt target — the side they land on is the whole question.
 // `$other-old` is already covered by the room's receipt; `$other-new` is inside
 // the window a thread receipt would extend over.
+// A backfill *into the open thread*: displayed by the panel, but display-early
+// and arrival-late, so the display-last event is not the arrival-max one.
+const THREAD_BACKFILL = event('$thread-backfill', T0 - 6 * MINUTE, 2610, ROOT)
+/** The open thread's arrival-max reply, redacted. */
+const THREAD_REDACTED = {
+  ...event('$thread-redacted', T0 + MINUTE, 2612, ROOT),
+  redacted: true,
+}
 const OTHER_ROOT_EVENT = event(OTHER_ROOT, T0 - 9 * MINUTE, 2510)
 const OTHER_REPLY = event('$other-reply', T0 - 3 * MINUTE, 2580, OTHER_ROOT)
 // A bridge backfill into the *other* thread: stamped before that thread was last
 // read, but ingested after everything else in the room.
 const BACKFILLED_REPLY = event('$backfilled', T0 - 8 * MINUTE, 2605, OTHER_ROOT)
+// The other thread's arrival-max reply, redacted — rendered by nothing when the
+// hide-redacted setting is on.
+const REDACTED_REPLY = {
+  ...event('$redacted', T0 - 30 * 1000, 2604, OTHER_ROOT),
+  redacted: true,
+}
 const OTHER_REPLY_NEW = event(
   '$other-reply-new',
   T0 - 90 * SECOND,
@@ -170,9 +184,20 @@ function renderRoom(
     threadsSlow?: boolean
     /** A backfilled reply: old `origin_ts`, high `arrival_order`. */
     backfilledForeignReply?: boolean
+    /** Give the read foreign thread a *redacted* arrival-max reply. */
+    redactedForeignReply?: boolean
+    /** Turn on the hide-redacted-events setting (off by default). */
+    hideRedacted?: boolean
+    /** Serve the open thread a reply that is display-early and arrival-late. */
+    threadHasBackfill?: boolean
+    /** Serve the open thread a redacted arrival-max reply. */
+    threadHasRedacted?: boolean
+    /** Fail device-state hydration, as a repeating HTTP error does. */
+    deviceStateFail?: boolean
   } = {},
 ) {
   const roomEvents = [
+    ...(options.redactedForeignReply === true ? [REDACTED_REPLY] : []),
     ...(options.backfilledForeignReply === true ? [BACKFILLED_REPLY] : []),
     REPLY_2,
     REPLY_1,
@@ -232,7 +257,13 @@ function renderRoom(
     http.get(threadTimelinePath(ROOT), () =>
       HttpResponse.json({
         data: {
-          events: options.replies ?? [REPLY_2, REPLY_1],
+          events:
+            options.replies ??
+            (options.threadHasRedacted === true
+              ? [REPLY_2, REPLY_1, THREAD_REDACTED]
+              : options.threadHasBackfill === true
+                ? [REPLY_2, REPLY_1, THREAD_BACKFILL]
+                : [REPLY_2, REPLY_1]),
           next_cursor: null,
         },
       }),
@@ -270,6 +301,9 @@ function renderRoom(
     http.get(
       `${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`,
       async ({ params }) => {
+        if (options.deviceStateFail === true) {
+          return new HttpResponse(null, { status: 500 })
+        }
         if (
           params.namespace === 'thread_read_markers' &&
           options.hydratedThreadMarkers !== undefined
@@ -317,6 +351,9 @@ function renderRoom(
     `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}${options.query ?? ''}`,
   )
   const services = testServices()
+  if (options.hideRedacted === true) {
+    services.settings.hideRedactedEvents.value = true
+  }
   if (options.spyRooms === true) {
     vi.spyOn(services.rooms, 'noteUnreadCounts')
   }
@@ -727,6 +764,99 @@ describe('a thread view names the room receipt (ADR 0096)', () => {
     await settleReceipts()
 
     expect(reads).not.toContain(REPLY_2.event_id)
+  })
+
+  it('does not name a redacted reply the view never rendered', async () => {
+    // `$redacted` (2604) is the other thread's arrival-max reply and is covered
+    // by its marker, so it passes the read test purely on position — but with
+    // the hide-redacted setting on, nothing rendered it. ADR 0089's contract is
+    // that a receipt names something that was shown.
+    const { reads, findByText } = renderRoom({
+      threads: [MAIN_THREAD, OTHER_THREAD],
+      redactedForeignReply: true,
+      hideRedacted: true,
+      storedThreadMarkers: [
+        { root: ROOT, eventId: REPLY_2.event_id, originTs: REPLY_2.origin_ts },
+        {
+          root: OTHER_ROOT,
+          eventId: REDACTED_REPLY.event_id,
+          originTs: REDACTED_REPLY.origin_ts,
+        },
+      ],
+    })
+    await findByText(`body of ${MAIN.event_id}`)
+    await settleReceipts()
+
+    expect(reads).not.toContain(REDACTED_REPLY.event_id)
+  })
+
+  it('still clears the room-list badge when device state never hydrates', async () => {
+    // A repeating HTTP failure on the device-state GET has no retry until the
+    // socket drops. Waiting on hydration froze the badge exactly as waiting on
+    // the summary fetch did.
+    const { services, findByText } = renderRoom({
+      notificationCount: 3,
+      spyRooms: true,
+      deviceStateFail: true,
+    })
+    await findByText(`body of ${MAIN.event_id}`)
+
+    await waitFor(() =>
+      expect(
+        vi
+          .spyOn(services.rooms, 'noteUnreadCounts')
+          .mock.calls.filter(
+            (call) => call[1] === ROOM && call[2] === 0 && call[3] === 0,
+          ).length,
+      ).toBeGreaterThan(0),
+    )
+    await settleReceipts()
+  })
+
+  it('records how far the panel read in arrival order, not just display order', async () => {
+    // The thread holds a backfilled reply: display-early (T0 − 6m) and
+    // arrival-late (2610). The marker's display position is still `$reply2`,
+    // but what it records having *read through* has to be 2610 — otherwise
+    // `RoomPage.isRead` later reads the understatement as "still unread", makes
+    // that reply a blocker, and the room receipt can never extend past it.
+    const { services, findByText } = renderRoom({
+      query: `?thread=${encodeURIComponent(ROOT)}`,
+      threadHasBackfill: true,
+    })
+    await findByText(`body of ${REPLY_2.event_id}`)
+
+    await waitFor(() =>
+      expect(
+        services.deviceState.threadReadMarker(ACCOUNT, ROOM, ROOT),
+      ).toEqual({
+        roomId: ROOM,
+        rootEventId: ROOT,
+        eventId: REPLY_2.event_id,
+        originTs: REPLY_2.origin_ts,
+        arrivalThrough: THREAD_BACKFILL.arrival_order,
+      }),
+    )
+  })
+
+  it('claims nothing from a redacted reply the panel did not render', async () => {
+    const { services, reads, findByText } = renderRoom({
+      query: `?thread=${encodeURIComponent(ROOT)}`,
+      threadHasRedacted: true,
+      hideRedacted: true,
+    })
+    await findByText(`body of ${REPLY_2.event_id}`)
+    await settleReceipts()
+
+    // Neither claim may name it: not the receipt, and not the marker's
+    // read-through position, which would tell every other view the panel had
+    // displayed something it hid.
+    expect(reads).not.toContain(THREAD_REDACTED.event_id)
+    await waitFor(() =>
+      expect(
+        services.deviceState.threadReadMarker(ACCOUNT, ROOM, ROOT)
+          ?.arrivalThrough,
+      ).toBe(REPLY_2.arrival_order),
+    )
   })
 
   it('still sends when the room has other threads the user has never opened', async () => {
