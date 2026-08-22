@@ -100,9 +100,9 @@ describe('InvitesPage', () => {
     const { findByText, queryByText } = renderInbox()
 
     expect(await findByText('Direct message')).toBeTruthy()
-    expect(
-      await findByText(/Invited by Alice \(@alice:hs\) · Direct message/),
-    ).toBeTruthy()
+    expect((await findByText(/Invited by Alice/)).textContent).toBe(
+      'Invited by Alice (@alice:hs) · Encrypted',
+    )
     expect(queryByText('!opaque-room-id:hs')).toBeNull()
   })
 

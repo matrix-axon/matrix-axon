@@ -198,7 +198,9 @@ function InviteRow({
         <p class="invite-name">{title}</p>
         <p class="muted">
           Invited by {inviterLabel(invite)}
-          {invite.is_direct ? ' · Direct message' : ''}
+          {invite.is_direct && title !== 'Direct message'
+            ? ' · Direct message'
+            : ''}
           {invite.encrypted ? ' · Encrypted' : ''}
           {showAccount ? ` · ${invite.account_user_id}` : ''}
         </p>
