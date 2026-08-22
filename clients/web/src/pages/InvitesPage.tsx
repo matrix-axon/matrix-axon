@@ -11,12 +11,15 @@ import {
 
 function inviteTitle(invite: InviteDto): string {
   const name = invite.name?.trim()
-  if (name !== undefined && name !== '') {
+  if (name !== undefined && name !== '' && name !== invite.room_id) {
     return name
   }
   const alias = invite.canonical_alias?.trim()
   if (alias !== undefined && alias !== '') {
     return alias
+  }
+  if (invite.is_direct) {
+    return 'Direct message'
   }
   return invite.room_id
 }
@@ -195,7 +198,9 @@ function InviteRow({
         <p class="invite-name">{title}</p>
         <p class="muted">
           Invited by {inviterLabel(invite)}
-          {invite.is_direct ? ' · Direct message' : ''}
+          {invite.is_direct && title !== 'Direct message'
+            ? ' · Direct message'
+            : ''}
           {invite.encrypted ? ' · Encrypted' : ''}
           {showAccount ? ` · ${invite.account_user_id}` : ''}
         </p>
