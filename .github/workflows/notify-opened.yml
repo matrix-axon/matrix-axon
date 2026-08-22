@@ -1,0 +1,51 @@
+name: Notify opened issues and pull requests
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+# This workflow checks out only the base branch to use the shared sender helper.
+# It never checks out or executes pull-request code, so fork PRs can use the
+# repository notification secret safely.
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      # pull_request_target must use only the base branch; never execute PR code.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Notify axon-developer room
+        env:
+          NOTIFY_HOMESERVER: ${{ secrets.NOTIFY_HOMESERVER }}
+          NOTIFY_ROOM: ${{ secrets.NOTIFY_ROOM }}
+          NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
+          KIND: ${{ github.event_name == 'issues' && 'issue' || 'pull request' }}
+          TITLE: ${{ github.event_name == 'issues' && github.event.issue.title || github.event.pull_request.title }}
+          BODY: ${{ github.event_name == 'issues' && github.event.issue.body || github.event.pull_request.body }}
+          URL: ${{ github.event_name == 'issues' && github.event.issue.html_url || github.event.pull_request.html_url }}
+          AUTHOR: ${{ github.event_name == 'issues' && github.event.issue.user.login || github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+
+          MATRIX_BODY="$(jq -nr \
+            --arg kind "$KIND" \
+            --arg author "$AUTHOR" \
+            --arg title "$TITLE" \
+            --arg body "$BODY" \
+            --arg url "$URL" \
+            '(("New " + $kind + " opened by @" + $author + ": " + $title)
+              + "\n" + $url
+              + "\n\n"
+              + ($body[0:4000]))')"
+
+          export MATRIX_BODY
+          ./scripts/send-matrix-notification.sh
