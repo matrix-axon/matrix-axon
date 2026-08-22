@@ -477,6 +477,7 @@ async fn run_app(
     let (members_tx, mut members_rx) = mpsc::unbounded_channel();
     let (drafts_tx, mut drafts_rx) = mpsc::unbounded_channel();
     let (room_action_tx, mut room_action_rx) = mpsc::unbounded_channel();
+    let (bootstrap_tx, mut bootstrap_rx) = mpsc::unbounded_channel();
     let mut app = App::new(client, account_filter, config, picker);
     app.set_lifecycle_sender(lifecycle_tx);
     app.set_media_sender(media_tx);
@@ -485,19 +486,14 @@ async fn run_app(
     app.set_members_sender(members_tx);
     app.set_drafts_sender(drafts_tx);
     app.set_room_action_sender(room_action_tx);
+    app.set_bootstrap_sender(bootstrap_tx);
     app.set_device_id(app::load_or_create_device_id(&app.config_path));
-    app.refresh_accounts().await;
-    app.refresh_rooms().await;
-    // Hydrate cross-device drafts and read markers (M12) once rooms/accounts
-    // are known, so the first room's draft and the unread badges that survived
-    // the restart are already in place. Markers must hydrate *before* the first
-    // load_selected_timeline: opening a room reads it up to its newest loaded
-    // event, so if the server marker weren't in place first, that fabricated
-    // marker would (a) foreclose unseen-thread promotion for the launch room
-    // and (b) win the monotonic merge, permanently discarding the real marker.
-    app.refresh_read_markers().await;
-    app.load_selected_timeline().await;
-    app.refresh_drafts().await;
+    // Startup runs as spawned stages drained below, so the loop paints and
+    // accepts keys immediately instead of after five sequential awaits — which
+    // on a server with thousands of rooms looked like a hang (#189). The
+    // ordering those stages need (read markers before the first timeline load)
+    // is preserved inside `app::bootstrap`.
+    app.start_bootstrap();
 
     let mut tick = time::interval(Duration::from_millis(100));
     let mut next_sixel_inline_refresh = Instant::now() + app::SIXEL_REFRESH_INTERVAL;
@@ -516,6 +512,10 @@ async fn run_app(
                 app.flush_due_typing(now);
                 // Expire stale inbound typing overlays (M18, ADR 0056).
                 app.prune_typing(now);
+                // Pull in list titles for rooms scrolling or filtering has just
+                // brought on screen. Bounded and idempotent — already-titled
+                // rooms are skipped (#189).
+                app.sweep_visible_room_titles();
                 if inside_tmux()
                     && app.picker.protocol_type() == ProtocolType::Sixel
                     && now >= next_sixel_inline_refresh
@@ -597,19 +597,29 @@ async fn run_app(
             Some(frame) = live_rx.recv() => {
                 // The lossy bus may have dropped device_state frames while the
                 // socket was down: on every (re)connect, re-read the merged
-                // draft view instead of assuming what was missed (ADR 0048).
+                // view instead of assuming what was missed (ADR 0048).
                 let reconnected = matches!(frame, api::LiveFrame::Connected);
                 if app.handle_live_frame(frame) == LiveFrameAction::RefreshRooms {
-                    let had_selection = app.selected_room().is_some();
-                    app.refresh_rooms().await;
-                    if !had_selection && app.selected_room().is_some() {
-                        app.load_selected_timeline().await;
-                    }
+                    // Coalesced and off the main task: a WS backlog used to run
+                    // one full unpaginated room fetch per unknown-room frame,
+                    // each re-triggering the per-room title fan-out (#189).
+                    app.request_rooms_refresh();
                 }
-                if reconnected {
-                    app.refresh_read_markers().await;
-                    app.refresh_drafts().await;
+                // The first Connected arrives while startup is still fetching
+                // this exact state, so re-reading it then is pure duplicate
+                // work; later ones are real reconnects.
+                //
+                // Keyed on having seen that first frame rather than on startup
+                // being finished: a slow server can take long enough to load
+                // rooms that the socket drops and reconnects before the
+                // DeviceState stage lands, and those reconnects need the
+                // re-read exactly as much as later ones do (#210).
+                if reconnected && app.note_connected_frame() {
+                    app.request_device_state();
                 }
+            }
+            Some(outcome) = bootstrap_rx.recv() => {
+                app.handle_bootstrap_outcome(outcome).await;
             }
             Some(outcome) = lifecycle_rx.recv() => {
                 app.handle_lifecycle_outcome(outcome).await;

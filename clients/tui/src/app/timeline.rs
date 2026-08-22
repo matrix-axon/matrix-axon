@@ -23,13 +23,21 @@ use super::{
 /// triggered by live messages from senders whose display name we don't yet know.
 /// Collapses bursts of unknown senders into one fetch per room per window.
 const MEMBERS_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// Concurrent `/members` reads, matching the media pool's shape. The per-room
+/// cooldown above bounds *repeats* of one room; this bounds how many rooms are
+/// in flight at once, which is what a thousand-room list needs (#189).
+pub(crate) const MEMBERS_WORKERS: usize = 4;
 const UNREAD_THREAD_PREVIEW_LIMIT: usize = 3;
 
 /// Result of a background `/members` refresh ([`App::spawn_members_refresh`]),
 /// drained by the main loop and applied via [`App::apply_members_outcome`].
 pub(crate) struct MembersOutcome {
     pub(super) room_key: RoomKey,
-    pub(super) members: Vec<MemberDto>,
+    /// `None` when the read failed. The outcome is still delivered so the
+    /// caller can tell "no members to name this room after" (a permanent
+    /// answer) from "the request did not land" (retry after the cooldown).
+    pub(super) members: Option<Vec<MemberDto>>,
 }
 
 impl App {
@@ -199,11 +207,14 @@ impl App {
             }
             return LiveFrameAction::None;
         }
+        // Field comparison, not `RoomKey::from(room) == key`: that allocated a
+        // room-id `String` for every room in the list, for every live event
+        // (#189).
         let known_room = self
             .rooms
             .rooms
             .iter()
-            .any(|room| RoomKey::from(room) == key);
+            .any(|room| room.account_id == key.account_id && room.room_id == key.room_id);
         if known_room && self.is_own_membership_departure(&event, &key) {
             return LiveFrameAction::RefreshRooms;
         }
@@ -509,13 +520,18 @@ impl App {
         let client = self.client.clone();
         let account_id = key.account_id;
         let room_id = key.room_id.clone();
+        let workers = self.members_workers.clone();
         tokio::spawn(async move {
-            if let Ok(members) = client.room_members(account_id, &room_id).await {
-                let _ = tx.send(MembersOutcome {
-                    room_key: key,
-                    members,
-                });
-            }
+            // Hold a permit for the request: without this the room-list title
+            // sweep fans out one concurrent request per unnamed room.
+            let Ok(_permit) = workers.acquire().await else {
+                return;
+            };
+            let members = client.room_members(account_id, &room_id).await.ok();
+            let _ = tx.send(MembersOutcome {
+                room_key: key,
+                members,
+            });
         });
     }
 
@@ -524,10 +540,15 @@ impl App {
     /// away updates that room's names harmlessly and shows when they return.
     pub(crate) fn apply_members_outcome(&mut self, outcome: MembersOutcome) {
         let MembersOutcome { room_key, members } = outcome;
+        // A failed read says nothing about the room, so it must not be recorded
+        // as "has no derivable title" — the cooldown allows a retry instead.
+        let Some(members) = members else {
+            return;
+        };
         self.seed_display_names_for_key(room_key.clone(), &members);
         // For an unnamed room (e.g. a DM) derive a list title from its members so
         // it shows the other participant's name rather than the raw room id.
-        let derived = self
+        let unnamed = self
             .rooms
             .rooms
             .iter()
@@ -538,15 +559,26 @@ impl App {
                         .canonical_alias
                         .as_deref()
                         .is_none_or(|a| a.trim().is_empty())
-            })
-            .and_then(|room| {
-                super::dm_title_from_members(room.account_user_id.as_deref(), &members)
             });
-        if let Some(title) = derived {
-            self.room_titles.insert(room_key, title);
-            if matches!(self.room_sort, RoomSort::AlphaAsc | RoomSort::AlphaDesc) {
-                self.resort_rooms();
+        let derived = unnamed.and_then(|room| {
+            super::dm_title_from_members(room.account_user_id.as_deref(), &members)
+        });
+        match derived {
+            Some(title) => {
+                self.rooms_without_derived_title.remove(&room_key);
+                self.room_titles.insert(room_key, title);
+                if matches!(self.room_sort, RoomSort::AlphaAsc | RoomSort::AlphaDesc) {
+                    self.resort_rooms();
+                }
             }
+            // The read landed and there is nobody to name the room after, so
+            // asking again changes nothing until its membership does. Record
+            // that explicitly; the sweep used to re-request every cooldown for
+            // the life of the process (#189).
+            None if unnamed.is_some() => {
+                self.rooms_without_derived_title.insert(room_key);
+            }
+            None => {}
         }
     }
 
@@ -1074,15 +1106,76 @@ pub(crate) fn room_matches_search(room: &RoomDto, query: &str) -> bool {
     ]
     .into_iter()
     .flatten()
-    .any(|field| field.to_ascii_lowercase().contains(query))
+    .any(|field| contains_ascii_case_insensitive(field, query))
+}
+
+/// `haystack.to_ascii_lowercase().contains(needle)` without the allocation.
+///
+/// `needle` is already lowercased by the caller. The room-name filter runs this
+/// over every room on every keystroke *and* every frame; allocating a lowercased
+/// copy of each room's id, alias, name, and topic there was four `String`s per
+/// room per pass (#189). Byte windows are exact here because
+/// `to_ascii_lowercase` only ever folded ASCII, which is what
+/// `eq_ignore_ascii_case` compares.
+pub(crate) fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let needle = needle.as_bytes();
+    haystack.len() >= needle.len()
+        && haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn message_matches_search(event: &EventDto, query: &str) -> bool {
     if event.redacted {
         return false;
     }
+    // Both callers pass an already-lowercased query, so this is the same match
+    // the `to_ascii_lowercase().contains(..)` form made — without allocating a
+    // lowercased copy of every message body on each `/n`, `/N` and search
+    // commit, which is the allocation `room_matches_search` above already
+    // stopped making.
     event
         .body
         .as_deref()
-        .is_some_and(|body| body.to_ascii_lowercase().contains(query))
+        .is_some_and(|body| contains_ascii_case_insensitive(body, query))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contains_ascii_case_insensitive;
+
+    /// The allocation-free matcher must agree with the
+    /// `to_ascii_lowercase().contains(..)` it replaced, including on the
+    /// non-ASCII input where `to_ascii_lowercase` deliberately does nothing.
+    #[test]
+    fn case_insensitive_contains_matches_the_allocating_form() {
+        let cases = [
+            ("Ops Room", "ops"),
+            ("Ops Room", "ROOM"),
+            ("Ops Room", "room"),
+            ("Ops Room", "zzz"),
+            ("", "x"),
+            ("x", ""),
+            ("short", "much longer needle"),
+            ("!AbC:example.com", "abc:example"),
+            // `to_ascii_lowercase` leaves these alone, so both forms agree that
+            // an uppercase non-ASCII needle does not match its lowercase form.
+            ("Ärger", "ärger"),
+            ("Ärger", "Ärger"),
+            ("straße", "STRASSE"),
+        ];
+        for (haystack, needle) in cases {
+            assert_eq!(
+                contains_ascii_case_insensitive(haystack, needle),
+                haystack
+                    .to_ascii_lowercase()
+                    .contains(&needle.to_ascii_lowercase()),
+                "disagreed on {haystack:?} / {needle:?}"
+            );
+        }
+    }
 }

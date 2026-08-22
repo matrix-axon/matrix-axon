@@ -87,7 +87,7 @@ impl App {
         } else if self.shortcuts.unread_threads.matches(key) && !self.is_mid_command() {
             self.open_unread_threads_picker();
         } else if self.shortcuts.refresh.matches(key) && !self.is_mid_command() {
-            self.refresh_rooms().await;
+            self.request_rooms_refresh();
         } else {
             match self.mode.clone() {
                 Mode::Compose => self.handle_compose_key(key).await,
