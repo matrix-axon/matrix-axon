@@ -1065,8 +1065,10 @@ pub(crate) struct MessagePane {
     pub(crate) scroll: usize,
     pub(crate) page_size: usize,
     pub(crate) width: usize,
-    pub(crate) line_ranges: Vec<std::ops::Range<usize>>,
-    pub(crate) layout_event_ids: Vec<String>,
+    /// Per-image body heights the cached `layout` was built from, kept so
+    /// `draw` reads them instead of rederiving the same O(events) filter+map
+    /// every frame.
+    pub(crate) layout_image_thumb_rows: crate::app::render::ImageThumbRows,
     /// Digest of everything the cached `layout` was computed from (#54).
     /// `None` until the first layout runs.
     pub(crate) layout_key: Option<u64>,
@@ -1097,8 +1099,7 @@ impl Default for MessagePane {
             scroll: usize::MAX,
             page_size: 1,
             width: 80,
-            line_ranges: Vec::new(),
-            layout_event_ids: Vec::new(),
+            layout_image_thumb_rows: crate::app::render::ImageThumbRows::new(),
             layout_key: None,
             layout_checks: 0,
             layout_recomputes: 0,
@@ -4661,13 +4662,17 @@ mod tests {
         let key = app.messages.layout_key;
         assert!(key.is_some(), "the first call computes a layout");
 
-        app.messages.line_ranges = vec![99..100, 100..101];
+        // Corrupt the cached layout itself, not a copy of it: if the second
+        // call recomputes, the corruption is overwritten.
+        if let Some(layout) = app.messages.layout.as_mut() {
+            layout.ranges = vec![99..100, 100..101];
+        }
         app.ensure_message_layout();
 
         assert_eq!(app.messages.layout_key, key, "the digest is stable");
         assert_eq!(
-            app.messages.line_ranges,
-            vec![99..100, 100..101],
+            app.cached_message_ranges(),
+            [99..100, 100..101],
             "a cache hit must not recompute"
         );
     }
@@ -4927,7 +4932,7 @@ mod tests {
         // is fully on screen — rather than a hand-seeded offset. An image
         // inflates its own range, so a nav path using un-inflated ranges lands
         // short and fails here.
-        let range = app.messages.line_ranges[1].clone();
+        let range = app.cached_message_ranges()[1].clone();
         let page = app.messages.page_size;
         assert!(
             range.start >= app.messages.scroll && range.end <= app.messages.scroll + page,

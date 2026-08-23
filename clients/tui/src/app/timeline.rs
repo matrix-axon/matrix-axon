@@ -755,7 +755,7 @@ impl App {
             if events.is_empty() {
                 None
             } else {
-                let ranges = &self.messages.line_ranges;
+                let ranges = self.cached_message_ranges();
                 let total_lines = ranges
                     .last()
                     .map(|range| range.end)
@@ -769,11 +769,11 @@ impl App {
                     .unwrap_or_else(|| {
                         if direction.is_negative() {
                             message_index_at_line(
-                                ranges.as_slice(),
+                                ranges,
                                 self.messages.scroll.saturating_add(page.saturating_sub(1)),
                             )
                         } else {
-                            message_index_at_line(ranges.as_slice(), self.messages.scroll)
+                            message_index_at_line(ranges, self.messages.scroll)
                         }
                     });
                 let current_line = ranges
@@ -787,7 +787,7 @@ impl App {
                         .saturating_add(page)
                         .min(total_lines.saturating_sub(1))
                 };
-                let next = message_index_at_line(ranges.as_slice(), target_line);
+                let next = message_index_at_line(ranges, target_line);
                 Some((events[next].event_id.clone(), next, events.len()))
             }
         }) else {
@@ -802,7 +802,7 @@ impl App {
 
     pub(crate) fn ensure_message_index_visible(&mut self, index: usize) {
         self.ensure_message_layout();
-        let ranges = &self.messages.line_ranges;
+        let ranges = self.cached_message_ranges();
         let Some(range) = ranges.get(index) else {
             return;
         };
@@ -840,7 +840,7 @@ impl App {
     /// Used by the day-skip shortcuts to frame the day they land on.
     pub(crate) fn center_message_index(&mut self, index: usize) {
         self.ensure_message_layout();
-        let ranges = &self.messages.line_ranges;
+        let ranges = self.cached_message_ranges();
         let Some(range) = ranges.get(index) else {
             return;
         };
@@ -1000,8 +1000,7 @@ impl App {
     /// caller measures the pane *before* appending a live event, so the layout
     /// from the last draw is precisely the pre-append state it wants.
     fn selected_display_line_count(&self) -> usize {
-        self.messages
-            .line_ranges
+        self.cached_message_ranges()
             .last()
             .map(|range| range.end)
             .unwrap_or_default()

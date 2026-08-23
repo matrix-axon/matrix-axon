@@ -427,7 +427,10 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     app.ensure_message_layout();
     let selected_events = app.selected_events();
     let font_size = app.picker.font_size();
-    let image_thumb_rows = app.image_thumb_rows(selected_events.as_slice());
+    // Built alongside the cached layout, not rederived here: this is the same
+    // O(events) filter+map `ensure_message_layout` just ran, and it ran
+    // unconditionally every frame regardless of cache hit or miss (#229).
+    let image_thumb_rows = &app.messages.layout_image_thumb_rows;
     let layout = app
         .cached_message_layout()
         .expect("ensure_message_layout stores one before returning");

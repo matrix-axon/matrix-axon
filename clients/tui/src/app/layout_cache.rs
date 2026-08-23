@@ -63,27 +63,44 @@ where
     }
 }
 
-/// Everything [`message_layout`] reads, reduced to one value.
+/// Everything [`message_layout`] reads, gathered once.
+///
+/// Bundled rather than passed as nine arguments, in the shape `RelationContext`
+/// already uses a few lines up: the same values feed the digest and, on a miss,
+/// the layout itself, so they belong together.
+pub(crate) struct LayoutInputs<'a> {
+    pub(crate) events: &'a [&'a EventDto],
+    pub(crate) sender_labels: &'a [String],
+    pub(crate) selected_message: Option<&'a str>,
+    pub(crate) width: usize,
+    pub(crate) reactions: &'a HashMap<String, Vec<(String, usize)>>,
+    pub(crate) own_senders: &'a HashMap<Uuid, String>,
+    pub(crate) image_thumb_rows: &'a ImageThumbRows,
+    pub(crate) relations: &'a RelationContext,
+    pub(crate) config_generation: u64,
+}
+
+/// Reduce the layout inputs to one value.
 ///
 /// A miss costs a full re-layout, so this errs towards over-hashing: it is
 /// cheaper to recompute a layout that did not need it than to render lines that
 /// disagree with the ranges the nav math is using.
-#[allow(clippy::too_many_arguments)]
-fn layout_digest(
-    events: &[&EventDto],
-    sender_labels: &[String],
-    selected_message: Option<&str>,
-    width: usize,
-    reactions: &HashMap<String, Vec<(String, usize)>>,
-    own_senders: &HashMap<Uuid, String>,
-    image_thumb_rows: &ImageThumbRows,
-    relations: &RelationContext,
-    config_generation: u64,
-) -> u64 {
+fn layout_digest(inputs: &LayoutInputs<'_>) -> u64 {
+    let LayoutInputs {
+        events,
+        sender_labels,
+        selected_message,
+        width,
+        reactions,
+        own_senders,
+        image_thumb_rows,
+        relations,
+        config_generation,
+    } = inputs;
     let mut hasher = DefaultHasher::new();
 
     events.len().hash(&mut hasher);
-    for event in events {
+    for event in events.iter() {
         // Hash what the renderer *projects*, through the same accessors it
         // uses, rather than a hand-picked subset of raw fields. Two reasons:
         //
@@ -134,7 +151,7 @@ impl App {
     /// Recompute the message layout if anything it reads has changed.
     ///
     /// Call this in the update step, before anything reads
-    /// `messages.line_ranges` or the cached lines. It is idempotent and cheap
+    /// the cached ranges or lines. It is idempotent and cheap
     /// on a hit — one pass over the inputs to hash them.
     pub(crate) fn ensure_message_layout(&mut self) {
         self.messages.layout_checks = self.messages.layout_checks.saturating_add(1);
@@ -146,46 +163,47 @@ impl App {
             let reactions = self.selected_reactions();
             let image_thumb_rows = self.image_thumb_rows(events.as_slice());
             let relations = self.relation_context(events.as_slice());
-            let key = layout_digest(
-                events.as_slice(),
-                sender_labels.as_slice(),
-                self.messages.selection.as_deref(),
-                self.messages.width,
-                &reactions,
-                &self.live.own_senders,
-                &image_thumb_rows,
-                &relations,
-                self.config_generation,
-            );
+            let inputs = LayoutInputs {
+                events: events.as_slice(),
+                sender_labels: sender_labels.as_slice(),
+                selected_message: self.messages.selection.as_deref(),
+                width: self.messages.width,
+                reactions: &reactions,
+                own_senders: &self.live.own_senders,
+                image_thumb_rows: &image_thumb_rows,
+                relations: &relations,
+                config_generation: self.config_generation,
+            };
+            let key = layout_digest(&inputs);
             if self.messages.layout_key == Some(key) {
                 None
             } else {
                 let layout = message_layout(
-                    events.as_slice(),
-                    sender_labels.as_slice(),
-                    self.messages.selection.as_deref(),
+                    inputs.events,
+                    inputs.sender_labels,
+                    inputs.selected_message,
                     &self.colors,
-                    self.messages.width,
-                    &reactions,
-                    &self.live.own_senders,
-                    &image_thumb_rows,
-                    &relations,
+                    inputs.width,
+                    inputs.reactions,
+                    inputs.own_senders,
+                    inputs.image_thumb_rows,
+                    inputs.relations,
                     self.display.message_density,
                     self.display.time_format,
                     self.display.highlight_selected_line,
                 );
-                let event_ids: Vec<String> =
-                    events.iter().map(|event| event.event_id.clone()).collect();
-                Some((key, event_ids, layout))
+                // Kept alongside the layout it was built from, so `draw` reads
+                // it instead of rederiving the same O(events) filter+map every
+                // frame — which it did unconditionally, hit or miss.
+                Some((key, layout, image_thumb_rows))
             }
         };
 
-        if let Some((key, event_ids, layout)) = recomputed {
+        if let Some((key, layout, image_thumb_rows)) = recomputed {
             self.messages.layout_recomputes = self.messages.layout_recomputes.saturating_add(1);
             self.messages.layout_key = Some(key);
-            self.messages.line_ranges = layout.ranges.clone();
-            self.messages.layout_event_ids = event_ids;
             self.messages.layout = Some(layout);
+            self.messages.layout_image_thumb_rows = image_thumb_rows;
         }
         // Always, not just on a miss. `set_message_layout` used to run on every
         // frame, so any code reading `messages.scroll` between frames saw a
@@ -203,8 +221,7 @@ impl App {
     /// can run on a cache hit, where no layout is recomputed.
     fn resolve_message_scroll(&mut self) {
         let line_count = self
-            .messages
-            .line_ranges
+            .cached_message_ranges()
             .last()
             .map(|range| range.end)
             .unwrap_or_default();
@@ -214,6 +231,19 @@ impl App {
         } else {
             self.messages.scroll.min(max_scroll)
         };
+    }
+
+    /// The cached layout's ranges, or an empty slice before the first layout.
+    ///
+    /// Nav math and scroll clamping read this rather than a cloned copy: one
+    /// `Vec<Range>` per recompute existed only to keep a second field in sync
+    /// with the first.
+    pub(crate) fn cached_message_ranges(&self) -> &[std::ops::Range<usize>] {
+        self.messages
+            .layout
+            .as_ref()
+            .map(|layout| layout.ranges.as_slice())
+            .unwrap_or_default()
     }
 
     /// The cached layout, if one has been computed for the current inputs.
