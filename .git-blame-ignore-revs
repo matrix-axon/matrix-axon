@@ -4,6 +4,11 @@
 #
 #   git config blame.ignoreRevsFile .git-blame-ignore-revs
 #
+# This file doubles as the record of which files have been reformatted, since
+# every reformat must add itself here regardless. `AGENTS.md` and
+# `CONTRIBUTING.md` point at it rather than keeping their own list, so name the
+# files an entry covers in its comment.
+#
 # Only whole-tree formatting passes belong here, and only by their final SHA on
 # `main` — an entry naming a commit that was rebased away is worse than no
 # entry, because it silently ignores nothing while still claiming to. A commit

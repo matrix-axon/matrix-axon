@@ -202,9 +202,10 @@ this table is the orientation copy.
   A break per sentence gives a diff that names the sentence that changed, and never rewraps.
   Column wrapping was measured and rejected: `proseWrap: "always"` on `README.md` rewrote 62 lines into 162 and _still_ left lines of 226, 218 and 194 characters, because tables and long links cannot be broken.
   This applies to prose you write, and to paragraphs you are already rewriting for other reasons.
-  `AGENTS.md` and `README.md` are reflowed (#225);
-  every other file is not, `CONTRIBUTING.md` included — 83% of its paragraph-continuation line breaks still fall mid-sentence at a column.
-  Nothing else is being reflowed on sight, because a reformat mixed into an ordinary PR is a diff nobody can review and a blame nobody can skip.
+  **Which files have already been reflowed is not listed here.**
+  `.git-blame-ignore-revs` is that list — one entry per reformat, each naming the files it covered — and it is the only copy, because a reformat has to add itself there anyway and a second list would go stale the first time one didn't.
+  Assume a file you have not checked is still hard-wrapped at a column.
+  Nothing is reflowed on sight, because a reformat mixed into an ordinary PR is a diff nobody can review and a blame nobody can skip.
   To reflow one, do it **alone, in its own PR** with no other change of any kind — see the note in `.git-blame-ignore-revs` for why a commit-level split cannot substitute for a separate PR.
   **That is two pull requests, not one.**
   A squash SHA does not exist until the squash does, so listing it is necessarily a second, later change: reflow PR → merge → a one-line follow-up adding the SHA.

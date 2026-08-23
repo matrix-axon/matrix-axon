@@ -239,8 +239,8 @@ The rules that most often surprise a first contributor:
   The reason is diffs: an unwrapped paragraph makes every edit one enormous changed line, and a hard column wrap makes a one-word edit rewrap the whole paragraph.
   A break per sentence gives a diff that names the sentence that changed.
   This is for prose you write, and for paragraphs you are already rewriting for other reasons.
-  `AGENTS.md` and `README.md` have been reflowed;
-  no other existing file has, this one included — most of its prose is still hard-wrapped at a column.
+  `.git-blame-ignore-revs` lists the reformats that have happened, one entry each, and is the only place that does;
+  assume a file it does not name is still hard-wrapped at a column.
   To reflow a file, put it in its own PR with nothing else in it, then — once that PR has merged — add its squash SHA to `.git-blame-ignore-revs` in a one-line follow-up.
   That second step is what actually makes `git blame` skip it;
   the isolated PR only makes it possible.
