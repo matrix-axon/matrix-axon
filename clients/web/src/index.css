@@ -185,6 +185,7 @@ body {
 }
 
 .topbar-rooms-button,
+.topbar-room-heading,
 .topbar-room-title {
   display: none;
 }
@@ -225,10 +226,6 @@ body {
     padding: 0.45rem 0.55rem;
   }
 
-  .mobile-room-shell .topbar-brand {
-    display: none;
-  }
-
   .mobile-room-shell .topbar-rooms-button {
     display: inline-flex;
     flex: none;
@@ -246,9 +243,19 @@ body {
     white-space: nowrap;
   }
 
+  /* Title shrink-wraps so the live-socket dot sits on the name, not against
+     the action cluster. The heading takes leftover space; actions stay right. */
+  .mobile-room-shell .topbar-room-heading {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
   .mobile-room-shell .topbar-room-title {
     display: block;
-    flex: 1;
+    flex: 0 1 auto;
     min-width: 0;
     padding: 0.25rem 0.35rem;
     border: 0;
@@ -272,13 +279,8 @@ body {
     padding-inline: 0.2rem;
   }
 
-  .mobile-room-shell .topbar-brand-lockup {
-    order: 3;
-  }
-
   .topbar-actions {
     flex: none;
-    order: 4;
   }
 
   .topbar-icon-button,

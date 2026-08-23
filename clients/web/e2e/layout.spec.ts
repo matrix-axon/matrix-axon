@@ -748,6 +748,40 @@ test('the rooms edge tab sits close to the favorite controls', async ({
   )
 })
 
+test('narrow: connection indicator sits immediately after the room name', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(ROOM_URL)
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
+  await expect(page.locator('.topbar-room-title')).toContainText('E2E Room')
+
+  const geometry = await page.evaluate(() => {
+    const title = document.querySelector<HTMLElement>('.topbar-room-title')!
+    const span = title.querySelector('span')!
+    const range = document.createRange()
+    range.selectNodeContents(span)
+    const text = range.getBoundingClientRect()
+    const conn = document.querySelector<HTMLElement>('.conn')!
+    const actions = document.querySelector<HTMLElement>('.topbar-actions')!
+    return {
+      textRight: text.right,
+      connLeft: conn.getBoundingClientRect().left,
+      connRight: conn.getBoundingClientRect().right,
+      actionsLeft: actions.getBoundingClientRect().left,
+    }
+  })
+
+  // The live-socket dot follows the name, not the stretched title box.
+  expect(geometry.connLeft - geometry.textRight).toBeGreaterThanOrEqual(-1)
+  expect(geometry.connLeft - geometry.textRight).toBeLessThan(20)
+  // Leftover space belongs between the indicator and the action cluster.
+  expect(geometry.actionsLeft - geometry.connRight).toBeGreaterThan(24)
+})
+
 test('topbar stays pinned when the composer is focused', async ({ page }) => {
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
