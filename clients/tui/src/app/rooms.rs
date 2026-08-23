@@ -83,6 +83,7 @@ impl App {
         self.relation_refresh_latest.remove(key);
         self.members_refresh_after.remove(key);
         self.rooms_without_derived_title.remove(key);
+        self.drafts_written_since_fetch.remove(key);
         self.unread_threads.remove(key);
     }
 
