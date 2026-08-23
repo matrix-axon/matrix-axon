@@ -318,12 +318,21 @@ export function connectThreadReceipts(
       }
       seen.add(key)
       inBackground(
-        api
-          .GET('/v1/accounts/{account_id}/events/{event_id}', {
-            params: {
-              path: { account_id: frame.accountId, event_id: eventId },
-            },
-          })
+        // The marker's forward-only guard compares against the local cache, so
+        // writing before this account's namespace has hydrated skips it and can
+        // regress a more advanced position — including one another device set.
+        // This connector runs from app startup, while hydration is only
+        // triggered by opening a room, so without the wait it is writing blind
+        // for every account whose rooms have not been visited (review).
+        deviceState
+          .ensureHydrated(frame.accountId, THREAD_READ_MARKERS_NAMESPACE)
+          .then(() =>
+            api.GET('/v1/accounts/{account_id}/events/{event_id}', {
+              params: {
+                path: { account_id: frame.accountId, event_id: eventId },
+              },
+            }),
+          )
           .then(
             ({ data, response }) => {
               if (data === undefined) {

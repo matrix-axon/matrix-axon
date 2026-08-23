@@ -53,12 +53,9 @@ import {
   runPosition,
   type TimelineRow,
 } from '../timeline/group-media-runs'
-import {
-  maxByArrivalOrder,
-  maxByArrivalOrderBelow,
-  viewMayClaimReadState,
-} from '../timeline/arrival-order'
+import { viewMayClaimReadState } from '../timeline/arrival-order'
 import { hiddenByRedaction } from '../timeline/visibility'
+import { computeRoomReceipt } from '../timeline/room-receipt'
 import {
   NATIVE_BACK_EDGE_PX,
   SWIPE_AXIS_RATIO,
@@ -766,6 +763,22 @@ export function RoomPage() {
   )
 
   /**
+   * Memoised on the values the filter actually reads, not on render.
+   *
+   * A fresh `.filter()` per render is cheap on its own, but it is the input to
+   * `groupMediaRuns` below and to the media viewer's `imageSequence` — both of
+   * which walk every event through `parseMedia`. Handing them a new array
+   * identity on every render made both re-run on every `RoomPage` render, over
+   * up to `RETAINED_EVENT_LIMIT` events, including renders caused by things
+   * with no bearing on the timeline's contents at all: opening the reaction
+   * picker, the jump dialog, the room-info panel.
+   */
+  const visible = useMemo(
+    () => timeline.events.value.filter(isVisibleTimelineEvent),
+    [timeline.events.value, isVisibleTimelineEvent],
+  )
+
+  /**
    * The events this view has put on screen, in display order — the candidate
    * set both read positions are picked from (ADR 0089). Memoised on what the
    * filter actually reads: the effect below runs on it, and so does the thread
@@ -774,24 +787,18 @@ export function RoomPage() {
    */
   const displayed = useMemo(
     () =>
-      timeline.events.value.filter(
+      // Derived from `visible` rather than re-filtering the slice: the two ran
+      // `isVisibleTimelineEvent` over every loaded event independently, which is
+      // the pass this memo exists to avoid doing twice (review).
+      visible.filter(
         (event) =>
-          // The same predicate that decides what renders as a row. ADR 0089's
-          // contract is "among the events it has actually displayed", and under
-          // the default `stateEvents: 'important'` the events it hides include
-          // the `uk.half-shot.bridge` event from the original bug report — which
-          // would otherwise be a legal receipt target (and marker position)
-          // precisely because it is arrival-newest. Matches the TUI, whose
-          // `receipt_target_for` filters through `should_show_event`.
-          isVisibleTimelineEvent(event) &&
-          // A local echo has not been ingested, so it has no arrival position and
-          // is not a receipt candidate; it is not the room's read position either.
+          // A local echo has not been ingested, so it has no arrival position
+          // and is not a receipt candidate; it is not the room's read position
+          // either.
           !event.event_id.startsWith('local:') &&
           (unreadThreadCutoff === null || event.origin_ts < unreadThreadCutoff),
       ),
-    // `isVisibleTimelineEvent` is a `useCallback` as of #215, so it can be the
-    // dependency directly rather than the three settings it closes over.
-    [timeline.events.value, unreadThreadCutoff, isVisibleTimelineEvent],
+    [visible, unreadThreadCutoff],
   )
 
   /**
@@ -927,117 +934,31 @@ export function RoomPage() {
     roomId,
   ])
 
+  /**
+   * The receipt bound and target for this room (ADR 0096). The rule itself lives
+   * in `timeline/room-receipt.ts` so it can be tested without a page tree; this
+   * only adapts the page's stores to its inputs.
+   */
   const roomReceipt = useMemo(() => {
     void threadMarkerRevision
-    const base = maxByArrivalOrder(displayed)
-    const baseOrder = base?.arrival_order ?? -1
-    /** Thread replies above the room's own target, from threads not on screen. */
-    const above = timeline.events.value.filter((event) => {
-      if (event.arrival_order <= baseOrder) {
-        return false
-      }
-      // Redacted replies are excluded for the same reason `displayed` excludes
-      // them: with the setting on, the UI never rendered them, and ADR 0089's
-      // contract is that a receipt names something that was shown. Left in, the
-      // arrival-max reply of an already-read thread could be a redacted one and
-      // still become the target (review, blocking).
-      if (hiddenByRedaction(event, hideRedacted)) {
-        return false
-      }
-      const root = threadRootId(event)
-      return root !== null && root !== openThread
+    const candidate = (event: TimelineEvent) => ({
+      ...event,
+      threadRoot: threadRootId(event),
     })
-
-    /**
-     * While anything here is unread — or merely unknown — nothing above the main
-     * timeline is claimable, by this view or by a panel.
-     *
-     * The bound below can only see replies the client has *loaded*, while thread
-     * summaries know about unread replies sitting outside the loaded page.
-     * Extending past one of those acknowledges it in arrival order without ever
-     * having seen it (review, blocking 2).
-     *
-     * Read straight off the summaries rather than off `unreadThreadCutoff`,
-     * which the reconcile *effect* populates: effects run after the render that
-     * computes this, and in definition order, so on the render where summaries
-     * first arrive the cutoff is still empty and the extension fires against a
-     * room it has not yet judged. A receipt sent then cannot be recalled. A
-     * thread with no read position at all counts as unread here — for a claim
-     * this size, unknown is not read.
-     */
-    const anythingUnread =
-      !threadStoresLoaded ||
-      unreadThreadCutoff !== null ||
-      threadSummaryStates.some(({ summary, threadMarker }) => {
-        const latestTs = summary.latest_reply_ts ?? null
-        if (latestTs === null) {
-          return false
-        }
-        const markerTs =
-          threadMarker?.originTs ?? roomMarkerForThreads?.originTs ?? null
-        return markerTs === null || latestTs > markerTs
-      })
-    if (anythingUnread) {
-      return { blocker: baseOrder + 1, target: base }
-    }
-
-    /**
-     * Arrival position of each loaded event, so "has this reply been read" is
-     * answered in the key a receipt is interpreted in.
-     *
-     * Comparing the thread marker's `origin_ts` to the candidate's was wrong for
-     * the reason ADR 0089 exists: a bridge backfilling an older-stamped reply
-     * into a thread the user has read yields `marker.originTs >=
-     * reply.origin_ts` for a reply nobody displayed, and a forward-only receipt
-     * covering it cannot be walked back (review, blocking 1). The marker names an
-     * event; that event's arrival position bounds the claim, and a marker whose
-     * event is not loaded proves nothing.
-     */
-    const arrivalOf = new Map(
-      timeline.events.value.map((event) => [
-        event.event_id,
-        event.arrival_order,
-      ]),
-    )
-    const readThrough = new Map<string, number>()
-    const isRead = (event: TimelineEvent): boolean => {
-      const root = threadRootId(event)
-      if (root === null) {
-        return false
-      }
-      let through = readThrough.get(root)
-      if (through === undefined) {
-        const marker = deviceState.threadReadMarker(accountId, roomId, root)
-        // `arrivalThrough` is what the panel recorded having displayed. Falling
-        // back to resolving the marker's event in the slice is for markers
-        // written before that field existed, and it is strictly weaker: it
-        // understates a thread whose display-last event is not its arrival-max,
-        // and answers nothing once the event pages out.
-        through =
-          marker === null
-            ? -1
-            : (marker.arrivalThrough ?? arrivalOf.get(marker.eventId) ?? -1)
-        readThrough.set(root, through)
-      }
-      return through >= event.arrival_order
-    }
-
-    const unread = above.filter((event) => !isRead(event))
-    const blocker = unread.reduce<number | null>(
-      (lowest, event) =>
-        lowest === null || event.arrival_order < lowest
-          ? event.arrival_order
-          : lowest,
-      null,
-    )
-    const claimable = maxByArrivalOrderBelow(above.filter(isRead), blocker)
-    const target = maxByArrivalOrder(
-      [base, claimable].filter((event) => event !== null),
-    )
-    return { blocker, target }
-    // `deviceState.revision` is the scalar that stands in for the per-thread
-    // markers this reads — the dependency the first version said it could not
-    // name (review, non-blocking, raised twice).
+    return computeRoomReceipt({
+      displayed: displayed.map(candidate),
+      loaded: timeline.events.value
+        .filter((event) => !hiddenByRedaction(event, hideRedacted))
+        .map(candidate),
+      openThread,
+      threads: threadSummaryStates.map(({ summary, threadMarker }) => ({
+        summary,
+        marker: threadMarker,
+      })),
+      roomMarker: roomMarkerForThreads,
+      storesLoaded: threadStoresLoaded,
+      knownUnreadCutoff: unreadThreadCutoff,
+    })
   }, [
     displayed,
     timeline.events.value,
@@ -1047,10 +968,7 @@ export function RoomPage() {
     unreadThreadCutoff,
     openThread,
     hideRedacted,
-    deviceState,
     threadMarkerRevision,
-    accountId,
-    roomId,
   ])
   const threadReceiptCeiling = roomReceipt.blocker
 
@@ -1094,7 +1012,13 @@ export function RoomPage() {
   // `origin_ts` than the marker already holds, and the marker — forward-only on
   // `origin_ts` — would simply stop advancing.
   useEffect(() => {
-    if (!showingNewestEvents) {
+    // The loading term is here for the same reason its siblings carry it: an
+    // `atEnd` slice that has not loaded is vacuously at the end. Not reachable
+    // on today's load path — `events.value` is only populated once `loading`
+    // flips — but the two are independent signals, and a future path that fills
+    // one before the other would make this claim read state it never showed
+    // (review).
+    if (!showingNewestEvents || timeline.loading.value) {
       return
     }
     // Display order → cross-device marker (M-W6 step 5c, ADR 0048).
@@ -1127,6 +1051,7 @@ export function RoomPage() {
     displayed,
     roomReceipt.target,
     showingNewestEvents,
+    timeline.loading.value,
     accountId,
     roomId,
     deviceState,
@@ -1328,21 +1253,6 @@ export function RoomPage() {
     markersHydrated,
   ])
 
-  /**
-   * Memoised on the values the filter actually reads, not on render.
-   *
-   * A fresh `.filter()` per render is cheap on its own, but it is the input to
-   * `groupMediaRuns` below and to the media viewer's `imageSequence` — both of
-   * which walk every event through `parseMedia`. Handing them a new array
-   * identity on every render made both re-run on every `RoomPage` render, over
-   * up to `RETAINED_EVENT_LIMIT` events, including renders caused by things
-   * with no bearing on the timeline's contents at all: opening the reaction
-   * picker, the jump dialog, the room-info panel.
-   */
-  const visible = useMemo(
-    () => timeline.events.value.filter(isVisibleTimelineEvent),
-    [timeline.events.value, isVisibleTimelineEvent],
-  )
   /**
    * Adjacent images from one sender collapse into a gallery row (ADR 0081).
    * Computed here rather than inside `Timeline` so the media viewer can share

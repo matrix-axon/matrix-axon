@@ -222,6 +222,62 @@ describe('connectThreadReceipts', () => {
     expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).toBeNull()
   })
 
+  it('waits for hydration before writing, so it cannot regress a marker', async () => {
+    let stateGets = 0
+    server.use(
+      http.get(
+        `${BASE}/v1/devices/:deviceId/state/:namespace`,
+        ({ params }) => {
+          stateGets += 1
+          return HttpResponse.json({
+            data: {
+              namespace: String(params.namespace),
+              entries:
+                params.namespace === 'thread_read_markers'
+                  ? {
+                      [`${encodeURIComponent(ROOM)}:${encodeURIComponent(ROOT)}`]:
+                        {
+                          value: {
+                            room_id: ROOM,
+                            root_event_id: ROOT,
+                            event_id: '$later',
+                            origin_ts: REPLY_TS + 10_000,
+                            arrival_through: 99,
+                          },
+                        },
+                    }
+                  : {},
+            },
+          })
+        },
+      ),
+    )
+    const { deviceState, socket } = harness()
+
+    // Nothing has opened a room, so this namespace has never been hydrated —
+    // the state a live receipt meets right after login.
+    expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).toBeNull()
+    socket().emitMessage(receiptFrame({ ts: 1, thread_id: ROOT }))
+
+    await vi.waitFor(() => expect(stateGets).toBeGreaterThan(0))
+    await vi.waitFor(() =>
+      expect(
+        deviceState.threadReadMarker(ACCT, ROOM, ROOT)?.eventId,
+      ).toBeDefined(),
+    )
+
+    // The stored marker is further along than the receipt's event, so the
+    // forward-only guard must keep it. Writing into an empty cache would have
+    // skipped that guard and walked it backwards.
+    expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).toEqual({
+      roomId: ROOM,
+      rootEventId: ROOT,
+      eventId: '$later',
+      originTs: REPLY_TS + 10_000,
+      arrivalThrough: 99,
+    })
+  })
+
   it('ignores a main-timeline receipt', async () => {
     const { deviceState, threadUnread, socket } = harness()
 

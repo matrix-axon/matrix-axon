@@ -24,7 +24,10 @@ import {
   vi,
 } from 'vitest'
 import { ServicesContext } from '../services'
-import { READ_MARKERS_NAMESPACE } from '../stores/device-state'
+import {
+  READ_MARKERS_NAMESPACE,
+  THREAD_READ_MARKERS_NAMESPACE,
+} from '../stores/device-state'
 import { RECEIPT_DEBOUNCE_MS } from '../stores/ephemeral-sender'
 import type { EventDto } from '../stores/timeline'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -608,28 +611,37 @@ describe('a thread view names the room receipt (ADR 0096)', () => {
     expect(reads).not.toContain(REPLY_2.event_id)
   })
 
-  it('never flashes a false unread while markers are still hydrating', async () => {
+  it('never judges a thread before its markers have hydrated', async () => {
     const { services, findByText } = renderRoom({
       threads: [MAIN_THREAD],
       hydratedThreadMarkers: [
         { root: ROOT, eventId: REPLY_2.event_id, originTs: REPLY_2.origin_ts },
       ],
     })
-    let peak = 0
-    const watch = setInterval(() => {
-      peak = Math.max(peak, services.threadUnread.count.value)
-    }, 5)
+    // Asserted on the *call*, not on a peak sampled by a timer. The flash this
+    // guards lasts one render, and polling for it made the test a coin flip
+    // under parallel load: it failed once in a full run and passed in isolation.
+    const judged: boolean[] = []
+    const reconcile = services.threadUnread.reconcileSummary.bind(
+      services.threadUnread,
+    )
+    vi.spyOn(services.threadUnread, 'reconcileSummary').mockImplementation(
+      (summary, context) => {
+        judged.push(
+          services.deviceState.hydrated(ACCOUNT, THREAD_READ_MARKERS_NAMESPACE),
+        )
+        reconcile(summary, context)
+      },
+    )
     await findByText(`body of ${MAIN.event_id}`)
-    // Past this test's own receipt debounce as well as the hydration delay: the
-    // sender's timer outlives `cleanup()`, so a receipt left in flight lands in
-    // the *next* test's handler (the hazard `RoomPage.test.tsx` documents).
     await settleReceipts()
-    clearInterval(watch)
 
-    // The thread is read; its marker just arrives after the summaries. Judging
-    // it against the room marker in the meantime shows an unread badge that
-    // corrects itself a moment later — visible on reload as a flash.
-    expect(peak).toBe(0)
+    // Every judgement was made with the markers in hand. Judging earlier
+    // compares a thread against the *room* marker, which flags every thread
+    // whose replies are newer than the main timeline — an unread badge that
+    // corrects itself a moment later.
+    expect(judged.length).toBeGreaterThan(0)
+    expect(judged.every(Boolean)).toBe(true)
     expect(services.threadUnread.count.value).toBe(0)
   })
 

@@ -163,6 +163,11 @@ There is no server change: no route, no DTO, no gateway, no `ClientBuilder` call
 - **Reading one thread acknowledges the others below it.**
   An unthreaded receipt cannot say otherwise, and this is true of the room view's own receipt today — extending it to a thread member changes nothing about the events below that receipt's existing floor.
   What the ceiling protects is the window the extension actually adds.
+- **A backfilled reply is invisible to the summary check, and the summary cannot be made to show it.**
+  Replies the client has not loaded are covered by comparing the thread summary's `latest_reply_ts` against its read position — the only signal there is for them.
+  That misses a reply stamped _older_ than the thread's current newest, because `MAX(origin_ts)` does not move and neither does `latest_reply_event_id`; only `reply_count` changes.
+  Such a reply still has a recent arrival position, so if it falls below the extension's target the receipt acknowledges it unseen.
+  Closing it needs `MAX(events.id)` per thread on the summary — filed as #234, with the reasoning for why no client-side comparison substitutes.
 - **The ceiling can only see the slice the client holds.**
   A reply paged out of the room timeline, or one backfilled with an old `origin_ts` and a high `arrival_order`, is outside it and would be acknowledged unseen.
   That is the same coarseness the room's own receipt already has — the client names a target and the homeserver clears everything below it, loaded or not — and closing it means a read-position model per thread, which is § 6.

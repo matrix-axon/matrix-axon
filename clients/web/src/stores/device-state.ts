@@ -37,6 +37,12 @@ export interface DeviceStateStore {
   /** Fetch a `(accountId, namespace)` merged view once (idempotent). */
   hydrate(accountId: string, namespace: string): void
   /**
+   * The same fetch, awaitable — resolves once the scope has been fetched, so a
+   * writer can respect the forward-only guard instead of writing into an empty
+   * cache and bypassing it.
+   */
+  ensureHydrated(accountId: string, namespace: string): Promise<void>
+  /**
    * Send every debounced write now and resolve once the server has answered.
    * Called before an automatic reload (ADR 0087): drafts are durable, but only
    * once the `PUT` behind the 800 ms debounce has actually gone out, so without
@@ -262,7 +268,8 @@ export function createDeviceStateStore(
    */
   const scopes = signal<ReadonlyMap<string, ScopeState>>(new Map())
   /** `(account, namespace)` scopes already fetched (or in flight). */
-  const hydrated = new Set<string>()
+  /** In-flight or finished hydration per scope; see `ensureHydrated`. */
+  const hydrations = new Map<string, Promise<void>>()
   /** Debounced pending writes per scope: `key -> value | null`. */
   const pending = new Map<string, Map<string, unknown>>()
   const timers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -586,19 +593,34 @@ export function createDeviceStateStore(
     if (live.reconnects.value === 0) {
       return
     }
-    for (const scope of hydrated) {
+    for (const scope of hydrations.keys()) {
       const [accountId, namespace] = scope.split(SEP)
       void fetchScope(accountId, namespace)
     }
   })
 
   function hydrate(accountId: string, namespace: string): void {
+    void ensureHydrated(accountId, namespace)
+  }
+
+  /**
+   * Fetch a scope if nobody has, and resolve when that fetch has finished.
+   *
+   * A writer that must respect the forward-only guard has to wait for this: the
+   * guard compares against the local cache, so writing into an unhydrated scope
+   * skips it entirely and can regress a more advanced position — including one
+   * another device already set. Hydration is otherwise only triggered by opening
+   * a room, so anything wired at app startup is writing blind (review, ADR 0096).
+   */
+  function ensureHydrated(accountId: string, namespace: string): Promise<void> {
     const sk = scopeKey(accountId, namespace)
-    if (hydrated.has(sk)) {
-      return
+    const existing = hydrations.get(sk)
+    if (existing !== undefined) {
+      return existing
     }
-    hydrated.add(sk)
-    void fetchScope(accountId, namespace)
+    const started = fetchScope(accountId, namespace)
+    hydrations.set(sk, started)
+    return started
   }
 
   async function flushPending(): Promise<void> {
@@ -643,6 +665,7 @@ export function createDeviceStateStore(
       schedulePut(accountId, namespace, key, value)
     },
     hydrate,
+    ensureHydrated,
     flushPending,
     hydrated(accountId, namespace) {
       return scopes.value.get(scopeKey(accountId, namespace))?.hydrated === true
@@ -769,29 +792,27 @@ export function createDeviceStateStore(
       )
       // Both positions move forward only, and they move independently: a
       // backfilled reply raises how far the panel has read in *arrival* order
-      // while leaving the display position where it was.
+      // while leaving the display position where it was. The display test is
+      // computed once — it was written out three times, and an edit that
+      // updated the guard while missing one of the ternaries would have
+      // silently reintroduced a marker regression (review).
+      const keepsDisplayPosition =
+        current !== null && current.originTs >= originTs
       const nextArrival = Math.max(
         arrivalThrough ?? -1,
         current?.arrivalThrough ?? -1,
       )
       if (
-        current !== null &&
-        current.originTs >= originTs &&
-        nextArrival <= (current.arrivalThrough ?? -1)
+        keepsDisplayPosition &&
+        nextArrival <= (current?.arrivalThrough ?? -1)
       ) {
         return
       }
       const value = {
         room_id: roomId,
         root_event_id: rootEventId,
-        event_id:
-          current !== null && current.originTs >= originTs
-            ? current.eventId
-            : eventId,
-        origin_ts:
-          current !== null && current.originTs >= originTs
-            ? current.originTs
-            : originTs,
+        event_id: keepsDisplayPosition ? current.eventId : eventId,
+        origin_ts: keepsDisplayPosition ? current.originTs : originTs,
         ...(nextArrival >= 0 && { arrival_through: nextArrival }),
       }
       writeCache(accountId, THREAD_READ_MARKERS_NAMESPACE, key, value)
