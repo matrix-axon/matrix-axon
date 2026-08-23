@@ -12,7 +12,7 @@
 //!   sent, or text deleted) flushes as a `null` tombstone, so the clear wins
 //!   the cross-device merge.
 //! - Startup hydrates the local draft map from the server's merged view
-//!   ([`App::refresh_drafts`]). The buffer mirrors exactly one room's draft at
+//!   ([`App::apply_draft_reads`]). The buffer mirrors exactly one room's draft at
 //!   a time ([`App::compose_room`]): switching rooms settles the outgoing
 //!   room's draft and swaps in the newly-selected room's
 //!   ([`App::sync_draft_on_room_change`]), and returning to compose from a
@@ -239,35 +239,13 @@ impl App {
         }
     }
 
-    /// Hydrate the local draft map from the server's merged view, one GET per
-    /// active account. Called at startup (and safe to call again — e.g. after
-    /// a reconnect, since the lossy bus may have dropped frames). A failed
-    /// read leaves that account's local drafts as they are.
-    pub(crate) async fn refresh_drafts(&mut self) {
-        let device_id = self.device_id;
-        let account_ids: Vec<Uuid> = self
-            .accounts
-            .accounts
-            .iter()
-            .map(|a| a.account_id)
-            .collect();
-        // Fetch every account's merged view concurrently: this runs inline in
-        // the event loop, so a sequential GET-per-account would freeze the UI
-        // for account_count × RTT right after a network blip (or at startup,
-        // before first paint).
-        let reads = account_ids.into_iter().map(|account_id| {
-            let client = self.client.clone();
-            async move {
-                (
-                    account_id,
-                    client
-                        .get_device_state(device_id, account_id, DRAFTS_NAMESPACE)
-                        .await,
-                )
-            }
-        });
-        let results = futures_util::future::join_all(reads).await;
-        for (account_id, result) in results {
+    /// Apply the merged draft view for every account, then restore the current
+    /// room's draft into the compose buffer.
+    ///
+    /// The fetch half lives in [`super::bootstrap`] so startup and every WS
+    /// (re)connect can run it off the event loop (#189).
+    pub(crate) fn apply_draft_reads(&mut self, reads: super::bootstrap::DeviceStateReads) {
+        for (account_id, result) in reads {
             let Ok(state) = result else {
                 continue;
             };
@@ -279,10 +257,14 @@ impl App {
             // hasn't round-tripped yet, so the server's older view isn't newer.
             let present: std::collections::HashSet<&str> =
                 state.entries.keys().map(String::as_str).collect();
+            // Plus anything a live frame wrote after this read was dispatched:
+            // that write is newer than the view being applied, so the omission
+            // is staleness in the fetch, not a server-side tombstone.
             let protected: Vec<&RoomKey> = self
                 .compose_room
                 .iter()
                 .chain(self.pending_draft_put.as_ref().map(|p| &p.room))
+                .chain(self.drafts_written_since_fetch.iter())
                 .filter(|k| k.account_id == account_id)
                 .collect();
             self.drafts.retain(|key, _| {
@@ -291,14 +273,20 @@ impl App {
                     || protected.contains(&key)
             });
             for (room_id, entry) in state.entries {
+                let key = RoomKey {
+                    account_id,
+                    room_id,
+                };
+                // `retain` above stops a stale view *deleting* a protected key;
+                // without this the insert below would overwrite it instead,
+                // which loses exactly the same write by the other door. Applies
+                // to all three protected kinds: a live frame's newer text, the
+                // compose room, and a draft whose PUT has not round-tripped.
+                if protected.contains(&&key) {
+                    continue;
+                }
                 if let Some(text) = draft_text(&entry.value) {
-                    self.drafts.insert(
-                        RoomKey {
-                            account_id,
-                            room_id,
-                        },
-                        text.to_owned(),
-                    );
+                    self.drafts.insert(key, text.to_owned());
                 }
             }
         }
@@ -427,6 +415,8 @@ impl App {
                     self.drafts.remove(&key);
                 }
             }
+            // Newer than any read already in flight; see `apply_draft_reads`.
+            self.drafts_written_since_fetch.insert(key.clone());
 
             // Reflect the change in the visible buffer when it currently mirrors
             // this room's draft and holds no unsynced local edit. Keying on
@@ -494,6 +484,98 @@ mod tests {
                 .map(|(k, v)| (k.to_owned(), v))
                 .collect(),
         }
+    }
+
+    /// The same protection, against the other door.
+    ///
+    /// When the stale view *omits* the room, `retain` keeps the newer local
+    /// value. When it *contains* the room with older text, `retain` keeps it
+    /// too — and the insert loop then has to not overwrite it. Protecting only
+    /// the delete path loses the identical write via `insert`.
+    #[test]
+    fn a_live_draft_is_not_overwritten_by_older_text_in_the_same_fetch() {
+        let room = test_room(Uuid::nil(), "!r:example.com");
+        let key = RoomKey::from(&room);
+        let mut app = compose_app(&room);
+        app.compose_room = None;
+
+        // The read goes out; at that moment the server has "v1" for this room.
+        app.request_device_state();
+
+        // While it is in flight, a sibling device moves it to "v2".
+        let other_device = Uuid::new_v4();
+        app.handle_device_state_frame(
+            Uuid::nil(),
+            frame(other_device, vec![("!r:example.com", draft_value("v2"))]),
+        );
+
+        // The older read lands, carrying "v1" for that very room.
+        let mut entries = HashMap::new();
+        entries.insert(
+            "!r:example.com".to_owned(),
+            crate::api::DeviceStateEntryDto {
+                value: draft_value("v1"),
+            },
+        );
+        app.apply_draft_reads(vec![(
+            Uuid::nil(),
+            Ok(crate::api::DeviceStateDto { entries }),
+        )]);
+
+        assert_eq!(
+            app.drafts.get(&key).map(String::as_str),
+            Some("v2"),
+            "a write newer than the fetch must survive the fetch's own older text"
+        );
+    }
+
+    /// A draft a live frame installed while a device-state read was in flight
+    /// must survive that read landing.
+    ///
+    /// `apply_draft_reads` treats the merged view as authoritative and drops
+    /// keys it omits — correct for a server-side tombstone, wrong for a write
+    /// that happened *after* the read was dispatched. Reachable since the read
+    /// became a spawn (#189): the old awaited call blocked the loop, so no
+    /// frame could be applied mid-flight.
+    #[test]
+    fn a_live_draft_written_during_a_fetch_survives_that_fetch() {
+        let room = test_room(Uuid::nil(), "!r:example.com");
+        let key = RoomKey::from(&room);
+        let mut app = compose_app(&room);
+        // Not the compose room, so the existing `protected` set does not cover
+        // it — this must be saved by the newer-than-the-fetch rule alone.
+        app.compose_room = None;
+
+        // A read goes out; the server's view at that moment has no draft here.
+        app.request_device_state();
+
+        // While it is in flight, a sibling device's frame installs one.
+        let other_device = Uuid::new_v4();
+        app.handle_device_state_frame(
+            Uuid::nil(),
+            frame(
+                other_device,
+                vec![("!r:example.com", draft_value("from my phone"))],
+            ),
+        );
+        assert_eq!(
+            app.drafts.get(&key).map(String::as_str),
+            Some("from my phone")
+        );
+
+        // The older read lands, omitting the room.
+        app.apply_draft_reads(vec![(
+            Uuid::nil(),
+            Ok(crate::api::DeviceStateDto {
+                entries: HashMap::new(),
+            }),
+        )]);
+
+        assert_eq!(
+            app.drafts.get(&key).map(String::as_str),
+            Some("from my phone"),
+            "a write newer than the fetch is not a server-side tombstone"
+        );
     }
 
     #[test]
