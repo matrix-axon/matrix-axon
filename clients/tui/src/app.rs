@@ -2121,6 +2121,29 @@ impl App {
         };
     }
 
+    /// This account's own Matrix user id, from the strongest source available.
+    ///
+    /// Three tiers, because no single one is reliable: `RoomDto` omits
+    /// `account_user_id` on older servers, `own_senders` is only seeded once
+    /// this client has seen one of its own events, and the account list is
+    /// authoritative but indirect. Code that consults one tier alone gets `None`
+    /// where another would have answered — which is how the reaction tally ended
+    /// up with two disagreeing notions of "mine" (#220).
+    pub(crate) fn own_user_id_for(&self, room: &RoomDto) -> Option<String> {
+        room.account_user_id
+            .clone()
+            .or_else(|| self.live.own_senders.get(&room.account_id).cloned())
+            .or_else(|| {
+                // `account_user_id` is always present on AccountDto even when the
+                // room DTO omits it (e.g. the server hasn't joined yet).
+                self.accounts
+                    .accounts
+                    .iter()
+                    .find(|a| a.account_id == room.account_id)
+                    .map(|a| a.user_id.clone())
+            })
+    }
+
     fn send_message_to_room(&mut self, body: &str, formatted: Option<(String, String)>) {
         let Some(room) = self.selected_room().cloned() else {
             self.status = Status::from("select a room before sending".to_owned());
@@ -2142,20 +2165,7 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let sender = room
-            .account_user_id
-            .clone()
-            .or_else(|| self.live.own_senders.get(&room.account_id).cloned())
-            .or_else(|| {
-                // Fallback: account_user_id is always present on AccountDto even
-                // when the room DTO omits it (e.g. the server hasn't joined yet).
-                self.accounts
-                    .accounts
-                    .iter()
-                    .find(|a| a.account_id == room.account_id)
-                    .map(|a| a.user_id.clone())
-            })
-            .unwrap_or_default();
+        let sender = self.own_user_id_for(&room).unwrap_or_default();
         // Optimistic echo: insert before spawning so the message appears on the
         // very next frame. The spawned task delivers the real event_id (or error)
         // back via the lifecycle channel without blocking the render loop.
@@ -2869,12 +2879,21 @@ mod tests {
     }
 
     fn tally(count: i64, me: bool, my_event_ids: &[&str]) -> crate::api::ReactionTally {
+        // `count` is the cardinality of `senders` server-side, so a fixture that
+        // sets one without the other is a tally no server would send — and the
+        // code now keeps the two in lockstep (#220). Synthesize senders to
+        // match: the account's own user first when `me`, then filler.
+        let mut senders: Vec<String> = Vec::new();
+        if me {
+            senders.push("@alice:example.com".to_owned());
+        }
+        while (senders.len() as i64) < count {
+            senders.push(format!("@other{}:example.com", senders.len()));
+        }
         crate::api::ReactionTally {
             count,
             me,
-            // These fixtures predate `senders` and exercise paths that do not
-            // read it. Tests for the live-reaction merge populate it directly.
-            senders: Vec::new(),
+            senders,
             my_event_ids: my_event_ids.iter().map(|s| (*s).to_owned()).collect(),
         }
     }
@@ -3457,6 +3476,92 @@ mod tests {
             own[0].event_ids,
             vec!["$from-phone:example.com".to_owned()],
             "withdrawing redacts the reaction event that actually arrived"
+        );
+    }
+
+    /// The WS echo can beat the HTTP response that carries the reaction's id,
+    /// so the local optimistic apply runs *second*.
+    ///
+    /// This ordering was the gap the per-symptom patches left: the echo
+    /// recorded a sender and a count while `me` stayed false, and the local
+    /// apply then saw `!me` and counted the same reaction again. Both paths now
+    /// share one guard, so order does not matter.
+    #[test]
+    fn an_echo_arriving_before_the_local_apply_counts_once() {
+        for own_user_id_known in [true, false] {
+            let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+            let mut app = app_with_rooms(vec![room.clone()]);
+            app.rooms.selected = Some(0);
+            app.messages.events.insert(
+                RoomKey::from(&room),
+                vec![message_with_reactions("$target:example.com", Vec::new())],
+            );
+            if !own_user_id_known {
+                // Strip every tier the resolver consults.
+                app.live.own_senders.clear();
+                app.rooms.rooms[0].account_user_id = None;
+                app.accounts.accounts.clear();
+                app.accounts.client_visible.clear();
+            }
+
+            // The echo lands first.
+            app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+                "$mine:example.com",
+                "$target:example.com",
+                "\u{1f44d}",
+                "@alice:example.com",
+            ))));
+            // Then the HTTP response resolves and the optimistic patch runs.
+            app.apply_local_reaction(
+                "$target:example.com",
+                "\u{1f44d}",
+                "$mine:example.com".to_owned(),
+            );
+
+            assert_eq!(
+                app.selected_reactions().get("$target:example.com"),
+                Some(&vec![("\u{1f44d}".to_owned(), 1)]),
+                "one reaction counts once (own_user_id_known = {own_user_id_known})"
+            );
+        }
+    }
+
+    /// Withdrawing must take the badge to zero, not leave it stuck at one.
+    ///
+    /// When both paths had recorded us, `count` was decremented once while the
+    /// sender entry was also dropped — two removals for one contribution in the
+    /// old code, or none in the new one if removal did not mirror the record.
+    #[test]
+    fn withdrawing_after_an_echo_clears_the_badge() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![message_with_reactions("$target:example.com", Vec::new())],
+        );
+
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+            "$mine:example.com",
+            "$target:example.com",
+            "\u{1f44d}",
+            "@alice:example.com",
+        ))));
+        app.apply_local_reaction(
+            "$target:example.com",
+            "\u{1f44d}",
+            "$mine:example.com".to_owned(),
+        );
+        app.remove_local_reaction(
+            "$target:example.com",
+            "\u{1f44d}",
+            &["$mine:example.com".to_owned()],
+        );
+
+        assert_eq!(
+            app.selected_reactions().get("$target:example.com"),
+            None,
+            "the badge clears rather than sticking at 1"
         );
     }
 
