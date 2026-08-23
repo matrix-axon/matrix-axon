@@ -1079,7 +1079,7 @@ test('narrow: message actions fit as icon buttons', async ({ page }) => {
   const row = page.locator('.event-row', { hasText: body }).last()
   await expect(row).toBeVisible()
   await expect(row.getByRole('button', { name: 'Reply' })).toHaveCount(0)
-  await row.locator('.event-body').click()
+  await tapMessageBody(row.locator('.event-body'))
 
   await expect(row.getByRole('button', { name: 'Reply' })).toBeVisible()
   await expect(row.getByRole('button', { name: 'Thread' })).toBeVisible()
@@ -1103,6 +1103,72 @@ test('narrow: message actions fit as icon buttons', async ({ page }) => {
   expect(confirming.right).toBeLessThanOrEqual(confirming.viewportWidth)
   expect(confirming.iconCount).toBe(confirming.buttonCount)
   expect(confirming.visibleLabelCount).toBe(0)
+})
+
+test('narrow: opening message actions does not move the sender or avatar', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(ROOM_URL)
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
+
+  const body = `stable header ${Date.now()}`
+  await page.getByRole('textbox', { name: /^Message/ }).fill(body)
+  await page.getByRole('button', { name: 'Send' }).click()
+  const row = page.locator('.event-row', { hasText: body }).last()
+  await expect(row).toBeVisible()
+
+  const before = await rowHeaderGeometry(row)
+  await tapMessageBody(row.locator('.event-body'))
+  await expect(row.getByRole('button', { name: 'Reply' })).toBeVisible()
+  const after = await rowHeaderGeometry(row)
+
+  expect(Math.abs(after.senderLeft - before.senderLeft)).toBeLessThanOrEqual(
+    LAYOUT_EDGE_TOLERANCE_PX,
+  )
+  expect(Math.abs(after.senderTop - before.senderTop)).toBeLessThanOrEqual(
+    LAYOUT_EDGE_TOLERANCE_PX,
+  )
+  expect(Math.abs(after.avatarLeft - before.avatarLeft)).toBeLessThanOrEqual(
+    LAYOUT_EDGE_TOLERANCE_PX,
+  )
+  expect(Math.abs(after.avatarTop - before.avatarTop)).toBeLessThanOrEqual(
+    LAYOUT_EDGE_TOLERANCE_PX,
+  )
+})
+
+test('narrow: tapping a second message dismisses the first action bar', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(ROOM_URL)
+  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+    'Live',
+  )
+
+  const first = `first action ${Date.now()}`
+  const second = `second action ${Date.now()}`
+  const composer = page.getByRole('textbox', { name: /^Message/ })
+  await composer.fill(first)
+  await page.getByRole('button', { name: 'Send' }).click()
+  const row1 = page.locator('.event-row', { hasText: first }).last()
+  await expect(row1).toBeVisible()
+  await composer.fill(second)
+  await page.getByRole('button', { name: 'Send' }).click()
+  const row2 = page.locator('.event-row', { hasText: second }).last()
+  await expect(row2).toBeVisible()
+
+  await tapMessageBody(row1.locator('.event-body'))
+  await expect(row1.getByRole('button', { name: 'Reply' })).toBeVisible()
+  await expect(row2.getByRole('button', { name: 'Reply' })).toHaveCount(0)
+
+  await tapMessageBody(row2.locator('.event-body'))
+  await expect(row2.getByRole('button', { name: 'Reply' })).toBeVisible()
+  await expect(row1.getByRole('button', { name: 'Reply' })).toHaveCount(0)
 })
 
 test('narrow: thread badge opens on the first tap', async ({ page }) => {
@@ -1370,6 +1436,41 @@ for (const viewport of [320, 640, 880, 1024, 1400, 1920]) {
       return el.scrollWidth - el.clientWidth
     })
     expect(overflow).toBeLessThanOrEqual(0)
+  })
+}
+
+/**
+ * A finger tap, not Playwright's mouse `click()`. Chromium `click()` fires on
+ * any element; iOS often will not synthesize `click` on a non-button `<li>`,
+ * which is why a passing layout spec still failed on a real phone.
+ */
+async function rowHeaderGeometry(row: Locator) {
+  return row.evaluate((el) => {
+    const sender = el.querySelector<HTMLElement>('.event-sender')!
+    const avatar = el.querySelector<HTMLElement>('.user-avatar')!
+    const senderBox = sender.getBoundingClientRect()
+    const avatarBox = avatar.getBoundingClientRect()
+    return {
+      senderLeft: senderBox.left,
+      senderTop: senderBox.top,
+      avatarLeft: avatarBox.left,
+      avatarTop: avatarBox.top,
+    }
+  })
+}
+
+async function tapMessageBody(body: Locator) {
+  await body.evaluate((el) => {
+    const init: PointerEventInit = {
+      bubbles: true,
+      cancelable: true,
+      pointerId: 1,
+      pointerType: 'touch',
+      clientX: 1,
+      clientY: 1,
+    }
+    el.dispatchEvent(new PointerEvent('pointerdown', init))
+    el.dispatchEvent(new PointerEvent('pointerup', init))
   })
 }
 

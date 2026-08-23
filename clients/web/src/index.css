@@ -2712,6 +2712,18 @@ span.composer-attachment-thumb {
 }
 
 @media (max-width: 47.99rem) {
+  /* iOS only synthesizes `click` on a non-button if it looks clickable. */
+  .event-row {
+    cursor: pointer;
+  }
+
+  /* Match the icon-button box so opening the bar does not retarget the
+     sender's baseline (and the avatar next to it) down by a few pixels. */
+  .event-head {
+    align-items: center;
+    min-height: 1.75rem;
+  }
+
   .event-actions {
     gap: 0.1rem;
   }
@@ -2728,6 +2740,7 @@ span.composer-attachment-thumb {
   }
 
   .event-actions .event-action-button {
+    box-sizing: border-box;
     width: 1.75rem;
     height: 1.75rem;
     min-width: 1.75rem;
@@ -2966,6 +2979,11 @@ span.composer-attachment-thumb {
 
 .thread-root-copy {
   min-width: 0;
+}
+
+/* Full root is a regular message row so it can share the action bar. */
+.thread-root-event {
+  display: block;
 }
 
 .thread-root.compact {

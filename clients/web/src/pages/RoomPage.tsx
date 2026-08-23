@@ -1906,6 +1906,9 @@ function Timeline({
     eventId: string | null
     active: boolean
   }>({ eventId: null, active: false })
+  const [actionsOpenEventId, setActionsOpenEventId] = useState<string | null>(
+    null,
+  )
 
   /**
    * The row the reader's eye is on: where it sat relative to the scroller's
@@ -2612,6 +2615,8 @@ function Timeline({
       settings={settings}
       reactionPickerOpen={reactionPickerEventId === event.event_id}
       onSetReactionPicker={onSetReactionPicker}
+      actionsOpen={actionsOpenEventId === event.event_id}
+      onOpenActions={() => setActionsOpenEventId(event.event_id)}
       onReply={onReply}
       onEdit={onEdit}
       onOpenThread={onOpenThread}

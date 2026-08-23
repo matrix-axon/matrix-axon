@@ -188,6 +188,16 @@ function renderRoom(
   return { services, ...utils }
 }
 
+function panelEventRow(panel: HTMLElement, eventId: string): HTMLElement {
+  const row = [...panel.querySelectorAll('li.event-row')].find(
+    (element) => element.getAttribute('data-event-id') === eventId,
+  )
+  if (!(row instanceof HTMLElement)) {
+    throw new Error(`missing thread row ${eventId}`)
+  }
+  return row
+}
+
 function mockSinglePane() {
   return vi.spyOn(window, 'matchMedia').mockImplementation(
     (query: string) =>
@@ -1797,7 +1807,11 @@ describe('threads', () => {
     const panel = await findByLabelText('Thread')
     await within(panel).findByText('inside the thread')
 
-    fireEvent.click(within(panel).getByRole('button', { name: 'Reply' }))
+    fireEvent.click(
+      within(panelEventRow(panel, '$m1')).getByRole('button', {
+        name: 'Reply',
+      }),
+    )
     const textarea = getByLabelText('Reply in thread') as HTMLTextAreaElement
     fireEvent.input(textarea, { target: { value: 'specific reply' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
@@ -1845,11 +1859,87 @@ describe('threads', () => {
     const panel = await findByLabelText('Thread')
     await within(panel).findByText('inside the thread')
 
-    fireEvent.click(within(panel).getByRole('button', { name: 'React' }))
-    fireEvent.click(within(panel).getByRole('button', { name: '👍' }))
+    fireEvent.click(
+      within(panelEventRow(panel, '$m1')).getByRole('button', {
+        name: 'React',
+      }),
+    )
+    fireEvent.click(
+      within(panelEventRow(panel, '$m1')).getByRole('button', { name: '👍' }),
+    )
 
     await waitFor(() => expect(reactionBody.key).toBe('👍'))
     expect(reactionTarget).toBe('$m1')
+  })
+
+  it('lets the thread root use message actions except opening a nested thread', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: {
+              events: [
+                event('$m1', 200, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'inside the thread',
+                }),
+              ],
+              next_cursor: null,
+            },
+          }),
+      ),
+    )
+    const { findByLabelText } = renderRoom(
+      [event('$root', 100)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
+    )
+    const panel = await findByLabelText('Thread')
+    await within(panel).findByText('inside the thread')
+    const rootRow = await waitFor(() => panelEventRow(panel, '$root'))
+
+    expect(within(rootRow).getByRole('button', { name: 'Reply' })).toBeTruthy()
+    expect(within(rootRow).getByRole('button', { name: 'React' })).toBeTruthy()
+    expect(within(rootRow).queryByRole('button', { name: 'Thread' })).toBeNull()
+    expect(within(panel).queryByRole('button', { name: 'Thread' })).toBeNull()
+  })
+
+  it('reacts to the thread root from the thread pane', async () => {
+    let reactionBody: Record<string, unknown> = {}
+    let reactionTarget: string | null = null
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: { events: [], next_cursor: null },
+          }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/events/:eventId/reactions`,
+        async ({ params, request }) => {
+          reactionTarget = params.eventId as string
+          reactionBody = (await request.json()) as Record<string, unknown>
+          return HttpResponse.json({ data: { event_id: '$reaction' } })
+        },
+      ),
+    )
+    const { findByLabelText } = renderRoom(
+      [event('$root', 100)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
+    )
+    const panel = await findByLabelText('Thread')
+    const rootRow = await waitFor(() => panelEventRow(panel, '$root'))
+
+    fireEvent.click(
+      within(rootRow).getByRole('button', {
+        name: 'React',
+      }),
+    )
+    fireEvent.click(within(panel).getByRole('button', { name: '👍' }))
+
+    await waitFor(() => expect(reactionBody.key).toBe('👍'))
+    expect(reactionTarget).toBe('$root')
   })
 
   it('edits an own message from the thread pane', async () => {

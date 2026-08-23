@@ -321,6 +321,74 @@ describe('RoomPage', () => {
     expect(container.querySelectorAll('.day-separator')).toHaveLength(2)
   })
 
+  it('keeps only one message action bar open at a time', async () => {
+    const { findByText, container } = renderRoom([
+      event('$1', T0),
+      event('$2', T0 + 1),
+    ])
+    await findByText('body of $1')
+    const row1 = container.querySelector('li.event-row[data-event-id="$1"]')!
+    const row2 = container.querySelector('li.event-row[data-event-id="$2"]')!
+
+    fireEvent.click(row1.querySelector('.event-body')!)
+    expect(row1.classList.contains('actions-open')).toBe(true)
+    expect(row2.classList.contains('actions-open')).toBe(false)
+
+    fireEvent.click(row2.querySelector('.event-body')!)
+    expect(row1.classList.contains('actions-open')).toBe(false)
+    expect(row2.classList.contains('actions-open')).toBe(true)
+  })
+
+  it('opens the action bar from a touch tap, not only a mouse click', async () => {
+    const { findByText, container } = renderRoom([event('$1', T0)])
+    await findByText('body of $1')
+    const row = container.querySelector('li.event-row[data-event-id="$1"]')!
+    const body = row.querySelector('.event-body')!
+
+    fireEvent.pointerDown(body, {
+      pointerType: 'touch',
+      pointerId: 1,
+      clientX: 40,
+      clientY: 40,
+    })
+    fireEvent.pointerUp(body, {
+      pointerType: 'touch',
+      pointerId: 1,
+      clientX: 42,
+      clientY: 41,
+    })
+
+    expect(row.classList.contains('actions-open')).toBe(true)
+  })
+
+  it('does not open the action bar when the touch was a scroll', async () => {
+    const { findByText, container } = renderRoom([event('$1', T0)])
+    await findByText('body of $1')
+    const row = container.querySelector('li.event-row[data-event-id="$1"]')!
+    const body = row.querySelector('.event-body')!
+
+    fireEvent.pointerDown(body, {
+      pointerType: 'touch',
+      pointerId: 1,
+      clientX: 40,
+      clientY: 40,
+    })
+    fireEvent.pointerMove(body, {
+      pointerType: 'touch',
+      pointerId: 1,
+      clientX: 40,
+      clientY: 80,
+    })
+    fireEvent.pointerUp(body, {
+      pointerType: 'touch',
+      pointerId: 1,
+      clientX: 40,
+      clientY: 80,
+    })
+
+    expect(row.classList.contains('actions-open')).toBe(false)
+  })
+
   it('does not expose the raw room id in the composer while the title loads', async () => {
     const { findByText, getByRole } = renderRoom([event('$1', T0)], {
       roomsPending: true,

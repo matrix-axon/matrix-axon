@@ -136,6 +136,23 @@ export function ThreadPanel({
   const [reactionPickerEventId, setReactionPickerEventId] = useState<
     string | null
   >(null)
+  const [actionsOpenEventId, setActionsOpenEventId] = useState<string | null>(
+    null,
+  )
+  const refetchRoot = useCallback(() => {
+    const id = rootId
+    inBackground(
+      api
+        .GET('/v1/accounts/{account_id}/events/{event_id}', {
+          params: { path: { account_id: accountId, event_id: id } },
+        })
+        .then(({ data }) => {
+          if (data !== undefined) {
+            setRoot(data.data)
+          }
+        }),
+    )
+  }, [api, accountId, rootId])
   /** Scopes the viewer's focus-restore lookup to this panel's own rows. */
   const threadListRef = useRef<HTMLOListElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -206,7 +223,10 @@ export function ThreadPanel({
     roomTitles,
     ownUserId,
     attachmentScope: `${accountId}\0${roomId}\0${rootId}`,
-    onMutation: search.clear,
+    onMutation: () => {
+      search.clear()
+      refetchRoot()
+    },
     staging,
   })
 
@@ -292,11 +312,33 @@ export function ThreadPanel({
   useEffect(() => {
     return live.subscribe((frame) => {
       const event = timelineEvent(frame)
-      if (event !== null) {
-        thread.ingestLive(event)
+      if (event === null) {
+        return
+      }
+      thread.ingestLive(event)
+      if (event.event_id === rootId) {
+        setRoot(event)
+        return
+      }
+      const relates = event.relates_to as {
+        rel_type?: unknown
+        event_id?: unknown
+      } | null
+      if (
+        typeof relates?.event_id === 'string' &&
+        relates.event_id === rootId &&
+        (relates.rel_type === 'm.annotation' ||
+          relates.rel_type === 'm.replace')
+      ) {
+        refetchRoot()
+        return
+      }
+      const redacts = (event.content as { redacts?: unknown } | null)?.redacts
+      if (event.type === 'm.room.redaction' && redacts === rootId) {
+        refetchRoot()
       }
     })
-  }, [live, thread])
+  }, [live, refetchRoot, rootId, thread])
 
   // Reconnect gap-fill (ADR 0061): the bus is lossy, so re-read the thread's
   // head after a drop. `reconnects` starts at 0; the initial load above is
@@ -307,6 +349,15 @@ export function ThreadPanel({
     }
     void thread.loadLatest()
   }, [live.reconnects.value, thread])
+
+  useEffect(() => {
+    if (rootEvent === undefined) {
+      return
+    }
+    setRoot((current) =>
+      current?.event_id === rootEvent.event_id ? current : rootEvent,
+    )
+  }, [rootEvent])
 
   useEffect(() => {
     if (root !== undefined) {
@@ -320,7 +371,7 @@ export function ThreadPanel({
         })
         .then(({ data }) => {
           if (!cancelled && data !== undefined) {
-            setRoot(data.data)
+            setRoot((current) => current ?? data.data)
           }
         }),
     )
@@ -382,6 +433,8 @@ export function ThreadPanel({
       settings={settings}
       reactionPickerOpen={reactionPickerEventId === event.event_id}
       onSetReactionPicker={setReactionPickerEventId}
+      actionsOpen={actionsOpenEventId === event.event_id}
+      onOpenActions={() => setActionsOpenEventId(event.event_id)}
       onReply={(replyTo) => setAction({ kind: 'reply', event: replyTo })}
       onEdit={(editing) => setAction({ kind: 'edit', event: editing })}
       showThreadAction={false}
@@ -424,12 +477,44 @@ export function ThreadPanel({
           </div>
         )}
         <div ref={rootRef}>
-          <ThreadRoot
-            accountId={accountId}
-            rootId={rootId}
-            root={root}
-            members={members}
-          />
+          {root !== undefined ? (
+            <div class="thread-root thread-root-event">
+              <ol class="event-list">
+                <MessageEventRow
+                  event={root}
+                  timeline={thread}
+                  members={members}
+                  accountId={accountId}
+                  ownUserId={ownUserId}
+                  highlighted={root.event_id === targetEventId}
+                  settings={settings}
+                  reactionPickerOpen={reactionPickerEventId === root.event_id}
+                  onSetReactionPicker={setReactionPickerEventId}
+                  actionsOpen={actionsOpenEventId === root.event_id}
+                  onOpenActions={() => setActionsOpenEventId(root.event_id)}
+                  onReply={(replyTo) =>
+                    setAction({ kind: 'reply', event: replyTo })
+                  }
+                  onEdit={(editing) =>
+                    setAction({ kind: 'edit', event: editing })
+                  }
+                  showThreadAction={false}
+                  threadRootId={rootId}
+                  onReplyContextJump={jumpToReplyContext}
+                  onMutation={() => {
+                    search.clear()
+                    refetchRoot()
+                  }}
+                />
+              </ol>
+            </div>
+          ) : (
+            <div class="thread-root">
+              <span class="muted">
+                root <code>{rootId}</code>
+              </span>
+            </div>
+          )}
         </div>
         {thread.loading.value ? (
           <p class="muted">Loading thread…</p>

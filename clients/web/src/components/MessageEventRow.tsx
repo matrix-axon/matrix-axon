@@ -43,6 +43,8 @@ export const QUICK_REACTIONS = ['👍', '❤️', '😂', '🎉', '😮', '😢'
 const REACTION_TOOLTIP_NAME_LIMIT = 10
 const REACTION_TOUCH_HOLD_MS = 450
 const EVENT_ACTION_TOUCH_HOLD_MS = 550
+/** Finger travel that still counts as a tap on the row, matching the room list. */
+const ACTION_ROW_TAP_SLOP_PX = 10
 
 type EmojiPickerClickDetail = {
   unicode?: string
@@ -222,6 +224,8 @@ export function MessageEventRow({
   settings,
   reactionPickerOpen,
   onSetReactionPicker,
+  actionsOpen,
+  onOpenActions,
   onReply,
   onEdit,
   onOpenThread,
@@ -242,6 +246,12 @@ export function MessageEventRow({
   settings: SettingsStore
   reactionPickerOpen: boolean
   onSetReactionPicker: (eventId: string | null) => void
+  /**
+   * Owned by the list, not the row: one open bar at a time. A per-row flag
+   * would leave the previous message's actions up when another is tapped.
+   */
+  actionsOpen: boolean
+  onOpenActions: () => void
   onReply: (event: EventDto) => void
   onEdit: (event: EventDto) => void
   onOpenThread?: (rootId: string) => void
@@ -256,7 +266,12 @@ export function MessageEventRow({
   const [historyOpen, setHistoryOpen] = useState(false)
   const [confirmingRedact, setConfirmingRedact] = useState(false)
   const [inspectOpen, setInspectOpen] = useState(false)
-  const [actionsOpen, setActionsOpen] = useState(false)
+  const touchTap = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    moved: boolean
+  } | null>(null)
   const isState = isStateEvent(event)
   const replyTo = inReplyToId(event)
   const threadSummary = threads?.summaries.value.get(event.event_id)
@@ -273,13 +288,77 @@ export function MessageEventRow({
       receipt.userId !== ownUserId && receipt.userId !== event.sender,
   )
 
+  useEffect(() => {
+    if (!actionsOpen) {
+      setConfirmingRedact(false)
+    }
+  }, [actionsOpen])
+
   return (
     <li
       class={`event-row${isState ? ' state-event' : ''}${highlighted ? ' highlighted' : ''}${pending ? ' pending' : ''}${failed ? ' failed' : ''}${actionsOpen ? ' actions-open' : ''}`}
       data-event-id={event.event_id}
+      onPointerDown={(pointerEvent) => {
+        // Same reason the thread badge opens on pointerdown: iOS does not
+        // synthesize `click` on a non-button `<li>`, and mobile CSS hides the
+        // hover bar, so a real tap would otherwise do nothing. Mouse keeps
+        // `click` below. Scroll is filtered on move/cancel, like the room list.
+        if (
+          pointerEvent.pointerType === 'mouse' ||
+          isRowControl(pointerEvent.target)
+        ) {
+          return
+        }
+        touchTap.current = {
+          pointerId: pointerEvent.pointerId,
+          startX: pointerEvent.clientX,
+          startY: pointerEvent.clientY,
+          moved: false,
+        }
+      }}
+      onPointerMove={(pointerEvent) => {
+        const tap = touchTap.current
+        if (
+          tap === null ||
+          tap.pointerId !== pointerEvent.pointerId ||
+          tap.moved
+        ) {
+          return
+        }
+        if (
+          Math.hypot(
+            pointerEvent.clientX - tap.startX,
+            pointerEvent.clientY - tap.startY,
+          ) > ACTION_ROW_TAP_SLOP_PX
+        ) {
+          tap.moved = true
+        }
+      }}
+      onPointerCancel={() => {
+        touchTap.current = null
+      }}
+      onPointerUp={(pointerEvent) => {
+        const tap = touchTap.current
+        touchTap.current = null
+        if (
+          pointerEvent.pointerType === 'mouse' ||
+          tap === null ||
+          tap.pointerId !== pointerEvent.pointerId ||
+          tap.moved ||
+          Math.hypot(
+            pointerEvent.clientX - tap.startX,
+            pointerEvent.clientY - tap.startY,
+          ) > ACTION_ROW_TAP_SLOP_PX ||
+          isRowControl(pointerEvent.target)
+        ) {
+          return
+        }
+        pointerEvent.preventDefault()
+        onOpenActions()
+      }}
       onClick={(click) => {
         if (!isRowControl(click.target)) {
-          setActionsOpen(true)
+          onOpenActions()
         }
       }}
     >
