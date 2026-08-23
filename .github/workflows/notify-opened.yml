@@ -18,7 +18,7 @@ jobs:
     continue-on-error: true
     steps:
       # pull_request_target must use only the base branch; never execute PR code.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
@@ -28,13 +28,31 @@ jobs:
           NOTIFY_HOMESERVER: ${{ secrets.NOTIFY_HOMESERVER }}
           NOTIFY_ROOM: ${{ secrets.NOTIFY_ROOM }}
           NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
-          KIND: ${{ github.event_name == 'issues' && 'issue' || 'pull request' }}
-          TITLE: ${{ github.event_name == 'issues' && github.event.issue.title || github.event.pull_request.title }}
-          BODY: ${{ github.event_name == 'issues' && github.event.issue.body || github.event.pull_request.body }}
-          URL: ${{ github.event_name == 'issues' && github.event.issue.html_url || github.event.pull_request.html_url }}
-          AUTHOR: ${{ github.event_name == 'issues' && github.event.issue.user.login || github.event.pull_request.user.login }}
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
+
+          if [ "$EVENT_NAME" = "issues" ]; then
+            KIND="issue"
+            TITLE="$ISSUE_TITLE"
+            BODY="$ISSUE_BODY"
+            URL="$ISSUE_URL"
+            AUTHOR="$ISSUE_AUTHOR"
+          else
+            KIND="pull request"
+            TITLE="$PR_TITLE"
+            BODY="$PR_BODY"
+            URL="$PR_URL"
+            AUTHOR="$PR_AUTHOR"
+          fi
 
           MATRIX_BODY="$(jq -nr \
             --arg kind "$KIND" \
