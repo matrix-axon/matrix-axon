@@ -3536,6 +3536,39 @@ mod tests {
         event
     }
 
+    /// A non-`m.reaction` annotation must not reach the badge.
+    ///
+    /// Matrix permits any event type to carry `m.annotation`; ADR 0033
+    /// restricts aggregation to `m.reaction`, and #112 tracks the others
+    /// separately. Folding one into the tally would inflate the badge for a key
+    /// the server's own aggregation never includes, while the annotation also
+    /// rendered as its own row.
+    #[test]
+    fn a_non_reaction_annotation_does_not_touch_the_tally() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![message_with_reactions("$target:example.com", Vec::new())],
+        );
+
+        let mut annotation = reaction_frame(
+            "$approval:example.com",
+            "$target:example.com",
+            "\u{1f44d}",
+            "@bob:example.com",
+        );
+        annotation.event_type = "com.example.approval".to_owned();
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(annotation)));
+
+        assert_eq!(
+            app.selected_reactions().get("$target:example.com"),
+            None,
+            "only m.reaction annotations aggregate (ADR 0033)"
+        );
+    }
+
     /// A reaction from someone else must reach the badge as it arrives.
     ///
     /// `append_live_event` had a merge branch for edits and none for reactions,

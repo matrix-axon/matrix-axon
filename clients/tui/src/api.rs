@@ -1510,6 +1510,16 @@ impl EventDto {
     /// The `(target event id, key)` an `m.reaction` annotates
     /// (`m.relates_to` with `rel_type: m.annotation`).
     pub fn reaction_relation(&self) -> Option<(&str, &str)> {
+        // Matrix permits any event type to carry `m.annotation`, and ADR 0033
+        // restricts aggregation to `m.reaction` deliberately: a non-reaction
+        // annotation (a `com.example.approval`, say) is tracked separately
+        // (#112) and renders as its own row. Matching on `rel_type` alone would
+        // fold one into the badge for a key the server's own aggregation never
+        // includes, while it still rendered as a row — a double representation
+        // that only a reload would clear.
+        if self.event_type != "m.reaction" {
+            return None;
+        }
         let relates_to = self.relates_to.as_ref()?;
         if relates_to.get("rel_type")?.as_str()? != "m.annotation" {
             return None;
