@@ -3778,9 +3778,28 @@ input[type='checkbox'] {
   color: var(--muted);
 }
 
+/*
+ * Wraps rather than compresses: the options carry real sentences ("Membership
+ * and profile changes"), and shrinking them into narrow columns at phone width
+ * is far harder to read than letting a row spill onto a second line. The row
+ * gap is tighter than the column gap so a wrapped group still reads as one.
+ */
 .theme-picker {
   display: flex;
-  gap: 1.25rem;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.25rem;
+}
+
+/*
+ * Names a control group inside a settings panel, under the panel's own `h2`.
+ * `margin-top: 0` leaves the h2's bottom margin as the only gap above, so
+ * adding a label does not push the group down; the small bottom margin binds
+ * the label to the group it names rather than floating between the two.
+ */
+.settings-group-label {
+  margin: 0 0 0.4rem;
+  font-size: 0.9rem;
+  font-weight: 600;
 }
 
 .inline-form {

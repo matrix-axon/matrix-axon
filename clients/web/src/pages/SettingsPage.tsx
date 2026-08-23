@@ -113,7 +113,14 @@ export function SettingsPage() {
       </section>
       <section class="panel">
         <h2>Messages</h2>
-        <div class="theme-picker" role="radiogroup" aria-label="State events">
+        <h3 class="settings-group-label" id="settings-state-events">
+          State events
+        </h3>
+        <div
+          class="theme-picker"
+          role="radiogroup"
+          aria-labelledby="settings-state-events"
+        >
           {STATE_EVENTS.map(({ value, label }) => (
             <label key={value}>
               <input
@@ -145,10 +152,13 @@ export function SettingsPage() {
         <p class="muted">
           Remove redacted (deleted) placeholders from messages.
         </p>
+        <h3 class="settings-group-label" id="settings-time-format">
+          Timestamp format
+        </h3>
         <div
           class="theme-picker"
           role="radiogroup"
-          aria-label="Timestamp format"
+          aria-labelledby="settings-time-format"
         >
           {TIME_FORMATS.map(({ value, label }) => (
             <label key={value}>
@@ -163,7 +173,6 @@ export function SettingsPage() {
             </label>
           ))}
         </div>
-        <p class="muted">Timestamp format for messages.</p>
       </section>
       <section class="panel">
         <h2>Rooms</h2>
