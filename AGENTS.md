@@ -205,7 +205,10 @@ this table is the orientation copy.
   `AGENTS.md` and `README.md` are reflowed (#225);
   every other file is not, `CONTRIBUTING.md` included — 83% of its paragraph-continuation line breaks still fall mid-sentence at a column.
   Nothing else is being reflowed on sight, because a reformat mixed into an ordinary PR is a diff nobody can review and a blame nobody can skip.
-  To reflow one, do it **alone, in its own PR** with no other change of any kind, then add that PR's squash SHA to `.git-blame-ignore-revs` — see the note in that file for why a commit-level split cannot substitute.
+  To reflow one, do it **alone, in its own PR** with no other change of any kind — see the note in `.git-blame-ignore-revs` for why a commit-level split cannot substitute for a separate PR.
+  **That is two pull requests, not one.**
+  A squash SHA does not exist until the squash does, so listing it is necessarily a second, later change: reflow PR → merge → a one-line follow-up adding the SHA.
+  Skipping that follow-up leaves the reformat un-ignorable, which was the entire reason for isolating it.
 - **A code span must not cross a newline** inside a list item or a blockquote.
   Whitespace inside `` `backticks` `` is content, so `prettier` cannot re-indent the continuation line and dedents it to column 0 instead — dropping the list indentation, or the blockquote's `>`.
   CommonMark's lazy continuation means it still renders correctly, so the damage never shows in the output and only shows in the source.
