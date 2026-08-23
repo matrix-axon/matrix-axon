@@ -23,9 +23,16 @@
 # that reformat is simply not ignorable. Next time: reformat alone, in its own
 # PR, then add its SHA here.
 #
-# That is what #225 does: it reflows `AGENTS.md` and `README.md` to semantic
-# line breaks and contains nothing else — no prose, no config, no script — so
-# its squash SHA is listable. Adding that SHA is the last commit of the PR
-# stacked on it, once `main` actually has it. No entry is written before then:
-# a placeholder here is indistinguishable from a real entry that ignores
-# nothing, which is the failure this file's second paragraph warns about.
+# That is what #225 did: it reflowed `AGENTS.md` and `README.md` to semantic
+# line breaks and contained nothing else — no prose, no config, no script — so
+# its squash SHA is listable, and is the first entry below.
+#
+# Before adding an entry, check the squash itself rather than the branch: the
+# branch commits no longer exist, and the squash is what this file names. For
+# a whitespace-only pass, `jj file show` (or `git show`) both sides and compare
+# `.split()` — a pure reformat leaves the whitespace-delimited token stream of
+# every touched file byte-identical.
+
+# style: apply semantic line breaks to AGENTS.md and README.md (#225)
+# Verified against the squash: AGENTS.md 5423 tokens, README.md 2115, unchanged.
+ba3a050956ba19e2003d29da27d89aff41e80b8b
