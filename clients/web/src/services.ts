@@ -325,12 +325,17 @@ export function connectThreadReceipts(
             },
           })
           .then(
-            ({ data }) => {
+            ({ data, response }) => {
               if (data === undefined) {
-                // A 404 is final: the event is gone, and retrying the same
-                // lookup on every rebroadcast would be pure noise. The marker
-                // stays unset and the thread stays flagged, which is the safe
-                // direction to be wrong in.
+                // Only a 404 is a verdict about the event: it is gone, and
+                // retrying on every rebroadcast would be noise. Anything else —
+                // a 5xx, a gateway error — says nothing about it, and
+                // `openapi-fetch` *resolves* on HTTP errors, so without this
+                // check one transient 500 landed in the "final" branch and
+                // dropped that thread's read signal for the session (review).
+                if (response.status !== 404) {
+                  seen.delete(key)
+                }
                 return
               }
               deviceState.advanceThreadReadMarker(

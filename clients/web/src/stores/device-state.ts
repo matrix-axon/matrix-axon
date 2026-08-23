@@ -1,4 +1,4 @@
-import { computed, effect, signal, type ReadonlySignal } from '@preact/signals'
+import { effect, signal } from '@preact/signals'
 import type { ApiClient } from '../api/client'
 import { deviceStateChange } from '../api/frames'
 import type { LiveConnection } from './live-connection'
@@ -58,10 +58,12 @@ export interface DeviceStateStore {
    */
   hydrateSettled(accountId: string, namespace: string): boolean
   /**
-   * Bumped on every change to the merged cache — a stable scalar for a
-   * `useMemo` that reads markers, which otherwise has no dependency to name.
+   * How many times one `(account, namespace)` scope's entries have changed — a
+   * stable scalar for a `useMemo` that reads values behind a method call and so
+   * has no dependency to name. Per scope, so a draft keystroke does not
+   * invalidate a memo that only reads thread markers.
    */
-  readonly revision: ReadonlySignal<number>
+  revision(accountId: string, namespace: string): number
 
   /** Draft text for a room (`''` when none) — the `drafts` namespace. */
   draft(accountId: string, roomId: string): string
@@ -147,6 +149,16 @@ interface LocalWrite {
   written: number
   acked: number
   ackedAt: number
+}
+
+/** What is known about one `(account, namespace)` scope. */
+interface ScopeState {
+  /** A fetch returned data for it. */
+  hydrated: boolean
+  /** A fetch finished for it, with or without data. */
+  settled: boolean
+  /** Bumped on every change to this scope's entries. */
+  revision: number
 }
 
 /** Parse a marker's wire value (`{event_id, origin_ts}`); `null` if malformed. */
@@ -237,9 +249,18 @@ export function createDeviceStateStore(
 ): DeviceStateStore {
   const deviceId = loadDeviceId(storage)
   const entries = signal<ReadonlyMap<string, unknown>>(new Map())
-  const hydratedScopes = signal<ReadonlySet<string>>(new Set())
-  const settledScopes = signal<ReadonlySet<string>>(new Set())
-  const revision = signal(0)
+  /**
+   * One record per `(account, namespace)` scope instead of a set per outcome:
+   * a fetch's lifecycle is one state, and keeping `hydrated` and `settled` in
+   * separate structures invites updating one and forgetting the other — which
+   * is the exact bug class the two flags exist to prevent (review).
+   *
+   * `revision` counts writes to the scope's *entries*, a different axis from
+   * the fetch lifecycle, and it is per scope on purpose: a single global
+   * counter made every draft keystroke invalidate memos that only read thread
+   * markers, undoing most of the memoisation it was added to enable (review).
+   */
+  const scopes = signal<ReadonlyMap<string, ScopeState>>(new Map())
   /** `(account, namespace)` scopes already fetched (or in flight). */
   const hydrated = new Set<string>()
   /** Debounced pending writes per scope: `key -> value | null`. */
@@ -335,13 +356,29 @@ export function createDeviceStateStore(
       next.set(ck, value)
     }
     entries.value = next
-    revision.value += 1
+    bumpScope(accountId, namespace)
   }
 
-  function noteSettled(accountId: string, namespace: string): void {
-    settledScopes.value = new Set(settledScopes.value).add(
-      scopeKey(accountId, namespace),
-    )
+  function updateScope(
+    accountId: string,
+    namespace: string,
+    change: Partial<ScopeState>,
+  ): void {
+    const key = scopeKey(accountId, namespace)
+    const current = scopes.value.get(key) ?? {
+      hydrated: false,
+      settled: false,
+      revision: 0,
+    }
+    scopes.value = new Map(scopes.value).set(key, { ...current, ...change })
+  }
+
+  function bumpScope(accountId: string, namespace: string): void {
+    const key = scopeKey(accountId, namespace)
+    const current = scopes.value.get(key)
+    updateScope(accountId, namespace, {
+      revision: (current?.revision ?? 0) + 1,
+    })
   }
 
   async function fetchScope(
@@ -361,11 +398,11 @@ export function createDeviceStateStore(
         },
       }))
     } catch {
-      noteSettled(accountId, namespace)
+      updateScope(accountId, namespace, { settled: true })
       return
     }
     if (data === undefined) {
-      noteSettled(accountId, namespace)
+      updateScope(accountId, namespace, { settled: true })
       return
     }
     const next = new Map(entries.value)
@@ -377,11 +414,8 @@ export function createDeviceStateStore(
       }
     }
     entries.value = next
-    revision.value += 1
-    hydratedScopes.value = new Set(hydratedScopes.value).add(
-      scopeKey(accountId, namespace),
-    )
-    noteSettled(accountId, namespace)
+    bumpScope(accountId, namespace)
+    updateScope(accountId, namespace, { hydrated: true, settled: true })
   }
 
   async function putEntries(
@@ -541,7 +575,7 @@ export function createDeviceStateStore(
       }
     }
     entries.value = next
-    revision.value += 1
+    bumpScope(frame.accountId, change.namespace)
   })
 
   // Re-read every hydrated scope on reconnect — the lossy bus may have dropped
@@ -611,12 +645,14 @@ export function createDeviceStateStore(
     hydrate,
     flushPending,
     hydrated(accountId, namespace) {
-      return hydratedScopes.value.has(scopeKey(accountId, namespace))
+      return scopes.value.get(scopeKey(accountId, namespace))?.hydrated === true
     },
     hydrateSettled(accountId, namespace) {
-      return settledScopes.value.has(scopeKey(accountId, namespace))
+      return scopes.value.get(scopeKey(accountId, namespace))?.settled === true
     },
-    revision: computed(() => revision.value),
+    revision(accountId, namespace) {
+      return scopes.value.get(scopeKey(accountId, namespace))?.revision ?? 0
+    },
     draft(accountId, roomId) {
       return draftText(
         entries.value.get(cacheKey(accountId, DRAFTS_NAMESPACE, roomId)),
@@ -651,7 +687,8 @@ export function createDeviceStateStore(
     },
     async baselineReadMarkers(accountId, rooms) {
       if (
-        !hydratedScopes.value.has(scopeKey(accountId, READ_MARKERS_NAMESPACE))
+        scopes.value.get(scopeKey(accountId, READ_MARKERS_NAMESPACE))
+          ?.hydrated !== true
       ) {
         return
       }

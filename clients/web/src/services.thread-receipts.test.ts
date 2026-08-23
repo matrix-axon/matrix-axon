@@ -195,6 +195,33 @@ describe('connectThreadReceipts', () => {
     expect(threadUnread.isUnread(ACCT, ROOM, ROOT)).toBe(false)
   })
 
+  it('retries after a transient error status, but not after a 404', async () => {
+    const { deviceState, socket } = harness()
+    let attempts = 0
+    server.use(
+      http.get(`${BASE}/v1/accounts/:accountId/events/:eventId`, () => {
+        attempts += 1
+        // A 500 says nothing about the event; a 404 says it is gone.
+        return attempts === 1
+          ? new HttpResponse(null, { status: 500 })
+          : new HttpResponse(null, { status: 404 })
+      }),
+    )
+
+    socket().emitMessage(receiptFrame({ ts: 1, thread_id: ROOT }))
+    await vi.waitFor(() => expect(attempts).toBe(1))
+
+    // Retried, because the 500 released the dedup key.
+    socket().emitMessage(receiptFrame({ ts: 2, thread_id: ROOT }))
+    await vi.waitFor(() => expect(attempts).toBe(2))
+
+    // Not retried after the 404, which is final.
+    socket().emitMessage(receiptFrame({ ts: 3, thread_id: ROOT }))
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(attempts).toBe(2)
+    expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).toBeNull()
+  })
+
   it('ignores a main-timeline receipt', async () => {
     const { deviceState, threadUnread, socket } = harness()
 

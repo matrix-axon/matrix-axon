@@ -50,3 +50,24 @@ export function viewMayClaimReadState(view: {
 }): boolean {
   return view.anchoredTo === null && view.atEnd && !view.loading
 }
+
+/**
+ * The arrival-max event strictly below `ceiling`, or the arrival-max overall
+ * when there is no ceiling.
+ *
+ * Both receipt call sites bound their pick this way — the room view against the
+ * first unread foreign reply above its own target, the thread panel against the
+ * bound the room view hands it — and they had written the comparison
+ * separately. That is the duplication `viewMayClaimReadState` was extracted to
+ * end, one rule lower down (review).
+ */
+export function maxByArrivalOrderBelow<T extends HasArrivalOrder>(
+  events: Iterable<T>,
+  ceiling: number | null,
+): T | null {
+  return maxByArrivalOrder(
+    ceiling === null
+      ? events
+      : [...events].filter((event) => event.arrival_order < ceiling),
+  )
+}

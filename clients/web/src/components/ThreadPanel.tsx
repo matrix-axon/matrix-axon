@@ -19,8 +19,10 @@ import { createTimelineStore, type EventDto } from '../stores/timeline'
 import type { TimelineEvent, TimelineStore } from '../stores/timeline'
 import {
   maxByArrivalOrder,
+  maxByArrivalOrderBelow,
   viewMayClaimReadState,
 } from '../timeline/arrival-order'
+import { hiddenByRedaction } from '../timeline/visibility'
 import { Composer, type ComposerAutocompleteOption } from './Composer'
 import { ErrorBanner } from './ErrorBanner'
 import { Fragment } from 'preact'
@@ -315,7 +317,7 @@ export function ThreadPanel({
     const shown = thread.events.value.filter(
       (event) =>
         !event.event_id.startsWith('local:') &&
-        !(hideRedacted && event.redacted),
+        !hiddenByRedaction(event, hideRedacted),
     )
     const displayLast = shown.at(-1)
     const arrivalMax = maxByArrivalOrder(shown)
@@ -344,12 +346,7 @@ export function ThreadPanel({
     // clears and one that does not. The room stream names its own target from
     // the main timeline; `ephemeral-sender`'s forward-only floor merges the two
     // picks, so neither call site needs to know about the other.
-    const target =
-      receiptCeiling === null
-        ? arrivalMax
-        : maxByArrivalOrder(
-            shown.filter((event) => event.arrival_order < receiptCeiling),
-          )
+    const target = maxByArrivalOrderBelow(shown, receiptCeiling)
     if (target !== null) {
       ephemeralSender.noteRead(
         accountId,

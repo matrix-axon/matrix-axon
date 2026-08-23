@@ -55,8 +55,10 @@ import {
 } from '../timeline/group-media-runs'
 import {
   maxByArrivalOrder,
+  maxByArrivalOrderBelow,
   viewMayClaimReadState,
 } from '../timeline/arrival-order'
+import { hiddenByRedaction } from '../timeline/visibility'
 import {
   NATIVE_BACK_EDGE_PX,
   SWIPE_AXIS_RATIO,
@@ -328,12 +330,18 @@ export function RoomPage() {
    * that exact shape (review: `threads.error`, then device-state hydration).
    */
   /**
-   * One scalar standing in for every marker this page reads. `threadReadMarker`
-   * reaches them behind a method call, so a memo depending on them has nothing
-   * else to name — and listing `deviceState.revision.value` directly reads to
-   * the dependency rule as a redundant property of `deviceState`.
+   * One scalar standing in for the thread markers this page reads.
+   * `threadReadMarker` reaches them behind a method call, so a memo depending on
+   * them has nothing else to name — and listing the call directly reads to the
+   * dependency rule as a redundant property of `deviceState`.
+   *
+   * Scoped to the marker namespace, not the whole store: a global counter meant
+   * every draft keystroke re-ran the receipt scan (review).
    */
-  const deviceStateRevision = deviceState.revision.value
+  const threadMarkerRevision = deviceState.revision(
+    accountId,
+    THREAD_READ_MARKERS_NAMESPACE,
+  )
   const threadStoresLoaded =
     !threads.loading.value &&
     threads.error.value === null &&
@@ -900,7 +908,7 @@ export function RoomPage() {
     // Subscribes the memo to marker writes; `threadReadMarker` reads them
     // behind a method call, which the dependency rule cannot see (same idiom as
     // `ephemeral.revision` below).
-    void deviceStateRevision
+    void threadMarkerRevision
     return [...threads.summaries.value.values()].map((summary) => ({
       summary,
       threadMarker: deviceState.threadReadMarker(
@@ -914,13 +922,13 @@ export function RoomPage() {
     threads.summaries.value,
     threads.roots.value,
     deviceState,
-    deviceStateRevision,
+    threadMarkerRevision,
     accountId,
     roomId,
   ])
 
   const roomReceipt = useMemo(() => {
-    void deviceStateRevision
+    void threadMarkerRevision
     const base = maxByArrivalOrder(displayed)
     const baseOrder = base?.arrival_order ?? -1
     /** Thread replies above the room's own target, from threads not on screen. */
@@ -933,7 +941,7 @@ export function RoomPage() {
       // contract is that a receipt names something that was shown. Left in, the
       // arrival-max reply of an already-read thread could be a redacted one and
       // still become the target (review, blocking).
-      if (hideRedacted && event.redacted) {
+      if (hiddenByRedaction(event, hideRedacted)) {
         return false
       }
       const root = threadRootId(event)
@@ -1022,29 +1030,9 @@ export function RoomPage() {
           : lowest,
       null,
     )
-    const claimable = above.filter(
-      (event) =>
-        isRead(event) && (blocker === null || event.arrival_order < blocker),
-    )
+    const claimable = maxByArrivalOrderBelow(above.filter(isRead), blocker)
     const target = maxByArrivalOrder(
-      base === null ? claimable : [base, ...claimable],
-    )
-    console.log(
-      'ROOMRECEIPT',
-      JSON.stringify({
-        slice: timeline.events.value.map((e) => [
-          e.event_id,
-          e.arrival_order,
-          threadRootId(e),
-          e.redacted,
-        ]),
-        baseOrder,
-        base: base?.event_id,
-        above: above.map((e) => e.event_id),
-        claimable: claimable.map((e) => e.event_id),
-        blocker,
-        target: target?.event_id,
-      }),
+      [base, claimable].filter((event) => event !== null),
     )
     return { blocker, target }
     // `deviceState.revision` is the scalar that stands in for the per-thread
@@ -1060,7 +1048,7 @@ export function RoomPage() {
     openThread,
     hideRedacted,
     deviceState,
-    deviceStateRevision,
+    threadMarkerRevision,
     accountId,
     roomId,
   ])
