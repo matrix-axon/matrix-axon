@@ -1187,6 +1187,77 @@ describe('threads', () => {
     await waitFor(() => expect(document.activeElement).toBe(threadComposer))
   })
 
+  it('inserts day separators when a thread spans multiple days', async () => {
+    const day = 86_400_000
+    const monday = Date.UTC(2026, 5, 1, 12, 0, 0)
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: {
+              // Newest-first, matching the read API; the store reverses to
+              // oldest-at-top the same way the room timeline does.
+              events: [
+                event('$m2', monday + day, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'next day',
+                }),
+                event('$m1', monday, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'same day as root',
+                }),
+              ],
+              next_cursor: null,
+            },
+          }),
+      ),
+    )
+    const { findByLabelText } = renderRoom(
+      [event('$root', monday)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
+    )
+    const panel = await findByLabelText('Thread')
+    await within(panel).findByText('next day')
+    await waitFor(() => panelEventRow(panel, '$root'))
+
+    const labels = [...panel.querySelectorAll('.day-separator')].map(
+      (el) => el.textContent,
+    )
+    expect(labels).toHaveLength(2)
+    expect(labels[0]).not.toBe(labels[1])
+  })
+
+  it('does not insert a second day heading when thread replies stay on the root day', async () => {
+    const monday = Date.UTC(2026, 5, 1, 12, 0, 0)
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: {
+              events: [
+                event('$m1', monday + 60_000, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'later that day',
+                }),
+              ],
+              next_cursor: null,
+            },
+          }),
+      ),
+    )
+    const { findByLabelText } = renderRoom(
+      [event('$root', monday)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
+    )
+    const panel = await findByLabelText('Thread')
+    await within(panel).findByText('later that day')
+    await waitFor(() => panelEventRow(panel, '$root'))
+
+    expect(panel.querySelectorAll('.day-separator')).toHaveLength(1)
+  })
+
   it('mobile swipe-right from a thread closes the thread panel', async () => {
     const media = mockSinglePane()
     try {

@@ -22,7 +22,9 @@ import { ErrorBanner } from './ErrorBanner'
 import { Fragment } from 'preact'
 import { MediaViewerProvider } from '../media/media-viewer'
 import { MediaGalleryRow } from './MediaGalleryRow'
-import { groupMediaRuns } from '../timeline/group-media-runs'
+import { sameLocalDay } from '../calendar-day'
+import { DaySeparator } from './DaySeparator'
+import { groupMediaRuns, rowTs } from '../timeline/group-media-runs'
 import { EventBody } from './EventBody'
 import { MessageEventRow } from './MessageEventRow'
 import { UserAvatar } from './UserAvatar'
@@ -139,6 +141,8 @@ export function ThreadPanel({
   const [actionsOpenEventId, setActionsOpenEventId] = useState<string | null>(
     null,
   )
+  /** After a local refresh, ignore the parent's possibly-stale root copy. */
+  const rootRefreshed = useRef(false)
   const refetchRoot = useCallback(() => {
     const id = rootId
     inBackground(
@@ -148,6 +152,7 @@ export function ThreadPanel({
         })
         .then(({ data }) => {
           if (data !== undefined) {
+            rootRefreshed.current = true
             setRoot(data.data)
           }
         }),
@@ -317,6 +322,7 @@ export function ThreadPanel({
       }
       thread.ingestLive(event)
       if (event.event_id === rootId) {
+        rootRefreshed.current = true
         setRoot(event)
         return
       }
@@ -351,12 +357,10 @@ export function ThreadPanel({
   }, [live.reconnects.value, thread])
 
   useEffect(() => {
-    if (rootEvent === undefined) {
+    if (rootEvent === undefined || rootRefreshed.current) {
       return
     }
-    setRoot((current) =>
-      current?.event_id === rootEvent.event_id ? current : rootEvent,
-    )
+    setRoot(rootEvent)
   }, [rootEvent])
 
   useEffect(() => {
@@ -370,7 +374,7 @@ export function ThreadPanel({
           params: { path: { account_id: accountId, event_id: rootId } },
         })
         .then(({ data }) => {
-          if (!cancelled && data !== undefined) {
+          if (!cancelled && data !== undefined && !rootRefreshed.current) {
             setRoot((current) => current ?? data.data)
           }
         }),
@@ -480,6 +484,7 @@ export function ThreadPanel({
           {root !== undefined ? (
             <div class="thread-root thread-root-event">
               <ol class="event-list">
+                <DaySeparator ts={root.origin_ts} />
                 <MessageEventRow
                   event={root}
                   timeline={thread}
@@ -559,21 +564,39 @@ export function ThreadPanel({
             >
               <div class="timeline-list-shell">
                 <ol ref={threadListRef} class="event-list thread-list">
-                  {rows.map((row) => (
-                    <Fragment key={row.key}>
-                      {row.kind === 'gallery' ? (
-                        <MediaGalleryRow
-                          events={row.events}
-                          accountId={accountId}
-                          members={members}
-                          highlighted={targetEventId}
-                          renderEvent={renderRow}
-                        />
-                      ) : (
-                        renderRow(row.event)
-                      )}
-                    </Fragment>
-                  ))}
+                  {rows.map((row, index) => {
+                    const previousTs =
+                      index === 0
+                        ? (root?.origin_ts ?? null)
+                        : rowTs(rows[index - 1])
+                    const ts = rowTs(row)
+                    // A pending root is not the same as no root. Until it
+                    // resolves there is no day to compare the first reply
+                    // against, and treating that as "new day" flashes a
+                    // separator that disappears once the root lands —
+                    // reliably so on WebKit, which loses that race.
+                    const rootPending = index === 0 && root === undefined
+                    return (
+                      <Fragment key={row.key}>
+                        {!rootPending &&
+                          (previousTs === null ||
+                            !sameLocalDay(previousTs, ts)) && (
+                            <DaySeparator ts={ts} />
+                          )}
+                        {row.kind === 'gallery' ? (
+                          <MediaGalleryRow
+                            events={row.events}
+                            accountId={accountId}
+                            members={members}
+                            highlighted={targetEventId}
+                            renderEvent={renderRow}
+                          />
+                        ) : (
+                          renderRow(row.event)
+                        )}
+                      </Fragment>
+                    )
+                  })}
                 </ol>
               </div>
             </MediaViewerProvider>

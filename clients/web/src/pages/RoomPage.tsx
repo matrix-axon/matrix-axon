@@ -10,7 +10,8 @@ import {
 } from 'preact/hooks'
 import { apiErrorMessage, inBackground } from '../api/client'
 import { timelineEvent } from '../api/frames'
-import { parseCalendarDay } from '../calendar-day'
+import { parseCalendarDay, sameLocalDay } from '../calendar-day'
+import { DaySeparator } from '../components/DaySeparator'
 import { Composer } from '../components/Composer'
 import type { ComposerAutocompleteOption } from '../components/Composer'
 import { ErrorBanner } from '../components/ErrorBanner'
@@ -2675,15 +2676,8 @@ function Timeline({
           {rows.map((row, index) => (
             <Fragment key={row.key}>
               {(index === 0 ||
-                !sameDay(rowTs(rows[index - 1]), rowTs(row))) && (
-                <li class="day-separator" role="separator">
-                  {new Date(rowTs(row)).toLocaleDateString(undefined, {
-                    weekday: 'short',
-                    year: 'numeric',
-                    month: 'short',
-                    day: 'numeric',
-                  })}
-                </li>
+                !sameLocalDay(rowTs(rows[index - 1]), rowTs(row))) && (
+                <DaySeparator ts={rowTs(row)} />
               )}
               {row.kind === 'gallery' ? (
                 <MediaGalleryRow
@@ -2904,10 +2898,6 @@ function centerHighlightedRow(
   // jsdom has no scrollIntoView; the optional call keeps tests honest.
   row.scrollIntoView?.({ block: 'center', inline: 'nearest' })
   return true
-}
-
-function sameDay(a: number, b: number): boolean {
-  return new Date(a).toDateString() === new Date(b).toDateString()
 }
 
 function eventPreview(event: EventDto | undefined): string | null {
