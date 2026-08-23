@@ -84,20 +84,32 @@ fn layout_digest(
 
     events.len().hash(&mut hasher);
     for event in events {
-        // Identity plus the fields the layout renders: an edit replaces the
-        // body in place without changing the event id, so hashing the id alone
-        // would leave the edited text uncached behind a matching digest.
+        // Hash what the renderer *projects*, through the same accessors it
+        // uses, rather than a hand-picked subset of raw fields. Two reasons:
+        //
+        // - `display_body` and `membership_change` derive from `content`, a
+        //   `serde_json::Value` that is not `Hash` (it can hold an f64). Going
+        //   through the projections covers them without hashing the whole
+        //   value.
+        // - It makes this list checkable. It should match `render.rs`'s own
+        //   `event.*` reads exactly; if the renderer starts reading a new
+        //   field, that grep stops agreeing with this block. Over-hashing is
+        //   the safe direction — a spurious miss costs one re-layout, a missed
+        //   input renders lines that disagree with the ranges nav measures.
         event.event_id.hash(&mut hasher);
-        event.body.hash(&mut hasher);
-        // `content` is a `serde_json::Value`, which is not `Hash` (it can hold
-        // an f64). The layout only ever reads one field out of it, so hash that
-        // rather than a serialization of the whole value.
-        event.formatted_body().hash(&mut hasher);
-        event.event_type.hash(&mut hasher);
+        event.account_id.hash(&mut hasher);
         event.sender.hash(&mut hasher);
         event.origin_ts.hash(&mut hasher);
         event.redacted.hash(&mut hasher);
-        event.redaction_event_id.hash(&mut hasher);
+        // Rendered as a glyph that reserves two columns, so it feeds
+        // `body_prefix_cols` and therefore the wrap width. A stale verdict
+        // leaves the safety glyph wrong *and* wraps against the wrong width,
+        // corrupting the ranges nav and scrolling measure against (#229).
+        event.sender_trust.hash(&mut hasher);
+        event.display_body().hash(&mut hasher);
+        event.formatted_body().hash(&mut hasher);
+        event.image_mxc().hash(&mut hasher);
+        event.membership_change().hash(&mut hasher);
     }
     sender_labels.hash(&mut hasher);
     selected_message.hash(&mut hasher);

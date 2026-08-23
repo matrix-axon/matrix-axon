@@ -4714,6 +4714,83 @@ mod tests {
         );
     }
 
+    /// A trust verdict changing must invalidate the layout.
+    ///
+    /// `sender_trust` renders as a glyph that reserves two columns, so it feeds
+    /// `body_prefix_cols` and therefore the wrap width. Omitting it from the
+    /// digest left the safety glyph stale *and* the ranges wrapped against the
+    /// wrong width — a security-relevant badge disagreeing with what nav and
+    /// scrolling measure against (#229 review).
+    #[test]
+    fn a_sender_trust_change_recomputes_the_layout() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let key = RoomKey::from(&room);
+        app.messages.events.insert(
+            key.clone(),
+            vec![event_with_id(
+                "$one:example.com",
+                "m.room.message",
+                Some("hello"),
+                serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
+            )],
+        );
+
+        app.ensure_message_layout();
+        let before = app.messages.layout_key;
+
+        if let Some(events) = app.messages.events.get_mut(&key) {
+            events[0].sender_trust = Some("unverified".to_owned());
+        }
+        app.ensure_message_layout();
+
+        assert_ne!(
+            app.messages.layout_key, before,
+            "the trust glyph is rendered and shifts the wrap width, so it is a layout input"
+        );
+    }
+
+    /// A rendered change that lives in `content` must invalidate the layout.
+    ///
+    /// `content` is a `serde_json::Value` and cannot be hashed directly, so the
+    /// digest goes through the renderer's own accessors. This asserts the
+    /// outcome, not which accessor delivers it: `display_body` and
+    /// `membership_change` both project this change, so it stays covered if
+    /// either is present. The digest lists both because it mirrors `render.rs`
+    /// exactly — over-hashing costs a spurious re-layout, under-hashing renders
+    /// lines that disagree with the ranges nav measures.
+    #[test]
+    fn a_membership_change_recomputes_the_layout() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.display.show_state_events = true;
+        let key = RoomKey::from(&room);
+        app.messages.events.insert(
+            key.clone(),
+            vec![event_with_id(
+                "$join:example.com",
+                "m.room.member",
+                None,
+                serde_json::json!({ "membership": "join" }),
+            )],
+        );
+
+        app.ensure_message_layout();
+        let before = app.messages.layout_key;
+
+        if let Some(events) = app.messages.events.get_mut(&key) {
+            events[0].content = Some(serde_json::json!({ "membership": "leave" }));
+        }
+        app.ensure_message_layout();
+
+        assert_ne!(
+            app.messages.layout_key, before,
+            "a membership verb change is rendered, so it is a layout input"
+        );
+    }
+
     /// The pane getting narrower re-wraps, so it must invalidate. Width is a
     /// layout input that the old event-id-keyed cache did not cover.
     #[test]
