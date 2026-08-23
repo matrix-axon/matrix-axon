@@ -74,6 +74,7 @@ shows it.
 | Typing indicators and read receipts (M18)               | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Inline image whose terminal encode failed (placeholder) | **not covered**       | **n/a**                                                                                                   | **n/a**         |
 | Debug overlay diagnostics (`display.debug`)             | **not covered**       | **n/a**                                                                                                   | **n/a**         |
+| Room list loading state during startup                  | **not covered**       | **not covered**                                                                                           | **not covered** |
 | State-event notices (ADR 0083)                          | **not covered**       | **not covered**                                                                                           | **not covered** |
 
 ## Why the uncovered rows are uncovered
@@ -95,6 +96,12 @@ shows it.
   vacuously the second time, on the badge the first run left behind.
 - **Device verification.** Needs a second device to verify against, which the
   corpus does not stand up.
+- **Room list loading state.** The panel names the startup stage it is on
+  (ADR 0093) while accounts, rooms, and device state load. Against the demo
+  stack all three land in well under a frame, so a scene would either catch
+  nothing or have to fake a slow server. Worth revisiting if the demo ever
+  runs against a seeded large-room corpus, which is also what would make it
+  worth showing.
 - **Failed inline encode, and the debug overlay.** Both are states a _healthy_
   run never reaches. The placeholder needs an image the terminal-graphics
   encoder rejects, or a protocol cache saturated with in-flight encodes; the

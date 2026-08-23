@@ -1,6 +1,6 @@
 use ratatui::layout::{Rect, Size};
 use ratatui_image::picker::Picker;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Semaphore};
@@ -21,12 +21,14 @@ use crate::search::{SearchFormState, SearchRequest, SearchResultsState};
 #[cfg(test)]
 use ratatui::style::Modifier;
 use std::path::PathBuf;
+mod bootstrap;
 mod completion;
 mod drafts;
 mod ephemeral;
 pub(crate) use drafts::{load_or_create_device_id, DraftOutcome};
 mod lifecycle;
 mod read_markers;
+pub(crate) use bootstrap::{BootstrapOutcome, BootstrapStage};
 pub(crate) use lifecycle::LifecycleOutcome;
 pub(crate) mod media;
 pub(crate) use media::{
@@ -52,6 +54,7 @@ pub(crate) use room_actions::{PendingRoomAction, RoomActionOutcome};
 pub(crate) use rooms::{account_localpart, apply_edits, dm_title_from_members};
 #[cfg(test)]
 use timeline::should_show_event;
+use timeline::MEMBERS_WORKERS;
 
 /// The outcome of an [`App::request_protocol`] call.
 ///
@@ -856,6 +859,41 @@ pub(crate) struct App {
     pub(crate) sixel_preview_refresh_after: Instant,
     /// Encode requests that could not be started, for the debug overlay (#51).
     pub(crate) protocol_drops: ProtocolDropCounts,
+    /// Delivers completed startup stages to the main loop (#189).
+    pub(crate) bootstrap_tx: Option<mpsc::UnboundedSender<BootstrapOutcome>>,
+    /// How far startup has got; drives the rooms-panel loading label.
+    pub(crate) bootstrap: BootstrapStage,
+    /// How long each startup stage took, for the `display.debug` overlay: a
+    /// user reporting "slow start" can read the breakdown off their own screen
+    /// (#189). `None` until the stage completes.
+    pub(crate) bootstrap_timings: Vec<(&'static str, std::time::Duration)>,
+    /// When the current startup stage began.
+    pub(crate) bootstrap_stage_started: Instant,
+    /// Whether a `Connected` live frame has already been seen. Exactly the
+    /// first one is redundant with startup's own device-state fetch; every
+    /// later one is a genuine reconnect whose dropped frames must be re-read,
+    /// whether or not startup has finished by then (#210).
+    pub(crate) seen_first_connect: bool,
+    /// A device-state read is in flight, so another must not be started: two
+    /// overlapping reads landing out of order would let the older view delete a
+    /// draft the newer one installed. See `App::request_device_state`.
+    pub(crate) device_state_inflight: bool,
+    /// A device-state read was asked for while one was in flight; run one more
+    /// when it lands rather than one per request.
+    pub(crate) device_state_again: bool,
+    /// Draft keys written by a live `device_state` frame since the in-flight
+    /// read was dispatched. Those writes are newer than the view that read will
+    /// return, so `apply_draft_reads` must not mistake them for keys the server
+    /// tombstoned.
+    pub(crate) drafts_written_since_fetch: std::collections::HashSet<RoomKey>,
+    /// A room-list fetch is in flight, so another must not be started.
+    pub(crate) rooms_fetch_inflight: bool,
+    /// A room-list fetch was asked for while one was in flight; run one more
+    /// when it lands rather than one per request.
+    pub(crate) rooms_fetch_again: bool,
+    /// Whether a room was selected when the in-flight fetch was requested, so
+    /// the handler knows if the refresh revealed the session's first room.
+    pub(crate) rooms_fetch_had_selection: bool,
     /// Set for one frame after the media-preview popup closes so `draw()` can
     /// issue a targeted Clear over the former popup area.  Sixel/iTerm2 pixels
     /// are not erased by ratatui's cell-diff pass when the image disappears, so
@@ -902,6 +940,19 @@ pub(crate) struct App {
     /// Earliest instant a room may trigger another background `/members` refresh,
     /// rate-limiting the live unknown-sender path (see `spawn_members_refresh`).
     members_refresh_after: HashMap<RoomKey, std::time::Instant>,
+    /// Rooms whose `/members` read produced no derivable list title (no other
+    /// member to name them after). Without an explicit record the title sweep
+    /// asks again every cooldown, forever, on every refresh (#189).
+    ///
+    /// Deliberately separate from `members_refresh_after`: that map also rate
+    /// limits the live unknown-sender path, and suppressing *display name*
+    /// refreshes for an hour because a room has no derivable title would be a
+    /// different behaviour change entirely.
+    pub(crate) rooms_without_derived_title: HashSet<RoomKey>,
+    /// Bounds concurrent `/members` reads, as `media_workers` bounds image
+    /// work. A room list with thousands of unnamed rooms used to fan out one
+    /// unthrottled request per room (#189).
+    members_workers: Arc<Semaphore>,
     /// The event the next sent message replies to (ADR 0032 M4), set by `/reply`
     /// or the reply hotkey. Mutually exclusive with `pending_thread`; the status
     /// line shows it while set, and `Escape` clears it.
@@ -1121,6 +1172,17 @@ impl App {
             sixel_preview_generation: 0,
             sixel_preview_refresh_after: Instant::now() + SIXEL_REFRESH_INTERVAL,
             protocol_drops: ProtocolDropCounts::default(),
+            bootstrap_tx: None,
+            bootstrap: BootstrapStage::Accounts,
+            bootstrap_timings: Vec::new(),
+            bootstrap_stage_started: Instant::now(),
+            seen_first_connect: false,
+            device_state_inflight: false,
+            device_state_again: false,
+            drafts_written_since_fetch: std::collections::HashSet::new(),
+            rooms_fetch_inflight: false,
+            rooms_fetch_again: false,
+            rooms_fetch_had_selection: false,
             clear_media_preview: false,
             force_terminal_clear: false,
             prev_image_rects: Vec::new(),
@@ -1132,6 +1194,8 @@ impl App {
             relations_tx: None,
             members_tx: None,
             members_refresh_after: HashMap::new(),
+            rooms_without_derived_title: HashSet::new(),
+            members_workers: Arc::new(Semaphore::new(MEMBERS_WORKERS)),
             pending_reply: None,
             pending_thread: None,
             promoted_thread_events: std::collections::HashSet::new(),
@@ -1167,6 +1231,12 @@ impl App {
 
     pub(crate) fn set_room_action_sender(&mut self, tx: mpsc::UnboundedSender<RoomActionOutcome>) {
         self.room_action_tx = Some(tx);
+    }
+
+    /// Wire up the channel the main loop drains for completed startup stages
+    /// and coalesced room refreshes (#189).
+    pub(crate) fn set_bootstrap_sender(&mut self, tx: mpsc::UnboundedSender<BootstrapOutcome>) {
+        self.bootstrap_tx = Some(tx);
     }
 
     /// Wire up the channel the main loop drains for completed image downloads.
@@ -1601,7 +1671,7 @@ impl App {
             RoomFilter::Favorites => self.is_room_pinned(&RoomKey::from(room)),
             RoomFilter::Name(q) => {
                 timeline::room_matches_search(room, q)
-                    || self.room_list_title(room).to_ascii_lowercase().contains(q)
+                    || timeline::contains_ascii_case_insensitive(&self.room_list_title(room), q)
             }
         }
     }
@@ -1862,9 +1932,7 @@ impl App {
             Command::Bundle(event_id) => self.show_verification_bundle(&event_id).await,
             Command::Help => self.open_popup(PopupKind::Help),
             Command::Shortcuts => self.open_popup(PopupKind::Shortcuts),
-            Command::Refresh => {
-                self.refresh_rooms().await;
-            }
+            Command::Refresh => self.request_rooms_refresh(),
             Command::EditConfig => {
                 self.edit_config_requested = true;
             }
@@ -3347,6 +3415,43 @@ mod tests {
         assert!(status.contains("@bob:example.com  (logged out, 0 rooms)"));
     }
 
+    /// `/status` is a user-facing summary; the internal counters and timings
+    /// belong behind `display.debug`.
+    ///
+    /// Three places already described them as gated while they were not
+    /// (`App::protocol_drops`' doc comment, #189's overlay work, and the
+    /// `Debug overlay diagnostics (display.debug)` row in
+    /// docs/demo-coverage.md), so this pins the behaviour those claims assume.
+    #[test]
+    fn diagnostics_appear_in_status_only_when_debug_is_set() {
+        let mut app = app_with_rooms(Vec::new());
+
+        app.display.debug = false;
+        let plain = popup_status_lines(&app).join("\n");
+        for marker in ["Diagnostics", "Startup:", "Room titles:", "Encode drops:"] {
+            assert!(
+                !plain.contains(marker),
+                "{marker} must stay out of /status when debug is off"
+            );
+        }
+        // The user-facing summary is unaffected.
+        assert!(plain.contains("Axon server:"));
+        assert!(plain.contains("Rooms loaded:"));
+
+        app.display.debug = true;
+        let debug = popup_status_lines(&app).join("\n");
+        for marker in ["Diagnostics", "Startup:", "Room titles:", "Encode drops:"] {
+            assert!(
+                debug.contains(marker),
+                "{marker} must appear when debug is on"
+            );
+        }
+        assert!(
+            debug.contains("Axon server:"),
+            "and the summary is still there"
+        );
+    }
+
     #[test]
     fn status_disambiguates_duplicate_matrix_ids_with_account_ids() {
         let first_id = Uuid::from_u128(1);
@@ -3914,10 +4019,10 @@ mod tests {
         // A background /members refresh lands and resolves the name in place.
         app.apply_members_outcome(timeline::MembersOutcome {
             room_key: RoomKey::from(&room),
-            members: vec![MemberDto {
+            members: Some(vec![MemberDto {
                 user_id: "@alice:example.com".to_owned(),
                 display_name: Some("Alice".to_owned()),
-            }],
+            }]),
         });
         assert_eq!(app.sender_label(&message), "Alice");
     }
