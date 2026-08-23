@@ -4358,7 +4358,7 @@ describe('RoomPage', () => {
     it('paints the warm slice first, then merges what arrived while away', async () => {
       // The re-entry head fetch is held open, so whatever is on screen before
       // it settles came from the warm store — before phase 1 this was
-      // "Loading timeline…" until the network answered.
+      // "Loading messages…" until the network answered.
       let settle: (response: Response) => void = () => {}
       const { findByText, queryByText, heads } = await roundTrip([
         () =>
@@ -4372,7 +4372,7 @@ describe('RoomPage', () => {
       ])
 
       expect(await findByText('body of $1')).toBeTruthy()
-      expect(queryByText('Loading timeline…')).toBeNull()
+      expect(queryByText('Loading messages…')).toBeNull()
 
       // The held request is in flight by now, so releasing it is not a race.
       await waitFor(() => expect(heads()).toBe(2))

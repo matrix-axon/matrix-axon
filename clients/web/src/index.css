@@ -3324,6 +3324,10 @@ span.composer-attachment-thumb {
   gap: 0.5rem;
 }
 
+.settings-debug-body {
+  margin-top: 0.75rem;
+}
+
 .settings-version {
   margin-top: 1.5rem;
   font-size: 0.85rem;

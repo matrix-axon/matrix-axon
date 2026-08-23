@@ -100,13 +100,37 @@ describe('SettingsPage', () => {
     expect(box.checked).toBe(true)
   })
 
-  it('toggles developer mode', () => {
+  it('hides debug settings until Debug is selected', () => {
     const services = testServices()
-    const { getByLabelText } = render(
+    const { getByRole, queryByLabelText } = render(
       <ServicesContext.Provider value={services}>
         <SettingsPage />
       </ServicesContext.Provider>,
     )
+
+    expect(queryByLabelText('Developer mode')).toBeNull()
+    expect(queryByLabelText('Performance instrumentation')).toBeNull()
+    expect(queryByLabelText('Correct iOS keyboard page drift')).toBeNull()
+
+    fireEvent.click(getByRole('button', { name: 'Debug' }))
+
+    expect(queryByLabelText('Developer mode')).not.toBeNull()
+    expect(queryByLabelText('Performance instrumentation')).not.toBeNull()
+    expect(queryByLabelText('Correct iOS keyboard page drift')).not.toBeNull()
+
+    fireEvent.click(getByRole('button', { name: 'Debug' }))
+
+    expect(queryByLabelText('Developer mode')).toBeNull()
+  })
+
+  it('toggles developer mode from the Debug section', () => {
+    const services = testServices()
+    const { getByLabelText, getByRole } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    fireEvent.click(getByRole('button', { name: 'Debug' }))
     const box = getByLabelText('Developer mode') as HTMLInputElement
 
     expect(box.checked).toBe(false)

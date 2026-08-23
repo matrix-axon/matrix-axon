@@ -21,7 +21,7 @@ export const TIMELINE_STORE_LIMIT = 30
  *
  * `RoomPage` used to `useMemo` a store on `[api, media, accountId, roomId]`,
  * so leaving a room and returning **within one session** threw away every
- * event already fetched and re-paint went back through "Loading timeline…".
+ * event already fetched and re-paint went back through "Loading messages…".
  * That is the room switch a desktop tab pays over and over. Holding the store
  * instead makes re-entry paint immediately and reconcile in place.
  *

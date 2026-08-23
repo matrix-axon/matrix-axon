@@ -1671,7 +1671,7 @@ export function RoomPage() {
             </div>
           )}
           {timeline.loading.value ? (
-            <p>Loading timeline…</p>
+            <p>Loading messages…</p>
           ) : (
             <MediaViewerProvider
               accountId={accountId}

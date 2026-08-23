@@ -4,7 +4,7 @@ import { ACCOUNT_ID, openRoom, ROOM_URL } from './helpers'
 /**
  * ADR 0085 phase 1: a room re-entered within one session paints its loaded
  * timeline immediately and reconciles it in place, instead of blanking to
- * "Loading timeline…" until the network answers.
+ * "Loading messages…" until the network answers.
  *
  * jsdom already covers the merge; what only a browser can show is that the
  * paint happens *before* the response — so the mock is told to hold the
@@ -50,12 +50,12 @@ test('a re-entered room paints its timeline before the refetch settles', async (
 
   // The warm store, painted while the gap-fill request is still open.
   await expect(page.getByText(SECOND_ROOM_MESSAGE)).toBeVisible(BEFORE_RESPONSE)
-  await expect(page.getByText('Loading timeline…')).toBeHidden(BEFORE_RESPONSE)
+  await expect(page.getByText('Loading messages…')).toBeHidden(BEFORE_RESPONSE)
 
   // Control: a full document load throws the store away, so the same held
   // request *does* blank the timeline. Without this the assertions above would
   // also pass against a mock that answered instantly.
   await page.reload()
-  await expect(page.getByText('Loading timeline…')).toBeVisible(BEFORE_RESPONSE)
+  await expect(page.getByText('Loading messages…')).toBeVisible(BEFORE_RESPONSE)
   await expect(page.getByText(SECOND_ROOM_MESSAGE)).toBeVisible()
 })
