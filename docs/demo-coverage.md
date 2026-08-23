@@ -114,13 +114,10 @@ shows it.
   step (see the inline-images row) and has no equivalent overlay — hence `n/a`
   rather than a gap.
 - **Typing indicators and read receipts, and a reaction badge updating live.**
-  All need a second live client acting concurrently; the corpus is seeded
-  history, not a running participant. The reaction case is worth distinguishing
-  from the two rows above it: `timeline` covers badges that were already in the
-  aggregate at load, and `react` covers this client reacting to itself. Neither
-  exercises an `m.reaction` frame arriving over the WS for someone else's
-  reaction, which is a different code path — the frame patches the target
-  message's aggregate rather than being rendered as a row of its own.
+  All need a second live client acting concurrently; the corpus is seeded history, not a running participant.
+  The reaction case is worth distinguishing from the two rows above it:
+  `timeline` covers badges that were already in the aggregate at load, and `react` covers this client reacting to itself.
+  Neither exercises an `m.reaction` frame arriving over the WS for someone else's reaction, which is a different code path — the frame patches the target message's aggregate rather than being rendered as a row of its own.
 - **Spaces and galleries in the TUI.** The TUI has neither (see
   `docs/client-parity.md`); spaces appear in its room list as ordinary rooms.
   These are `n/a` rather than gaps in the demo.

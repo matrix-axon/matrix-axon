@@ -174,19 +174,19 @@ impl App {
             tally.my_event_ids.retain(|id| !withdrawn.contains(id));
             if tally.my_event_ids.is_empty() && tally.me {
                 tally.me = false;
-                // Mirror `record_reaction`: `count` follows sender membership,
-                // so drop it only alongside the sender entry it came with.
-                // Decrementing unconditionally left `count` at 1 with an empty
-                // `senders` whenever both paths had recorded us (#220).
-                match own_user_id.as_deref() {
-                    Some(own) if tally.senders.iter().any(|sender| sender == own) => {
-                        tally.senders.retain(|sender| sender != own);
-                        tally.count = tally.count.saturating_sub(1);
-                    }
-                    // Our user id is unknown, so `record_reaction` counted us
-                    // without a sender entry; undo that the same way.
-                    None => tally.count = tally.count.saturating_sub(1),
-                    Some(_) => {}
+                // `record_reaction` counts our contribution exactly once --
+                // through the sender arm when we can name ourselves, through
+                // the fallback arm when we cannot -- so removing it decrements
+                // exactly once, whichever arm recorded it. Gating the decrement
+                // on finding ourselves in `senders` left a phantom count
+                // whenever the fallback arm had recorded us and our user id
+                // resolved before the withdrawal (#220 review, pass 3).
+                //
+                // Dropping the sender entry stays best-effort for the same
+                // reason: there is nothing to drop when the fallback arm ran.
+                tally.count = tally.count.saturating_sub(1);
+                if let Some(own) = own_user_id.as_deref() {
+                    tally.senders.retain(|sender| sender != own);
                 }
             }
             if tally.count <= 0 {

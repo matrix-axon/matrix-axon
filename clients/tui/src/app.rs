@@ -3584,6 +3584,59 @@ mod tests {
         );
     }
 
+    /// Withdrawing must clear the badge even when the reaction was recorded
+    /// before this client could name itself.
+    ///
+    /// `record_reaction` counts our contribution through its fallback arm when
+    /// the user id is unresolved, adding to `count` without a `senders` entry.
+    /// If the id resolves before the withdrawal, a removal that gated its
+    /// decrement on finding us in `senders` found nothing and left a phantom
+    /// count behind — the same failure family as the bug the record step fixed,
+    /// living in the fix itself (#220 review, pass 3).
+    #[test]
+    fn withdrawing_clears_a_reaction_recorded_before_the_user_id_resolved() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![message_with_reactions("$target:example.com", Vec::new())],
+        );
+
+        // Unresolvable at record time: every tier stripped.
+        app.live.own_senders.clear();
+        app.rooms.rooms[0].account_user_id = None;
+        let saved_accounts = std::mem::take(&mut app.accounts.accounts);
+        app.accounts.client_visible.clear();
+
+        app.apply_local_reaction(
+            "$target:example.com",
+            "\u{1f44d}",
+            "$mine:example.com".to_owned(),
+        );
+        assert_eq!(
+            app.selected_reactions().get("$target:example.com"),
+            Some(&vec![("\u{1f44d}".to_owned(), 1)]),
+            "the fallback arm counts it once"
+        );
+
+        // The id resolves before the user withdraws.
+        app.accounts.accounts = saved_accounts;
+        app.rooms.rooms[0].account_user_id = Some("@alice:example.com".to_owned());
+
+        app.remove_local_reaction(
+            "$target:example.com",
+            "\u{1f44d}",
+            &["$mine:example.com".to_owned()],
+        );
+
+        assert_eq!(
+            app.selected_reactions().get("$target:example.com"),
+            None,
+            "the badge clears rather than leaving a phantom count"
+        );
+    }
+
     /// The WS echo can beat the HTTP response that carries the reaction's id,
     /// so the local optimistic apply runs *second*.
     ///
@@ -3688,8 +3741,14 @@ mod tests {
             RoomKey::from(&room),
             vec![message_with_reactions("$target:example.com", Vec::new())],
         );
-        // The premise: this account's user id is unknown.
+        // The premise, and it takes all three tiers: `own_user_id_for` falls
+        // back from the room DTO to `own_senders` to the account list, so
+        // clearing only one of them leaves the id resolvable and the test
+        // passes for an unrelated reason (#220 review, pass 3).
         app.live.own_senders.clear();
+        app.rooms.rooms[0].account_user_id = None;
+        app.accounts.accounts.clear();
+        app.accounts.client_visible.clear();
 
         app.apply_local_reaction(
             "$target:example.com",

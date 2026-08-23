@@ -226,8 +226,7 @@ impl App {
                 .rooms
                 .iter()
                 .find(|room| room.account_id == event.account_id && room.room_id == event.room_id)
-                .cloned()
-                .and_then(|room| self.own_user_id_for(&room));
+                .and_then(|room| self.own_user_id_for(room));
             self.apply_remote_reaction(
                 &key,
                 &event.event_id,
