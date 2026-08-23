@@ -22,7 +22,8 @@ sanitizer for `mxc://` only), an inline preview for audio/video/PDF/text
 attachments (ADR 0072) and syntax-highlighted code blocks and text attachments
 (ADR 0073, highlight.js), media _send_ (M-W8.5, ADR 0065: attach by
 paperclip, drag-and-drop onto the room or thread pane, or paste; the composer's
-text becomes the caption; staged upload then `send-media`, with an optimistic
+text becomes the caption and renders with the same markdown as a message body;
+staged upload then `send-media`, with an optimistic
 echo that shows the picked image while its bytes are still going up, and
 Retry/Discard on failure — one file at a time, images and files only), full
 messaging: composer with markdown-on-send, member/room autocomplete that emits

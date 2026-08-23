@@ -4405,6 +4405,11 @@ audio.media-player {
   max-width: min(60ch, 90vw);
 }
 
+.lightbox-caption a {
+  color: inherit;
+  text-decoration: underline;
+}
+
 /* Video and PDF in the lightbox (ADR 0072). The wrapper is what the media
    hook's ref observes, so it must not collapse to zero. */
 .lightbox-media {

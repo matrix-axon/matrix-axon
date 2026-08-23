@@ -74,7 +74,7 @@ export function Lightbox({
 }: {
   /** Accessible name for the dialog — the caption or filename. */
   label: string
-  caption: string | null
+  caption: ComponentChildren
   onClose: () => void
   paging?: LightboxPaging
   /**
@@ -285,9 +285,9 @@ export function Lightbox({
         )}
         <figure class="lightbox-figure">
           {children}
-          {caption !== null && (
+          {caption ? (
             <figcaption class="lightbox-caption">{caption}</figcaption>
-          )}
+          ) : null}
         </figure>
         {paging !== undefined && (
           <>
