@@ -28,8 +28,10 @@ Retry/Discard on failure — one file at a time, images and files only), full
 messaging: composer with markdown-on-send, member/room autocomplete that emits
 pill links in sent and edited text, reply (ADR 0032), edit,
 redact-with-confirm, reaction toggle, and threads (badges, panel via
-`?thread=`, send-in-thread, and an unread-thread drawer that keeps hidden
-thread replies unread until their thread panel loads), full-text message
+`?thread=`, send-in-thread, and a threads drawer that lists unread threads
+across rooms, or — when you are in a room — that room's threads, toggled
+from the drawer title; hidden thread replies stay unread until their thread
+panel loads), full-text message
 search (M-W10, ADR 0066: a URL-addressed overlay opened with `/`, `Ctrl-G`, a
 topbar button, or `/search`, with chip/token filters and client-side
 re-sorting), `/leave`, `/part`, and `/forget` room-membership slash commands
