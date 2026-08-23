@@ -1,25 +1,15 @@
-import { useEffect, useMemo, useState } from 'preact/hooks'
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
+import { currentRoomFromPath } from '../search-tokens'
 import { useServices } from '../services'
 import { useShortcuts } from '../shortcuts'
-import { createThreadsStore, type ThreadSummaryDto } from '../stores/threads'
+import {
+  createThreadsStore,
+  type ThreadsStore,
+  type ThreadSummaryDto,
+} from '../stores/threads'
 import type { EventDto } from '../stores/timeline'
 import { useModalFocus } from './use-modal-focus'
-
-const ROOM_PATH = /^\/([^/]+)\/rooms\/(.+)$/
-
-function currentRoomFromPath(
-  path: string,
-): { accountId: string; roomId: string } | null {
-  const match = ROOM_PATH.exec(path)
-  if (match === null) {
-    return null
-  }
-  return {
-    accountId: decodeURIComponent(match[1]),
-    roomId: decodeURIComponent(match[2]),
-  }
-}
 
 function eventPreview(event: EventDto | undefined): string | null {
   const body = event?.body?.trim()
@@ -54,6 +44,8 @@ export function UnreadThreadsPanel({ onClose }: { onClose: () => void }) {
     return createThreadsStore(api, roomAccountId, roomId)
   }, [api, roomAccountId, roomId])
   const [preferRoomThreads, setPreferRoomThreads] = useState(false)
+  const showingRoomThreads =
+    room !== null && (unreadEntries.length === 0 || preferRoomThreads)
 
   useEffect(() => {
     if (unreadEntries.length === 0) {
@@ -61,11 +53,24 @@ export function UnreadThreadsPanel({ onClose }: { onClose: () => void }) {
     }
   }, [unreadEntries.length])
 
+  /**
+   * Fetched only once the room list is actually on screen. This store
+   * duplicates `RoomPage`'s — a summaries GET plus one GET per root — so a
+   * drawer that opens on the unread list must not pay for it until the
+   * reader toggles over.
+   */
+  const fetchedFor = useRef<ThreadsStore | null>(null)
   useEffect(() => {
-    if (threads !== null) {
-      void threads.refresh()
+    if (
+      threads === null ||
+      !showingRoomThreads ||
+      fetchedFor.current === threads
+    ) {
+      return
     }
-  }, [threads])
+    fetchedFor.current = threads
+    void threads.refresh()
+  }, [threads, showingRoomThreads])
 
   useShortcuts(
     {
@@ -78,8 +83,6 @@ export function UnreadThreadsPanel({ onClose }: { onClose: () => void }) {
   )
 
   const canToggle = room !== null && unreadEntries.length > 0
-  const showingRoomThreads =
-    room !== null && (unreadEntries.length === 0 || preferRoomThreads)
   const title = showingRoomThreads ? 'Threads' : 'Unread threads'
   const toggleTitle = showingRoomThreads
     ? 'Show unread threads'

@@ -4882,6 +4882,12 @@ audio.media-player {
   display: none;
 }
 
+/* A markdown caption renders as `<p>`; keep its first line beside the
+   "Image N:" prefix instead of pushing it onto its own row. */
+.gallery-caption .body-html > p:first-child {
+  display: inline;
+}
+
 .invites-link {
   margin: 0 0.5rem 0.4rem;
   display: flex;

@@ -307,6 +307,9 @@ export function MessageEventRow({
           pointerEvent.pointerType === 'mouse' ||
           isRowControl(pointerEvent.target)
         ) {
+          // Drop any tap a missing `pointerup` (finger left the row) left
+          // behind, so it cannot be mistaken for this gesture's start.
+          touchTap.current = null
           return
         }
         touchTap.current = {

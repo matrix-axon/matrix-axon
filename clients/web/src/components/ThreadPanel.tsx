@@ -228,12 +228,24 @@ export function ThreadPanel({
     roomTitles,
     ownUserId,
     attachmentScope: `${accountId}\0${roomId}\0${rootId}`,
-    onMutation: () => {
-      search.clear()
-      refetchRoot()
-    },
+    onMutation: search.clear,
     staging,
   })
+
+  /**
+   * A thread send cannot change the root, so only an edit *of* the root pays
+   * for a re-read. The composer clears `action` before it awaits, so the
+   * target is captured here, in the render that owns it.
+   */
+  const submitThreadMessage = async (body: string): Promise<boolean> => {
+    const editingRoot =
+      action?.kind === 'edit' && action.event.event_id === rootId
+    const ok = await submitMessage(body)
+    if (ok && editingRoot) {
+      refetchRoot()
+    }
+    return ok
+  }
 
   // The room page's `?event=` jump owns the main timeline. A thread needs the
   // same lookup against its own paged endpoint, otherwise a deep link closes
@@ -644,7 +656,7 @@ export function ThreadPanel({
         onAttach={attachable ? stage : undefined}
         attachments={{ ...attachments, onRemove: removeAttachment }}
         // The store is thread-scoped, so `thread_root` is already implied.
-        onSubmit={submitMessage}
+        onSubmit={submitThreadMessage}
       />
     </aside>
   )

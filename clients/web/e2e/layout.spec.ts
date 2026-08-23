@@ -1439,11 +1439,7 @@ for (const viewport of [320, 640, 880, 1024, 1400, 1920]) {
   })
 }
 
-/**
- * A finger tap, not Playwright's mouse `click()`. Chromium `click()` fires on
- * any element; iOS often will not synthesize `click` on a non-button `<li>`,
- * which is why a passing layout spec still failed on a real phone.
- */
+/** The sender name and avatar boxes, to compare across an action-bar open. */
 async function rowHeaderGeometry(row: Locator) {
   return row.evaluate((el) => {
     const sender = el.querySelector<HTMLElement>('.event-sender')!
@@ -1459,6 +1455,11 @@ async function rowHeaderGeometry(row: Locator) {
   })
 }
 
+/**
+ * A finger tap, not Playwright's mouse `click()`. Chromium `click()` fires on
+ * any element; iOS often will not synthesize `click` on a non-button `<li>`,
+ * which is why a passing layout spec still failed on a real phone.
+ */
 async function tapMessageBody(body: Locator) {
   await body.evaluate((el) => {
     const init: PointerEventInit = {
