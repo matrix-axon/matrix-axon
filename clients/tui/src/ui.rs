@@ -384,7 +384,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         } else {
             Style::default().fg(app.colors.border)
         };
-        let rooms_title = if let Mode::Search(SearchKind::Rooms, q) = &app.mode {
+        let rooms_title = if let Some(stage) = app.bootstrap.label() {
+            // Startup is still fetching. Say so, or an empty panel reads as
+            // "this account has no rooms" (#189).
+            format!("Rooms — {stage}…")
+        } else if let Mode::Search(SearchKind::Rooms, q) = &app.mode {
             format!("Rooms  Search: {q}")
         } else if let Mode::Search(SearchKind::RoomNameFilter, q) = &app.mode {
             format!("Rooms  Filter: {q}")
@@ -2451,22 +2455,12 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         format!("Terminal graphics: {protocol}  (cell {width}x{height}px)")
     };
 
-    // Encode requests that could not be started. Both are self-healing per
-    // frame, so neither is worth a status message, but a count that keeps
-    // climbing is the signal that thumbnails are starving or the media channel
-    // was never wired (#51).
-    let media_drops_line = format!(
-        "Encode drops: {} cache-saturated, {} channel-unwired",
-        app.protocol_drops.cache_saturated, app.protocol_drops.channel_unwired
-    );
-
     let mut lines = vec![
         format!("Axon server: {}", app.client.base_url()),
         auth_line,
         version,
         graphics_line,
         conn_line,
-        media_drops_line,
         "".to_owned(),
         format!("Rooms loaded: {}", app.rooms.rooms.len()),
         account_filter_line,
@@ -2514,6 +2508,58 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
             ));
             lines.push(format!("      device: {device_str}  [{verified_str}]",));
         }
+    }
+
+    // Diagnostics, behind `display.debug`. These are internal counters and
+    // timings — nothing a user acts on, and noise in the summary `/status` is
+    // otherwise meant to be. Three things already described this as gated while
+    // it was not: `App::protocol_drops`' own doc comment, #189's overlay work,
+    // and the `Debug overlay diagnostics (display.debug)` row in
+    // docs/demo-coverage.md. One switch, and new telemetry joins it here.
+    // Diagnostics, behind `display.debug`. These are internal counters and
+    // timings — nothing a user acts on, and noise in the summary `/status` is
+    // otherwise meant to be. Three things already described this as gated while
+    // it was not: `App::protocol_drops`' own doc comment, #189's overlay work,
+    // and the `Debug overlay diagnostics (display.debug)` row in
+    // docs/demo-coverage.md. One switch, and new telemetry joins it here.
+    //
+    // Built inside the branch, not merely pushed inside it: `/status` redraws
+    // every frame while open, so formatting these and dropping them would run
+    // the allocations (and `bootstrap_timings`' Vec + join) on every frame of
+    // the common case, where the flag is off.
+    if app.display.debug {
+        // Encode requests that could not be started. Both are self-healing per
+        // frame, so neither is worth a status message, but a count that keeps
+        // climbing is the signal that thumbnails are starving or the media
+        // channel was never wired (#51).
+        let media_drops_line = format!(
+            "Encode drops: {} cache-saturated, {} channel-unwired",
+            app.protocol_drops.cache_saturated, app.protocol_drops.channel_unwired
+        );
+
+        // Startup stage timings and the bounded background work behind the room
+        // list: enough to diagnose a "slow first connect" report from the user's
+        // own screen, since the TUI has no log file (#189).
+        let startup_line = if app.bootstrap_timings.is_empty() {
+            format!("Startup: {}…", app.bootstrap.label().unwrap_or("done"))
+        } else {
+            let stages: Vec<String> = app
+                .bootstrap_timings
+                .iter()
+                .map(|(stage, elapsed)| format!("{stage} {}ms", elapsed.as_millis()))
+                .collect();
+            format!("Startup: {}", stages.join(" · "))
+        };
+        let room_titles_line = format!(
+            "Room titles: {} cached, {} with none derivable",
+            app.room_titles.len(),
+            app.rooms_without_derived_title.len()
+        );
+        lines.push("".to_owned());
+        lines.push("Diagnostics (display.debug):".to_owned());
+        lines.push(media_drops_line);
+        lines.push(startup_line);
+        lines.push(room_titles_line);
     }
 
     lines

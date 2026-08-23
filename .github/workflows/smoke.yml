@@ -97,12 +97,27 @@ jobs:
           key: ${{ runner.os }}-cargo-smoke-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-smoke-
 
+      - name: Resolve smoke lane
+        id: lane
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_LANE: ${{ inputs.lane }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            lane="$DISPATCH_LANE"
+          else
+            lane="all"
+          fi
+          echo "lane=$lane" >> "$GITHUB_OUTPUT"
+
       - name: Run the requested lane
         # A dispatch names its lane; a push or a schedule runs everything, which
         # re-runs the stub lane too. That overlap is deliberate: `all` is the
         # documented S1 gate, and carving it up here would create a second
         # definition of what S1 means.
-        run: ./scripts/smoke-gate.sh "${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'all' }}"
+        env:
+          SMOKE_LANE: ${{ steps.lane.outputs.lane }}
+        run: ./scripts/smoke-gate.sh "$SMOKE_LANE"
 
       - name: Upload failure artifacts
         if: failure()
@@ -111,3 +126,67 @@ jobs:
           name: smoke-artifacts-true-local
           path: smoke-artifacts/
           if-no-files-found: ignore
+
+      - name: Notify axon-developer room of result
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          NOTIFY_HOMESERVER: ${{ secrets.NOTIFY_HOMESERVER }}
+          NOTIFY_ROOM: ${{ secrets.NOTIFY_ROOM }}
+          NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
+          BRANCH: ${{ github.ref_name }}
+          TRIGGER: ${{ github.event_name }}
+          LANE: ${{ steps.lane.outputs.lane }}
+          COMMIT: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+          STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+
+          fields="$(jq -n \
+            --arg branch "$BRANCH" \
+            --arg trigger "$TRIGGER" \
+            --arg lane "$LANE" \
+            --arg commit "$COMMIT" \
+            --arg actor "$ACTOR" \
+            --arg run_url "$RUN_URL" \
+            --arg attempt "$ATTEMPT" \
+            --arg status "$STATUS" \
+            '{
+              body: (
+                "Smoke Test Run"
+                + "\n\ntrue-local " + $status
+                + "\n\nBranch: " + $branch
+                + "\nTrigger: " + $trigger
+                + "\nLane: " + $lane
+                + "\nCommit: " + $commit
+                + "\nActor: " + $actor
+                + "\nAttempt: " + $attempt
+                + "\nRun: " + $run_url
+              ),
+              formatted_body: (
+                def html_escape:
+                  gsub("&"; "&amp;")
+                  | gsub("<"; "&lt;")
+                  | gsub(">"; "&gt;")
+                  | gsub("\u0022"; "&quot;")
+                  | gsub("\u0027"; "&#39;");
+                "<h1>Smoke Test Run</h1>"
+                + "<h2>true-local <strong>" + ($status | html_escape) + "</strong></h2>"
+                + "<p><strong>Branch:</strong> " + ($branch | html_escape)
+                + "<br><strong>Trigger:</strong> " + ($trigger | html_escape)
+                + "<br><strong>Lane:</strong> " + ($lane | html_escape)
+                + "<br><strong>Commit:</strong> " + ($commit | html_escape)
+                + "<br><strong>Actor:</strong> " + ($actor | html_escape)
+                + "<br><strong>Attempt:</strong> " + ($attempt | html_escape)
+                + "<br><strong>Run:</strong> <a href=\"" + ($run_url | html_escape) + "\">"
+                + ($run_url | html_escape) + "</a></p>"
+              )
+            }')"
+
+          MATRIX_BODY="$(jq -r .body <<<"$fields")"
+          MATRIX_FORMATTED_BODY="$(jq -r .formatted_body <<<"$fields")"
+          export MATRIX_BODY MATRIX_FORMATTED_BODY
+          ./scripts/send-matrix-notification.sh

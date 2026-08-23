@@ -25,6 +25,20 @@
 
 ## Event loop and async
 
+- **Reach the first frame before any network await (ADR 0093).** Startup runs
+  as spawned stages applied through the main loop's channel, so the client
+  paints and accepts keys immediately; a blank terminal during a slow load
+  reads as a hang, not a load. Any new startup work joins that chain rather
+  than adding a sixth await ahead of the loop. The one deliberate exception is
+  the launch room's timeline, which is bounded and must follow read-marker
+  hydration (ADR 0048/0089).
+- **Per-room background work is demand-driven and semaphore-bounded (ADR
+  0093).** Anything that costs one request per room — member reads for list
+  titles, and any future per-room fetch — must ask only for what is on screen
+  plus a small lookahead, hold a permit from a bounded pool, and record a
+  negative answer so it stops asking. A per-room cooldown bounds repeats of one
+  room; it does not bound how many rooms are in flight, which is the property
+  that matters on a server with thousands of them.
 - **Never `await` an API call from key handling or a draw-adjacent path.** Spawn the work as a task and apply its result through the main-loop outcome channel (the lifecycle verbs under _Mutations_ are the model). Blocking the loop freezes input and redraw.
 - **Async results must be cancelable or stale-checked before they mutate mode or state.** A result that lands after the user has changed mode, room, or account must be dropped or reconciled against the current state, never applied blindly — the same discipline media workers use for evicted entries.
 - **Historical navigation reuses the existing timeline window/cursor semantics.** A jump (search hit, thread jump, unread marker) must land in the same window/cursor machinery so `Home`/`End`/`PageUp`/`PageDown` keep working after the jump; do not add a parallel scroll path.
