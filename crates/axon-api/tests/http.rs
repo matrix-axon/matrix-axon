@@ -1498,6 +1498,148 @@ async fn unknown_v1_paths_stay_in_the_api_boundary() {
     assert_eq!(body["error"]["message"], "route not found");
 }
 
+/// Issue #86: JSON (and HTML) compress when the client asks; identity when it
+/// does not. `/healthz` stays uncompressed because it is under the 32-byte
+/// floor. Media is covered separately below.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn json_and_html_compress_when_the_client_asks() {
+    let store = store().await;
+    let app = read_app(store);
+
+    let (status, headers, bytes) = send_request(
+        &app,
+        "GET",
+        "/v1/status",
+        None,
+        Some(&bearer()),
+        Some(("accept-encoding", "gzip")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-encoding"], "gzip");
+    assert!(
+        serde_json::from_slice::<Value>(&bytes).is_err(),
+        "gzip body must not parse as JSON"
+    );
+
+    let (status, headers, bytes) = send_request(
+        &app,
+        "GET",
+        "/v1/status",
+        None,
+        Some(&bearer()),
+        Some(("accept-encoding", "br")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-encoding"], "br");
+    assert!(serde_json::from_slice::<Value>(&bytes).is_err());
+
+    // No Accept-Encoding: identity, which is what the TUI's reqwest sends.
+    let (status, headers, json) =
+        request_parts(&app, "GET", "/v1/status", None, Some(&bearer())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers.get("content-encoding").is_none(),
+        "identity response must not set Content-Encoding, got {headers:?}"
+    );
+    assert!(
+        json.get("data").is_some(),
+        "identity body is the JSON envelope"
+    );
+
+    let (status, headers, bytes) = send_request(
+        &app,
+        "GET",
+        "/",
+        None,
+        None,
+        Some(("accept-encoding", "gzip")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-encoding"], "gzip");
+    assert!(
+        !bytes.starts_with(b"<!doctype html>"),
+        "gzip body must not be the raw HTML"
+    );
+
+    // Tiny JSON: DefaultPredicate's 32-byte floor. `{"status":"ok"}` is 16 bytes.
+    let (status, headers, bytes) = send_request(
+        &app,
+        "GET",
+        "/healthz",
+        None,
+        None,
+        Some(("accept-encoding", "gzip")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get("content-encoding").is_none());
+    assert_eq!(bytes, br#"{"status":"ok"}"#);
+}
+
+/// A body large enough to clear the 32-byte compression floor, so a miss of
+/// the media predicate would actually encode and fail the assertion.
+const MEDIA_PAYLOAD: &[u8] = &[0xA5; 64];
+
+async fn assert_media_stays_uncompressed(mimetype: &str, served_content_type: &str) {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@cmp-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!cmp-{}:localhost", Uuid::new_v4());
+    let mxc_url = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+    insert_media_event(&store, account_id, &room_id, &mxc_url, Some(mimetype)).await;
+    let media = Arc::new(ConfiguredMediaProxy::ok(MEDIA_PAYLOAD));
+    let app = media_app(store.clone(), media);
+
+    let media_path = mxc_url.trim_start_matches("mxc://");
+    let (status, headers, bytes) = send_request(
+        &app,
+        "GET",
+        &format!("/v1/media/{account_id}/{media_path}"),
+        None,
+        Some(&bearer()),
+        Some(("accept-encoding", "gzip")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "mimetype {mimetype}");
+    assert_eq!(
+        headers["content-type"], served_content_type,
+        "mimetype {mimetype}"
+    );
+    assert!(
+        headers.get("content-encoding").is_none(),
+        "media must not be re-encoded (mimetype {mimetype}), headers {headers:?}"
+    );
+    assert_eq!(bytes, MEDIA_PAYLOAD, "mimetype {mimetype}");
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn media_is_not_recompressed() {
+    // DefaultPredicate already skips `image/*`. The extra predicate covers
+    // audio/video and the octet-stream fallback for anything not inline-safe.
+    assert_media_stays_uncompressed("image/png", "image/png").await;
+    assert_media_stays_uncompressed("audio/mpeg", "audio/mpeg").await;
+    assert_media_stays_uncompressed("video/mp4", "video/mp4").await;
+    assert_media_stays_uncompressed("application/pdf", "application/octet-stream").await;
+}
+
 // ---- Lifecycle: login / logout / delete / recover ----
 
 #[tokio::test]

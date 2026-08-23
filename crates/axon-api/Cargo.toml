@@ -30,7 +30,15 @@ tracing    = { workspace = true }
 # Per-request access logging (method/path/status/latency) on the router (M15b
 # follow-up: the upload/send-media handlers were otherwise silent on the
 # request path, so a stalled request left no server-side trace at all).
-tower-http = { workspace = true, features = ["trace"] }
+# `compression-*` is issue #86: negotiate gzip/br/zstd on JSON (and HTML)
+# responses so a 660 KB room list is not 660 KB on the wire. Media is
+# excluded by predicate (already-compressed bytes + Range).
+tower-http = { workspace = true, features = [
+    "trace",
+    "compression-gzip",
+    "compression-br",
+    "compression-zstd",
+] }
 # OAuth 2.0 authorization server (M14, ADR 0054). `rustls` matches the feature
 # spelling used elsewhere in the workspace (clients/tui) so Cargo unifies on
 # the single already-locked reqwest/aws-lc-rs TLS provider (see axon-store's

@@ -77,6 +77,10 @@ use axum::{
     Json, Router,
 };
 use serde_json::{json, Value};
+use tower_http::compression::{
+    predicate::{DefaultPredicate, NotForContentType, Predicate},
+    CompressionLayer,
+};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
@@ -451,6 +455,14 @@ pub fn router(state: AppState) -> Router {
         // unmatched paths. This is intentionally outside the `/v1` subtree so
         // unknown API routes keep auth + JSON semantics above.
         .fallback(browser_fallback)
+        // Compress JSON/HTML when the client sends `Accept-Encoding` (issue
+        // #86). Inner of the two layers so the access log sees the encoded
+        // response. Clients that do not advertise an encoding (the TUI's
+        // reqwest, curl without `--compressed`) get the identity body. A
+        // reverse proxy that already set Content-Encoding, or that fetches
+        // identity from this process and encodes itself, will not double
+        // compress — we skip a body that is already encoded.
+        .layer(response_compression_layer())
         // Baseline per-request access log (method/path/status/latency) at INFO
         // so it's visible under the default log level, not just RUST_LOG=debug.
         // Without this, a request that stalls inside a handler (e.g. blocked on
@@ -469,6 +481,26 @@ pub fn router(state: AppState) -> Router {
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         .with_state(state)
+}
+
+/// gzip / brotli / zstd, negotiated from `Accept-Encoding`.
+///
+/// `DefaultPredicate` already skips gRPC, SSE, bodies under 32 bytes, and
+/// `image/*` (SVG excepted). We additionally skip `audio/*`, `video/*`, and
+/// `application/octet-stream` — the media proxy's inline-safe types and the
+/// fallback it uses for everything else. Those bodies are already compressed
+/// (or opaque binary) and the routes advertise `Accept-Ranges`; compressing
+/// them would strip that header and fight `Range` requests. tower-http also
+/// refuses to compress a response that already carries `Content-Range`.
+fn response_compression_layer() -> CompressionLayer<impl Predicate> {
+    CompressionLayer::new().compress_when(response_compression_predicate())
+}
+
+fn response_compression_predicate() -> impl Predicate {
+    DefaultPredicate::new()
+        .and(NotForContentType::const_new("audio/"))
+        .and(NotForContentType::const_new("video/"))
+        .and(NotForContentType::const_new("application/octet-stream"))
 }
 
 /// Liveness probe. Always returns `200 OK` with `{"status":"ok"}` — it does not
@@ -502,4 +534,45 @@ async fn browser_fallback() -> Html<&'static str> {
 </html>
 "#,
     )
+}
+
+#[cfg(test)]
+mod compression_predicate_tests {
+    use axum::body::Body;
+    use axum::http::{header, Response};
+    use tower_http::compression::predicate::Predicate;
+
+    use super::response_compression_predicate;
+
+    fn should_compress(content_type: &str, body_len: usize) -> bool {
+        let response = Response::builder()
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from("n".repeat(body_len)))
+            .expect("response");
+        response_compression_predicate().should_compress(&response)
+    }
+
+    /// Large enough to clear `DefaultPredicate`'s 32-byte floor.
+    const LARGE: usize = 64;
+
+    #[test]
+    fn compresses_json_and_html() {
+        assert!(should_compress("application/json", LARGE));
+        assert!(should_compress("application/json; charset=utf-8", LARGE));
+        assert!(should_compress("text/html; charset=utf-8", LARGE));
+    }
+
+    #[test]
+    fn skips_bodies_under_the_size_floor() {
+        assert!(!should_compress("application/json", 16));
+    }
+
+    #[test]
+    fn skips_already_compressed_or_ranged_media() {
+        assert!(!should_compress("image/png", LARGE));
+        assert!(!should_compress("image/jpeg", LARGE));
+        assert!(!should_compress("audio/mpeg", LARGE));
+        assert!(!should_compress("video/mp4", LARGE));
+        assert!(!should_compress("application/octet-stream", LARGE));
+    }
 }
