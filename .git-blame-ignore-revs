@@ -41,3 +41,9 @@
 # style: apply semantic line breaks to AGENTS.md and README.md (#225)
 # Verified against the squash: AGENTS.md 5423 tokens, README.md 2115, unchanged.
 ba3a050956ba19e2003d29da27d89aff41e80b8b
+
+# style: apply semantic line breaks to CONTRIBUTING.md (#227)
+# Verified against the squash: CONTRIBUTING.md 1908 tokens, unchanged, with
+# blockquote markers stripped -- the reflow leaves each quote intact but spread
+# over fewer lines, so 24 bare `>` markers became 19.
+bc0ebf5d46b66131e660dca6f959b817e447f419
