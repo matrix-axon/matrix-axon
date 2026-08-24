@@ -27,6 +27,7 @@ pub(crate) struct MessageLayout {
 /// a truncated excerpt of its body. Present only when the target was resolved
 /// (in the loaded slice or via cross-window fetch); its absence for a replying
 /// event renders the `[reply context not loaded]` placeholder.
+#[derive(Hash)]
 pub(crate) struct ReplyPreview {
     pub(crate) sender: String,
     pub(crate) snippet: String,
@@ -36,6 +37,7 @@ pub(crate) struct ReplyPreview {
 /// `count` is the server-aggregated reply total when known, otherwise the
 /// in-slice member count; `latest_*` describe the most recent member resolved
 /// from the loaded slice.
+#[derive(Hash)]
 pub(crate) struct ThreadBadge {
     pub(crate) count: i64,
     pub(crate) unread_count: usize,
