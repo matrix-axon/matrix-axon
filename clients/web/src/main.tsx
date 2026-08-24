@@ -18,7 +18,8 @@ initReloadGuard(BUILD_INFO.version, reloadEnv)
  * Recover from a chunk that a redeploy deleted (ADR 0087).
  *
  * The app is code-split — every highlight.js language, the PDF viewer, the
- * emoji picker — so a session that outlives a deploy will eventually `import()`
+ * emoji picker, the licenses page — so a session that outlives a deploy will
+ * eventually `import()`
  * a hashed chunk the origin no longer has. Vite raises `vite:preloadError` for
  * exactly this case, and its own guidance is to reload: the failure is not
  * retryable, and the stale thing is the document naming the missing chunk.

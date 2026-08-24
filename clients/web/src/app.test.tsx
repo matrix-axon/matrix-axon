@@ -104,6 +104,14 @@ describe('App', () => {
     )
   })
 
+  it('lazy-loads the licenses page from its own chunk', async () => {
+    history.replaceState(null, '', '/licenses')
+    const { findByRole } = render(<App services={testServices()} />)
+    expect(
+      await findByRole('heading', { name: 'Open-source licenses' }),
+    ).toBeTruthy()
+  })
+
   it('groups connection with the brand and keeps utility actions together', () => {
     const { getByRole } = render(<App services={testServices()} />)
     const brand = getByRole('link', { name: 'axon' })

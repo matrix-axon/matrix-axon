@@ -129,6 +129,10 @@ server URL setup is needed — the client is same-origin with the API, and its v
   docker compose exec axon-server axon token issue --label web
   ```
 
+The front door compresses JS/CSS/HTML and proxied `/v1/` JSON (`encode zstd gzip` in `deploy/web/Caddyfile`).
+Media (`image/*`, `video/*`, …) is left alone — those bytes are already compressed, and the media routes support `Range`.
+Clients that do not send `Accept-Encoding` (axon-tui) get the uncompressed body.
+
 ### Optional: OAuth / SSO sign-in
 
 For a nicer recurring sign-in you can enable Axon's

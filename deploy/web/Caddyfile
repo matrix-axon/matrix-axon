@@ -12,6 +12,12 @@
 # the proxy is reachable from outside the host.
 
 :8080 {
+	# Compress SPA assets and proxied JSON (issue #86). Default MIME matcher
+	# covers JS/CSS/HTML/JSON and skips image/video; WebSocket upgrades are
+	# not encoded. Clients that do not send Accept-Encoding (the TUI's
+	# reqwest) get the identity body.
+	encode zstd gzip
+
 	# The API surface goes to axon. /healthz lives OUTSIDE /v1, so it needs its
 	# own route — otherwise it would fall through to the SPA and return
 	# index.html instead of the {"status":"ok"} liveness JSON. reverse_proxy
