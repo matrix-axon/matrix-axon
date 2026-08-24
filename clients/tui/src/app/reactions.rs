@@ -3,6 +3,59 @@ use std::collections::HashMap;
 use super::completion::emoji_cycle_status;
 use super::{cycle_index, App, Mode, OwnReaction, RoomKey, Status};
 
+/// Record one sender's reaction against a tally, idempotently.
+///
+/// The single answer to "is this reaction already counted", shared by the
+/// optimistic local path and the live remote one. Each previously had its own
+/// guard over its own field — local checked `!me`, remote checked `senders` —
+/// and the two disagreed whenever the account's user id was unresolved, or the
+/// paths ran in either order. That mismatch is the root cause behind all three
+/// counting bugs reported on #220. `count` is now guarded by exactly one thing,
+/// sender membership, and `me` / `my_event_ids` are set in the same step rather
+/// than by whichever path happened to run.
+///
+/// `reaction_event_id` is recorded only when the reaction is ours, because it is
+/// what a withdrawal redacts: `own_reactions_for` needs `me` *and* an id.
+fn record_reaction(
+    tally: &mut crate::api::ReactionTally,
+    sender: Option<&str>,
+    reaction_event_id: Option<&str>,
+    is_own: bool,
+) {
+    match sender {
+        Some(sender) if !tally.senders.iter().any(|known| known == sender) => {
+            tally.senders.push(sender.to_owned());
+            // `me` is set only by this function, and only alongside counting
+            // us exactly once. So `is_own && me` here means the fallback arm
+            // already counted us, back when we could not be named: adopt the
+            // sender entry now that we can, but do not count the same person
+            // again. Without this, learning our own id part-way through a
+            // session doubled a badge we had already contributed to (#220
+            // review, pass 4).
+            if !(is_own && tally.me) {
+                tally.count += 1;
+            }
+        }
+        Some(_) => {}
+        // A sender we cannot name cannot be deduplicated by name. That happens
+        // only for our own reaction on a client that has not resolved its user
+        // id; `my_event_ids` and `me` stand in, and the caller's event-id check
+        // catches the echo, so this still counts exactly once.
+        None if is_own && !tally.me && tally.my_event_ids.is_empty() => {
+            tally.count += 1;
+        }
+        None => {}
+    }
+    if is_own {
+        tally.me = true;
+        if let Some(id) = reaction_event_id {
+            if !tally.my_event_ids.iter().any(|known| known == id) {
+                tally.my_event_ids.push(id.to_owned());
+            }
+        }
+    }
+}
+
 impl App {
     pub(crate) async fn start_unreact_from_selected_message(&mut self) {
         let Some(target_event_id) = self.selected_message_id().map(str::to_owned) else {
@@ -115,6 +168,7 @@ impl App {
         let Some(room) = self.selected_room().cloned() else {
             return;
         };
+        let own_user_id = self.own_user_id_for(&room);
         let room_key = RoomKey::from(&room);
         let Some(events) = self.messages.events.get_mut(&room_key) else {
             return;
@@ -129,7 +183,20 @@ impl App {
             tally.my_event_ids.retain(|id| !withdrawn.contains(id));
             if tally.my_event_ids.is_empty() && tally.me {
                 tally.me = false;
+                // `record_reaction` counts our contribution exactly once --
+                // through the sender arm when we can name ourselves, through
+                // the fallback arm when we cannot -- so removing it decrements
+                // exactly once, whichever arm recorded it. Gating the decrement
+                // on finding ourselves in `senders` left a phantom count
+                // whenever the fallback arm had recorded us and our user id
+                // resolved before the withdrawal (#220 review, pass 3).
+                //
+                // Dropping the sender entry stays best-effort for the same
+                // reason: there is nothing to drop when the fallback arm ran.
                 tally.count = tally.count.saturating_sub(1);
+                if let Some(own) = own_user_id.as_deref() {
+                    tally.senders.retain(|sender| sender != own);
+                }
             }
             if tally.count <= 0 {
                 reactions.remove(key);
@@ -138,6 +205,50 @@ impl App {
         if reactions.is_empty() {
             event.reactions = None;
         }
+    }
+
+    /// Our own Matrix user id, inferred from reaction events already known to
+    /// be ours.
+    ///
+    /// The fourth tier of identity resolution, after `own_user_id_for`'s three,
+    /// and the only one left when the account's user id is unknown by every
+    /// other route: a reaction we recorded as ours names us in its own raw row.
+    ///
+    /// Shared by both reaction paths deliberately. It began as a local-only
+    /// fallback, and the remote path not having it meant the two disagreed
+    /// about what "ours" meant — a second device's reaction with the same key
+    /// then counted as a new sender, doubling a badge for one person (#220
+    /// review, pass 4). Callers differ only in which ids they can offer: the
+    /// local path the one it is about to record, the remote path the ones the
+    /// tally already holds.
+    fn own_user_id_from_reaction_rows(
+        &self,
+        room: &RoomKey,
+        reaction_event_ids: &[&str],
+    ) -> Option<String> {
+        if reaction_event_ids.is_empty() {
+            return None;
+        }
+        self.messages.events.get(room).and_then(|events| {
+            events
+                .iter()
+                .find(|event| reaction_event_ids.contains(&event.event_id.as_str()))
+                .map(|event| event.sender.clone())
+        })
+    }
+
+    /// The reaction event ids this tally already records as ours.
+    fn own_reaction_ids(&self, room: &RoomKey, target_event_id: &str, key: &str) -> Vec<String> {
+        self.messages
+            .events
+            .get(room)
+            .and_then(|events| {
+                let target = events
+                    .iter()
+                    .find(|event| event.event_id == target_event_id)?;
+                Some(target.reactions.as_ref()?.get(key)?.my_event_ids.clone())
+            })
+            .unwrap_or_default()
     }
 
     /// Optimistically add the account user's own reaction to the target message's
@@ -156,6 +267,14 @@ impl App {
             return;
         };
         let room_key = RoomKey::from(&room);
+        // A fourth tier beyond `own_user_id_for`, available only here: if this
+        // reaction's own WS echo already landed, its raw `m.reaction` row names
+        // the sender, and that sender is us. Without it, a client that cannot
+        // otherwise name itself has no way to see that the echo already counted
+        // this reaction, and counts it a second time (#220).
+        let own_user_id = self
+            .own_user_id_for(&room)
+            .or_else(|| self.own_user_id_from_reaction_rows(&room_key, &[&reaction_event_id]));
         let Some(events) = self.messages.events.get_mut(&room_key) else {
             return;
         };
@@ -165,18 +284,76 @@ impl App {
         let reactions = event.reactions.get_or_insert_with(HashMap::new);
         let tally = reactions
             .entry(key.to_owned())
-            .or_insert_with(|| crate::api::ReactionTally {
-                count: 0,
-                me: false,
-                my_event_ids: Vec::new(),
-            });
-        if !tally.me {
-            tally.count += 1;
-            tally.me = true;
+            .or_insert_with(crate::api::ReactionTally::default);
+        record_reaction(
+            tally,
+            own_user_id.as_deref(),
+            Some(&reaction_event_id),
+            true,
+        );
+    }
+
+    /// Fold a live `m.reaction` from any sender into the target message's
+    /// server-aggregated tally.
+    ///
+    /// `append_live_event` has had a merge branch for edits since M8 — an
+    /// `m.replace` frame patches the body of the event it edits — but none for
+    /// reactions. A reaction frame appended a raw `m.reaction` row that
+    /// `should_show_event` filters out, while the badge renders from the
+    /// *target's* `reactions` aggregate, which nothing updated. The badge
+    /// therefore only appeared after a room switch refetched the timeline.
+    ///
+    /// Idempotent: a sender already in the tally is a no-op, so a duplicate or
+    /// echoed frame cannot double-count.
+    pub(super) fn apply_remote_reaction(
+        &mut self,
+        room: &RoomKey,
+        reaction_event_id: &str,
+        target_event_id: &str,
+        key: &str,
+        sender: &str,
+        own_user_id: Option<&str>,
+    ) {
+        // Tier 4, resolved before the mutable borrow below: when the caller's
+        // three tiers came up empty, a reaction already recorded as ours on
+        // this tally names us through its own raw row. Without it, our own
+        // reaction arriving from a second device reads as a new sender and the
+        // badge counts one person twice (#220 review, pass 4).
+        let resolved_own = own_user_id.map(str::to_owned).or_else(|| {
+            let mine = self.own_reaction_ids(room, target_event_id, key);
+            let mine: Vec<&str> = mine.iter().map(String::as_str).collect();
+            self.own_user_id_from_reaction_rows(room, &mine)
+        });
+        let own_user_id = resolved_own.as_deref();
+        let Some(events) = self.messages.events.get_mut(room) else {
+            return;
+        };
+        let Some(event) = events
+            .iter_mut()
+            .find(|item| item.event_id == target_event_id)
+        else {
+            return;
+        };
+        let reactions = event.reactions.get_or_insert_with(HashMap::new);
+        let tally = reactions
+            .entry(key.to_owned())
+            .or_insert_with(crate::api::ReactionTally::default);
+        // Our own reaction echoing back. Keyed on the reaction event id rather
+        // than on the sender, because `own_user_id` is only known once the
+        // account's user id has been resolved — an older server without
+        // `RoomDto.account_user_id`, or a session where the user has not yet
+        // sent a plain message, leaves it `None`. `apply_local_reaction` already
+        // counted this and recorded the id, so a sender-only check would miss
+        // the echo in exactly those cases and count one reaction twice.
+        if tally.my_event_ids.iter().any(|id| id == reaction_event_id) {
+            return;
         }
-        if !tally.my_event_ids.contains(&reaction_event_id) {
-            tally.my_event_ids.push(reaction_event_id);
-        }
+        record_reaction(
+            tally,
+            Some(sender),
+            Some(reaction_event_id),
+            own_user_id == Some(sender),
+        );
     }
 
     pub(crate) fn start_react_to_selected_message(&mut self) {
