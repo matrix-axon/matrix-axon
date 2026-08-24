@@ -75,7 +75,7 @@ beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
-function harness() {
+function harness(options: { accountsEmptyUntilRefresh?: boolean } = {}) {
   let socket: FakeWebSocket | undefined
   const live = createLiveConnection({
     socketFactory: () => {
@@ -93,8 +93,19 @@ function harness() {
   )
   const deviceState = createDeviceStateStore(api, live, memoryStorage())
   const threadUnread = createThreadUnreadStore()
+  const known = signal(
+    options.accountsEmptyUntilRefresh === true
+      ? []
+      : [{ account_id: ACCT, user_id: ME }],
+  )
+  let refreshes = 0
   const accounts = {
-    accounts: computed(() => [{ account_id: ACCT, user_id: ME }]),
+    accounts: computed(() => known.value),
+    refresh: () => {
+      refreshes += 1
+      known.value = [{ account_id: ACCT, user_id: ME }]
+      return Promise.resolve()
+    },
   } as unknown as AccountsStore
   const rooms = {
     rooms: computed(() => signal([]).value),
@@ -115,7 +126,12 @@ function harness() {
     } as unknown as EventDto,
     { roomTitle: 'Ops', ownUserId: ME },
   )
-  return { deviceState, threadUnread, socket: () => socket! }
+  return {
+    deviceState,
+    threadUnread,
+    socket: () => socket!,
+    refreshes: () => refreshes,
+  }
 }
 
 const receiptFrame = (receipt: Record<string, unknown>, userId = ME) =>
@@ -276,6 +292,24 @@ describe('connectThreadReceipts', () => {
       originTs: REPLY_TS + 10_000,
       arrivalThrough: 99,
     })
+  })
+
+  it('loads the accounts store rather than dropping a frame that beat it', async () => {
+    const { deviceState, socket, refreshes } = harness({
+      accountsEmptyUntilRefresh: true,
+    })
+
+    // A receipt can beat the stores on a reconnect. Returning here loses it for
+    // good: receipts are live-only and nothing backfills them (#213).
+    socket().emitMessage(receiptFrame({ ts: 1, thread_id: ROOT }))
+    await vi.waitFor(() =>
+      expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).not.toBeNull(),
+    )
+
+    // A burst of frames must not become a burst of requests.
+    socket().emitMessage(receiptFrame({ ts: 2, thread_id: '$other' }))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    expect(refreshes()).toBe(1)
   })
 
   it('ignores a main-timeline receipt', async () => {

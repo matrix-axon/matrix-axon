@@ -285,6 +285,17 @@ export function connectThreadReceipts(
   threadUnread: ThreadUnreadStore,
 ): () => void {
   const seen = new Set<string>()
+  /** One shared accounts refresh for frames that beat the store's first load. */
+  let accountsLoad: Promise<void> | null = null
+
+  const ownUserIdFor = (accountId: string, roomId: string): string | null =>
+    accounts.accounts.value.find((account) => account.account_id === accountId)
+      ?.user_id ??
+    rooms.rooms.value.find(
+      (room) => room.account_id === accountId && room.room_id === roomId,
+    )?.account_user_id ??
+    null
+
   return live.subscribe((frame) => {
     const passthrough = ephemeralPassthrough(frame)
     if (
@@ -295,83 +306,90 @@ export function connectThreadReceipts(
       return
     }
     const roomId = passthrough.roomId
-    const room = rooms.rooms.value.find(
-      (candidate) =>
-        candidate.account_id === frame.accountId &&
-        candidate.room_id === roomId,
-    )
-    const ownUserId =
-      accounts.accounts.value.find((a) => a.account_id === frame.accountId)
-        ?.user_id ??
-      room?.account_user_id ??
-      null
-    if (ownUserId === null) {
-      return
-    }
-    for (const [eventId, threadRootId] of ownThreadedReceipts(
-      passthrough.content,
-      ownUserId,
-    )) {
-      const key = `${frame.accountId}\u0000${roomId}\u0000${eventId}`
-      if (seen.has(key)) {
-        continue
-      }
-      seen.add(key)
-      inBackground(
-        // The marker's forward-only guard compares against the local cache, so
-        // writing before this account's namespace has hydrated skips it and can
-        // regress a more advanced position — including one another device set.
-        // This connector runs from app startup, while hydration is only
-        // triggered by opening a room, so without the wait it is writing blind
-        // for every account whose rooms have not been visited (review).
-        deviceState
-          .ensureHydrated(frame.accountId, THREAD_READ_MARKERS_NAMESPACE)
-          .then(() =>
-            api.GET('/v1/accounts/{account_id}/events/{event_id}', {
+    const content = passthrough.content
+    inBackground(
+      (async () => {
+        let ownUserId = ownUserIdFor(frame.accountId, roomId)
+        if (ownUserId === null) {
+          // Neither store has this account yet — a receipt can beat them on a
+          // reconnect. Dropping the frame here costs the whole session, because
+          // receipts are live-only and nothing backfills them (#213), so the
+          // thread stays flagged unread even though it was read elsewhere. One
+          // shared refresh, so a burst of frames does not become a burst of
+          // requests (review).
+          accountsLoad ??= accounts.refresh().catch(() => {})
+          await accountsLoad
+          ownUserId = ownUserIdFor(frame.accountId, roomId)
+        }
+        if (ownUserId === null) {
+          return
+        }
+        for (const [eventId, threadRootId] of ownThreadedReceipts(
+          content,
+          ownUserId,
+        )) {
+          const key = `${frame.accountId}\u0000${roomId}\u0000${eventId}`
+          if (seen.has(key)) {
+            continue
+          }
+          seen.add(key)
+          // The marker's forward-only guard compares against the local cache, so
+          // writing before this account's namespace has hydrated skips it and
+          // can regress a more advanced position — including one another device
+          // set. This connector runs from app startup, while hydration is only
+          // triggered by opening a room, so without the wait it is writing blind
+          // for every account whose rooms have not been visited (review).
+          await deviceState.ensureHydrated(
+            frame.accountId,
+            THREAD_READ_MARKERS_NAMESPACE,
+          )
+          const { data, response } = await api.GET(
+            '/v1/accounts/{account_id}/events/{event_id}',
+            {
               params: {
                 path: { account_id: frame.accountId, event_id: eventId },
               },
-            }),
+            },
           )
-          .then(
-            ({ data, response }) => {
-              if (data === undefined) {
-                // Only a 404 is a verdict about the event: it is gone, and
-                // retrying on every rebroadcast would be noise. Anything else —
-                // a 5xx, a gateway error — says nothing about it, and
-                // `openapi-fetch` *resolves* on HTTP errors, so without this
-                // check one transient 500 landed in the "final" branch and
-                // dropped that thread's read signal for the session (review).
-                if (response.status !== 404) {
-                  seen.delete(key)
-                }
-                return
-              }
-              deviceState.advanceThreadReadMarker(
-                frame.accountId,
-                roomId,
-                threadRootId,
-                eventId,
-                data.data.origin_ts,
-                // The other client read this thread through this event, and the
-                // lookup already carries its arrival position — so a thread read
-                // in Element contributes real arrival evidence here rather than
-                // a marker the receipt path has to guess at.
-                data.data.arrival_order,
-              )
-              threadUnread.markThreadRead(frame.accountId, roomId, threadRootId)
-            },
-            () => {
-              // The request never got an answer (offline, a dropped
-              // connection). Unlike a 404 that is not a verdict about the
-              // event, so release the dedup key: otherwise one network hiccup
-              // silently discards this thread's read signal for the rest of the
-              // session, and receipts are never replayed (review, non-blocking).
+          if (data === undefined) {
+            // Only a 404 is a verdict about the event: it is gone, and retrying
+            // on every rebroadcast would be noise. Anything else — a 5xx, a
+            // gateway error — says nothing about it, and `openapi-fetch`
+            // *resolves* on HTTP errors, so without this check one transient 500
+            // landed in the "final" branch and dropped that thread's read signal
+            // for the session (review).
+            if (response.status !== 404) {
               seen.delete(key)
-            },
-          ),
-      )
-    }
+            }
+            continue
+          }
+          deviceState.advanceThreadReadMarker(
+            frame.accountId,
+            roomId,
+            threadRootId,
+            eventId,
+            data.data.origin_ts,
+            // The other client read this thread through this event, and the
+            // lookup already carries its arrival position — so a thread read in
+            // Element contributes real arrival evidence here rather than a
+            // marker the receipt path has to guess at.
+            data.data.arrival_order,
+          )
+          threadUnread.markThreadRead(frame.accountId, roomId, threadRootId)
+        }
+      })().catch(() => {
+        // The request never got an answer (offline, a dropped connection).
+        // Unlike a 404 that is not a verdict about the event, so release every
+        // key this frame claimed: otherwise one network hiccup silently discards
+        // the thread's read signal for the rest of the session (review).
+        for (const [eventId] of ownThreadedReceipts(
+          content,
+          ownUserIdFor(frame.accountId, roomId) ?? '',
+        )) {
+          seen.delete(`${frame.accountId}\u0000${roomId}\u0000${eventId}`)
+        }
+      }),
+    )
   })
 }
 

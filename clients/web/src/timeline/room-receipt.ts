@@ -109,16 +109,24 @@ export function computeRoomReceipt<T extends ReceiptCandidate>(
    * display-last event is not its arrival-max, and answers nothing once that
    * event pages out.
    */
-  const arrivalOf = new Map(
-    input.loaded.map((event) => [event.event_id, event.arrival_order]),
+  const needsFallback = input.threads.some(
+    ({ marker }) => marker !== null && marker.arrivalThrough === null,
   )
+  // Built only for a marker written before `arrivalThrough` existed. This is the
+  // steady-state branch — it reruns on every new message — and the map is a full
+  // pass over the slice serving, usually, zero markers (review).
+  const arrivalOf = needsFallback
+    ? new Map(
+        input.loaded.map((event) => [event.event_id, event.arrival_order]),
+      )
+    : null
   const readThrough = new Map<string, number>()
   for (const { summary, marker } of input.threads) {
     readThrough.set(
       summary.root_event_id,
       marker === null
         ? -1
-        : (marker.arrivalThrough ?? arrivalOf.get(marker.eventId) ?? -1),
+        : (marker.arrivalThrough ?? arrivalOf?.get(marker.eventId) ?? -1),
     )
   }
   const isRead = (event: T): boolean =>

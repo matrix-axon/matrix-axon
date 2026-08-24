@@ -250,71 +250,30 @@ before starting a milestone.
   a flash on every reload. An unhydrated namespace is "not known yet", not "no
   marker".
 - **A thread member can be the room's receipt target, behind a gate** (ADR 0096).
-  Thread members are hidden from the main timeline, so nothing the room view can
-  name ever covers them — in a room whose arrival-newest events are all replies,
-  the receipt stops below them and the badge returns on every load (#207). The
-  panel may name its own arrival-max member when the room stream is at its live
-  end **and has loaded** (`atEnd` starts `true` on a cold store, so the two are
-  not the same check), and when its own slice reaches the thread's newest reply.
-  **The bound is a window, not the room.** `threadReceiptCeiling` is the first
-  _unread_ reply above the room view's own target belonging to a thread the panel
-  is not showing; the panel names the highest member below it, **and so does the room
-  view** — its target extends over read thread replies up to the same bound,
-  which is the only thing that closes out a room whose newest events are all in
-  threads. A panel names only its own thread and only while open, so reading two
-  threads in the wrong order otherwise leaves the room one event short forever.
-  **Read replies are
-  exempt** — a thread marker covering one means it is not an obstruction, and
-  without that exemption a room with two interleaved threads can never clear:
-  whichever panel is open, the other's replies sit in the window, so reading them
-  all changes nothing. No marker still blocks. Do not turn this back
-  into "has the user read every thread here" — that version passed seven tests
-  and never cleared a single badge on a dev server, because a real room is full
-  of threads nobody opened this session, and their replies sit _below_ the room's
-  own target where its receipt has already acknowledged them. The gate reads no
-  marker, no summary and no unread state on purpose: each of those is a model of
-  what the user has read, and each was wrong here in a different way. The window
-  is a fact about the events in hand.
-- **The room read marker is a _main-timeline_ position** (ADR 0048, ADR 0096
-  § 1), but `RoomDto.last_event_id` is `MAX(origin_ts)` over every event in the
-  room, thread replies included. The summary-derived marker effect therefore
-  skips a summary event the loaded slice shows to be a thread member, and lets
-  the timeline effect name a main-timeline position instead. Without that skip
-  the marker parks on a reply the main timeline never rendered, and — because
-  `reconcileSummary` falls back to the room marker for a thread with no marker
-  of its own — the fallback answers "read" for the very thread it came from, so
-  the room badges while reporting no unread thread (#209). Only skippable when
-  the slice can _show_ the event is a reply — so the effect is gated on
-  `timeline.loading` (which starts `true` on a cold store), because the room list
-  comes back from IndexedDB before the first timeline page and the check
-  otherwise runs against an empty slice and seeds from the reply anyway. Gate on
-  `loading`, **not** on emptiness: a loaded-but-empty or gap-filled slice is what
-  this effect exists to serve. And because `advanceReadMarker` is forward-only,
-  every account that opened such a room before this landed still carries the bad
-  marker in device state — so `reconcileSummary`'s fallback withholds a room
-  marker pointing at a thread member and substitutes the display-last
-  main-timeline event. Withholding alone is not enough: no read position means
-  `reconcileSummary` records nothing, which is silent in a different way.
-- **A thread read in another client comes back as a receipt, not as device
-  state** (`connectThreadReceipts`). Element sends a thread-scoped `m.read`
-  (MSC3771) and it reaches us verbatim through ADR 0056's passthrough; axon's
-  own receipts are always unthreaded (ADR 0096), so a `thread_id` on _our_
-  user's receipt can only have come from somewhere else — no echo suppression
-  needed, unlike the `device_state.changed` paths. Write it through to a
-  `thread_read_markers` entry rather than just clearing the in-memory flag:
-  receipts are live-only and never replayed, so a session-scoped clear is
-  undone by the next reload. `thread_id: "main"` is the room stream, not a
-  thread, and is ignored — acting on it would be a claim about a read position
-  that has its own owner.
-- **Debounced device-state writes need an unload flush.** Every write — draft,
-  read marker, thread read marker — sits behind an 800 ms debounce, and
-  `flushPending` was wired only into the auto-refresh path (ADR 0087), which
-  additionally returns early in dev. A reload inside that window silently
-  dropped the write, which presented as a thread the user had just opened coming
-  back unread. `connectDeviceStateFlush` listens on `visibilitychange` and
-  `pagehide`. When testing this, note that a default 1 s `vi.waitFor` is
-  satisfied by the debounce firing on its own — the assertion has to land well
-  inside 800 ms or it passes with the listener removed.
+  Thread members are hidden from the main timeline, so nothing the room view can name ever covers them — in a room whose arrival-newest events are all replies, the receipt stops below them and the badge returns on every load (#207).
+  The panel may name its own arrival-max member when the room stream is at its live end **and has loaded** (`atEnd` starts `true` on a cold store, so the two are not the same check), and when its own slice reaches the thread's newest reply.
+  **The bound is a window, not the room.** `threadReceiptCeiling` is the first _unread_ reply above the room view's own target belonging to a thread the panel is not showing; the panel names the highest member below it, **and so does the room view** — its target extends over read thread replies up to the same bound, which is the only thing that closes out a room whose newest events are all in threads.
+  A panel names only its own thread and only while open, so reading two threads in the wrong order otherwise leaves the room one event short forever.
+  **Read replies are exempt** — a thread marker covering one means it is not an obstruction, and without that exemption a room with two interleaved threads can never clear: whichever panel is open, the other's replies sit in the window, so reading them all changes nothing.
+  No marker still blocks.
+  Do not turn this back into "has the user read every thread here" — that version passed seven tests and never cleared a single badge on a dev server, because a real room is full of threads nobody opened this session, and their replies sit _below_ the room's own target where its receipt has already acknowledged them.
+  The gate reads no marker, no summary and no unread state on purpose: each of those is a model of what the user has read, and each was wrong here in a different way.
+  The window is a fact about the events in hand.
+- **The room read marker is a _main-timeline_ position** (ADR 0048, ADR 0096 § 1), but `RoomDto.last_event_id` is `MAX(origin_ts)` over every event in the room, thread replies included.
+  The summary-derived marker effect therefore skips a summary event the loaded slice shows to be a thread member, and lets the timeline effect name a main-timeline position instead.
+  Without that skip the marker parks on a reply the main timeline never rendered, and — because `reconcileSummary` falls back to the room marker for a thread with no marker of its own — the fallback answers "read" for the very thread it came from, so the room badges while reporting no unread thread (#209).
+  Only skippable when the slice can _show_ the event is a reply — so the effect is gated on `timeline.loading` (which starts `true` on a cold store), because the room list comes back from IndexedDB before the first timeline page and the check otherwise runs against an empty slice and seeds from the reply anyway.
+  Gate on `loading`, **not** on emptiness: a loaded-but-empty or gap-filled slice is what this effect exists to serve.
+  And because `advanceReadMarker` is forward-only, every account that opened such a room before this landed still carries the bad marker in device state — so `reconcileSummary`'s fallback withholds a room marker pointing at a thread member and substitutes the display-last main-timeline event.
+  Withholding alone is not enough: no read position means `reconcileSummary` records nothing, which is silent in a different way.
+- **A thread read in another client comes back as a receipt, not as device state** (`connectThreadReceipts`).
+  Element sends a thread-scoped `m.read` (MSC3771) and it reaches us verbatim through ADR 0056's passthrough; axon's own receipts are always unthreaded (ADR 0096), so a `thread_id` on _our_ user's receipt can only have come from somewhere else — no echo suppression needed, unlike the `device_state.changed` paths.
+  Write it through to a `thread_read_markers` entry rather than just clearing the in-memory flag: receipts are live-only and never replayed, so a session-scoped clear is undone by the next reload.
+  `thread_id: "main"` is the room stream, not a thread, and is ignored — acting on it would be a claim about a read position that has its own owner.
+- **Debounced device-state writes need an unload flush.** Every write — draft, read marker, thread read marker — sits behind an 800 ms debounce, and `flushPending` was wired only into the auto-refresh path (ADR 0087), which additionally returns early in dev.
+  A reload inside that window silently dropped the write, which presented as a thread the user had just opened coming back unread.
+  `connectDeviceStateFlush` listens on `visibilitychange` and `pagehide`.
+  When testing this, note that a default 1 s `vi.waitFor` is satisfied by the debounce firing on its own — the assertion has to land well inside 800 ms or it passes with the listener removed.
 - **Async work in `RoomPage` outlives its own world.** The page does not remount
   across a room switch or an `?event=`/`?thread=` change (ADR 0085), so every
   `await` inside an effect can resolve after the user has moved on — a second

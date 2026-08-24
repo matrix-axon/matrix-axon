@@ -49,6 +49,12 @@ async function clearDeploy(page: Page): Promise<void> {
  * on the way out.
  *
  * State lives on `window` because it has to survive between the two calls.
+ *
+ * **The awaited call resolves before the dispatch runs.** That is inherent: the
+ * dispatch may destroy the context it would have to resolve in, which is the
+ * whole reason it is deferred. Every caller must therefore follow this with an
+ * auto-retrying assertion (`expect.poll`, `toHaveCount`, `toBeVisible`) rather
+ * than a one-shot read, or it will race the reload (review).
  */
 async function returnAfterAway(page: Page, awayMs: number): Promise<void> {
   await page.evaluate(() => {

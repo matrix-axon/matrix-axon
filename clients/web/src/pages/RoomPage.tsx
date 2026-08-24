@@ -875,13 +875,19 @@ export function RoomPage() {
    * a reply newer than it unread, which is also true.
    */
   const mainTimelineRead = displayed.at(-1)
-  const markerIsThreadMember =
-    roomReadMarker !== null &&
-    timeline.events.value.some(
-      (event) =>
-        event.event_id === roomReadMarker.eventId &&
-        threadRootId(event) !== null,
-    )
+  // Memoised on the marker's id rather than left in the render body: it is a
+  // full scan of the slice, and the page re-renders for typing, reaction
+  // pickers and unrelated signal churn (review).
+  const markerIsThreadMember = useMemo(
+    () =>
+      roomReadMarker !== null &&
+      timeline.events.value.some(
+        (event) =>
+          event.event_id === roomReadMarker.eventId &&
+          threadRootId(event) !== null,
+      ),
+    [timeline.events.value, roomReadMarker],
+  )
   // Memoised on the values rather than the objects: `readMarker()` parses a
   // fresh object on every call, so an unmemoised result re-runs the reconcile
   // effect below on every render of the page.
