@@ -13,7 +13,7 @@ use ratatui_image::Resize;
 
 use super::relations::thread_visible;
 use super::{
-    collect_reactions, match_status, message_index_at_line, message_layout, next_match_index,
+    collect_reactions, match_status, message_index_at_line, next_match_index,
     selected_message_target_index, App, ConnectionState, ImageState, ImageThumbRows,
     LiveFrameAction, MediaKey, RoomKey, RoomSort, Status, UnreadThread, UnreadThreadPreview,
     IMAGE_THUMB_ROWS,
@@ -748,13 +748,14 @@ impl App {
     }
 
     pub(crate) fn page_selected_message(&mut self, direction: isize) {
+        self.ensure_message_layout();
         let page = self.messages.page_size.max(1);
         let Some((event_id, next, event_count)) = ({
             let events = self.selected_events();
             if events.is_empty() {
                 None
             } else {
-                let ranges = self.selected_message_ranges(events.as_slice());
+                let ranges = self.cached_message_ranges();
                 let total_lines = ranges
                     .last()
                     .map(|range| range.end)
@@ -768,11 +769,11 @@ impl App {
                     .unwrap_or_else(|| {
                         if direction.is_negative() {
                             message_index_at_line(
-                                ranges.as_slice(),
+                                ranges,
                                 self.messages.scroll.saturating_add(page.saturating_sub(1)),
                             )
                         } else {
-                            message_index_at_line(ranges.as_slice(), self.messages.scroll)
+                            message_index_at_line(ranges, self.messages.scroll)
                         }
                     });
                 let current_line = ranges
@@ -786,7 +787,7 @@ impl App {
                         .saturating_add(page)
                         .min(total_lines.saturating_sub(1))
                 };
-                let next = message_index_at_line(ranges.as_slice(), target_line);
+                let next = message_index_at_line(ranges, target_line);
                 Some((events[next].event_id.clone(), next, events.len()))
             }
         }) else {
@@ -800,8 +801,8 @@ impl App {
     }
 
     pub(crate) fn ensure_message_index_visible(&mut self, index: usize) {
-        let events = self.selected_events();
-        let ranges = self.selected_message_ranges(events.as_slice());
+        self.ensure_message_layout();
+        let ranges = self.cached_message_ranges();
         let Some(range) = ranges.get(index) else {
             return;
         };
@@ -838,8 +839,8 @@ impl App {
     /// the pane, keeping earlier and later messages visible above and below it.
     /// Used by the day-skip shortcuts to frame the day they land on.
     pub(crate) fn center_message_index(&mut self, index: usize) {
-        let events = self.selected_events();
-        let ranges = self.selected_message_ranges(events.as_slice());
+        self.ensure_message_layout();
+        let ranges = self.cached_message_ranges();
         let Some(range) = ranges.get(index) else {
             return;
         };
@@ -993,39 +994,28 @@ impl App {
         }
     }
 
+    /// Total rendered lines for the selected timeline, from the cached layout.
+    ///
+    /// Read directly rather than through `ensure_message_layout`: the one
+    /// caller measures the pane *before* appending a live event, so the layout
+    /// from the last draw is precisely the pre-append state it wants.
     fn selected_display_line_count(&self) -> usize {
-        let events = self.selected_events();
-        self.selected_message_ranges(events.as_slice())
+        self.cached_message_ranges()
             .last()
             .map(|range| range.end)
             .unwrap_or_default()
     }
 
-    fn selected_message_ranges(
-        &self,
-        events: &[&crate::api::EventDto],
-    ) -> Vec<std::ops::Range<usize>> {
-        let current_event_ids = events
-            .iter()
-            .map(|event| event.event_id.as_str())
-            .collect::<Vec<_>>();
-        if current_event_ids.iter().copied().eq(self
-            .messages
-            .layout_event_ids
-            .iter()
-            .map(String::as_str))
-        {
-            return self.messages.line_ranges.clone();
-        }
-
-        let sender_labels = self.sender_labels(events);
-        let reactions = self.selected_reactions();
-        // Build per-image heights from the cache so nav lands on lines that
-        // match what draw() renders (draw() uses the same logic).  An empty map
-        // here would force every image to IMAGE_THUMB_ROWS=6, causing a desync
-        // whenever a shorter image has already been decoded.
+    /// Per-image body heights, from the decoded-image cache.
+    ///
+    /// Shared by the layout cache and by `draw`, which previously derived this
+    /// separately with the same logic. Only entries that differ from
+    /// `IMAGE_THUMB_ROWS` are stored, so the map stays small: an empty map means
+    /// every image is at the default height, while a missing single entry would
+    /// force that image back to the default and desync nav from what is drawn.
+    pub(crate) fn image_thumb_rows(&self, events: &[&EventDto]) -> ImageThumbRows {
         let font_size = self.picker.font_size();
-        let image_thumb_rows: ImageThumbRows = events
+        events
             .iter()
             .filter_map(|event| {
                 let (account_id, mxc_url) = event.image_mxc()?;
@@ -1036,29 +1026,9 @@ impl App {
                 } else {
                     IMAGE_THUMB_ROWS
                 };
-                if thumb_h != IMAGE_THUMB_ROWS {
-                    Some(((account_id, mxc_url), thumb_h))
-                } else {
-                    None
-                }
+                (thumb_h != IMAGE_THUMB_ROWS).then_some(((account_id, mxc_url), thumb_h))
             })
-            .collect();
-        let relations = self.relation_context(events);
-        message_layout(
-            events,
-            sender_labels.as_slice(),
-            self.messages.selection.as_deref(),
-            &self.colors,
-            self.messages.width,
-            &reactions,
-            &self.live.own_senders,
-            &image_thumb_rows,
-            &relations,
-            self.display.message_density,
-            self.display.time_format,
-            self.display.highlight_selected_line,
-        )
-        .ranges
+            .collect()
     }
 
     pub(crate) fn sender_labels(&self, events: &[&EventDto]) -> Vec<String> {
@@ -1071,22 +1041,6 @@ impl App {
     pub(crate) fn set_message_viewport(&mut self, page_size: usize, width: usize) {
         self.messages.page_size = page_size.max(1);
         self.messages.width = width.max(1);
-    }
-
-    pub(crate) fn set_message_layout(
-        &mut self,
-        event_ids: Vec<String>,
-        ranges: Vec<std::ops::Range<usize>>,
-    ) {
-        let line_count = ranges.last().map(|range| range.end).unwrap_or_default();
-        let max_scroll = line_count.saturating_sub(self.messages.page_size);
-        self.messages.scroll = if self.messages.scroll == usize::MAX {
-            max_scroll
-        } else {
-            self.messages.scroll.min(max_scroll)
-        };
-        self.messages.layout_event_ids = event_ids;
-        self.messages.line_ranges = ranges;
     }
 }
 
