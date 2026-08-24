@@ -215,18 +215,32 @@ impl App {
         // browsing history still belongs in the tally they will scroll back to.
         // The raw row still falls through to the normal append, which
         // `should_show_event` filters out of the rendered timeline as before.
-        if let Some((target_id, reaction_key)) = event.reaction_relation() {
-            // The same resolver the local path uses. Consulting only
-            // `own_senders` here would leave `me` unset for our own reaction
-            // arriving from another device whenever this client has not yet
-            // seen one of its own events — the case #220's root-cause fix
-            // exists to remove.
-            let own_user_id = self
+        // One scan, reused: this and the `known_room` check below both want the
+        // same row. Field comparison, not `RoomKey::from(room) == key`, because
+        // that allocated a room-id `String` for every room in the list, for
+        // every live event (#189).
+        //
+        // The borrow is scoped so nothing is cloned: `own_user_id_for` returns
+        // an owned id and `is_some` a bool, so the room row itself never has to
+        // outlive this block or reach the `&mut self` call below.
+        let (known_room, own_user_id) = {
+            let live_room = self
                 .rooms
                 .rooms
                 .iter()
-                .find(|room| room.account_id == event.account_id && room.room_id == event.room_id)
+                .find(|room| room.account_id == key.account_id && room.room_id == key.room_id);
+            // The same resolver the local path uses, and only when this frame
+            // is actually a reaction. Consulting only `own_senders` would leave
+            // `me` unset for our own reaction arriving from another device
+            // whenever this client has not yet seen one of its own events — the
+            // case #220's root-cause fix exists to remove.
+            let own_user_id = event
+                .reaction_relation()
+                .and(live_room)
                 .and_then(|room| self.own_user_id_for(room));
+            (live_room.is_some(), own_user_id)
+        };
+        if let Some((target_id, reaction_key)) = event.reaction_relation() {
             self.apply_remote_reaction(
                 &key,
                 &event.event_id,
@@ -236,14 +250,7 @@ impl App {
                 own_user_id.as_deref(),
             );
         }
-        // Field comparison, not `RoomKey::from(room) == key`: that allocated a
-        // room-id `String` for every room in the list, for every live event
-        // (#189).
-        let known_room = self
-            .rooms
-            .rooms
-            .iter()
-            .any(|room| room.account_id == key.account_id && room.room_id == key.room_id);
+
         if known_room && self.is_own_membership_departure(&event, &key) {
             return LiveFrameAction::RefreshRooms;
         }

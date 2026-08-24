@@ -25,7 +25,16 @@ fn record_reaction(
     match sender {
         Some(sender) if !tally.senders.iter().any(|known| known == sender) => {
             tally.senders.push(sender.to_owned());
-            tally.count += 1;
+            // `me` is set only by this function, and only alongside counting
+            // us exactly once. So `is_own && me` here means the fallback arm
+            // already counted us, back when we could not be named: adopt the
+            // sender entry now that we can, but do not count the same person
+            // again. Without this, learning our own id part-way through a
+            // session doubled a badge we had already contributed to (#220
+            // review, pass 4).
+            if !(is_own && tally.me) {
+                tally.count += 1;
+            }
         }
         Some(_) => {}
         // A sender we cannot name cannot be deduplicated by name. That happens
@@ -198,6 +207,50 @@ impl App {
         }
     }
 
+    /// Our own Matrix user id, inferred from reaction events already known to
+    /// be ours.
+    ///
+    /// The fourth tier of identity resolution, after `own_user_id_for`'s three,
+    /// and the only one left when the account's user id is unknown by every
+    /// other route: a reaction we recorded as ours names us in its own raw row.
+    ///
+    /// Shared by both reaction paths deliberately. It began as a local-only
+    /// fallback, and the remote path not having it meant the two disagreed
+    /// about what "ours" meant — a second device's reaction with the same key
+    /// then counted as a new sender, doubling a badge for one person (#220
+    /// review, pass 4). Callers differ only in which ids they can offer: the
+    /// local path the one it is about to record, the remote path the ones the
+    /// tally already holds.
+    fn own_user_id_from_reaction_rows(
+        &self,
+        room: &RoomKey,
+        reaction_event_ids: &[&str],
+    ) -> Option<String> {
+        if reaction_event_ids.is_empty() {
+            return None;
+        }
+        self.messages.events.get(room).and_then(|events| {
+            events
+                .iter()
+                .find(|event| reaction_event_ids.contains(&event.event_id.as_str()))
+                .map(|event| event.sender.clone())
+        })
+    }
+
+    /// The reaction event ids this tally already records as ours.
+    fn own_reaction_ids(&self, room: &RoomKey, target_event_id: &str, key: &str) -> Vec<String> {
+        self.messages
+            .events
+            .get(room)
+            .and_then(|events| {
+                let target = events
+                    .iter()
+                    .find(|event| event.event_id == target_event_id)?;
+                Some(target.reactions.as_ref()?.get(key)?.my_event_ids.clone())
+            })
+            .unwrap_or_default()
+    }
+
     /// Optimistically add the account user's own reaction to the target message's
     /// server-aggregated tally so the badge appears and the reaction can be
     /// withdrawn immediately, before the next timeline reload re-derives the
@@ -219,14 +272,9 @@ impl App {
         // the sender, and that sender is us. Without it, a client that cannot
         // otherwise name itself has no way to see that the echo already counted
         // this reaction, and counts it a second time (#220).
-        let own_user_id = self.own_user_id_for(&room).or_else(|| {
-            self.messages.events.get(&room_key).and_then(|events| {
-                events
-                    .iter()
-                    .find(|event| event.event_id == reaction_event_id)
-                    .map(|event| event.sender.clone())
-            })
-        });
+        let own_user_id = self
+            .own_user_id_for(&room)
+            .or_else(|| self.own_user_id_from_reaction_rows(&room_key, &[&reaction_event_id]));
         let Some(events) = self.messages.events.get_mut(&room_key) else {
             return;
         };
@@ -266,6 +314,17 @@ impl App {
         sender: &str,
         own_user_id: Option<&str>,
     ) {
+        // Tier 4, resolved before the mutable borrow below: when the caller's
+        // three tiers came up empty, a reaction already recorded as ours on
+        // this tally names us through its own raw row. Without it, our own
+        // reaction arriving from a second device reads as a new sender and the
+        // badge counts one person twice (#220 review, pass 4).
+        let resolved_own = own_user_id.map(str::to_owned).or_else(|| {
+            let mine = self.own_reaction_ids(room, target_event_id, key);
+            let mine: Vec<&str> = mine.iter().map(String::as_str).collect();
+            self.own_user_id_from_reaction_rows(room, &mine)
+        });
+        let own_user_id = resolved_own.as_deref();
         let Some(events) = self.messages.events.get_mut(room) else {
             return;
         };

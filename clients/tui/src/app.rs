@@ -3670,6 +3670,61 @@ mod tests {
         );
     }
 
+    /// One person reacting from two devices is one distinct sender, even when
+    /// this client cannot name itself.
+    ///
+    /// The local path had a fourth identity tier — a reaction we know is ours
+    /// names us in its raw row — and the remote path did not, so the two
+    /// disagreed about what "ours" meant. A second device's reaction with the
+    /// same key then read as a new sender and the badge counted one person
+    /// twice (#220 review, pass 4). Realistic rather than contrived:
+    /// `own_senders` is seeded only by sending a plain message, so an account
+    /// that only reacts, against a server omitting `account_user_id`, never
+    /// resolves its id by any other tier.
+    #[test]
+    fn one_person_reacting_from_two_devices_counts_once() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![message_with_reactions("$target:example.com", Vec::new())],
+        );
+        // Unresolvable by every tier except the reaction rows themselves.
+        app.live.own_senders.clear();
+        app.rooms.rooms[0].account_user_id = None;
+        app.accounts.accounts.clear();
+        app.accounts.client_visible.clear();
+
+        // React here. The id is recorded as ours; nothing yet names us.
+        app.apply_local_reaction(
+            "$target:example.com",
+            "\u{1f44d}",
+            "$device-one:example.com".to_owned(),
+        );
+        // Our own echo lands, so the raw row for that id is now held.
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+            "$device-one:example.com",
+            "$target:example.com",
+            "\u{1f44d}",
+            "@alice:example.com",
+        ))));
+        // The same person reacts again from a second device: a different event
+        // id, the same sender.
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(reaction_frame(
+            "$device-two:example.com",
+            "$target:example.com",
+            "\u{1f44d}",
+            "@alice:example.com",
+        ))));
+
+        assert_eq!(
+            app.selected_reactions().get("$target:example.com"),
+            Some(&vec![("\u{1f44d}".to_owned(), 1)]),
+            "count is distinct senders, and both devices are one sender"
+        );
+    }
+
     /// The WS echo can beat the HTTP response that carries the reaction's id,
     /// so the local optimistic apply runs *second*.
     ///
