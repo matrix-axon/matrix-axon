@@ -17,6 +17,7 @@ import type { MembersStore } from '../stores/members'
 import {
   memberDisplay,
   roomKey,
+  roomListAvatarUrl,
   roomTitle,
   type MemberDto,
   type RoomDto,
@@ -25,6 +26,7 @@ import { useShortcuts } from '../shortcuts'
 import { formatInviteeList, inviteErrorMessage } from '../invite'
 import { BodyPortal } from './BodyPortal'
 import { CopyableText } from './CopyableText'
+import { RoomAvatar, roomAvatarColor } from './RoomAvatar'
 import { ErrorBanner } from './ErrorBanner'
 import { useModalFocus } from './use-modal-focus'
 import { UserAvatar } from './UserAvatar'
@@ -131,7 +133,8 @@ export function RoomInfoPanel({
     return roomState.errors.info === undefined ? 'Loading…' : 'Unavailable'
   }
   const [roomStateVersion, setRoomStateVersion] = useState(0)
-  const displayTitle = room !== undefined ? roomTitle(room, roomTitles) : roomId
+  const displayTitle =
+    room !== undefined ? roomTitle(room, roomTitles) || roomId : roomId
   const ownUserId = room?.account_user_id ?? null
   const homeServerName = serverNameFromRoomReference(ownUserId ?? roomId ?? '')
   const dmTitle =
@@ -412,6 +415,27 @@ export function RoomInfoPanel({
         <button type="button" class="ghost" onClick={onClose}>
           Close
         </button>
+      </div>
+
+      <div class="room-info-identity">
+        <RoomAvatar
+          accountId={accountId}
+          mxcUrl={
+            room !== undefined
+              ? roomListAvatarUrl(room, rooms.dmAvatars.value)
+              : null
+          }
+          title={displayTitle}
+          color={roomAvatarColor(roomStateKey)}
+        />
+        <div class="room-info-identity-copy">
+          <p class="room-info-identity-name">{displayTitle}</p>
+          {room?.topic !== undefined &&
+            room.topic !== null &&
+            room.topic.trim() !== '' && (
+              <p class="room-info-identity-topic muted">{room.topic}</p>
+            )}
+        </div>
       </div>
 
       <section class="room-info-section" aria-labelledby="room-info-details">

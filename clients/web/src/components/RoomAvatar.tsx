@@ -1,7 +1,7 @@
 import { useMediaBlob } from '../media/use-media-blob'
 
-export function roomAvatarLabel(title: string): string {
-  const trimmed = title.trim()
+export function roomAvatarLabel(title: string | null | undefined): string {
+  const trimmed = (title ?? '').trim()
   return trimmed === '' ? '?' : trimmed[0].toLocaleUpperCase()
 }
 

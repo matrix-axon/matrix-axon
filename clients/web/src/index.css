@@ -3090,8 +3090,44 @@ span.composer-attachment-thumb {
 }
 
 .room-info-panel > .overlay-head,
+.room-info-identity,
 .room-info-section {
   flex: 0 0 auto;
+}
+
+.room-info-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  min-width: 0;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.room-info-identity .room-avatar {
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 12px;
+  font-size: 1.35rem;
+}
+
+.room-info-identity-copy {
+  min-width: 0;
+}
+
+.room-info-identity-name {
+  margin: 0;
+  font-weight: 700;
+  font-size: 1.05rem;
+  overflow-wrap: anywhere;
+}
+
+.room-info-identity-topic {
+  margin: 0.2rem 0 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .room-info-section {

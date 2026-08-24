@@ -258,6 +258,13 @@ function renderRoom(
               : (options.members ?? []),
         }),
     ),
+    http.get(
+      `${TEST_BASE_URL}/v1/media/${ACCOUNT}/hs/avatar`,
+      () =>
+        new HttpResponse('avatar-bytes', {
+          headers: { 'content-type': 'image/png' },
+        }),
+    ),
   )
   window.history.replaceState(
     null,
@@ -439,7 +446,18 @@ describe('RoomPage', () => {
     const panel = await findByRole('complementary', {
       name: 'Room information',
     })
-    expect(within(panel).getByText('Daily operations')).toBeTruthy()
+    expect(panel.querySelector('.room-info-identity-name')?.textContent).toBe(
+      'Ops',
+    )
+    expect(panel.querySelector('.room-info-identity-topic')?.textContent).toBe(
+      'Daily operations',
+    )
+    await waitFor(() => {
+      expect(
+        panel.querySelector('.room-info-identity .room-avatar img'),
+      ).toBeTruthy()
+    })
+    expect(within(panel).getAllByText('Daily operations').length).toBe(2)
     expect(within(panel).getByText('#ops:hs')).toBeTruthy()
     expect(
       within(panel).getAllByText('Unavailable from current API').length,

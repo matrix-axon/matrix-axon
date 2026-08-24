@@ -22,7 +22,11 @@ afterEach(() => {
 })
 afterAll(() => server.close())
 
-const room = (roomId: string, name: string): RoomDto =>
+const room = (
+  roomId: string,
+  name: string,
+  extra: Partial<RoomDto> = {},
+): RoomDto =>
   ({
     account_id: ACCOUNT,
     account_user_id: '@me:example.org',
@@ -31,6 +35,7 @@ const room = (roomId: string, name: string): RoomDto =>
     last_activity_ts: 0,
     notification_count: 0,
     highlight_count: 0,
+    ...extra,
   }) as unknown as RoomDto
 
 /**
@@ -67,7 +72,7 @@ function handlers(options: { failSecond?: boolean } = {}) {
   ]
 }
 
-function renderPanel(roomId: string) {
+function renderPanel(roomId: string, extra: Partial<RoomDto> = {}) {
   const services = testServices()
   const members = createMembersStore(services.api, ACCOUNT, roomId)
   const view = render(
@@ -76,7 +81,7 @@ function renderPanel(roomId: string) {
         <RoomInfoPanel
           accountId={ACCOUNT}
           roomId={roomId}
-          room={room(roomId, roomId === FIRST ? 'First' : 'Second')}
+          room={room(roomId, roomId === FIRST ? 'First' : 'Second', extra)}
           roomTitles={new Map()}
           members={members}
           onClose={() => {}}
@@ -123,6 +128,49 @@ it('copies a populated detail on click and skips placeholders', async () => {
 
   expect(queryByRole('button', { name: 'Copy Topic' })).toBeNull()
   expect(queryByRole('button', { name: 'Copy Full alias list' })).toBeNull()
+})
+
+it('shows a colored letter in the identity header when the room has no avatar', () => {
+  server.use(...handlers())
+  const { container } = renderPanel(FIRST)
+  const identity = container.querySelector('.room-info-identity')
+  const avatar = identity?.querySelector<HTMLElement>('.room-avatar')
+  expect(identity?.querySelector('.room-info-identity-name')?.textContent).toBe(
+    'First',
+  )
+  expect(identity?.querySelector('.room-info-identity-topic')).toBeNull()
+  expect(avatar?.textContent).toBe('F')
+  expect(avatar?.querySelector('img')).toBeNull()
+  expect(avatar?.className).toMatch(/\broom-avatar-color-\d\b/)
+})
+
+it('shows the room avatar in the identity header', async () => {
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/media/${ACCOUNT}/hs/avatar`,
+      () =>
+        new HttpResponse('avatar-bytes', {
+          headers: { 'content-type': 'image/png' },
+        }),
+    ),
+    ...handlers(),
+  )
+  const { container } = renderPanel(FIRST, { avatar_url: 'mxc://hs/avatar' })
+  await waitFor(() => {
+    const img = container.querySelector<HTMLImageElement>(
+      '.room-info-identity .room-avatar img',
+    )
+    expect(img?.src).toMatch(/^blob:/)
+  })
+  expect(detail('Avatar')).toBe('mxc://hs/avatar')
+})
+
+it('shows the topic under the identity name when the room has one', () => {
+  server.use(...handlers())
+  const { container } = renderPanel(FIRST, { topic: 'Planning the next hike' })
+  expect(
+    container.querySelector('.room-info-identity-topic')?.textContent,
+  ).toBe('Planning the next hike')
 })
 
 it('never shows the previous room’s state after a room switch', async () => {
