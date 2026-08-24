@@ -81,6 +81,45 @@ export function dmTitleFromMembers(
 }
 
 /**
+ * The other person's avatar in a 1:1 DM, or `null` when there isn't exactly
+ * one other joined/invited member with an `mxc://` avatar. Unnamed rooms with
+ * several people keep the letter fallback unless the room itself has an
+ * avatar — this is the DM case only.
+ */
+export function dmPeerAvatarFromMembers(
+  selfUserId: string | null,
+  members: readonly MemberDto[],
+): string | null {
+  const others = members.filter(
+    (member) =>
+      member.user_id !== selfUserId &&
+      (member.membership === 'join' || member.membership === 'invite'),
+  )
+  if (others.length !== 1) {
+    return null
+  }
+  const avatar = others[0].avatar_url
+  return blank(avatar) ? null : avatar!
+}
+
+/**
+ * Avatar shown on a room-list row: the room's own `avatar_url` when set,
+ * else a cached DM peer avatar, else none (the colored letter).
+ */
+export function roomListAvatarUrl(
+  room: RoomDto,
+  dmAvatars: ReadonlyMap<string, string>,
+): string | null {
+  if (!blank(room.avatar_url)) {
+    return room.avatar_url!
+  }
+  if (!isLikelyDm(room)) {
+    return null
+  }
+  return dmAvatars.get(roomKey(room)) ?? null
+}
+
+/**
  * The rendered room-list title: name, else canonical alias, else the cached
  * member-derived title for unnamed rooms, else the room id. Matches the TUI's
  * `room_list_title_from_cache`.
