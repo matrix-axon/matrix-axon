@@ -145,7 +145,8 @@ Operator-provided static client IDs are the fallback for deployments that do not
 Registration metadata is shared safely across accounts, while user access and refresh tokens remain account-scoped and encrypted under Axon's store key.
 
 `ClientManager` restores OAuth accounts with `client.oauth().restore_session(...)` and legacy accounts with `client.matrix_auth().restore_session(...)`.
-It configures matrix-rust-sdk's session callbacks so every replacement access/refresh-token pair is persisted as one encrypted database update before the client continues normal work.
+Each OAuth account run supervises a session-change persister that subscribes before the session can refresh, reads `client.oauth().full_session()` after a token-change signal, and writes the replacement access token, refresh token, and client ID in one encrypted database update.
+Persistence is serialized per account, retries the newest full snapshot with bounded backoff, reports degraded session durability, and gets a bounded shutdown flush so an older snapshot cannot overwrite a newer rotation.
 A provider may invalidate a rotated refresh token before any local process can durably record its replacement, so a crash in that remote/local gap can still require a fresh QR login; the implementation and tests must make that residual failure explicit rather than silently restoring a known-stale token forever.
 Logout uses the matching authentication implementation and makes upstream revocation best-effort, bounded, and observable without leaking token material.
 
