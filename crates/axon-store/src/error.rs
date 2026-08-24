@@ -18,6 +18,11 @@ pub enum StoreError {
     /// contents. This is a build-time mistake, surfaced at startup.
     #[error("invalid embedded migration: {0}")]
     EmbeddedMigration(String),
+
+    /// An account's persisted authentication fields do not form one complete,
+    /// current session. The message never contains token material.
+    #[error("invalid account session: {0}")]
+    InvalidAccountSession(String),
 }
 
 impl From<StoreError> for axon_core::Error {

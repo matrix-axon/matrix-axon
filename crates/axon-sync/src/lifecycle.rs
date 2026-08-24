@@ -935,8 +935,11 @@ impl AccountLifecycle {
         self.reap_task(account_id).await?;
 
         if let Some(client) = self.manager.take(account_id).await {
-            match tokio::time::timeout(UPSTREAM_LOGOUT_TIMEOUT, client.matrix_auth().logout()).await
-            {
+            // `Client::logout` dispatches to the session's matching auth
+            // implementation: Matrix `/logout` for legacy sessions, OAuth token
+            // revocation for OAuth sessions. Local teardown is already complete,
+            // so either upstream failure remains bounded and best-effort.
+            match tokio::time::timeout(UPSTREAM_LOGOUT_TIMEOUT, client.logout()).await {
                 Ok(Ok(_)) => {}
                 Ok(Err(err)) => tracing::warn!(
                     %account_id,

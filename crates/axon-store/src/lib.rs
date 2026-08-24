@@ -27,7 +27,9 @@ mod tokens;
 mod unread;
 mod upstream_reconcile;
 
-pub use accounts::{Account, AccountState};
+pub use accounts::{
+    Account, AccountAuthKind, AccountState, MatrixOAuthRegistration, StoredAccountSession,
+};
 pub use backfill::{AccountBackfillProgress, RoomBackfillState};
 pub use device_state::{DeviceStateRow, DeviceStateUpsert};
 pub use error::StoreError;

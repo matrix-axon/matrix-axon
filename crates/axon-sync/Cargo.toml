@@ -31,6 +31,8 @@ tokio-util = { workspace = true, features = ["rt"] }
 futures-util = { workspace = true, features = ["std"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 serde_json = { workspace = true }
+url = { workspace = true }
+reqwest = { workspace = true, features = ["rustls"] }
 mime = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
@@ -45,4 +47,5 @@ sqlx-core = { workspace = true }
 # Homeserver-discovery tests: a tiny loopback HTTP server standing in for the
 # mxdomain (well-known) and the homeserver (versions probe).
 axum = { workspace = true }
+chrono = { workspace = true }
 tokio = { workspace = true, features = ["net"] }

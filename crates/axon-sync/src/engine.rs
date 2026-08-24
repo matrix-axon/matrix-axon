@@ -19,8 +19,8 @@ use axon_core::{
 use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
 use axon_store::{
-    Account, AccountDataUpsert, EventCiphertext, NewEvent, RoomInviteSnapshot, RoomStateUpsert,
-    Store,
+    Account, AccountAuthKind, AccountDataUpsert, EventCiphertext, NewEvent, RoomInviteSnapshot,
+    RoomStateUpsert, Store,
 };
 use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::event_handler::{Ctx, RawEvent};
@@ -44,6 +44,7 @@ use crate::error::{sdk_err, SyncError};
 use crate::gateway::SdkGateway;
 use crate::lifecycle::{lock_for, AccountLifecycle, IdentityLock, IdentityLocks};
 use crate::manager::ClientManager;
+use crate::matrix_oauth;
 use crate::redecrypt;
 use crate::sync_health::SyncHealth;
 use crate::verification::{
@@ -1449,6 +1450,11 @@ async fn run_account(
     // gateway, which may have connected this account already). A connect failure
     // surfaces as a SyncError so the supervisor's backoff/retry is unchanged.
     let client = manager.get_or_connect(account.account_id).await?;
+    // Subscribe before sync can make an authenticated request and trigger token
+    // refresh. The watcher's initial full snapshot also heals a refresh made by
+    // a gateway that lazily connected this client before the supervisor arrived.
+    let oauth_session_changes = (account.auth_kind == AccountAuthKind::OAuth)
+        .then(|| client.subscribe_to_session_changes());
 
     // Register event persistence before starting the sync service so no events
     // are missed between SyncService::start() and handler registration.
@@ -1545,6 +1551,25 @@ async fn run_account(
         .build()
         .await
         .map_err(sdk_err)?;
+
+    // OAuth refresh durability is part of this account run's supervised
+    // lifetime. One writer per run serializes snapshots, and teardown drains it
+    // before the cached client can be revoked or replaced.
+    let oauth_session_cancel = cancel.child_token();
+    let oauth_session_handle = oauth_session_changes.map(|changes| {
+        let store_key = config
+            .store_key
+            .clone()
+            .expect("OAuth client restore requires sync.store_key");
+        tokio::spawn(matrix_oauth::watch_session_changes(
+            client.clone(),
+            store.clone(),
+            account.account_id,
+            store_key,
+            changes,
+            oauth_session_cancel.clone(),
+        ))
+    });
     sync_service.start().await;
     tracing::info!(account_id = %account.account_id, "sync service started");
 
@@ -1793,6 +1818,16 @@ async fn run_account(
     // then stop and join the re-decryption queue so it doesn't outlive this run
     // (which would leak a task or duplicate one across a supervised restart).
     sync_service.stop().await;
+    oauth_session_cancel.cancel();
+    if let Some(handle) = oauth_session_handle {
+        if let Err(err) = handle.await {
+            tracing::warn!(
+                account_id = %account.account_id,
+                error = %err,
+                "OAuth session watcher did not shut down cleanly"
+            );
+        }
+    }
     redecrypt_cancel.cancel();
     if let Err(err) = redecrypt_handle.await {
         tracing::warn!(
