@@ -104,6 +104,7 @@ describe('createThreadUnreadStore', () => {
         rootEventId: ROOT,
         eventId: '$reply',
         originTs: 200,
+        arrivalThrough: null,
       },
     })
     expect(store.isUnread(ACCT, ROOM, ROOT)).toBe(false)
