@@ -1,4 +1,4 @@
-import { LocationProvider, Route, Router, useLocation } from 'preact-iso'
+import { LocationProvider, Route, Router, lazy, useLocation } from 'preact-iso'
 import {
   useCallback,
   useEffect,
@@ -30,7 +30,6 @@ import {
 } from './search-tokens'
 import { ShellActionsContext } from './shell-actions'
 import { AccountsPage } from './pages/AccountsPage'
-import { LicensesPage } from './pages/LicensesPage'
 import { NotFound } from './pages/NotFound'
 import { RoomPage } from './pages/RoomPage'
 import { InvitesPage } from './pages/InvitesPage'
@@ -66,6 +65,18 @@ import { roomKey } from './stores/room-list'
 import { orderedSpaces } from './stores/spaces'
 import type { Account } from './stores/accounts'
 import type { RoomEntryResult, RoomsStore } from './stores/rooms'
+
+/**
+ * License texts are generated at build time (~84 KB of JSON) and are only
+ * read on `/licenses`. A static import would put them in the main chunk and
+ * trip Vite's 500 kB warning on every `pnpm build`; the rest of the app is
+ * already code-split the same way (highlight.js grammars, pdf.js, the emoji
+ * picker). `lazy` throws a thenable until the chunk lands — preact-iso's
+ * suspense hook catches it.
+ */
+const LicensesPage = lazy(() =>
+  import('./pages/LicensesPage').then((mod) => mod.LicensesPage),
+)
 
 const PAGE_SCROLL_RESET_KEY = 'axon.pagescrollreset'
 
