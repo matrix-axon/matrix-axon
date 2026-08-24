@@ -17,6 +17,12 @@ import { threadRootId } from '../stores/threads'
 import { localThreadEventHref } from '../matrix-to'
 import { createTimelineStore, type EventDto } from '../stores/timeline'
 import type { TimelineEvent, TimelineStore } from '../stores/timeline'
+import {
+  maxByArrivalOrder,
+  maxByArrivalOrderBelow,
+  viewMayClaimReadState,
+} from '../timeline/arrival-order'
+import { hiddenByRedaction } from '../timeline/visibility'
 import { Composer, type ComposerAutocompleteOption } from './Composer'
 import { ErrorBanner } from './ErrorBanner'
 import { Fragment } from 'preact'
@@ -97,6 +103,8 @@ export function ThreadPanel({
   rooms,
   roomTitles,
   threadUnread,
+  mayNameRoomReceipt = false,
+  receiptCeiling = null,
   onCommand,
   roomCompletions,
   onClose,
@@ -111,6 +119,22 @@ export function ThreadPanel({
   rooms: readonly RoomDto[]
   roomTitles: ReadonlyMap<string, string>
   threadUnread: ThreadUnreadStore
+  /**
+   * Whether the room stream is caught up, so a member of *this* thread is a
+   * legal target for the room's Matrix receipt (ADR 0096). The room page owns
+   * that judgement; this panel adds the half only it can know — that its own
+   * slice reaches the thread's newest reply. Defaults to `false`: a caller that
+   * has not thought about it must not have a receipt sent on its behalf.
+   */
+  mayNameRoomReceipt?: boolean
+  /**
+   * Exclusive upper bound in `arrival_order` on what this panel may name: the
+   * first reply above the room's own target belonging to a thread this panel is
+   * not showing. A receipt covers everything at or below its target, so naming
+   * past that bound would acknowledge a reply the user has never opened.
+   * `null` means nothing is in the way.
+   */
+  receiptCeiling?: number | null
   onCommand?: ThreadCommandHandler
   roomCompletions?(query: string): ComposerAutocompleteOption[]
   onClose: () => void
@@ -120,6 +144,7 @@ export function ThreadPanel({
   const {
     api,
     deviceState,
+    ephemeralSender,
     live,
     media,
     search,
@@ -256,28 +281,89 @@ export function ThreadPanel({
     }
   }, [api, accountId, rootId, thread, targetEventId])
 
+  /**
+   * Whether this panel is showing the thread's newest replies, the same pair of
+   * conditions the room stream derives as `showingNewestEvents` (#136): not
+   * parked on an anchor, *and* the loaded slice reaches the live end. Both are
+   * needed here for the same reasons they are there — `highlightedEventId` opens
+   * the panel on an old reply and `jumpTo` parks the slice below the tail, while
+   * a live-end slice says nothing about an anchor the panel is still resolving.
+   */
+  const showingNewestReplies = viewMayClaimReadState({
+    anchoredTo: targetEventId,
+    atEnd: thread.atEnd.value,
+    loading: thread.loading.value,
+  })
+
   useEffect(() => {
-    if (thread.loading.value) {
+    // Read state may only be claimed from a view that showed the newest replies
+    // (#154). Everything below this line is a claim: the thread marker is
+    // cross-device, `markThreadRead` clears the unread-threads entry outright,
+    // and the receipt is a homeserver-visible acknowledgement of the whole room
+    // up to its target. A panel opened on a deep link is parked in history by
+    // definition and has displayed none of that.
+    if (!showingNewestReplies) {
       return
     }
-    const latest = thread.events.value.findLast(
-      (event) => !event.event_id.startsWith('local:'),
+    // One set of replies, three claims derived from it — the marker, the unread
+    // flag, and the receipt — so they cannot disagree about what was shown.
+    // They did: `latest` was display-order and unfiltered while the receipt
+    // target was arrival-order and filtered, so a backfilled reply (display-
+    // early, arrival-late) left the marker understating what the panel had
+    // rendered. `RoomPage.isRead` then read that understatement as "still
+    // unread", made the reply a blocker, and the room receipt could never
+    // extend past it — the badge-never-clears bug this ADR exists to end,
+    // through a second door (review, blocking).
+    const shown = thread.events.value.filter(
+      (event) =>
+        !event.event_id.startsWith('local:') &&
+        !hiddenByRedaction(event, hideRedacted),
     )
-    if (latest === undefined) {
+    const displayLast = shown.at(-1)
+    const arrivalMax = maxByArrivalOrder(shown)
+    if (displayLast === undefined || arrivalMax === null) {
       return
     }
+    // Where the "read to here" line sits, in display order — and how far the
+    // panel has read in arrival order, which is a different question and now a
+    // separate field rather than something a later reader has to re-derive.
     deviceState.advanceThreadReadMarker(
       accountId,
       roomId,
       rootId,
-      latest.event_id,
-      latest.origin_ts,
+      displayLast.event_id,
+      displayLast.origin_ts,
+      arrivalMax.arrival_order,
     )
     threadUnread.markThreadRead(accountId, roomId, rootId)
+    if (!mayNameRoomReceipt) {
+      return
+    }
+    // The receipt names the arrival-max member (ADR 0089), bounded by the
+    // ceiling: a reply from another thread sitting above some of this thread's
+    // members still leaves the members below it safe to acknowledge, and
+    // reaching as far as is honest is the difference between a badge that
+    // clears and one that does not. The room stream names its own target from
+    // the main timeline; `ephemeral-sender`'s forward-only floor merges the two
+    // picks, so neither call site needs to know about the other.
+    const target = maxByArrivalOrderBelow(shown, receiptCeiling)
+    if (target !== null) {
+      ephemeralSender.noteRead(
+        accountId,
+        roomId,
+        target.event_id,
+        target.arrival_order,
+      )
+    }
   }, [
     thread.loading.value,
     thread.events.value,
+    showingNewestReplies,
+    mayNameRoomReceipt,
+    receiptCeiling,
+    hideRedacted,
     deviceState,
+    ephemeralSender,
     threadUnread,
     accountId,
     roomId,

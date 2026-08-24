@@ -421,16 +421,32 @@ describe('createDeviceStateStore', () => {
       rootEventId: ROOT,
       eventId: '$reply1',
       originTs: 100,
+      // A marker written before the field existed parses as `null`, which the
+      // receipt path treats as "no arrival evidence" rather than zero.
+      arrivalThrough: null,
     })
 
     store.advanceThreadReadMarker(ACCT, ROOM, ROOT, '$older', 50)
     expect(store.threadReadMarker(ACCT, ROOM, ROOT)?.eventId).toBe('$reply1')
-    store.advanceThreadReadMarker(ACCT, ROOM, ROOT, '$reply2', 200)
+    store.advanceThreadReadMarker(ACCT, ROOM, ROOT, '$reply2', 200, 7)
     expect(store.threadReadMarker(ACCT, ROOM, ROOT)).toEqual({
       roomId: ROOM,
       rootEventId: ROOT,
       eventId: '$reply2',
       originTs: 200,
+      arrivalThrough: 7,
+    })
+
+    // The two positions advance independently: a backfilled reply raises how far
+    // the panel has read in arrival order while leaving the display position
+    // where it is.
+    store.advanceThreadReadMarker(ACCT, ROOM, ROOT, '$backfilled', 150, 9)
+    expect(store.threadReadMarker(ACCT, ROOM, ROOT)).toEqual({
+      roomId: ROOM,
+      rootEventId: ROOT,
+      eventId: '$reply2',
+      originTs: 200,
+      arrivalThrough: 9,
     })
 
     await vi.advanceTimersByTimeAsync(800)
@@ -441,9 +457,42 @@ describe('createDeviceStateStore', () => {
           root_event_id: ROOT,
           event_id: '$reply2',
           origin_ts: 200,
+          arrival_through: 9,
         },
       },
     })
+    vi.useRealTimers()
+  })
+
+  it('scopes the revision counter to one namespace', () => {
+    const { store } = setup()
+    const before = store.revision(ACCT, 'thread_read_markers')
+
+    // A draft keystroke must not invalidate a memo that only reads thread
+    // markers — a single global counter made every character re-run the
+    // receipt scan over the room's timeline (review).
+    store.setDraft(ACCT, ROOM, 'h')
+    store.setDraft(ACCT, ROOM, 'he')
+    expect(store.revision(ACCT, 'thread_read_markers')).toBe(before)
+    expect(store.revision(ACCT, 'drafts')).toBeGreaterThan(0)
+
+    store.advanceThreadReadMarker(ACCT, ROOM, ROOT, '$reply', 100, 5)
+    expect(store.revision(ACCT, 'thread_read_markers')).toBeGreaterThan(before)
+  })
+
+  it('reports a failed hydration as settled but not hydrated', async () => {
+    vi.useFakeTimers()
+    server.use(
+      http.get(STATE_PATH, () => new HttpResponse(null, { status: 500 })),
+    )
+    const { store } = setup()
+    store.hydrateThreadReadMarkers(ACCT)
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The distinction a room badge needs: the fetch is over, so stop waiting,
+    // but no data arrived, so a receipt must not claim on it.
+    expect(store.hydrateSettled(ACCT, 'thread_read_markers')).toBe(true)
+    expect(store.hydrated(ACCT, 'thread_read_markers')).toBe(false)
     vi.useRealTimers()
   })
 

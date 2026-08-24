@@ -3518,7 +3518,14 @@ describe('RoomPage', () => {
   })
 
   it('opening the room advances the read marker from the room summary', async () => {
-    const { services } = renderRoom([])
+    // The summary event is in the slice, so this view can tell it is an ordinary
+    // main-timeline message rather than a thread reply. ADR 0096 made that a
+    // precondition: seeding a read position from an event the client cannot
+    // classify is what parked the marker on a thread member and made a room
+    // report no unread thread while badging for one (#207/#209). The fixture was
+    // an empty timeline before that; the effect now stands down there and the
+    // timeline effect owns the marker.
+    const { services } = renderRoom([event('$last', T0)])
 
     await waitFor(() =>
       expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
@@ -3526,6 +3533,16 @@ describe('RoomPage', () => {
         originTs: T0,
       }),
     )
+  })
+
+  it('does not advance the read marker from a summary event it cannot classify', async () => {
+    // `last_event_id` is `MAX(origin_ts)` over every event including thread
+    // replies, and `rooms`/`timeline` update independently — so "absent from the
+    // slice" cannot be read as "not a thread reply" (ADR 0096).
+    const { services } = renderRoom([])
+
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toBeNull()
   })
 
   describe('a view parked in history claims nothing as read', () => {

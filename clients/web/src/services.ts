@@ -1,7 +1,7 @@
 import { effect, signal, type Signal } from '@preact/signals'
 import { createContext } from 'preact'
 import { useContext } from 'preact/hooks'
-import { createApiClient, type ApiClient } from './api/client'
+import { createApiClient, inBackground, type ApiClient } from './api/client'
 import {
   deviceStateChange,
   ephemeralPassthrough,
@@ -25,7 +25,11 @@ import {
   THREAD_READ_MARKERS_NAMESPACE,
   type DeviceStateStore,
 } from './stores/device-state'
-import { createEphemeralStore, type EphemeralStore } from './stores/ephemeral'
+import {
+  createEphemeralStore,
+  walkReceiptContent,
+  type EphemeralStore,
+} from './stores/ephemeral'
 import {
   createEphemeralSender,
   type EphemeralSender,
@@ -248,6 +252,205 @@ export function connectReadMarkers(
       }
     }
   })
+}
+
+/**
+ * Learn that a thread was read on a client axon does not run — Element and
+ * friends — from the threaded read receipts they send (#209).
+ *
+ * `m.receipt` reaches us verbatim through the ADR 0056 passthrough, and a
+ * per-user receipt carries `thread_id` when it is thread-scoped (MSC3771). Axon
+ * itself only ever sends *unthreaded* receipts (ADR 0096 § 2 keeps them that
+ * way), so a thread-scoped receipt for our own user can only have come from
+ * somewhere else — no echo to suppress, unlike the device-state paths above.
+ *
+ * The receipt is turned into a durable `thread_read_markers` entry rather than
+ * just clearing the in-memory flag. Receipts are live-only and never replayed,
+ * so a session-scoped clear would last until the next reload and no longer —
+ * which is the complaint this exists to answer. Writing the marker also carries
+ * the knowledge to this account's other axon clients, the same way opening the
+ * thread here would.
+ *
+ * The receipt names an event but not its `origin_ts`, and the marker is ordered
+ * on `origin_ts`, so the event is resolved through the API. One fetch per
+ * newly-seen receipt target, deduped — these arrive only when the user reads a
+ * thread elsewhere, which is rare, and a repeat costs nothing but a map lookup.
+ */
+export function connectThreadReceipts(
+  api: ApiClient,
+  live: LiveConnection,
+  rooms: RoomsStore,
+  accounts: AccountsStore,
+  deviceState: DeviceStateStore,
+  threadUnread: ThreadUnreadStore,
+): () => void {
+  const seen = new Set<string>()
+  /** One shared accounts refresh for frames that beat the store's first load. */
+  let accountsLoad: Promise<void> | null = null
+
+  const ownUserIdFor = (accountId: string, roomId: string): string | null =>
+    accounts.accounts.value.find((account) => account.account_id === accountId)
+      ?.user_id ??
+    rooms.rooms.value.find(
+      (room) => room.account_id === accountId && room.room_id === roomId,
+    )?.account_user_id ??
+    null
+
+  return live.subscribe((frame) => {
+    const passthrough = ephemeralPassthrough(frame)
+    if (
+      passthrough === null ||
+      passthrough.eventType !== 'm.receipt' ||
+      passthrough.roomId === null
+    ) {
+      return
+    }
+    const roomId = passthrough.roomId
+    const content = passthrough.content
+    inBackground(
+      (async () => {
+        let ownUserId = ownUserIdFor(frame.accountId, roomId)
+        if (ownUserId === null) {
+          // Neither store has this account yet — a receipt can beat them on a
+          // reconnect. Dropping the frame here costs the whole session, because
+          // receipts are live-only and nothing backfills them (#213), so the
+          // thread stays flagged unread even though it was read elsewhere. One
+          // shared refresh, so a burst of frames does not become a burst of
+          // requests (review).
+          accountsLoad ??= accounts.refresh().catch(() => {})
+          await accountsLoad
+          ownUserId = ownUserIdFor(frame.accountId, roomId)
+        }
+        if (ownUserId === null) {
+          return
+        }
+        for (const [eventId, threadRootId] of ownThreadedReceipts(
+          content,
+          ownUserId,
+        )) {
+          const key = `${frame.accountId}\u0000${roomId}\u0000${eventId}`
+          if (seen.has(key)) {
+            continue
+          }
+          seen.add(key)
+          // The marker's forward-only guard compares against the local cache, so
+          // writing before this account's namespace has hydrated skips it and
+          // can regress a more advanced position — including one another device
+          // set. This connector runs from app startup, while hydration is only
+          // triggered by opening a room, so without the wait it is writing blind
+          // for every account whose rooms have not been visited (review).
+          await deviceState.ensureHydrated(
+            frame.accountId,
+            THREAD_READ_MARKERS_NAMESPACE,
+          )
+          const { data, response } = await api.GET(
+            '/v1/accounts/{account_id}/events/{event_id}',
+            {
+              params: {
+                path: { account_id: frame.accountId, event_id: eventId },
+              },
+            },
+          )
+          if (data === undefined) {
+            // Only a 404 is a verdict about the event: it is gone, and retrying
+            // on every rebroadcast would be noise. Anything else — a 5xx, a
+            // gateway error — says nothing about it, and `openapi-fetch`
+            // *resolves* on HTTP errors, so without this check one transient 500
+            // landed in the "final" branch and dropped that thread's read signal
+            // for the session (review).
+            if (response.status !== 404) {
+              seen.delete(key)
+            }
+            continue
+          }
+          deviceState.advanceThreadReadMarker(
+            frame.accountId,
+            roomId,
+            threadRootId,
+            eventId,
+            data.data.origin_ts,
+            // The other client read this thread through this event, and the
+            // lookup already carries its arrival position — so a thread read in
+            // Element contributes real arrival evidence here rather than a
+            // marker the receipt path has to guess at.
+            data.data.arrival_order,
+          )
+          threadUnread.markThreadRead(frame.accountId, roomId, threadRootId)
+        }
+      })().catch(() => {
+        // The request never got an answer (offline, a dropped connection).
+        // Unlike a 404 that is not a verdict about the event, so release every
+        // key this frame claimed: otherwise one network hiccup silently discards
+        // the thread's read signal for the rest of the session (review).
+        for (const [eventId] of ownThreadedReceipts(
+          content,
+          ownUserIdFor(frame.accountId, roomId) ?? '',
+        )) {
+          seen.delete(`${frame.accountId}\u0000${roomId}\u0000${eventId}`)
+        }
+      }),
+    )
+  })
+}
+
+/**
+ * The `(event id, thread root)` pairs in one `m.receipt` content that are this
+ * user's own thread-scoped receipts.
+ *
+ * `thread_id: "main"` is the main timeline, not a thread, and is deliberately
+ * ignored — acting on it would be a claim about the room stream, which has its
+ * own read position. The wire shape itself is walked by
+ * [`walkReceiptContent`](./stores/ephemeral.ts), shared with the ephemeral
+ * overlay so one parser knows it.
+ */
+function ownThreadedReceipts(
+  content: unknown,
+  ownUserId: string,
+): [string, string][] {
+  const found: [string, string][] = []
+  for (const record of walkReceiptContent(content)) {
+    if (
+      record.userId === ownUserId &&
+      record.threadId !== null &&
+      record.threadId !== 'main'
+    ) {
+      found.push([record.eventId, record.threadId])
+    }
+  }
+  return found
+}
+
+/**
+ * Send debounced device-state writes before the page goes away.
+ *
+ * Every write — a draft, a read marker, a thread read marker — sits behind an
+ * 800 ms debounce, and nothing flushed it on unload: `flushPending` was wired
+ * only into the auto-refresh path (ADR 0087), which additionally does not
+ * install in dev. So a reload within the debounce window silently dropped the
+ * write, and the user saw a thread they had just opened come back unread.
+ *
+ * `visibilitychange` is the primary hook rather than `beforeunload`: it fires on
+ * reload, navigation, and tab switches, it is the one signal mobile browsers
+ * reliably deliver before discarding a page, and a `fetch` issued there still
+ * goes out. `pagehide` is a belt for desktop paths that skip it. Neither is
+ * filtered on the new visibility state: flushing when a tab is *revealed* is a
+ * no-op when nothing is pending, and a branch no test can distinguish is worse
+ * than the call it saves.
+ */
+export function connectDeviceStateFlush(
+  deviceState: DeviceStateStore,
+  doc: Document = document,
+  win: Window = window,
+): () => void {
+  const flush = () => {
+    void deviceState.flushPending()
+  }
+  doc.addEventListener('visibilitychange', flush)
+  win.addEventListener('pagehide', flush)
+  return () => {
+    doc.removeEventListener('visibilitychange', flush)
+    win.removeEventListener('pagehide', flush)
+  }
 }
 
 /** Apply sibling devices' thread-read markers to local unread-thread state. */
@@ -614,6 +817,8 @@ export function createServices(
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
   connectThreadReadMarkers(live, threadUnread, deviceState)
+  connectThreadReceipts(api, live, rooms, accounts, deviceState, threadUnread)
+  connectDeviceStateFlush(deviceState)
   connectTimelineCacheReset(auth, timelines)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
