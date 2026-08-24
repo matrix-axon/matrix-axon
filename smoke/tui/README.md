@@ -189,11 +189,34 @@ It is **not a test and not a CI gate** — it needs Docker and a real terminal.
 `scripts/smoke-gate.sh` does not run it.
 
 ```sh
-scripts/demo-stack.sh up        # placeholder photos if needed, then boot + seed
+scripts/demo-stack.sh up               # placeholder photos if needed, then boot + seed
+scripts/demo-stack.sh record --capture # ffmpeg records the window itself — see below
+scripts/demo-stack.sh down
+```
+
+`--capture[=FILE]` records this terminal's own window with ffmpeg instead of you starting and stopping a screen recorder by hand —
+no more racing the pilot to hit record in time, or trimming a take's dead air at the edges afterward.
+It works on X11 and XWayland (ffmpeg's `x11grab`, pointed at exactly this window's geometry via `xdotool`/`xwininfo`);
+it does nothing for a native-Wayland terminal or macOS, both of which have no X window for `x11grab` to find.
+There, keep using your own screen recorder:
+
+```sh
+scripts/demo-stack.sh up
 # start your screen recorder, then:
 scripts/demo-stack.sh record    # -- --scene media --pace 1.5 to pass flags through
 scripts/demo-stack.sh down
 ```
+
+`FILE` defaults to `demo-artifacts/tui-demo.mp4` (gitignored — it belongs on a release, not in git, same as the web recordings; see `clients/web/README.md` § Demo recording).
+Don't move or resize the window while it's running: the captured region is fixed at start.
+`AXON_DEMO_WINDOW_ID` overrides the auto-detected window if it ever picks the wrong one (e.g. multiple terminals open);
+`AXON_DEMO_CAPTURE_FRAMERATE` overrides the default 30fps.
+
+`--capture` also resizes the window to a fixed 1280x800px first (`--size WxH` to pick a different target, `--no-resize` to keep whatever size the window already is),
+so takes come out a consistent size regardless of however the terminal happened to be sized that day.
+This is `xdotool windowsize` — the actual X window, at the server level — not a terminal escape sequence:
+those depend on the terminal choosing to honor a resize request (xterm gates it behind `allowWindowOps`, off by default in most distros; several common terminals don't implement it at all),
+so they are not a reliable way to get this.
 
 `scripts/demo-stack.sh` is a thin wrapper; the underlying commands are worth
 knowing when something goes wrong:
