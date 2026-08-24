@@ -235,12 +235,34 @@ export function parseTypingContent(content: unknown): readonly string[] | null {
   return [...unique]
 }
 
-export function parseReceiptContent(
+/** The receipt types Matrix defines for a read position. */
+const RECEIPT_TYPES = ['m.read', 'm.read.private'] as const
+
+/** One user's receipt on one event, as it appears on the wire. */
+export interface ReceiptRecord {
+  eventId: string
+  receiptType: (typeof RECEIPT_TYPES)[number]
+  userId: string
+  ts: number | null
+  /** MSC3771 thread scope: a thread root, the literal `"main"`, or absent. */
+  threadId: string | null
+}
+
+/**
+ * Walk an `m.receipt` content object, yielding one record per
+ * `content[eventId][receiptType][userId]`.
+ *
+ * The single place that knows this wire shape. Consumers want different slices
+ * of it — the ephemeral overlay wants every user's timestamp per event to render
+ * read avatars, `connectThreadReceipts` wants this user's thread-scoped ones —
+ * and both used to walk it separately, so a fix to one had no reason to reach
+ * the other (review, non-blocking).
+ */
+export function* walkReceiptContent(
   content: unknown,
-): ReadonlyMap<string, ReceiptEntry> {
-  const parsed = new Map<string, ReceiptEntry>()
+): Generator<ReceiptRecord> {
   if (typeof content !== 'object' || content === null) {
-    return parsed
+    return
   }
   for (const [eventId, receiptTypes] of Object.entries(
     content as Record<string, unknown>,
@@ -248,33 +270,50 @@ export function parseReceiptContent(
     if (typeof receiptTypes !== 'object' || receiptTypes === null) {
       continue
     }
-    const publicRead = parseReceiptUsers(
-      (receiptTypes as Record<string, unknown>)['m.read'],
-    )
-    const privateRead = parseReceiptUsers(
-      (receiptTypes as Record<string, unknown>)['m.read.private'],
-    )
-    if (publicRead.size > 0 || privateRead.size > 0) {
-      parsed.set(eventId, { publicRead, privateRead })
+    for (const receiptType of RECEIPT_TYPES) {
+      const byUser = (receiptTypes as Record<string, unknown>)[receiptType]
+      if (typeof byUser !== 'object' || byUser === null) {
+        continue
+      }
+      for (const [userId, metadata] of Object.entries(
+        byUser as Record<string, unknown>,
+      )) {
+        const fields =
+          typeof metadata === 'object' && metadata !== null
+            ? (metadata as Record<string, unknown>)
+            : {}
+        yield {
+          eventId,
+          receiptType,
+          userId,
+          ts: typeof fields.ts === 'number' ? fields.ts : null,
+          threadId:
+            typeof fields.thread_id === 'string' ? fields.thread_id : null,
+        }
+      }
     }
   }
-  return parsed
 }
 
-function parseReceiptUsers(value: unknown): ReadonlyMap<string, number | null> {
-  const users = new Map<string, number | null>()
-  if (typeof value !== 'object' || value === null) {
-    return users
-  }
-  for (const [userId, metadata] of Object.entries(
-    value as Record<string, unknown>,
-  )) {
-    if (typeof metadata !== 'object' || metadata === null) {
-      users.set(userId, null)
-      continue
+export function parseReceiptContent(
+  content: unknown,
+): ReadonlyMap<string, ReceiptEntry> {
+  const parsed = new Map<
+    string,
+    {
+      publicRead: Map<string, number | null>
+      privateRead: Map<string, number | null>
     }
-    const ts = (metadata as Record<string, unknown>).ts
-    users.set(userId, typeof ts === 'number' ? ts : null)
+  >()
+  for (const record of walkReceiptContent(content)) {
+    let entry = parsed.get(record.eventId)
+    if (entry === undefined) {
+      entry = { publicRead: new Map(), privateRead: new Map() }
+      parsed.set(record.eventId, entry)
+    }
+    const target =
+      record.receiptType === 'm.read' ? entry.publicRead : entry.privateRead
+    target.set(record.userId, record.ts)
   }
-  return users
+  return parsed
 }

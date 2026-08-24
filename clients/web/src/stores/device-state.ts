@@ -37,6 +37,12 @@ export interface DeviceStateStore {
   /** Fetch a `(accountId, namespace)` merged view once (idempotent). */
   hydrate(accountId: string, namespace: string): void
   /**
+   * The same fetch, awaitable — resolves once the scope has been fetched, so a
+   * writer can respect the forward-only guard instead of writing into an empty
+   * cache and bypassing it.
+   */
+  ensureHydrated(accountId: string, namespace: string): Promise<void>
+  /**
    * Send every debounced write now and resolve once the server has answered.
    * Called before an automatic reload (ADR 0087): drafts are durable, but only
    * once the `PUT` behind the 800 ms debounce has actually gone out, so without
@@ -46,6 +52,24 @@ export interface DeviceStateStore {
   flushPending(): Promise<void>
   /** Whether a `(accountId, namespace)` merged view has successfully loaded. */
   hydrated(accountId: string, namespace: string): boolean
+  /**
+   * Whether a `(accountId, namespace)` fetch has *finished*, successfully or
+   * not.
+   *
+   * A caller that must not act on absent data waits for [`hydrated`]; one that
+   * only needs to stop waiting uses this. The distinction is the difference
+   * between a read receipt (never claim on missing evidence) and a room badge
+   * (a repeating HTTP failure must not freeze it forever, since there is no
+   * retry until the socket drops and reconnects).
+   */
+  hydrateSettled(accountId: string, namespace: string): boolean
+  /**
+   * How many times one `(account, namespace)` scope's entries have changed — a
+   * stable scalar for a `useMemo` that reads values behind a method call and so
+   * has no dependency to name. Per scope, so a draft keystroke does not
+   * invalidate a memo that only reads thread markers.
+   */
+  revision(accountId: string, namespace: string): number
 
   /** Draft text for a room (`''` when none) — the `drafts` namespace. */
   draft(accountId: string, roomId: string): string
@@ -93,6 +117,7 @@ export interface DeviceStateStore {
     rootEventId: string,
     eventId: string,
     originTs: number,
+    arrivalThrough?: number,
   ): void
   /** Fetch an account's thread read markers once. */
   hydrateThreadReadMarkers(accountId: string): void
@@ -108,6 +133,18 @@ export interface ReadMarker {
 export interface ThreadReadMarker extends ReadMarker {
   roomId: string
   rootEventId: string
+  /**
+   * The greatest `arrival_order` the panel had displayed when this was written,
+   * or `null` for a marker written before this field existed.
+   *
+   * `eventId`/`originTs` are a *display* position — where the thread's "read to
+   * here" line sits — and display order is not arrival order (ADR 0089). A
+   * receipt decision needs the second, and resolving it by looking `eventId` up
+   * in a loaded slice both understates it (a backfilled reply can be display-
+   * earlier and arrival-later than the display-last event) and fails outright
+   * once that event pages out. Recording it at write time removes both.
+   */
+  arrivalThrough: number | null
 }
 
 /**
@@ -118,6 +155,16 @@ interface LocalWrite {
   written: number
   acked: number
   ackedAt: number
+}
+
+/** What is known about one `(account, namespace)` scope. */
+interface ScopeState {
+  /** A fetch returned data for it. */
+  hydrated: boolean
+  /** A fetch finished for it, with or without data. */
+  settled: boolean
+  /** Bumped on every change to this scope's entries. */
+  revision: number
 }
 
 /** Parse a marker's wire value (`{event_id, origin_ts}`); `null` if malformed. */
@@ -144,12 +191,20 @@ export function parseThreadReadMarker(value: unknown): ThreadReadMarker | null {
     root_event_id: rootEventId,
     event_id: eventId,
     origin_ts: originTs,
+    arrival_through: arrivalThrough,
   } = value as Record<string, unknown>
   return typeof roomId === 'string' &&
     typeof rootEventId === 'string' &&
     typeof eventId === 'string' &&
     typeof originTs === 'number'
-    ? { roomId, rootEventId, eventId, originTs }
+    ? {
+        roomId,
+        rootEventId,
+        eventId,
+        originTs,
+        arrivalThrough:
+          typeof arrivalThrough === 'number' ? arrivalThrough : null,
+      }
     : null
 }
 
@@ -200,9 +255,21 @@ export function createDeviceStateStore(
 ): DeviceStateStore {
   const deviceId = loadDeviceId(storage)
   const entries = signal<ReadonlyMap<string, unknown>>(new Map())
-  const hydratedScopes = signal<ReadonlySet<string>>(new Set())
+  /**
+   * One record per `(account, namespace)` scope instead of a set per outcome:
+   * a fetch's lifecycle is one state, and keeping `hydrated` and `settled` in
+   * separate structures invites updating one and forgetting the other — which
+   * is the exact bug class the two flags exist to prevent (review).
+   *
+   * `revision` counts writes to the scope's *entries*, a different axis from
+   * the fetch lifecycle, and it is per scope on purpose: a single global
+   * counter made every draft keystroke invalidate memos that only read thread
+   * markers, undoing most of the memoisation it was added to enable (review).
+   */
+  const scopes = signal<ReadonlyMap<string, ScopeState>>(new Map())
   /** `(account, namespace)` scopes already fetched (or in flight). */
-  const hydrated = new Set<string>()
+  /** In-flight or finished hydration per scope; see `ensureHydrated`. */
+  const hydrations = new Map<string, Promise<void>>()
   /** Debounced pending writes per scope: `key -> value | null`. */
   const pending = new Map<string, Map<string, unknown>>()
   const timers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -296,6 +363,29 @@ export function createDeviceStateStore(
       next.set(ck, value)
     }
     entries.value = next
+    bumpScope(accountId, namespace)
+  }
+
+  function updateScope(
+    accountId: string,
+    namespace: string,
+    change: Partial<ScopeState>,
+  ): void {
+    const key = scopeKey(accountId, namespace)
+    const current = scopes.value.get(key) ?? {
+      hydrated: false,
+      settled: false,
+      revision: 0,
+    }
+    scopes.value = new Map(scopes.value).set(key, { ...current, ...change })
+  }
+
+  function bumpScope(accountId: string, namespace: string): void {
+    const key = scopeKey(accountId, namespace)
+    const current = scopes.value.get(key)
+    updateScope(accountId, namespace, {
+      revision: (current?.revision ?? 0) + 1,
+    })
   }
 
   async function fetchScope(
@@ -315,9 +405,11 @@ export function createDeviceStateStore(
         },
       }))
     } catch {
+      updateScope(accountId, namespace, { settled: true })
       return
     }
     if (data === undefined) {
+      updateScope(accountId, namespace, { settled: true })
       return
     }
     const next = new Map(entries.value)
@@ -329,9 +421,8 @@ export function createDeviceStateStore(
       }
     }
     entries.value = next
-    hydratedScopes.value = new Set(hydratedScopes.value).add(
-      scopeKey(accountId, namespace),
-    )
+    bumpScope(accountId, namespace)
+    updateScope(accountId, namespace, { hydrated: true, settled: true })
   }
 
   async function putEntries(
@@ -491,6 +582,7 @@ export function createDeviceStateStore(
       }
     }
     entries.value = next
+    bumpScope(frame.accountId, change.namespace)
   })
 
   // Re-read every hydrated scope on reconnect — the lossy bus may have dropped
@@ -501,19 +593,34 @@ export function createDeviceStateStore(
     if (live.reconnects.value === 0) {
       return
     }
-    for (const scope of hydrated) {
+    for (const scope of hydrations.keys()) {
       const [accountId, namespace] = scope.split(SEP)
       void fetchScope(accountId, namespace)
     }
   })
 
   function hydrate(accountId: string, namespace: string): void {
+    void ensureHydrated(accountId, namespace)
+  }
+
+  /**
+   * Fetch a scope if nobody has, and resolve when that fetch has finished.
+   *
+   * A writer that must respect the forward-only guard has to wait for this: the
+   * guard compares against the local cache, so writing into an unhydrated scope
+   * skips it entirely and can regress a more advanced position — including one
+   * another device already set. Hydration is otherwise only triggered by opening
+   * a room, so anything wired at app startup is writing blind (review, ADR 0096).
+   */
+  function ensureHydrated(accountId: string, namespace: string): Promise<void> {
     const sk = scopeKey(accountId, namespace)
-    if (hydrated.has(sk)) {
-      return
+    const existing = hydrations.get(sk)
+    if (existing !== undefined) {
+      return existing
     }
-    hydrated.add(sk)
-    void fetchScope(accountId, namespace)
+    const started = fetchScope(accountId, namespace)
+    hydrations.set(sk, started)
+    return started
   }
 
   async function flushPending(): Promise<void> {
@@ -558,9 +665,16 @@ export function createDeviceStateStore(
       schedulePut(accountId, namespace, key, value)
     },
     hydrate,
+    ensureHydrated,
     flushPending,
     hydrated(accountId, namespace) {
-      return hydratedScopes.value.has(scopeKey(accountId, namespace))
+      return scopes.value.get(scopeKey(accountId, namespace))?.hydrated === true
+    },
+    hydrateSettled(accountId, namespace) {
+      return scopes.value.get(scopeKey(accountId, namespace))?.settled === true
+    },
+    revision(accountId, namespace) {
+      return scopes.value.get(scopeKey(accountId, namespace))?.revision ?? 0
     },
     draft(accountId, roomId) {
       return draftText(
@@ -596,7 +710,8 @@ export function createDeviceStateStore(
     },
     async baselineReadMarkers(accountId, rooms) {
       if (
-        !hydratedScopes.value.has(scopeKey(accountId, READ_MARKERS_NAMESPACE))
+        scopes.value.get(scopeKey(accountId, READ_MARKERS_NAMESPACE))
+          ?.hydrated !== true
       ) {
         return
       }
@@ -661,21 +776,44 @@ export function createDeviceStateStore(
         ),
       )
     },
-    advanceThreadReadMarker(accountId, roomId, rootEventId, eventId, originTs) {
+    advanceThreadReadMarker(
+      accountId,
+      roomId,
+      rootEventId,
+      eventId,
+      originTs,
+      arrivalThrough,
+    ) {
       const key = threadReadMarkerKey(roomId, rootEventId)
       const current = parseThreadReadMarker(
         entries.value.get(
           cacheKey(accountId, THREAD_READ_MARKERS_NAMESPACE, key),
         ),
       )
-      if (current !== null && current.originTs >= originTs) {
+      // Both positions move forward only, and they move independently: a
+      // backfilled reply raises how far the panel has read in *arrival* order
+      // while leaving the display position where it was. The display test is
+      // computed once — it was written out three times, and an edit that
+      // updated the guard while missing one of the ternaries would have
+      // silently reintroduced a marker regression (review).
+      const keepsDisplayPosition =
+        current !== null && current.originTs >= originTs
+      const nextArrival = Math.max(
+        arrivalThrough ?? -1,
+        current?.arrivalThrough ?? -1,
+      )
+      if (
+        keepsDisplayPosition &&
+        nextArrival <= (current?.arrivalThrough ?? -1)
+      ) {
         return
       }
       const value = {
         room_id: roomId,
         root_event_id: rootEventId,
-        event_id: eventId,
-        origin_ts: originTs,
+        event_id: keepsDisplayPosition ? current.eventId : eventId,
+        origin_ts: keepsDisplayPosition ? current.originTs : originTs,
+        ...(nextArrival >= 0 && { arrival_through: nextArrival }),
       }
       writeCache(accountId, THREAD_READ_MARKERS_NAMESPACE, key, value)
       schedulePut(accountId, THREAD_READ_MARKERS_NAMESPACE, key, value)
