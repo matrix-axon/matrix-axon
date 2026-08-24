@@ -105,7 +105,24 @@ Send media (ADR 0059/0062, `/send <path> [caption]`) is a two-step client call, 
 
 ## Own-message identification
 
-The TUI can seed the user's own Matrix ID from `RoomDto.account_user_id` when the server provides it, so own-message coloring works on first render. Keep that field optional in the client DTO for compatibility with older Axon servers. As a fallback, after `send_message_to_room` succeeds, the TUI stores the returned event_id as `pending_own_event_id`; when the echo arrives via the live WebSocket, it records `account_id → sender` in `own_senders`. Messages from that sender/account pair render with `colors.own_message_sender` instead of `colors.message_sender`.
+Resolve the account's own Matrix ID through `App::own_user_id_for`, never by reading one source directly.
+No single source is reliable, so it tries three in order, and code that consults only one of them gets `None` where another would have answered:
+
+1. `RoomDto.account_user_id`, when the server provides it — this is what makes own-message colouring correct on the first render.
+   Keep the field optional in the client DTO, for compatibility with older Axon servers that omit it.
+2. `own_senders`, recorded when one of our own events comes back over the WebSocket.
+   After `send_message_to_room` succeeds the TUI stores the returned event id as `pending_own_event_id`, and the echo records `account_id → sender`.
+   This tier is seeded only by sending a plain message, so a session that has only ever reacted never populates it.
+3. The account list, which always carries `user_id` even when the room DTO omits it.
+
+Messages from that sender/account pair render with `colors.own_message_sender` instead of `colors.message_sender`.
+
+Reactions add a fourth tier on top, `own_user_id_from_reaction_rows`, because a badge that is wrong is a visible miscount rather than a colour:
+a reaction event already recorded as ours names us in its own raw row.
+Both the optimistic local path and the live remote path call it, deliberately — when only one of them had it, the two disagreed about what "ours" meant and a reaction sent from a second device counted the same person twice (#220).
+
+The general rule the reaction bugs taught: **one function answers "is this mine", and every path calls it.**
+Two guards over two fields, each settable independently, will disagree the moment one source is unavailable.
 
 ## Formatted Messages
 
