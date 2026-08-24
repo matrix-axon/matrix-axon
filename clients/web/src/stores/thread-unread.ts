@@ -1,6 +1,7 @@
 import { computed, signal, type ReadonlySignal } from '@preact/signals'
 import type { ReadMarker, ThreadReadMarker } from './device-state'
 import { threadRootId, type ThreadSummaryDto } from './threads'
+import { summaryLooksUnread } from '../timeline/room-receipt'
 import type { EventDto } from './timeline'
 
 const SEP = '\0'
@@ -180,11 +181,15 @@ export function createThreadUnreadStore(): ThreadUnreadStore {
       }
       const markerTs =
         context.threadMarker?.originTs ?? context.roomMarker?.originTs ?? null
-      if (markerTs === null) {
-        return
-      }
-      if (latestTs <= markerTs) {
-        remove(key)
+      // `'silent'`: with no read position established, the display says nothing
+      // rather than guessing — a room joined years ago would otherwise light up
+      // every thread in it. The receipt asks the same question with `'unread'`,
+      // because there the safe default is the opposite one. One helper, one
+      // parameter, so the two cannot drift apart (review).
+      if (!summaryLooksUnread(summary, markerTs, 'silent')) {
+        if (markerTs !== null) {
+          remove(key)
+        }
         return
       }
       upsert({

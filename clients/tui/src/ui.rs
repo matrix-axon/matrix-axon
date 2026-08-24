@@ -11,10 +11,10 @@ use ratatui_image::{FontSize, Image, Resize};
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    account_localpart, date_separator_line, format_date, format_time, message_layout,
-    selected_line_style, AccountSelection, App, ImageState, ImageThumbRows, MediaKey, Mode,
-    PopupKind, ProtocolKey, ProtocolState, RoomFilter, RoomKey, SearchKind, UnreadThreadEntry,
-    VerificationDirection, VerificationFlow, VerificationStage, IMAGE_THUMB_ROWS,
+    account_localpart, date_separator_line, format_date, format_time, selected_line_style,
+    AccountSelection, App, ImageState, MediaKey, Mode, PopupKind, ProtocolKey, ProtocolState,
+    RoomFilter, RoomKey, SearchKind, UnreadThreadEntry, VerificationDirection, VerificationFlow,
+    VerificationStage, IMAGE_THUMB_ROWS,
 };
 use ratatui_image::picker::ProtocolType;
 
@@ -421,48 +421,19 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let message_page_size = usize::from(messages_area.height.saturating_sub(2)).max(1);
     let message_width = usize::from(messages_area.width.saturating_sub(2)).max(1);
     app.set_message_viewport(message_page_size, message_width);
+    // One layout per change, shared with the nav math rather than recomputed
+    // here every frame (#54, #52). Must follow the viewport write: `width` is
+    // one of the inputs its digest keys on.
+    app.ensure_message_layout();
     let selected_events = app.selected_events();
-    let sender_labels = selected_events
-        .iter()
-        .map(|event| app.sender_label(event))
-        .collect::<Vec<_>>();
-    let reactions = app.selected_reactions();
-    // Build thumbnail heights from the cache. The shared message layout adds
-    // each image's wrapped label/caption rows and computes all line ranges once.
     let font_size = app.picker.font_size();
-    let image_thumb_rows: ImageThumbRows = selected_events
-        .iter()
-        .filter_map(|event| {
-            let (account_id, mxc_url) = event.image_mxc()?;
-            let key = MediaKey::new(account_id, mxc_url.clone());
-            let thumb_h = if let Some(ImageState::Ready(img)) = app.image_cache.get(&key) {
-                let nat = Resize::natural_size(img, font_size);
-                (nat.height as usize).clamp(1, IMAGE_THUMB_ROWS)
-            } else {
-                IMAGE_THUMB_ROWS
-            };
-            if thumb_h != IMAGE_THUMB_ROWS {
-                Some(((account_id, mxc_url), thumb_h))
-            } else {
-                None
-            }
-        })
-        .collect();
-    let relations = app.relation_context(selected_events.as_slice());
-    let layout = message_layout(
-        selected_events.as_slice(),
-        sender_labels.as_slice(),
-        app.selected_message_id(),
-        &app.colors,
-        message_width,
-        &reactions,
-        &app.live.own_senders,
-        &image_thumb_rows,
-        &relations,
-        app.display.message_density,
-        app.display.time_format,
-        app.display.highlight_selected_line,
-    );
+    // Built alongside the cached layout, not rederived here: this is the same
+    // O(events) filter+map `ensure_message_layout` just ran, and it ran
+    // unconditionally every frame regardless of cache hit or miss (#229).
+    let image_thumb_rows = &app.messages.layout_image_thumb_rows;
+    let layout = app
+        .cached_message_layout()
+        .expect("ensure_message_layout stores one before returning");
     let total_lines = layout
         .ranges
         .last()
@@ -563,11 +534,6 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .collect();
         (requests, specs)
     };
-    let layout_event_ids = selected_events
-        .iter()
-        .map(|event| event.event_id.clone())
-        .collect();
-    app.set_message_layout(layout_event_ids, layout.ranges);
     for (key, encrypted) in &media_requests {
         app.request_image(key.account_id, key.mxc_url.clone(), *encrypted);
     }
@@ -2555,11 +2521,30 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
             app.room_titles.len(),
             app.rooms_without_derived_title.len()
         );
+        // A cache that never hits looks identical on screen: same pixels, just
+        // slower. Without these counts a broken digest and a working one are
+        // indistinguishable from the UI, so the overlay reports the hit rate
+        // (#54). The reading that matters is whether `recomputed` climbs while
+        // the client sits idle — it should not.
+        let layout_line = {
+            let checks = app.messages.layout_checks;
+            let recomputes = app.messages.layout_recomputes;
+            let hits = checks.saturating_sub(recomputes);
+            let hit_rate = if checks == 0 {
+                0.0
+            } else {
+                (hits as f64 / checks as f64) * 100.0
+            };
+            format!(
+                "Message layout: {recomputes} recomputed / {checks} checked ({hit_rate:.1}% cached)"
+            )
+        };
         lines.push("".to_owned());
         lines.push("Diagnostics (display.debug):".to_owned());
         lines.push(media_drops_line);
         lines.push(startup_line);
         lines.push(room_titles_line);
+        lines.push(layout_line);
     }
 
     lines
