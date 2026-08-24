@@ -1079,6 +1079,10 @@ h2 {
   margin: 0.25rem 0 0.5rem;
 }
 
+.card-meta + .card-meta {
+  margin-top: 0;
+}
+
 .card-actions {
   display: flex;
   align-items: center;
@@ -1893,6 +1897,7 @@ p.timeline-edge {
   white-space: nowrap;
 }
 
+.copyable-text,
 .event-time-copy {
   appearance: none;
   border: 0;
@@ -1900,15 +1905,25 @@ p.timeline-edge {
   background: transparent;
   padding: 0 0.125rem;
   font: inherit;
+  color: inherit;
+  text-align: inherit;
   cursor: copy;
 }
 
+.copyable-text {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.copyable-text:hover,
+.copyable-text:focus-visible,
 .event-time-copy:hover,
 .event-time-copy:focus-visible {
   color: var(--accent);
   background: rgba(64, 121, 255, 0.12);
 }
 
+.copyable-text.failed,
 .event-time-copy.failed {
   color: var(--danger);
 }
@@ -2173,6 +2188,10 @@ p.timeline-edge {
 }
 
 .event-inspector-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
   padding: 0.4rem 0.6rem;
   border-bottom: 1px solid var(--border);
   color: var(--muted);
@@ -2180,6 +2199,40 @@ p.timeline-edge {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+.event-inspector-copy-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.event-inspector-copy-cluster .event-copy-status {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+}
+
+.event-inspector-copy {
+  flex: none;
+  display: inline-flex;
+  padding: 0.15rem;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: copy;
+}
+
+.event-inspector-copy:hover,
+.event-inspector-copy:focus-visible {
+  color: var(--accent);
+  border-color: transparent;
+  background: transparent;
+}
+
+/* Same as `.lightbox-action`: row action SVGs are hidden on desktop. */
+.event-inspector-copy .event-action-icon {
+  display: block;
 }
 
 .event-inspector pre {

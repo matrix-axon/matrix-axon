@@ -26,6 +26,7 @@ import { UserAvatar } from './UserAvatar'
 import { useModalFocus } from './use-modal-focus'
 import type { MembersStore } from '../stores/members'
 import { EventActionIcon } from './EventActionIcon'
+import { useCopyFeedback } from './CopyableText'
 import {
   isEditable,
   isMessageActionable,
@@ -687,13 +688,42 @@ function eventDiagnostics(event: TimelineEvent) {
 }
 
 function EventInspector({ event }: { event: TimelineEvent }) {
+  const json = JSON.stringify(eventDiagnostics(event), null, 2)
+  const { status, copy } = useCopyFeedback()
+  const title =
+    status === 'copied'
+      ? 'Copied'
+      : status === 'failed'
+        ? 'Could not copy'
+        : 'Copy API event data'
   return (
     <section
       class="event-inspector"
       aria-label={`Event diagnostics for ${event.event_id}`}
     >
-      <div class="event-inspector-title">API event data</div>
-      <pre>{JSON.stringify(eventDiagnostics(event), null, 2)}</pre>
+      <div class="event-inspector-title">
+        <span>API event data</span>
+        <span class="event-inspector-copy-cluster">
+          {status !== 'idle' && (
+            <span
+              class={`event-copy-status${status === 'failed' ? ' error' : ''}`}
+              role="status"
+            >
+              {status === 'copied' ? 'Copied' : 'Copy failed'}
+            </span>
+          )}
+          <button
+            type="button"
+            class="ghost event-inspector-copy"
+            title={title}
+            aria-label="Copy API event data"
+            onClick={() => void copy(json)}
+          >
+            <EventActionIcon name={status === 'copied' ? 'confirm' : 'copy'} />
+          </button>
+        </span>
+      </div>
+      <pre>{json}</pre>
     </section>
   )
 }

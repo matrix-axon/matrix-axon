@@ -1,8 +1,8 @@
-import { cleanup, render, waitFor } from '@testing-library/preact'
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import { LocationProvider } from 'preact-iso'
-import { afterAll, afterEach, beforeAll, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
 import { ServicesContext } from '../services'
 import { createMembersStore } from '../stores/members'
 import type { RoomDto } from '../stores/room-list'
@@ -18,6 +18,7 @@ beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   cleanup()
   server.resetHandlers()
+  vi.unstubAllGlobals()
 })
 afterAll(() => server.close())
 
@@ -106,6 +107,23 @@ const detail = (label: string): string => {
   const term = terms.find((node) => node.textContent === label)
   return term?.nextElementSibling?.textContent ?? ''
 }
+
+it('copies a populated detail on click and skips placeholders', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  vi.stubGlobal('navigator', { clipboard: { writeText } })
+  server.use(...handlers())
+  const { getByRole, findByRole, queryByRole } = renderPanel(FIRST)
+
+  fireEvent.click(getByRole('button', { name: 'Copy Room ID' }))
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(FIRST))
+  expect((await findByRole('status')).textContent).toBe('Copied')
+
+  fireEvent.click(getByRole('button', { name: 'Copy Name' }))
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith('First'))
+
+  expect(queryByRole('button', { name: 'Copy Topic' })).toBeNull()
+  expect(queryByRole('button', { name: 'Copy Full alias list' })).toBeNull()
+})
 
 it('never shows the previous room’s state after a room switch', async () => {
   server.use(...handlers())

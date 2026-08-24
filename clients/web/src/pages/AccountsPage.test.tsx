@@ -2,7 +2,15 @@ import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import { LocationProvider } from 'preact-iso'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { ServicesContext, type AppServices } from '../services'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { AccountsPage } from './AccountsPage'
@@ -50,6 +58,7 @@ afterEach(() => {
   cleanup()
   server.resetHandlers()
   window.history.replaceState(null, '', '/')
+  vi.unstubAllGlobals()
 })
 afterAll(() => server.close())
 
@@ -81,6 +90,32 @@ describe('AccountsPage', () => {
     expect(getByText('@bob:example.org')).toBeTruthy()
     expect(getByText('verified')).toBeTruthy()
     expect(getByText('deactivated')).toBeTruthy()
+  })
+
+  it('copies user id, account id, and homeserver URL from a card', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { findAllByRole, getAllByRole } = renderPage()
+
+    fireEvent.click(
+      (await findAllByRole('button', { name: 'Copy user ID' }))[0],
+    )
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith('@alice:example.org'),
+    )
+
+    fireEvent.click(getAllByRole('button', { name: 'Copy account ID' })[0])
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(ALICE.account_id),
+    )
+
+    fireEvent.click(getAllByRole('button', { name: 'Copy homeserver URL' })[0])
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith('https://matrix.example.org'),
+    )
   })
 
   it('shows the backfill status including the paused warning', async () => {

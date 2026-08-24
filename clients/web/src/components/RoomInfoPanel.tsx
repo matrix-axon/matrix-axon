@@ -10,6 +10,7 @@ import {
   serverNameFromRoomReference,
 } from '../matrix-to'
 import { parseUserIdList } from '../matrix-user'
+import { copyText } from '../copy-text'
 import { joinRoomError } from '../room-entry'
 import { useServices } from '../services'
 import type { MembersStore } from '../stores/members'
@@ -23,6 +24,7 @@ import {
 import { useShortcuts } from '../shortcuts'
 import { formatInviteeList, inviteErrorMessage } from '../invite'
 import { BodyPortal } from './BodyPortal'
+import { CopyableText } from './CopyableText'
 import { ErrorBanner } from './ErrorBanner'
 import { useModalFocus } from './use-modal-focus'
 import { UserAvatar } from './UserAvatar'
@@ -1091,19 +1093,41 @@ function LeaveRoomDialog({
   )
 }
 
+/** Placeholders are not worth copying; real IDs, names, and state are. */
+function isPopulatedDetail(value: string | null | undefined): value is string {
+  return (
+    typeof value === 'string' &&
+    value !== '' &&
+    value !== 'None' &&
+    value !== 'Unavailable' &&
+    value !== 'Loading…' &&
+    !value.startsWith('Unavailable from')
+  )
+}
+
 function DetailRow({
   label,
   value,
   code = false,
 }: {
   label: string
-  value: string
+  value: string | null | undefined
   code?: boolean
 }) {
+  const text = value ?? ''
+  const displayed = code ? <code>{text}</code> : text
   return (
     <>
       <dt>{label}</dt>
-      <dd>{code ? <code>{value}</code> : value}</dd>
+      <dd>
+        {isPopulatedDetail(value) ? (
+          <CopyableText text={value} label={label}>
+            {displayed}
+          </CopyableText>
+        ) : (
+          displayed
+        )}
+      </dd>
     </>
   )
 }
@@ -1154,16 +1178,4 @@ function isOnlyJoinedMember(
 ): boolean {
   const joined = [...members].filter((member) => member.membership === 'join')
   return joined.length === 1 && joined[0]?.user_id === ownUserId
-}
-
-async function copyText(text: string): Promise<boolean> {
-  if (navigator.clipboard?.writeText === undefined) {
-    return false
-  }
-  try {
-    await navigator.clipboard.writeText(text)
-    return true
-  } catch {
-    return false
-  }
 }

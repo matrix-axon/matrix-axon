@@ -6,6 +6,7 @@ import {
   requestAppBadgeNotificationPermission,
 } from '../app-badge'
 import { BUILD_INFO } from '../build-info'
+import { CopyableText } from '../components/CopyableText'
 import {
   installOutcome,
   installPromptAvailable,
@@ -252,7 +253,14 @@ export function SettingsPage() {
       </section>
       <p class="muted">These settings are stored locally, not on the server.</p>
       <footer class="settings-version muted">
-        Web client <code>{BUILD_INFO.displayVersion}</code> · built{' '}
+        Web client{' '}
+        <CopyableText
+          text={BUILD_INFO.displayVersion}
+          label="web client version"
+        >
+          <code>{BUILD_INFO.displayVersion}</code>
+        </CopyableText>{' '}
+        · built{' '}
         <time dateTime={BUILD_INFO.builtAt}>{BUILD_INFO.builtAtLabel}</time>
         {' · '}
         <a href="/licenses">Open-source licenses</a>

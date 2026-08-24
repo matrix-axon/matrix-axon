@@ -1292,6 +1292,41 @@ describe('RoomPage', () => {
     expect(inspector.textContent).toContain('"sender_trust": "verified"')
   })
 
+  it('copies inspect JSON from the title-bar clipboard control', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const { services, findByText, findByRole } = renderRoom([
+      event('$debug', T0, {
+        type: 'm.call.invite',
+        body: null,
+        content: { call_id: 'call-1' },
+        sender_trust: 'verified',
+      }),
+    ])
+
+    services.settings.developerMode.value = true
+    expect(await findByText('unsupported event: m.call.invite')).toBeTruthy()
+    fireEvent.click(await findByRole('button', { name: 'Inspect' }))
+    const inspector = await findByRole('region', {
+      name: 'Event diagnostics for $debug',
+    })
+    fireEvent.click(await findByRole('button', { name: 'Copy API event data' }))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledOnce())
+    expect(inspector.querySelector('[role="status"]')?.textContent).toBe(
+      'Copied',
+    )
+    const payload = JSON.parse(writeText.mock.calls[0][0] as string) as {
+      event_id: string
+      type: string
+      content: { call_id: string }
+    }
+    expect(payload.event_id).toBe('$debug')
+    expect(payload.type).toBe('m.call.invite')
+    expect(payload.content.call_id).toBe('call-1')
+    vi.unstubAllGlobals()
+  })
+
   it('tiers state events by the persisted visibility setting', async () => {
     // The toggle lives in Settings now, so the room reads the persisted
     // preference rather than owning an ephemeral checkbox.

@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'preact/hooks'
 import { apiErrorMessage } from '../api/client'
 import type { components } from '../api/schema'
+import { CopyableText } from '../components/CopyableText'
 import { useServices } from '../services'
 
 type StatusDto = components['schemas']['StatusDto']
-type ServerBuildInfo = {
+export type ServerBuildInfo = {
   build_time: string
   git_hash: string
   profile: string
@@ -70,21 +71,26 @@ export function ServerStatus() {
       <h2>Server status</h2>
       {build !== undefined && (
         <p>
-          Axon server <code>{build.version}</code>
-          {build.git_hash !== '' && (
-            <>
-              {' '}
-              · <code>{shortHash(build.git_hash)}</code>
-            </>
-          )}
-          {' · '}
-          {build.profile}
-          {' · '}
-          <time dateTime={build.build_time}>
-            {formatDate(build.build_time)}
-          </time>
-          {' · '}
-          <code>{build.rustc_version}</code>
+          <CopyableText
+            text={formatServerBuildLine(build)}
+            label="server status"
+          >
+            Axon server <code>{build.version}</code>
+            {build.git_hash !== '' && (
+              <>
+                {' '}
+                · <code>{shortHash(build.git_hash)}</code>
+              </>
+            )}
+            {' · '}
+            {build.profile}
+            {' · '}
+            <time dateTime={build.build_time}>
+              {formatDate(build.build_time)}
+            </time>
+            {' · '}
+            <code>{build.rustc_version}</code>
+          </CopyableText>
         </p>
       )}
       <p>
@@ -135,6 +141,16 @@ export function ServerStatus() {
 
 function shortHash(hash: string): string {
   return hash.length > 12 ? hash.slice(0, 12) : hash
+}
+
+/** Plain-text form of the build line, matching what the status panel shows. */
+export function formatServerBuildLine(build: ServerBuildInfo): string {
+  const parts = [`Axon server ${build.version}`]
+  if (build.git_hash !== '') {
+    parts.push(shortHash(build.git_hash))
+  }
+  parts.push(build.profile, formatDate(build.build_time), build.rustc_version)
+  return parts.join(' · ')
 }
 
 function formatDate(value: string | number): string {
