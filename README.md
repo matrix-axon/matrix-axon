@@ -181,6 +181,11 @@ axon oauth identities unbind <id>       # revokes every token/refresh token that
 `bind` prints a URL — open it in any browser, on this machine or elsewhere, since it only needs to reach Axon's already-running `/v1/` surface — and polls until that browser leg completes or the 10-minute handshake expires.
 Sign-in with Apple is not yet supported (deferred to the iOS client work).
 
+The Matrix OAuth session foundation for Axon's own homeserver sessions is configured separately under `sync.matrix_oauth` (ADR 0097).
+It dynamically registers a public client when the discovered authorization server permits it; operators can configure a static public client ID for issuers that disable dynamic registration.
+Access and refresh tokens are encrypted with `sync.store_key`, and client secrets are not supported.
+The QR acquisition API and client UI land in later slices; the existing password and token-import account routes are unchanged by this foundation.
+
 For first launch only, an interactive server can mint the first credential from the one-time `/bootstrap/<code>` URL printed at startup instead of requiring `axon token issue` in another shell.
 The bootstrap page is loopback-only by default.
 To allow a trusted remote browser during setup, set `server.bootstrap_web_allow_remote = true` (or `AXON_SERVER__BOOTSTRAP_WEB_ALLOW_REMOTE=true`) and make sure the server is fronted by TLS, a proxy, or a trusted network.
