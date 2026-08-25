@@ -346,6 +346,35 @@ describe('RoomPage', () => {
     expect(row2.classList.contains('actions-open')).toBe(true)
   })
 
+  it('closes inspect when another row takes the action bar', async () => {
+    const { services, findByText, findByRole, container } = renderRoom([
+      event('$1', T0),
+      event('$2', T0 + 1),
+    ])
+    services.settings.developerMode.value = true
+    await findByText('body of $1')
+    const row1 = container.querySelector<HTMLElement>(
+      'li.event-row[data-event-id="$1"]',
+    )!
+    const row2 = container.querySelector<HTMLElement>(
+      'li.event-row[data-event-id="$2"]',
+    )!
+
+    fireEvent.click(row1.querySelector('.event-body')!)
+    fireEvent.click(within(row1).getByRole('button', { name: 'Inspect' }))
+    expect(
+      await findByRole('region', { name: 'Event diagnostics for $1' }),
+    ).toBeTruthy()
+
+    fireEvent.click(row2.querySelector('.event-body')!)
+    await waitFor(() =>
+      expect(
+        container.querySelector('[aria-label="Event diagnostics for $1"]'),
+      ).toBeNull(),
+    )
+    expect(row1.classList.contains('actions-open')).toBe(false)
+  })
+
   it('opens the action bar from a touch tap, not only a mouse click', async () => {
     const { findByText, container } = renderRoom([event('$1', T0)])
     await findByText('body of $1')

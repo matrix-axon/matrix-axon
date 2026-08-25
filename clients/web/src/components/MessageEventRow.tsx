@@ -292,6 +292,11 @@ export function MessageEventRow({
   useEffect(() => {
     if (!actionsOpen) {
       setConfirmingRedact(false)
+      // Inspect and edit history are opened from the action bar. On mobile
+      // that bar is `display: none` once another row takes it, so leaving
+      // these flags set strands the panel with no Hide/close control.
+      setInspectOpen(false)
+      setHistoryOpen(false)
     }
   }, [actionsOpen])
 
