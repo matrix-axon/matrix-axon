@@ -1073,11 +1073,6 @@ impl App {
             .map(|event| self.sender_label(event))
             .collect()
     }
-
-    pub(crate) fn set_message_viewport(&mut self, page_size: usize, width: usize) {
-        self.messages.page_size = page_size.max(1);
-        self.messages.width = width.max(1);
-    }
 }
 
 pub(crate) fn should_show_event(event: &EventDto, display: &DisplayOptions) -> bool {
