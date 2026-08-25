@@ -21,9 +21,9 @@
 # human starting and stopping their own screen recorder. X11/XWayland only —
 # see the "ffmpeg window capture" section below for why, and what to do on
 # Wayland-native or macOS. It also resizes this terminal's window to a fixed
-# default (1280x800px, `--size WxH` to override, `--no-resize` to skip) before
-# recording, so takes come out a consistent size run to run — pass `--size`/
-# `--no-resize` only alongside `--capture`.
+# default (1280x800px, `--size WxH` or `--size=WxH` to override, `--no-resize`
+# to skip) before recording, so takes come out a consistent size run to run —
+# pass `--size`/`--no-resize` only alongside `--capture`.
 #
 # Environment:
 #   AXON_DEMO_MANIFEST         manifest path (default /tmp/axon-demo.json)
@@ -65,8 +65,9 @@ usage: scripts/demo-stack.sh <up|info|record|down|photos> [-- <pilot args>]
           Resizes the window to 1280x800px first (via `xdotool windowsize`,
           not a terminal escape sequence — those depend on the terminal
           choosing to honor them, and most don't by default), so every take
-          comes out the same size. --size WxH picks a different target;
-          --no-resize records at whatever size the window already is.
+          comes out the same size. --size WxH (or --size=WxH) picks a
+          different target; --no-resize records at whatever size the window
+          already is.
 
 Manifest path: $AXON_DEMO_MANIFEST, default /tmp/axon-demo.json
 EOF
@@ -359,18 +360,7 @@ EOF
     require_stack
     capture=0
     capture_out="$capture_default_out"
-    capture_dir="$(dirname "${capture_out}")"
     capture_size="$capture_default_size"
-    if [ ! -d "${capture_dir}" ]
-    then
-      if ! mkdir -p "${capture_dir}"
-      then
-    cat >&2 <<EOF
-Error: could not create output directory ${capture_dir}. Exiting.
-EOF
-exit 1
-      fi
-    fi
     no_resize=0
     size_given=0
     while [ "$#" -gt 0 ]; do
@@ -389,6 +379,15 @@ exit 1
           size_given=1
           shift
           ;;
+        --size)
+          [ "$#" -ge 2 ] || {
+            printf 'demo-stack: --size requires a value, e.g. --size 1920x1080\n' >&2
+            exit 1
+          }
+          capture_size="$2"
+          size_given=1
+          shift 2
+          ;;
         --no-resize)
           no_resize=1
           shift
@@ -405,6 +404,17 @@ exit 1
     if [ "$capture" -eq 0 ] && { [ "$no_resize" -eq 1 ] || [ "$size_given" -eq 1 ]; }; then
       printf 'demo-stack: --size/--no-resize only apply together with --capture\n' >&2
       exit 1
+    fi
+    capture_dir="$(dirname "${capture_out}")"
+    if [ ! -d "${capture_dir}" ]
+    then
+      if ! mkdir -p "${capture_dir}"
+      then
+    cat >&2 <<EOF
+Error: could not create output directory ${capture_dir}. Exiting.
+EOF
+exit 1
+      fi
     fi
     # Built first so cargo's own progress output cannot land in the recording.
     cargo build -p axon-smoke-tui --bin axon-demo-tui
