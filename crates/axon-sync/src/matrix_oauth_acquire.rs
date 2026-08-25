@@ -135,8 +135,12 @@ pub enum MatrixOAuthAcquireError {
     InvalidUserId,
     #[error("too many Matrix OAuth QR login flows are active or retained")]
     Capacity,
-    #[error("a Matrix OAuth QR login already exists for this user")]
-    Conflict,
+    #[error("the Matrix account is already active")]
+    AccountAlreadyActive,
+    #[error("the Matrix account is being deleted")]
+    AccountBeingDeleted,
+    #[error("a Matrix OAuth QR login is already in progress for this user")]
+    FlowAlreadyExists,
     #[error("Matrix OAuth QR login flow not found: {0}")]
     NotFound(Uuid),
     #[error("input does not match the flow presentation or stage")]
@@ -145,6 +149,14 @@ pub enum MatrixOAuthAcquireError {
     InvalidInput(&'static str),
     #[error("Matrix OAuth QR login storage failed")]
     Internal,
+}
+
+fn account_state_conflict(state: AccountState) -> Option<MatrixOAuthAcquireError> {
+    match state {
+        AccountState::Active => Some(MatrixOAuthAcquireError::AccountAlreadyActive),
+        AccountState::Deactivated => None,
+        AccountState::Deleting => Some(MatrixOAuthAcquireError::AccountBeingDeleted),
+    }
 }
 
 struct FlowMutable {
@@ -306,7 +318,7 @@ impl MatrixOAuthAcquireEngine {
         {
             return Err(MatrixOAuthAcquireError::Capacity);
         }
-        if self
+        if let Some(error) = self
             .inner
             .store
             .find_account_by_user_id(expected_user_id)
@@ -315,9 +327,9 @@ impl MatrixOAuthAcquireEngine {
                 tracing::error!(error_class = %store_error_class(&err), "checking Matrix OAuth acquire identity failed");
                 MatrixOAuthAcquireError::Internal
             })?
-            .is_some_and(|account| account.state != AccountState::Deactivated)
+            .and_then(|account| account_state_conflict(account.state))
         {
-            return Err(MatrixOAuthAcquireError::Conflict);
+            return Err(error);
         }
         let flow_id = Uuid::new_v4();
         let staging_dir_name = flow_id.to_string();
@@ -334,9 +346,9 @@ impl MatrixOAuthAcquireEngine {
             .map_err(|err| {
                 tracing::error!(%flow_id, error_class = %store_error_class(&err), "creating Matrix OAuth acquire breadcrumb failed");
                 MatrixOAuthAcquireError::Internal
-            })?;
+        })?;
         if !created {
-            return Err(MatrixOAuthAcquireError::Conflict);
+            return Err(MatrixOAuthAcquireError::FlowAlreadyExists);
         }
 
         let (scan_tx, scan_rx) = oneshot::channel();
@@ -999,6 +1011,19 @@ fn store_error_class(error: &axon_store::StoreError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_state_distinguishes_login_conflicts() {
+        assert!(matches!(
+            account_state_conflict(AccountState::Active),
+            Some(MatrixOAuthAcquireError::AccountAlreadyActive)
+        ));
+        assert!(account_state_conflict(AccountState::Deactivated).is_none());
+        assert!(matches!(
+            account_state_conflict(AccountState::Deleting),
+            Some(MatrixOAuthAcquireError::AccountBeingDeleted)
+        ));
+    }
 
     #[test]
     fn stage_transition_exposes_only_stage_appropriate_data() {

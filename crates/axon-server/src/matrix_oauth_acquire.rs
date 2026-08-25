@@ -69,8 +69,14 @@ fn map_error(value: MatrixOAuthAcquireError) -> MatrixOAuthQrError {
         MatrixOAuthAcquireError::Capacity => MatrixOAuthQrError::TooMany(
             "too many Matrix OAuth QR login flows are active or retained; retry later".to_owned(),
         ),
-        MatrixOAuthAcquireError::Conflict => MatrixOAuthQrError::Conflict(
-            "a Matrix OAuth QR login already exists for this Matrix user".to_owned(),
+        MatrixOAuthAcquireError::AccountAlreadyActive => {
+            MatrixOAuthQrError::Conflict("this Matrix account is already logged in".to_owned())
+        }
+        MatrixOAuthAcquireError::AccountBeingDeleted => MatrixOAuthQrError::Conflict(
+            "this Matrix account is currently being deleted".to_owned(),
+        ),
+        MatrixOAuthAcquireError::FlowAlreadyExists => MatrixOAuthQrError::Conflict(
+            "a Matrix OAuth QR login is already in progress for this Matrix user".to_owned(),
         ),
         MatrixOAuthAcquireError::WrongStage => MatrixOAuthQrError::Conflict(
             "input does not match the flow presentation or current stage".to_owned(),
@@ -178,6 +184,33 @@ mod tests {
             MatrixOAuthQrPresentation::Scan,
         ] {
             assert_eq!(presentation_to_api(presentation_to_sync(api)), api);
+        }
+    }
+
+    #[test]
+    fn login_conflicts_have_distinct_api_messages() {
+        let cases = [
+            (
+                MatrixOAuthAcquireError::AccountAlreadyActive,
+                "this Matrix account is already logged in",
+            ),
+            (
+                MatrixOAuthAcquireError::AccountBeingDeleted,
+                "this Matrix account is currently being deleted",
+            ),
+            (
+                MatrixOAuthAcquireError::FlowAlreadyExists,
+                "a Matrix OAuth QR login is already in progress for this Matrix user",
+            ),
+        ];
+
+        for (error, expected_message) in cases {
+            match map_error(error) {
+                MatrixOAuthQrError::Conflict(message) => {
+                    assert_eq!(message, expected_message);
+                }
+                other => panic!("expected conflict, got {other:?}"),
+            }
         }
     }
 }
