@@ -79,6 +79,17 @@ pub enum SyncError {
     #[error("homeserver does not advertise Matrix OAuth authentication")]
     MatrixOAuthUnavailable,
 
+    /// Operator-controlled Matrix OAuth configuration is invalid. This stays
+    /// distinct from an upstream failure so QR acquisition reports the fault as
+    /// local without exposing the invalid value.
+    #[error("invalid Matrix OAuth configuration")]
+    MatrixOAuthConfiguration,
+
+    /// Axon's persisted OAuth registration state is invalid or cannot be used.
+    /// The presentation-safe message deliberately excludes the stored value.
+    #[error("invalid local Matrix OAuth registration state")]
+    MatrixOAuthLocalState,
+
     /// A login was rejected by the homeserver because the credentials were wrong
     /// (an `M_FORBIDDEN` / `M_UNAUTHORIZED` from the login call), as opposed to a
     /// transient connection failure. Lets the lifecycle layer return `401` rather

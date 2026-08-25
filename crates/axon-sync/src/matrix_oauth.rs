@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
-use crate::error::{sdk_err, SyncError};
+use crate::error::SyncError;
 
 const MAX_STATIC_REGISTRATIONS: usize = 64;
 const MAX_SERVER_URL_BYTES: usize = 2_048;
@@ -64,9 +64,7 @@ impl MatrixOAuthRegistrationManager {
     /// dynamically register Axon and persist the result.
     pub async fn prepare(&self, client: &Client) -> Result<ClientId, SyncError> {
         if client.oauth().client_id().is_some() {
-            return Err(SyncError::Sdk(
-                "Matrix OAuth registration requires an unregistered client".to_owned(),
-            ));
+            return Err(SyncError::MatrixOAuthLocalState);
         }
         validate_config(&self.config)?;
         let timeout = Duration::from_secs(self.config.request_timeout_secs);
@@ -75,7 +73,7 @@ impl MatrixOAuthRegistrationManager {
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(sdk_err)?;
+            .map_err(|_| SyncError::MatrixOAuthConfiguration)?;
         let metadata = discover_metadata(&http, &client.homeserver(), timeout).await?;
         let issuer = metadata.issuer;
         let issuer_url = issuer.as_str();
@@ -92,14 +90,11 @@ impl MatrixOAuthRegistrationManager {
         // concurrent flows may discover together, but only one can register.
         let _guard = self.registration_lock.lock().await;
         if let Some(registration) = self.store.matrix_oauth_registration(issuer_url).await? {
-            validate_client_id(&registration.client_id)?;
+            validate_client_id(&registration.client_id)
+                .map_err(|_| SyncError::MatrixOAuthLocalState)?;
             let client_id = ClientId::new(registration.client_id);
             client.oauth().restore_registered_client(client_id.clone());
-            tracing::debug!(
-                issuer = issuer_url,
-                homeserver = homeserver.as_str(),
-                "restored persisted Matrix OAuth client registration"
-            );
+            tracing::debug!("restored persisted Matrix OAuth client registration");
             return Ok(client_id);
         }
 
@@ -110,11 +105,7 @@ impl MatrixOAuthRegistrationManager {
                 self.persist(&issuer, &homeserver, &client_id),
             )
             .await?;
-            tracing::info!(
-                issuer = issuer_url,
-                homeserver = homeserver.as_str(),
-                "restored operator-provided Matrix OAuth client registration"
-            );
+            tracing::info!("restored operator-provided Matrix OAuth client registration");
             return Ok(client_id);
         }
 
@@ -124,7 +115,7 @@ impl MatrixOAuthRegistrationManager {
                     .to_owned(),
             )
         })?;
-        let client_metadata = client_metadata()?;
+        let client_metadata = client_metadata().map_err(|_| SyncError::MatrixOAuthLocalState)?;
         let body = client_metadata.json().get().as_bytes().to_vec();
         let response = http
             .post(registration_endpoint)
@@ -157,18 +148,20 @@ impl MatrixOAuthRegistrationManager {
                 );
                 SyncError::Sdk(format!("invalid Matrix OAuth registration response: {err}"))
             })?;
-        validate_client_id(response.client_id.as_str())?;
+        validate_client_id(response.client_id.as_str()).inspect_err(|_| {
+            tracing::warn!(
+                phase = "oauth_registration",
+                error_class = "invalid_response",
+                "Matrix OAuth dynamic registration returned an invalid client ID"
+            );
+        })?;
         persist_then_restore_registration(
             client,
             &response.client_id,
             self.persist(&issuer, &homeserver, &response.client_id),
         )
         .await?;
-        tracing::info!(
-            issuer = issuer_url,
-            homeserver = homeserver.as_str(),
-            "dynamically registered Matrix OAuth client"
-        );
+        tracing::info!("dynamically registered Matrix OAuth client");
         Ok(response.client_id)
     }
 
@@ -178,7 +171,7 @@ impl MatrixOAuthRegistrationManager {
         homeserver: &Url,
         client_id: &ClientId,
     ) -> Result<(), SyncError> {
-        validate_client_id(client_id.as_str())?;
+        validate_client_id(client_id.as_str()).map_err(|_| SyncError::MatrixOAuthLocalState)?;
         self.store
             .upsert_matrix_oauth_registration(&MatrixOAuthRegistration {
                 issuer_url: issuer.to_string(),
@@ -365,22 +358,17 @@ fn validate_client_id(client_id: &str) -> Result<(), SyncError> {
 
 fn validate_config(config: &MatrixOAuthConfig) -> Result<(), SyncError> {
     if config.request_timeout_secs == 0 {
-        return Err(SyncError::Sdk(
-            "sync.matrix_oauth.request_timeout_secs must be greater than zero".to_owned(),
-        ));
+        return Err(SyncError::MatrixOAuthConfiguration);
     }
     if config.static_registrations.len() > MAX_STATIC_REGISTRATIONS {
-        return Err(SyncError::Sdk(format!(
-            "sync.matrix_oauth.static_registrations exceeds the {MAX_STATIC_REGISTRATIONS}-entry limit"
-        )));
+        return Err(SyncError::MatrixOAuthConfiguration);
     }
     for registration in config.static_registrations.values() {
         if registration.server_url.len() > MAX_SERVER_URL_BYTES {
-            return Err(SyncError::Sdk(
-                "Matrix OAuth static registration URL is too long".to_owned(),
-            ));
+            return Err(SyncError::MatrixOAuthConfiguration);
         }
-        validate_client_id(&registration.client_id)?;
+        validate_client_id(&registration.client_id)
+            .map_err(|_| SyncError::MatrixOAuthConfiguration)?;
     }
     Ok(())
 }
@@ -391,11 +379,8 @@ fn static_client_id(
     issuer: &Url,
 ) -> Result<Option<ClientId>, SyncError> {
     for registration in config.static_registrations.values() {
-        let server_url = Url::parse(&registration.server_url).map_err(|_| {
-            SyncError::Sdk(
-                "sync.matrix_oauth.static_registrations contains an invalid server_url".to_owned(),
-            )
-        })?;
+        let server_url = Url::parse(&registration.server_url)
+            .map_err(|_| SyncError::MatrixOAuthConfiguration)?;
         if server_url == *homeserver || server_url == *issuer {
             return Ok(Some(ClientId::new(registration.client_id.clone())));
         }
@@ -604,7 +589,10 @@ mod tests {
             request_timeout_secs: 0,
             ..MatrixOAuthConfig::default()
         };
-        assert!(validate_config(&config).is_err());
+        assert!(matches!(
+            validate_config(&config),
+            Err(SyncError::MatrixOAuthConfiguration)
+        ));
 
         let config = MatrixOAuthConfig {
             static_registrations: (0..=MAX_STATIC_REGISTRATIONS)
@@ -620,7 +608,10 @@ mod tests {
                 .collect(),
             ..MatrixOAuthConfig::default()
         };
-        assert!(validate_config(&config).is_err());
+        assert!(matches!(
+            validate_config(&config),
+            Err(SyncError::MatrixOAuthConfiguration)
+        ));
     }
 
     #[test]

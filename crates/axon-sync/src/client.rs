@@ -28,7 +28,7 @@ use matrix_sdk::{
     cross_process_lock::CrossProcessLockConfig,
     ruma::OwnedUserId,
     store::RoomLoadSettings,
-    Client, ClientBuilder, SessionMeta, SessionTokens, SqliteStoreConfig,
+    Client, ClientBuildError, ClientBuilder, SessionMeta, SessionTokens, SqliteStoreConfig,
 };
 
 use crate::error::{sdk_err, SyncError};
@@ -404,18 +404,30 @@ pub(crate) fn matrix_oauth_acquire_staging_dir(
 /// Build the isolated OAuth client used while Axon has no account row yet.
 /// Every SDK request receives the same bounded timeout as Matrix OAuth
 /// discovery/registration; the overall interactive flow has a separate TTL.
+#[derive(Debug)]
+pub(crate) enum MatrixOAuthAcquireClientError {
+    Configuration,
+    LocalStorage,
+    Upstream,
+}
+
 pub(crate) async fn build_matrix_oauth_acquire_client(
     config: &SyncConfig,
     staging_dir_name: &str,
     server_name_or_url: &str,
-) -> Result<Client, SyncError> {
+) -> Result<Client, MatrixOAuthAcquireClientError> {
     let store_key = config
         .store_key
         .as_deref()
-        .ok_or(SyncError::MissingStoreKey)?;
-    let staging = matrix_oauth_acquire_staging_dir(config, staging_dir_name)?;
-    remove_dir_if_present(&staging).await?;
-    create_store_dir(&staging).await?;
+        .ok_or(MatrixOAuthAcquireClientError::Configuration)?;
+    let staging = matrix_oauth_acquire_staging_dir(config, staging_dir_name)
+        .map_err(|_| MatrixOAuthAcquireClientError::Configuration)?;
+    remove_dir_if_present(&staging)
+        .await
+        .map_err(|_| MatrixOAuthAcquireClientError::LocalStorage)?;
+    create_store_dir(&staging)
+        .await
+        .map_err(|_| MatrixOAuthAcquireClientError::LocalStorage)?;
     let timeout = Duration::from_secs(config.matrix_oauth.request_timeout_secs);
     Client::builder()
         .server_name_or_homeserver_url(server_name_or_url)
@@ -425,7 +437,15 @@ pub(crate) async fn build_matrix_oauth_acquire_client(
         .sqlite_store_with_config_and_cache_path(sqlite_config(&staging, store_key), None::<&Path>)
         .build()
         .await
-        .map_err(sdk_err)
+        .map_err(|error| match error {
+            ClientBuildError::AutoDiscovery(_)
+            | ClientBuildError::SlidingSyncVersion(_)
+            | ClientBuildError::Http(_) => MatrixOAuthAcquireClientError::Upstream,
+            ClientBuildError::MissingHomeserver
+            | ClientBuildError::InvalidServerName
+            | ClientBuildError::Url(_) => MatrixOAuthAcquireClientError::Configuration,
+            ClientBuildError::SqliteStore(_) => MatrixOAuthAcquireClientError::LocalStorage,
+        })
 }
 
 /// Remove an abandoned pre-account SDK store. Idempotent for cancellation,

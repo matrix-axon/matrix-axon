@@ -26,10 +26,14 @@ use matrix_sdk::{
 };
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::{
-    client::{build_matrix_oauth_acquire_client, remove_matrix_oauth_acquire_staging},
+    client::{
+        build_matrix_oauth_acquire_client, remove_matrix_oauth_acquire_staging,
+        MatrixOAuthAcquireClientError,
+    },
     error::SyncError,
     lifecycle::{AccountLifecycle, LifecycleError},
     MatrixOAuthRegistrationManager,
@@ -410,9 +414,18 @@ impl MatrixOAuthAcquireEngine {
 
         let driver = self.clone();
         let task_flow = flow.clone();
-        self.inner.tracker.spawn(async move {
-            driver.drive(task_flow, scan_rx, check_code_rx).await;
-        });
+        let driver_span = tracing::info_span!(
+            "matrix_oauth_qr_login",
+            %flow_id,
+            role = "acquire",
+            presentation = presentation.as_str()
+        );
+        self.inner.tracker.spawn(
+            async move {
+                driver.drive(task_flow, scan_rx, check_code_rx).await;
+            }
+            .instrument(driver_span),
+        );
         tracing::info!(
             %flow_id,
             role = "acquire",
@@ -640,7 +653,7 @@ impl MatrixOAuthAcquireEngine {
                     user_id.server_name().as_str(),
                 )
                 .await
-                .map_err(|_| DriverFailure::Upstream)?
+                .map_err(classify_client_build_error)?
             }
             MatrixOAuthAcquirePresentation::Scan => {
                 let qr = tokio::select! {
@@ -655,7 +668,7 @@ impl MatrixOAuthAcquireEngine {
                     &server,
                 )
                 .await
-                .map_err(|_| DriverFailure::Upstream)?;
+                .map_err(classify_client_build_error)?;
                 self.inner
                     .registrations
                     .prepare(&client)
@@ -784,17 +797,33 @@ impl MatrixOAuthAcquireEngine {
         let validation = async {
             let who = tokio::time::timeout(WHOAMI_TIMEOUT, client.whoami())
                 .await
-                .map_err(|_| DriverFailure::Timeout)?
-                .map_err(|_| DriverFailure::Upstream)?;
+                .map_err(|_| {
+                    let failure = DriverFailure::Timeout;
+                    log_driver_failure("identity_validation", &failure, None);
+                    failure
+                })?
+                .map_err(|error| {
+                    let failure = DriverFailure::Upstream;
+                    let http_status = error
+                        .as_client_api_error()
+                        .map(|response| response.status_code.as_u16());
+                    log_driver_failure("identity_validation", &failure, http_status);
+                    failure
+                })?;
             if who.user_id.as_str() != flow.snapshot().expected_user_id {
-                return Err(DriverFailure::UserMismatch);
+                let failure = DriverFailure::UserMismatch;
+                log_driver_failure("identity_validation", &failure, None);
+                return Err(failure);
             }
-            let session = client
-                .oauth()
-                .full_session()
-                .ok_or(DriverFailure::Upstream)?;
+            let session = client.oauth().full_session().ok_or_else(|| {
+                let failure = DriverFailure::Internal;
+                log_driver_failure("session_validation", &failure, None);
+                failure
+            })?;
             if session.user.tokens.refresh_token.is_none() {
-                return Err(DriverFailure::Upstream);
+                let failure = DriverFailure::Upstream;
+                log_driver_failure("session_validation", &failure, None);
+                return Err(failure);
             }
             Ok(session)
         }
@@ -863,6 +892,7 @@ enum DriverFailure {
     RendezvousExpired,
     UserMismatch,
     Upstream,
+    Internal,
 }
 
 impl DriverFailure {
@@ -876,6 +906,7 @@ impl DriverFailure {
             Self::RendezvousExpired => "rendezvous_expired",
             Self::UserMismatch => "user_mismatch",
             Self::Upstream => "upstream",
+            Self::Internal => "internal",
         }
     }
 }
@@ -999,6 +1030,11 @@ fn classify_qr_error(error: QRCodeLoginError) -> DriverFailure {
             ("peer_authorization", DriverFailure::Upstream, None)
         }
     };
+    log_driver_failure(phase, &failure, http_status);
+    failure
+}
+
+fn log_driver_failure(phase: &'static str, failure: &DriverFailure, http_status: Option<u16>) {
     if let Some(http_status) = http_status {
         tracing::warn!(
             phase,
@@ -1013,14 +1049,44 @@ fn classify_qr_error(error: QRCodeLoginError) -> DriverFailure {
             "Matrix OAuth QR protocol step failed"
         );
     }
-    failure
 }
 
 fn classify_registration_error(error: SyncError) -> DriverFailure {
-    match error {
+    let failure = match &error {
         SyncError::MatrixOAuthUnavailable => DriverFailure::Unsupported,
-        _ => DriverFailure::Upstream,
-    }
+        SyncError::MatrixOAuthConfiguration => DriverFailure::Internal,
+        SyncError::MatrixOAuthLocalState
+        | SyncError::Store(_)
+        | SyncError::MissingStoreKey
+        | SyncError::MissingDeviceId(_)
+        | SyncError::NoCredential(_) => DriverFailure::Internal,
+        SyncError::Sdk(_) | SyncError::AuthFailed(_) => DriverFailure::Upstream,
+    };
+    let phase = match &error {
+        SyncError::MatrixOAuthConfiguration => "oauth_registration_config",
+        SyncError::MatrixOAuthLocalState
+        | SyncError::Store(_)
+        | SyncError::MissingStoreKey
+        | SyncError::MissingDeviceId(_)
+        | SyncError::NoCredential(_) => "oauth_registration_state",
+        _ => "oauth_registration",
+    };
+    log_driver_failure(phase, &failure, None);
+    failure
+}
+
+fn classify_client_build_error(error: MatrixOAuthAcquireClientError) -> DriverFailure {
+    let (phase, failure) = match error {
+        MatrixOAuthAcquireClientError::Configuration => {
+            ("client_build_config", DriverFailure::Internal)
+        }
+        MatrixOAuthAcquireClientError::LocalStorage => {
+            ("client_build_storage", DriverFailure::Internal)
+        }
+        MatrixOAuthAcquireClientError::Upstream => ("client_build", DriverFailure::Upstream),
+    };
+    log_driver_failure(phase, &failure, None);
+    failure
 }
 
 fn lifecycle_failure_code(error: &LifecycleError) -> &'static str {
@@ -1113,6 +1179,7 @@ mod tests {
             (DriverFailure::RendezvousExpired, "rendezvous_expired"),
             (DriverFailure::UserMismatch, "user_mismatch"),
             (DriverFailure::Upstream, "upstream"),
+            (DriverFailure::Internal, "internal"),
         ];
         for (failure, expected) in cases {
             assert_eq!(failure.code(), expected);
@@ -1127,6 +1194,30 @@ mod tests {
         ));
         assert!(matches!(
             classify_registration_error(SyncError::Sdk("network failure".to_owned())),
+            DriverFailure::Upstream
+        ));
+        assert!(matches!(
+            classify_registration_error(SyncError::MatrixOAuthConfiguration),
+            DriverFailure::Internal
+        ));
+        assert!(matches!(
+            classify_registration_error(SyncError::MatrixOAuthLocalState),
+            DriverFailure::Internal
+        ));
+    }
+
+    #[test]
+    fn client_build_failures_distinguish_local_and_upstream_causes() {
+        assert!(matches!(
+            classify_client_build_error(MatrixOAuthAcquireClientError::Configuration),
+            DriverFailure::Internal
+        ));
+        assert!(matches!(
+            classify_client_build_error(MatrixOAuthAcquireClientError::LocalStorage),
+            DriverFailure::Internal
+        ));
+        assert!(matches!(
+            classify_client_build_error(MatrixOAuthAcquireClientError::Upstream),
             DriverFailure::Upstream
         ));
     }
