@@ -140,7 +140,7 @@ async fn room_switch_shortcut_dismisses_input_help_when_no_rooms_exist() {
         .await;
 
     assert!(!app.show_input_help);
-    assert_eq!(app.status, "no rooms to switch");
+    assert_eq!(app.status.text(false), "no rooms to switch");
 }
 
 #[tokio::test]
@@ -158,7 +158,7 @@ async fn room_switch_shortcut_abandons_edit_mode() {
     assert_eq!(app.mode, Mode::Compose);
     assert_eq!(app.input.buffer, "");
     assert_eq!(app.input.cursor, 0);
-    assert_eq!(app.status, "no rooms to switch");
+    assert_eq!(app.status.text(false), "no rooms to switch");
 }
 
 #[tokio::test]
@@ -198,7 +198,7 @@ async fn search_results_edit_key_reopens_existing_query_form() {
 
     assert_eq!(app.mode, Mode::SearchForm);
     assert_eq!(app.search_form, edit_form);
-    assert_eq!(app.status, "edit search");
+    assert_eq!(app.status.text(false), "edit search");
 
     app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
 
@@ -228,5 +228,8 @@ async fn search_form_current_account_requires_concrete_account() {
         app.search_form.error.as_deref(),
         Some("select an account or choose all accounts")
     );
-    assert_eq!(app.status, "select an account or choose all accounts");
+    assert_eq!(
+        app.status.text(false),
+        "select an account or choose all accounts"
+    );
 }

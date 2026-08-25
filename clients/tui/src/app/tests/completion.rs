@@ -106,7 +106,7 @@ async fn submitting_account_search_reports_no_match() {
     app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
 
     assert_eq!(app.accounts.selected, AccountSelection::All);
-    assert_eq!(app.status, "no account matches: missing");
+    assert_eq!(app.status.text(false), "no account matches: missing");
 }
 
 #[test]

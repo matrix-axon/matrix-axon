@@ -293,7 +293,7 @@ async fn leave_outcome_prunes_departed_caches_after_post_leave_refresh() {
         Some("!next:example.com")
     );
     assert_room_caches_pruned(&app, &departed_key);
-    assert_eq!(app.status, "left Departed");
+    assert_eq!(app.status.text(false), "left Departed");
 }
 
 #[test]

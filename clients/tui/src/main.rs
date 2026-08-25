@@ -3,6 +3,7 @@ mod app;
 mod args;
 mod command;
 mod config;
+mod geometry;
 mod html;
 mod keymap;
 mod search;

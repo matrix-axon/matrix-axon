@@ -487,7 +487,7 @@ async fn action_shortcuts_do_not_steal_compose_text_input() {
         }
 
         assert_eq!(app.input.buffer, text);
-        assert_eq!(app.status, "");
+        assert_eq!(app.status.text(false), "");
     }
 }
 

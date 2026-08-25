@@ -32,10 +32,12 @@ mod read_markers;
 pub(crate) use bootstrap::{BootstrapOutcome, BootstrapStage};
 pub(crate) use lifecycle::LifecycleOutcome;
 pub(crate) mod media;
+use media::{evict_lru_where, touch_lru};
 pub(crate) use media::{
     ImageState, MediaKey, MediaResult, ProtocolKey, ProtocolState, IMAGE_CACHE_LIMIT,
     MEDIA_WORKERS, PROTOCOL_CACHE_LIMIT,
 };
+mod panels;
 mod reactions;
 mod relations;
 mod render;
@@ -657,18 +659,6 @@ impl From<String> for Status {
 impl From<&str> for Status {
     fn from(value: &str) -> Self {
         Self::Info(value.to_owned())
-    }
-}
-
-impl PartialEq<&str> for Status {
-    fn eq(&self, other: &&str) -> bool {
-        self.text(true) == *other || self.text(false) == *other
-    }
-}
-
-impl PartialEq<Status> for &str {
-    fn eq(&self, other: &Status) -> bool {
-        other == self
     }
 }
 
@@ -1525,14 +1515,6 @@ impl App {
             .unwrap_or(AccountSelection::All);
     }
 
-    pub(crate) fn accounts_panel_visible(&self) -> bool {
-        !self.accounts_panel_hidden && self.accounts.accounts.len() >= 2
-    }
-
-    pub(crate) fn rooms_panel_visible(&self) -> bool {
-        !self.rooms_panel_hidden
-    }
-
     pub(crate) fn toggle_accounts_panel(&mut self) {
         self.accounts_panel_hidden = !self.accounts_panel_hidden;
         if self.accounts_panel_hidden
@@ -1555,25 +1537,6 @@ impl App {
         {
             self.mode = Mode::Compose;
         }
-    }
-
-    pub(crate) fn adjust_accounts_width(&mut self, delta: i16) {
-        const MIN: u16 = 10;
-        const MAX: u16 = 60;
-        self.display.accounts_panel_width =
-            (self.display.accounts_panel_width as i16 + delta).clamp(MIN as i16, MAX as i16) as u16;
-    }
-
-    pub(crate) fn adjust_rooms_width(&mut self, delta: i16) {
-        self.display.rooms_panel_width_adj = self
-            .display
-            .rooms_panel_width_adj
-            .saturating_add(delta)
-            .clamp(-50, 50);
-    }
-
-    pub(crate) fn adjust_input_lines(&mut self, delta: i16) {
-        self.display.input_lines = (self.display.input_lines as i16 + delta).clamp(1, 10) as u16;
     }
 
     pub(crate) fn active_account_filter(&self) -> Option<Uuid> {
@@ -2569,128 +2532,6 @@ pub(crate) fn next_match_index(
 
 pub(crate) fn match_status(match_num: usize, total: usize) -> Status {
     Status::from(format!("match {} of {}", match_num, total))
-}
-
-fn touch_lru<K: Clone + Eq>(order: &mut VecDeque<K>, key: &K) {
-    if let Some(index) = order.iter().position(|candidate| candidate == key) {
-        order.remove(index);
-    }
-    order.push_back(key.clone());
-}
-
-fn evict_lru_where<K, V>(
-    cache: &mut HashMap<K, V>,
-    order: &mut VecDeque<K>,
-    limit: usize,
-    can_evict: impl Fn(&V) -> bool,
-) -> bool
-where
-    K: Clone + Eq + std::hash::Hash,
-{
-    if cache.len() < limit {
-        return true;
-    }
-    let Some(index) = order
-        .iter()
-        .position(|key| cache.get(key).is_some_and(&can_evict))
-    else {
-        return false;
-    };
-    let Some(oldest) = order.remove(index) else {
-        return false;
-    };
-    cache.remove(&oldest);
-    true
-}
-
-/// Apply the EXIF orientation tag to `img` so it displays upright, matching
-/// what other Matrix clients show. `load_from_memory` decodes raw pixels but
-/// ignores EXIF, so without this correction rotated JPEGs appear sideways.
-/// Returns `img` unchanged if EXIF is absent, unreadable, or already upright.
-pub(super) fn apply_exif_orientation(
-    img: image::DynamicImage,
-    bytes: &[u8],
-) -> image::DynamicImage {
-    use std::io::Cursor;
-    let orientation = exif::Reader::new()
-        .read_from_container(&mut Cursor::new(bytes))
-        .ok()
-        .and_then(|exif| {
-            exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
-                .and_then(|f| f.value.get_uint(0))
-        })
-        .unwrap_or(1);
-
-    // EXIF orientation values 1–8; 1 = already upright.
-    match orientation {
-        2 => img.fliph(),
-        3 => img.rotate180(),
-        4 => img.flipv(),
-        5 => img.rotate90().fliph(),
-        6 => img.rotate90(),
-        7 => img.rotate270().fliph(),
-        8 => img.rotate270(),
-        _ => img,
-    }
-}
-
-/// Identify an image format from raw magic bytes without relying on the
-/// compiled-in feature set of the `image` crate. Returns a short description
-/// including a hex dump of the first bytes for truly unrecognized content.
-pub(super) fn sniff_format(bytes: &[u8]) -> String {
-    if bytes.starts_with(b"\xFF\xD8\xFF") {
-        return "JPEG".into();
-    }
-    if bytes.starts_with(b"\x89PNG\r\n\x1A\n") {
-        return "PNG".into();
-    }
-    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return "GIF".into();
-    }
-    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
-        return "WebP".into();
-    }
-    if bytes.starts_with(b"BM") {
-        return "BMP".into();
-    }
-    if bytes.starts_with(b"II\x2A\x00") || bytes.starts_with(b"MM\x00\x2A") {
-        return "TIFF".into();
-    }
-    // ISO Base Media File Format container: AVIF, HEIC, HEIF, MP4, …
-    if bytes.get(4..8) == Some(b"ftyp") {
-        return match bytes.get(8..12) {
-            Some(b"avif") | Some(b"avis") => "AVIF".into(),
-            Some(b"heic") | Some(b"heis") | Some(b"heim") | Some(b"heix") => "HEIC".into(),
-            Some(b"mif1") | Some(b"msf1") => "HEIF".into(),
-            _ => "ISO BMFF (AVIF/HEIC/MP4/…)".into(),
-        };
-    }
-    if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") || bytes.starts_with(b"<SVG") {
-        return "SVG (not supported)".into();
-    }
-    if bytes.starts_with(b"\x00\x00\x01\x00") {
-        return "ICO".into();
-    }
-    // Not a recognized image format — could be a JSON/HTML error body served
-    // with a 2xx status. Show the first bytes so the cause is obvious.
-    let prefix: String = bytes
-        .iter()
-        .take(16)
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let printable: String = bytes
-        .iter()
-        .take(16)
-        .map(|&b| {
-            if b.is_ascii_graphic() || b == b' ' {
-                b as char
-            } else {
-                '.'
-            }
-        })
-        .collect();
-    format!("unknown — first bytes: {prefix}  ({printable})")
 }
 
 #[cfg(test)]

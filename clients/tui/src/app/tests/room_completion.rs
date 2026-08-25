@@ -11,7 +11,7 @@ fn tab_completion_reports_missing_slash_command() {
     app.complete_input();
 
     assert_eq!(app.input.buffer, "/zzz");
-    assert_eq!(app.status, "no command matches: /zzz");
+    assert_eq!(app.status.text(false), "no command matches: /zzz");
 }
 
 #[test]
