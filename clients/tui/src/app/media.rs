@@ -3,6 +3,7 @@
 //! Downloads, decoding, EXIF correction, resizing, and terminal-protocol
 //! encoding all happen outside the TUI event/render loop.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::{io::Cursor, num::NonZeroU64};
 
@@ -234,7 +235,7 @@ fn decode_image(
     match decode_image_with_limits(&bytes) {
         Ok(image) => Ok(Arc::new(image)),
         Err(err) => {
-            let format = super::sniff_format(&bytes);
+            let format = sniff_format(&bytes);
             if is_encrypted && format.starts_with("unknown") {
                 Err(format!(
                     "encrypted media - server could not decrypt ({mxc_url})"
@@ -263,7 +264,7 @@ fn decode_image_with_limits(bytes: &[u8]) -> Result<image::DynamicImage, String>
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     reader.limits(limits);
     let image = reader.decode().map_err(|err| err.to_string())?;
-    let image = super::apply_exif_orientation(image, bytes);
+    let image = apply_exif_orientation(image, bytes);
     // thumbnail() upscales small images; only downscale when the image exceeds the cap.
     Ok(
         if image.width() > MAX_CACHED_IMAGE_DIMENSION || image.height() > MAX_CACHED_IMAGE_DIMENSION
@@ -283,6 +284,125 @@ fn validate_image_dimensions(width: u32, height: u32) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+pub(super) fn touch_lru<K: Clone + Eq>(order: &mut VecDeque<K>, key: &K) {
+    if let Some(index) = order.iter().position(|candidate| candidate == key) {
+        order.remove(index);
+    }
+    order.push_back(key.clone());
+}
+
+pub(super) fn evict_lru_where<K, V>(
+    cache: &mut HashMap<K, V>,
+    order: &mut VecDeque<K>,
+    limit: usize,
+    can_evict: impl Fn(&V) -> bool,
+) -> bool
+where
+    K: Clone + Eq + std::hash::Hash,
+{
+    if cache.len() < limit {
+        return true;
+    }
+    let Some(index) = order
+        .iter()
+        .position(|key| cache.get(key).is_some_and(&can_evict))
+    else {
+        return false;
+    };
+    let Some(oldest) = order.remove(index) else {
+        return false;
+    };
+    cache.remove(&oldest);
+    true
+}
+
+/// Apply the EXIF orientation tag to `img` so it displays upright, matching
+/// what other Matrix clients show. `load_from_memory` decodes raw pixels but
+/// ignores EXIF, so without this correction rotated JPEGs appear sideways.
+/// Returns `img` unchanged if EXIF is absent, unreadable, or already upright.
+fn apply_exif_orientation(img: image::DynamicImage, bytes: &[u8]) -> image::DynamicImage {
+    use std::io::Cursor;
+    let orientation = exif::Reader::new()
+        .read_from_container(&mut Cursor::new(bytes))
+        .ok()
+        .and_then(|exif| {
+            exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+                .and_then(|f| f.value.get_uint(0))
+        })
+        .unwrap_or(1);
+
+    // EXIF orientation values 1–8; 1 = already upright.
+    match orientation {
+        2 => img.fliph(),
+        3 => img.rotate180(),
+        4 => img.flipv(),
+        5 => img.rotate90().fliph(),
+        6 => img.rotate90(),
+        7 => img.rotate270().fliph(),
+        8 => img.rotate270(),
+        _ => img,
+    }
+}
+
+/// Identify an image format from raw magic bytes without relying on the
+/// compiled-in feature set of the `image` crate. Returns a short description
+/// including a hex dump of the first bytes for truly unrecognized content.
+fn sniff_format(bytes: &[u8]) -> String {
+    if bytes.starts_with(b"\xFF\xD8\xFF") {
+        return "JPEG".into();
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1A\n") {
+        return "PNG".into();
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return "GIF".into();
+    }
+    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        return "WebP".into();
+    }
+    if bytes.starts_with(b"BM") {
+        return "BMP".into();
+    }
+    if bytes.starts_with(b"II\x2A\x00") || bytes.starts_with(b"MM\x00\x2A") {
+        return "TIFF".into();
+    }
+    // ISO Base Media File Format container: AVIF, HEIC, HEIF, MP4, …
+    if bytes.get(4..8) == Some(b"ftyp") {
+        return match bytes.get(8..12) {
+            Some(b"avif") | Some(b"avis") => "AVIF".into(),
+            Some(b"heic") | Some(b"heis") | Some(b"heim") | Some(b"heix") => "HEIC".into(),
+            Some(b"mif1") | Some(b"msf1") => "HEIF".into(),
+            _ => "ISO BMFF (AVIF/HEIC/MP4/…)".into(),
+        };
+    }
+    if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") || bytes.starts_with(b"<SVG") {
+        return "SVG (not supported)".into();
+    }
+    if bytes.starts_with(b"\x00\x00\x01\x00") {
+        return "ICO".into();
+    }
+    // Not a recognized image format — could be a JSON/HTML error body served
+    // with a 2xx status. Show the first bytes so the cause is obvious.
+    let prefix: String = bytes
+        .iter()
+        .take(16)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let printable: String = bytes
+        .iter()
+        .take(16)
+        .map(|&b| {
+            if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '.'
+            }
+        })
+        .collect();
+    format!("unknown — first bytes: {prefix}  ({printable})")
 }
 
 #[cfg(test)]
