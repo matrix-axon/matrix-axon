@@ -1208,7 +1208,7 @@ test('narrow: thread badge opens on the first tap', async ({ page }) => {
   ).toBeVisible()
 })
 
-test('narrow: unread-thread drawer lists hidden thread replies', async ({
+test('narrow: opening a thread from the unread drawer uncovers the thread pane', async ({
   page,
 }) => {
   await signIn(page)
@@ -1298,6 +1298,13 @@ test('narrow: unread-thread drawer lists hidden thread replies', async ({
   const box = await panel.boundingBox()
   expect(box?.x).toBeGreaterThanOrEqual(0)
   expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(390)
+
+  await panel.getByRole('button', { name: /New thread activity/ }).click()
+  await expect(panel).toHaveCount(0)
+  await expect(page).toHaveURL(/thread=%24seed-image/)
+  const thread = page.getByRole('complementary', { name: 'Thread' })
+  await expect(thread).toBeVisible()
+  await expectPaneCenterUncovered(page, '.thread-panel')
 })
 
 test('narrow: sparse room messages remain visible when composing', async ({
