@@ -10,7 +10,6 @@ import {
   serverNameFromRoomReference,
 } from '../matrix-to'
 import { parseUserIdList } from '../matrix-user'
-import { copyText } from '../copy-text'
 import { joinRoomError } from '../room-entry'
 import { useServices } from '../services'
 import type { MembersStore } from '../stores/members'
@@ -25,7 +24,7 @@ import {
 import { useShortcuts } from '../shortcuts'
 import { formatInviteeList, inviteErrorMessage } from '../invite'
 import { BodyPortal } from './BodyPortal'
-import { CopyableText } from './CopyableText'
+import { CopyableText, useCopyFeedback } from './CopyableText'
 import { RoomAvatar, roomAvatarColor } from './RoomAvatar'
 import { ErrorBanner } from './ErrorBanner'
 import { useModalFocus } from './use-modal-focus'
@@ -87,13 +86,10 @@ export function RoomInfoPanel({
   const location = useLocation()
   const { rooms, search, spaces, api, live } = useServices()
   const inviteInput = useRef<HTMLInputElement>(null)
-  const clearCopyStatus = useRef<number | null>(null)
+  const { status: copyStatus, copy } = useCopyFeedback()
   const [filter, setFilter] = useState('')
   const [dmUserId, setDmUserId] = useState<string | null>(null)
   const [dmError, setDmError] = useState<string | null>(null)
-  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>(
-    'idle',
-  )
   const [inviteOpen, setInviteOpen] = useState(false)
   const [inviteValue, setInviteValue] = useState('')
   const [inviteStatus, setInviteStatus] = useState<string | null>(null)
@@ -173,13 +169,6 @@ export function RoomInfoPanel({
       inviteInput.current?.focus()
     }
   }, [inviteOpen])
-  useEffect(() => {
-    return () => {
-      if (clearCopyStatus.current !== null) {
-        window.clearTimeout(clearCopyStatus.current)
-      }
-    }
-  }, [])
   useEffect(() => {
     let cancelled = false
     const stateKey = `${accountId}/${roomId}`
@@ -276,21 +265,12 @@ export function RoomInfoPanel({
   }, [live.reconnects.value])
 
   const copyRoomLink = async () => {
-    if (clearCopyStatus.current !== null) {
-      window.clearTimeout(clearCopyStatus.current)
-      clearCopyStatus.current = null
-    }
     const href = matrixToRoomReferenceLink(
       room?.room_id ?? roomId,
       room?.canonical_alias,
       { via: serverNamesFromUserId(room?.account_user_id) },
     )
-    const ok = await copyText(href)
-    setCopyStatus(ok ? 'copied' : 'failed')
-    clearCopyStatus.current = window.setTimeout(() => {
-      setCopyStatus('idle')
-      clearCopyStatus.current = null
-    }, 1800)
+    await copy(href)
   }
 
   const startDm = async (userId: string) => {
