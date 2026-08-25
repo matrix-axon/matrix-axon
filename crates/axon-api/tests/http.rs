@@ -18,9 +18,14 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use axon_api::{AccountLifecycle, AppState, MediaProxy, RedecryptUtdsStats};
+use async_trait::async_trait;
+use axon_api::{
+    AccountLifecycle, AppState, MatrixOAuthQrAcquireService, MatrixOAuthQrError,
+    MatrixOAuthQrFlowDto, MatrixOAuthQrPresentation, MatrixOAuthQrStage, MediaProxy,
+    RedecryptUtdsStats,
+};
 use axon_store::{AccountState, NewEvent, RoomInviteSnapshot, RoomStateUpsert, Store};
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -275,6 +280,119 @@ fn lifecycle_app(store: Store, lifecycle: Arc<dyn AccountLifecycle>) -> axum::Ro
         Arc::new(StubMediaProxy),
         None,
     ))
+}
+
+struct StubMatrixOAuthQr {
+    flow_id: Uuid,
+    calls: Mutex<Vec<&'static str>>,
+}
+
+impl StubMatrixOAuthQr {
+    fn new(flow_id: Uuid) -> Self {
+        Self {
+            flow_id,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn flow(
+        &self,
+        presentation: MatrixOAuthQrPresentation,
+        stage: MatrixOAuthQrStage,
+    ) -> MatrixOAuthQrFlowDto {
+        MatrixOAuthQrFlowDto {
+            flow_id: self.flow_id,
+            expected_user_id: "@alice:example.org".to_owned(),
+            presentation,
+            stage,
+            qr_code_data: (stage == MatrixOAuthQrStage::QrReady).then(|| "opaque-qr".to_owned()),
+            check_code: (stage == MatrixOAuthQrStage::CheckCodeToDisplay).then(|| "42".to_owned()),
+            authorization_user_code: (stage == MatrixOAuthQrStage::WaitingForAuthorization)
+                .then(|| "ABCD-EFGH".to_owned()),
+            verification_uri: None,
+            account_id: None,
+            error_code: None,
+        }
+    }
+
+    fn calls(&self) -> Vec<&'static str> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl MatrixOAuthQrAcquireService for StubMatrixOAuthQr {
+    async fn create(
+        &self,
+        expected_user_id: &str,
+        presentation: MatrixOAuthQrPresentation,
+    ) -> Result<MatrixOAuthQrFlowDto, MatrixOAuthQrError> {
+        assert_eq!(expected_user_id, "@alice:example.org");
+        self.calls.lock().unwrap().push("create");
+        Ok(self.flow(presentation, MatrixOAuthQrStage::Starting))
+    }
+
+    async fn get(&self, flow_id: Uuid) -> Result<MatrixOAuthQrFlowDto, MatrixOAuthQrError> {
+        assert_eq!(flow_id, self.flow_id);
+        self.calls.lock().unwrap().push("get");
+        Ok(self.flow(
+            MatrixOAuthQrPresentation::Display,
+            MatrixOAuthQrStage::QrReady,
+        ))
+    }
+
+    async fn submit_scan(
+        &self,
+        flow_id: Uuid,
+        qr_code_data: &str,
+    ) -> Result<MatrixOAuthQrFlowDto, MatrixOAuthQrError> {
+        assert_eq!(flow_id, self.flow_id);
+        assert_eq!(qr_code_data, "opaque-qr");
+        self.calls.lock().unwrap().push("scan");
+        Ok(self.flow(
+            MatrixOAuthQrPresentation::Scan,
+            MatrixOAuthQrStage::CheckCodeToDisplay,
+        ))
+    }
+
+    async fn submit_check_code(
+        &self,
+        flow_id: Uuid,
+        check_code: &str,
+    ) -> Result<MatrixOAuthQrFlowDto, MatrixOAuthQrError> {
+        assert_eq!(flow_id, self.flow_id);
+        assert_eq!(check_code, "42");
+        self.calls.lock().unwrap().push("check");
+        Ok(self.flow(
+            MatrixOAuthQrPresentation::Display,
+            MatrixOAuthQrStage::WaitingForAuthorization,
+        ))
+    }
+
+    async fn cancel(&self, flow_id: Uuid) -> Result<(), MatrixOAuthQrError> {
+        assert_eq!(flow_id, self.flow_id);
+        self.calls.lock().unwrap().push("cancel");
+        Ok(())
+    }
+}
+
+fn matrix_oauth_qr_app(store: Store, service: Arc<StubMatrixOAuthQr>) -> axum::Router {
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    axon_api::router(
+        AppState::new(
+            store,
+            live,
+            Arc::new(StubSender::ok("$unused:localhost")),
+            Arc::new(StubLifecycle::ok(Uuid::nil())),
+            Arc::new(StubVerification::ok("$unused-flow")),
+            Arc::new(StubTrust::ok()),
+            Arc::new(StubDeviceList::ok()),
+            Arc::new(StubTokenVerifier::ok()),
+            Arc::new(StubMediaProxy),
+            None,
+        )
+        .with_matrix_oauth_acquire(service),
+    )
 }
 
 /// Build a router whose verify routes are backed by `verify` (other ports unused).
@@ -1454,6 +1572,90 @@ async fn auth_gate_covers_read_routes_but_healthz_is_open() {
     // The unversioned liveness probe carries no auth, so a monitor can reach it.
     let (status, _) = request(&app, "GET", "/healthz", None, None).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn matrix_oauth_qr_routes_are_authenticated_and_preserve_stage_fields() {
+    let store = store().await;
+    let flow_id = Uuid::new_v4();
+    let service = Arc::new(StubMatrixOAuthQr::new(flow_id));
+    let app = matrix_oauth_qr_app(store, service.clone());
+
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/v1/accounts/login/qr",
+        Some(json!({
+            "expected_user_id": "@alice:example.org",
+            "presentation": "display"
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(service.calls().is_empty(), "auth rejects before the port");
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/v1/accounts/login/qr",
+        Some(json!({
+            "expected_user_id": "@alice:example.org",
+            "presentation": "display"
+        })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["data"]["stage"], "starting");
+    assert_eq!(body["data"]["presentation"], "display");
+
+    let (status, body) = get(&app, &format!("/v1/accounts/login/qr/{flow_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["stage"], "qr_ready");
+    assert_eq!(body["data"]["qr_code_data"], "opaque-qr");
+    assert!(body["data"].get("check_code").is_none());
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        &format!("/v1/accounts/login/qr/{flow_id}/scan"),
+        Some(json!({ "qr_code_data": "opaque-qr" })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["stage"], "check_code_to_display");
+    assert_eq!(body["data"]["check_code"], "42");
+    assert!(body["data"].get("qr_code_data").is_none());
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        &format!("/v1/accounts/login/qr/{flow_id}/check-code"),
+        Some(json!({ "check_code": "42" })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["stage"], "waiting_for_authorization");
+    assert_eq!(body["data"]["authorization_user_code"], "ABCD-EFGH");
+
+    let (status, body) = request(
+        &app,
+        "DELETE",
+        &format!("/v1/accounts/login/qr/{flow_id}"),
+        None,
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(body, Value::Null);
+    assert_eq!(
+        service.calls(),
+        ["create", "get", "scan", "check", "cancel"]
+    );
 }
 
 #[tokio::test]

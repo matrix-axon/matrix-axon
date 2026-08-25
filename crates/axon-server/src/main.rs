@@ -14,6 +14,7 @@ mod devices;
 mod gateway;
 mod init;
 mod lifecycle;
+mod matrix_oauth_acquire;
 mod media;
 mod member_profiles;
 mod oauth;
@@ -41,6 +42,7 @@ use crate::cli::{Cli, Command};
 use crate::devices::DeviceAdapter;
 use crate::gateway::GatewayAdapter;
 use crate::lifecycle::LifecycleAdapter;
+use crate::matrix_oauth_acquire::MatrixOAuthAcquireAdapter;
 use crate::media::CachingMediaProxy;
 use crate::member_profiles::MemberProfileAdapter;
 use crate::trust::TrustAdapter;
@@ -253,6 +255,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // ignore list, directory search, ADR 0068 M19f).
     let account_actions: Arc<dyn axon_api::AccountActionsSender> = sender.clone();
     let lifecycle = Arc::new(LifecycleAdapter(sync_engine.lifecycle()));
+    let matrix_oauth_acquire = Arc::new(MatrixOAuthAcquireAdapter(
+        sync_engine.matrix_oauth_acquire(),
+    ));
     let verify = Arc::new(VerificationAdapter(sync_engine.verification()));
     let trust = Arc::new(TrustAdapter(sync_engine.sender_trust()));
     let devices = Arc::new(DeviceAdapter(sync_engine.devices()));
@@ -308,6 +313,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     .with_backfill_status(backfill_status)
     .with_sync_status(sync_status)
     .with_sync_state(sync_state)
+    .with_matrix_oauth_acquire(matrix_oauth_acquire)
     .with_build_info(axon_api::BuildInfo {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         git_hash: env!("AXON_GIT_HASH").to_owned(),

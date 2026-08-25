@@ -214,6 +214,15 @@ impl ClientManager {
         Ok(client)
     }
 
+    /// Cache a client whose already-authenticated SDK store was adopted by the
+    /// Matrix OAuth QR-login finalizer. The account is still `deactivated` while
+    /// this slot is filled, so a concurrent cold connect cannot create a second
+    /// client; activation happens only after this returns.
+    pub(crate) async fn adopt_matrix_oauth_client(&self, account_id: Uuid, client: Client) {
+        let slot = self.slot(account_id);
+        *slot.lock().await = Some(client);
+    }
+
     /// Take the cached client for `account_id` out of its slot, returning it (or
     /// `None` if nothing is cached). This both *yields* the client — so the caller
     /// can do one last thing with it, e.g. invalidate the device token upstream on

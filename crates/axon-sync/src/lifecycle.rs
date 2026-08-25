@@ -20,7 +20,8 @@ use std::time::Duration;
 use axon_core::{LiveFrame, SyncConfig};
 use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
-use axon_store::{Account, AccountState, Store, StoreError};
+use axon_store::{Account, AccountState, CommitMatrixOAuthAcquire, Store, StoreError};
+use matrix_sdk::authentication::oauth::OAuthSession;
 use matrix_sdk::encryption::recovery::RecoveryError;
 use matrix_sdk::ruma::OwnedUserId;
 use matrix_sdk::Client;
@@ -72,6 +73,7 @@ const UPSTREAM_LOGOUT_TIMEOUT: Duration = Duration::from_secs(10);
 /// retries in config.
 const RECOVER_SWEEP_TIMEOUT: Duration = Duration::from_secs(30);
 const MANUAL_REDECRYPT_TIMEOUT: Duration = Duration::from_secs(30);
+const QR_TRUST_DERIVATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What can go wrong running a lifecycle verb. Wire-neutral, like
 /// [`GatewayError`](crate::GatewayError): the composition-root adapter
@@ -92,6 +94,22 @@ pub enum LifecycleError {
     /// (An *active* account is not an error — login is an idempotent no-op there.)
     #[error("account is being deleted: {0}")]
     BeingDeleted(Uuid),
+
+    /// A QR acquisition completed remotely but another login made the identity
+    /// active before finalization obtained its lifecycle lock. → 409.
+    #[error("account is already active: {0}")]
+    AlreadyActive(Uuid),
+
+    /// A prior QR acquisition has crossed its durable commit point and still
+    /// owns this identity while SDK-store adoption is reconciled. → 409.
+    #[error("Matrix OAuth QR login is still finalizing for {0}")]
+    LoginFinalizing(String),
+
+    /// The QR protocol completed but the SDK's own device is not actually
+    /// cross-signed, so Axon refuses to claim the combined login-and-verify
+    /// outcome. → failed flow, never an active account.
+    #[error("Matrix OAuth QR login did not produce a verified device")]
+    DeviceNotVerified,
 
     /// No account exists for the given id. Raised by the id-keyed verbs
     /// (logout/delete); login never returns it (it mints a row for a new
@@ -481,6 +499,8 @@ impl AccountLifecycle {
         let lock = self.lock_for(username, "");
         let _guard = lock.lock().await;
 
+        self.ensure_no_matrix_oauth_acquire(username).await?;
+
         let account = match self.resolve_login_target(username).await? {
             ResolvedTarget::AlreadyActive(id) => return Ok(id),
             ResolvedTarget::Retained(existing) => Some(existing),
@@ -572,6 +592,18 @@ impl AccountLifecycle {
         }
     }
 
+    async fn ensure_no_matrix_oauth_acquire(&self, username: &str) -> Result<(), LifecycleError> {
+        if self
+            .store
+            .has_matrix_oauth_acquire_for_user(username)
+            .await?
+        {
+            Err(LifecycleError::LoginFinalizing(username.to_owned()))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Mint a fresh account row and hold it `deactivated` until the caller's
     /// credential is confirmed — shared by `login` and `import_token` for the
     /// no-existing-row case.
@@ -607,6 +639,13 @@ impl AccountLifecycle {
                 return Err(err);
             }
         };
+        Ok(self.supervise(active))
+    }
+
+    /// Register an already-active account on the engine's ordinary supervised
+    /// path. Shared by password/token activation and QR-store adoption so the
+    /// latter cannot drift into a second supervision implementation.
+    fn supervise(&self, active: Account) -> Uuid {
         let account_id = active.account_id;
         spawn_supervised(
             &self.tracker,
@@ -623,6 +662,116 @@ impl AccountLifecycle {
             self.index.clone(),
             self.backfill_health.clone(),
             self.sync_health.clone(),
+        );
+        account_id
+    }
+
+    /// Finalize a successful Matrix OAuth QR login under the same per-identity
+    /// lock as login/logout/delete. The encrypted session and durable adoption
+    /// breadcrumb commit together while the account remains deactivated; only
+    /// after the SDK store is in its permanent location is the account activated
+    /// and handed to the normal supervisor.
+    pub(crate) async fn finalize_matrix_oauth_acquire(
+        &self,
+        flow_id: Uuid,
+        staging_dir_name: &str,
+        expected_user_id: &str,
+        client: Client,
+        session: OAuthSession,
+    ) -> Result<Uuid, LifecycleError> {
+        let lock = self.lock_for(expected_user_id, "");
+        let _guard = lock.lock().await;
+
+        match self.resolve_login_target(expected_user_id).await? {
+            ResolvedTarget::AlreadyActive(account_id) => {
+                return Err(LifecycleError::AlreadyActive(account_id))
+            }
+            ResolvedTarget::Retained(_) | ResolvedTarget::New => {}
+        }
+
+        if !tokio::time::timeout(QR_TRUST_DERIVATION_TIMEOUT, derive_verified(&client))
+            .await
+            .unwrap_or(false)
+        {
+            return Err(LifecycleError::DeviceNotVerified);
+        }
+
+        let refresh_token = session
+            .user
+            .tokens
+            .refresh_token
+            .as_deref()
+            .ok_or_else(|| {
+                LifecycleError::Upstream(
+                    "Matrix OAuth QR login returned no refresh token".to_owned(),
+                )
+            })?;
+        if session.user.meta.user_id.as_str() != expected_user_id {
+            return Err(LifecycleError::AuthFailed(
+                "Matrix OAuth QR login returned a different Matrix user".to_owned(),
+            ));
+        }
+        let store_key = self
+            .config
+            .store_key
+            .as_deref()
+            .ok_or(SyncError::MissingStoreKey)?;
+        let homeserver_url = client.homeserver().to_string();
+        let committed = self
+            .store
+            .commit_matrix_oauth_acquire(
+                flow_id,
+                expected_user_id,
+                &homeserver_url,
+                session.user.meta.device_id.as_str(),
+                &session.user.tokens.access_token,
+                refresh_token,
+                session.client_id.as_str(),
+                store_key,
+            )
+            .await?;
+        let account = match committed {
+            CommitMatrixOAuthAcquire::Committed(account) => account,
+            CommitMatrixOAuthAcquire::ActiveConflict(account_id) => {
+                return Err(LifecycleError::AlreadyActive(account_id))
+            }
+            CommitMatrixOAuthAcquire::DeletingConflict(account_id) => {
+                return Err(LifecycleError::BeingDeleted(account_id))
+            }
+        };
+
+        crate::client::adopt_matrix_oauth_acquire_staging(
+            &self.config,
+            staging_dir_name,
+            account.account_id,
+        )
+        .await?;
+        self.manager
+            .adopt_matrix_oauth_client(account.account_id, client)
+            .await;
+        if !self
+            .store
+            .finalize_matrix_oauth_acquire(flow_id, account.account_id)
+            .await?
+        {
+            self.manager.evict(account.account_id).await;
+            return Err(LifecycleError::Store(
+                "Matrix OAuth QR finalization breadcrumb disappeared".to_owned(),
+            ));
+        }
+        // The activation transaction succeeded, so use the row we already own
+        // rather than introducing a fallible read between activation and
+        // supervision. No account fields other than lifecycle/trust change in
+        // that transaction.
+        let mut active = account;
+        active.state = AccountState::Active;
+        active.verified = true;
+        let account_id = self.supervise(active);
+        tracing::info!(
+            %flow_id,
+            %account_id,
+            user_id = expected_user_id,
+            "Matrix OAuth QR login finalized and supervised"
         );
         Ok(account_id)
     }
@@ -664,6 +813,8 @@ impl AccountLifecycle {
         // Serialize before any store/homeserver work, same key space `login` uses.
         let lock = self.lock_for(username, "");
         let _guard = lock.lock().await;
+
+        self.ensure_no_matrix_oauth_acquire(username).await?;
 
         let account = match self.resolve_login_target(username).await? {
             ResolvedTarget::AlreadyActive(id) => return Ok(id),

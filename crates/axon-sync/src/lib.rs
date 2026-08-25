@@ -23,6 +23,7 @@ mod gateway;
 mod lifecycle;
 mod manager;
 mod matrix_oauth;
+mod matrix_oauth_acquire;
 mod media;
 mod member_profiles;
 mod meta;
@@ -39,6 +40,10 @@ pub use error::{GatewayError, SyncError};
 pub use gateway::{LeaveOutcome as GatewayLeaveOutcome, SdkGateway};
 pub use lifecycle::{AccountLifecycle, LifecycleError};
 pub use matrix_oauth::MatrixOAuthRegistrationManager;
+pub use matrix_oauth_acquire::{
+    MatrixOAuthAcquireEngine, MatrixOAuthAcquireError, MatrixOAuthAcquirePresentation,
+    MatrixOAuthAcquireStage, MatrixOAuthAcquireState,
+};
 pub use media::SdkMediaProxy;
 pub use member_profiles::{MemberProfile, MemberProfileEngine, MemberProfileError};
 pub use redecrypt::RedecryptSummary;

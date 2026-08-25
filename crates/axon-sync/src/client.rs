@@ -12,7 +12,10 @@
 //! restores the session from that stored token; there is no boot-time
 //! credential path.
 
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use axon_core::SyncConfig;
 use axon_store::{Account, AccountAuthKind, Store, StoredAccountSession};
@@ -21,6 +24,7 @@ use matrix_sdk::{
         matrix::MatrixSession,
         oauth::{ClientId, OAuthSession, UserSession},
     },
+    config::RequestConfig,
     cross_process_lock::CrossProcessLockConfig,
     ruma::OwnedUserId,
     store::RoomLoadSettings,
@@ -378,6 +382,120 @@ async fn create_store_dir(path: &Path) -> Result<(), SyncError> {
         .map_err(|e| SyncError::Sdk(format!("creating SDK store dir {}: {e}", path.display())))
 }
 
+/// Directory containing pre-account Matrix OAuth QR-login SDK stores.
+/// Individual directory names are generated UUIDs and are also persisted in a
+/// non-secret Postgres breadcrumb before this path is touched.
+pub(crate) fn matrix_oauth_acquire_root(config: &SyncConfig) -> PathBuf {
+    config.data_dir.join(".matrix-oauth-acquire")
+}
+
+/// Resolve one generated staging name without accepting path traversal from a
+/// corrupted database row.
+pub(crate) fn matrix_oauth_acquire_staging_dir(
+    config: &SyncConfig,
+    staging_dir_name: &str,
+) -> Result<PathBuf, SyncError> {
+    uuid::Uuid::parse_str(staging_dir_name).map_err(|_| {
+        SyncError::Sdk("invalid Matrix OAuth acquire staging directory name".to_owned())
+    })?;
+    Ok(matrix_oauth_acquire_root(config).join(staging_dir_name))
+}
+
+/// Build the isolated OAuth client used while Axon has no account row yet.
+/// Every SDK request receives the same bounded timeout as Matrix OAuth
+/// discovery/registration; the overall interactive flow has a separate TTL.
+pub(crate) async fn build_matrix_oauth_acquire_client(
+    config: &SyncConfig,
+    staging_dir_name: &str,
+    server_name_or_url: &str,
+) -> Result<Client, SyncError> {
+    let store_key = config
+        .store_key
+        .as_deref()
+        .ok_or(SyncError::MissingStoreKey)?;
+    let staging = matrix_oauth_acquire_staging_dir(config, staging_dir_name)?;
+    remove_dir_if_present(&staging).await?;
+    create_store_dir(&staging).await?;
+    let timeout = Duration::from_secs(config.matrix_oauth.request_timeout_secs);
+    Client::builder()
+        .server_name_or_homeserver_url(server_name_or_url)
+        .handle_refresh_tokens()
+        .cross_process_store_config(CrossProcessLockConfig::SingleProcess)
+        .request_config(RequestConfig::new().timeout(timeout))
+        .sqlite_store_with_config_and_cache_path(sqlite_config(&staging, store_key), None::<&Path>)
+        .build()
+        .await
+        .map_err(sdk_err)
+}
+
+/// Remove an abandoned pre-account SDK store. Idempotent for cancellation,
+/// failed login, and boot reconciliation.
+pub(crate) async fn remove_matrix_oauth_acquire_staging(
+    config: &SyncConfig,
+    staging_dir_name: &str,
+) -> Result<(), SyncError> {
+    let staging = matrix_oauth_acquire_staging_dir(config, staging_dir_name)?;
+    remove_dir_if_present(&staging).await
+}
+
+/// Adopt a completed QR login's SDK store as an account's permanent store.
+///
+/// The staging store is authoritative once the encrypted OAuth session has
+/// committed. Moving the previous permanent store aside and then renaming the
+/// staging directory is restart-idempotent: a crash between either rename is
+/// completed from the same breadcrumb on the next boot.
+pub(crate) async fn adopt_matrix_oauth_acquire_staging(
+    config: &SyncConfig,
+    staging_dir_name: &str,
+    account_id: uuid::Uuid,
+) -> Result<(), SyncError> {
+    let root = matrix_oauth_acquire_root(config);
+    let staging = matrix_oauth_acquire_staging_dir(config, staging_dir_name)?;
+    let permanent = config.data_dir.join(account_id.to_string());
+    let previous = root.join(format!("{staging_dir_name}.previous"));
+    create_store_dir(&root).await?;
+
+    let staging_exists = tokio::fs::try_exists(&staging)
+        .await
+        .map_err(|e| SyncError::Sdk(format!("checking Matrix OAuth staging store: {e}")))?;
+    if staging_exists {
+        let previous_exists = tokio::fs::try_exists(&previous)
+            .await
+            .map_err(|e| SyncError::Sdk(format!("checking prior SDK store backup: {e}")))?;
+        if !previous_exists {
+            match tokio::fs::rename(&permanent, &previous).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(SyncError::Sdk(format!(
+                        "staging previous SDK store for Matrix OAuth adoption: {e}"
+                    )))
+                }
+            }
+        } else {
+            // A surviving backup proves an earlier attempt already moved the old
+            // store. Any permanent directory alongside the still-present staging
+            // directory is an incomplete new copy and is safe to discard.
+            remove_dir_if_present(&permanent).await?;
+        }
+        tokio::fs::rename(&staging, &permanent)
+            .await
+            .map_err(|e| SyncError::Sdk(format!("adopting Matrix OAuth SDK store: {e}")))?;
+    } else if !tokio::fs::try_exists(&permanent)
+        .await
+        .map_err(|e| SyncError::Sdk(format!("checking adopted SDK store: {e}")))?
+    {
+        return Err(SyncError::Sdk(
+            "Matrix OAuth SDK staging and permanent stores are both missing".to_owned(),
+        ));
+    }
+
+    // The new permanent store is authoritative. A leftover old store is only a
+    // cleanup leak and can be retried by the same idempotent reconciliation.
+    remove_dir_if_present(&previous).await?;
+    Ok(())
+}
+
 /// `remove_dir_all` that treats an absent directory as success.
 ///
 /// Retries on EMFILE (os error 24) with exponential back-off: the Matrix SDK
@@ -506,8 +624,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{client_builder, restore, with_staged_store_dir};
+    use super::{
+        adopt_matrix_oauth_acquire_staging, client_builder, matrix_oauth_acquire_root, restore,
+        with_staged_store_dir,
+    };
     use crate::error::SyncError;
+    use axon_core::SyncConfig;
     use axon_store::{Account, AccountAuthKind, AccountState, StoredAccountSession};
     use chrono::Utc;
     use std::path::PathBuf;
@@ -542,6 +664,79 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    fn sync_config(root: &TempRoot) -> SyncConfig {
+        SyncConfig {
+            data_dir: root.0.clone(),
+            store_key: Some("test-store-key".to_owned()),
+            ..SyncConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_adoption_replaces_previous_store_and_is_idempotent() {
+        let root = TempRoot::new();
+        let config = sync_config(&root);
+        let flow_id = Uuid::new_v4();
+        let staging_name = flow_id.to_string();
+        let account_id = Uuid::new_v4();
+        let staging = matrix_oauth_acquire_root(&config).join(&staging_name);
+        let permanent = config.data_dir.join(account_id.to_string());
+        tokio::fs::create_dir_all(&staging).await.unwrap();
+        tokio::fs::create_dir_all(&permanent).await.unwrap();
+        tokio::fs::write(staging.join("new-store"), b"new")
+            .await
+            .unwrap();
+        tokio::fs::write(permanent.join("old-store"), b"old")
+            .await
+            .unwrap();
+
+        adopt_matrix_oauth_acquire_staging(&config, &staging_name, account_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read(permanent.join("new-store")).await.unwrap(),
+            b"new"
+        );
+        assert!(!permanent.join("old-store").exists());
+        assert!(!staging.exists());
+
+        adopt_matrix_oauth_acquire_staging(&config, &staging_name, account_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read(permanent.join("new-store")).await.unwrap(),
+            b"new"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_adoption_resumes_between_the_two_renames() {
+        let root = TempRoot::new();
+        let config = sync_config(&root);
+        let flow_id = Uuid::new_v4();
+        let staging_name = flow_id.to_string();
+        let account_id = Uuid::new_v4();
+        let acquire_root = matrix_oauth_acquire_root(&config);
+        let staging = acquire_root.join(&staging_name);
+        let previous = acquire_root.join(format!("{staging_name}.previous"));
+        let permanent = config.data_dir.join(account_id.to_string());
+        tokio::fs::create_dir_all(&staging).await.unwrap();
+        tokio::fs::create_dir_all(&previous).await.unwrap();
+        tokio::fs::write(staging.join("new-store"), b"new")
+            .await
+            .unwrap();
+        tokio::fs::write(previous.join("old-store"), b"old")
+            .await
+            .unwrap();
+
+        adopt_matrix_oauth_acquire_staging(&config, &staging_name, account_id)
+            .await
+            .unwrap();
+        assert!(permanent.join("new-store").exists());
+        assert!(!previous.exists());
+        assert!(!staging.exists());
     }
 
     #[tokio::test]

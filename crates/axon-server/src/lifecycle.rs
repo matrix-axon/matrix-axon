@@ -27,6 +27,12 @@ fn map_login_err(err: LifecycleError) -> LoginError {
         LifecycleError::BeingDeleted(id) => {
             LoginError::Conflict(format!("account is being deleted: {id}"))
         }
+        LifecycleError::AlreadyActive(id) => {
+            LoginError::Conflict(format!("account is already active: {id}"))
+        }
+        LifecycleError::LoginFinalizing(user_id) => LoginError::Conflict(format!(
+            "a Matrix OAuth QR login is still finalizing for {user_id}"
+        )),
         LifecycleError::AuthFailed(msg) => LoginError::AuthFailed(msg),
         LifecycleError::Upstream(msg) => LoginError::Upstream(msg),
         // A previous task for this identity hasn't terminated yet; the store dir
@@ -47,6 +53,10 @@ fn map_login_err(err: LifecycleError) -> LoginError {
         }
         LifecycleError::RecoveryFailed(msg) => {
             tracing::error!(error = %msg, "unexpected recovery error from account login");
+            LoginError::Internal
+        }
+        LifecycleError::DeviceNotVerified => {
+            tracing::error!("unexpected QR-only trust error from account login");
             LoginError::Internal
         }
     }
