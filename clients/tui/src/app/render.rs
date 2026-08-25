@@ -100,6 +100,16 @@ pub(crate) fn thread_badge_text(badge: &ThreadBadge) -> String {
 /// thumbnail has enough vertical space to be legible.
 pub(crate) const IMAGE_THUMB_ROWS: usize = 6;
 
+/// The gutter every message's header line opens with.
+///
+/// The two must stay the same display width. That is the fact the whole
+/// draw-time selection overlay rests on (#235): the marker feeds
+/// `body_prefix_cols` and therefore the wrap width, so a selected and an
+/// unselected message wrap identically and one cached layout serves both.
+/// `selection_markers_are_the_same_width` pins it.
+pub(crate) const SELECTED_MARKER: &str = "> ";
+pub(crate) const UNSELECTED_MARKER: &str = "  ";
+
 pub(crate) fn format_time(origin_ts: i64, time_format: TimeFormat) -> String {
     Local
         .timestamp_millis_opt(origin_ts)
@@ -159,11 +169,18 @@ pub(crate) fn message_index_at_line(ranges: &[Range<usize>], line: usize) -> usi
         .unwrap_or_else(|| ranges.len().saturating_sub(1))
 }
 
+/// Build the rendered lines and per-message line ranges for a timeline.
+///
+/// The lines are **selection-neutral**: every message gets
+/// [`UNSELECTED_MARKER`] and default marker/timestamp styling, and the caller
+/// restyles the selected one at draw time with [`overlay_selection_on_page`].
+/// That is what keeps `selected_message` out of the layout digest, so moving
+/// the selection is a cache hit rather than a full re-parse and re-wrap of the
+/// timeline (#235).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn message_layout(
     events: &[&EventDto],
     sender_labels: &[String],
-    selected_message: Option<&str>,
     colors: &ColorScheme,
     width: usize,
     reactions: &HashMap<String, Vec<(String, usize)>>,
@@ -172,7 +189,6 @@ pub(crate) fn message_layout(
     relations: &RelationContext,
     density: MessageDensity,
     time_format: TimeFormat,
-    highlight_selected_line: bool,
 ) -> MessageLayout {
     let reaction_style = Style::default().fg(colors.input_hint);
     let relation_style = Style::default()
@@ -199,16 +215,7 @@ pub(crate) fn message_layout(
             ));
             last_date_day = event_day;
         }
-        let is_selected = selected_message == Some(event.event_id.as_str());
-        let selected_line_style = selected_line_style(colors, is_selected, highlight_selected_line);
-        let unselected_line_style = Style::default();
         let is_own = own_senders.get(&event.account_id) == Some(&event.sender);
-        let marker = if is_selected { "> " } else { "  " };
-        let time_style = if is_selected {
-            Style::default().fg(colors.selected_room)
-        } else {
-            Style::default()
-        };
         let sender_color = if is_own {
             colors.own_message_sender
         } else {
@@ -337,12 +344,13 @@ pub(crate) fn message_layout(
         // Sender header line: marker, time, optional trust glyph, sender. The
         // first body span rides here unless a reply context line takes the row
         // below the header instead (ADR 0032 M1).
+        //
+        // The marker and the time are spans 0 and 1, in that order, and
+        // `apply_selected_message_style` restyles them by that index — so
+        // anything inserted ahead of them has to move it too.
         let mut header = vec![
-            Span::styled(marker, time_style),
-            Span::styled(
-                format!("{} ", format_time(event.origin_ts, time_format)),
-                time_style,
-            ),
+            Span::raw(UNSELECTED_MARKER),
+            Span::raw(format!("{} ", format_time(event.origin_ts, time_format))),
         ];
         if let Some((symbol, color)) = trust {
             header.push(Span::styled(
@@ -371,12 +379,7 @@ pub(crate) fn message_layout(
                 header.extend(first);
             }
         }
-        lines.push(selected_message_header_line(
-            header,
-            width,
-            selected_line_style,
-            is_selected && highlight_selected_line,
-        ));
+        lines.push(Line::from(header));
 
         // Helper: wrap a single-style text to continuation_body_width and push
         // each resulting row with a "  " indent.  This prevents reply context,
@@ -402,7 +405,7 @@ pub(crate) fn message_layout(
         for body in body_iter {
             let mut spans = vec![Span::raw(body_indent.clone())];
             spans.extend(body);
-            lines.push(Line::from(spans).style(unselected_line_style));
+            lines.push(Line::from(spans));
         }
 
         if let Some(badge) = relations.thread_badges.get(event.event_id.as_str()) {
@@ -434,23 +437,85 @@ pub(crate) fn message_layout(
     }
 }
 
-fn selected_message_header_line(
-    mut spans: Vec<Span<'static>>,
+/// Restyle the selected message's header line inside a page of cached lines.
+///
+/// The counterpart to [`message_layout`]'s selection-neutral output, and the
+/// only thing standing between the cached layout and the drawn frame as far as
+/// selection goes (#235). `page_start` is the layout line index `page` begins
+/// at, so the caller hands over exactly the rows it is about to draw.
+///
+/// A selected message scrolled off either end of the page simply has no line to
+/// restyle, which is what `checked_sub` and `get_mut` express between them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn overlay_selection_on_page(
+    page: &mut [Line<'static>],
+    page_start: usize,
+    ranges: &[Range<usize>],
+    events: &[&EventDto],
+    selected_message: Option<&str>,
+    colors: &ColorScheme,
     width: usize,
-    style: Style,
-    highlight: bool,
-) -> Line<'static> {
-    let mut line = Line::from(spans);
-    if highlight {
-        let fill = width.saturating_sub(line.width());
-        if fill > 0 {
-            spans = line.spans;
-            spans.push(Span::styled(" ".repeat(fill), style));
-            line = Line::from(spans);
-        }
-        line = line.style(style);
+    highlight_selected_line: bool,
+) {
+    let Some(line) = selected_message_line(ranges, events, selected_message)
+        .and_then(|line| line.checked_sub(page_start))
+        .and_then(|offset| page.get_mut(offset))
+    else {
+        return;
+    };
+    apply_selected_message_style(line, colors, width, highlight_selected_line);
+}
+
+/// Which layout line carries `selected_message`'s header, if any.
+///
+/// The header is the first line of the message's range, and it is the only line
+/// the selection touches: `message_layout` styles continuation rows identically
+/// whether or not their message is selected, which
+/// `the_selection_overlay_highlights_only_the_header_line` pins.
+fn selected_message_line(
+    ranges: &[Range<usize>],
+    events: &[&EventDto],
+    selected_message: Option<&str>,
+) -> Option<usize> {
+    let selected = selected_message?;
+    let index = events.iter().position(|event| event.event_id == selected)?;
+    ranges.get(index).map(|range| range.start)
+}
+
+/// Turn one selection-neutral header line into the selected message's.
+///
+/// Three things, all of which `message_layout` used to bake in: the marker
+/// becomes [`SELECTED_MARKER`], the marker and timestamp take the
+/// selected-room colour, and — only under `highlight_selected_line` — the line
+/// is padded to `width` and given the selection background.
+///
+/// Because [`SELECTED_MARKER`] and [`UNSELECTED_MARKER`] are the same width,
+/// none of this changes the line's geometry, so the ranges the nav math and
+/// scrolling measure against stay valid.
+fn apply_selected_message_style(
+    line: &mut Line<'static>,
+    colors: &ColorScheme,
+    width: usize,
+    highlight_selected_line: bool,
+) {
+    let time_style = Style::default().fg(colors.selected_room);
+    if let Some(marker) = line.spans.first_mut() {
+        *marker = Span::styled(SELECTED_MARKER, time_style);
     }
-    line
+    if let Some(time) = line.spans.get_mut(1) {
+        time.style = time_style;
+    }
+    if !highlight_selected_line {
+        return;
+    }
+    let style = selected_line_style(colors, true, true);
+    // Pad to the full pane width so the background reads as a bar rather than
+    // stopping at the end of the text.
+    let fill = width.saturating_sub(line.width());
+    if fill > 0 {
+        line.spans.push(Span::styled(" ".repeat(fill), style));
+    }
+    line.style = style;
 }
 
 pub(crate) fn selected_line_style(

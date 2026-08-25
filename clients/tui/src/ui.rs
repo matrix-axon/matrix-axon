@@ -11,10 +11,10 @@ use ratatui_image::{FontSize, Image, Resize};
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    account_localpart, date_separator_line, format_date, format_time, selected_line_style,
-    AccountSelection, App, ImageState, MediaKey, Mode, PopupKind, ProtocolKey, ProtocolState,
-    RoomFilter, RoomKey, SearchKind, UnreadThreadEntry, VerificationDirection, VerificationFlow,
-    VerificationStage, IMAGE_THUMB_ROWS,
+    account_localpart, date_separator_line, format_date, format_time, overlay_selection_on_page,
+    selected_line_style, AccountSelection, App, ImageState, MediaKey, Mode, PopupKind, ProtocolKey,
+    ProtocolState, RoomFilter, RoomKey, SearchKind, UnreadThreadEntry, VerificationDirection,
+    VerificationFlow, VerificationStage, IMAGE_THUMB_ROWS,
 };
 use ratatui_image::picker::ProtocolType;
 
@@ -448,13 +448,27 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         app.messages.scroll.min(max_scroll)
     };
-    let message_lines = layout
+    let mut message_lines = layout
         .lines
         .iter()
         .skip(message_scroll)
         .take(message_page_size)
         .cloned()
         .collect::<Vec<_>>();
+    // Selection styling is applied here rather than baked into the cached
+    // layout. It changes two glyph cells and some colours, never the wrap, so
+    // keeping it out of the layout digest turns holding a nav key from a full
+    // re-parse of the timeline per keypress into a cache hit (#235).
+    overlay_selection_on_page(
+        &mut message_lines,
+        message_scroll,
+        &layout.ranges,
+        &selected_events,
+        app.messages.selection.as_deref(),
+        &app.colors,
+        message_width,
+        app.display.highlight_selected_line,
+    );
     let title = app
         .selected_room()
         .map(|room| app.room_list_title(room))

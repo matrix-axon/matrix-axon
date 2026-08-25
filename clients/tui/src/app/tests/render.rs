@@ -8,6 +8,7 @@ use crate::ui::draw;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::Terminal;
+use unicode_width::UnicodeWidthStr;
 
 #[test]
 fn formatted_body_renders_supported_html_styles() {
@@ -31,7 +32,6 @@ fn formatted_body_renders_supported_html_styles() {
     let lines = message_layout(
         &[&event],
         sender_labels.as_slice(),
-        None,
         &colors,
         80,
         &HashMap::new(),
@@ -40,7 +40,6 @@ fn formatted_body_renders_supported_html_styles() {
         &RelationContext::default(),
         MessageDensity::Dense,
         TimeFormat::H24,
-        false,
     )
     .lines;
 
@@ -80,7 +79,6 @@ fn formatted_body_strips_unsupported_html_and_falls_back_when_empty() {
     let lines = message_layout(
         &[&event],
         sender_labels.as_slice(),
-        None,
         &colors,
         80,
         &HashMap::new(),
@@ -89,7 +87,6 @@ fn formatted_body_strips_unsupported_html_and_falls_back_when_empty() {
         &RelationContext::default(),
         MessageDensity::Dense,
         TimeFormat::H24,
-        false,
     )
     .lines;
 
@@ -121,7 +118,6 @@ fn image_layout_counts_caption_and_cached_thumbnail_rows_once() {
     let layout = message_layout(
         &[&event],
         sender_labels.as_slice(),
-        None,
         &colors,
         80,
         &HashMap::new(),
@@ -130,7 +126,6 @@ fn image_layout_counts_caption_and_cached_thumbnail_rows_once() {
         &RelationContext::default(),
         MessageDensity::Dense,
         TimeFormat::H24,
-        false,
     );
 
     assert_eq!(layout.image_body_rows.get(&key), Some(&2));
@@ -151,7 +146,6 @@ fn normal_layout_puts_body_below_sender_header() {
     let layout = message_layout(
         &[&event],
         sender_labels.as_slice(),
-        None,
         &colors,
         80,
         &HashMap::new(),
@@ -160,7 +154,6 @@ fn normal_layout_puts_body_below_sender_header() {
         &RelationContext::default(),
         MessageDensity::Normal,
         TimeFormat::H24,
-        false,
     );
 
     // Header row carries the sender but no body; the body is a separate row.
@@ -201,7 +194,6 @@ fn normal_layout_image_body_rows_includes_header_row() {
     let layout = message_layout(
         &[&event],
         sender_labels.as_slice(),
-        None,
         &colors,
         80,
         &HashMap::new(),
@@ -210,7 +202,6 @@ fn normal_layout_image_body_rows_includes_header_row() {
         &RelationContext::default(),
         MessageDensity::Normal,
         TimeFormat::H24,
-        false,
     );
 
     // Same 2 caption rows + 2 thumbnail rows as the dense case, but the
@@ -244,7 +235,6 @@ fn image_reply_offsets_thumbnail_below_the_reply_line() {
     let layout = message_layout(
         &[&event],
         sender_labels.as_slice(),
-        None,
         &colors,
         80,
         &HashMap::new(),
@@ -253,7 +243,6 @@ fn image_reply_offsets_thumbnail_below_the_reply_line() {
         &RelationContext::default(),
         MessageDensity::Normal,
         TimeFormat::H24,
-        false,
     );
 
     // header(1) + reply line(1) + caption(2) = 4 rows above the thumbnail.
@@ -517,6 +506,257 @@ fn a_local_reaction_recomputes_the_layout() {
         app.messages.layout_key, before,
         "a reaction the client applied itself must invalidate the layout"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The draw-time selection overlay (#235)
+// ---------------------------------------------------------------------------
+
+/// The fact the whole design rests on: the two markers occupy the same columns,
+/// so the marker's contribution to `body_prefix_cols` — and therefore the wrap
+/// width and `MessageLayout.ranges` — does not depend on the selection.
+///
+/// Widen one of them and every wrapped line of the selected message would move
+/// while the cached ranges still described the old geometry, which is a scroll
+/// desync rather than a cosmetic bug. Hence a test rather than a comment.
+#[test]
+fn selection_markers_are_the_same_width() {
+    assert_eq!(
+        UnicodeWidthStr::width(SELECTED_MARKER),
+        UnicodeWidthStr::width(UNSELECTED_MARKER)
+    );
+}
+
+/// The point of the change: moving the selection must not recompute anything.
+///
+/// Before this, `layout_recomputes` advanced once per `move_selected_message`
+/// call, so holding a nav key re-parsed and re-wrapped the whole timeline on
+/// every keystroke.
+#[test]
+fn moving_the_selection_is_a_layout_cache_hit() {
+    let mut app = app_with_timeline(vec![
+        text_message("$one:example.com", "first"),
+        text_message("$two:example.com", "second"),
+        text_message("$three:example.com", "third"),
+    ]);
+    app.messages.selection = Some("$one:example.com".to_owned());
+    app.ensure_message_layout();
+    let recomputes = app.messages.layout_recomputes;
+
+    for id in ["$two:example.com", "$three:example.com", "$one:example.com"] {
+        app.messages.selection = Some(id.to_owned());
+        app.ensure_message_layout();
+    }
+
+    assert_eq!(
+        app.messages.layout_recomputes, recomputes,
+        "selection changes styling, not geometry, so they must all be cache hits"
+    );
+    assert_eq!(
+        app.messages.layout_checks,
+        recomputes + 3,
+        "and the checks must still be counted"
+    );
+}
+
+/// The overlay's own output, on the header line and nowhere else.
+///
+/// Moved here from `app/tests/rooms.rs` when the styling moved out of
+/// `message_layout`; it asserted the same three things about the baked-in
+/// version. The scope is deliberate and unchanged: a selected message that
+/// wraps gets the background bar on its header row only, not on its
+/// continuation rows.
+#[test]
+fn the_selection_overlay_highlights_only_the_header_line() {
+    let colors = TuiConfig::test_default().colors;
+    let event = text_message("$message:example.com", "hello");
+    let sender_labels = vec!["@alice:example.com".to_owned()];
+    let layout = message_layout(
+        &[&event],
+        sender_labels.as_slice(),
+        &colors,
+        80,
+        &HashMap::new(),
+        &HashMap::new(),
+        &ImageThumbRows::new(),
+        &RelationContext::default(),
+        MessageDensity::Normal,
+        TimeFormat::H24,
+    );
+    let mut page = layout.lines.clone();
+
+    overlay_selection_on_page(
+        &mut page,
+        0,
+        &layout.ranges,
+        &[&event],
+        Some("$message:example.com"),
+        &colors,
+        80,
+        true,
+    );
+
+    assert_eq!(page[1].style.bg, Some(colors.selection_background));
+    assert_eq!(page[1].width(), 80);
+    assert_eq!(page[2].style.bg, None);
+    // Untouched by the overlay, so still what the layout built.
+    assert_eq!(layout.lines[1].style.bg, None);
+}
+
+/// `highlight_selected_line = false` — the default — still marks the selected
+/// message and recolours its timestamp, it just does not paint the line. That
+/// split is what `selected_line_style` encodes, and it is easy to lose when the
+/// three effects move from one call site to another.
+#[test]
+fn the_selection_overlay_marks_the_header_without_the_line_style() {
+    let colors = TuiConfig::test_default().colors;
+    let event = text_message("$message:example.com", "hello");
+    let sender_labels = vec!["@alice:example.com".to_owned()];
+    let layout = message_layout(
+        &[&event],
+        sender_labels.as_slice(),
+        &colors,
+        80,
+        &HashMap::new(),
+        &HashMap::new(),
+        &ImageThumbRows::new(),
+        &RelationContext::default(),
+        MessageDensity::Normal,
+        TimeFormat::H24,
+    );
+    let mut page = layout.lines.clone();
+
+    overlay_selection_on_page(
+        &mut page,
+        0,
+        &layout.ranges,
+        &[&event],
+        Some("$message:example.com"),
+        &colors,
+        80,
+        false,
+    );
+
+    assert_eq!(page[1].spans[0].content, SELECTED_MARKER);
+    assert_eq!(page[1].spans[0].style.fg, Some(colors.selected_room));
+    assert_eq!(page[1].spans[1].style.fg, Some(colors.selected_room));
+    assert_eq!(
+        page[1].style.bg, None,
+        "no bar without the highlight option"
+    );
+    // The marker replaced the neutral one in place, so the line is still the
+    // width the layout measured.
+    assert_eq!(page[1].width(), layout.lines[1].width());
+}
+
+/// The overlay indexes into a *page*, not the whole layout, so it has to map
+/// the layout line through `page_start`. Off by one and it paints the wrong
+/// message; miss the bounds check and a selection scrolled off the top wraps
+/// around to some unrelated row.
+#[test]
+fn the_selection_overlay_is_confined_to_the_page_it_is_given() {
+    let colors = TuiConfig::test_default().colors;
+    let events: Vec<EventDto> = (0..4)
+        .map(|i| text_message(&format!("${i}:example.com"), "hello"))
+        .collect();
+    let refs: Vec<&EventDto> = events.iter().collect();
+    let sender_labels = vec!["@alice:example.com".to_owned(); events.len()];
+    let layout = message_layout(
+        refs.as_slice(),
+        sender_labels.as_slice(),
+        &colors,
+        80,
+        &HashMap::new(),
+        &HashMap::new(),
+        &ImageThumbRows::new(),
+        &RelationContext::default(),
+        MessageDensity::Normal,
+        TimeFormat::H24,
+    );
+    // Message 2's header, in whole-layout coordinates.
+    let header = layout.ranges[2].start;
+
+    // A page that starts at message 2's header: the overlay lands on its
+    // first row.
+    let mut page = layout.lines[header..].to_vec();
+    overlay_selection_on_page(
+        &mut page,
+        header,
+        &layout.ranges,
+        refs.as_slice(),
+        Some("$2:example.com"),
+        &colors,
+        80,
+        true,
+    );
+    assert_eq!(page[0].style.bg, Some(colors.selection_background));
+    assert!(
+        page[1..].iter().all(|line| line.style.bg.is_none()),
+        "exactly one line is restyled"
+    );
+
+    // The same selection with a page that starts *after* it: nothing to
+    // restyle, and in particular not row zero.
+    let start = header + 1;
+    let mut page = layout.lines[start..].to_vec();
+    overlay_selection_on_page(
+        &mut page,
+        start,
+        &layout.ranges,
+        refs.as_slice(),
+        Some("$2:example.com"),
+        &colors,
+        80,
+        true,
+    );
+    assert!(
+        page.iter().all(|line| line.style.bg.is_none()),
+        "a selection above the page must not be painted onto it"
+    );
+    assert!(
+        page.iter().all(|line| line
+            .spans
+            .first()
+            .is_none_or(|span| span.content != SELECTED_MARKER)),
+        "and must not move the marker either"
+    );
+}
+
+/// A selection naming an event that is not in the timeline — a stale id left
+/// over from a room switch, or a message that scrolled out of the loaded slice
+/// — must be a no-op rather than restyling whatever happens to be at line
+/// zero.
+#[test]
+fn an_unknown_selection_restyles_nothing() {
+    let colors = TuiConfig::test_default().colors;
+    let event = text_message("$message:example.com", "hello");
+    let sender_labels = vec!["@alice:example.com".to_owned()];
+    let layout = message_layout(
+        &[&event],
+        sender_labels.as_slice(),
+        &colors,
+        80,
+        &HashMap::new(),
+        &HashMap::new(),
+        &ImageThumbRows::new(),
+        &RelationContext::default(),
+        MessageDensity::Normal,
+        TimeFormat::H24,
+    );
+    let mut page = layout.lines.clone();
+
+    overlay_selection_on_page(
+        &mut page,
+        0,
+        &layout.ranges,
+        &[&event],
+        Some("$gone:example.com"),
+        &colors,
+        80,
+        true,
+    );
+
+    assert_eq!(page, layout.lines);
 }
 
 // ---------------------------------------------------------------------------
