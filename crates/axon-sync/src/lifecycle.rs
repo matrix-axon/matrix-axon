@@ -709,90 +709,75 @@ impl AccountLifecycle {
         let lock = self.lock_for(expected_user_id, "");
         let _guard = lock.lock().await;
 
-        let target = match self.resolve_login_target(expected_user_id).await {
-            Ok(target) => target,
-            Err(error) => {
-                return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
-                    error, client,
-                ))
+        // Keep all fallible pre-commit work in one borrowing future. If it
+        // fails, ownership of `client` remains here so the protocol driver can
+        // revoke the minted session. Once this returns an account, the durable
+        // breadcrumb owns recovery and the client can be consumed by promotion.
+        let precommit: Result<Account, LifecycleError> = async {
+            match self.resolve_login_target(expected_user_id).await? {
+                ResolvedTarget::AlreadyActive(account_id) => {
+                    return Err(LifecycleError::AlreadyActive(account_id))
+                }
+                ResolvedTarget::Retained(_) | ResolvedTarget::New => {}
             }
-        };
-        match target {
-            ResolvedTarget::AlreadyActive(account_id) => {
-                return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
-                    LifecycleError::AlreadyActive(account_id),
-                    client,
-                ))
+
+            if !tokio::time::timeout(QR_TRUST_DERIVATION_TIMEOUT, derive_verified(&client))
+                .await
+                .unwrap_or(false)
+            {
+                return Err(LifecycleError::DeviceNotVerified);
             }
-            ResolvedTarget::Retained(_) | ResolvedTarget::New => {}
-        }
 
-        if !tokio::time::timeout(QR_TRUST_DERIVATION_TIMEOUT, derive_verified(&client))
-            .await
-            .unwrap_or(false)
-        {
-            return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
-                LifecycleError::DeviceNotVerified,
-                client,
-            ));
-        }
-
-        let Some(refresh_token) = session.user.tokens.refresh_token.as_deref() else {
-            return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
-                LifecycleError::Upstream(
-                    "Matrix OAuth QR login returned no refresh token".to_owned(),
-                ),
-                client,
-            ));
-        };
-        if session.user.meta.user_id.as_str() != expected_user_id {
-            return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
-                LifecycleError::AuthFailed(
+            let refresh_token = session
+                .user
+                .tokens
+                .refresh_token
+                .as_deref()
+                .ok_or_else(|| {
+                    LifecycleError::Upstream(
+                        "Matrix OAuth QR login returned no refresh token".to_owned(),
+                    )
+                })?;
+            if session.user.meta.user_id.as_str() != expected_user_id {
+                return Err(LifecycleError::AuthFailed(
                     "Matrix OAuth QR login returned a different Matrix user".to_owned(),
-                ),
-                client,
-            ));
+                ));
+            }
+            let store_key = self
+                .config
+                .store_key
+                .as_deref()
+                .ok_or(SyncError::MissingStoreKey)?;
+            let homeserver_url = client.homeserver().to_string();
+            match self
+                .store
+                .commit_matrix_oauth_acquire(
+                    flow_id,
+                    expected_user_id,
+                    &homeserver_url,
+                    session.user.meta.device_id.as_str(),
+                    &session.user.tokens.access_token,
+                    refresh_token,
+                    session.client_id.as_str(),
+                    store_key,
+                )
+                .await?
+            {
+                CommitMatrixOAuthAcquire::Committed(account) => Ok(account),
+                CommitMatrixOAuthAcquire::ActiveConflict(account_id) => {
+                    Err(LifecycleError::AlreadyActive(account_id))
+                }
+                CommitMatrixOAuthAcquire::DeletingConflict(account_id) => {
+                    Err(LifecycleError::BeingDeleted(account_id))
+                }
+            }
         }
-        let Some(store_key) = self.config.store_key.as_deref() else {
-            return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
-                SyncError::MissingStoreKey,
-                client,
-            ));
-        };
-        let homeserver_url = client.homeserver().to_string();
-        let committed = match self
-            .store
-            .commit_matrix_oauth_acquire(
-                flow_id,
-                expected_user_id,
-                &homeserver_url,
-                session.user.meta.device_id.as_str(),
-                &session.user.tokens.access_token,
-                refresh_token,
-                session.client_id.as_str(),
-                store_key,
-            )
-            .await
-        {
-            Ok(committed) => committed,
+        .await;
+        let account = match precommit {
+            Ok(account) => account,
             Err(error) => {
                 return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
                     error, client,
-                ))
-            }
-        };
-        let account = match committed {
-            CommitMatrixOAuthAcquire::Committed(account) => account,
-            CommitMatrixOAuthAcquire::ActiveConflict(account_id) => {
-                return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
-                    LifecycleError::AlreadyActive(account_id),
-                    client,
-                ))
-            }
-            CommitMatrixOAuthAcquire::DeletingConflict(account_id) => {
-                return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
-                    LifecycleError::BeingDeleted(account_id),
-                    client,
                 ))
             }
         };
