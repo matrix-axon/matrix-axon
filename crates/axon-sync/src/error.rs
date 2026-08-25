@@ -74,6 +74,11 @@ pub enum SyncError {
     #[error("matrix sdk error: {0}")]
     Sdk(String),
 
+    /// The homeserver exposes neither Matrix OAuth authentication-metadata
+    /// endpoint, so QR login is unavailable rather than transiently failing.
+    #[error("homeserver does not advertise Matrix OAuth authentication")]
+    MatrixOAuthUnavailable,
+
     /// A login was rejected by the homeserver because the credentials were wrong
     /// (an `M_FORBIDDEN` / `M_UNAUTHORIZED` from the login call), as opposed to a
     /// transient connection failure. Lets the lifecycle layer return `401` rather

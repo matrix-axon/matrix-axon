@@ -204,14 +204,36 @@ async fn discover_metadata(
         .send()
         .await
         .map_err(|err| oauth_http_error("discovery", timeout, err))?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
+    let stable_status = response.status();
+    if stable_status == reqwest::StatusCode::NOT_FOUND {
         response = http
             .get(unstable)
             .send()
             .await
             .map_err(|err| oauth_http_error("discovery", timeout, err))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            tracing::warn!(
+                phase = "oauth_discovery",
+                error_class = "unsupported",
+                stable_http_status = stable_status.as_u16(),
+                unstable_http_status = response.status().as_u16(),
+                "homeserver does not advertise Matrix OAuth authentication"
+            );
+            return Err(SyncError::MatrixOAuthUnavailable);
+        }
     }
     if !response.status().is_success() {
+        tracing::warn!(
+            phase = "oauth_discovery",
+            error_class = "upstream",
+            endpoint = if stable_status == reqwest::StatusCode::NOT_FOUND {
+                "unstable"
+            } else {
+                "stable"
+            },
+            http_status = response.status().as_u16(),
+            "Matrix OAuth discovery failed"
+        );
         return Err(SyncError::Sdk(format!(
             "Matrix OAuth discovery returned HTTP {}",
             response.status()
@@ -500,6 +522,7 @@ mod tests {
     use axon_core::MatrixOAuthStaticRegistration;
     use axum::{
         extract::State,
+        http::StatusCode,
         routing::{get, post},
         Json, Router,
     };
@@ -664,6 +687,37 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("65536-byte limit"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn missing_stable_and_unstable_metadata_is_unsupported() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route(
+                "/_matrix/client/v1/auth_metadata",
+                get(|| async { StatusCode::NOT_FOUND }),
+            )
+            .route(
+                "/_matrix/client/unstable/org.matrix.msc2965/auth_metadata",
+                get(|| async { StatusCode::NOT_FOUND }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+
+        let error = discover_metadata(
+            &http,
+            &Url::parse(&base_url).unwrap(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, SyncError::MatrixOAuthUnavailable));
         server.abort();
     }
 

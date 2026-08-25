@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 use crate::{
     client::{build_matrix_oauth_acquire_client, remove_matrix_oauth_acquire_staging},
+    error::SyncError,
     lifecycle::{AccountLifecycle, LifecycleError},
     MatrixOAuthRegistrationManager,
 };
@@ -659,7 +660,7 @@ impl MatrixOAuthAcquireEngine {
                     .registrations
                     .prepare(&client)
                     .await
-                    .map_err(|_| DriverFailure::Upstream)?;
+                    .map_err(classify_registration_error)?;
                 if let Err(failure) = self.run_scan_login(&flow, &client, &qr, deadline).await {
                     if client.oauth().full_session().is_some() {
                         best_effort_revoke(&client).await;
@@ -674,7 +675,7 @@ impl MatrixOAuthAcquireEngine {
             .registrations
             .prepare(&client)
             .await
-            .map_err(|_| DriverFailure::Upstream)?;
+            .map_err(classify_registration_error)?;
         if let Err(failure) = self
             .run_display_login(&flow, &client, check_code_rx, deadline)
             .await
@@ -968,6 +969,13 @@ fn classify_qr_error(error: QRCodeLoginError) -> DriverFailure {
     }
 }
 
+fn classify_registration_error(error: SyncError) -> DriverFailure {
+    match error {
+        SyncError::MatrixOAuthUnavailable => DriverFailure::Unsupported,
+        _ => DriverFailure::Upstream,
+    }
+}
+
 fn lifecycle_failure_code(error: &LifecycleError) -> &'static str {
     match error {
         LifecycleError::AlreadyActive(_)
@@ -1057,6 +1065,18 @@ mod tests {
         for (failure, expected) in cases {
             assert_eq!(failure.code(), expected);
         }
+    }
+
+    #[test]
+    fn unavailable_oauth_discovery_is_not_a_transient_upstream_failure() {
+        assert!(matches!(
+            classify_registration_error(SyncError::MatrixOAuthUnavailable),
+            DriverFailure::Unsupported
+        ));
+        assert!(matches!(
+            classify_registration_error(SyncError::Sdk("network failure".to_owned())),
+            DriverFailure::Upstream
+        ));
     }
 
     #[test]
