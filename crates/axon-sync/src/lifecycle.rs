@@ -152,6 +152,33 @@ pub enum LifecycleError {
     Store(String),
 }
 
+/// A Matrix OAuth acquisition finalization failure, including the staging-bound
+/// client only while the durable session has not committed yet.
+///
+/// The protocol driver needs that client to revoke a freshly minted session on
+/// a pre-commit failure. After commit, the breadcrumb owns recovery and the
+/// client must already have been dropped before its SQLite directory moves.
+pub(crate) struct MatrixOAuthAcquireFinalizeFailure {
+    pub(crate) error: LifecycleError,
+    pub(crate) acquisition_client: Option<Client>,
+}
+
+impl MatrixOAuthAcquireFinalizeFailure {
+    fn before_commit(error: impl Into<LifecycleError>, acquisition_client: Client) -> Self {
+        Self {
+            error: error.into(),
+            acquisition_client: Some(acquisition_client),
+        }
+    }
+
+    fn after_commit(error: impl Into<LifecycleError>) -> Self {
+        Self {
+            error: error.into(),
+            acquisition_client: None,
+        }
+    }
+}
+
 impl From<StoreError> for LifecycleError {
     fn from(err: StoreError) -> Self {
         LifecycleError::Store(err.to_string())
@@ -678,13 +705,24 @@ impl AccountLifecycle {
         expected_user_id: &str,
         client: Client,
         session: OAuthSession,
-    ) -> Result<Uuid, LifecycleError> {
+    ) -> Result<Uuid, MatrixOAuthAcquireFinalizeFailure> {
         let lock = self.lock_for(expected_user_id, "");
         let _guard = lock.lock().await;
 
-        match self.resolve_login_target(expected_user_id).await? {
+        let target = match self.resolve_login_target(expected_user_id).await {
+            Ok(target) => target,
+            Err(error) => {
+                return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
+                    error, client,
+                ))
+            }
+        };
+        match target {
             ResolvedTarget::AlreadyActive(account_id) => {
-                return Err(LifecycleError::AlreadyActive(account_id))
+                return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
+                    LifecycleError::AlreadyActive(account_id),
+                    client,
+                ))
             }
             ResolvedTarget::Retained(_) | ResolvedTarget::New => {}
         }
@@ -693,31 +731,36 @@ impl AccountLifecycle {
             .await
             .unwrap_or(false)
         {
-            return Err(LifecycleError::DeviceNotVerified);
-        }
-
-        let refresh_token = session
-            .user
-            .tokens
-            .refresh_token
-            .as_deref()
-            .ok_or_else(|| {
-                LifecycleError::Upstream(
-                    "Matrix OAuth QR login returned no refresh token".to_owned(),
-                )
-            })?;
-        if session.user.meta.user_id.as_str() != expected_user_id {
-            return Err(LifecycleError::AuthFailed(
-                "Matrix OAuth QR login returned a different Matrix user".to_owned(),
+            return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
+                LifecycleError::DeviceNotVerified,
+                client,
             ));
         }
-        let store_key = self
-            .config
-            .store_key
-            .as_deref()
-            .ok_or(SyncError::MissingStoreKey)?;
+
+        let Some(refresh_token) = session.user.tokens.refresh_token.as_deref() else {
+            return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
+                LifecycleError::Upstream(
+                    "Matrix OAuth QR login returned no refresh token".to_owned(),
+                ),
+                client,
+            ));
+        };
+        if session.user.meta.user_id.as_str() != expected_user_id {
+            return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
+                LifecycleError::AuthFailed(
+                    "Matrix OAuth QR login returned a different Matrix user".to_owned(),
+                ),
+                client,
+            ));
+        }
+        let Some(store_key) = self.config.store_key.as_deref() else {
+            return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
+                SyncError::MissingStoreKey,
+                client,
+            ));
+        };
         let homeserver_url = client.homeserver().to_string();
-        let committed = self
+        let committed = match self
             .store
             .commit_matrix_oauth_acquire(
                 flow_id,
@@ -729,34 +772,49 @@ impl AccountLifecycle {
                 session.client_id.as_str(),
                 store_key,
             )
-            .await?;
+            .await
+        {
+            Ok(committed) => committed,
+            Err(error) => {
+                return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
+                    error, client,
+                ))
+            }
+        };
         let account = match committed {
             CommitMatrixOAuthAcquire::Committed(account) => account,
             CommitMatrixOAuthAcquire::ActiveConflict(account_id) => {
-                return Err(LifecycleError::AlreadyActive(account_id))
+                return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
+                    LifecycleError::AlreadyActive(account_id),
+                    client,
+                ))
             }
             CommitMatrixOAuthAcquire::DeletingConflict(account_id) => {
-                return Err(LifecycleError::BeingDeleted(account_id))
+                return Err(MatrixOAuthAcquireFinalizeFailure::before_commit(
+                    LifecycleError::BeingDeleted(account_id),
+                    client,
+                ))
             }
         };
 
-        crate::client::adopt_matrix_oauth_acquire_staging(
-            &self.config,
-            staging_dir_name,
-            account.account_id,
-        )
-        .await?;
-        self.manager
-            .adopt_matrix_oauth_client(account.account_id, client)
-            .await;
-        if !self
+        if let Err(error) = self
+            .manager
+            .promote_matrix_oauth_acquire(&account, staging_dir_name, client)
+            .await
+        {
+            return Err(MatrixOAuthAcquireFinalizeFailure::after_commit(error));
+        }
+        let finalized = self
             .store
             .finalize_matrix_oauth_acquire(flow_id, account.account_id)
-            .await?
-        {
+            .await
+            .map_err(MatrixOAuthAcquireFinalizeFailure::after_commit)?;
+        if !finalized {
             self.manager.evict(account.account_id).await;
-            return Err(LifecycleError::Store(
-                "Matrix OAuth QR finalization breadcrumb disappeared".to_owned(),
+            return Err(MatrixOAuthAcquireFinalizeFailure::after_commit(
+                LifecycleError::Store(
+                    "Matrix OAuth QR finalization breadcrumb disappeared".to_owned(),
+                ),
             ));
         }
         // The activation transaction succeeded, so use the row we already own

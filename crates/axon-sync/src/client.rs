@@ -112,7 +112,30 @@ pub(crate) async fn connect_account(
         .store_key
         .as_deref()
         .ok_or(SyncError::MissingStoreKey)?;
+    let session = store
+        .account_session(account.account_id, store_key)
+        .await?
+        .ok_or_else(|| SyncError::NoCredential(account.user_id.clone()))?;
+    let client = restore_account_client(account, config, session).await?;
+    tracing::info!(account_id = %account.account_id, user_id = %account.user_id, "restored session");
+    Ok(client)
+}
 
+/// Build a client against an account's permanent SDK store and restore one
+/// already-loaded session onto it.
+///
+/// Keeping this separate from [`connect_account`] lets tests exercise the
+/// filesystem handoff without Postgres while ensuring every production restore
+/// uses the same permanent-path construction.
+async fn restore_account_client(
+    account: &Account,
+    config: &SyncConfig,
+    session: StoredAccountSession,
+) -> Result<Client, SyncError> {
+    let store_key = config
+        .store_key
+        .as_deref()
+        .ok_or(SyncError::MissingStoreKey)?;
     let data_dir = config.data_dir.join(account.account_id.to_string());
     create_store_dir(&data_dir).await?;
 
@@ -124,13 +147,7 @@ pub(crate) async fn connect_account(
     .build()
     .await
     .map_err(sdk_err)?;
-
-    let session = store
-        .account_session(account.account_id, store_key)
-        .await?
-        .ok_or_else(|| SyncError::NoCredential(account.user_id.clone()))?;
     restore(&client, account, session).await?;
-    tracing::info!(account_id = %account.account_id, user_id = %account.user_id, "restored session");
     Ok(client)
 }
 
@@ -646,7 +663,7 @@ where
 mod tests {
     use super::{
         adopt_matrix_oauth_acquire_staging, client_builder, matrix_oauth_acquire_root, restore,
-        with_staged_store_dir,
+        restore_account_client, sqlite_config, with_staged_store_dir,
     };
     use crate::error::SyncError;
     use axon_core::SyncConfig;
@@ -757,6 +774,64 @@ mod tests {
         assert!(permanent.join("new-store").exists());
         assert!(!previous.exists());
         assert!(!staging.exists());
+    }
+
+    #[tokio::test]
+    async fn oauth_adoption_reopens_the_store_at_its_permanent_path() {
+        let root = TempRoot::new();
+        let config = sync_config(&root);
+        let staging_name = Uuid::new_v4().to_string();
+        let account = account(AccountAuthKind::OAuth);
+        let staging = matrix_oauth_acquire_root(&config).join(&staging_name);
+        tokio::fs::create_dir_all(&staging).await.unwrap();
+
+        let acquisition_client = client_builder(&account.homeserver_url, true)
+            .sqlite_store_with_config_and_cache_path(
+                sqlite_config(&staging, config.store_key.as_deref().unwrap()),
+                None::<&std::path::Path>,
+            )
+            .build()
+            .await
+            .unwrap();
+        restore(
+            &acquisition_client,
+            &account,
+            StoredAccountSession::OAuth {
+                access_token: "oauth-access".to_owned(),
+                refresh_token: "oauth-refresh".to_owned(),
+                client_id: "axon-public-client".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        drop(acquisition_client);
+
+        adopt_matrix_oauth_acquire_staging(&config, &staging_name, account.account_id)
+            .await
+            .unwrap();
+        let permanent_client = restore_account_client(
+            &account,
+            &config,
+            StoredAccountSession::OAuth {
+                access_token: "oauth-access".to_owned(),
+                refresh_token: "oauth-refresh".to_owned(),
+                client_id: "axon-public-client".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        permanent_client
+            .state_store()
+            .get_room_infos(&matrix_sdk::store::RoomLoadSettings::default())
+            .await
+            .expect("the promoted state store must be readable");
+        assert!(!staging.exists(), "the old staging path must stay absent");
+        assert!(config
+            .data_dir
+            .join(account.account_id.to_string())
+            .join("matrix-sdk-state.sqlite3")
+            .exists());
     }
 
     #[tokio::test]

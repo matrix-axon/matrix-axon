@@ -580,7 +580,7 @@ impl MatrixOAuthAcquireEngine {
                         flow_id,
                         &flow.staging_dir_name,
                         &flow.snapshot().expected_user_id,
-                        client.clone(),
+                        client,
                         session,
                     )
                     .await
@@ -596,13 +596,14 @@ impl MatrixOAuthAcquireEngine {
                             "Matrix OAuth QR login flow completed"
                         );
                     }
-                    Err(err) => {
-                        let code = lifecycle_failure_code(&err);
+                    Err(failure) => {
+                        let code = lifecycle_failure_code(&failure.error);
                         // Cleanup inspects the durable commit point before it
                         // revokes anything. Once the encrypted session has
                         // committed, boot reconciliation must retain and adopt
                         // that still-valid session instead.
-                        self.cleanup_precommit(&flow, Some(&client)).await;
+                        self.cleanup_precommit(&flow, failure.acquisition_client.as_ref())
+                            .await;
                         flow.terminal(MatrixOAuthAcquireStage::Failed, None, Some(code));
                         tracing::warn!(
                             %flow_id,

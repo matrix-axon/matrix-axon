@@ -25,7 +25,9 @@ use matrix_sdk::Client;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-use crate::client::{connect_account, import_token_new_device, login_new_device};
+use crate::client::{
+    adopt_matrix_oauth_acquire_staging, connect_account, import_token_new_device, login_new_device,
+};
 use crate::error::{GatewayError, SyncError};
 
 /// A per-account connection slot. The slot's [`AsyncMutex`] is what makes a
@@ -214,13 +216,32 @@ impl ClientManager {
         Ok(client)
     }
 
-    /// Cache a client whose already-authenticated SDK store was adopted by the
-    /// Matrix OAuth QR-login finalizer. The account is still `deactivated` while
-    /// this slot is filled, so a concurrent cold connect cannot create a second
-    /// client; activation happens only after this returns.
-    pub(crate) async fn adopt_matrix_oauth_client(&self, account_id: Uuid, client: Client) {
-        let slot = self.slot(account_id);
-        *slot.lock().await = Some(client);
+    /// Promote an authenticated Matrix OAuth QR-login client from its staging
+    /// store into `account`'s permanent connection slot.
+    ///
+    /// The acquisition client is built with SQLite paths under
+    /// `.matrix-oauth-acquire`; renaming that directory does not rewrite the
+    /// paths held by its connection pools. Drop it before the rename, then build
+    /// and restore a fresh client from the durable session at the permanent
+    /// account path. Holding the slot lock across the whole handoff keeps this
+    /// single-flight with every lazy connection attempt. The row remains
+    /// `deactivated` until the lifecycle finalizer activates it afterward.
+    pub(crate) async fn promote_matrix_oauth_acquire(
+        &self,
+        account: &Account,
+        staging_dir_name: &str,
+        acquisition_client: Client,
+    ) -> Result<(), SyncError> {
+        let slot = self.slot(account.account_id);
+        let mut guard = slot.lock().await;
+        *guard = None;
+        drop(acquisition_client);
+
+        adopt_matrix_oauth_acquire_staging(&self.config, staging_dir_name, account.account_id)
+            .await?;
+        let permanent_client = connect_account(&self.store, account, &self.config).await?;
+        *guard = Some(permanent_client);
+        Ok(())
     }
 
     /// Take the cached client for `account_id` out of its slot, returning it (or
