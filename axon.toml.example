@@ -111,6 +111,19 @@ store_key = "change-me"
 # access_token + device_id) — see the API docs. The server boots and serves
 # HTTP with no accounts configured.
 
+# Matrix OAuth client registration used by QR login (ADR 0097). This is
+# separate from [oauth] below: here Axon is a Matrix OAuth client, while the
+# top-level section configures Axon as an authorization server for /v1/ clients.
+[sync.matrix_oauth]
+# Total timeout for each discovery or dynamic-registration request. Default 15.
+request_timeout_secs = 15
+# Dynamic registration is preferred. If an authorization server does not allow
+# it, provision a public client ID out-of-band and match either the homeserver
+# URL or the discovered issuer URL. Client secrets are not supported.
+# [sync.matrix_oauth.static_registrations.mas]
+# server_url = "https://auth.example.org/"
+# client_id = "01JAXONPUBLICCLIENT"
+
 # [search]
 # Directory for the Tantivy full-text index. MUST be durable (rebuildable from
 # Postgres, but expensive to reseed). Defaults to the platform data directory

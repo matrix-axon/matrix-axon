@@ -26,6 +26,7 @@
 //! discoverable (e.g. a stripped-environment container), each falls back to a
 //! CWD-relative `axon-data/…` path.
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
@@ -156,6 +157,11 @@ pub struct SyncConfig {
     /// surfaces a readable error if it's missing when needed.
     #[serde(default)]
     pub store_key: Option<String>,
+    /// Matrix OAuth client-registration policy used by QR login (ADR 0097).
+    /// This is distinct from top-level [`OauthConfig`], where Axon acts as an
+    /// authorization server for its own `/v1/` clients.
+    #[serde(default)]
+    pub matrix_oauth: MatrixOAuthConfig,
     /// Per-room timeline window the sliding-sync list requests (`n`). The SDK
     /// default is `1` (latest event only); we raise it so each room archives its
     /// last N events, giving the timeline read real depth to paginate. Since M10
@@ -293,6 +299,42 @@ pub struct SyncConfig {
     /// filter; re-joining restores them.
     #[serde(default)]
     pub purge_on_leave: bool,
+}
+
+/// Matrix authorization-server registration settings (ADR 0097).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MatrixOAuthConfig {
+    /// Total budget for each OAuth discovery or dynamic-registration request.
+    /// Defaults to 15 seconds.
+    #[serde(default = "default_matrix_oauth_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+    /// Public client IDs provisioned out-of-band for servers that do not allow
+    /// dynamic client registration. Map keys are operator-chosen labels; each
+    /// value names a homeserver or issuer URL.
+    #[serde(default)]
+    pub static_registrations: BTreeMap<String, MatrixOAuthStaticRegistration>,
+}
+
+/// One operator-provided public Matrix OAuth client registration.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct MatrixOAuthStaticRegistration {
+    /// Canonical homeserver or authorization-server issuer URL.
+    pub server_url: String,
+    /// Public OAuth client identifier. Client secrets are unsupported.
+    pub client_id: String,
+}
+
+fn default_matrix_oauth_request_timeout_secs() -> u64 {
+    15
+}
+
+impl Default for MatrixOAuthConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout_secs: default_matrix_oauth_request_timeout_secs(),
+            static_registrations: BTreeMap::new(),
+        }
+    }
 }
 
 /// Full-text search (Tantivy) settings.
@@ -769,6 +811,7 @@ impl Default for SyncConfig {
         Self {
             data_dir: default_sync_data_dir(),
             store_key: None,
+            matrix_oauth: MatrixOAuthConfig::default(),
             timeline_limit: default_timeline_limit(),
             live_event_buffer: default_live_event_buffer(),
             ephemeral_event_types: default_ephemeral_event_types(),
@@ -1226,10 +1269,76 @@ mod tests {
                 assert!(config.sync.data_dir.ends_with("axon/sync"));
             }
             assert!(config.sync.store_key.is_none());
+            assert_eq!(config.sync.matrix_oauth.request_timeout_secs, 15);
+            assert!(config.sync.matrix_oauth.static_registrations.is_empty());
             assert_eq!(config.sync.send_mutation_timeout_secs, 30);
             assert_eq!(config.sync.ephemeral_send_timeout_secs, 10);
             assert_eq!(config.sync.membership_mutation_timeout_secs, 15);
             assert_eq!(config.sync.room_entry_timeout_secs, 30);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn matrix_oauth_registration_config_loads_from_toml() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.create_file(
+                "axon.toml",
+                r#"
+                    [database]
+                    url = "postgres://u:p@localhost/db"
+
+                    [sync.matrix_oauth]
+                    request_timeout_secs = 9
+
+                    [sync.matrix_oauth.static_registrations.mas]
+                    server_url = "https://auth.example.org/"
+                    client_id = "public-client"
+                "#,
+            )?;
+            let config = Config::load(Some(Path::new("axon.toml"))).expect("load");
+            assert_eq!(config.sync.matrix_oauth.request_timeout_secs, 9);
+            assert_eq!(
+                config.sync.matrix_oauth.static_registrations,
+                BTreeMap::from([(
+                    "mas".to_owned(),
+                    MatrixOAuthStaticRegistration {
+                        server_url: "https://auth.example.org/".to_owned(),
+                        client_id: "public-client".to_owned(),
+                    },
+                )])
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn matrix_oauth_registration_config_loads_from_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("AXON_SYNC__MATRIX_OAUTH__REQUEST_TIMEOUT_SECS", "7");
+            jail.set_env(
+                "AXON_SYNC__MATRIX_OAUTH__STATIC_REGISTRATIONS__MAS__SERVER_URL",
+                "https://auth.example.org/",
+            );
+            jail.set_env(
+                "AXON_SYNC__MATRIX_OAUTH__STATIC_REGISTRATIONS__MAS__CLIENT_ID",
+                "public-client",
+            );
+            let config = Config::load(None).expect("load");
+            assert_eq!(config.sync.matrix_oauth.request_timeout_secs, 7);
+            assert_eq!(
+                config.sync.matrix_oauth.static_registrations,
+                BTreeMap::from([(
+                    "mas".to_owned(),
+                    MatrixOAuthStaticRegistration {
+                        server_url: "https://auth.example.org/".to_owned(),
+                        client_id: "public-client".to_owned(),
+                    },
+                )])
+            );
             Ok(())
         });
     }

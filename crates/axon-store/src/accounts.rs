@@ -1,10 +1,10 @@
 //! Account rows: one per Matrix account this Axon process syncs.
 //!
 //! "One human per Axon process, N Matrix accounts inside" — every
-//! account-scoped table references [`Account::account_id`]. The access token is
-//! encrypted at rest with pgcrypto's `pgp_sym_encrypt` (ADR 0008); the
-//! symmetric key lives in config (`sync.store_key`) and is passed in per call,
-//! never stored in the database.
+//! account-scoped table references [`Account::account_id`]. Access and OAuth
+//! refresh tokens are encrypted at rest with pgcrypto's `pgp_sym_encrypt`
+//! (ADR 0008, ADR 0097); the symmetric key lives in config (`sync.store_key`)
+//! and is passed in per call, never stored in the database.
 //!
 //! Queries use sqlx's runtime `query`/`query_as` API rather than the
 //! compile-time macros (the macros require the `sqlx` umbrella we dropped — see
@@ -17,6 +17,62 @@ use sqlx_postgres::{PgRow, Postgres};
 use uuid::Uuid;
 
 use crate::{Store, StoreError};
+
+/// The Matrix authentication implementation that owns an account's session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountAuthKind {
+    /// A Matrix Client-Server API access-token session.
+    Matrix,
+    /// A Matrix OAuth 2.0 session with refresh-token rotation.
+    OAuth,
+}
+
+impl AccountAuthKind {
+    /// The database representation (kept in sync with the migration `CHECK`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Matrix => "matrix",
+            Self::OAuth => "oauth",
+        }
+    }
+
+    fn from_db(s: &str) -> Result<Self, sqlx_core::Error> {
+        match s {
+            "matrix" => Ok(Self::Matrix),
+            "oauth" => Ok(Self::OAuth),
+            other => Err(sqlx_core::Error::ColumnDecode {
+                index: "auth_kind".to_owned(),
+                source: format!("unknown account auth kind {other:?}").into(),
+            }),
+        }
+    }
+}
+
+/// A decrypted account session.
+///
+/// Deliberately does not implement [`Debug`] so accidental structured logging
+/// cannot expose either token.
+pub enum StoredAccountSession {
+    /// A legacy Matrix access-token session.
+    Matrix { access_token: String },
+    /// An OAuth session, including the public client registration identifier.
+    OAuth {
+        access_token: String,
+        refresh_token: String,
+        client_id: String,
+    },
+}
+
+/// A public OAuth client registration shared across Matrix accounts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatrixOAuthRegistration {
+    /// Canonical authorization-server issuer URL.
+    pub issuer_url: String,
+    /// Homeserver URL through which this issuer was discovered.
+    pub homeserver_url: String,
+    /// Public OAuth client identifier (never a client secret).
+    pub client_id: String,
+}
 
 /// An account's lifecycle state, kept orthogonal to verification (ADR 0022).
 ///
@@ -68,9 +124,9 @@ impl std::fmt::Display for AccountState {
     }
 }
 
-/// A Matrix account row. The encrypted access token is deliberately absent —
-/// it is only ever read back through [`Store::account_token`], which decrypts
-/// in SQL, so the plaintext never lingers on this struct.
+/// A Matrix account row. Encrypted tokens are deliberately absent — they are
+/// only ever read back through [`Store::account_session`], which decrypts in
+/// SQL, so plaintext never lingers on this struct.
 #[derive(Debug, Clone)]
 pub struct Account {
     /// Stable primary key, referenced by every account-scoped table.
@@ -81,6 +137,8 @@ pub struct Account {
     pub homeserver_url: String,
     /// Device ID assigned at login (or supplied with a pre-provisioned token).
     pub device_id: Option<String>,
+    /// Authentication implementation that owns the persisted session.
+    pub auth_kind: AccountAuthKind,
     /// Lifecycle state (ADR 0022). The sync engine connects only [`AccountState::Active`] rows.
     pub state: AccountState,
     /// Whether axon's own device is currently cross-signed (orthogonal to
@@ -101,11 +159,13 @@ pub struct Account {
 impl sqlx_core::from_row::FromRow<'_, PgRow> for Account {
     fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
         let state: String = row.try_get("state")?;
+        let auth_kind: String = row.try_get("auth_kind")?;
         Ok(Account {
             account_id: row.try_get("account_id")?,
             user_id: row.try_get("user_id")?,
             homeserver_url: row.try_get("homeserver_url")?,
             device_id: row.try_get("device_id")?,
+            auth_kind: AccountAuthKind::from_db(&auth_kind)?,
             state: AccountState::from_db(&state)?,
             verified: row.try_get("verified")?,
             sync_token: row.try_get("sync_token")?,
@@ -117,7 +177,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for Account {
 
 /// Columns selected for an [`Account`] (no encrypted token).
 const ACCOUNT_COLUMNS: &str = "account_id, user_id, homeserver_url, device_id, \
-    state, verified, sync_token, created_at, updated_at";
+    auth_kind, state, verified, sync_token, created_at, updated_at";
 
 impl Store {
     /// Insert the account for `(user_id, homeserver_url)`, or return the
@@ -313,10 +373,9 @@ impl Store {
         Ok(())
     }
 
-    /// Persist a login session: encrypt the access token with `key` (pgcrypto
-    /// `pgp_sym_encrypt`) and store it alongside the device ID. The plaintext
-    /// token is bound as a parameter and never logged.
-    pub async fn set_account_session(
+    /// Persist a legacy Matrix login session and clear any prior OAuth state.
+    /// The plaintext token is bound as a parameter and never logged.
+    pub async fn set_account_matrix_session(
         &self,
         account_id: Uuid,
         device_id: &str,
@@ -326,7 +385,10 @@ impl Store {
         sqlx_core::query::query(
             "UPDATE accounts \
              SET device_id = $2, \
-                 access_token_encrypted = pgp_sym_encrypt($3, $4) \
+                 auth_kind = 'matrix', \
+                 access_token_encrypted = pgp_sym_encrypt($3, $4), \
+                 oauth_refresh_token_encrypted = NULL, \
+                 oauth_client_id = NULL \
              WHERE account_id = $1",
         )
         .bind(account_id)
@@ -338,16 +400,89 @@ impl Store {
         Ok(())
     }
 
-    /// Decrypt and return the stored access token, or `None` if the account has
-    /// no session yet (first boot before login). Decryption happens in SQL via
-    /// `pgp_sym_decrypt` so the ciphertext never reaches application memory.
-    pub async fn account_token(
+    /// Persist a complete Matrix OAuth session in one atomic database update.
+    /// Both tokens are encrypted with `key`; no token is logged or stored in a
+    /// struct that implements [`Debug`].
+    pub async fn set_account_oauth_session(
+        &self,
+        account_id: Uuid,
+        device_id: &str,
+        access_token: &str,
+        refresh_token: &str,
+        client_id: &str,
+        key: &str,
+    ) -> Result<(), StoreError> {
+        let result = sqlx_core::query::query(
+            "UPDATE accounts \
+             SET device_id = $2, \
+                 auth_kind = 'oauth', \
+                 access_token_encrypted = pgp_sym_encrypt($3, $6), \
+                 oauth_refresh_token_encrypted = pgp_sym_encrypt($4, $6), \
+                 oauth_client_id = $5 \
+             WHERE account_id = $1",
+        )
+        .bind(account_id)
+        .bind(device_id)
+        .bind(access_token)
+        .bind(refresh_token)
+        .bind(client_id)
+        .bind(key)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::InvalidAccountSession(
+                "account disappeared while storing OAuth session".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Atomically persist a rotated OAuth token pair and client ID.
+    ///
+    /// The authentication-kind predicate prevents a late refresh write from
+    /// replacing a session that a concurrent lifecycle operation changed back
+    /// to legacy Matrix authentication.
+    pub async fn update_account_oauth_session(
+        &self,
+        account_id: Uuid,
+        access_token: &str,
+        refresh_token: &str,
+        client_id: &str,
+        key: &str,
+    ) -> Result<(), StoreError> {
+        let result = sqlx_core::query::query(
+            "UPDATE accounts \
+             SET access_token_encrypted = pgp_sym_encrypt($2, $5), \
+                 oauth_refresh_token_encrypted = pgp_sym_encrypt($3, $5), \
+                 oauth_client_id = $4 \
+             WHERE account_id = $1 AND auth_kind = 'oauth'",
+        )
+        .bind(account_id)
+        .bind(access_token)
+        .bind(refresh_token)
+        .bind(client_id)
+        .bind(key)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::OAuthSessionNotCurrent);
+        }
+        Ok(())
+    }
+
+    /// Decrypt and return the stored session, or `None` before first login.
+    /// Decryption happens in SQL via `pgp_sym_decrypt`; ciphertext never leaves
+    /// Postgres and inconsistent session shapes fail closed.
+    pub async fn account_session(
         &self,
         account_id: Uuid,
         key: &str,
-    ) -> Result<Option<String>, StoreError> {
+    ) -> Result<Option<StoredAccountSession>, StoreError> {
         let row = sqlx_core::query::query(
-            "SELECT pgp_sym_decrypt(access_token_encrypted, $2) AS token \
+            "SELECT auth_kind, \
+                    pgp_sym_decrypt(access_token_encrypted, $2) AS access_token, \
+                    pgp_sym_decrypt(oauth_refresh_token_encrypted, $2) AS refresh_token, \
+                    oauth_client_id \
              FROM accounts WHERE account_id = $1",
         )
         .bind(account_id)
@@ -355,10 +490,68 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
 
-        match row {
-            Some(row) => Ok(row.try_get::<Option<String>, _>("token")?),
-            None => Ok(None),
+        let Some(row) = row else { return Ok(None) };
+        let auth_kind = AccountAuthKind::from_db(row.try_get("auth_kind")?)?;
+        let access_token: Option<String> = row.try_get("access_token")?;
+        let refresh_token: Option<String> = row.try_get("refresh_token")?;
+        let client_id: Option<String> = row.try_get("oauth_client_id")?;
+
+        match (auth_kind, access_token, refresh_token, client_id) {
+            (AccountAuthKind::Matrix, None, None, None) => Ok(None),
+            (AccountAuthKind::Matrix, Some(access_token), None, None) => {
+                Ok(Some(StoredAccountSession::Matrix { access_token }))
+            }
+            (AccountAuthKind::OAuth, Some(access_token), Some(refresh_token), Some(client_id)) => {
+                Ok(Some(StoredAccountSession::OAuth {
+                    access_token,
+                    refresh_token,
+                    client_id,
+                }))
+            }
+            _ => Err(StoreError::InvalidAccountSession(
+                "stored account session has an inconsistent shape".to_owned(),
+            )),
         }
+    }
+
+    /// Find a persisted public OAuth client registration by canonical issuer.
+    pub async fn matrix_oauth_registration(
+        &self,
+        issuer_url: &str,
+    ) -> Result<Option<MatrixOAuthRegistration>, StoreError> {
+        let row = sqlx_core::query::query(
+            "SELECT issuer_url, homeserver_url, client_id \
+             FROM matrix_oauth_registrations WHERE issuer_url = $1",
+        )
+        .bind(issuer_url)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| MatrixOAuthRegistration {
+            issuer_url: row.get("issuer_url"),
+            homeserver_url: row.get("homeserver_url"),
+            client_id: row.get("client_id"),
+        }))
+    }
+
+    /// Insert or replace a public OAuth client registration for an issuer.
+    pub async fn upsert_matrix_oauth_registration(
+        &self,
+        registration: &MatrixOAuthRegistration,
+    ) -> Result<(), StoreError> {
+        sqlx_core::query::query(
+            "INSERT INTO matrix_oauth_registrations \
+                 (issuer_url, homeserver_url, client_id) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (issuer_url) DO UPDATE \
+             SET homeserver_url = EXCLUDED.homeserver_url, \
+                 client_id = EXCLUDED.client_id",
+        )
+        .bind(&registration.issuer_url)
+        .bind(&registration.homeserver_url)
+        .bind(&registration.client_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Update the reserved sync-position cursor. Currently unused (the

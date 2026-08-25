@@ -15,17 +15,25 @@
 use std::path::Path;
 
 use axon_core::SyncConfig;
-use axon_store::{Account, Store};
+use axon_store::{Account, AccountAuthKind, Store, StoredAccountSession};
 use matrix_sdk::{
-    authentication::matrix::MatrixSession, cross_process_lock::CrossProcessLockConfig,
-    ruma::OwnedUserId, store::RoomLoadSettings, Client, ClientBuilder, SessionMeta, SessionTokens,
-    SqliteStoreConfig,
+    authentication::{
+        matrix::MatrixSession,
+        oauth::{ClientId, OAuthSession, UserSession},
+    },
+    cross_process_lock::CrossProcessLockConfig,
+    ruma::OwnedUserId,
+    store::RoomLoadSettings,
+    Client, ClientBuilder, SessionMeta, SessionTokens, SqliteStoreConfig,
 };
 
 use crate::error::{sdk_err, SyncError};
 
 /// The [`ClientBuilder`] every production client is built from, carrying the
 /// settings that must not differ between the first-boot and restore paths.
+/// Automatic refresh is enabled only for OAuth restores: legacy Matrix rows
+/// retain their pre-ADR 0097 unknown-token behavior exactly, while OAuth access
+/// tokens are expected to expire and rotate through their refresh token.
 ///
 /// `SingleProcess` disables the SDK's cross-process store lock. The SDK defaults
 /// to `MultiProcess`, which exists for setups that share one crypto store across
@@ -37,10 +45,15 @@ use crate::error::{sdk_err, SyncError};
 /// process on the same directory is unsupported regardless — and on a spinning
 /// disk that lease renewal is a continuous stream of tiny fsync'd writes (~43
 /// KB/s, ~3.7 GB/day) with the server completely idle.
-fn client_builder(homeserver_url: &str) -> ClientBuilder {
-    Client::builder()
+fn client_builder(homeserver_url: &str, handle_refresh_tokens: bool) -> ClientBuilder {
+    let builder = Client::builder()
         .homeserver_url(homeserver_url)
-        .cross_process_store_config(CrossProcessLockConfig::SingleProcess)
+        .cross_process_store_config(CrossProcessLockConfig::SingleProcess);
+    if handle_refresh_tokens {
+        builder.handle_refresh_tokens()
+    } else {
+        builder
+    }
 }
 
 /// Connections each SDK SQLite store keeps in its pool.
@@ -99,17 +112,20 @@ pub(crate) async fn connect_account(
     let data_dir = config.data_dir.join(account.account_id.to_string());
     create_store_dir(&data_dir).await?;
 
-    let client = client_builder(&account.homeserver_url)
-        .sqlite_store_with_config_and_cache_path(sqlite_config(&data_dir, store_key), None::<&Path>)
-        .build()
-        .await
-        .map_err(sdk_err)?;
+    let client = client_builder(
+        &account.homeserver_url,
+        account.auth_kind == AccountAuthKind::OAuth,
+    )
+    .sqlite_store_with_config_and_cache_path(sqlite_config(&data_dir, store_key), None::<&Path>)
+    .build()
+    .await
+    .map_err(sdk_err)?;
 
-    let token = store
-        .account_token(account.account_id, store_key)
+    let session = store
+        .account_session(account.account_id, store_key)
         .await?
         .ok_or_else(|| SyncError::NoCredential(account.user_id.clone()))?;
-    restore(&client, account, token).await?;
+    restore(&client, account, session).await?;
     tracing::info!(account_id = %account.account_id, user_id = %account.user_id, "restored session");
     Ok(client)
 }
@@ -126,7 +142,7 @@ pub(crate) async fn connect_account(
 /// is moved aside and restored on failure, so a rejected password or an
 /// unreachable homeserver leaves the account exactly as it was (the durable
 /// Postgres archive is never touched here regardless). The new session (device id
-/// and access token) is persisted via [`Store::set_account_session`], so a later
+/// and access token) is persisted via [`Store::set_account_matrix_session`], so a later
 /// restart restores it like any other. The password is consumed here, never stored.
 ///
 /// `account.user_id` must be the full MXID (the login verb resolves identity
@@ -146,7 +162,7 @@ pub(crate) async fn login_new_device(
     let backup = config.data_dir.join(format!("{}.prev", account.account_id));
 
     with_staged_store_dir(&data_dir, &backup, || async {
-        let client = client_builder(&account.homeserver_url)
+        let client = client_builder(&account.homeserver_url, false)
             .sqlite_store_with_config_and_cache_path(
                 sqlite_config(&data_dir, store_key),
                 None::<&Path>,
@@ -163,7 +179,7 @@ pub(crate) async fn login_new_device(
             .await
             .map_err(login_err)?;
         store
-            .set_account_session(
+            .set_account_matrix_session(
                 account.account_id,
                 response.device_id.as_str(),
                 &response.access_token,
@@ -245,7 +261,7 @@ pub(crate) async fn import_token_new_device(
     let backup = config.data_dir.join(format!("{}.prev", account.account_id));
 
     with_staged_store_dir(&data_dir, &backup, || async {
-        let client = client_builder(&account.homeserver_url)
+        let client = client_builder(&account.homeserver_url, false)
             .sqlite_store_with_config_and_cache_path(
                 sqlite_config(&data_dir, store_key),
                 None::<&Path>,
@@ -259,7 +275,14 @@ pub(crate) async fn import_token_new_device(
         // throwaway copy rather than mutating the caller's row.
         let mut with_device = account.clone();
         with_device.device_id = Some(device_id.to_owned());
-        restore(&client, &with_device, access_token.to_owned()).await?;
+        restore(
+            &client,
+            &with_device,
+            StoredAccountSession::Matrix {
+                access_token: access_token.to_owned(),
+            },
+        )
+        .await?;
 
         let who = client.whoami().await.map_err(whoami_err)?;
         if who.user_id.as_str() != account.user_id {
@@ -277,7 +300,7 @@ pub(crate) async fn import_token_new_device(
         }
 
         store
-            .set_account_session(account.account_id, device_id, access_token, store_key)
+            .set_account_matrix_session(account.account_id, device_id, access_token, store_key)
             .await?;
         tracing::info!(
             account_id = %account.account_id,
@@ -291,12 +314,12 @@ pub(crate) async fn import_token_new_device(
     .await
 }
 
-/// Restore a Matrix session onto `client` from a stored or provided access token.
-/// Requires the account row to carry the `device_id` the token belongs to.
-async fn restore(
+/// Restore a Matrix or OAuth session onto `client` from encrypted storage.
+/// Requires the account row to carry the `device_id` the tokens belong to.
+pub(crate) async fn restore(
     client: &Client,
     account: &Account,
-    access_token: String,
+    session: StoredAccountSession,
 ) -> Result<(), SyncError> {
     let device_id = account
         .device_id
@@ -304,22 +327,48 @@ async fn restore(
         .ok_or_else(|| SyncError::MissingDeviceId(account.user_id.clone()))?;
     let user_id = OwnedUserId::try_from(account.user_id.as_str()).map_err(sdk_err)?;
 
-    let session = MatrixSession {
-        meta: SessionMeta {
-            user_id,
-            device_id: device_id.as_str().into(),
-        },
-        tokens: SessionTokens {
-            access_token,
-            refresh_token: None,
-        },
+    let meta = SessionMeta {
+        user_id,
+        device_id: device_id.as_str().into(),
     };
 
-    client
-        .matrix_auth()
-        .restore_session(session, RoomLoadSettings::default())
-        .await
-        .map_err(sdk_err)
+    match session {
+        StoredAccountSession::Matrix { access_token } => client
+            .matrix_auth()
+            .restore_session(
+                MatrixSession {
+                    meta,
+                    tokens: SessionTokens {
+                        access_token,
+                        refresh_token: None,
+                    },
+                },
+                RoomLoadSettings::default(),
+            )
+            .await
+            .map_err(sdk_err),
+        StoredAccountSession::OAuth {
+            access_token,
+            refresh_token,
+            client_id,
+        } => client
+            .oauth()
+            .restore_session(
+                OAuthSession {
+                    client_id: ClientId::new(client_id),
+                    user: UserSession {
+                        meta,
+                        tokens: SessionTokens {
+                            access_token,
+                            refresh_token: Some(refresh_token),
+                        },
+                    },
+                },
+                RoomLoadSettings::default(),
+            )
+            .await
+            .map_err(sdk_err),
+    }
 }
 
 /// Create the SDK store directory (and parents) if it doesn't exist.
@@ -457,9 +506,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::with_staged_store_dir;
+    use super::{client_builder, restore, with_staged_store_dir};
     use crate::error::SyncError;
+    use axon_store::{Account, AccountAuthKind, AccountState, StoredAccountSession};
+    use chrono::Utc;
     use std::path::PathBuf;
+    use uuid::Uuid;
 
     /// A throwaway directory under the OS temp dir, removed on drop.
     struct TempRoot(PathBuf);
@@ -475,6 +527,69 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn account(auth_kind: AccountAuthKind) -> Account {
+        Account {
+            account_id: Uuid::new_v4(),
+            user_id: "@alice:example.org".to_owned(),
+            homeserver_url: "https://example.org/".to_owned(),
+            device_id: Some("AXONDEVICE".to_owned()),
+            auth_kind,
+            state: AccountState::Active,
+            verified: false,
+            sync_token: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn restores_legacy_matrix_session_without_refresh_token() {
+        let client = client_builder("https://example.org/", false)
+            .build()
+            .await
+            .unwrap();
+        restore(
+            &client,
+            &account(AccountAuthKind::Matrix),
+            StoredAccountSession::Matrix {
+                access_token: "matrix-access".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let session = client.matrix_auth().session().expect("Matrix session");
+        assert_eq!(session.tokens.access_token, "matrix-access");
+        assert!(session.tokens.refresh_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn restores_oauth_session_with_rotating_refresh_state() {
+        let client = client_builder("https://example.org/", true)
+            .build()
+            .await
+            .unwrap();
+        restore(
+            &client,
+            &account(AccountAuthKind::OAuth),
+            StoredAccountSession::OAuth {
+                access_token: "oauth-access".to_owned(),
+                refresh_token: "oauth-refresh".to_owned(),
+                client_id: "axon-public-client".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let session = client.oauth().full_session().expect("OAuth session");
+        assert_eq!(session.client_id.as_str(), "axon-public-client");
+        assert_eq!(session.user.tokens.access_token, "oauth-access");
+        assert_eq!(
+            session.user.tokens.refresh_token.as_deref(),
+            Some("oauth-refresh")
+        );
     }
 
     /// A failed login must leave the prior store untouched — Codex's concern: a
