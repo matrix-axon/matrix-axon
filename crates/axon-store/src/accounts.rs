@@ -465,9 +465,7 @@ impl Store {
         .execute(&self.pool)
         .await?;
         if result.rows_affected() != 1 {
-            return Err(StoreError::InvalidAccountSession(
-                "OAuth session is no longer current".to_owned(),
-            ));
+            return Err(StoreError::OAuthSessionNotCurrent);
         }
         Ok(())
     }

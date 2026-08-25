@@ -7,7 +7,7 @@
 use std::{sync::Arc, time::Duration};
 
 use axon_core::MatrixOAuthConfig;
-use axon_store::{MatrixOAuthRegistration, Store};
+use axon_store::{MatrixOAuthRegistration, Store, StoreError};
 use matrix_sdk::{
     authentication::oauth::{
         registration::{ApplicationType, ClientMetadata, Localized, OAuthGrantType},
@@ -104,8 +104,12 @@ impl MatrixOAuthRegistrationManager {
         }
 
         if let Some(client_id) = static_client_id(&self.config, &homeserver, &issuer)? {
-            client.oauth().restore_registered_client(client_id.clone());
-            self.persist(&issuer, &homeserver, &client_id).await?;
+            persist_then_restore_registration(
+                client,
+                &client_id,
+                self.persist(&issuer, &homeserver, &client_id),
+            )
+            .await?;
             tracing::info!(
                 issuer = issuer_url,
                 homeserver = homeserver.as_str(),
@@ -141,11 +145,12 @@ impl MatrixOAuthRegistrationManager {
                 SyncError::Sdk(format!("invalid Matrix OAuth registration response: {err}"))
             })?;
         validate_client_id(response.client_id.as_str())?;
-        client
-            .oauth()
-            .restore_registered_client(response.client_id.clone());
-        self.persist(&issuer, &homeserver, &response.client_id)
-            .await?;
+        persist_then_restore_registration(
+            client,
+            &response.client_id,
+            self.persist(&issuer, &homeserver, &response.client_id),
+        )
+        .await?;
         tracing::info!(
             issuer = issuer_url,
             homeserver = homeserver.as_str(),
@@ -170,6 +175,16 @@ impl MatrixOAuthRegistrationManager {
             .await?;
         Ok(())
     }
+}
+
+async fn persist_then_restore_registration(
+    client: &Client,
+    client_id: &ClientId,
+    persist: impl std::future::Future<Output = Result<(), SyncError>>,
+) -> Result<(), SyncError> {
+    persist.await?;
+    client.oauth().restore_registered_client(client_id.clone());
+    Ok(())
 }
 
 async fn discover_metadata(
@@ -421,6 +436,13 @@ async fn persist_latest_with_retry(
                 }
                 return;
             }
+            Err(SyncError::Store(StoreError::OAuthSessionNotCurrent)) => {
+                tracing::debug!(
+                    %account_id,
+                    "stopped persisting an OAuth session that is no longer current"
+                );
+                return;
+            }
             Err(err) => match retry_delay {
                 Some(delay) => {
                     if !degraded {
@@ -646,6 +668,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistence_failure_leaves_registration_retryable() {
+        let client = Client::builder()
+            .homeserver_url("https://homeserver.example.org/")
+            .build()
+            .await
+            .unwrap();
+        let client_id = ClientId::new("public-client".to_owned());
+
+        let error = persist_then_restore_registration(&client, &client_id, async {
+            Err(SyncError::Store(StoreError::InvalidAccountSession(
+                "forced persistence failure".to_owned(),
+            )))
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            SyncError::Store(StoreError::InvalidAccountSession(_))
+        ));
+        assert!(client.oauth().client_id().is_none());
+
+        persist_then_restore_registration(&client, &client_id, async { Ok(()) })
+            .await
+            .unwrap();
+        assert_eq!(
+            client.oauth().client_id().unwrap().as_str(),
+            client_id.as_str()
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn dynamic_registration_is_persisted_and_reused_by_issuer() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -848,6 +901,31 @@ mod tests {
             restarted_session.user.tokens.refresh_token.as_deref(),
             Some("refresh-2")
         );
+
+        // A lifecycle transition is permanent, not a transient durability
+        // failure. The persister must return immediately rather than consuming
+        // its multi-second retry schedule and emitting a false crash warning.
+        store
+            .set_account_matrix_session(
+                account.account_id,
+                "MATRIXDEVICE",
+                "matrix-access",
+                "store-key",
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            persist_latest_with_retry(
+                &restarted,
+                &store,
+                account.account_id,
+                "store-key",
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("stale OAuth persistence should not retry");
 
         // The auth-aware logout path dispatches to OAuth revocation rather than
         // Matrix `/logout`. OAuth2 correctly rejects this test server's insecure

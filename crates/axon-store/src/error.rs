@@ -23,6 +23,12 @@ pub enum StoreError {
     /// current session. The message never contains token material.
     #[error("invalid account session: {0}")]
     InvalidAccountSession(String),
+
+    /// A refresh write found that the account was removed or its authentication
+    /// kind changed. This is a permanent lifecycle outcome rather than a
+    /// transient database failure.
+    #[error("OAuth session is no longer current")]
+    OAuthSessionNotCurrent,
 }
 
 impl From<StoreError> for axon_core::Error {

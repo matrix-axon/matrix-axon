@@ -10,7 +10,9 @@
 
 mod common;
 
-use axon_store::{AccountAuthKind, AccountState, MatrixOAuthRegistration, StoredAccountSession};
+use axon_store::{
+    AccountAuthKind, AccountState, MatrixOAuthRegistration, StoreError, StoredAccountSession,
+};
 use sqlx_core::row::Row;
 use uuid::Uuid;
 
@@ -191,6 +193,20 @@ async fn oauth_session_rotates_atomically_and_can_return_to_matrix_auth() {
         }
         StoredAccountSession::OAuth { .. } => panic!("stale OAuth rotation won lifecycle race"),
     }
+
+    let stale_result = store
+        .update_account_oauth_session(
+            account.account_id,
+            "later-stale-access",
+            "later-stale-refresh",
+            "client-1",
+            "key-A",
+        )
+        .await;
+    assert!(matches!(
+        stale_result,
+        Err(StoreError::OAuthSessionNotCurrent)
+    ));
 
     common::cleanup_account(&common::raw_pool().await, account.account_id).await;
 }
