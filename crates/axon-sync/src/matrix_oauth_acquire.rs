@@ -19,7 +19,7 @@ use matrix_sdk::{
     authentication::oauth::qrcode::{
         CheckCodeSender, DeviceAuthorizationOAuthError, GeneratedQrProgress, LoginProgress,
         Msc4108IntentData, QRCodeLoginError, QrCodeData, QrCodeIntent, QrCodeIntentData,
-        QrProgress,
+        QrProgress, SecureChannelError,
     },
     ruma::{OwnedServerName, OwnedUserId},
     Client,
@@ -960,13 +960,60 @@ fn parse_check_code(value: &str) -> Result<u8, MatrixOAuthAcquireError> {
 }
 
 fn classify_qr_error(error: QRCodeLoginError) -> DriverFailure {
-    match error {
+    let (phase, failure, http_status) = match &error {
         QRCodeLoginError::OAuth(DeviceAuthorizationOAuthError::NoDeviceAuthorizationEndpoint) => {
-            DriverFailure::Unsupported
+            ("device_authorization", DriverFailure::Unsupported, None)
         }
-        QRCodeLoginError::NotFound => DriverFailure::RendezvousExpired,
-        _ => DriverFailure::Upstream,
+        QRCodeLoginError::OAuth(_) => ("device_authorization", DriverFailure::Upstream, None),
+        QRCodeLoginError::SecureChannel(SecureChannelError::RendezvousChannel(http_error)) => {
+            let response = http_error.as_client_api_error();
+            let failure = if response.is_some_and(|error| error.is_endpoint_not_implemented()) {
+                DriverFailure::Unsupported
+            } else {
+                DriverFailure::Upstream
+            };
+            (
+                "rendezvous",
+                failure,
+                response.map(|error| error.status_code.as_u16()),
+            )
+        }
+        QRCodeLoginError::SecureChannel(SecureChannelError::InvalidCheckCode) => {
+            ("secure_channel", DriverFailure::InvalidCheckCode, None)
+        }
+        QRCodeLoginError::SecureChannel(_) => ("secure_channel", DriverFailure::Upstream, None),
+        QRCodeLoginError::NotFound => ("rendezvous", DriverFailure::RendezvousExpired, None),
+        QRCodeLoginError::CrossProcessRefreshLock(_) => {
+            ("session_activation", DriverFailure::Upstream, None)
+        }
+        QRCodeLoginError::UserIdDiscovery(_) => {
+            ("identity_discovery", DriverFailure::Upstream, None)
+        }
+        QRCodeLoginError::SessionTokens(_) => ("session_activation", DriverFailure::Upstream, None),
+        QRCodeLoginError::DeviceKeyUpload(_) => {
+            ("device_key_upload", DriverFailure::Upstream, None)
+        }
+        QRCodeLoginError::SecretImport(_) => ("secret_import", DriverFailure::Upstream, None),
+        QRCodeLoginError::ServerReset(_) => ("homeserver_reset", DriverFailure::Upstream, None),
+        QRCodeLoginError::LoginFailure { .. } | QRCodeLoginError::UnexpectedMessage { .. } => {
+            ("peer_authorization", DriverFailure::Upstream, None)
+        }
+    };
+    if let Some(http_status) = http_status {
+        tracing::warn!(
+            phase,
+            error_class = failure.code(),
+            http_status,
+            "Matrix OAuth QR protocol step failed"
+        );
+    } else {
+        tracing::warn!(
+            phase,
+            error_class = failure.code(),
+            "Matrix OAuth QR protocol step failed"
+        );
     }
+    failure
 }
 
 fn classify_registration_error(error: SyncError) -> DriverFailure {
@@ -1019,6 +1066,11 @@ fn store_error_class(error: &axon_store::StoreError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use matrix_sdk::ruma::api::error::{
+        Error as MatrixApiError, ErrorBody, ErrorKind, FromHttpResponseError, StandardErrorBody,
+    };
+    use matrix_sdk::ruma::exports::http::StatusCode as HttpStatus;
+    use matrix_sdk::{HttpError, RumaApiError};
 
     #[test]
     fn account_state_distinguishes_login_conflicts() {
@@ -1076,6 +1128,23 @@ mod tests {
         assert!(matches!(
             classify_registration_error(SyncError::Sdk("network failure".to_owned())),
             DriverFailure::Upstream
+        ));
+    }
+
+    #[test]
+    fn missing_rendezvous_endpoint_is_unsupported() {
+        let body = ErrorBody::Standard(StandardErrorBody::new(
+            ErrorKind::Unrecognized,
+            "Unrecognized request".to_owned(),
+        ));
+        let error = HttpError::Api(Box::new(FromHttpResponseError::Server(
+            RumaApiError::MatrixError(MatrixApiError::new(HttpStatus::NOT_FOUND, body)),
+        )));
+        let error = QRCodeLoginError::SecureChannel(SecureChannelError::RendezvousChannel(error));
+
+        assert!(matches!(
+            classify_qr_error(error),
+            DriverFailure::Unsupported
         ));
     }
 

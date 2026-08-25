@@ -132,8 +132,16 @@ impl MatrixOAuthRegistrationManager {
             .body(body)
             .send()
             .await
-            .map_err(|err| oauth_http_error("dynamic registration", timeout, err))?;
+            .map_err(|err| {
+                oauth_http_error("oauth_registration", "dynamic registration", timeout, err)
+            })?;
         if !response.status().is_success() {
+            tracing::warn!(
+                phase = "oauth_registration",
+                error_class = "upstream",
+                http_status = response.status().as_u16(),
+                "Matrix OAuth dynamic registration failed"
+            );
             return Err(SyncError::Sdk(format!(
                 "Matrix OAuth dynamic registration returned HTTP {}",
                 response.status()
@@ -142,6 +150,11 @@ impl MatrixOAuthRegistrationManager {
         let body = bounded_body(response, MAX_REGISTRATION_RESPONSE_BYTES).await?;
         let response: matrix_sdk::authentication::oauth::registration::ClientRegistrationResponse =
             serde_json::from_slice(&body).map_err(|err| {
+                tracing::warn!(
+                    phase = "oauth_registration",
+                    error_class = "invalid_response",
+                    "Matrix OAuth dynamic registration response was invalid"
+                );
                 SyncError::Sdk(format!("invalid Matrix OAuth registration response: {err}"))
             })?;
         validate_client_id(response.client_id.as_str())?;
@@ -203,14 +216,14 @@ async fn discover_metadata(
         .get(stable)
         .send()
         .await
-        .map_err(|err| oauth_http_error("discovery", timeout, err))?;
+        .map_err(|err| oauth_http_error("oauth_discovery", "discovery", timeout, err))?;
     let stable_status = response.status();
     if stable_status == reqwest::StatusCode::NOT_FOUND {
         response = http
             .get(unstable)
             .send()
             .await
-            .map_err(|err| oauth_http_error("discovery", timeout, err))?;
+            .map_err(|err| oauth_http_error("oauth_discovery", "discovery", timeout, err))?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             tracing::warn!(
                 phase = "oauth_discovery",
@@ -240,12 +253,29 @@ async fn discover_metadata(
         )));
     }
     let body = bounded_body(response, MAX_OAUTH_METADATA_BYTES).await?;
-    let raw: Raw<AuthorizationServerMetadata> = serde_json::from_slice(&body)
-        .map_err(|err| SyncError::Sdk(format!("invalid Matrix OAuth metadata: {err}")))?;
-    let metadata = raw
-        .deserialize()
-        .map_err(|err| SyncError::Sdk(format!("invalid Matrix OAuth metadata: {err}")))?;
-    validate_metadata_urls(homeserver, &metadata)?;
+    let raw: Raw<AuthorizationServerMetadata> = serde_json::from_slice(&body).map_err(|err| {
+        tracing::warn!(
+            phase = "oauth_discovery",
+            error_class = "invalid_response",
+            "Matrix OAuth discovery response was invalid"
+        );
+        SyncError::Sdk(format!("invalid Matrix OAuth metadata: {err}"))
+    })?;
+    let metadata = raw.deserialize().map_err(|err| {
+        tracing::warn!(
+            phase = "oauth_discovery",
+            error_class = "invalid_metadata",
+            "Matrix OAuth discovery metadata was invalid"
+        );
+        SyncError::Sdk(format!("invalid Matrix OAuth metadata: {err}"))
+    })?;
+    validate_metadata_urls(homeserver, &metadata).inspect_err(|_| {
+        tracing::warn!(
+            phase = "oauth_discovery",
+            error_class = "unsafe_metadata",
+            "Matrix OAuth discovery metadata contains unsafe URLs"
+        );
+    })?;
     Ok(metadata)
 }
 
@@ -298,13 +328,28 @@ async fn bounded_body(
     Ok(body)
 }
 
-fn oauth_http_error(operation: &str, timeout: Duration, err: reqwest::Error) -> SyncError {
+fn oauth_http_error(
+    phase: &'static str,
+    operation: &str,
+    timeout: Duration,
+    err: reqwest::Error,
+) -> SyncError {
     if err.is_timeout() {
+        tracing::warn!(
+            phase,
+            error_class = "timeout",
+            "Matrix OAuth request timed out"
+        );
         SyncError::Sdk(format!(
             "Matrix OAuth {operation} timed out after {} seconds",
             timeout.as_secs()
         ))
     } else {
+        tracing::warn!(
+            phase,
+            error_class = "network",
+            "Matrix OAuth request failed"
+        );
         SyncError::Sdk(format!("Matrix OAuth {operation} request failed: {err}"))
     }
 }
