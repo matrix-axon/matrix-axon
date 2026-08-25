@@ -416,15 +416,29 @@ pub(crate) async fn watch_session_changes(
     mut changes: broadcast::Receiver<SessionChange>,
     cancel: CancellationToken,
 ) {
-    persist_latest_with_retry(&client, &store, account_id, &store_key, &cancel).await;
+    let _ = persist_latest_with_retry(&client, &store, account_id, &store_key, &cancel).await;
 
     loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => break,
             change = changes.recv() => match change {
-                Ok(SessionChange::TokensRefreshed) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                    persist_latest_with_retry(
+                Ok(SessionChange::TokensRefreshed) => {
+                    if persist_latest_with_retry(
+                        &client,
+                        &store,
+                        account_id,
+                        &store_key,
+                        &cancel,
+                    ).await {
+                        tracing::info!(
+                            %account_id,
+                            "Matrix OAuth tokens refreshed and persisted"
+                        );
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = persist_latest_with_retry(
                         &client,
                         &store,
                         account_id,
@@ -465,7 +479,7 @@ async fn persist_latest_with_retry(
     account_id: Uuid,
     store_key: &str,
     cancel: &CancellationToken,
-) {
+) -> bool {
     let mut degraded = false;
     for (attempt, retry_delay) in PERSIST_RETRY_DELAYS
         .iter()
@@ -476,7 +490,7 @@ async fn persist_latest_with_retry(
     {
         let Some(session) = client.oauth().full_session() else {
             tracing::warn!(%account_id, "OAuth session snapshot is unavailable");
-            return;
+            return false;
         };
         match persist_snapshot(store, account_id, store_key, session).await {
             Ok(()) => {
@@ -486,14 +500,14 @@ async fn persist_latest_with_retry(
                         "Matrix OAuth session durability recovered"
                     );
                 }
-                return;
+                return true;
             }
             Err(SyncError::Store(StoreError::OAuthSessionNotCurrent)) => {
                 tracing::debug!(
                     %account_id,
                     "stopped persisting an OAuth session that is no longer current"
                 );
-                return;
+                return false;
             }
             Err(err) => match retry_delay {
                 Some(delay) => {
@@ -507,7 +521,7 @@ async fn persist_latest_with_retry(
                     }
                     tokio::select! {
                         biased;
-                        _ = cancel.cancelled() => return,
+                        _ = cancel.cancelled() => return false,
                         _ = tokio::time::sleep(delay) => {}
                     }
                 }
@@ -518,11 +532,12 @@ async fn persist_latest_with_retry(
                         attempts = attempt + 1,
                         "failed to persist refreshed Matrix OAuth session; a crash may require fresh login"
                     );
-                    return;
+                    return false;
                 }
             },
         }
     }
+    false
 }
 
 async fn persist_snapshot(
