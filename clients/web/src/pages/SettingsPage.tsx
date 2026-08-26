@@ -6,6 +6,7 @@ import {
   requestAppBadgeNotificationPermission,
 } from '../app-badge'
 import { BUILD_INFO } from '../build-info'
+import { CopyableText } from '../components/CopyableText'
 import {
   installOutcome,
   installPromptAvailable,
@@ -112,8 +113,15 @@ export function SettingsPage() {
         </div>
       </section>
       <section class="panel">
-        <h2>Timeline</h2>
-        <div class="theme-picker" role="radiogroup" aria-label="State events">
+        <h2>Messages</h2>
+        <h3 class="settings-group-label" id="settings-state-events">
+          State events
+        </h3>
+        <div
+          class="theme-picker"
+          role="radiogroup"
+          aria-labelledby="settings-state-events"
+        >
           {STATE_EVENTS.map(({ value, label }) => (
             <label key={value}>
               <input
@@ -129,9 +137,8 @@ export function SettingsPage() {
         </div>
         <p class="muted">
           Membership and profile changes are joins, leaves, invites, kicks and
-          display-name changes — shown by default, as in the terminal client.
-          All state events adds topic, name, power-level and other
-          room-configuration changes.
+          display-name changes. All state events adds topic, name, power-level
+          and other room-configuration changes.
         </p>
         <label class="setting-row">
           <input
@@ -144,13 +151,15 @@ export function SettingsPage() {
           Hide deleted messages
         </label>
         <p class="muted">
-          Remove redacted message placeholders from the timeline. Off by
-          default.
+          Remove redacted (deleted) placeholders from messages.
         </p>
+        <h3 class="settings-group-label" id="settings-time-format">
+          Timestamp format
+        </h3>
         <div
           class="theme-picker"
           role="radiogroup"
-          aria-label="Timestamp format"
+          aria-labelledby="settings-time-format"
         >
           {TIME_FORMATS.map(({ value, label }) => (
             <label key={value}>
@@ -165,55 +174,9 @@ export function SettingsPage() {
             </label>
           ))}
         </div>
-        <p class="muted">Timestamp format for timeline messages.</p>
-        <label class="setting-row">
-          <input
-            type="checkbox"
-            checked={settings.developerMode.value}
-            onChange={(event) =>
-              (settings.developerMode.value = event.currentTarget.checked)
-            }
-          />
-          Developer mode
-        </label>
-        <p class="muted">
-          Adds per-event diagnostics to the timeline. Inspect panels show
-          decrypted event content already returned by the Axon API.
-        </p>
-        <label class="setting-row">
-          <input
-            type="checkbox"
-            checked={settings.perfMarks.value}
-            onChange={(event) =>
-              (settings.perfMarks.value = event.currentTarget.checked)
-            }
-          />
-          Performance instrumentation
-        </label>
-        <p class="muted">
-          Records timing marks and draws a live scroll-anchoring readout over
-          the app — the numbers a screen recording needs on a phone, where there
-          is no console to read marks from.
-        </p>
-        <label class="setting-row">
-          <input
-            type="checkbox"
-            checked={settings.pageScrollReset.value}
-            onChange={(event) =>
-              (settings.pageScrollReset.value = event.currentTarget.checked)
-            }
-          />
-          Correct iOS keyboard page drift
-        </label>
-        <p class="muted">
-          Off by default. On, the app snaps the page back when iOS Safari
-          scrolls it behind the keyboard — which measurably causes the shell to
-          jitter while scrolling, because the snap and Safari fight each frame.
-          The layout is already correct without it. Turn it on only to compare.
-        </p>
       </section>
       <section class="panel">
-        <h2>Room list</h2>
+        <h2>Rooms</h2>
         <label class="setting-row">
           <input
             type="checkbox"
@@ -224,9 +187,7 @@ export function SettingsPage() {
           />
           Preview room
         </label>
-        <p class="muted">
-          Show the latest message excerpt under each room name.
-        </p>
+        <p class="muted">Show the latest messages in the room list.</p>
         <label class="setting-row">
           <input
             type="checkbox"
@@ -238,10 +199,10 @@ export function SettingsPage() {
           Keep the room list on this device
         </label>
         <p class="muted">
-          Shows your rooms straight away instead of waiting for the server, and
+          Shows your rooms immediately rather than wait for the server, and
           keeps them visible when you're offline. Stores room names, topics and
-          unread counts on this device — no messages. Turning this off erases
-          what has been stored.
+          unread counts unencrypted on this device. Turning this off erases any
+          stored data.
         </p>
         <button type="button" onClick={() => void markAllRead()}>
           {markingRead ? 'Marking…' : 'Mark all as read'}
@@ -277,24 +238,29 @@ export function SettingsPage() {
         <h2>Accounts</h2>
         <AccountLifecycle />
       </section>
+      <DebugSettings />
       <section class="panel">
         <h2>Session</h2>
         <button type="button" class="danger" onClick={() => auth.clearToken()}>
           Sign out
         </button>
         <p class="muted">
-          Sign out clears this browser's Axon access and refresh tokens, along
-          with everything cached for the session: the room list, message
-          history, and the names shown for direct messages. Your settings on
-          this page are kept.
+          Clear this browser's Axon access and refresh tokens, along with
+          everything cached for the session: the room list, message history, and
+          the names shown for direct messages. Only your settings on this page
+          are kept.
         </p>
       </section>
-      <p class="muted">
-        Settings are stored in this browser (<code>localStorage</code>), not on
-        the server.
-      </p>
+      <p class="muted">These settings are stored locally, not on the server.</p>
       <footer class="settings-version muted">
-        Web client <code>{BUILD_INFO.displayVersion}</code> · built{' '}
+        Web client{' '}
+        <CopyableText
+          text={BUILD_INFO.displayVersion}
+          label="web client version"
+        >
+          <code>{BUILD_INFO.displayVersion}</code>
+        </CopyableText>{' '}
+        · built{' '}
         <time dateTime={BUILD_INFO.builtAt}>{BUILD_INFO.builtAtLabel}</time>
         {' · '}
         <a href="/licenses">Open-source licenses</a>
@@ -348,6 +314,79 @@ function UpdateCheckControl() {
         </>
       )}
     </>
+  )
+}
+
+/**
+ * Developer / diagnostic toggles. Hidden behind a Debug button so the rest of
+ * Settings stays a user-facing page; these three exist to diagnose a device,
+ * not to configure day-to-day use.
+ */
+function DebugSettings() {
+  const { settings } = useServices()
+  const [open, setOpen] = useState(false)
+
+  return (
+    <section class="panel">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={open ? 'debug-settings' : undefined}
+        onClick={() => setOpen((current) => !current)}
+      >
+        Debug
+      </button>
+      {open && (
+        <div id="debug-settings" class="settings-debug-body">
+          <label class="setting-row">
+            <input
+              type="checkbox"
+              checked={settings.developerMode.value}
+              onChange={(event) =>
+                (settings.developerMode.value = event.currentTarget.checked)
+              }
+            />
+            Developer mode
+          </label>
+          <p class="muted">
+            Adds per-event diagnostics to the message list. Inspect panels show
+            decrypted event content.
+          </p>
+          <label class="setting-row">
+            <input
+              type="checkbox"
+              checked={settings.perfMarks.value}
+              onChange={(event) =>
+                (settings.perfMarks.value = event.currentTarget.checked)
+              }
+            />
+            Performance instrumentation
+          </label>
+          <p class="muted">
+            Records timing marks and draws a live scroll-anchoring readout over
+            the app — the numbers a screen recording needs on a phone, where
+            there is no console to read marks from.
+          </p>
+          <label class="setting-row">
+            <input
+              type="checkbox"
+              checked={settings.pageScrollReset.value}
+              onChange={(event) =>
+                (settings.pageScrollReset.value = event.currentTarget.checked)
+              }
+            />
+            Correct iOS keyboard page drift
+          </label>
+          <p class="muted">
+            Off by default. On, the app snaps the page back when iOS Safari
+            scrolls it behind the keyboard — which measurably causes the shell
+            to jitter while scrolling, because the snap and Safari fight each
+            frame. The layout is already correct without it. Turn it on only to
+            compare.
+          </p>
+        </div>
+      )}
+    </section>
   )
 }
 

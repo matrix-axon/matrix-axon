@@ -982,12 +982,14 @@ function ShellChrome() {
     <ShellActionsContext.Provider value={shellActions}>
       <div class={`shell${mobileRoomChrome ? ' mobile-room-shell' : ''}`}>
         <header class="topbar">
-          <div class="topbar-brand-lockup">
-            <a href="/" class="brand topbar-brand">
-              axon
-            </a>
-            <ConnectionIndicator />
-          </div>
+          {!mobileRoomChrome && (
+            <div class="topbar-brand-lockup">
+              <a href="/" class="brand topbar-brand">
+                axon
+              </a>
+              <ConnectionIndicator />
+            </div>
+          )}
           {mobileRoomChrome && (
             <a
               href="/"
@@ -999,16 +1001,19 @@ function ShellChrome() {
             </a>
           )}
           {mobileRoomChrome && (
-            <button
-              ref={roomTitleButton}
-              type="button"
-              class="topbar-room-title"
-              aria-label="Open room information"
-              title={`Room information (${SLASH_COMMAND.whereami})`}
-              onClick={() => roomChrome.action?.()}
-            >
-              <span>{roomChrome.title ?? 'Room'}</span>
-            </button>
+            <div class="topbar-room-heading">
+              <button
+                ref={roomTitleButton}
+                type="button"
+                class="topbar-room-title"
+                aria-label="Open room information"
+                title={`Room information (${SLASH_COMMAND.whereami})`}
+                onClick={() => roomChrome.action?.()}
+              >
+                <span>{roomChrome.title ?? 'Room'}</span>
+              </button>
+              <ConnectionIndicator />
+            </div>
           )}
           {mode === 'room' && jumpAction !== null && !singlePane && (
             <button

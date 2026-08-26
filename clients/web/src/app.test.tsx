@@ -142,6 +142,45 @@ describe('App', () => {
     )
   })
 
+  it('sits the connection indicator next to the room name in single-pane room view', async () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({
+          media: query,
+          matches: query === SINGLE_PANE_QUERY,
+          onchange: null,
+          addListener: () => {},
+          removeListener: () => {},
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          dispatchEvent: () => false,
+        }) as MediaQueryList,
+    )
+    installRoomPageHandlers()
+    history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+    )
+    const { container, getByRole } = render(<App services={testServices()} />)
+    const title = await waitFor(() => {
+      const button = container.querySelector('.topbar-room-title')
+      expect(button).toBeTruthy()
+      return button as HTMLElement
+    })
+    const connection = container.querySelector('.conn') as HTMLElement
+    const threads = getByRole('button', { name: 'Unread threads' })
+    expect(connection).toBeTruthy()
+    expect(connection.getAttribute('title')).toMatch(/^WebSocket:/)
+
+    expect(title.parentElement).toBe(connection.parentElement)
+    expect(title.parentElement?.className).toBe('topbar-room-heading')
+    expect(title.parentElement).not.toBe(threads.parentElement)
+    expect(title.compareDocumentPosition(connection)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+  })
+
   it('intercepts Matrix.to room links and joins them in the active account', async () => {
     installRoomPageHandlers()
     const joinedRoom = '!joined:hs'

@@ -61,6 +61,15 @@ describe('MediaAttachment', () => {
     expect(getByText('Seems bad')).toBeTruthy()
   })
 
+  it('renders markdown in the attachment caption', () => {
+    const { container } = renderAttachment(
+      file({ caption: 'a **bold** caption' }),
+    )
+    const caption = container.querySelector('.media-attachment-caption')
+    expect(caption?.querySelector('strong')?.textContent).toBe('bold')
+    expect(caption?.textContent).toBe('a bold caption')
+  })
+
   it('downloads via a transient anchor on Download click', async () => {
     server.use(
       http.get(

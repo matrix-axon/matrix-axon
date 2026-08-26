@@ -2,6 +2,7 @@ import { humanDuration, humanSize } from '../media/human-size'
 import type { ParsedMedia } from '../media/parse-media'
 import type { PreviewKind } from '../media/preview-kind'
 import { useMediaBlob } from '../media/use-media-blob'
+import { MediaCaption } from './MediaCaption'
 
 /** The widest a tile gets, in CSS px — matches `MediaImage`'s thumbnail cap so
  *  a video and a photo in the same room line up. */
@@ -22,6 +23,7 @@ export function MediaTile({
   accountId,
   media,
   kind,
+  content,
   onOpen,
   children,
 }: {
@@ -30,6 +32,8 @@ export function MediaTile({
   /** Only the lightbox kinds reach here (`previewPresentation`); anything
    *  else falls back to the document treatment rather than failing. */
   kind: PreviewKind
+  /** Event `content`, so a caption with `formatted_body` can use it. */
+  content?: unknown
   onOpen: () => void
   /** The Download button — rendered into the tile's footer. */
   children?: preact.ComponentChildren
@@ -87,7 +91,13 @@ export function MediaTile({
         <span class="media-tile-meta">
           <span class="media-attachment-name">{media.filename}</span>
           {media.caption !== null && (
-            <span class="media-attachment-caption">{media.caption}</span>
+            <span class="media-attachment-caption">
+              <MediaCaption
+                accountId={accountId}
+                caption={media.caption}
+                content={content}
+              />
+            </span>
           )}
           {size !== null && <span class="muted">{size}</span>}
         </span>

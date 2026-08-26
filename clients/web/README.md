@@ -22,16 +22,17 @@ sanitizer for `mxc://` only), an inline preview for audio/video/PDF/text
 attachments (ADR 0072) and syntax-highlighted code blocks and text attachments
 (ADR 0073, highlight.js), media _send_ (M-W8.5, ADR 0065: attach by
 paperclip, drag-and-drop onto the room or thread pane, or paste; the composer's
-text becomes the caption; staged upload then `send-media`, with an optimistic
-echo that shows the picked image while its bytes are still going up, and
-Retry/Discard on failure — one file at a time, images and files only), full
+text becomes the caption and renders with the same markdown as a message body;
+staged upload then `send-media`, with an optimistic echo that shows the picked
+image while its bytes are still going up, and Retry/Discard on failure — one file at a time, images and files only), full
 messaging: composer with markdown-on-send, member/room autocomplete that emits
 pill links in sent and edited text, reply (ADR 0032), edit,
 redact-with-confirm, reaction toggle, and threads (badges, panel via
-`?thread=`, send-in-thread, and an unread-thread drawer that keeps hidden
-thread replies unread until their thread panel loads), full-text message
-search (M-W10, ADR 0066: a URL-addressed overlay opened with `/`, `Ctrl-G`, a
-topbar button, or `/search`, with chip/token filters and client-side
+`?thread=`, send-in-thread, and a threads drawer that lists unread threads
+across rooms, or — when you are in a room — that room's threads, toggled from
+the drawer title; hidden thread replies stay unread until their thread panel
+loads), full-text message search (M-W10, ADR 0066: a URL-addressed overlay
+opened with `/`, `Ctrl-G`, a topbar button, or `/search`, with chip/token filters and client-side
 re-sorting), `/leave`, `/part`, and `/forget` room-membership slash commands
 (M19-W1), an incoming-invite inbox (`/invites`, Accept/Reject and Accept
 all/Reject all; an Invites row appears at the top of the room list when any

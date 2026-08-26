@@ -7,6 +7,7 @@ import {
 } from '../media/use-thumbnail-fallback'
 import { useMediaViewer } from '../media/media-viewer'
 import { Lightbox, LightboxImage } from './Lightbox'
+import { MediaCaption } from './MediaCaption'
 
 /** Height held for an image whose event carries no dimensions, in CSS px. */
 const UNSIZED_MIN = 180
@@ -38,6 +39,7 @@ export function MediaImage({
   media,
   previewUrl,
   eventId,
+  content,
 }: {
   accountId: string
   media: ParsedMedia
@@ -54,6 +56,8 @@ export function MediaImage({
    * `MediaPreview` and search results depend on.
    */
   eventId?: string
+  /** Event `content`, so a caption with `formatted_body` can use it. */
+  content?: unknown
 }) {
   const viewer = useMediaViewer()
   const [status, setStatus] = useState<'idle' | 'error'>('idle')
@@ -150,7 +154,13 @@ export function MediaImage({
         </div>
       </div>
       {media.caption !== null && (
-        <figcaption class="media-caption">{media.caption}</figcaption>
+        <figcaption class="media-caption">
+          <MediaCaption
+            accountId={accountId}
+            caption={media.caption}
+            content={content}
+          />
+        </figcaption>
       )}
     </figure>
   )
@@ -161,7 +171,15 @@ export function MediaImage({
       {lightboxOpen && media.url !== null && (
         <Lightbox
           label={alt}
-          caption={media.caption}
+          caption={
+            media.caption === null ? null : (
+              <MediaCaption
+                accountId={accountId}
+                caption={media.caption}
+                content={content}
+              />
+            )
+          }
           onClose={() => setLightboxOpen(false)}
         >
           <LightboxImage accountId={accountId} mxcUrl={media.url} alt={alt} />

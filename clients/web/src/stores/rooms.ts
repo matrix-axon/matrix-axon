@@ -9,6 +9,7 @@ import type { components } from '../api/schema'
 import { apiErrorCode, apiErrorMessage, type ApiClient } from '../api/client'
 import { markdownToPlainText } from '../markdown/markdown'
 import {
+  dmPeerAvatarFromMembers,
   dmTitleFromMembers,
   isLikelyDm,
   memberDisplay,
@@ -67,6 +68,11 @@ export interface RoomsStore {
    * `roomTitle(room, titles.value)`.
    */
   titles: ReadonlySignal<ReadonlyMap<string, string>>
+  /**
+   * Other-user avatars for 1:1 DMs that have no room avatar, keyed by room
+   * key. Populated from the same `/members` fetch that resolves DM titles.
+   */
+  dmAvatars: ReadonlySignal<ReadonlyMap<string, string>>
 
   /** Fetch the room list (server-side membership filtering per ADR 0037). */
   refresh(): Promise<void>
@@ -173,6 +179,7 @@ export function createRoomsStore(
   const stale = signal(false)
   const error = signal<string | null>(null)
   const titles = signal<ReadonlyMap<string, string>>(loadTitleCache(storage))
+  const dmAvatars = signal<ReadonlyMap<string, string>>(new Map())
   /** Keys with a fetch in flight or already settled (including "no title"). */
   const requested = new Set<string>()
   /** Preview cache keys: `${roomKey}\0${last_event_id}`. */
@@ -232,6 +239,27 @@ export function createRoomsStore(
     if (title !== null) {
       setCachedTitle(roomKey(room), title)
     }
+    setCachedDmAvatar(
+      roomKey(room),
+      dmPeerAvatarFromMembers(room.account_user_id, data.data),
+    )
+  }
+
+  function setCachedDmAvatar(key: string, avatar: string | null): void {
+    const current = dmAvatars.value.get(key)
+    if (avatar === null) {
+      if (current === undefined) {
+        return
+      }
+      const next = new Map(dmAvatars.value)
+      next.delete(key)
+      dmAvatars.value = next
+      return
+    }
+    if (current === avatar) {
+      return
+    }
+    dmAvatars.value = new Map(dmAvatars.value).set(key, avatar)
   }
 
   function setCachedTitle(key: string, title: string): void {
@@ -620,6 +648,9 @@ export function createRoomsStore(
     // write of a fresh Map would keep dirtying the signal on a re-run.
     if (titles.value.size > 0) {
       titles.value = new Map()
+    }
+    if (dmAvatars.value.size > 0) {
+      dmAvatars.value = new Map()
     }
     clearTitleCache(storage)
     if (
@@ -1017,6 +1048,7 @@ export function createRoomsStore(
     stale: computed(() => stale.value),
     error,
     titles: computed(() => titles.value),
+    dmAvatars: computed(() => dmAvatars.value),
     refresh,
     ensureLoaded,
     resetSession,

@@ -5,6 +5,7 @@ import { useMediaViewer } from '../media/media-viewer'
 import type { MembersStore } from '../stores/members'
 import type { TimelineEvent } from '../stores/timeline'
 import { useGalleryExpansion } from '../timeline/gallery-expansion'
+import { MediaCaption } from './MediaCaption'
 import { GALLERY_EAGER_BYTES, MediaGalleryCell } from './MediaGalleryCell'
 import { ReadReceiptsSummary } from './MessageEventRow'
 import type { ReadReceipt } from '../stores/ephemeral'
@@ -297,7 +298,11 @@ export function MediaGalleryRow({
                 )}
                 <span>
                   {captioned.length > 1 ? `Image ${position}: ` : ''}
-                  {caption}
+                  <MediaCaption
+                    accountId={accountId}
+                    caption={caption}
+                    content={event.content}
+                  />
                 </span>
               </li>
             ))}

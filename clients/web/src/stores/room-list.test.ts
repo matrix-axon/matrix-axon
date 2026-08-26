@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
   accountLabels,
+  dmPeerAvatarFromMembers,
   dmTitleFromMembers,
   filterRooms,
   isLikelyDm,
   localpart,
   roomKey,
+  roomListAvatarUrl,
   roomTitle,
   sortRooms,
   type MemberDto,
@@ -25,8 +27,17 @@ function room(overrides: Partial<RoomDto> & { room_id: string }): RoomDto {
   }
 }
 
-function member(user_id: string, display_name?: string): MemberDto {
-  return { user_id, membership: 'join', display_name: display_name ?? null }
+function member(
+  user_id: string,
+  display_name?: string,
+  avatar_url?: string | null,
+): MemberDto {
+  return {
+    user_id,
+    membership: 'join',
+    display_name: display_name ?? null,
+    avatar_url: avatar_url ?? null,
+  }
 }
 
 describe('roomKey', () => {
@@ -71,6 +82,56 @@ describe('dmTitleFromMembers (TUI parity)', () => {
 
   it('returns null for a note-to-self room', () => {
     expect(dmTitleFromMembers('@me:x', [member('@me:x')])).toBeNull()
+  })
+})
+
+describe('dmPeerAvatarFromMembers', () => {
+  it('returns the other member’s avatar in a 1:1 DM', () => {
+    expect(
+      dmPeerAvatarFromMembers('@me:hs', [
+        member('@me:hs', 'Me'),
+        member('@bob:hs', 'Bob', 'mxc://hs/bob'),
+      ]),
+    ).toBe('mxc://hs/bob')
+  })
+
+  it('returns null when the peer has no avatar, or the roster is not 1:1', () => {
+    expect(
+      dmPeerAvatarFromMembers('@me:hs', [
+        member('@me:hs'),
+        member('@bob:hs', 'Bob'),
+      ]),
+    ).toBeNull()
+    expect(
+      dmPeerAvatarFromMembers('@me:hs', [
+        member('@me:hs'),
+        member('@bob:hs', 'Bob', 'mxc://hs/bob'),
+        member('@carol:hs', 'Carol', 'mxc://hs/carol'),
+      ]),
+    ).toBeNull()
+    expect(dmPeerAvatarFromMembers('@me:hs', [member('@me:hs')])).toBeNull()
+  })
+})
+
+describe('roomListAvatarUrl', () => {
+  const cache = new Map([[`${ACCOUNT}/!dm:hs`, 'mxc://hs/bob']])
+
+  it('prefers the room avatar over a DM peer avatar', () => {
+    expect(
+      roomListAvatarUrl(
+        room({ room_id: '!dm:hs', avatar_url: 'mxc://hs/room' }),
+        cache,
+      ),
+    ).toBe('mxc://hs/room')
+  })
+
+  it('uses the cached peer avatar only for unnamed rooms without a room avatar', () => {
+    expect(roomListAvatarUrl(room({ room_id: '!dm:hs' }), cache)).toBe(
+      'mxc://hs/bob',
+    )
+    expect(
+      roomListAvatarUrl(room({ room_id: '!ops:hs', name: 'Ops' }), cache),
+    ).toBeNull()
   })
 })
 
