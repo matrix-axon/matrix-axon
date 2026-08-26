@@ -1,5 +1,12 @@
 import { signal } from '@preact/signals'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { CopyableText } from '../components/CopyableText'
 import { ErrorBanner } from '../components/ErrorBanner'
@@ -257,7 +264,10 @@ function AccountAcquisition({
   const [method, setMethod] = useState<'password' | 'qr'>('password')
   const section = useRef<HTMLElement>(null)
 
-  useEffect(() => {
+  // Establish the reactivation default before the updated form paints. A
+  // passive effect can run after a fast user has already selected QR, then
+  // overwrite that choice and unexpectedly return them to the password form.
+  useLayoutEffect(() => {
     if (reactivation === null) {
       return
     }

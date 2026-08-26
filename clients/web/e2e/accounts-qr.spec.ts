@@ -253,6 +253,65 @@ test('a deactivated account can sign in again with its stored identity', async (
   await expect(page).toHaveURL(/\/$/)
 })
 
+test('QR stays selected when chosen immediately after logout and reactivation', async ({
+  page,
+}) => {
+  let active = true
+  const account = {
+    account_id: '44444444-4444-4444-8444-444444444444',
+    user_id: '@returning:hs',
+    homeserver_url: 'https://matrix.hs',
+    state: 'active',
+    sync_state: 'ready',
+    verified: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }
+  await page.route('**/v1/accounts', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue()
+      return
+    }
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: [{ ...account, state: active ? 'active' : 'deactivated' }],
+      }),
+    })
+  })
+  await page.route(`**/v1/accounts/${account.account_id}/logout`, (route) => {
+    active = false
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { ...account, state: 'deactivated' } }),
+    })
+  })
+
+  await signIn(page)
+  await page.goto('/accounts')
+  await page.getByRole('button', { name: 'Log out' }).click()
+
+  await page
+    .getByRole('button', { name: 'Sign in again' })
+    .evaluate((button) => {
+      ;(button as HTMLButtonElement).click()
+      queueMicrotask(() => {
+        const qrTab = [...document.querySelectorAll('[role="tab"]')].find(
+          (tab) => tab.textContent?.trim() === 'Sign in with QR code',
+        )
+        if (!(qrTab instanceof HTMLButtonElement)) {
+          throw new Error('QR sign-in tab did not render')
+        }
+        qrTab.click()
+      })
+    })
+
+  await expect(page.getByLabel('Expected Matrix user ID')).toHaveValue(
+    '@returning:hs',
+  )
+  await expect(page.getByLabel('Password')).toHaveCount(0)
+})
+
 test('Accounts acquisition stays usable at desktop and phone widths', async ({
   page,
 }) => {
