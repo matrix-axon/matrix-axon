@@ -32,6 +32,7 @@ on:
         type: choice
         default: all
         options:
+          - notify
           - tui
           - tui-true-local
           - server
@@ -79,7 +80,7 @@ jobs:
 
   # Does not gate pull requests: needs Docker and a real Synapse.
   true-local:
-    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.lane != 'tui')
+    if: inputs.lane != 'notify' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.lane != 'tui')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -131,8 +132,7 @@ jobs:
         if: ${{ always() }}
         continue-on-error: true
         env:
-          NOTIFY_HOMESERVER: ${{ secrets.NOTIFY_HOMESERVER }}
-          NOTIFY_ROOM: ${{ secrets.NOTIFY_ROOM }}
+          NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
           NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
           BRANCH: ${{ github.ref_name }}
           TRIGGER: ${{ github.event_name }}
@@ -155,17 +155,6 @@ jobs:
             --arg attempt "$ATTEMPT" \
             --arg status "$STATUS" \
             '{
-              body: (
-                "Smoke Test Run"
-                + "\n\ntrue-local " + $status
-                + "\n\nBranch: " + $branch
-                + "\nTrigger: " + $trigger
-                + "\nLane: " + $lane
-                + "\nCommit: " + $commit
-                + "\nActor: " + $actor
-                + "\nAttempt: " + $attempt
-                + "\nRun: " + $run_url
-              ),
               formatted_body: (
                 def html_escape:
                   gsub("&"; "&amp;")
@@ -173,20 +162,90 @@ jobs:
                   | gsub(">"; "&gt;")
                   | gsub("\u0022"; "&quot;")
                   | gsub("\u0027"; "&#39;");
-                "<h1>Smoke Test Run</h1>"
-                + "<h2>true-local <strong>" + ($status | html_escape) + "</strong></h2>"
-                + "<p><strong>Branch:</strong> " + ($branch | html_escape)
-                + "<br><strong>Trigger:</strong> " + ($trigger | html_escape)
-                + "<br><strong>Lane:</strong> " + ($lane | html_escape)
-                + "<br><strong>Commit:</strong> " + ($commit | html_escape)
-                + "<br><strong>Actor:</strong> " + ($actor | html_escape)
-                + "<br><strong>Attempt:</strong> " + ($attempt | html_escape)
-                + "<br><strong>Run:</strong> <a href=\"" + ($run_url | html_escape) + "\">"
-                + ($run_url | html_escape) + "</a></p>"
+                "# Smoke Test Run\n"
+                + "## true-local: " + ($status | html_escape)
+                + "  \n**Branch:** " + ($branch | html_escape)
+                + "  \n**Trigger:** " + ($trigger | html_escape)
+                + "  \n**Lane:** " + ($lane | html_escape)
+                + "  \n**Commit:** " + ($commit | html_escape)
+                + "  \n**Actor:** " + ($actor | html_escape)
+                + "  \n**Attempt:** " + ($attempt | html_escape)
+                + "  \n**Run:** [" + ($run_url | html_escape) + "]("
+                + ($run_url | html_escape) + ")"
               )
             }')"
 
-          MATRIX_BODY="$(jq -r .body <<<"$fields")"
           MATRIX_FORMATTED_BODY="$(jq -r .formatted_body <<<"$fields")"
-          export MATRIX_BODY MATRIX_FORMATTED_BODY
+          export MATRIX_FORMATTED_BODY
+          ./scripts/send-matrix-notification.sh
+
+
+  notify:
+    if: github.event_name == 'workflow_dispatch' && inputs.lane == 'notify'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve smoke lane
+        id: lane
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_LANE: ${{ inputs.lane }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            lane="$DISPATCH_LANE"
+          else
+            lane="all"
+          fi
+          echo "lane=$lane" >> "$GITHUB_OUTPUT"
+
+      - name: Notify axon-developer room of result
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
+          NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
+          BRANCH: ${{ github.ref_name }}
+          TRIGGER: ${{ github.event_name }}
+          LANE: ${{ steps.lane.outputs.lane }}
+          COMMIT: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+          STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+
+          fields="$(jq -n \
+            --arg branch "$BRANCH" \
+            --arg trigger "$TRIGGER" \
+            --arg lane "$LANE" \
+            --arg commit "$COMMIT" \
+            --arg actor "$ACTOR" \
+            --arg run_url "$RUN_URL" \
+            --arg attempt "$ATTEMPT" \
+            --arg status "$STATUS" \
+            '{
+              formatted_body: (
+                def html_escape:
+                  gsub("&"; "&amp;")
+                  | gsub("<"; "&lt;")
+                  | gsub(">"; "&gt;")
+                  | gsub("\u0022"; "&quot;")
+                  | gsub("\u0027"; "&#39;");
+                "# Smoke Test Run\n"
+                + "## true-local: " + ($status | html_escape)
+                + "  \n**Branch:** " + ($branch | html_escape)
+                + "  \n**Trigger:** " + ($trigger | html_escape)
+                + "  \n**Lane:** " + ($lane | html_escape)
+                + "  \n**Commit:** " + ($commit | html_escape)
+                + "  \n**Actor:** " + ($actor | html_escape)
+                + "  \n**Attempt:** " + ($attempt | html_escape)
+                + "  \n**Run:** [" + ($run_url | html_escape) + "]("
+                + ($run_url | html_escape) + ")"
+              )
+            }')"
+
+          MATRIX_FORMATTED_BODY="$(jq -r .formatted_body <<<"$fields")"
+          export MATRIX_FORMATTED_BODY
           ./scripts/send-matrix-notification.sh
