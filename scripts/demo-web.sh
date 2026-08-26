@@ -76,6 +76,12 @@ die() {
   exit 1
 }
 
+assemble_list=""
+cleanup_assemble_list() {
+  [ -z "$assemble_list" ] || rm -f -- "$assemble_list"
+}
+trap cleanup_assemble_list EXIT
+
 cmd_up() {
   AXON_DEMO_MANIFEST="$manifest" "$repo_root/scripts/demo-stack.sh" up
 }
@@ -127,12 +133,11 @@ assemble_platform() {
   shift 3
   local scenes=("$@")
 
-  # A plain local `list` plus an explicit rm below, rather than `trap RETURN`:
-  # traps are global to the shell, not scoped to this function, so a trap set
-  # on one call fires again on the *next* function return anywhere in the
-  # script and trips over a `$list` that has since gone out of scope.
+  # Keep the list in a shell-global variable so the EXIT trap also removes it
+  # when find_scene_dir or the input validation below calls die().
   local list
   list="$(mktemp)"
+  assemble_list="$list"
   local scene dir
   for scene in "${scenes[@]}"; do
     dir="$(find_scene_dir "$form" "$scene" "$project")"
@@ -145,6 +150,7 @@ assemble_platform() {
     -c:v libx264 -pix_fmt yuv420p -movflags +faststart \
     "$out" </dev/null -loglevel error -stats
   rm -f "$list"
+  assemble_list=""
   test -s "$out" || die "$out was not produced"
 }
 

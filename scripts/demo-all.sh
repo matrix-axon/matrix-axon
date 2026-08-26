@@ -122,6 +122,16 @@ workflow's own 'paths:' trigger fires on its own:
 EOF
 }
 
+upload_for_scope() {
+  if [ "$tui_only" -eq 1 ]; then
+    cmd_upload tui
+  elif [ "$web_only" -eq 1 ]; then
+    cmd_upload web
+  else
+    cmd_upload both
+  fi
+}
+
 cmd="${1:-}"
 [ "$#" -gt 0 ] && shift || true
 
@@ -150,15 +160,7 @@ case "$cmd" in
   tui) exec "$stack" record "$@" ;;
   web) exec "$web" record "$@" ;;
   assemble) exec "$web" assemble ;;
-  upload)
-    if [ "$tui_only" -eq 1 ]; then
-      cmd_upload tui
-    elif [ "$web_only" -eq 1 ]; then
-      cmd_upload web
-    else
-      cmd_upload both
-    fi
-    ;;
+  upload) upload_for_scope ;;
   all)
     "$stack" up
     [ "$web_only" -eq 1 ] || "$stack" record --capture
@@ -167,13 +169,7 @@ case "$cmd" in
       "$web" assemble
     fi
     if [ "$do_upload" -eq 1 ]; then
-      if [ "$web_only" -eq 1 ]; then
-        cmd_upload web
-      elif [ "$tui_only" -eq 1 ]; then
-        cmd_upload tui
-      else
-        cmd_upload both
-      fi
+      upload_for_scope
     fi
     if [ "$keep_up" -eq 1 ]; then
       say "leaving the stack up (--keep-up) — tear it down with: scripts/demo-all.sh down"

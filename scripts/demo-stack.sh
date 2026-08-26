@@ -405,15 +405,17 @@ EOF
       printf 'demo-stack: --size/--no-resize only apply together with --capture\n' >&2
       exit 1
     fi
-    capture_dir="$(dirname "${capture_out}")"
-    if [ ! -d "${capture_dir}" ]
-    then
-      if ! mkdir -p "${capture_dir}"
+    if [ "$capture" -eq 1 ]; then
+      capture_dir="$(dirname "${capture_out}")"
+      if [ ! -d "${capture_dir}" ]
       then
-    cat >&2 <<EOF
-Error: could not create output directory ${capture_dir}. Exiting.
+        if ! mkdir -p "${capture_dir}"
+        then
+          cat >&2 <<EOF
+	Error: could not create output directory ${capture_dir}. Exiting.
 EOF
-exit 1
+          exit 1
+        fi
       fi
     fi
     # Built first so cargo's own progress output cannot land in the recording.
