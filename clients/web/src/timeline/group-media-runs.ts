@@ -1,3 +1,4 @@
+import { sameLocalDay } from '../calendar-day'
 import { eventMedia, isImageMedia } from '../media/event-media'
 import { inReplyToId, type TimelineEvent } from '../stores/timeline'
 
@@ -34,17 +35,6 @@ export interface GroupMediaRunsOptions {
    * what those things are.
    */
   breaks?: (event: TimelineEvent) => boolean
-}
-
-/** Local midnight, so a run cannot straddle a day separator. */
-function sameDay(a: number, b: number): boolean {
-  const left = new Date(a)
-  const right = new Date(b)
-  return (
-    left.getFullYear() === right.getFullYear() &&
-    left.getMonth() === right.getMonth() &&
-    left.getDate() === right.getDate()
-  )
 }
 
 /**
@@ -158,7 +148,8 @@ export function groupMediaRuns(
       // newest-first list would group images hours apart — which is exactly
       // what the e2e fixture does.
       Math.abs(event.origin_ts - previous.origin_ts) <= windowMs &&
-      sameDay(previous.origin_ts, event.origin_ts) &&
+      // Local midnight, so a run cannot straddle a day separator.
+      sameLocalDay(previous.origin_ts, event.origin_ts) &&
       run.length < max
     if (!joins) {
       flush()

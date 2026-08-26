@@ -120,6 +120,7 @@ describe('createRoomsStore', () => {
     await vi.waitFor(() =>
       expect(store.titles.value.get(roomKey(UNNAMED))).toBe('Bob'),
     )
+    expect(store.dmAvatars.value.get(roomKey(UNNAMED))).toBeUndefined()
     // Named rooms never trigger a members fetch.
     expect(memberCalls).toBe(1)
 
@@ -127,6 +128,42 @@ describe('createRoomsStore', () => {
     await store.refresh()
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(memberCalls).toBe(1)
+  })
+
+  it('caches the other user’s avatar for a 1:1 DM with no room avatar', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [NAMED, UNNAMED] }),
+      ),
+      http.get(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
+        () =>
+          HttpResponse.json({
+            data: [
+              {
+                user_id: '@me:example.org',
+                membership: 'join',
+              },
+              {
+                user_id: '@bob:example.org',
+                membership: 'join',
+                display_name: 'Bob',
+                avatar_url: 'mxc://hs/bob',
+              },
+            ],
+          }),
+      ),
+    )
+
+    const store = makeStore()
+    await store.refresh()
+    await vi.waitFor(() =>
+      expect(store.dmAvatars.value.get(roomKey(UNNAMED))).toBe('mxc://hs/bob'),
+    )
+    expect(store.dmAvatars.value.has(roomKey(NAMED))).toBe(false)
+
+    store.resetSession()
+    expect(store.dmAvatars.value.size).toBe(0)
   })
 
   it('persists room titles and starts the next store from the cache', async () => {

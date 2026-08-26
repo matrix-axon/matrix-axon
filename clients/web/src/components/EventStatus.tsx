@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
+import { copyText } from '../copy-text'
 import { matrixToEventLink } from '../matrix-to'
 import type { TimeFormat } from '../stores/settings'
 import type { TimelineEvent, TimelineStore } from '../stores/timeline'
@@ -100,18 +101,6 @@ export function EventTime({
       )}
     </>
   )
-}
-
-async function copyText(text: string): Promise<boolean> {
-  if (navigator.clipboard?.writeText === undefined) {
-    return false
-  }
-  try {
-    await navigator.clipboard.writeText(text)
-    return true
-  } catch {
-    return false
-  }
 }
 
 /** The failed-send notice with its Retry/Discard controls. */

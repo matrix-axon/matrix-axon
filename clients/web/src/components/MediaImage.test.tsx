@@ -162,6 +162,14 @@ describe('MediaImage', () => {
     )
   })
 
+  it('renders markdown in the caption', () => {
+    serveBytes()
+    const { container } = renderImage(image({ caption: 'a **bold** caption' }))
+    const caption = container.querySelector('.media-caption')
+    expect(caption?.querySelector('strong')?.textContent).toBe('bold')
+    expect(caption?.textContent).toBe('a bold caption')
+  })
+
   it('renders a blob-backed image once the download resolves', async () => {
     serveBytes()
     const { findByRole } = renderImage(image())

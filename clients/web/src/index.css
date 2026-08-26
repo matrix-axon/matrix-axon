@@ -185,6 +185,7 @@ body {
 }
 
 .topbar-rooms-button,
+.topbar-room-heading,
 .topbar-room-title {
   display: none;
 }
@@ -225,10 +226,6 @@ body {
     padding: 0.45rem 0.55rem;
   }
 
-  .mobile-room-shell .topbar-brand {
-    display: none;
-  }
-
   .mobile-room-shell .topbar-rooms-button {
     display: inline-flex;
     flex: none;
@@ -246,9 +243,19 @@ body {
     white-space: nowrap;
   }
 
+  /* Title shrink-wraps so the live-socket dot sits on the name, not against
+     the action cluster. The heading takes leftover space; actions stay right. */
+  .mobile-room-shell .topbar-room-heading {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
   .mobile-room-shell .topbar-room-title {
     display: block;
-    flex: 1;
+    flex: 0 1 auto;
     min-width: 0;
     padding: 0.25rem 0.35rem;
     border: 0;
@@ -272,13 +279,8 @@ body {
     padding-inline: 0.2rem;
   }
 
-  .mobile-room-shell .topbar-brand-lockup {
-    order: 3;
-  }
-
   .topbar-actions {
     flex: none;
-    order: 4;
   }
 
   .topbar-icon-button,
@@ -1075,6 +1077,10 @@ h2 {
   color: var(--muted);
   font-size: 0.9rem;
   margin: 0.25rem 0 0.5rem;
+}
+
+.card-meta + .card-meta {
+  margin-top: 0;
 }
 
 .card-actions {
@@ -1891,6 +1897,7 @@ p.timeline-edge {
   white-space: nowrap;
 }
 
+.copyable-text,
 .event-time-copy {
   appearance: none;
   border: 0;
@@ -1898,15 +1905,25 @@ p.timeline-edge {
   background: transparent;
   padding: 0 0.125rem;
   font: inherit;
+  color: inherit;
+  text-align: inherit;
   cursor: copy;
 }
 
+.copyable-text {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.copyable-text:hover,
+.copyable-text:focus-visible,
 .event-time-copy:hover,
 .event-time-copy:focus-visible {
   color: var(--accent);
   background: rgba(64, 121, 255, 0.12);
 }
 
+.copyable-text.failed,
 .event-time-copy.failed {
   color: var(--danger);
 }
@@ -2171,6 +2188,10 @@ p.timeline-edge {
 }
 
 .event-inspector-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
   padding: 0.4rem 0.6rem;
   border-bottom: 1px solid var(--border);
   color: var(--muted);
@@ -2178,6 +2199,40 @@ p.timeline-edge {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+.event-inspector-copy-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.event-inspector-copy-cluster .event-copy-status {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+}
+
+.event-inspector-copy {
+  flex: none;
+  display: inline-flex;
+  padding: 0.15rem;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: copy;
+}
+
+.event-inspector-copy:hover,
+.event-inspector-copy:focus-visible {
+  color: var(--accent);
+  border-color: transparent;
+  background: transparent;
+}
+
+/* Same as `.lightbox-action`: row action SVGs are hidden on desktop. */
+.event-inspector-copy .event-action-icon {
+  display: block;
 }
 
 .event-inspector pre {
@@ -2710,6 +2765,18 @@ span.composer-attachment-thumb {
 }
 
 @media (max-width: 47.99rem) {
+  /* iOS only synthesizes `click` on a non-button if it looks clickable. */
+  .event-row {
+    cursor: pointer;
+  }
+
+  /* Match the icon-button box so opening the bar does not retarget the
+     sender's baseline (and the avatar next to it) down by a few pixels. */
+  .event-head {
+    align-items: center;
+    min-height: 1.75rem;
+  }
+
   .event-actions {
     gap: 0.1rem;
   }
@@ -2726,6 +2793,7 @@ span.composer-attachment-thumb {
   }
 
   .event-actions .event-action-button {
+    box-sizing: border-box;
     width: 1.75rem;
     height: 1.75rem;
     min-width: 1.75rem;
@@ -2966,6 +3034,11 @@ span.composer-attachment-thumb {
   min-width: 0;
 }
 
+/* Full root is a regular message row so it can share the action bar. */
+.thread-root-event {
+  display: block;
+}
+
 .thread-root.compact {
   background: var(--bg);
   padding-top: 0.35rem;
@@ -3017,8 +3090,44 @@ span.composer-attachment-thumb {
 }
 
 .room-info-panel > .overlay-head,
+.room-info-identity,
 .room-info-section {
   flex: 0 0 auto;
+}
+
+.room-info-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  min-width: 0;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.room-info-identity .room-avatar {
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 12px;
+  font-size: 1.35rem;
+}
+
+.room-info-identity-copy {
+  min-width: 0;
+}
+
+.room-info-identity-name {
+  margin: 0;
+  font-weight: 700;
+  font-size: 1.05rem;
+  overflow-wrap: anywhere;
+}
+
+.room-info-identity-topic {
+  margin: 0.2rem 0 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .room-info-section {
@@ -3249,6 +3358,35 @@ span.composer-attachment-thumb {
 
 .unread-threads-panel {
   max-width: 31rem;
+  max-height: min(32rem, calc(var(--app-viewport-height, 100dvh) - 6rem));
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.unread-threads-panel > .overlay-head {
+  flex: 0 0 auto;
+}
+
+/* Nested so these beat the generic `button` / `button:hover` rules later. */
+.unread-threads-panel .unread-threads-mode {
+  font: inherit;
+  font-weight: inherit;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.unread-threads-panel .unread-threads-mode:hover,
+.unread-threads-panel .unread-threads-mode:focus-visible {
+  color: var(--accent);
+  border-color: transparent;
+  background: transparent;
 }
 
 .unread-threads-empty {
@@ -3261,6 +3399,10 @@ span.composer-attachment-thumb {
   list-style: none;
   margin: 0.75rem 0 0;
   padding: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .unread-thread-entry {
@@ -3322,6 +3464,10 @@ span.composer-attachment-thumb {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+.settings-debug-body {
+  margin-top: 0.75rem;
 }
 
 .settings-version {
@@ -3721,9 +3867,28 @@ input[type='checkbox'] {
   color: var(--muted);
 }
 
+/*
+ * Wraps rather than compresses: the options carry real sentences ("Membership
+ * and profile changes"), and shrinking them into narrow columns at phone width
+ * is far harder to read than letting a row spill onto a second line. The row
+ * gap is tighter than the column gap so a wrapped group still reads as one.
+ */
 .theme-picker {
   display: flex;
-  gap: 1.25rem;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.25rem;
+}
+
+/*
+ * Names a control group inside a settings panel, under the panel's own `h2`.
+ * `margin-top: 0` leaves the h2's bottom margin as the only gap above, so
+ * adding a label does not push the group down; the small bottom margin binds
+ * the label to the group it names rather than floating between the two.
+ */
+.settings-group-label {
+  margin: 0 0 0.4rem;
+  font-size: 0.9rem;
+  font-weight: 600;
 }
 
 .inline-form {
@@ -4348,6 +4513,11 @@ audio.media-player {
   max-width: min(60ch, 90vw);
 }
 
+.lightbox-caption a {
+  color: inherit;
+  text-decoration: underline;
+}
+
 /* Video and PDF in the lightbox (ADR 0072). The wrapper is what the media
    hook's ref observes, so it must not collapse to zero. */
 .lightbox-media {
@@ -4818,6 +4988,12 @@ audio.media-player {
 
 .gallery-caption-index {
   display: none;
+}
+
+/* A markdown caption renders as `<p>`; keep its first line beside the
+   "Image N:" prefix instead of pushing it onto its own row. */
+.gallery-caption .body-html > p:first-child {
+  display: inline;
 }
 
 .invites-link {

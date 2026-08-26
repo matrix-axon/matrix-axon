@@ -1301,7 +1301,7 @@ describe('inReplyToId', () => {
 
 /**
  * `loading` means "there is nothing to show yet", not "a request is in
- * flight". RoomPage swaps the whole timeline for "Loading timeline…" while it
+ * flight". RoomPage swaps the whole timeline for "Loading messages…" while it
  * is true, and the reconnect gap-fill (ADR 0061) calls `loadLatest` on an
  * already-loaded slice — so a socket that drops and reopens blanked the
  * timeline each time. On a phone the sidebar is hidden and the timeline is the
