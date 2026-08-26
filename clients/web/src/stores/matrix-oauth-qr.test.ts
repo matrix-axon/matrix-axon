@@ -195,6 +195,45 @@ describe('MatrixOAuthQrStore', () => {
     expect(store.flow.value?.check_code).toBe('81')
   })
 
+  it('keeps a rejected scan visible until retry or stage advancement', async () => {
+    vi.useFakeTimers()
+    const api = apiMock()
+    api.POST.mockReturnValueOnce(
+      success(flow('starting', { presentation: 'scan' }), 201),
+    ).mockResolvedValueOnce({
+      error: {
+        error: {
+          code: 'invalid_request',
+          message: 'QR payload is not compatible with this flow',
+        },
+      },
+      response: response(400),
+    })
+    api.GET.mockReturnValueOnce(
+      success(flow('starting', { presentation: 'scan' })),
+    ).mockReturnValueOnce(
+      success(
+        flow('check_code_to_display', {
+          presentation: 'scan',
+          check_code: '42',
+        }),
+      ),
+    )
+    const { store } = create(api, { pollDelayMs: 10 })
+
+    await store.start('@alice:example.org', 'scan')
+    await expect(store.submitScan('AQID')).resolves.toBe(false)
+    expect(store.error.value).toMatch(/not compatible/i)
+
+    await vi.advanceTimersByTimeAsync(10)
+    expect(store.flow.value?.stage).toBe('starting')
+    expect(store.error.value).toMatch(/not compatible/i)
+
+    await vi.advanceTimersByTimeAsync(10)
+    expect(store.flow.value?.stage).toBe('check_code_to_display')
+    expect(store.error.value).toBeNull()
+  })
+
   it('backs transport-failed polls off and refreshes accounts once on done', async () => {
     vi.useFakeTimers()
     const api = apiMock()

@@ -120,6 +120,23 @@ export function createMatrixOAuthQrStore(
   let request: AbortController | null = null
   let pollTimer: ReturnType<typeof setTimeout> | null = null
   const refreshed = new Set<string>()
+  let retainedErrorAt: Pick<MatrixOAuthQrFlow, 'flow_id' | 'stage'> | null =
+    null
+
+  function clearRetainedError(): void {
+    retainedErrorAt = null
+  }
+
+  function retainError(
+    message: string,
+    current: MatrixOAuthQrFlow | null = flow.value,
+  ): void {
+    error.value = message
+    retainedErrorAt =
+      current === null
+        ? null
+        : { flow_id: current.flow_id, stage: current.stage }
+  }
 
   function clearPoll(): void {
     if (pollTimer !== null) {
@@ -172,9 +189,17 @@ export function createMatrixOAuthQrStore(
     if (owner !== generation) {
       return
     }
+    const retainCurrentError =
+      retainedErrorAt?.flow_id === next.flow_id &&
+      retainedErrorAt.stage === next.stage
     flow.value = next
-    error.value =
-      next.stage === 'failed' ? failureMessage(next.error_code) : null
+    if (next.stage === 'failed') {
+      clearRetainedError()
+      error.value = failureMessage(next.error_code)
+    } else if (!retainCurrentError) {
+      clearRetainedError()
+      error.value = null
+    }
     if (terminal(next)) {
       clearPoll()
       storage.removeItem(ACTIVE_FLOW_KEY)
@@ -213,6 +238,7 @@ export function createMatrixOAuthQrStore(
         return false
       }
       if (result.error !== undefined) {
+        clearRetainedError()
         if (result.response.status === 404) {
           storage.removeItem(ACTIVE_FLOW_KEY)
           flow.value = null
@@ -233,6 +259,7 @@ export function createMatrixOAuthQrStore(
       ) {
         return false
       }
+      clearRetainedError()
       error.value = transportMessage(cause)
       operation.value = 'idle'
       schedulePoll(owner, transportBackoffMs)
@@ -245,8 +272,9 @@ export function createMatrixOAuthQrStore(
   async function reconcileAmbiguous(owner: number): Promise<boolean> {
     const reconciled = await fetchCurrent(owner, 'polling')
     if (!reconciled && owner === generation) {
-      error.value =
-        'The request outcome is unknown. Axon is checking the flow before you retry.'
+      retainError(
+        'The request outcome is unknown. Axon is checking the flow before you retry.',
+      )
     }
     return reconciled
   }
@@ -265,6 +293,7 @@ export function createMatrixOAuthQrStore(
     const owner = generation
     clearPoll()
     operation.value = kind
+    clearRetainedError()
     error.value = null
     const active = beginRequest()
     try {
@@ -273,7 +302,7 @@ export function createMatrixOAuthQrStore(
         return false
       }
       if (result.error !== undefined) {
-        error.value = apiErrorMessage(result.error)
+        retainError(apiErrorMessage(result.error), current)
         operation.value = 'idle'
         schedulePoll(owner)
         return false
@@ -306,6 +335,7 @@ export function createMatrixOAuthQrStore(
       clearPoll()
       request?.abort()
       flow.value = null
+      clearRetainedError()
       error.value = null
       operation.value = 'starting'
       storage.removeItem(ACTIVE_FLOW_KEY)
@@ -384,6 +414,7 @@ export function createMatrixOAuthQrStore(
       const owner = generation
       clearPoll()
       operation.value = 'cancelling'
+      clearRetainedError()
       error.value = null
       const active = beginRequest()
       try {
@@ -395,7 +426,7 @@ export function createMatrixOAuthQrStore(
           return false
         }
         if (result.error !== undefined) {
-          error.value = apiErrorMessage(result.error)
+          retainError(apiErrorMessage(result.error), current)
           operation.value = 'idle'
           schedulePoll(owner)
           return false
@@ -412,7 +443,10 @@ export function createMatrixOAuthQrStore(
         ) {
           return false
         }
-        error.value = `${transportMessage(cause)} Cancellation was not confirmed; you can retry it.`
+        retainError(
+          `${transportMessage(cause)} Cancellation was not confirmed; you can retry it.`,
+          current,
+        )
         operation.value = 'idle'
         schedulePoll(owner)
         return false
@@ -436,6 +470,7 @@ export function createMatrixOAuthQrStore(
       request = null
       flow.value = null
       operation.value = 'idle'
+      clearRetainedError()
       error.value = null
       storage.removeItem(ACTIVE_FLOW_KEY)
     },
