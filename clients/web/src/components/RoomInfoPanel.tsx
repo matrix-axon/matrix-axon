@@ -16,6 +16,7 @@ import type { MembersStore } from '../stores/members'
 import {
   memberDisplay,
   roomKey,
+  roomListAvatarUrl,
   roomTitle,
   type MemberDto,
   type RoomDto,
@@ -23,6 +24,8 @@ import {
 import { useShortcuts } from '../shortcuts'
 import { formatInviteeList, inviteErrorMessage } from '../invite'
 import { BodyPortal } from './BodyPortal'
+import { CopyableText, useCopyFeedback } from './CopyableText'
+import { RoomAvatar, roomAvatarColor } from './RoomAvatar'
 import { ErrorBanner } from './ErrorBanner'
 import { useModalFocus } from './use-modal-focus'
 import { UserAvatar } from './UserAvatar'
@@ -83,13 +86,10 @@ export function RoomInfoPanel({
   const location = useLocation()
   const { rooms, search, spaces, api, live } = useServices()
   const inviteInput = useRef<HTMLInputElement>(null)
-  const clearCopyStatus = useRef<number | null>(null)
+  const { status: copyStatus, copy } = useCopyFeedback()
   const [filter, setFilter] = useState('')
   const [dmUserId, setDmUserId] = useState<string | null>(null)
   const [dmError, setDmError] = useState<string | null>(null)
-  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>(
-    'idle',
-  )
   const [inviteOpen, setInviteOpen] = useState(false)
   const [inviteValue, setInviteValue] = useState('')
   const [inviteStatus, setInviteStatus] = useState<string | null>(null)
@@ -129,7 +129,8 @@ export function RoomInfoPanel({
     return roomState.errors.info === undefined ? 'Loading…' : 'Unavailable'
   }
   const [roomStateVersion, setRoomStateVersion] = useState(0)
-  const displayTitle = room !== undefined ? roomTitle(room, roomTitles) : roomId
+  const displayTitle =
+    room !== undefined ? roomTitle(room, roomTitles) || roomId : roomId
   const ownUserId = room?.account_user_id ?? null
   const homeServerName = serverNameFromRoomReference(ownUserId ?? roomId ?? '')
   const dmTitle =
@@ -168,13 +169,6 @@ export function RoomInfoPanel({
       inviteInput.current?.focus()
     }
   }, [inviteOpen])
-  useEffect(() => {
-    return () => {
-      if (clearCopyStatus.current !== null) {
-        window.clearTimeout(clearCopyStatus.current)
-      }
-    }
-  }, [])
   useEffect(() => {
     let cancelled = false
     const stateKey = `${accountId}/${roomId}`
@@ -271,21 +265,12 @@ export function RoomInfoPanel({
   }, [live.reconnects.value])
 
   const copyRoomLink = async () => {
-    if (clearCopyStatus.current !== null) {
-      window.clearTimeout(clearCopyStatus.current)
-      clearCopyStatus.current = null
-    }
     const href = matrixToRoomReferenceLink(
       room?.room_id ?? roomId,
       room?.canonical_alias,
       { via: serverNamesFromUserId(room?.account_user_id) },
     )
-    const ok = await copyText(href)
-    setCopyStatus(ok ? 'copied' : 'failed')
-    clearCopyStatus.current = window.setTimeout(() => {
-      setCopyStatus('idle')
-      clearCopyStatus.current = null
-    }, 1800)
+    await copy(href)
   }
 
   const startDm = async (userId: string) => {
@@ -410,6 +395,27 @@ export function RoomInfoPanel({
         <button type="button" class="ghost" onClick={onClose}>
           Close
         </button>
+      </div>
+
+      <div class="room-info-identity">
+        <RoomAvatar
+          accountId={accountId}
+          mxcUrl={
+            room !== undefined
+              ? roomListAvatarUrl(room, rooms.dmAvatars.value)
+              : null
+          }
+          title={displayTitle}
+          color={roomAvatarColor(roomStateKey)}
+        />
+        <div class="room-info-identity-copy">
+          <p class="room-info-identity-name">{displayTitle}</p>
+          {room?.topic !== undefined &&
+            room.topic !== null &&
+            room.topic.trim() !== '' && (
+              <p class="room-info-identity-topic muted">{room.topic}</p>
+            )}
+        </div>
       </div>
 
       <section class="room-info-section" aria-labelledby="room-info-details">
@@ -1091,19 +1097,41 @@ function LeaveRoomDialog({
   )
 }
 
+/** Placeholders are not worth copying; real IDs, names, and state are. */
+function isPopulatedDetail(value: string | null | undefined): value is string {
+  return (
+    typeof value === 'string' &&
+    value !== '' &&
+    value !== 'None' &&
+    value !== 'Unavailable' &&
+    value !== 'Loading…' &&
+    !value.startsWith('Unavailable from')
+  )
+}
+
 function DetailRow({
   label,
   value,
   code = false,
 }: {
   label: string
-  value: string
+  value: string | null | undefined
   code?: boolean
 }) {
+  const text = value ?? ''
+  const displayed = code ? <code>{text}</code> : text
   return (
     <>
       <dt>{label}</dt>
-      <dd>{code ? <code>{value}</code> : value}</dd>
+      <dd>
+        {isPopulatedDetail(value) ? (
+          <CopyableText text={value} label={label}>
+            {displayed}
+          </CopyableText>
+        ) : (
+          displayed
+        )}
+      </dd>
     </>
   )
 }
@@ -1154,16 +1182,4 @@ function isOnlyJoinedMember(
 ): boolean {
   const joined = [...members].filter((member) => member.membership === 'join')
   return joined.length === 1 && joined[0]?.user_id === ownUserId
-}
-
-async function copyText(text: string): Promise<boolean> {
-  if (navigator.clipboard?.writeText === undefined) {
-    return false
-  }
-  try {
-    await navigator.clipboard.writeText(text)
-    return true
-  } catch {
-    return false
-  }
 }

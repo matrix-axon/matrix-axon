@@ -188,6 +188,16 @@ function renderRoom(
   return { services, ...utils }
 }
 
+function panelEventRow(panel: HTMLElement, eventId: string): HTMLElement {
+  const row = [...panel.querySelectorAll('li.event-row')].find(
+    (element) => element.getAttribute('data-event-id') === eventId,
+  )
+  if (!(row instanceof HTMLElement)) {
+    throw new Error(`missing thread row ${eventId}`)
+  }
+  return row
+}
+
 function mockSinglePane() {
   return vi.spyOn(window, 'matchMedia').mockImplementation(
     (query: string) =>
@@ -1177,6 +1187,77 @@ describe('threads', () => {
     await waitFor(() => expect(document.activeElement).toBe(threadComposer))
   })
 
+  it('inserts day separators when a thread spans multiple days', async () => {
+    const day = 86_400_000
+    const monday = Date.UTC(2026, 5, 1, 12, 0, 0)
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: {
+              // Newest-first, matching the read API; the store reverses to
+              // oldest-at-top the same way the room timeline does.
+              events: [
+                event('$m2', monday + day, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'next day',
+                }),
+                event('$m1', monday, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'same day as root',
+                }),
+              ],
+              next_cursor: null,
+            },
+          }),
+      ),
+    )
+    const { findByLabelText } = renderRoom(
+      [event('$root', monday)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
+    )
+    const panel = await findByLabelText('Thread')
+    await within(panel).findByText('next day')
+    await waitFor(() => panelEventRow(panel, '$root'))
+
+    const labels = [...panel.querySelectorAll('.day-separator')].map(
+      (el) => el.textContent,
+    )
+    expect(labels).toHaveLength(2)
+    expect(labels[0]).not.toBe(labels[1])
+  })
+
+  it('does not insert a second day heading when thread replies stay on the root day', async () => {
+    const monday = Date.UTC(2026, 5, 1, 12, 0, 0)
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: {
+              events: [
+                event('$m1', monday + 60_000, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'later that day',
+                }),
+              ],
+              next_cursor: null,
+            },
+          }),
+      ),
+    )
+    const { findByLabelText } = renderRoom(
+      [event('$root', monday)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
+    )
+    const panel = await findByLabelText('Thread')
+    await within(panel).findByText('later that day')
+    await waitFor(() => panelEventRow(panel, '$root'))
+
+    expect(panel.querySelectorAll('.day-separator')).toHaveLength(1)
+  })
+
   it('mobile swipe-right from a thread closes the thread panel', async () => {
     const media = mockSinglePane()
     try {
@@ -1797,7 +1878,11 @@ describe('threads', () => {
     const panel = await findByLabelText('Thread')
     await within(panel).findByText('inside the thread')
 
-    fireEvent.click(within(panel).getByRole('button', { name: 'Reply' }))
+    fireEvent.click(
+      within(panelEventRow(panel, '$m1')).getByRole('button', {
+        name: 'Reply',
+      }),
+    )
     const textarea = getByLabelText('Reply in thread') as HTMLTextAreaElement
     fireEvent.input(textarea, { target: { value: 'specific reply' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
@@ -1845,11 +1930,87 @@ describe('threads', () => {
     const panel = await findByLabelText('Thread')
     await within(panel).findByText('inside the thread')
 
-    fireEvent.click(within(panel).getByRole('button', { name: 'React' }))
-    fireEvent.click(within(panel).getByRole('button', { name: '👍' }))
+    fireEvent.click(
+      within(panelEventRow(panel, '$m1')).getByRole('button', {
+        name: 'React',
+      }),
+    )
+    fireEvent.click(
+      within(panelEventRow(panel, '$m1')).getByRole('button', { name: '👍' }),
+    )
 
     await waitFor(() => expect(reactionBody.key).toBe('👍'))
     expect(reactionTarget).toBe('$m1')
+  })
+
+  it('lets the thread root use message actions except opening a nested thread', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: {
+              events: [
+                event('$m1', 200, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'inside the thread',
+                }),
+              ],
+              next_cursor: null,
+            },
+          }),
+      ),
+    )
+    const { findByLabelText } = renderRoom(
+      [event('$root', 100)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
+    )
+    const panel = await findByLabelText('Thread')
+    await within(panel).findByText('inside the thread')
+    const rootRow = await waitFor(() => panelEventRow(panel, '$root'))
+
+    expect(within(rootRow).getByRole('button', { name: 'Reply' })).toBeTruthy()
+    expect(within(rootRow).getByRole('button', { name: 'React' })).toBeTruthy()
+    expect(within(rootRow).queryByRole('button', { name: 'Thread' })).toBeNull()
+    expect(within(panel).queryByRole('button', { name: 'Thread' })).toBeNull()
+  })
+
+  it('reacts to the thread root from the thread pane', async () => {
+    let reactionBody: Record<string, unknown> = {}
+    let reactionTarget: string | null = null
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: { events: [], next_cursor: null },
+          }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/events/:eventId/reactions`,
+        async ({ params, request }) => {
+          reactionTarget = params.eventId as string
+          reactionBody = (await request.json()) as Record<string, unknown>
+          return HttpResponse.json({ data: { event_id: '$reaction' } })
+        },
+      ),
+    )
+    const { findByLabelText } = renderRoom(
+      [event('$root', 100)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
+    )
+    const panel = await findByLabelText('Thread')
+    const rootRow = await waitFor(() => panelEventRow(panel, '$root'))
+
+    fireEvent.click(
+      within(rootRow).getByRole('button', {
+        name: 'React',
+      }),
+    )
+    fireEvent.click(within(panel).getByRole('button', { name: '👍' }))
+
+    await waitFor(() => expect(reactionBody.key).toBe('👍'))
+    expect(reactionTarget).toBe('$root')
   })
 
   it('edits an own message from the thread pane', async () => {

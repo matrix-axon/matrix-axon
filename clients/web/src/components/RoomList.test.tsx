@@ -105,6 +105,7 @@ function renderPage(
     /** Room ids whose `space/children` read fails, as it does when offline. */
     spaceChildrenFail?: string[]
     withSpaces?: boolean
+    members?: unknown[]
   } = {},
 ) {
   const activeAccounts = options.activeAccounts ?? activeAccountsForRooms(rooms)
@@ -149,7 +150,7 @@ function renderPage(
       `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/members`,
       () =>
         HttpResponse.json({
-          data: [
+          data: options.members ?? [
             { user_id: '@me:example.org', membership: 'join' },
             {
               user_id: '@bob:example.org',
@@ -599,6 +600,37 @@ describe('RoomList', () => {
     expect(avatar.textContent).toBe('O')
     expect(avatar.className).toMatch(/\broom-avatar-color-\d\b/)
     expect(avatar.querySelector('img')).toBeNull()
+  })
+
+  it('uses the other user’s avatar for a DM with no room avatar', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/media/${ACCOUNT}/hs/bob`,
+        () =>
+          new HttpResponse('bob-avatar', {
+            headers: { 'content-type': 'image/png' },
+          }),
+      ),
+    )
+    const { findByText, container } = renderPage([DM], undefined, {
+      members: [
+        { user_id: '@me:example.org', membership: 'join' },
+        {
+          user_id: '@bob:example.org',
+          membership: 'join',
+          display_name: 'Bob',
+          avatar_url: 'mxc://hs/bob',
+        },
+      ],
+    })
+
+    await findByText('Bob')
+    await waitFor(() => {
+      const avatar = container.querySelector<HTMLImageElement>(
+        '.room-row .room-avatar img',
+      )
+      expect(avatar?.src).toMatch(/^blob:/)
+    })
   })
 
   it('filters: DMs, groups, favorites, and name query', async () => {

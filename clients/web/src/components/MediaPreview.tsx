@@ -10,6 +10,7 @@ import { languageForFilename, languageFromShebang } from '../code/languages'
 import { useMediaBlob } from '../media/use-media-blob'
 import { useServices } from '../services'
 import { Lightbox } from './Lightbox'
+import { MediaCaption } from './MediaCaption'
 import { PdfViewer } from './PdfViewer'
 
 /** The longest side an inline video is allowed, in CSS px (matches MediaImage). */
@@ -30,11 +31,14 @@ export function MediaPreview({
   accountId,
   media,
   plan,
+  content,
   onClose,
 }: {
   accountId: string
   media: ParsedMedia
   plan: PreviewPlan
+  /** Event `content`, so a caption with `formatted_body` can use it. */
+  content?: unknown
   /** Present in the lightbox and dismiss with this, instead of inline. */
   onClose?: () => void
 }) {
@@ -53,6 +57,7 @@ export function MediaPreview({
       media={media}
       kind={plan.kind}
       contentType={plan.contentType}
+      content={content}
       onClose={onClose}
     />
   )
@@ -63,12 +68,14 @@ function BlobPreview({
   media,
   kind,
   contentType,
+  content,
   onClose,
 }: {
   accountId: string
   media: ParsedMedia
   kind: Exclude<PreviewKind, 'text'>
   contentType: string | null
+  content?: unknown
   onClose?: () => void
 }) {
   const [unplayable, setUnplayable] = useState(false)
@@ -156,7 +163,19 @@ function BlobPreview({
   // out of the timeline.
   if (framed) {
     return (
-      <Lightbox label={label} caption={media.caption} onClose={onClose}>
+      <Lightbox
+        label={label}
+        caption={
+          media.caption === null ? null : (
+            <MediaCaption
+              accountId={accountId}
+              caption={media.caption}
+              content={content}
+            />
+          )
+        }
+        onClose={onClose}
+      >
         <div ref={ref} class="lightbox-media">
           {body}
         </div>

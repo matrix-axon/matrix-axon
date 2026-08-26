@@ -37,11 +37,14 @@ on:
       - 'docs/img/**'
       - '.github/workflows/api-docs.yml'
   workflow_dispatch:
-
-# The release the demo recordings hang off. Bump this when a new recording is
-# published under a new tag; the workflow has to be run by hand afterwards.
-env:
-  DEMO_RELEASE_TAG: demo-2026-08
+    inputs:
+      demo_release_tag:
+        description: >-
+          Release tag to pull the demo recordings (*.mp4) from. Leave blank
+          to use the most recently published release — see "Pull the demo
+          recordings into the site" below.
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -89,15 +92,38 @@ jobs:
         # fetched on every build because Actions-based Pages replaces the whole
         # site each deploy — there is no incremental upload to add them to.
         #
-        # Publishing a *new* recording therefore means uploading it to the
-        # release and running this workflow by hand: re-uploading an asset
-        # changes no path in the `paths:` filter above, so nothing triggers on
-        # its own.
+        # Publishing a *new* recording therefore means uploading its MP4s to a
+        # release — the latest one, ordinarily — and running this workflow by
+        # hand: re-uploading an asset changes no path in the `paths:` filter
+        # above, so nothing triggers on its own.
+        #
+        # Defaults to the most recently *published* release, not GitHub's
+        # notion of "latest": every release here is deliberately marked a
+        # pre-release (ADR 0086, so a video-only or demo release never wears
+        # the "Latest" badge on a version that isn't), and the `/releases/
+        # latest` API — which `gh release download`/`gh release view` use
+        # with no tag argument — excludes pre-releases and 404s when every
+        # release is one. `gh release list`'s default sort does not exclude
+        # them, so it is what resolves "latest" here. A manual run can name a
+        # specific release instead via the `demo_release_tag`
+        # workflow_dispatch input — e.g. to pull last month's recording back
+        # onto the site, or preview one attached to a release that isn't the
+        # newest.
         env:
           GH_TOKEN: ${{ github.token }}
+          DEMO_RELEASE_TAG: ${{ inputs.demo_release_tag }}
         run: |
           mkdir -p _site/demo
-          gh release download "$DEMO_RELEASE_TAG" \
+          tag="$DEMO_RELEASE_TAG"
+          if [ -n "$tag" ]; then
+            echo "Pulling demo recordings from release $tag (manual override)"
+          else
+            tag="$(gh release list --repo "${{ github.repository }}" \
+              --exclude-drafts --limit 1 --json tagName -q '.[0].tagName')"
+            [ -n "$tag" ] || { echo "::error::no releases found on ${{ github.repository }} to pull demo recordings from"; exit 1; }
+            echo "Pulling demo recordings from $tag (most recently published release)"
+          fi
+          gh release download "$tag" \
             --repo "${{ github.repository }}" \
             --pattern '*.mp4' \
             --dir _site/demo

@@ -28,6 +28,7 @@ import {
   filterRooms,
   isLikelyDm,
   roomKey,
+  roomListAvatarUrl,
   roomTitle,
   sortRooms,
   type ActiveFilter,
@@ -1207,7 +1208,7 @@ function RoomRow({
       >
         <RoomAvatar
           accountId={room.account_id}
-          mxcUrl={room.avatar_url ?? null}
+          mxcUrl={roomListAvatarUrl(room, rooms.dmAvatars.value)}
           title={title}
           color={roomAvatarColor(key)}
         />

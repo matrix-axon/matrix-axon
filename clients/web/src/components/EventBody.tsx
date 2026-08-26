@@ -23,9 +23,14 @@ function MediaBody({
       // A still-uploading echo is deliberately not in the viewer's sequence,
       // so it keeps its own lightbox rather than opening one that omits it.
       eventId={pending ? undefined : event.event_id}
+      content={event.content}
     />
   ) : (
-    <MediaAttachment accountId={event.account_id} media={media} />
+    <MediaAttachment
+      accountId={event.account_id}
+      media={media}
+      content={event.content}
+    />
   )
 }
 

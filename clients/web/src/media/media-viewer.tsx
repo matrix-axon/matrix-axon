@@ -9,6 +9,7 @@ import {
   useState,
 } from 'preact/hooks'
 import { Lightbox, LightboxImage } from '../components/Lightbox'
+import { MediaCaption } from '../components/MediaCaption'
 import { imageSequence, type LightboxItem } from './image-sequence'
 import { useMediaBlob } from './use-media-blob'
 import { downloadMedia, isDownloadable } from './download-media'
@@ -555,7 +556,15 @@ export function MediaViewerProvider({
       {item !== null && item.media.url !== null && (
         <Lightbox
           label={item.media.caption ?? item.media.filename}
-          caption={item.media.caption}
+          caption={
+            item.media.caption === null ? null : (
+              <MediaCaption
+                accountId={item.accountId ?? accountId}
+                caption={item.media.caption}
+                content={item.event.content}
+              />
+            )
+          }
           restoreTo={restoreTo}
           paging={{
             index,

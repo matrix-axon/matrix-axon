@@ -78,3 +78,17 @@ export function isoCalendarDay(ts: number): string {
   const day = String(date.getDate()).padStart(2, '0')
   return `${date.getFullYear()}-${month}-${day}`
 }
+
+export function sameLocalDay(a: number, b: number): boolean {
+  return isoCalendarDay(a) === isoCalendarDay(b)
+}
+
+/** Timeline day heading: "Mon, Jun 1, 2026". */
+export function formatTimelineDay(ts: number): string {
+  return new Date(ts).toLocaleDateString(undefined, {
+    weekday: 'short',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
+}

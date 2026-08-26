@@ -8,6 +8,7 @@ import {
   type PreviewKind,
 } from '../media/preview-kind'
 import { useServices } from '../services'
+import { MediaCaption } from './MediaCaption'
 import { MediaPreview } from './MediaPreview'
 import { MediaTile } from './MediaTile'
 
@@ -39,9 +40,12 @@ const PREVIEW_VERB: Record<Extract<PreviewKind, 'audio' | 'text'>, string> = {
 export function MediaAttachment({
   accountId,
   media,
+  content,
 }: {
   accountId: string
   media: ParsedMedia
+  /** Event `content`, so a caption with `formatted_body` can use it. */
+  content?: unknown
 }) {
   const { media: service } = useServices()
   const [downloading, setDownloading] = useState(false)
@@ -85,6 +89,7 @@ export function MediaAttachment({
           accountId={accountId}
           media={media}
           kind={plan.kind}
+          content={content}
           onOpen={() => setExpanded(true)}
         >
           {downloadButton}
@@ -97,7 +102,13 @@ export function MediaAttachment({
           <span class="media-attachment-meta">
             <span class="media-attachment-name">{media.filename}</span>
             {media.caption !== null && (
-              <span class="media-attachment-caption">{media.caption}</span>
+              <span class="media-attachment-caption">
+                <MediaCaption
+                  accountId={accountId}
+                  caption={media.caption}
+                  content={content}
+                />
+              </span>
             )}
             {size !== null && <span class="muted">{size}</span>}
             {error !== null && (
@@ -132,6 +143,7 @@ export function MediaAttachment({
           accountId={accountId}
           media={media}
           plan={plan}
+          content={content}
           onClose={framed ? () => setExpanded(false) : undefined}
         />
       )}

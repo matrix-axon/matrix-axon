@@ -258,6 +258,13 @@ function renderRoom(
               : (options.members ?? []),
         }),
     ),
+    http.get(
+      `${TEST_BASE_URL}/v1/media/${ACCOUNT}/hs/avatar`,
+      () =>
+        new HttpResponse('avatar-bytes', {
+          headers: { 'content-type': 'image/png' },
+        }),
+    ),
   )
   window.history.replaceState(
     null,
@@ -321,6 +328,103 @@ describe('RoomPage', () => {
     expect(container.querySelectorAll('.day-separator')).toHaveLength(2)
   })
 
+  it('keeps only one message action bar open at a time', async () => {
+    const { findByText, container } = renderRoom([
+      event('$1', T0),
+      event('$2', T0 + 1),
+    ])
+    await findByText('body of $1')
+    const row1 = container.querySelector('li.event-row[data-event-id="$1"]')!
+    const row2 = container.querySelector('li.event-row[data-event-id="$2"]')!
+
+    fireEvent.click(row1.querySelector('.event-body')!)
+    expect(row1.classList.contains('actions-open')).toBe(true)
+    expect(row2.classList.contains('actions-open')).toBe(false)
+
+    fireEvent.click(row2.querySelector('.event-body')!)
+    expect(row1.classList.contains('actions-open')).toBe(false)
+    expect(row2.classList.contains('actions-open')).toBe(true)
+  })
+
+  it('closes inspect when another row takes the action bar', async () => {
+    const { services, findByText, findByRole, container } = renderRoom([
+      event('$1', T0),
+      event('$2', T0 + 1),
+    ])
+    services.settings.developerMode.value = true
+    await findByText('body of $1')
+    const row1 = container.querySelector<HTMLElement>(
+      'li.event-row[data-event-id="$1"]',
+    )!
+    const row2 = container.querySelector<HTMLElement>(
+      'li.event-row[data-event-id="$2"]',
+    )!
+
+    fireEvent.click(row1.querySelector('.event-body')!)
+    fireEvent.click(within(row1).getByRole('button', { name: 'Inspect' }))
+    expect(
+      await findByRole('region', { name: 'Event diagnostics for $1' }),
+    ).toBeTruthy()
+
+    fireEvent.click(row2.querySelector('.event-body')!)
+    await waitFor(() =>
+      expect(
+        container.querySelector('[aria-label="Event diagnostics for $1"]'),
+      ).toBeNull(),
+    )
+    expect(row1.classList.contains('actions-open')).toBe(false)
+  })
+
+  it('opens the action bar from a touch tap, not only a mouse click', async () => {
+    const { findByText, container } = renderRoom([event('$1', T0)])
+    await findByText('body of $1')
+    const row = container.querySelector('li.event-row[data-event-id="$1"]')!
+    const body = row.querySelector('.event-body')!
+
+    fireEvent.pointerDown(body, {
+      pointerType: 'touch',
+      pointerId: 1,
+      clientX: 40,
+      clientY: 40,
+    })
+    fireEvent.pointerUp(body, {
+      pointerType: 'touch',
+      pointerId: 1,
+      clientX: 42,
+      clientY: 41,
+    })
+
+    expect(row.classList.contains('actions-open')).toBe(true)
+  })
+
+  it('does not open the action bar when the touch was a scroll', async () => {
+    const { findByText, container } = renderRoom([event('$1', T0)])
+    await findByText('body of $1')
+    const row = container.querySelector('li.event-row[data-event-id="$1"]')!
+    const body = row.querySelector('.event-body')!
+
+    fireEvent.pointerDown(body, {
+      pointerType: 'touch',
+      pointerId: 1,
+      clientX: 40,
+      clientY: 40,
+    })
+    fireEvent.pointerMove(body, {
+      pointerType: 'touch',
+      pointerId: 1,
+      clientX: 40,
+      clientY: 80,
+    })
+    fireEvent.pointerUp(body, {
+      pointerType: 'touch',
+      pointerId: 1,
+      clientX: 40,
+      clientY: 80,
+    })
+
+    expect(row.classList.contains('actions-open')).toBe(false)
+  })
+
   it('does not expose the raw room id in the composer while the title loads', async () => {
     const { findByText, getByRole } = renderRoom([event('$1', T0)], {
       roomsPending: true,
@@ -371,7 +475,18 @@ describe('RoomPage', () => {
     const panel = await findByRole('complementary', {
       name: 'Room information',
     })
-    expect(within(panel).getByText('Daily operations')).toBeTruthy()
+    expect(panel.querySelector('.room-info-identity-name')?.textContent).toBe(
+      'Ops',
+    )
+    expect(panel.querySelector('.room-info-identity-topic')?.textContent).toBe(
+      'Daily operations',
+    )
+    await waitFor(() => {
+      expect(
+        panel.querySelector('.room-info-identity .room-avatar img'),
+      ).toBeTruthy()
+    })
+    expect(within(panel).getAllByText('Daily operations').length).toBe(2)
     expect(within(panel).getByText('#ops:hs')).toBeTruthy()
     expect(
       within(panel).getAllByText('Unavailable from current API').length,
@@ -1222,6 +1337,41 @@ describe('RoomPage', () => {
     expect(inspector.textContent).toContain('"type": "m.call.invite"')
     expect(inspector.textContent).toContain('"call_id": "call-1"')
     expect(inspector.textContent).toContain('"sender_trust": "verified"')
+  })
+
+  it('copies inspect JSON from the title-bar clipboard control', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const { services, findByText, findByRole } = renderRoom([
+      event('$debug', T0, {
+        type: 'm.call.invite',
+        body: null,
+        content: { call_id: 'call-1' },
+        sender_trust: 'verified',
+      }),
+    ])
+
+    services.settings.developerMode.value = true
+    expect(await findByText('unsupported event: m.call.invite')).toBeTruthy()
+    fireEvent.click(await findByRole('button', { name: 'Inspect' }))
+    const inspector = await findByRole('region', {
+      name: 'Event diagnostics for $debug',
+    })
+    fireEvent.click(await findByRole('button', { name: 'Copy API event data' }))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledOnce())
+    expect(inspector.querySelector('[role="status"]')?.textContent).toBe(
+      'Copied',
+    )
+    const payload = JSON.parse(writeText.mock.calls[0][0] as string) as {
+      event_id: string
+      type: string
+      content: { call_id: string }
+    }
+    expect(payload.event_id).toBe('$debug')
+    expect(payload.type).toBe('m.call.invite')
+    expect(payload.content.call_id).toBe('call-1')
+    vi.unstubAllGlobals()
   })
 
   it('tiers state events by the persisted visibility setting', async () => {
@@ -4375,7 +4525,7 @@ describe('RoomPage', () => {
     it('paints the warm slice first, then merges what arrived while away', async () => {
       // The re-entry head fetch is held open, so whatever is on screen before
       // it settles came from the warm store — before phase 1 this was
-      // "Loading timeline…" until the network answered.
+      // "Loading messages…" until the network answered.
       let settle: (response: Response) => void = () => {}
       const { findByText, queryByText, heads } = await roundTrip([
         () =>
@@ -4389,7 +4539,7 @@ describe('RoomPage', () => {
       ])
 
       expect(await findByText('body of $1')).toBeTruthy()
-      expect(queryByText('Loading timeline…')).toBeNull()
+      expect(queryByText('Loading messages…')).toBeNull()
 
       // The held request is in flight by now, so releasing it is not a race.
       await waitFor(() => expect(heads()).toBe(2))

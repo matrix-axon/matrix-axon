@@ -65,7 +65,7 @@ shows it.
 | Shortcuts and help popups                               | `shortcuts`           | `shortcuts`                                                                                               | **n/a**         |
 | Spaces: picker, filtering, hierarchy (ADR 0084)         | **n/a**               | `spaces`                                                                                                  | `rooms`         |
 | Single-pane navigation and Back (ADR 0062)              | **n/a**               | **n/a**                                                                                                   | `rooms`         |
-| Room information panel                                  | **not covered**       | **not covered**                                                                                           | `timeline`      |
+| Room information panel                                  | **not covered**       | `rooms`                                                                                                   | `timeline`      |
 | Unread thread picker (Alt-T)                            | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Search result sort / group / edit toggles               | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Sending media                                           | **not covered**       | **not covered**                                                                                           | **not covered** |

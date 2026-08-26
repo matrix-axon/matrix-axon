@@ -405,10 +405,10 @@ ADR 0087:
 ## Diagnosing reports that only reproduce on someone else's device
 
 The loop is in `docs/adr/0077-web-on-device-perf-readout.md`; the tooling is
-**Settings → Performance instrumentation** (no URL editing, no tethering to a
-Mac). Ask for a screen recording, read the on-screen readout out of the video,
-and measure the behaviour from the same frames. These are the lessons that cost
-the most time in the ADR 0076 investigation:
+**Settings → Debug → Performance instrumentation** (no URL editing, no
+tethering to a Mac). Ask for a screen recording, read the on-screen readout out
+of the video, and measure the behaviour from the same frames. These are the
+lessons that cost the most time in the ADR 0076 investigation:
 
 - **Try the scripted reproduction before asking for a recording.**
   `playwright.config.ts` has a **WebKit project at the iPhone 13 profile**
@@ -432,8 +432,8 @@ the most time in the ADR 0076 investigation:
 - **The room-list boot has a one-line summary** (`boot:room-list`, ADR 0085
   phase 2): `hydrate`, `rows`, `net`, `saved = net - rows` — milliseconds since
   navigation, so they read against each other directly. Turn on Settings →
-  Performance instrumentation, load twice, and read the second load's line off
-  the recording; `saved` is the blank time the cache removed, and a **negative
+  Debug → Performance instrumentation, load twice, and read the second load's
+  line off the recording; `saved` is the blank time the cache removed, and a **negative
   `saved` means the network won and the cache bought nothing on that load**.
   Its absence is data too: a resumed tab runs no new document, so only cold
   opens emit one.
@@ -493,8 +493,9 @@ the most time in the ADR 0076 investigation:
   — but note that only affects _programmatic_ focus, so it does nothing for a
   plain tap into the composer.
 - **The correction _was_ the jitter.** Settled by a mark-proven A/B on a real
-  iPhone (Settings → "Correct iOS keyboard page drift", which renames the mark
-  to `page-scroll-observed` when off, so a recording proves which arm ran).
+  iPhone (Settings → Debug → "Correct iOS keyboard page drift", which renames
+  the mark to `page-scroll-observed` when off, so a recording proves which arm
+  ran).
   Correcting: `offsetTop` oscillates 26 → 2 → 7 → 12 → 21 → 4 → 6 → 9 every
   frame, 15 measurable shell excursions in one capture, keyboard-raise transient
   366 CSS px over 183 ms. Not correcting: `offsetTop` settles to 414–417 and
