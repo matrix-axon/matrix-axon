@@ -29,6 +29,7 @@ test('the boot summary reports the cache winning the race', async ({
   // `read=null` — which is precisely what a device reported while this spec
   // was passing.
   await page.goto('/settings')
+  await page.getByRole('button', { name: 'Debug' }).click()
   await page.getByLabel('Performance instrumentation').check()
   await page.goto('/')
   await expect(page.getByText('E2E Room')).toBeVisible()

@@ -166,6 +166,19 @@ describe('MediaGalleryRow', () => {
     expect(container.querySelector('.gallery-cell .gallery-caption')).toBeNull()
   })
 
+  it('renders markdown in gallery captions', async () => {
+    serveBytes()
+    const { container } = renderRow([
+      image('$1', { filename: 'a.png', body: 'a **bold** caption' }),
+    ])
+    await waitFor(() =>
+      expect(container.querySelector('.gallery-caption strong')).not.toBeNull(),
+    )
+    expect(
+      container.querySelector('.gallery-caption strong')!.textContent,
+    ).toBe('bold')
+  })
+
   it('hands the column count to the CSS instead of repeating it', () => {
     // `ArrowUp`/`ArrowDown` move by `GALLERY_COLUMNS`; the grid used to repeat
     // the number as a CSS literal. Two independent constants that must agree

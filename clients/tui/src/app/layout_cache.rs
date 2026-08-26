@@ -21,10 +21,27 @@
 //! same self-validating treatment: hash what the layout reads, and a mutation
 //! anybody forgets to announce still changes the hash.
 //!
-//! The exception is config-level input (colors, density, time format,
-//! highlight). Those change only on a config reload, and hashing a whole
-//! `ColorScheme` on every tick would cost more than it saves, so they are
-//! covered by [`App::config_generation`] — one counter, bumped in one place.
+//! The exception is config-level input (colors, density, time format). Those
+//! change only on a config reload, and hashing a whole `ColorScheme` on every
+//! tick would cost more than it saves, so they are covered by
+//! [`App::config_generation`] — one counter, bumped in one place.
+//!
+//! # Why the selection is *not* hashed
+//!
+//! It was, and that made every nav keypress a full O(events) re-parse and
+//! re-wrap of the timeline — the same redundant work this cache exists to
+//! remove, on a hotter path than the idle tick (#235).
+//!
+//! It no longer needs to be. `"> "` and `"  "` are the same width, so the
+//! marker's contribution to `body_prefix_cols` — and therefore the wrap width
+//! and `MessageLayout.ranges` — is identical either way. `message_layout` now
+//! builds selection-neutral lines and `draw` restyles the selected message's
+//! header line through `overlay_selection_on_page`, so one cached layout is
+//! correct for *every* selection and moving it is a pure hit.
+//!
+//! `highlight_selected_line` left the layout at the same time and for the same
+//! reason: it only ever decided how the selected line was styled, so it belongs
+//! wherever the selection is applied.
 //!
 //! # Ordering
 //!
@@ -71,7 +88,6 @@ where
 pub(crate) struct LayoutInputs<'a> {
     pub(crate) events: &'a [&'a EventDto],
     pub(crate) sender_labels: &'a [String],
-    pub(crate) selected_message: Option<&'a str>,
     pub(crate) width: usize,
     pub(crate) reactions: &'a HashMap<String, Vec<(String, usize)>>,
     pub(crate) own_senders: &'a HashMap<Uuid, String>,
@@ -89,7 +105,6 @@ fn layout_digest(inputs: &LayoutInputs<'_>) -> u64 {
     let LayoutInputs {
         events,
         sender_labels,
-        selected_message,
         width,
         reactions,
         own_senders,
@@ -129,7 +144,6 @@ fn layout_digest(inputs: &LayoutInputs<'_>) -> u64 {
         event.membership_change().hash(&mut hasher);
     }
     sender_labels.hash(&mut hasher);
-    selected_message.hash(&mut hasher);
     width.hash(&mut hasher);
     hash_sorted_map(reactions, &mut hasher);
     hash_sorted_map(own_senders, &mut hasher);
@@ -166,7 +180,6 @@ impl App {
             let inputs = LayoutInputs {
                 events: events.as_slice(),
                 sender_labels: sender_labels.as_slice(),
-                selected_message: self.messages.selection.as_deref(),
                 width: self.messages.width,
                 reactions: &reactions,
                 own_senders: &self.live.own_senders,
@@ -181,7 +194,6 @@ impl App {
                 let layout = message_layout(
                     inputs.events,
                     inputs.sender_labels,
-                    inputs.selected_message,
                     &self.colors,
                     inputs.width,
                     inputs.reactions,
@@ -190,7 +202,6 @@ impl App {
                     inputs.relations,
                     self.display.message_density,
                     self.display.time_format,
-                    self.display.highlight_selected_line,
                 );
                 // Kept alongside the layout it was built from, so `draw` reads
                 // it instead of rederiving the same O(events) filter+map every

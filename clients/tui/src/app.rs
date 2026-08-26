@@ -50,8 +50,8 @@ mod typing;
 pub(crate) use reactions::{collect_reactions, emoji_matches, unreact_selection_status};
 pub(crate) use render::{
     date_separator_line, display_body_with_sender, format_date, format_time, message_index_at_line,
-    selected_line_style, ImageThumbRows, RelationContext, ReplyPreview, ThreadBadge,
-    IMAGE_THUMB_ROWS,
+    overlay_selection_on_page, selected_line_style, ImageThumbRows, RelationContext, ReplyPreview,
+    ThreadBadge, IMAGE_THUMB_ROWS,
 };
 pub(crate) use room_actions::{PendingRoomAction, RoomActionOutcome};
 pub(crate) use rooms::{account_localpart, apply_edits, dm_title_from_members};

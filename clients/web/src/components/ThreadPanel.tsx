@@ -28,7 +28,9 @@ import { ErrorBanner } from './ErrorBanner'
 import { Fragment } from 'preact'
 import { MediaViewerProvider } from '../media/media-viewer'
 import { MediaGalleryRow } from './MediaGalleryRow'
-import { groupMediaRuns } from '../timeline/group-media-runs'
+import { sameLocalDay } from '../calendar-day'
+import { DaySeparator } from './DaySeparator'
+import { groupMediaRuns, rowTs } from '../timeline/group-media-runs'
 import { EventBody } from './EventBody'
 import { MessageEventRow } from './MessageEventRow'
 import { UserAvatar } from './UserAvatar'
@@ -161,6 +163,26 @@ export function ThreadPanel({
   const [reactionPickerEventId, setReactionPickerEventId] = useState<
     string | null
   >(null)
+  const [actionsOpenEventId, setActionsOpenEventId] = useState<string | null>(
+    null,
+  )
+  /** After a local refresh, ignore the parent's possibly-stale root copy. */
+  const rootRefreshed = useRef(false)
+  const refetchRoot = useCallback(() => {
+    const id = rootId
+    inBackground(
+      api
+        .GET('/v1/accounts/{account_id}/events/{event_id}', {
+          params: { path: { account_id: accountId, event_id: id } },
+        })
+        .then(({ data }) => {
+          if (data !== undefined) {
+            rootRefreshed.current = true
+            setRoot(data.data)
+          }
+        }),
+    )
+  }, [api, accountId, rootId])
   /** Scopes the viewer's focus-restore lookup to this panel's own rows. */
   const threadListRef = useRef<HTMLOListElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -234,6 +256,21 @@ export function ThreadPanel({
     onMutation: search.clear,
     staging,
   })
+
+  /**
+   * A thread send cannot change the root, so only an edit *of* the root pays
+   * for a re-read. The composer clears `action` before it awaits, so the
+   * target is captured here, in the render that owns it.
+   */
+  const submitThreadMessage = async (body: string): Promise<boolean> => {
+    const editingRoot =
+      action?.kind === 'edit' && action.event.event_id === rootId
+    const ok = await submitMessage(body)
+    if (ok && editingRoot) {
+      refetchRoot()
+    }
+    return ok
+  }
 
   // The room page's `?event=` jump owns the main timeline. A thread needs the
   // same lookup against its own paged endpoint, otherwise a deep link closes
@@ -378,11 +415,34 @@ export function ThreadPanel({
   useEffect(() => {
     return live.subscribe((frame) => {
       const event = timelineEvent(frame)
-      if (event !== null) {
-        thread.ingestLive(event)
+      if (event === null) {
+        return
+      }
+      thread.ingestLive(event)
+      if (event.event_id === rootId) {
+        rootRefreshed.current = true
+        setRoot(event)
+        return
+      }
+      const relates = event.relates_to as {
+        rel_type?: unknown
+        event_id?: unknown
+      } | null
+      if (
+        typeof relates?.event_id === 'string' &&
+        relates.event_id === rootId &&
+        (relates.rel_type === 'm.annotation' ||
+          relates.rel_type === 'm.replace')
+      ) {
+        refetchRoot()
+        return
+      }
+      const redacts = (event.content as { redacts?: unknown } | null)?.redacts
+      if (event.type === 'm.room.redaction' && redacts === rootId) {
+        refetchRoot()
       }
     })
-  }, [live, thread])
+  }, [live, refetchRoot, rootId, thread])
 
   // Reconnect gap-fill (ADR 0061): the bus is lossy, so re-read the thread's
   // head after a drop. `reconnects` starts at 0; the initial load above is
@@ -395,6 +455,13 @@ export function ThreadPanel({
   }, [live.reconnects.value, thread])
 
   useEffect(() => {
+    if (rootEvent === undefined || rootRefreshed.current) {
+      return
+    }
+    setRoot(rootEvent)
+  }, [rootEvent])
+
+  useEffect(() => {
     if (root !== undefined) {
       return
     }
@@ -405,8 +472,8 @@ export function ThreadPanel({
           params: { path: { account_id: accountId, event_id: rootId } },
         })
         .then(({ data }) => {
-          if (!cancelled && data !== undefined) {
-            setRoot(data.data)
+          if (!cancelled && data !== undefined && !rootRefreshed.current) {
+            setRoot((current) => current ?? data.data)
           }
         }),
     )
@@ -468,6 +535,8 @@ export function ThreadPanel({
       settings={settings}
       reactionPickerOpen={reactionPickerEventId === event.event_id}
       onSetReactionPicker={setReactionPickerEventId}
+      actionsOpen={actionsOpenEventId === event.event_id}
+      onOpenActions={() => setActionsOpenEventId(event.event_id)}
       onReply={(replyTo) => setAction({ kind: 'reply', event: replyTo })}
       onEdit={(editing) => setAction({ kind: 'edit', event: editing })}
       showThreadAction={false}
@@ -510,12 +579,45 @@ export function ThreadPanel({
           </div>
         )}
         <div ref={rootRef}>
-          <ThreadRoot
-            accountId={accountId}
-            rootId={rootId}
-            root={root}
-            members={members}
-          />
+          {root !== undefined ? (
+            <div class="thread-root thread-root-event">
+              <ol class="event-list">
+                <DaySeparator ts={root.origin_ts} />
+                <MessageEventRow
+                  event={root}
+                  timeline={thread}
+                  members={members}
+                  accountId={accountId}
+                  ownUserId={ownUserId}
+                  highlighted={root.event_id === targetEventId}
+                  settings={settings}
+                  reactionPickerOpen={reactionPickerEventId === root.event_id}
+                  onSetReactionPicker={setReactionPickerEventId}
+                  actionsOpen={actionsOpenEventId === root.event_id}
+                  onOpenActions={() => setActionsOpenEventId(root.event_id)}
+                  onReply={(replyTo) =>
+                    setAction({ kind: 'reply', event: replyTo })
+                  }
+                  onEdit={(editing) =>
+                    setAction({ kind: 'edit', event: editing })
+                  }
+                  showThreadAction={false}
+                  threadRootId={rootId}
+                  onReplyContextJump={jumpToReplyContext}
+                  onMutation={() => {
+                    search.clear()
+                    refetchRoot()
+                  }}
+                />
+              </ol>
+            </div>
+          ) : (
+            <div class="thread-root">
+              <span class="muted">
+                root <code>{rootId}</code>
+              </span>
+            </div>
+          )}
         </div>
         {thread.loading.value ? (
           <p class="muted">Loading thread…</p>
@@ -560,21 +662,39 @@ export function ThreadPanel({
             >
               <div class="timeline-list-shell">
                 <ol ref={threadListRef} class="event-list thread-list">
-                  {rows.map((row) => (
-                    <Fragment key={row.key}>
-                      {row.kind === 'gallery' ? (
-                        <MediaGalleryRow
-                          events={row.events}
-                          accountId={accountId}
-                          members={members}
-                          highlighted={targetEventId}
-                          renderEvent={renderRow}
-                        />
-                      ) : (
-                        renderRow(row.event)
-                      )}
-                    </Fragment>
-                  ))}
+                  {rows.map((row, index) => {
+                    const previousTs =
+                      index === 0
+                        ? (root?.origin_ts ?? null)
+                        : rowTs(rows[index - 1])
+                    const ts = rowTs(row)
+                    // A pending root is not the same as no root. Until it
+                    // resolves there is no day to compare the first reply
+                    // against, and treating that as "new day" flashes a
+                    // separator that disappears once the root lands —
+                    // reliably so on WebKit, which loses that race.
+                    const rootPending = index === 0 && root === undefined
+                    return (
+                      <Fragment key={row.key}>
+                        {!rootPending &&
+                          (previousTs === null ||
+                            !sameLocalDay(previousTs, ts)) && (
+                            <DaySeparator ts={ts} />
+                          )}
+                        {row.kind === 'gallery' ? (
+                          <MediaGalleryRow
+                            events={row.events}
+                            accountId={accountId}
+                            members={members}
+                            highlighted={targetEventId}
+                            renderEvent={renderRow}
+                          />
+                        ) : (
+                          renderRow(row.event)
+                        )}
+                      </Fragment>
+                    )
+                  })}
                 </ol>
               </div>
             </MediaViewerProvider>
@@ -622,7 +742,7 @@ export function ThreadPanel({
         onAttach={attachable ? stage : undefined}
         attachments={{ ...attachments, onRemove: removeAttachment }}
         // The store is thread-scoped, so `thread_root` is already implied.
-        onSubmit={submitMessage}
+        onSubmit={submitThreadMessage}
       />
     </aside>
   )

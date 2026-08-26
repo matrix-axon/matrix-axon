@@ -1,6 +1,7 @@
 import { signal } from '@preact/signals'
 import { useEffect, useMemo, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
+import { CopyableText } from '../components/CopyableText'
 import { ErrorBanner } from '../components/ErrorBanner'
 import { NoticeBanner, type Notice } from '../components/NoticeBanner'
 import { isValidRecoveryKey } from '../recovery-key'
@@ -84,7 +85,9 @@ function AccountCard({ account }: { account: Account }) {
   return (
     <li class={`card account-${account.state}`}>
       <div class="card-head">
-        <strong>{account.user_id}</strong>
+        <CopyableText text={account.user_id} label="user ID">
+          <strong>{account.user_id}</strong>
+        </CopyableText>
         <span class={`badge state-${account.state}`}>{account.state}</span>
         {account.verified === true && (
           <span class="badge verified" title="axon's device is cross-signed">
@@ -93,7 +96,18 @@ function AccountCard({ account }: { account: Account }) {
         )}
         <SyncBadge account={account} />
       </div>
-      <div class="card-meta">{account.homeserver_url}</div>
+      <div class="card-meta">
+        <CopyableText text={id} label="account ID">
+          <code>{id}</code>
+        </CopyableText>
+      </div>
+      {account.homeserver_url !== '' && (
+        <div class="card-meta">
+          <CopyableText text={account.homeserver_url} label="homeserver URL">
+            {account.homeserver_url}
+          </CopyableText>
+        </div>
+      )}
 
       <div class="card-actions">
         {account.state === 'active' && (

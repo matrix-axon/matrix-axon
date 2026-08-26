@@ -16,7 +16,9 @@ import {
   setupInstallPromptCapture,
   type BeforeInstallPromptEvent,
 } from '../install-prompt'
+import { BUILD_INFO } from '../build-info'
 import { TEST_BASE_URL, testServices } from '../test/services'
+import { formatServerBuildLine } from './ServerStatus'
 import { SettingsPage } from './SettingsPage'
 
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
@@ -45,6 +47,7 @@ afterEach(() => {
   cleanupPromptCapture = null
   resetInstallPromptForTest()
   server.resetHandlers()
+  vi.unstubAllGlobals()
 })
 afterAll(() => server.close())
 
@@ -100,13 +103,37 @@ describe('SettingsPage', () => {
     expect(box.checked).toBe(true)
   })
 
-  it('toggles developer mode', () => {
+  it('hides debug settings until Debug is selected', () => {
     const services = testServices()
-    const { getByLabelText } = render(
+    const { getByRole, queryByLabelText } = render(
       <ServicesContext.Provider value={services}>
         <SettingsPage />
       </ServicesContext.Provider>,
     )
+
+    expect(queryByLabelText('Developer mode')).toBeNull()
+    expect(queryByLabelText('Performance instrumentation')).toBeNull()
+    expect(queryByLabelText('Correct iOS keyboard page drift')).toBeNull()
+
+    fireEvent.click(getByRole('button', { name: 'Debug' }))
+
+    expect(queryByLabelText('Developer mode')).not.toBeNull()
+    expect(queryByLabelText('Performance instrumentation')).not.toBeNull()
+    expect(queryByLabelText('Correct iOS keyboard page drift')).not.toBeNull()
+
+    fireEvent.click(getByRole('button', { name: 'Debug' }))
+
+    expect(queryByLabelText('Developer mode')).toBeNull()
+  })
+
+  it('toggles developer mode from the Debug section', () => {
+    const services = testServices()
+    const { getByLabelText, getByRole } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    fireEvent.click(getByRole('button', { name: 'Debug' }))
     const box = getByLabelText('Developer mode') as HTMLInputElement
 
     expect(box.checked).toBe(false)
@@ -475,6 +502,67 @@ describe('SettingsPage', () => {
     )
 
     expect(getByText(/Web client/)).toBeTruthy()
+  })
+
+  it('copies the web client version from the footer', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { getByRole, findByRole } = render(
+      <ServicesContext.Provider value={testServices()}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+
+    fireEvent.click(getByRole('button', { name: 'Copy web client version' }))
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(BUILD_INFO.displayVersion),
+    )
+    expect((await findByRole('status')).textContent).toBe('Copied')
+  })
+
+  it('copies the axon server version from server status', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/status`, () =>
+        HttpResponse.json({
+          data: {
+            backfill: { paused: false, free_bytes: 0, accounts: [] },
+            build: {
+              version: '0.15.0',
+              git_hash: 'abcdef1234567890',
+              profile: 'release',
+              build_time: '2026-07-22T12:34:56Z',
+              rustc_version: 'rustc 1.89.0',
+            },
+          },
+        }),
+      ),
+    )
+    const { findByRole } = render(
+      <ServicesContext.Provider value={testServices()}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+
+    fireEvent.click(await findByRole('button', { name: 'Copy server status' }))
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        formatServerBuildLine({
+          version: '0.15.0',
+          git_hash: 'abcdef1234567890',
+          profile: 'release',
+          build_time: '2026-07-22T12:34:56Z',
+          rustc_version: 'rustc 1.89.0',
+        }),
+      ),
+    )
   })
 })
 

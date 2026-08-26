@@ -114,6 +114,7 @@ function roomsStub() {
     stale: computed(() => false),
     error: signal<string | null>(null),
     titles: computed(() => new Map<string, string>()),
+    dmAvatars: computed(() => new Map<string, string>()),
     refresh: () => {
       refreshes += 1
       return Promise.resolve()

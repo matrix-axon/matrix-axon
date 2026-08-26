@@ -78,6 +78,15 @@ describe('MediaTile', () => {
     expect(getByText('3:07')).toBeTruthy()
   })
 
+  it('renders markdown in the tile caption', () => {
+    const { container } = renderAttachment(
+      video({ caption: 'a **bold** caption' }),
+    )
+    const caption = container.querySelector('.media-attachment-caption')
+    expect(caption?.querySelector('strong')?.textContent).toBe('bold')
+    expect(caption?.textContent).toBe('a bold caption')
+  })
+
   it('shows a sender-supplied thumbnail as the poster', async () => {
     server.use(
       http.get(

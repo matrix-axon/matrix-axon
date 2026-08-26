@@ -7,6 +7,7 @@ export type EventActionIconName =
   | 'confirm'
   | 'cancel'
   | 'inspect'
+  | 'copy'
 
 /** Shared iconography for message actions in rows and the media viewer. */
 export function EventActionIcon({ name }: { name: EventActionIconName }) {
@@ -130,6 +131,31 @@ function eventActionIconPath(name: EventActionIconName) {
           stroke-linejoin="round"
           stroke-width="2"
         />
+      )
+    case 'copy':
+      // Lucide `clipboard` (ISC), same stroke language as the sibling icons.
+      return (
+        <>
+          <rect
+            width="8"
+            height="4"
+            x="8"
+            y="2"
+            rx="1"
+            ry="1"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          />
+          <path
+            d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"
+            fill="none"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+          />
+        </>
       )
   }
 }

@@ -5,7 +5,7 @@
 //! drag an import list with it.
 
 pub(super) use crate::api::{AccountDto, AccountState, MemberDto, TimelinePage, VerificationFrame};
-pub(super) use crate::app::render::message_layout;
+pub(super) use crate::app::render::{message_layout, SELECTED_MARKER, UNSELECTED_MARKER};
 pub(super) use crate::app::search_flow::{SearchJumpAction, SearchJumpThreadLoad, SearchOutcome};
 pub(super) use crate::command::HELP_COMMANDS;
 pub(super) use crate::config::TimeFormat;
