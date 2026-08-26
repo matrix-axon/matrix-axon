@@ -91,7 +91,7 @@ function AccountCard({ account }: { account: Account }) {
             verified
           </span>
         )}
-        <SyncBadge account={account} />
+        {account.state === 'active' && <SyncBadge account={account} />}
       </div>
       <div class="card-meta">
         <CopyableText text={id} label="account ID">

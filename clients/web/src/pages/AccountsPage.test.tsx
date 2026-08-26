@@ -100,6 +100,15 @@ describe('AccountsPage', () => {
     expect(getByText('deactivated')).toBeTruthy()
   })
 
+  it('does not show sync readiness for a deactivated account', async () => {
+    const { findByText, queryByText } = renderPage([
+      { ...BOB, sync_state: 'connecting' },
+    ])
+
+    expect(await findByText('deactivated')).toBeTruthy()
+    expect(queryByText('connecting')).toBeNull()
+  })
+
   it('copies user id, account id, and homeserver URL from a card', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', {
