@@ -21,7 +21,7 @@ import { layoutMode, SINGLE_PANE_QUERY } from './layout'
 import type { Account } from './stores/accounts'
 import type { EventDto } from './stores/timeline'
 import { memoryStorage } from './test/memory-storage'
-import { TEST_BASE_URL, testServices } from './test/services'
+import { TEST_BASE_URL, UNKNOWN_BACKUP, testServices } from './test/services'
 
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
 const ROOM = '!room:hs'
@@ -35,6 +35,7 @@ const ACCOUNT_DTO: Account = {
   state: 'active',
   sync_state: 'ready',
   verified: true,
+  backup: UNKNOWN_BACKUP,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 }

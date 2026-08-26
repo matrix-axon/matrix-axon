@@ -147,6 +147,12 @@ pub struct Account {
     /// [`Store::set_account_verified`]; `false` for a never-verified or
     /// not-yet-synced device.
     pub verified: bool,
+    /// Durable intent that a megolm backup enable/export is in flight (ADR 0098).
+    /// Set true before `recovery().enable_backup()`; cleared only after
+    /// `export_secrets` succeeds. Crash-resume uses this plus this device's
+    /// `auth_data` signature to decide whether a homeserver backup version is
+    /// ours to replace.
+    pub backup_enable_intent: bool,
     /// Reserved sync-position cursor; the SyncService manages its own position
     /// in its SQLite store, so this currently stays `NULL`.
     pub sync_token: Option<String>,
@@ -168,6 +174,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for Account {
             auth_kind: AccountAuthKind::from_db(&auth_kind)?,
             state: AccountState::from_db(&state)?,
             verified: row.try_get("verified")?,
+            backup_enable_intent: row.try_get("backup_enable_intent")?,
             sync_token: row.try_get("sync_token")?,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
@@ -177,7 +184,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for Account {
 
 /// Columns selected for an [`Account`] (no encrypted token).
 const ACCOUNT_COLUMNS: &str = "account_id, user_id, homeserver_url, device_id, \
-    auth_kind, state, verified, sync_token, created_at, updated_at";
+    auth_kind, state, verified, backup_enable_intent, sync_token, created_at, updated_at";
 
 impl Store {
     /// Insert the account for `(user_id, homeserver_url)`, or return the
@@ -339,6 +346,24 @@ impl Store {
             .bind(verified)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Set the durable megolm-backup enable/export intent (ADR 0098).
+    /// `true` before `enable_backup()`; `false` only after `export_secrets`
+    /// succeeds. The `updated_at` trigger maintains the timestamp.
+    pub async fn set_backup_enable_intent(
+        &self,
+        account_id: Uuid,
+        intent: bool,
+    ) -> Result<(), StoreError> {
+        sqlx_core::query::query(
+            "UPDATE accounts SET backup_enable_intent = $2 WHERE account_id = $1",
+        )
+        .bind(account_id)
+        .bind(intent)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

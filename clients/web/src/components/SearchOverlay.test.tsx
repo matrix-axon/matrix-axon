@@ -4,7 +4,7 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { App } from '../app'
 import type { components } from '../api/schema'
-import { TEST_BASE_URL, testServices } from '../test/services'
+import { TEST_BASE_URL, UNKNOWN_BACKUP, testServices } from '../test/services'
 
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
 const ROOM = '!ops:hs'
@@ -16,6 +16,7 @@ function account(): components['schemas']['AccountDto'] {
     homeserver_url: 'https://hs',
     state: 'active',
     sync_state: 'ready',
+    backup: UNKNOWN_BACKUP,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
   }

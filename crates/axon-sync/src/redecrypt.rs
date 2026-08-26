@@ -68,11 +68,12 @@ pub struct RedecryptSummary {
 }
 
 impl RedecryptSummary {
-    pub fn timed_out() -> Self {
-        Self {
-            timed_out: true,
-            ..Self::default()
-        }
+    /// Preserve counts from an in-flight sweep and mark it timed out (ADR 0098).
+    /// A timeout is not `selected=0`.
+    pub fn timed_out(mut summary: Self) -> Self {
+        summary.timed_out = true;
+        summary.still_pending = summary.selected.saturating_sub(summary.decrypted);
+        summary
     }
 }
 
@@ -166,12 +167,17 @@ pub(crate) async fn run(
 /// One startup pass over every pending UTD for the account. Keys already in the
 /// crypto store (from a prior run or a just-finished `recover()`) won't fire the
 /// arrival stream, so we retry the full backlog once at boot.
+///
+/// `cancel` is checked per room so a recover/manual timeout can stop the sweep
+/// and still return the partial summary (ADR 0098). The boot path races this
+/// against the supervised task's cancel token.
 pub(crate) async fn sweep_pending_utds(
     client: &Client,
     store: &Store,
     account_id: Uuid,
     scope: SweepScope,
     index: Option<&IndexHandle>,
+    cancel: &CancellationToken,
 ) -> RedecryptSummary {
     let rows = match scope {
         SweepScope::StartupUnattempted => store.pending_utds_for_startup_attempt(account_id).await,
@@ -192,7 +198,8 @@ pub(crate) async fn sweep_pending_utds(
     // `from_backup`: recover() imported the backup *decryption key* but not the
     // room keys themselves, so the sweep must pull them from the server backup
     // before decrypting (see redecrypt_rows).
-    let mut summary = redecrypt_rows(client, store, account_id, rows, true, index).await;
+    let mut summary =
+        redecrypt_rows(client, store, account_id, rows, true, index, Some(cancel)).await;
     summary.selected = selected;
     summary.still_pending = summary.selected.saturating_sub(summary.decrypted);
     if matches!(scope, SweepScope::StartupUnattempted) {
@@ -240,7 +247,7 @@ async fn redecrypt_session(
         return;
     }
     // The arrival stream's keys are already in the crypto store — no backup fetch.
-    redecrypt_rows(client, store, account_id, rows, false, index).await;
+    redecrypt_rows(client, store, account_id, rows, false, index, None).await;
 }
 
 /// Re-decrypt a set of pending rows, fetching each `Room` handle once. Per-row
@@ -257,6 +264,7 @@ async fn redecrypt_rows(
     rows: Vec<PendingUtd>,
     from_backup: bool,
     index: Option<&IndexHandle>,
+    cancel: Option<&CancellationToken>,
 ) -> RedecryptSummary {
     let mut summary = RedecryptSummary::default();
     let mut by_room: HashMap<String, Vec<PendingUtd>> = HashMap::new();
@@ -265,6 +273,10 @@ async fn redecrypt_rows(
     }
 
     for (room_id, rows) in by_room {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            summary.timed_out = true;
+            break;
+        }
         let Some(room) = room_handle(client, &room_id) else {
             tracing::warn!(%account_id, room_id, "no room handle; skipping re-decryption for room");
             continue;
@@ -280,11 +292,18 @@ async fn redecrypt_rows(
             }
         }
         for row in &rows {
+            if cancel.is_some_and(CancellationToken::is_cancelled) {
+                summary.timed_out = true;
+                break;
+            }
             summary.attempted += 1;
             summary.attempted_event_ids.push(row.event_id.clone());
             if redecrypt_one(&room, store, account_id, row, index).await {
                 summary.decrypted += 1;
             }
+        }
+        if summary.timed_out {
+            break;
         }
     }
     summary
@@ -504,5 +523,24 @@ mod tests {
         let (content, event_type) = extract_decrypted(&ev).expect("decrypted fields");
         assert_eq!(event_type, "m.room.message");
         assert_eq!(content["body"], "hello from a re-decrypted message");
+    }
+
+    #[test]
+    fn timed_out_preserves_counts() {
+        let summary = RedecryptSummary {
+            selected: 22_521,
+            attempted: 100,
+            decrypted: 0,
+            still_pending: 0,
+            startup_marked: 0,
+            timed_out: false,
+            attempted_event_ids: Vec::new(),
+        };
+        let out = RedecryptSummary::timed_out(summary);
+        assert!(out.timed_out);
+        assert_eq!(out.selected, 22_521);
+        assert_eq!(out.attempted, 100);
+        assert_eq!(out.decrypted, 0);
+        assert_eq!(out.still_pending, 22_521);
     }
 }

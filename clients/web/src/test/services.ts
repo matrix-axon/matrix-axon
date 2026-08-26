@@ -50,6 +50,14 @@ import { memoryStorage } from './memory-storage'
 /** msw handlers in component tests register against this origin. */
 export const TEST_BASE_URL = 'http://axon.test'
 
+/** Deactivated-shaped `AccountDto.backup` (ADR 0098). Typed fixtures need it. */
+export const UNKNOWN_BACKUP = {
+  exists_on_server: null,
+  this_device_uploading: false,
+  backup_state: 'unknown',
+  recovery_state: 'unknown',
+} as const
+
 /**
  * The real service graph over an in-memory storage and the msw base URL —
  * what `createServices` builds in production, minus the browser globals.

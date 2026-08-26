@@ -343,6 +343,47 @@ async fn set_account_verified_round_trips_orthogonal_to_state() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn set_backup_enable_intent_round_trips_orthogonal_to_state() {
+    let store = common::migrated_store().await;
+    let user = format!("@backup-intent-{}:localhost", Uuid::new_v4());
+    let account = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("upsert");
+
+    assert!(
+        !account.backup_enable_intent,
+        "fresh row defaults intent off (ADR 0098)"
+    );
+
+    store
+        .set_backup_enable_intent(account.account_id, true)
+        .await
+        .expect("set intent");
+    let after = store
+        .get_account(account.account_id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert!(after.backup_enable_intent);
+    assert_eq!(after.state, AccountState::Active);
+
+    store
+        .set_backup_enable_intent(account.account_id, false)
+        .await
+        .expect("clear intent");
+    let cleared = store
+        .get_account(account.account_id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert!(!cleared.backup_enable_intent);
+
+    common::cleanup_account(&common::raw_pool().await, account.account_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn delete_removes_row_and_is_idempotent() {
     let store = common::migrated_store().await;
     let user = format!("@delete-{}:localhost", Uuid::new_v4());

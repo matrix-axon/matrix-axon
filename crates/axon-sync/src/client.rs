@@ -538,6 +538,7 @@ mod tests {
             auth_kind,
             state: AccountState::Active,
             verified: false,
+            backup_enable_intent: false,
             sync_token: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),

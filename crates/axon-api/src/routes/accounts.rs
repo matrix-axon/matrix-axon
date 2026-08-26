@@ -6,17 +6,31 @@
 
 use std::sync::Arc;
 
-use axon_store::Store;
+use axon_store::{Account, Store};
 use axum::extract::State;
 use uuid::Uuid;
 
+use crate::backup_state::BackupStateProvider;
 use crate::dto::{
-    AccountDto, ImportTokenRequest, LoginRequest, RecoverRequest, RedecryptUtdsResponse,
+    AccountDto, EnableBackupRequest, EnableBackupResponseDto, ImportTokenRequest, LoginRequest,
+    RecoverRequest, RecoverResponseDto, RedecryptUtdsResponse,
 };
 use crate::extract::{Json, Path};
 use crate::lifecycle::AccountLifecycle;
 use crate::response::{ApiError, ApiResponse};
 use crate::sync_state::SyncStateProvider;
+
+/// Live `AccountDto` for a stored row: sync-state plus a bounded backup snapshot.
+async fn account_dto(
+    account: Account,
+    sync_state: &dyn SyncStateProvider,
+    backup_state: &dyn BackupStateProvider,
+) -> AccountDto {
+    let id = account.account_id;
+    let state = sync_state.sync_state(id).into();
+    let backup = backup_state.snapshot(id).await;
+    AccountDto::from_account(account, state, backup)
+}
 
 /// List the accounts this Axon manages, oldest first — the **client-visible**
 /// set: `active` and `deactivated`.
@@ -37,17 +51,18 @@ use crate::sync_state::SyncStateProvider;
 pub async fn list_accounts(
     State(store): State<Store>,
     State(sync_state): State<Arc<dyn SyncStateProvider>>,
+    State(backup_state): State<Arc<dyn BackupStateProvider>>,
 ) -> Result<ApiResponse<Vec<AccountDto>>, ApiError> {
     let accounts = store.list_client_visible_accounts().await?;
-    Ok(ApiResponse::new(
-        accounts
-            .into_iter()
-            .map(|a| {
-                let state = sync_state.sync_state(a.account_id).into();
-                AccountDto::from_account(a, state)
-            })
-            .collect(),
-    ))
+    // Fan out backup probes so a hung account cannot pin the whole list
+    // (ADR 0098). Each probe is bounded inside the provider.
+    let dtos = futures_util::future::join_all(accounts.into_iter().map(|a| {
+        let sync_state = Arc::clone(&sync_state);
+        let backup_state = Arc::clone(&backup_state);
+        async move { account_dto(a, sync_state.as_ref(), backup_state.as_ref()).await }
+    }))
+    .await;
+    Ok(ApiResponse::new(dtos))
 }
 
 /// Add or reactivate a Matrix account at runtime, then return the resulting
@@ -91,6 +106,7 @@ pub async fn login(
     State(store): State<Store>,
     State(lifecycle): State<Arc<dyn AccountLifecycle>>,
     State(sync_state): State<Arc<dyn SyncStateProvider>>,
+    State(backup_state): State<Arc<dyn BackupStateProvider>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<ApiResponse<AccountDto>, ApiError> {
     let account_id = lifecycle
@@ -103,8 +119,9 @@ pub async fn login(
         .get_account(account_id)
         .await?
         .ok_or_else(ApiError::internal)?;
-    let state = sync_state.sync_state(account_id).into();
-    Ok(ApiResponse::new(AccountDto::from_account(account, state)))
+    Ok(ApiResponse::new(
+        account_dto(account, sync_state.as_ref(), backup_state.as_ref()).await,
+    ))
 }
 
 /// Adopt an existing Matrix access token as a runtime account, then return the
@@ -145,6 +162,7 @@ pub async fn import_token(
     State(store): State<Store>,
     State(lifecycle): State<Arc<dyn AccountLifecycle>>,
     State(sync_state): State<Arc<dyn SyncStateProvider>>,
+    State(backup_state): State<Arc<dyn BackupStateProvider>>,
     Json(req): Json<ImportTokenRequest>,
 ) -> Result<ApiResponse<AccountDto>, ApiError> {
     let account_id = lifecycle
@@ -162,8 +180,9 @@ pub async fn import_token(
         .get_account(account_id)
         .await?
         .ok_or_else(ApiError::internal)?;
-    let state = sync_state.sync_state(account_id).into();
-    Ok(ApiResponse::new(AccountDto::from_account(account, state)))
+    Ok(ApiResponse::new(
+        account_dto(account, sync_state.as_ref(), backup_state.as_ref()).await,
+    ))
 }
 
 /// Log a Matrix account out, then return the resulting (now `deactivated`)
@@ -193,6 +212,7 @@ pub async fn logout(
     State(store): State<Store>,
     State(lifecycle): State<Arc<dyn AccountLifecycle>>,
     State(sync_state): State<Arc<dyn SyncStateProvider>>,
+    State(backup_state): State<Arc<dyn BackupStateProvider>>,
     Path(account_id): Path<Uuid>,
 ) -> Result<ApiResponse<AccountDto>, ApiError> {
     lifecycle.logout(account_id).await?;
@@ -202,27 +222,29 @@ pub async fn logout(
         .get_account(account_id)
         .await?
         .ok_or_else(ApiError::internal)?;
-    let state = sync_state.sync_state(account_id).into();
-    Ok(ApiResponse::new(AccountDto::from_account(account, state)))
+    Ok(ApiResponse::new(
+        account_dto(account, sync_state.as_ref(), backup_state.as_ref()).await,
+    ))
 }
 
 /// Acquire E2EE keys for an **active** account from its Secure-Storage (4S)
-/// recovery key, then return the account with its `verified` flag re-derived. One
-/// SDK call imports the account's megolm key backup + cross-signing keys —
-/// self-verifying axon's device with no interactive partner — and any
-/// already-stored UTDs the keys unlock are back-filled. The recovery key is used
-/// once and never persisted.
+/// recovery key, then return the account with its `verified` flag re-derived
+/// and an honest megolm-backup action (ADR 0098). Cross-signing is imported
+/// from 4S; if the homeserver has no megolm backup, recover auto-enables one
+/// using this same key (it does not mint a new recovery key). Stored UTDs the
+/// imported keys unlock are back-filled under a 30s cap. The recovery key is
+/// used once and never persisted.
 ///
-/// A `200` means the **keys were imported** (the recovery succeeded); the returned
-/// `verified` reflects the freshly-derived cross-signing state, which is `true` in
-/// the normal case but is a *derived observation*, not a guaranteed postcondition
-/// (e.g. a partial Secure-Backup that imports the megolm key but not the
-/// cross-signing keys would import successfully yet stay unverified).
+/// A `200` means **4S import succeeded**, not that history keys downloaded and
+/// not that backup enabled. The flattened body keeps `account_id` / `verified`
+/// at the top level for existing clients; `backup_action` and `redecrypt` are
+/// additive siblings. `verified` is a derived observation of cross-signing.
 ///
 /// The account must be `active`: a logged-out (`deactivated`) account is a `409`
 /// (log in first), as is one mid-deletion (`deleting`). A wrong/rotated key, or an
 /// account that never set up Secure Backup, is a `400` (a readable error, not a
-/// silent permanent UTD). An unknown id is a `404`.
+/// silent permanent UTD). An unknown id is a `404`. Recover never 409s because
+/// an existing homeserver backup needs joining.
 ///
 /// Secret-bearing; gated by the bearer-token auth layer like every `/v1/` route
 /// (M7b, ADR 0029).
@@ -234,7 +256,7 @@ pub async fn logout(
     ),
     request_body = RecoverRequest,
     responses(
-        (status = 200, description = "Keys imported; account returned with `verified` re-derived (normally true)", body = ApiResponse<AccountDto>),
+        (status = 200, description = "4S import succeeded; flattened account plus `redecrypt` and `backup_action`", body = ApiResponse<RecoverResponseDto>),
         (status = 400, description = "The recovery key was wrong/rotated, or the account has no Secure Backup", body = crate::response::ErrorResponse),
         (status = 404, description = "No such account", body = crate::response::ErrorResponse),
         (status = 409, description = "The account is not active (logged out — log in first) or is being deleted", body = crate::response::ErrorResponse),
@@ -245,10 +267,11 @@ pub async fn recover(
     State(store): State<Store>,
     State(lifecycle): State<Arc<dyn AccountLifecycle>>,
     State(sync_state): State<Arc<dyn SyncStateProvider>>,
+    State(backup_state): State<Arc<dyn BackupStateProvider>>,
     Path(account_id): Path<Uuid>,
     Json(req): Json<RecoverRequest>,
-) -> Result<ApiResponse<AccountDto>, ApiError> {
-    lifecycle.recover(account_id, &req.recovery_key).await?;
+) -> Result<ApiResponse<RecoverResponseDto>, ApiError> {
+    let result = lifecycle.recover(account_id, &req.recovery_key).await?;
     // Read the row back so the response reflects the freshly-derived `verified`
     // state. The account was just operated on, so a missing row is a real
     // inconsistency.
@@ -256,8 +279,58 @@ pub async fn recover(
         .get_account(account_id)
         .await?
         .ok_or_else(ApiError::internal)?;
-    let state = sync_state.sync_state(account_id).into();
-    Ok(ApiResponse::new(AccountDto::from_account(account, state)))
+    Ok(ApiResponse::new(RecoverResponseDto {
+        account: account_dto(account, sync_state.as_ref(), backup_state.as_ref()).await,
+        redecrypt: RedecryptUtdsResponse::from(result.redecrypt),
+        backup_action: result.backup_action.into(),
+    }))
+}
+
+/// Originate megolm key backup, export `m.megolm_backup.v1` into existing 4S,
+/// resume a crashed create, or kick an already-enabled upload (ADR 0098).
+/// Never mints a new recovery key. Never deletes someone else's backup.
+///
+/// `recovery_key` is required for create, export-only, and crash-resume
+/// replace. Omitting it is kick-upload only. Unverified device or a
+/// homeserver backup this device is not connected to (and did not sign with
+/// intent) is a `409`.
+#[utoipa::path(
+    post,
+    path = "/v1/accounts/{account_id}/backup/enable",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account id"),
+    ),
+    request_body = EnableBackupRequest,
+    responses(
+        (status = 200, description = "Flattened account plus `backup_action`", body = ApiResponse<EnableBackupResponseDto>),
+        (status = 400, description = "recovery_key required, or the account has no 4S (Axon will not mint a new key)", body = crate::response::ErrorResponse),
+        (status = 404, description = "No such account", body = crate::response::ErrorResponse),
+        (status = 409, description = "Not active, unverified, or an existing HS backup this device is not connected to", body = crate::response::ErrorResponse),
+    ),
+    tag = "accounts",
+)]
+pub async fn enable_backup(
+    State(store): State<Store>,
+    State(lifecycle): State<Arc<dyn AccountLifecycle>>,
+    State(sync_state): State<Arc<dyn SyncStateProvider>>,
+    State(backup_state): State<Arc<dyn BackupStateProvider>>,
+    Path(account_id): Path<Uuid>,
+    Json(req): Json<EnableBackupRequest>,
+) -> Result<ApiResponse<EnableBackupResponseDto>, ApiError> {
+    let recovery_key = req
+        .recovery_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty());
+    let backup_action = lifecycle.enable_backup(account_id, recovery_key).await?;
+    let account = store
+        .get_account(account_id)
+        .await?
+        .ok_or_else(ApiError::internal)?;
+    Ok(ApiResponse::new(EnableBackupResponseDto {
+        account: account_dto(account, sync_state.as_ref(), backup_state.as_ref()).await,
+        backup_action: backup_action.into(),
+    }))
 }
 
 /// Explicitly retry every pending UTD for an active account. The default startup
@@ -340,12 +413,14 @@ pub async fn delete_account(
 pub async fn get_account(
     State(store): State<Store>,
     State(sync_state): State<Arc<dyn SyncStateProvider>>,
+    State(backup_state): State<Arc<dyn BackupStateProvider>>,
     Path(account_id): Path<Uuid>,
 ) -> Result<ApiResponse<AccountDto>, ApiError> {
     let account = store
         .get_account(account_id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("account {account_id} not found")))?;
-    let state = sync_state.sync_state(account_id).into();
-    Ok(ApiResponse::new(AccountDto::from_account(account, state)))
+    Ok(ApiResponse::new(
+        account_dto(account, sync_state.as_ref(), backup_state.as_ref()).await,
+    ))
 }

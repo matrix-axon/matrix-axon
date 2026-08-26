@@ -1204,6 +1204,80 @@ impl From<&'static str> for SyncStateDto {
     }
 }
 
+/// SDK `BackupState` on the wire (ADR 0098). Closed enum; not inferred from
+/// `verified` or `RecoveryState`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupStateDto {
+    Unknown,
+    Creating,
+    Enabling,
+    Resuming,
+    Enabled,
+    Downloading,
+    Disabling,
+}
+
+/// SDK `RecoveryState` on the wire (ADR 0098). Must not be treated as
+/// "megolm keys are in backup."
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryStateDto {
+    Unknown,
+    Enabled,
+    Disabled,
+    Incomplete,
+}
+
+/// What this recover / enable-backup request did about megolm backup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupActionDto {
+    /// Import connected this device to an existing HS backup (4S had the key).
+    Joined,
+    /// This request created an HS backup (none existed) and exported
+    /// `m.megolm_backup.v1` into existing 4S.
+    Enabled,
+    /// This device has a local backup key (`are_enabled`) but 4S still lacks
+    /// `m.megolm_backup.v1`. Retry enable (export-only).
+    ExportPending,
+    /// 4S import / CS succeeded; create or export failed. Retry
+    /// `POST .../backup/enable`. Recover is still 200.
+    Failed,
+    /// This device was already `BackupState::Enabled` and 4S already had the
+    /// megolm secret; we only kicked a bounded upload wait.
+    AlreadyUploading,
+}
+
+/// Live megolm-backup observation. Orthogonal to `verified` (ADR 0098).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct BackupSnapshotDto {
+    /// Homeserver has a backup version.
+    /// `null` if we did not ask (deactivated/deleting) or the bounded probe
+    /// failed. GET uses the SDK's cached `exists_on_server()` — another
+    /// client creating backup can leave this stale until enable/recover
+    /// re-fetches.
+    pub exists_on_server: Option<bool>,
+    /// This device has a local backup decryption key + version and can upload.
+    pub this_device_uploading: bool,
+    pub backup_state: BackupStateDto,
+    /// Must not be treated as "megolm keys are in backup."
+    pub recovery_state: RecoveryStateDto,
+}
+
+impl BackupSnapshotDto {
+    /// Deactivated / deleting / unknown / failed-probe shape: no homeserver
+    /// call, never a stale `this_device_uploading: true`.
+    pub fn unknown() -> Self {
+        Self {
+            exists_on_server: None,
+            this_device_uploading: false,
+            backup_state: BackupStateDto::Unknown,
+            recovery_state: RecoveryStateDto::Unknown,
+        }
+    }
+}
+
 /// An account in the lifecycle read API (`GET /v1/accounts`,
 /// `GET /v1/accounts/{account_id}`). The encrypted access token is deliberately
 /// absent — only public lifecycle facts are exposed, never a secret.
@@ -1235,6 +1309,11 @@ pub struct AccountDto {
     /// sync service is retrying a lost homeserver connection. Also pushed live
     /// on transition as an `account.sync_state` `/v1/ws` frame.
     pub sync_state: SyncStateDto,
+    /// Live megolm-backup observation (ADR 0098), orthogonal to `verified`.
+    /// Always present; `exists_on_server` is nullable when the probe was
+    /// skipped or failed. GET uses a cached homeserver answer that may lag
+    /// another client's backup creation.
+    pub backup: BackupSnapshotDto,
     /// Row creation time, RFC 3339.
     pub created_at: String,
     /// Last update time, RFC 3339.
@@ -1243,10 +1322,11 @@ pub struct AccountDto {
 
 impl AccountDto {
     /// Build the DTO from a stored row plus its live sync-engine readiness
-    /// (ADR 0030). `sync_state` isn't a stored column — it's read from the
-    /// `SyncStateProvider` port at request time — so every construction site
-    /// supplies it explicitly rather than risk a stale default value.
-    pub fn from_account(a: Account, sync_state: SyncStateDto) -> Self {
+    /// (ADR 0030) and megolm-backup snapshot (ADR 0098). Neither is a stored
+    /// column — they're read from ports at request time — so every
+    /// construction site supplies them explicitly rather than risk a stale
+    /// default value.
+    pub fn from_account(a: Account, sync_state: SyncStateDto, backup: BackupSnapshotDto) -> Self {
         AccountDto {
             account_id: a.account_id,
             user_id: a.user_id,
@@ -1257,6 +1337,7 @@ impl AccountDto {
             // for wire stability; populated from the persisted column.
             verified: Some(a.verified),
             sync_state,
+            backup,
             created_at: a.created_at.to_rfc3339(),
             updated_at: a.updated_at.to_rfc3339(),
         }
@@ -1305,12 +1386,46 @@ pub struct ImportTokenRequest {
 /// Request body for recovery-key key acquisition
 /// (`POST /v1/accounts/{account_id}/recover`). The Secure-Storage (4S) recovery
 /// key imports the account's megolm key backup + cross-signing keys, self-verifies
-/// axon's device, and unlocks stored UTDs. Like the login password it is a
-/// crown-jewel secret: used once to recover and **never persisted** or echoed back.
+/// axon's device, and unlocks stored UTDs. When 4S has cross-signing but the
+/// homeserver has no megolm backup, recover auto-enables backup and exports
+/// `m.megolm_backup.v1` into the existing 4S (ADR 0098). Like the login
+/// password it is a crown-jewel secret: used once to recover and **never
+/// persisted** or echoed back.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RecoverRequest {
     /// The account's Secure-Storage (4S) recovery key.
     pub recovery_key: String,
+}
+
+/// Flattened recover 200 body (ADR 0098): `AccountDto` at the top level so
+/// existing clients keep reading `data.account_id` / `data.verified`, plus
+/// sibling honesty fields.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RecoverResponseDto {
+    #[serde(flatten)]
+    pub account: AccountDto,
+    pub redecrypt: RedecryptUtdsResponse,
+    pub backup_action: BackupActionDto,
+}
+
+/// Request body for originating or joining megolm key backup
+/// (`POST /v1/accounts/{account_id}/backup/enable`). `recovery_key` is
+/// required for create-new, export-only, and crash-resume replace; omitting
+/// it is kick-upload only. Consumed once, never persisted, never logged.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct EnableBackupRequest {
+    /// The account's Secure-Storage (4S) recovery key. Required when 4S
+    /// export is needed; omit to kick an already-enabled upload.
+    #[serde(default)]
+    pub recovery_key: Option<String>,
+}
+
+/// Flattened enable-backup 200 body: `AccountDto` plus what this request did.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EnableBackupResponseDto {
+    #[serde(flatten)]
+    pub account: AccountDto,
+    pub backup_action: BackupActionDto,
 }
 
 /// Result of an explicit UTD re-decryption retry.
@@ -1336,6 +1451,18 @@ impl From<crate::lifecycle::RedecryptUtdsStats> for RedecryptUtdsResponse {
             decrypted: stats.decrypted,
             still_pending: stats.still_pending,
             timed_out: stats.timed_out,
+        }
+    }
+}
+
+impl From<crate::lifecycle::BackupAction> for BackupActionDto {
+    fn from(action: crate::lifecycle::BackupAction) -> Self {
+        match action {
+            crate::lifecycle::BackupAction::Joined => Self::Joined,
+            crate::lifecycle::BackupAction::Enabled => Self::Enabled,
+            crate::lifecycle::BackupAction::ExportPending => Self::ExportPending,
+            crate::lifecycle::BackupAction::Failed => Self::Failed,
+            crate::lifecycle::BackupAction::AlreadyUploading => Self::AlreadyUploading,
         }
     }
 }

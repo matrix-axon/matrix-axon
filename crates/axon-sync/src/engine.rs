@@ -342,6 +342,12 @@ impl SyncEngine {
         self.sync_health.clone()
     }
 
+    /// Live megolm-backup snapshot handle (ADR 0098) for `AccountDto.backup`.
+    /// Cheap to clone (store + client-manager handles).
+    pub fn backup_health(&self) -> crate::backup::BackupHealth {
+        crate::backup::BackupHealth::new(self.store.clone(), self.manager.clone())
+    }
+
     /// The runtime device-verification port, for the API layer's verify routes.
     /// `axon-server` wraps this in an adapter implementing its `VerificationService`
     /// port. Shares this engine's flow registry, task tracker, and cancel token, so
@@ -1599,7 +1605,14 @@ async fn run_account(
     };
     tokio::select! {
         _ = cancel.cancelled() => {}
-        summary = redecrypt::sweep_pending_utds(&client, store, account.account_id, scope, index) => {
+        summary = redecrypt::sweep_pending_utds(
+            &client,
+            store,
+            account.account_id,
+            scope,
+            index,
+            cancel,
+        ) => {
             if summary.selected > 0 {
                 tracing::info!(
                     account_id = %account.account_id,
