@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import { CopyableText } from '../../components/CopyableText'
 import { ErrorBanner } from '../../components/ErrorBanner'
 import { useServices } from '../../services'
 import type { MatrixOAuthQrFlow } from '../../stores/matrix-oauth-qr'
-import type { QrCameraSession } from '../../qr/browser-qr'
+import type { QrCameraDevice, QrCameraSession } from '../../qr/browser-qr'
 
 const STAGE_SUMMARIES: Record<MatrixOAuthQrFlow['stage'], string> = {
   starting: 'Preparing QR sign-in…',
@@ -80,57 +80,137 @@ function QrScanner() {
   const { matrixOAuthQr, qr } = useServices()
   const video = useRef<HTMLVideoElement>(null)
   const session = useRef<QrCameraSession | null>(null)
+  const cameraGeneration = useRef(0)
+  const selectedCameraRef = useRef<string | null>(null)
   const [cameraStarting, setCameraStarting] = useState(false)
   const [cameraActive, setCameraActive] = useState(false)
+  const [cameras, setCameras] = useState<QrCameraDevice[]>([])
+  const [selectedCamera, setSelectedCamera] = useState<string | null>(null)
   const [cameraError, setCameraError] = useState<string | null>(null)
+  const [cameraListError, setCameraListError] = useState<string | null>(null)
   const [imageError, setImageError] = useState<string | null>(null)
   const [decodingImage, setDecodingImage] = useState(false)
 
-  const stopCamera = () => {
+  const selectCamera = useCallback((deviceId: string | null) => {
+    selectedCameraRef.current = deviceId
+    setSelectedCamera(deviceId)
+  }, [])
+
+  const stopCamera = useCallback(() => {
+    cameraGeneration.current += 1
     session.current?.stop()
     session.current = null
     setCameraStarting(false)
     setCameraActive(false)
-  }
+  }, [])
 
-  useEffect(() => stopCamera, [])
+  const refreshCameras = useCallback(
+    async (owner: number, fromDeviceChange = false) => {
+      try {
+        const available = await qr.listCameras()
+        if (owner !== cameraGeneration.current) {
+          return
+        }
+        setCameraListError(null)
+        setCameras(available)
+        const activeDeviceId =
+          session.current?.deviceId ?? selectedCameraRef.current
+        const activeStillAvailable = available.some(
+          (camera) => camera.deviceId === activeDeviceId,
+        )
+        if (
+          fromDeviceChange &&
+          session.current !== null &&
+          activeDeviceId !== null &&
+          !activeStillAvailable
+        ) {
+          stopCamera()
+          selectCamera(available[0]?.deviceId ?? null)
+          setCameraError('The selected camera is no longer available.')
+          return
+        }
+        selectCamera(
+          activeStillAvailable
+            ? activeDeviceId
+            : (available[0]?.deviceId ?? null),
+        )
+      } catch (cause) {
+        if (owner === cameraGeneration.current) {
+          setCameraListError(
+            cause instanceof Error
+              ? `Camera choices could not be loaded: ${cause.message}`
+              : 'Camera choices could not be loaded.',
+          )
+        }
+      }
+    },
+    [qr, selectCamera, stopCamera],
+  )
+
+  useEffect(() => {
+    const unwatch = qr.watchCameras(() => {
+      void refreshCameras(cameraGeneration.current, true)
+    })
+    return () => {
+      unwatch()
+      cameraGeneration.current += 1
+      session.current?.stop()
+      session.current = null
+    }
+  }, [qr, refreshCameras])
 
   const submitBytes = (bytes: Uint8Array) => {
     stopCamera()
     void matrixOAuthQr.submitScan(qr.encodeBase64(bytes))
   }
 
-  const startCamera = async () => {
+  const startCamera = async (
+    deviceId: string | null = selectedCameraRef.current,
+  ) => {
     const target = video.current
     if (target === null) {
       return
     }
     stopCamera()
+    const owner = cameraGeneration.current
     setCameraError(null)
+    setCameraListError(null)
     setCameraStarting(true)
     try {
-      session.current = await qr.startCamera(
+      const started = await qr.startCamera(
         target,
         submitBytes,
         setCameraError,
+        deviceId ?? undefined,
       )
+      if (owner !== cameraGeneration.current) {
+        started.stop()
+        return
+      }
+      session.current = started
+      selectCamera(started.deviceId ?? deviceId)
       setCameraActive(true)
+      await refreshCameras(owner)
     } catch (cause) {
-      setCameraError(
-        cause instanceof Error
-          ? cause.message
-          : 'Camera permission was not granted.',
-      )
+      if (owner === cameraGeneration.current) {
+        setCameraError(
+          cause instanceof Error
+            ? cause.message
+            : 'Camera permission was not granted.',
+        )
+      }
     } finally {
-      setCameraStarting(false)
+      if (owner === cameraGeneration.current) {
+        setCameraStarting(false)
+      }
     }
   }
 
   return (
     <div class="qr-scanner">
       <p>
-        Start the environment-facing camera, or choose an image containing the
-        QR code from your trusted device.
+        Start a camera, or choose an image containing the QR code from your
+        trusted device. Camera choices appear after permission is granted.
       </p>
       <video
         ref={video}
@@ -138,6 +218,29 @@ function QrScanner() {
         playsInline
         muted
       />
+      {cameras.length > 1 && (
+        <label class="qr-camera-picker">
+          Camera
+          <select
+            aria-label="Camera"
+            value={selectedCamera ?? cameras[0].deviceId}
+            disabled={
+              cameraStarting || matrixOAuthQr.operation.value !== 'idle'
+            }
+            onChange={(event) => {
+              const deviceId = event.currentTarget.value
+              selectCamera(deviceId)
+              void startCamera(deviceId)
+            }}
+          >
+            {cameras.map((camera) => (
+              <option key={camera.deviceId} value={camera.deviceId}>
+                {camera.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <div class="card-actions">
         <button
           type="button"
@@ -187,6 +290,9 @@ function QrScanner() {
       </div>
       {cameraError !== null && (
         <p class="field-hint error">{cameraError} Choose an image instead.</p>
+      )}
+      {cameraListError !== null && (
+        <p class="field-hint error">{cameraListError}</p>
       )}
       {imageError !== null && <p class="field-hint error">{imageError}</p>}
     </div>

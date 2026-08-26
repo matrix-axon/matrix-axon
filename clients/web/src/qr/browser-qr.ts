@@ -2,7 +2,13 @@ export const MAX_QR_IMAGE_BYTES = 8 * 1024 * 1024
 export const MAX_QR_SCAN_DIMENSION = 2048
 const CAMERA_SCAN_INTERVAL_MS = 250
 
+export interface QrCameraDevice {
+  deviceId: string
+  label: string
+}
+
 export interface QrCameraSession {
+  deviceId: string | null
   stop(): void
 }
 
@@ -11,10 +17,13 @@ export interface BrowserQrAdapter {
   encodeBase64(bytes: Uint8Array): string
   render(canvas: HTMLCanvasElement, bytes: Uint8Array): Promise<void>
   scanImage(file: File): Promise<Uint8Array>
+  listCameras(): Promise<QrCameraDevice[]>
+  watchCameras(onChange: () => void): () => void
   startCamera(
     video: HTMLVideoElement,
     onResult: (bytes: Uint8Array) => void,
     onError: (message: string) => void,
+    deviceId?: string,
   ): Promise<QrCameraSession>
 }
 
@@ -132,14 +141,43 @@ export function createBrowserQrAdapter(): BrowserQrAdapter {
       }
     },
 
-    startCamera: async (video, onResult, onError) => {
+    listCameras: async () => {
+      if (navigator.mediaDevices?.enumerateDevices === undefined) {
+        return []
+      }
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      return devices
+        .filter(
+          (device) => device.kind === 'videoinput' && device.deviceId !== '',
+        )
+        .map((device, index) => ({
+          deviceId: device.deviceId,
+          label: device.label.trim() || `Camera ${index + 1}`,
+        }))
+    },
+
+    watchCameras: (onChange) => {
+      const mediaDevices = navigator.mediaDevices
+      if (mediaDevices?.addEventListener === undefined) {
+        return () => {}
+      }
+      mediaDevices.addEventListener('devicechange', onChange)
+      return () => mediaDevices.removeEventListener('devicechange', onChange)
+    },
+
+    startCamera: async (video, onResult, onError, deviceId) => {
       if (navigator.mediaDevices?.getUserMedia === undefined) {
         throw new Error('Camera access is unavailable in this browser.')
       }
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' } },
+        video:
+          deviceId === undefined
+            ? { facingMode: { ideal: 'environment' } }
+            : { deviceId: { exact: deviceId } },
         audio: false,
       })
+      const activeDeviceId =
+        stream.getVideoTracks()[0]?.getSettings().deviceId ?? deviceId ?? null
       const canvas = document.createElement('canvas')
       let timer: ReturnType<typeof setInterval> | null = null
       let stopped = false
@@ -210,7 +248,7 @@ export function createBrowserQrAdapter(): BrowserQrAdapter {
             }
           })()
         }, CAMERA_SCAN_INTERVAL_MS)
-        return { stop }
+        return { deviceId: activeDeviceId, stop }
       } catch (cause) {
         stop()
         throw cause instanceof Error

@@ -1157,6 +1157,13 @@ h2 {
   object-fit: cover;
 }
 
+.qr-camera-picker {
+  display: grid;
+  gap: 0.25rem;
+  width: min(100%, 24rem);
+  margin-bottom: 0.75rem;
+}
+
 .button-like {
   display: inline-flex;
   align-items: center;

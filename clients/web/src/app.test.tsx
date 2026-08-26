@@ -822,6 +822,27 @@ describe('App', () => {
     expect(window.location.pathname).toBe('/accounts')
   })
 
+  it('keeps a signed-in user with no active account in the Accounts portal', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
+        HttpResponse.json({
+          data: [{ ...ACCOUNT_DTO, state: 'deactivated', verified: null }],
+        }),
+      ),
+    )
+    history.replaceState(null, '', '/settings')
+
+    const { findByRole, queryByRole } = render(
+      <App services={testServices()} />,
+    )
+
+    await waitFor(() => expect(window.location.pathname).toBe('/accounts'))
+    expect(await findByRole('heading', { name: 'Accounts' })).toBeTruthy()
+    await waitFor(() =>
+      expect(queryByRole('heading', { name: 'Theme' })).toBeNull(),
+    )
+  })
+
   it('sign out drops back to the login bootstrap', async () => {
     const services = testServices()
     history.replaceState(null, '', '/settings')

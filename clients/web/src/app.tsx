@@ -595,7 +595,9 @@ function ShellChrome() {
   // The search overlay is URL-addressed (ADR 0066): mounted while `?search=`
   // is present (even empty), so a shared link restores it and Back closes it.
   const searchOpen = typeof query.search === 'string'
-  const accountCount = accounts.accounts.value.length
+  const hasActiveAccount = accounts.accounts.value.some(
+    (account) => account.state === 'active',
+  )
   const accountsLoading = accounts.loading.value
   const accountsError = accounts.error.value
   const roomListLoading = rooms.loading.value
@@ -744,12 +746,12 @@ function ShellChrome() {
     if (
       !accountsLoading &&
       accountsError === null &&
-      accountCount === 0 &&
+      !hasActiveAccount &&
       path !== '/accounts'
     ) {
       location.route('/accounts', true)
     }
-  }, [accountCount, accountsError, accountsLoading, location, path])
+  }, [accountsError, accountsLoading, hasActiveAccount, location, path])
   useEffect(() => {
     const raw =
       typeof query.matrixLink === 'string'

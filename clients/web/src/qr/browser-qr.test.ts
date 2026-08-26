@@ -134,16 +134,67 @@ describe('browser QR adapter', () => {
     ).rejects.toThrow('permission denied')
   })
 
+  it('enumerates selectable cameras and observes device changes', async () => {
+    const enumerateDevices = vi.fn().mockResolvedValue([
+      { kind: 'audioinput', deviceId: 'mic', label: 'Microphone' },
+      { kind: 'videoinput', deviceId: 'front', label: 'Front camera' },
+      { kind: 'videoinput', deviceId: 'rear', label: '' },
+      { kind: 'videoinput', deviceId: '', label: '' },
+    ])
+    const listeners = new Set<EventListenerOrEventListenerObject>()
+    const addEventListener = vi.fn(
+      (_type: string, listener: EventListenerOrEventListenerObject) =>
+        listeners.add(listener),
+    )
+    const removeEventListener = vi.fn(
+      (_type: string, listener: EventListenerOrEventListenerObject) =>
+        listeners.delete(listener),
+    )
+    vi.stubGlobal('navigator', {
+      mediaDevices: {
+        enumerateDevices,
+        addEventListener,
+        removeEventListener,
+      },
+    })
+    const adapter = createBrowserQrAdapter()
+
+    await expect(adapter.listCameras()).resolves.toEqual([
+      { deviceId: 'front', label: 'Front camera' },
+      { deviceId: 'rear', label: 'Camera 2' },
+    ])
+    const changed = vi.fn()
+    const unwatch = adapter.watchCameras(changed)
+    for (const listener of listeners) {
+      if (typeof listener === 'function') {
+        listener(new Event('devicechange'))
+      } else {
+        listener.handleEvent(new Event('devicechange'))
+      }
+    }
+    expect(changed).toHaveBeenCalledOnce()
+
+    unwatch()
+    expect(removeEventListener).toHaveBeenCalledWith('devicechange', changed)
+    expect(listeners).toHaveLength(0)
+  })
+
   it('latches the first camera result and releases tracks, timer, and canvas', async () => {
     vi.useFakeTimers()
     mockCanvas()
     mocks.jsQr.mockReturnValue({ binaryData: [9, 8, 7] })
     const stopTrack = vi.fn()
+    const track = {
+      stop: stopTrack,
+      getSettings: () => ({ deviceId: 'rear' }),
+    }
     const stream = {
-      getTracks: () => [{ stop: stopTrack }],
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
     } as unknown as MediaStream
+    const getUserMedia = vi.fn().mockResolvedValue(stream)
     vi.stubGlobal('navigator', {
-      mediaDevices: { getUserMedia: vi.fn().mockResolvedValue(stream) },
+      mediaDevices: { getUserMedia },
     })
     const video = document.createElement('video')
     Object.defineProperties(video, {
@@ -160,6 +211,11 @@ describe('browser QR adapter', () => {
       onResult,
       vi.fn(),
     )
+    expect(getUserMedia).toHaveBeenCalledWith({
+      video: { facingMode: { ideal: 'environment' } },
+      audio: false,
+    })
+    expect(session.deviceId).toBe('rear')
     await vi.advanceTimersByTimeAsync(250)
     await vi.runAllTicks()
 
@@ -170,6 +226,41 @@ describe('browser QR adapter', () => {
 
     await vi.advanceTimersByTimeAsync(1_000)
     expect(onResult).toHaveBeenCalledOnce()
+    session.stop()
+    expect(stopTrack).toHaveBeenCalledOnce()
+  })
+
+  it('opens an explicitly selected camera and reports its active device id', async () => {
+    const stopTrack = vi.fn()
+    const track = {
+      stop: stopTrack,
+      getSettings: () => ({ deviceId: 'usb-camera' }),
+    }
+    const stream = {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    } as unknown as MediaStream
+    const getUserMedia = vi.fn().mockResolvedValue(stream)
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } })
+    const video = document.createElement('video')
+    Object.defineProperties(video, {
+      play: { configurable: true, value: vi.fn().mockResolvedValue(undefined) },
+      pause: { configurable: true, value: vi.fn() },
+      srcObject: { configurable: true, writable: true, value: null },
+    })
+
+    const session = await createBrowserQrAdapter().startCamera(
+      video,
+      vi.fn(),
+      vi.fn(),
+      'usb-camera',
+    )
+
+    expect(getUserMedia).toHaveBeenCalledWith({
+      video: { deviceId: { exact: 'usb-camera' } },
+      audio: false,
+    })
+    expect(session.deviceId).toBe('usb-camera')
     session.stop()
     expect(stopTrack).toHaveBeenCalledOnce()
   })

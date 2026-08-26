@@ -316,6 +316,8 @@ describe('AccountsPage', () => {
       encodeBase64: vi.fn(),
       render: renderQr,
       scanImage: vi.fn(),
+      listCameras: vi.fn().mockResolvedValue([]),
+      watchCameras: vi.fn(() => () => {}),
       startCamera: vi.fn(),
     }
     server.use(
@@ -374,6 +376,8 @@ describe('AccountsPage', () => {
       encodeBase64: vi.fn(() => 'AAH-_w'),
       render: vi.fn(),
       scanImage: vi.fn().mockResolvedValue(Uint8Array.from([0, 1, 254, 255])),
+      listCameras: vi.fn().mockResolvedValue([]),
+      watchCameras: vi.fn(() => () => {}),
       startCamera: vi.fn().mockRejectedValue(new Error('camera denied')),
     }
     server.use(
@@ -430,6 +434,80 @@ describe('AccountsPage', () => {
     await waitFor(() => expect(scanBody).toEqual({ qr_code_data: 'AAH-_w' }))
     expect(await findByText('42')).toBeTruthy()
     services.matrixOAuthQr.reset()
+  })
+
+  it('lists available cameras and releases the old stream when switching', async () => {
+    const stopRear = vi.fn()
+    const stopUsb = vi.fn()
+    const startCamera = vi
+      .fn()
+      .mockResolvedValueOnce({ deviceId: 'rear', stop: stopRear })
+      .mockResolvedValueOnce({ deviceId: 'usb', stop: stopUsb })
+    const qr: BrowserQrAdapter = {
+      decodeBase64: vi.fn(),
+      encodeBase64: vi.fn(),
+      render: vi.fn(),
+      scanImage: vi.fn(),
+      listCameras: vi.fn().mockResolvedValue([
+        { deviceId: 'rear', label: 'Built-in rear camera' },
+        { deviceId: 'usb', label: 'USB document camera' },
+      ]),
+      watchCameras: vi.fn(() => () => {}),
+      startCamera,
+    }
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/login/qr`, () =>
+        HttpResponse.json(
+          {
+            data: {
+              flow_id: '10000000-0000-4000-8000-000000000001',
+              expected_user_id: '@alice:example.org',
+              presentation: 'scan',
+              stage: 'starting',
+            },
+          },
+          { status: 201 },
+        ),
+      ),
+    )
+    const { findByLabelText, findByText, getByLabelText, getByRole, unmount } =
+      renderPage([], qr)
+
+    fireEvent.click(getByRole('tab', { name: 'Sign in and verify with QR' }))
+    fireEvent.input(getByLabelText('Expected Matrix user ID'), {
+      target: { value: '@alice:example.org' },
+    })
+    fireEvent.click(getByLabelText('Scan a QR code with this device'))
+    fireEvent.click(getByRole('button', { name: 'Start QR sign-in' }))
+    fireEvent.click(await findByText('Start camera'))
+
+    const picker = (await findByLabelText('Camera')) as HTMLSelectElement
+    expect(picker.value).toBe('rear')
+    expect(getByRole('option', { name: 'Built-in rear camera' })).toBeTruthy()
+    expect(getByRole('option', { name: 'USB document camera' })).toBeTruthy()
+    expect(startCamera).toHaveBeenNthCalledWith(
+      1,
+      expect.any(HTMLVideoElement),
+      expect.any(Function),
+      expect.any(Function),
+      undefined,
+    )
+
+    fireEvent.change(picker, { target: { value: 'usb' } })
+    await waitFor(() =>
+      expect(startCamera).toHaveBeenNthCalledWith(
+        2,
+        expect.any(HTMLVideoElement),
+        expect.any(Function),
+        expect.any(Function),
+        'usb',
+      ),
+    )
+    expect(stopRear).toHaveBeenCalledOnce()
+    expect(picker.value).toBe('usb')
+
+    unmount()
+    expect(stopUsb).toHaveBeenCalledOnce()
   })
 
   it('accepts exactly two check-code digits and exposes only a safe approval link', async () => {
