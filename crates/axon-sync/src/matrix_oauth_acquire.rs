@@ -14,7 +14,7 @@ use std::{
 
 use axon_core::SyncConfig;
 use axon_store::Store;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use matrix_sdk::{
     authentication::oauth::qrcode::{
         CheckCodeSender, DeviceAuthorizationOAuthError, GeneratedQrProgress, LoginProgress,
@@ -48,6 +48,40 @@ const TERMINAL_RETENTION: Duration = Duration::from_secs(2 * 60);
 const REAPER_INTERVAL: Duration = Duration::from_secs(5);
 const WHOAMI_TIMEOUT: Duration = Duration::from_secs(15);
 const REVOCATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A progress stream that becomes permanently pending after its first close.
+///
+/// Matrix SDK progress and completion are separate channels. The completion
+/// future may still be running when progress closes, so returning `None` again
+/// would leave an always-ready branch in `tokio::select!` and busy-spin until
+/// completion, cancellation, or timeout.
+struct ProgressUntilClosed<S> {
+    inner: S,
+    closed: bool,
+}
+
+impl<S> ProgressUntilClosed<S>
+where
+    S: Stream + Unpin,
+{
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            closed: false,
+        }
+    }
+
+    async fn next(&mut self) -> Option<S::Item> {
+        if self.closed {
+            return std::future::pending().await;
+        }
+        let next = self.inner.next().await;
+        if next.is_none() {
+            self.closed = true;
+        }
+        next
+    }
+}
 
 /// Which device presents the QR image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -702,7 +736,7 @@ impl MatrixOAuthAcquireEngine {
     ) -> Result<(), DriverFailure> {
         let oauth = client.oauth();
         let login = oauth.login_with_qr_code(None).scan(qr);
-        let mut progress = Box::pin(login.subscribe_to_progress());
+        let mut progress = ProgressUntilClosed::new(Box::pin(login.subscribe_to_progress()));
         let mut login = login.into_future();
         loop {
             tokio::select! {
@@ -741,7 +775,7 @@ impl MatrixOAuthAcquireEngine {
     ) -> Result<(), DriverFailure> {
         let oauth = client.oauth();
         let login = oauth.login_with_qr_code(None).generate();
-        let mut progress = Box::pin(login.subscribe_to_progress());
+        let mut progress = ProgressUntilClosed::new(Box::pin(login.subscribe_to_progress()));
         let mut login = login.into_future();
         let mut check_sender: Option<CheckCodeSender> = None;
         loop {
@@ -1133,12 +1167,39 @@ fn store_error_class(error: &axon_store::StoreError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use matrix_sdk::ruma::api::error::{
         Error as MatrixApiError, ErrorBody, ErrorKind, FromHttpResponseError, StandardErrorBody,
     };
     use matrix_sdk::ruma::exports::http::StatusCode as HttpStatus;
     use matrix_sdk::{HttpError, RumaApiError};
+
+    #[tokio::test]
+    async fn closed_progress_stream_is_not_polled_again() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&polls);
+        let stream = futures_util::stream::poll_fn(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            std::task::Poll::Ready(None::<()>)
+        });
+        let mut progress = ProgressUntilClosed::new(Box::pin(stream));
+
+        assert!(progress.next().await.is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), progress.next())
+                .await
+                .is_err(),
+            "a closed progress stream must stay disabled"
+        );
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            1,
+            "the underlying closed stream must not be polled repeatedly"
+        );
+    }
 
     #[test]
     fn lifecycle_reservation_distinguishes_login_conflicts() {
