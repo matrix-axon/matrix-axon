@@ -631,6 +631,41 @@ impl AccountLifecycle {
         }
     }
 
+    /// Reserve one Matrix identity for a QR acquisition under the same lock as
+    /// password login, token import, deletion, and finalization. The lock covers
+    /// only the local conflict decision and durable breadcrumb insertion; the
+    /// multi-minute remote protocol starts after this method returns.
+    pub(crate) async fn reserve_matrix_oauth_acquire(
+        &self,
+        flow_id: Uuid,
+        expected_user_id: &str,
+        presentation: &str,
+        staging_dir_name: &str,
+    ) -> Result<(), LifecycleError> {
+        let lock = self.lock_for(expected_user_id, "");
+        let _guard = lock.lock().await;
+
+        match self.resolve_login_target(expected_user_id).await? {
+            ResolvedTarget::AlreadyActive(account_id) => {
+                return Err(LifecycleError::AlreadyActive(account_id))
+            }
+            ResolvedTarget::Retained(_) | ResolvedTarget::New => {}
+        }
+        if !self
+            .store
+            .create_matrix_oauth_acquire_breadcrumb(
+                flow_id,
+                expected_user_id,
+                presentation,
+                staging_dir_name,
+            )
+            .await?
+        {
+            return Err(LifecycleError::LoginFinalizing(expected_user_id.to_owned()));
+        }
+        Ok(())
+    }
+
     /// Mint a fresh account row and hold it `deactivated` until the caller's
     /// credential is confirmed — shared by `login` and `import_token` for the
     /// no-existing-row case.
@@ -1202,6 +1237,12 @@ impl AccountLifecycle {
             .await?
             .ok_or(LifecycleError::NotFound(account_id))?;
 
+        // A QR flow that won the same identity lock owns the account's next
+        // session and staging-store finalization. Refuse deletion before its
+        // durable row or store path can be removed out from under that flow.
+        self.ensure_no_matrix_oauth_acquire(&account.user_id)
+            .await?;
+
         // Flip to `deleting` first (unless already there — a resume). Durably marks
         // that external cleanup is owed, and — like logout's flip — moves the row
         // out of `active` so `get_or_connect`'s cold-connect gate refuses any new
@@ -1406,6 +1447,89 @@ mod tests {
             .execute(store.pool())
             .await
             .expect("cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn qr_reservation_waits_for_a_login_state_decision() {
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@qr-login-race-{}:localhost", Uuid::new_v4());
+        let account = lc.store.upsert_account(&user, hs).await.unwrap();
+        lc.store
+            .set_account_state(account.account_id, AccountState::Deactivated)
+            .await
+            .unwrap();
+
+        // Stand in for the password-login critical section: QR creation must
+        // wait, then re-read the state written while the shared lock was held.
+        let lock = lc.lock_for(&user, hs);
+        let guard = lock.lock().await;
+        let flow_id = Uuid::new_v4();
+        let reserve = tokio::spawn({
+            let lc = lc.clone();
+            let user = user.clone();
+            async move {
+                lc.reserve_matrix_oauth_acquire(flow_id, &user, "display", &flow_id.to_string())
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        lc.store
+            .set_account_state(account.account_id, AccountState::Active)
+            .await
+            .unwrap();
+        drop(guard);
+
+        assert!(matches!(
+            reserve.await.unwrap().unwrap_err(),
+            LifecycleError::AlreadyActive(id) if id == account.account_id
+        ));
+        assert!(!lc
+            .store
+            .has_matrix_oauth_acquire_for_user(&user)
+            .await
+            .unwrap());
+        delete_account(&lc.store, account.account_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn qr_reservation_wins_before_other_lifecycle_verbs() {
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@qr-first-race-{}:localhost", Uuid::new_v4());
+        let account = lc.store.upsert_account(&user, hs).await.unwrap();
+        lc.store
+            .set_account_state(account.account_id, AccountState::Deactivated)
+            .await
+            .unwrap();
+        let flow_id = Uuid::new_v4();
+        lc.reserve_matrix_oauth_acquire(flow_id, &user, "scan", &flow_id.to_string())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            lc.login(Some(hs), &user, "not-used").await.unwrap_err(),
+            LifecycleError::LoginFinalizing(ref blocked) if blocked == &user
+        ));
+        assert!(matches!(
+            lc.import_token(hs, &user, "not-used", "DEVICE")
+                .await
+                .unwrap_err(),
+            LifecycleError::LoginFinalizing(ref blocked) if blocked == &user
+        ));
+        assert!(matches!(
+            lc.delete(account.account_id).await.unwrap_err(),
+            LifecycleError::LoginFinalizing(ref blocked) if blocked == &user
+        ));
+
+        assert!(lc
+            .store
+            .abandon_matrix_oauth_acquire(flow_id)
+            .await
+            .unwrap());
+        delete_account(&lc.store, account.account_id).await;
     }
 
     /// Login on an already-`active` account is an idempotent no-op: it returns the

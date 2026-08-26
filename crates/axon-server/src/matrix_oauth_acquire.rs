@@ -75,6 +75,9 @@ fn map_error(value: MatrixOAuthAcquireError) -> MatrixOAuthQrError {
         MatrixOAuthAcquireError::AccountBeingDeleted => MatrixOAuthQrError::Conflict(
             "this Matrix account is currently being deleted".to_owned(),
         ),
+        MatrixOAuthAcquireError::AccountDraining => MatrixOAuthQrError::Conflict(
+            "this Matrix account is still shutting down; retry shortly".to_owned(),
+        ),
         MatrixOAuthAcquireError::FlowAlreadyExists => MatrixOAuthQrError::Conflict(
             "a Matrix OAuth QR login is already in progress for this Matrix user".to_owned(),
         ),
@@ -197,6 +200,10 @@ mod tests {
             (
                 MatrixOAuthAcquireError::AccountBeingDeleted,
                 "this Matrix account is currently being deleted",
+            ),
+            (
+                MatrixOAuthAcquireError::AccountDraining,
+                "this Matrix account is still shutting down; retry shortly",
             ),
             (
                 MatrixOAuthAcquireError::FlowAlreadyExists,

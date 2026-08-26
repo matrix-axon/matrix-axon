@@ -13,7 +13,7 @@ use std::{
 };
 
 use axon_core::SyncConfig;
-use axon_store::{AccountState, Store};
+use axon_store::Store;
 use futures_util::StreamExt;
 use matrix_sdk::{
     authentication::oauth::qrcode::{
@@ -144,6 +144,8 @@ pub enum MatrixOAuthAcquireError {
     AccountAlreadyActive,
     #[error("the Matrix account is being deleted")]
     AccountBeingDeleted,
+    #[error("the Matrix account's previous session is still shutting down")]
+    AccountDraining,
     #[error("a Matrix OAuth QR login is already in progress for this user")]
     FlowAlreadyExists,
     #[error("Matrix OAuth QR login flow not found: {0}")]
@@ -156,11 +158,20 @@ pub enum MatrixOAuthAcquireError {
     Internal,
 }
 
-fn account_state_conflict(state: AccountState) -> Option<MatrixOAuthAcquireError> {
-    match state {
-        AccountState::Active => Some(MatrixOAuthAcquireError::AccountAlreadyActive),
-        AccountState::Deactivated => None,
-        AccountState::Deleting => Some(MatrixOAuthAcquireError::AccountBeingDeleted),
+fn create_lifecycle_error(error: LifecycleError) -> MatrixOAuthAcquireError {
+    match error {
+        LifecycleError::AlreadyActive(_) => MatrixOAuthAcquireError::AccountAlreadyActive,
+        LifecycleError::BeingDeleted(_) => MatrixOAuthAcquireError::AccountBeingDeleted,
+        LifecycleError::Draining(_) => MatrixOAuthAcquireError::AccountDraining,
+        LifecycleError::LoginFinalizing(_) => MatrixOAuthAcquireError::FlowAlreadyExists,
+        LifecycleError::InvalidUserId(_) => MatrixOAuthAcquireError::InvalidUserId,
+        other => {
+            tracing::error!(
+                error_class = lifecycle_failure_code(&other),
+                "reserving Matrix OAuth QR login identity failed"
+            );
+            MatrixOAuthAcquireError::Internal
+        }
     }
 }
 
@@ -323,38 +334,18 @@ impl MatrixOAuthAcquireEngine {
         {
             return Err(MatrixOAuthAcquireError::Capacity);
         }
-        if let Some(error) = self
-            .inner
-            .store
-            .find_account_by_user_id(expected_user_id)
-            .await
-            .map_err(|err| {
-                tracing::error!(error_class = %store_error_class(&err), "checking Matrix OAuth acquire identity failed");
-                MatrixOAuthAcquireError::Internal
-            })?
-            .and_then(|account| account_state_conflict(account.state))
-        {
-            return Err(error);
-        }
         let flow_id = Uuid::new_v4();
         let staging_dir_name = flow_id.to_string();
-        let created = self
-            .inner
-            .store
-            .create_matrix_oauth_acquire_breadcrumb(
+        self.inner
+            .lifecycle
+            .reserve_matrix_oauth_acquire(
                 flow_id,
                 expected_user_id,
                 presentation.as_str(),
                 &staging_dir_name,
             )
             .await
-            .map_err(|err| {
-                tracing::error!(%flow_id, error_class = %store_error_class(&err), "creating Matrix OAuth acquire breadcrumb failed");
-                MatrixOAuthAcquireError::Internal
-        })?;
-        if !created {
-            return Err(MatrixOAuthAcquireError::FlowAlreadyExists);
-        }
+            .map_err(create_lifecycle_error)?;
 
         let (scan_tx, scan_rx) = oneshot::channel();
         let (check_code_tx, check_code_rx) = oneshot::channel();
@@ -1150,15 +1141,25 @@ mod tests {
     use matrix_sdk::{HttpError, RumaApiError};
 
     #[test]
-    fn account_state_distinguishes_login_conflicts() {
+    fn lifecycle_reservation_distinguishes_login_conflicts() {
+        let account_id = Uuid::new_v4();
         assert!(matches!(
-            account_state_conflict(AccountState::Active),
-            Some(MatrixOAuthAcquireError::AccountAlreadyActive)
+            create_lifecycle_error(LifecycleError::AlreadyActive(account_id)),
+            MatrixOAuthAcquireError::AccountAlreadyActive
         ));
-        assert!(account_state_conflict(AccountState::Deactivated).is_none());
         assert!(matches!(
-            account_state_conflict(AccountState::Deleting),
-            Some(MatrixOAuthAcquireError::AccountBeingDeleted)
+            create_lifecycle_error(LifecycleError::BeingDeleted(account_id)),
+            MatrixOAuthAcquireError::AccountBeingDeleted
+        ));
+        assert!(matches!(
+            create_lifecycle_error(LifecycleError::Draining(account_id)),
+            MatrixOAuthAcquireError::AccountDraining
+        ));
+        assert!(matches!(
+            create_lifecycle_error(LifecycleError::LoginFinalizing(
+                "@alice:example.org".to_owned()
+            )),
+            MatrixOAuthAcquireError::FlowAlreadyExists
         ));
     }
 
