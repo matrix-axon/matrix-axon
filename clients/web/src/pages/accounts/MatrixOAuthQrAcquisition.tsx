@@ -405,31 +405,53 @@ function ActiveQrFlow({ flow }: { flow: MatrixOAuthQrFlow }) {
   )
 }
 
-export function MatrixOAuthQrAcquisition() {
+export function MatrixOAuthQrAcquisition({
+  expectedUserId,
+  onSuccess,
+}: {
+  expectedUserId?: string
+  onSuccess?: () => void
+}) {
   const { accounts, matrixOAuthQr } = useServices()
   const [userId, setUserId] = useState('')
   const [presentation, setPresentation] = useState<'display' | 'scan'>(
     'display',
   )
-  const navigated = useRef(false)
+  const completionHandled = useRef(false)
+  const navigateAfterCompletion = useRef<boolean | null>(null)
   const flow = matrixOAuthQr.flow.value
+  const effectiveUserId = expectedUserId ?? userId
 
   useEffect(() => {
     void matrixOAuthQr.resume()
   }, [matrixOAuthQr])
 
   useEffect(() => {
+    if (flow === null) {
+      completionHandled.current = false
+      navigateAfterCompletion.current = null
+      return
+    }
+    if (!accounts.loading.value && navigateAfterCompletion.current === null) {
+      navigateAfterCompletion.current = !accounts.accounts.value.some(
+        (account) => account.state === 'active',
+      )
+    }
     if (
-      flow?.stage === 'done' &&
+      flow.stage === 'done' &&
       !accounts.loading.value &&
-      accounts.accounts.value.length === 1 &&
-      !navigated.current
+      navigateAfterCompletion.current !== null &&
+      !completionHandled.current
     ) {
-      navigated.current = true
+      completionHandled.current = true
+      onSuccess?.()
+      if (!navigateAfterCompletion.current) {
+        return
+      }
       history.pushState(null, '', '/')
       window.dispatchEvent(new PopStateEvent('popstate'))
     }
-  }, [accounts.accounts.value, accounts.loading.value, flow?.stage])
+  }, [accounts.accounts.value, accounts.loading.value, flow, onSuccess])
 
   if (flow !== null) {
     return <ActiveQrFlow flow={flow} />
@@ -440,14 +462,19 @@ export function MatrixOAuthQrAcquisition() {
       class="stack-form qr-start-form"
       onSubmit={(event) => {
         event.preventDefault()
-        void matrixOAuthQr.start(userId.trim(), presentation)
+        navigateAfterCompletion.current = !accounts.accounts.value.some(
+          (account) => account.state === 'active',
+        )
+        completionHandled.current = false
+        void matrixOAuthQr.start(effectiveUserId.trim(), presentation)
       }}
     >
       <label>
         Expected Matrix user ID
         <input
-          value={userId}
+          value={effectiveUserId}
           placeholder="@alice:example.org"
+          readOnly={expectedUserId !== undefined}
           onInput={(event) => setUserId(event.currentTarget.value)}
         />
       </label>
@@ -477,7 +504,8 @@ export function MatrixOAuthQrAcquisition() {
       <button
         type="submit"
         disabled={
-          userId.trim() === '' || matrixOAuthQr.operation.value === 'starting'
+          effectiveUserId.trim() === '' ||
+          matrixOAuthQr.operation.value === 'starting'
         }
       >
         {matrixOAuthQr.operation.value === 'starting'

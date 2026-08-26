@@ -815,7 +815,7 @@ describe('App', () => {
     expect(getByRole('heading', { name: 'Accounts' })).toBeTruthy()
     expect(getByRole('button', { name: 'Log in' })).toBeTruthy()
     expect(
-      getByRole('tab', { name: 'Sign in and verify with QR' }),
+      getByRole('tab', { name: 'Sign in with QR code' }),
     ).toBeTruthy()
     expect(queryByRole('heading', { name: 'Theme' })).toBeNull()
     expect(queryByRole('heading', { name: 'Rooms' })).toBeNull()

@@ -160,6 +160,66 @@ test('multiple cameras can be selected after permission is granted', async ({
     .toEqual(['rear', 'usb'])
 })
 
+test('a deactivated account can sign in again with its stored identity', async ({
+  page,
+}) => {
+  let active = false
+  let loginBody: unknown
+  const account = {
+    account_id: '33333333-3333-4333-8333-333333333333',
+    user_id: '@returning:hs',
+    homeserver_url: 'https://matrix.hs',
+    state: 'deactivated',
+    sync_state: 'connecting',
+    verified: false,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }
+  await page.route('**/v1/accounts', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue()
+      return
+    }
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: [{ ...account, state: active ? 'active' : 'deactivated' }],
+      }),
+    })
+  })
+  await page.route('**/v1/accounts/login', async (route) => {
+    loginBody = route.request().postDataJSON()
+    active = true
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { ...account, state: 'active' } }),
+    })
+  })
+
+  await signIn(page)
+  await page.goto('/settings')
+  await expect(page).toHaveURL(/\/accounts$/)
+  await expect(page.getByText('deactivated')).toBeVisible()
+  await expect(page.getByText('connecting')).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'Sign in again' }).click()
+  const userId = page.getByLabel('Matrix user ID')
+  await expect(userId).toHaveValue('@returning:hs')
+  await expect(userId).toHaveAttribute('readonly', '')
+  await expect(page.getByLabel('Password')).toBeFocused()
+  await page.getByLabel('Password').fill('test-password')
+  await page.getByRole('button', { name: 'Reactivate account' }).click()
+
+  await expect
+    .poll(() => loginBody)
+    .toEqual({
+      username: '@returning:hs',
+      password: 'test-password',
+      homeserver_url: null,
+    })
+  await expect(page).toHaveURL(/\/$/)
+})
+
 test('Accounts acquisition stays usable at desktop and phone widths', async ({
   page,
 }) => {

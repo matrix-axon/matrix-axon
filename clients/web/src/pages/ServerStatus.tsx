@@ -68,7 +68,7 @@ export function ServerStatus() {
   const gib = (backfill.free_bytes / 1024 ** 3).toFixed(1)
   return (
     <section class="panel">
-      <h2>Server status</h2>
+      <h2>Axon status</h2>
       {build !== undefined && (
         <p>
           <CopyableText

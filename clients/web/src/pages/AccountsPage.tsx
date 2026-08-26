@@ -1,5 +1,5 @@
 import { signal } from '@preact/signals'
-import { useEffect, useMemo, useState } from 'preact/hooks'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { CopyableText } from '../components/CopyableText'
 import { ErrorBanner } from '../components/ErrorBanner'
@@ -12,11 +12,13 @@ import { MatrixOAuthQrAcquisition } from './accounts/MatrixOAuthQrAcquisition'
 
 /**
  * The account lifecycle page (ADR 0046, M-W3): list with state and
- * sync-readiness, login (add account), logout, recover, delete-with-confirm,
- * and the active-account switch persisted in settings.
+ * sync-readiness, login (add or reactivate), logout, recover,
+ * delete-with-confirm, and the active-account switch persisted in settings.
  */
 export function AccountsPage() {
   const { accounts } = useServices()
+  const [reactivation, setReactivation] = useState<Account | null>(null)
+  const finishReactivation = useCallback(() => setReactivation(null), [])
 
   useEffect(() => {
     void accounts.refresh()
@@ -37,11 +39,19 @@ export function AccountsPage() {
       ) : (
         <ul class="cards">
           {accounts.accounts.value.map((account) => (
-            <AccountCard key={account.account_id} account={account} />
+            <AccountCard
+              key={account.account_id}
+              account={account}
+              onReactivate={setReactivation}
+            />
           ))}
         </ul>
       )}
-      <AccountAcquisition />
+      <AccountAcquisition
+        reactivation={reactivation}
+        onCancelReactivation={finishReactivation}
+        onSuccess={finishReactivation}
+      />
       <ServerStatus />
     </div>
   )
@@ -64,7 +74,13 @@ function SyncBadge({ account }: { account: Account }) {
   )
 }
 
-function AccountCard({ account }: { account: Account }) {
+function AccountCard({
+  account,
+  onReactivate,
+}: {
+  account: Account
+  onReactivate: (account: Account) => void
+}) {
   const { accounts, settings } = useServices()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [recoverKey, setRecoverKey] = useState<string | null>(null)
@@ -107,6 +123,15 @@ function AccountCard({ account }: { account: Account }) {
       )}
 
       <div class="card-actions">
+        {account.state === 'deactivated' && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onReactivate(account)}
+          >
+            Sign in again
+          </button>
+        )}
         {account.state === 'active' && (
           <>
             <label class="switch">
@@ -220,12 +245,50 @@ function AccountCard({ account }: { account: Account }) {
   )
 }
 
-function AccountAcquisition() {
+function AccountAcquisition({
+  reactivation,
+  onCancelReactivation,
+  onSuccess,
+}: {
+  reactivation: Account | null
+  onCancelReactivation: () => void
+  onSuccess: () => void
+}) {
   const [method, setMethod] = useState<'password' | 'qr'>('password')
+  const section = useRef<HTMLElement>(null)
+
+  useEffect(() => {
+    if (reactivation === null) {
+      return
+    }
+    setMethod('password')
+    section.current?.scrollIntoView?.({ block: 'start' })
+  }, [reactivation])
 
   return (
-    <section class="account-add panel" aria-labelledby="add-account-heading">
-      <h2 id="add-account-heading">Add account</h2>
+    <section
+      ref={section}
+      class="account-add panel"
+      aria-labelledby="add-account-heading"
+    >
+      <h2 id="add-account-heading">
+        {reactivation === null
+          ? 'Add account'
+          : `Reactivate ${reactivation.user_id}`}
+      </h2>
+      {reactivation !== null && (
+        <>
+          <p class="muted">
+            Sign in again with this account&rsquo;s password or a trusted Matrix
+            device. Axon will reuse its stored homeserver.
+          </p>
+          <div class="card-actions">
+            <button type="button" onClick={onCancelReactivation}>
+              Cancel reactivation
+            </button>
+          </div>
+        </>
+      )}
       <div
         class="acquisition-methods"
         role="tablist"
@@ -245,31 +308,55 @@ function AccountAcquisition() {
           aria-selected={method === 'qr'}
           onClick={() => setMethod('qr')}
         >
-          Sign in and verify with QR
+          Sign in with QR code
         </button>
       </div>
       <div role="tabpanel">
         {method === 'password' ? (
-          <PasswordAccountAcquisition />
+          <PasswordAccountAcquisition
+            reactivation={reactivation}
+            onSuccess={onSuccess}
+          />
         ) : (
-          <MatrixOAuthQrAcquisition />
+          <MatrixOAuthQrAcquisition
+            expectedUserId={reactivation?.user_id}
+            onSuccess={onSuccess}
+          />
         )}
       </div>
     </section>
   )
 }
 
-function PasswordAccountAcquisition() {
+function PasswordAccountAcquisition({
+  reactivation,
+  onSuccess,
+}: {
+  reactivation: Account | null
+  onSuccess: () => void
+}) {
   const { accounts } = useServices()
   const location = useLocation()
+  const passwordInput = useRef<HTMLInputElement>(null)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [recoveryKey, setRecoveryKey] = useState('')
   const [homeserver, setHomeserver] = useState('')
   const busy = accounts.pending.value !== null
+  const effectiveUsername = reactivation?.user_id ?? username
   // The key is optional here (SAS or a later recover can supply it), so an
   // empty field is fine; a non-empty one must be well-formed before submit.
   const keyOk = recoveryKey.trim() === '' || isValidRecoveryKey(recoveryKey)
+
+  useEffect(() => {
+    setUsername('')
+    setPassword('')
+    setRecoveryKey('')
+    setHomeserver('')
+    if (reactivation !== null) {
+      passwordInput.current?.focus()
+    }
+  }, [reactivation])
 
   return (
     <div class="password-acquisition">
@@ -277,15 +364,19 @@ function PasswordAccountAcquisition() {
         class="stack-form"
         onSubmit={(event) => {
           event.preventDefault()
-          const firstLogin = accounts.accounts.value.length === 0
+          const firstActiveLogin = !accounts.accounts.value.some(
+            (account) => account.state === 'active',
+          )
           void accounts
             .login({
-              username: username.trim(),
+              username: effectiveUsername.trim(),
               password,
               recovery_key:
                 recoveryKey.trim() === '' ? undefined : recoveryKey.trim(),
               homeserver_url:
-                homeserver.trim() === '' ? undefined : homeserver.trim(),
+                reactivation !== null || homeserver.trim() === ''
+                  ? undefined
+                  : homeserver.trim(),
             })
             .then((ok) => {
               setPassword('')
@@ -293,7 +384,8 @@ function PasswordAccountAcquisition() {
               if (ok) {
                 setUsername('')
                 setHomeserver('')
-                if (firstLogin) {
+                onSuccess()
+                if (firstActiveLogin) {
                   location.route('/')
                 }
               }
@@ -303,22 +395,23 @@ function PasswordAccountAcquisition() {
         <label>
           Matrix user ID
           <input
-            value={username}
+            value={effectiveUsername}
             placeholder="@alice:example.org"
+            readOnly={reactivation !== null}
             onInput={(event) => setUsername(event.currentTarget.value)}
           />
         </label>
         <label>
           Password
           <input
+            ref={passwordInput}
             type="password"
             value={password}
             onInput={(event) => setPassword(event.currentTarget.value)}
           />
         </label>
         <label>
-          Matrix Recovery Key (optional - can be entered later or skipped with
-          SAS verification)
+          Matrix Recovery Key (optional; enter later or skip with SAS or QR code verification)
           <input
             type="password"
             value={recoveryKey}
@@ -332,20 +425,24 @@ function PasswordAccountAcquisition() {
             missing or extra character, or leave it blank to skip.
           </p>
         )}
-        <label>
-          Homeserver URL{' '}
-          <span class="muted">(optional — autodiscovered when omitted)</span>
-          <input
-            value={homeserver}
-            placeholder="https://matrix.example.org"
-            onInput={(event) => setHomeserver(event.currentTarget.value)}
-          />
-        </label>
+        {reactivation === null && (
+          <label>
+            Homeserver URL{' '}
+            <span class="muted">(optional — autodiscovered when omitted)</span>
+            <input
+              value={homeserver}
+              placeholder="https://matrix.example.org"
+              onInput={(event) => setHomeserver(event.currentTarget.value)}
+            />
+          </label>
+        )}
         <button
           type="submit"
-          disabled={busy || username.trim() === '' || password === '' || !keyOk}
+          disabled={
+            busy || effectiveUsername.trim() === '' || password === '' || !keyOk
+          }
         >
-          Log in
+          {reactivation === null ? 'Log in' : 'Reactivate account'}
         </button>
       </form>
       <p class="muted">

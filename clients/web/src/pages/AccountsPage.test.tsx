@@ -109,6 +109,67 @@ describe('AccountsPage', () => {
     expect(queryByText('connecting')).toBeNull()
   })
 
+  it('opens a focused, cancellable reactivation form from the account card', async () => {
+    const { findByRole, getByLabelText, getByRole, queryByLabelText } =
+      renderPage([BOB])
+
+    fireEvent.click(await findByRole('button', { name: 'Sign in again' }))
+
+    expect(
+      getByRole('heading', { name: 'Reactivate @bob:example.org' }),
+    ).toBeTruthy()
+    const userId = getByLabelText(/Matrix user ID/) as HTMLInputElement
+    const password = getByLabelText('Password') as HTMLInputElement
+    expect(userId.value).toBe('@bob:example.org')
+    expect(userId.readOnly).toBe(true)
+    await waitFor(() => expect(document.activeElement).toBe(password))
+    expect(queryByLabelText(/Homeserver URL/)).toBeNull()
+
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
+    const expectedUserId = getByLabelText(
+      'Expected Matrix user ID',
+    ) as HTMLInputElement
+    expect(expectedUserId.value).toBe('@bob:example.org')
+    expect(expectedUserId.readOnly).toBe(true)
+
+    fireEvent.click(getByRole('button', { name: 'Cancel reactivation' }))
+    expect(getByRole('heading', { name: 'Add account' })).toBeTruthy()
+    expect(
+      (getByLabelText('Expected Matrix user ID') as HTMLInputElement).readOnly,
+    ).toBe(false)
+  })
+
+  it('reactivates with the stored identity and routes the first active account', async () => {
+    window.history.replaceState(null, '', '/accounts')
+    let reactivated = false
+    let loginBody: unknown
+    const { findByRole, getByLabelText, getByRole } = renderPage(() => [
+      reactivated ? { ...BOB, state: 'active' } : BOB,
+    ])
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/login`, async ({ request }) => {
+        loginBody = await request.json()
+        reactivated = true
+        return HttpResponse.json({ data: { ...BOB, state: 'active' } })
+      }),
+    )
+
+    fireEvent.click(await findByRole('button', { name: 'Sign in again' }))
+    fireEvent.input(getByLabelText('Password'), {
+      target: { value: 'hunter2' },
+    })
+    fireEvent.click(getByRole('button', { name: 'Reactivate account' }))
+
+    await waitFor(() =>
+      expect(loginBody).toEqual({
+        username: '@bob:example.org',
+        password: 'hunter2',
+        homeserver_url: null,
+      }),
+    )
+    await waitFor(() => expect(window.location.pathname).toBe('/'))
+  })
+
   it('copies user id, account id, and homeserver URL from a card', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', {
@@ -355,7 +416,7 @@ describe('AccountsPage', () => {
     )
 
     fireEvent.click(
-      await findByRole('tab', { name: 'Sign in and verify with QR' }),
+      await findByRole('tab', { name: 'Sign in with QR code' }),
     )
     fireEvent.input(getByLabelText('Expected Matrix user ID'), {
       target: { value: '@alice:example.org' },
@@ -424,7 +485,7 @@ describe('AccountsPage', () => {
       qr,
     )
 
-    fireEvent.click(getByRole('tab', { name: 'Sign in and verify with QR' }))
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
     fireEvent.input(getByLabelText('Expected Matrix user ID'), {
       target: { value: '@alice:example.org' },
     })
@@ -482,7 +543,7 @@ describe('AccountsPage', () => {
     const { findByLabelText, findByText, getByLabelText, getByRole, unmount } =
       renderPage([], qr)
 
-    fireEvent.click(getByRole('tab', { name: 'Sign in and verify with QR' }))
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
     fireEvent.input(getByLabelText('Expected Matrix user ID'), {
       target: { value: '@alice:example.org' },
     })
@@ -555,7 +616,7 @@ describe('AccountsPage', () => {
     const { services, findByLabelText, findByRole, getByLabelText, getByRole } =
       renderPage([])
 
-    fireEvent.click(getByRole('tab', { name: 'Sign in and verify with QR' }))
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
     fireEvent.input(getByLabelText('Expected Matrix user ID'), {
       target: { value: '@alice:example.org' },
     })
@@ -599,7 +660,7 @@ describe('AccountsPage', () => {
     )
     const { findByText, getByLabelText, getByRole } = renderPage([])
 
-    fireEvent.click(getByRole('tab', { name: 'Sign in and verify with QR' }))
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
     fireEvent.input(getByLabelText('Expected Matrix user ID'), {
       target: { value: '@alice:example.org' },
     })
@@ -634,12 +695,63 @@ describe('AccountsPage', () => {
     )
 
     await findByText('No accounts yet — add one below.')
-    fireEvent.click(getByRole('tab', { name: 'Sign in and verify with QR' }))
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
     fireEvent.input(getByLabelText('Expected Matrix user ID'), {
       target: { value: '@alice:example.org' },
     })
     fireEvent.click(getByRole('button', { name: 'Start QR sign-in' }))
 
+    await waitFor(() => expect(window.location.pathname).toBe('/'))
+  })
+
+  it('reactivates by QR and routes when only deactivated accounts existed', async () => {
+    window.history.replaceState(null, '', '/accounts')
+    const carol = {
+      ...BOB,
+      account_id: '6b53f7f0-0000-4000-8000-000000000003',
+      user_id: '@carol:example.org',
+    }
+    let reactivated = false
+    let startBody: unknown
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/login/qr`,
+        async ({ request }) => {
+          startBody = await request.json()
+          reactivated = true
+          return HttpResponse.json(
+            {
+              data: {
+                flow_id: '10000000-0000-4000-8000-000000000001',
+                expected_user_id: BOB.user_id,
+                presentation: 'display',
+                stage: 'done',
+                account_id: BOB.account_id,
+              },
+            },
+            { status: 201 },
+          )
+        },
+      ),
+    )
+    const { findAllByRole, getByRole } = renderPage(() => [
+      reactivated ? { ...BOB, state: 'active' } : BOB,
+      carol,
+    ])
+
+    const [reactivateBob] = await findAllByRole('button', {
+      name: 'Sign in again',
+    })
+    fireEvent.click(reactivateBob)
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
+    fireEvent.click(getByRole('button', { name: 'Start QR sign-in' }))
+
+    await waitFor(() =>
+      expect(startBody).toEqual({
+        expected_user_id: '@bob:example.org',
+        presentation: 'display',
+      }),
+    )
     await waitFor(() => expect(window.location.pathname).toBe('/'))
   })
 
@@ -664,7 +776,7 @@ describe('AccountsPage', () => {
     const { findByText, getByLabelText, getByRole } = renderPage([ALICE, BOB])
 
     await findByText('@alice:example.org')
-    fireEvent.click(getByRole('tab', { name: 'Sign in and verify with QR' }))
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
     fireEvent.input(getByLabelText('Expected Matrix user ID'), {
       target: { value: '@bob:example.org' },
     })
