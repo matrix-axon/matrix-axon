@@ -425,6 +425,13 @@ mod tests {
         assert_eq!(active.state, AccountState::Active);
         assert!(permanent.join("new-store").exists());
         assert!(!permanent.join("old-store").exists());
+        assert!(
+            crate::client::matrix_oauth_acquire_root(&config)
+                .join(format!("{}.previous", account.account_id))
+                .join("old-store")
+                .exists(),
+            "boot adoption must retain the old store until the new one opens"
+        );
         assert!(!store
             .has_matrix_oauth_acquire_for_user(&committed_user)
             .await

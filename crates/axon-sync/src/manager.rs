@@ -26,7 +26,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::client::{
-    adopt_matrix_oauth_acquire_staging, connect_account, import_token_new_device, login_new_device,
+    adopt_matrix_oauth_acquire_staging, connect_account, finish_matrix_oauth_acquire_adoption,
+    import_token_new_device, login_new_device,
 };
 use crate::error::{GatewayError, SyncError};
 
@@ -74,6 +75,11 @@ pub struct ClientManager {
     /// mutex, so connects for different accounts never block each other and a
     /// connect never blocks the map.
     slots: Arc<Mutex<HashMap<Uuid, Slot>>>,
+    /// Accounts whose adopted Matrix OAuth store opened successfully but whose
+    /// displaced-store cleanup failed. Cached-client calls retry only these
+    /// entries; a cold connect always checks once so restart recovery does not
+    /// depend on this process-local set.
+    pending_adoption_cleanup: Arc<Mutex<HashSet<Uuid>>>,
     /// Rooms the homeserver says it does not know. See [`DeadRooms`].
     dead_rooms: DeadRooms,
 }
@@ -87,7 +93,41 @@ impl ClientManager {
             store,
             config,
             slots: Arc::new(Mutex::new(HashMap::new())),
+            pending_adoption_cleanup: Arc::new(Mutex::new(HashSet::new())),
             dead_rooms: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn finish_adoption_cleanup(&self, account_id: Uuid) {
+        match finish_matrix_oauth_acquire_adoption(&self.config, account_id).await {
+            Ok(()) => {
+                self.pending_adoption_cleanup
+                    .lock()
+                    .expect("pending Matrix OAuth adoption cleanup set poisoned")
+                    .remove(&account_id);
+            }
+            Err(error) => {
+                self.pending_adoption_cleanup
+                    .lock()
+                    .expect("pending Matrix OAuth adoption cleanup set poisoned")
+                    .insert(account_id);
+                tracing::warn!(
+                    %account_id,
+                    error = %error,
+                    "failed to remove previous Matrix OAuth SDK store; will retry"
+                );
+            }
+        }
+    }
+
+    async fn retry_pending_adoption_cleanup(&self, account_id: Uuid) {
+        let pending = self
+            .pending_adoption_cleanup
+            .lock()
+            .expect("pending Matrix OAuth adoption cleanup set poisoned")
+            .contains(&account_id);
+        if pending {
+            self.finish_adoption_cleanup(account_id).await;
         }
     }
 
@@ -149,7 +189,10 @@ impl ClientManager {
         let slot = self.slot(account_id);
         let mut guard = slot.lock().await;
         if let Some(client) = guard.as_ref() {
-            return Ok(client.clone());
+            let client = client.clone();
+            drop(guard);
+            self.retry_pending_adoption_cleanup(account_id).await;
+            return Ok(client);
         }
 
         let account = self
@@ -173,6 +216,7 @@ impl ClientManager {
         }
 
         let client = connect_account(&self.store, &account, &self.config).await?;
+        self.finish_adoption_cleanup(account_id).await;
         *guard = Some(client.clone());
         Ok(client)
     }
@@ -230,8 +274,8 @@ impl ClientManager {
     /// A failed first restore after a successful adoption is not a promotion
     /// failure. The lifecycle finalizer can still activate and supervise the
     /// durable account, and the ordinary supervisor will retry the cold connect
-    /// with backoff. Returning an error there would strand the committed QR
-    /// breadcrumb until process restart even though no finalization work remains.
+    /// with backoff. The displaced store remains available until one of those
+    /// attempts opens the adopted store and completes its retryable cleanup.
     pub(crate) async fn promote_matrix_oauth_acquire(
         &self,
         account: &Account,
@@ -246,8 +290,15 @@ impl ClientManager {
         adopt_matrix_oauth_acquire_staging(&self.config, staging_dir_name, account.account_id)
             .await?;
         match connect_account(&self.store, account, &self.config).await {
-            Ok(permanent_client) => *guard = Some(permanent_client),
+            Ok(permanent_client) => {
+                self.finish_adoption_cleanup(account.account_id).await;
+                *guard = Some(permanent_client);
+            }
             Err(error) => {
+                self.pending_adoption_cleanup
+                    .lock()
+                    .expect("pending Matrix OAuth adoption cleanup set poisoned")
+                    .insert(account.account_id);
                 tracing::warn!(
                     account_id = %account.account_id,
                     user_id = %account.user_id,
