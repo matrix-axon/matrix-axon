@@ -32,12 +32,11 @@ async function clearDeploy(page: Page): Promise<void> {
 }
 
 /**
- * Hide the tab and bring it back after `awayMs` of *page* time. The policy
- * measures absence with `Date.now()`, so faking the clock is what lets the test
- * cross the one-minute "the user was away" threshold without waiting a minute.
- */
-/**
  * Hide the tab, let `awayMs` appear to pass, and return to it.
+ *
+ * The policy measures absence with `Date.now()`, so faking the clock is what
+ * lets the test cross the one-minute "the user was away" threshold without
+ * waiting a minute.
  *
  * The two dispatches are deliberately in separate `evaluate` calls, and the
  * return is fired from a timer: the reload this provokes can now begin
@@ -52,9 +51,13 @@ async function clearDeploy(page: Page): Promise<void> {
  *
  * **The awaited call resolves before the dispatch runs.** That is inherent: the
  * dispatch may destroy the context it would have to resolve in, which is the
- * whole reason it is deferred. Every caller must therefore follow this with an
- * auto-retrying assertion (`expect.poll`, `toHaveCount`, `toBeVisible`) rather
- * than a one-shot read, or it will race the reload (review).
+ * whole reason it is deferred. Callers that expect a reload must use
+ * `returnAfterAwayExpectingReload`, which arms `load` first — the same pattern
+ * as `reloadFromInsidePage`. `expect.poll(() => page.evaluate(...))` does not
+ * retry a throw from the callback (Playwright only retries matcher failures),
+ * so a navigation mid-evaluate fails the poll immediately. Locator assertions
+ * retry across a navigation, but they can still sample the outgoing document;
+ * waiting for `load` puts them on the new one.
  */
 async function returnAfterAway(page: Page, awayMs: number): Promise<void> {
   await page.evaluate(() => {
@@ -78,6 +81,35 @@ async function returnAfterAway(page: Page, awayMs: number): Promise<void> {
     state.hidden = false
     setTimeout(() => document.dispatchEvent(new Event('visibilitychange')), 0)
   }, awayMs)
+}
+
+/**
+ * `returnAfterAway` plus a wait for the in-page `location.reload()` it is
+ * expected to provoke. The `load` listener is armed in the same `Promise.all`
+ * as the away/return sequence, matching `reloadFromInsidePage`: the reload is
+ * async (update check, then a draft flush of up to `FLUSH_TIMEOUT_MS`), so
+ * attaching after `returnAfterAway` resolves can miss it, and a thrown helper
+ * must not leave the `load` waiter as an unhandled rejection.
+ *
+ * The away/return evaluates can themselves be killed by that reload — hiding
+ * the tab is enough when an update is already known — so a destroyed context
+ * there is success, not a failed helper.
+ */
+async function returnAfterAwayExpectingReload(
+  page: Page,
+  awayMs: number,
+): Promise<void> {
+  await Promise.all([
+    page.waitForEvent('load', { timeout: 15_000 }),
+    returnAfterAway(page, awayMs).catch((error: unknown) => {
+      if (
+        !(error instanceof Error) ||
+        !error.message.includes('Execution context was destroyed')
+      ) {
+        throw error
+      }
+    }),
+  ])
 }
 
 test.afterEach(async ({ page }) => {
@@ -164,14 +196,10 @@ test('a backgrounded tab reloads itself on return', async ({ page }) => {
   })
 
   await stageDeploy(page, 'build-from-e2e')
-  await returnAfterAway(page, 90_000)
+  await returnAfterAwayExpectingReload(page, 90_000)
 
   // A navigation clears the page context, so the marker is gone.
-  await expect
-    .poll(() => page.evaluate(() => window.__reloaded === true), {
-      timeout: 15_000,
-    })
-    .toBe(false)
+  expect(await page.evaluate(() => window.__reloaded === true)).toBe(false)
 })
 
 // The loop guard. With the origin permanently claiming a build the tab can
@@ -191,10 +219,10 @@ test('a manifest that never matches reloads exactly once', async ({ page }) => {
   await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
     'Live',
   )
-  await returnAfterAway(page, 90_000)
+  await returnAfterAwayExpectingReload(page, 90_000)
 
-  // Give a loop time to show itself: the reload, then a settling window in
-  // which a broken guard would fire again on every check.
+  // Give a loop time to show itself: a settling window *after* the permitted
+  // reload, in which a broken guard would fire again on every check.
   await page.waitForTimeout(5000)
 
   // The initial goto plus at most the one permitted reload.
@@ -216,28 +244,27 @@ test('a manifest that never matches reloads exactly once', async ({ page }) => {
  * loop-guard regression above from the run — the one test in this file whose
  * absence nobody would notice, because a reload loop is what it exists to catch.
  *
- * Every assertion after the reload gets the same 15s budget the sibling reload
- * tests use: `returnAfterAway` only *starts* the sequence, and the update check
- * is async and awaits a draft flush of up to `FLUSH_TIMEOUT_MS` (2s) before the
- * navigation even begins, after which the timeline has to mount and paint again.
- * The 5s default is not enough headroom for that on a loaded runner.
+ * `returnAfterAwayExpectingReload` waits for the document `load` (the update
+ * check is async and the draft flush can take up to `FLUSH_TIMEOUT_MS`). The
+ * assertions after that still get a 15s budget: the timeline has to mount and
+ * paint again, and the 5s default is not enough headroom on a loaded runner.
  */
 test('an automatic reload closes the restored thread view', async ({
   page,
 }) => {
-  // Three 15s assertion budgets stack sequentially, and the per-test default is
-  // 30s (`playwright.config.ts` sets no top-level `timeout`), so the test itself
-  // would expire first and report a generic "Test timeout of 30000ms exceeded"
-  // instead of the assertion the budget exists to name. Raised past 45s of
-  // assertions plus the setup ahead of them.
-  test.setTimeout(60_000)
+  // The 15s `load` wait plus three 15s assertion budgets stack sequentially,
+  // and the per-test default is 30s (`playwright.config.ts` sets no top-level
+  // `timeout`), so the test itself would expire first and report a generic
+  // "Test timeout of 30000ms exceeded" instead of the assertion the budget
+  // exists to name. Raised past those waits plus the setup ahead of them.
+  test.setTimeout(90_000)
 
   await signIn(page)
   await page.goto(`${ROOM_URL}?thread=%24root`)
   await expect(page.locator('.thread-panel')).toBeVisible()
 
   await stageDeploy(page, 'build-from-e2e')
-  await returnAfterAway(page, 90_000)
+  await returnAfterAwayExpectingReload(page, 90_000)
 
   await expect(page).not.toHaveURL(/thread=/, { timeout: 15_000 })
   await expect(page.locator('.thread-panel')).toHaveCount(0, {
