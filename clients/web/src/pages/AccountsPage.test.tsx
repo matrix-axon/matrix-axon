@@ -415,9 +415,7 @@ describe('AccountsPage', () => {
       qr,
     )
 
-    fireEvent.click(
-      await findByRole('tab', { name: 'Sign in with QR code' }),
-    )
+    fireEvent.click(await findByRole('tab', { name: 'Sign in with QR code' }))
     fireEvent.input(getByLabelText('Expected Matrix user ID'), {
       target: { value: '@alice:example.org' },
     })
@@ -613,8 +611,15 @@ describe('AccountsPage', () => {
         },
       ),
     )
-    const { services, findByLabelText, findByRole, getByLabelText, getByRole } =
-      renderPage([])
+    const {
+      container,
+      services,
+      findByLabelText,
+      findByRole,
+      getAllByRole,
+      getByLabelText,
+      getByRole,
+    } = renderPage([])
 
     fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
     fireEvent.input(getByLabelText('Expected Matrix user ID'), {
@@ -622,12 +627,21 @@ describe('AccountsPage', () => {
     })
     fireEvent.click(getByRole('button', { name: 'Start QR sign-in' }))
     const input = await findByLabelText('Two-digit check code')
+    expect(
+      getAllByRole('textbox', { name: 'Two-digit check code' }),
+    ).toHaveLength(1)
+    const cells = container.querySelectorAll('.segmented-code-cell')
+    expect(cells).toHaveLength(2)
     const confirm = getByRole('button', {
       name: 'Confirm code',
     }) as HTMLButtonElement
     fireEvent.input(input, { target: { value: '1a' } })
+    expect(cells[0].textContent).toBe('1')
+    expect(cells[1].textContent).toBe('')
     expect(confirm.disabled).toBe(true)
     fireEvent.input(input, { target: { value: '12' } })
+    expect(cells[0].textContent).toBe('1')
+    expect(cells[1].textContent).toBe('2')
     expect(confirm.disabled).toBe(false)
     fireEvent.click(confirm)
 

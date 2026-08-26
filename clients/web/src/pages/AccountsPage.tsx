@@ -411,7 +411,8 @@ function PasswordAccountAcquisition({
           />
         </label>
         <label>
-          Matrix Recovery Key (optional; enter later or skip with SAS or QR code verification)
+          Matrix Recovery Key (optional; add later, or skip with SAS or QR code
+          verification)
           <input
             type="password"
             value={recoveryKey}

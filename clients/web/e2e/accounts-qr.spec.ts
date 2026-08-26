@@ -8,7 +8,7 @@ const QR_BINARY_BASE64 = Buffer.from([0, 1, 2, 3, 127, 128, 254, 255])
 async function openQrSetup(page: import('@playwright/test').Page) {
   await signIn(page)
   await page.goto('/accounts')
-  await page.getByRole('tab', { name: 'Sign in and verify with QR' }).click()
+  await page.getByRole('tab', { name: 'Sign in with QR code' }).click()
   await page.getByLabel('Expected Matrix user ID').fill('@me:hs')
 }
 
@@ -39,6 +39,39 @@ test('a rendered binary QR image scans back to the exact original bytes', async 
   )
   expect(result.data.expected).toBe(QR_BINARY_BASE64)
   expect(result.data.submitted).toBe(QR_BINARY_BASE64)
+})
+
+test('the two-digit check code uses one input rendered as two cells', async ({
+  page,
+}) => {
+  await page.route('**/v1/accounts/login/qr', async (route) => {
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          flow_id: '10000000-0000-4000-8000-000000000001',
+          expected_user_id: '@me:hs',
+          presentation: 'display',
+          stage: 'check_code_required',
+        },
+      }),
+    })
+  })
+  await openQrSetup(page)
+  await page.getByRole('button', { name: 'Start QR sign-in' }).click()
+
+  const input = page.getByLabel('Two-digit check code')
+  const cells = page.locator('.segmented-code-cell')
+  await expect(input).toHaveCount(1)
+  await expect(cells).toHaveCount(2)
+  await input.fill('4')
+  await expect(cells.nth(0)).toHaveText('4')
+  await expect(cells.nth(1)).toHaveText('')
+  await input.fill('42')
+  await expect(cells.nth(0)).toHaveText('4')
+  await expect(cells.nth(1)).toHaveText('2')
+  await expect(page.getByRole('button', { name: 'Confirm code' })).toBeEnabled()
 })
 
 test('camera denial keeps image upload available', async ({ page }) => {
@@ -235,7 +268,7 @@ test('Accounts acquisition stays usable at desktop and phone widths', async ({
       page.getByRole('tab', { name: 'Sign in with password' }),
     ).toBeVisible()
     await expect(
-      page.getByRole('tab', { name: 'Sign in and verify with QR' }),
+      page.getByRole('tab', { name: 'Sign in with QR code' }),
     ).toBeVisible()
     const box = await page.locator('.account-add').boundingBox()
     expect(box).not.toBeNull()

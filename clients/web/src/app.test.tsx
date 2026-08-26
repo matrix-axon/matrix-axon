@@ -814,9 +814,7 @@ describe('App', () => {
     expect(await findByText('No accounts yet — add one below.')).toBeTruthy()
     expect(getByRole('heading', { name: 'Accounts' })).toBeTruthy()
     expect(getByRole('button', { name: 'Log in' })).toBeTruthy()
-    expect(
-      getByRole('tab', { name: 'Sign in with QR code' }),
-    ).toBeTruthy()
+    expect(getByRole('tab', { name: 'Sign in with QR code' })).toBeTruthy()
     expect(queryByRole('heading', { name: 'Theme' })).toBeNull()
     expect(queryByRole('heading', { name: 'Rooms' })).toBeNull()
     expect(window.location.pathname).toBe('/accounts')

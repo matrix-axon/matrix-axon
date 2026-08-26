@@ -330,18 +330,39 @@ function ActiveQrFlow({ flow }: { flow: MatrixOAuthQrFlow }) {
             }
           }}
         >
-          <label>
+          <label class="segmented-code-label">
             Two-digit check code
-            <input
-              value={checkCode}
-              inputMode="numeric"
-              autoComplete="one-time-code"
-              pattern="[0-9]{2}"
-              maxLength={2}
-              onInput={(event) =>
-                setCheckCode(event.currentTarget.value.replace(/[^0-9]/g, ''))
-              }
-            />
+            <span class="segmented-code">
+              <span class="segmented-code-cells" aria-hidden="true">
+                {[0, 1].map((index) => (
+                  <span
+                    key={index}
+                    class={`segmented-code-cell${
+                      checkCode[index] === undefined ? '' : ' filled'
+                    }${
+                      index === Math.min(checkCode.length, 1) ? ' current' : ''
+                    }`}
+                  >
+                    {checkCode[index] ?? ''}
+                  </span>
+                ))}
+              </span>
+              <input
+                class="segmented-code-input"
+                value={checkCode}
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                pattern="[0-9]{2}"
+                maxLength={2}
+                onInput={(event) =>
+                  setCheckCode(
+                    event.currentTarget.value
+                      .replace(/[^0-9]/g, '')
+                      .slice(0, 2),
+                  )
+                }
+              />
+            </span>
           </label>
           <button
             type="submit"
