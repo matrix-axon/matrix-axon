@@ -151,10 +151,9 @@ describe('SettingsPage', () => {
     )
 
     expect(getByRole('heading', { name: 'Accounts' })).toBeTruthy()
-    expect(getByRole('link', { name: 'Manage accounts' })).toHaveProperty(
-      'pathname',
-      '/accounts',
-    )
+    const manageAccounts = getByRole('link', { name: 'Manage accounts' })
+    expect(manageAccounts).toHaveProperty('pathname', '/accounts')
+    expect(manageAccounts.classList.contains('button-link')).toBe(true)
     expect(queryByRole('button', { name: 'Log in' })).toBeNull()
     expect(queryByRole('button', { name: 'Delete' })).toBeNull()
 

@@ -3926,7 +3926,8 @@ kbd {
 
 /* ---- forms & buttons ---- */
 
-button {
+button,
+a.button-link {
   font: inherit;
   padding: 0.35rem 0.8rem;
   border: 1px solid var(--border);
@@ -3936,8 +3937,14 @@ button {
   cursor: pointer;
 }
 
-button:hover:not(:disabled) {
+button:hover:not(:disabled),
+a.button-link:hover {
   border-color: var(--accent);
+}
+
+a.button-link {
+  display: inline-block;
+  text-decoration: none;
 }
 
 button:disabled {

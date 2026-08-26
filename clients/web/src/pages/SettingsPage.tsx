@@ -239,7 +239,9 @@ export function SettingsPage() {
           Add Matrix accounts, choose the active account, and manage recovery,
           verification, logout, and deletion on the dedicated accounts page.
         </p>
-        <a href="/accounts">Manage accounts</a>
+        <a href="/accounts" class="button-link">
+          Manage accounts
+        </a>
       </section>
       <DebugSettings />
       <section class="panel">
