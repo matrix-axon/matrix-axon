@@ -80,7 +80,7 @@ jobs:
 
   # Does not gate pull requests: needs Docker and a real Synapse.
   true-local:
-    if: inputs.lane != 'notify' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.lane != 'tui')
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || (inputs.lane != 'tui' && inputs.lane != 'notify'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -130,122 +130,35 @@ jobs:
 
       - name: Notify axon-developer room of result
         if: ${{ always() }}
+        # A failed notification must not fail the build; the `notify` lane below
+        # is the job that exists to notice a broken webhook.
         continue-on-error: true
         env:
           NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
           NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
-          BRANCH: ${{ github.ref_name }}
-          TRIGGER: ${{ github.event_name }}
-          LANE: ${{ steps.lane.outputs.lane }}
-          COMMIT: ${{ github.sha }}
-          ACTOR: ${{ github.actor }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ATTEMPT: ${{ github.run_attempt }}
+          SMOKE_LANE: ${{ steps.lane.outputs.lane }}
+          JOB_LABEL: true-local
           STATUS: ${{ job.status }}
-        run: |
-          set -euo pipefail
+        run: ./scripts/notify-smoke-result.sh
 
-          fields="$(jq -n \
-            --arg branch "$BRANCH" \
-            --arg trigger "$TRIGGER" \
-            --arg lane "$LANE" \
-            --arg commit "$COMMIT" \
-            --arg actor "$ACTOR" \
-            --arg run_url "$RUN_URL" \
-            --arg attempt "$ATTEMPT" \
-            --arg status "$STATUS" \
-            '{
-              formatted_body: (
-                def html_escape:
-                  gsub("&"; "&amp;")
-                  | gsub("<"; "&lt;")
-                  | gsub(">"; "&gt;")
-                  | gsub("\u0022"; "&quot;")
-                  | gsub("\u0027"; "&#39;");
-                "# Smoke Test Run\n"
-                + "## true-local: " + ($status | html_escape)
-                + "  \n**Branch:** " + ($branch | html_escape)
-                + "  \n**Trigger:** " + ($trigger | html_escape)
-                + "  \n**Lane:** " + ($lane | html_escape)
-                + "  \n**Commit:** " + ($commit | html_escape)
-                + "  \n**Actor:** " + ($actor | html_escape)
-                + "  \n**Attempt:** " + ($attempt | html_escape)
-                + "  \n**Run:** [" + ($run_url | html_escape) + "]("
-                + ($run_url | html_escape) + ")"
-              )
-            }')"
-
-          MATRIX_FORMATTED_BODY="$(jq -r .formatted_body <<<"$fields")"
-          export MATRIX_FORMATTED_BODY
-          ./scripts/send-matrix-notification.sh
-
-
+  # Exercises the notification path itself, by hand, without paying for a lane.
+  # Reaching the webhook at all is the whole result, so this job deliberately
+  # does not swallow a send failure the way true-local does -- a red dispatch is
+  # the signal. Its own status can therefore only ever be `success` here, which
+  # is why the message calls itself a self-test rather than reporting a lane.
   notify:
     if: github.event_name == 'workflow_dispatch' && inputs.lane == 'notify'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-      - name: Resolve smoke lane
-        id: lane
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          DISPATCH_LANE: ${{ inputs.lane }}
-        run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            lane="$DISPATCH_LANE"
-          else
-            lane="all"
-          fi
-          echo "lane=$lane" >> "$GITHUB_OUTPUT"
-
-      - name: Notify axon-developer room of result
-        if: ${{ always() }}
-        continue-on-error: true
+      - name: Post a notification self-test to the axon-developer room
         env:
           NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
           NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
-          BRANCH: ${{ github.ref_name }}
-          TRIGGER: ${{ github.event_name }}
-          LANE: ${{ steps.lane.outputs.lane }}
-          COMMIT: ${{ github.sha }}
-          ACTOR: ${{ github.actor }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ATTEMPT: ${{ github.run_attempt }}
+          SMOKE_LANE: ${{ inputs.lane }}
+          JOB_LABEL: notify self-test
           STATUS: ${{ job.status }}
-        run: |
-          set -euo pipefail
-
-          fields="$(jq -n \
-            --arg branch "$BRANCH" \
-            --arg trigger "$TRIGGER" \
-            --arg lane "$LANE" \
-            --arg commit "$COMMIT" \
-            --arg actor "$ACTOR" \
-            --arg run_url "$RUN_URL" \
-            --arg attempt "$ATTEMPT" \
-            --arg status "$STATUS" \
-            '{
-              formatted_body: (
-                def html_escape:
-                  gsub("&"; "&amp;")
-                  | gsub("<"; "&lt;")
-                  | gsub(">"; "&gt;")
-                  | gsub("\u0022"; "&quot;")
-                  | gsub("\u0027"; "&#39;");
-                "# Smoke Test Run\n"
-                + "## true-local: " + ($status | html_escape)
-                + "  \n**Branch:** " + ($branch | html_escape)
-                + "  \n**Trigger:** " + ($trigger | html_escape)
-                + "  \n**Lane:** " + ($lane | html_escape)
-                + "  \n**Commit:** " + ($commit | html_escape)
-                + "  \n**Actor:** " + ($actor | html_escape)
-                + "  \n**Attempt:** " + ($attempt | html_escape)
-                + "  \n**Run:** [" + ($run_url | html_escape) + "]("
-                + ($run_url | html_escape) + ")"
-              )
-            }')"
-
-          MATRIX_FORMATTED_BODY="$(jq -r .formatted_body <<<"$fields")"
-          export MATRIX_FORMATTED_BODY
-          ./scripts/send-matrix-notification.sh
+        run: ./scripts/notify-smoke-result.sh

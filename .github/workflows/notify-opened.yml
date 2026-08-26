@@ -53,16 +53,35 @@ jobs:
             AUTHOR="$PR_AUTHOR"
           fi
 
-          MATRIX_FORMATTED_BODY="$(jq -nr \
+          # The title, body and author are attacker-controlled: anyone can open
+          # an issue, and pull_request_target fires for any fork. The webhook
+          # renders Markdown, so escape it the way the plugin's own escape_md
+          # filter does -- otherwise a body can forge a CI-looking notice whose
+          # link label reads as a github.com URL and whose target is not. Raw
+          # HTML needs no handling here; the plugin's Jinja autoescape covers it.
+          #
+          # Line-leading `#` is escaped on top of that, because headings are the
+          # visual signature of the smoke notices in the same room -- an
+          # unescaped body can mint a convincing "## true-local: FAILED" even
+          # with its links already defanged. Lists and blockquotes are left to
+          # render: they forge nothing, and mangling them would make every
+          # ordinary issue body harder to read. Only the URL is trusted enough
+          # to link.
+          NOTIFY_MESSAGE="$(jq -nr \
             --arg kind "$KIND" \
             --arg author "$AUTHOR" \
             --arg title "$TITLE" \
             --arg body "$BODY" \
             --arg url "$URL" \
-            '(("New " + $kind + " opened by @" + $author + ": " + $title)
-              + "  \n" + $url
+            '
+            def escape_md: gsub("(?<c>[\\\\`*_\\[\\]])"; "\\\(.c)");
+            def escape_headings:
+              gsub("(?<p>\n)(?<h>#)"; "\(.p)\\\(.h)") | sub("^#"; "\\#");
+            ("New " + $kind + " opened by @" + ($author | escape_md)
+              + ": " + ($title[0:200] | escape_md))
+              + "  \n[" + $url + "](" + $url + ")"
               + "  \n\n"
-              + ($body[0:4000]))')"
+              + ($body[0:4000] | escape_md | escape_headings)')"
 
-          export MATRIX_FORMATTED_BODY
+          export NOTIFY_MESSAGE
           ./scripts/send-matrix-notification.sh
