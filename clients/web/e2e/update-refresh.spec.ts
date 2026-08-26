@@ -85,10 +85,11 @@ async function returnAfterAway(page: Page, awayMs: number): Promise<void> {
 
 /**
  * `returnAfterAway` plus a wait for the in-page `location.reload()` it is
- * expected to provoke. The `load` listener is armed before the away/return
- * sequence, matching `reloadFromInsidePage`: the reload is async (update check,
- * then a draft flush of up to `FLUSH_TIMEOUT_MS`), so attaching after
- * `returnAfterAway` resolves can miss it.
+ * expected to provoke. The `load` listener is armed in the same `Promise.all`
+ * as the away/return sequence, matching `reloadFromInsidePage`: the reload is
+ * async (update check, then a draft flush of up to `FLUSH_TIMEOUT_MS`), so
+ * attaching after `returnAfterAway` resolves can miss it, and a thrown helper
+ * must not leave the `load` waiter as an unhandled rejection.
  *
  * The away/return evaluates can themselves be killed by that reload — hiding
  * the tab is enough when an update is already known — so a destroyed context
@@ -98,18 +99,17 @@ async function returnAfterAwayExpectingReload(
   page: Page,
   awayMs: number,
 ): Promise<void> {
-  const loaded = page.waitForEvent('load', { timeout: 15_000 })
-  try {
-    await returnAfterAway(page, awayMs)
-  } catch (error) {
-    if (
-      !(error instanceof Error) ||
-      !error.message.includes('Execution context was destroyed')
-    ) {
-      throw error
-    }
-  }
-  await loaded
+  await Promise.all([
+    page.waitForEvent('load', { timeout: 15_000 }),
+    returnAfterAway(page, awayMs).catch((error: unknown) => {
+      if (
+        !(error instanceof Error) ||
+        !error.message.includes('Execution context was destroyed')
+      ) {
+        throw error
+      }
+    }),
+  ])
 }
 
 test.afterEach(async ({ page }) => {
