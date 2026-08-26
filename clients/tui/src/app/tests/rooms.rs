@@ -551,7 +551,6 @@ fn own_message_color_applies_without_send_echo() {
     let lines = message_layout(
         &[&event],
         sender_labels.as_slice(),
-        None,
         &colors,
         80,
         &HashMap::new(),
@@ -560,40 +559,8 @@ fn own_message_color_applies_without_send_echo() {
         &RelationContext::default(),
         MessageDensity::Dense,
         TimeFormat::H24,
-        false,
     )
     .lines;
 
     assert_eq!(lines[1].spans[2].style.fg, Some(colors.own_message_sender));
-}
-
-#[test]
-fn selected_message_background_applies_only_to_first_line_when_enabled() {
-    let colors = TuiConfig::test_default().colors;
-    let event = event_with_id(
-        "$message:example.com",
-        "m.room.message",
-        Some("hello"),
-        serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
-    );
-    let sender_labels = vec!["@alice:example.com".to_owned()];
-    let lines = message_layout(
-        &[&event],
-        sender_labels.as_slice(),
-        Some("$message:example.com"),
-        &colors,
-        80,
-        &HashMap::new(),
-        &HashMap::new(),
-        &ImageThumbRows::new(),
-        &RelationContext::default(),
-        MessageDensity::Normal,
-        TimeFormat::H24,
-        true,
-    )
-    .lines;
-
-    assert_eq!(lines[1].style.bg, Some(colors.selection_background));
-    assert_eq!(lines[1].width(), 80);
-    assert_eq!(lines[2].style.bg, None);
 }
