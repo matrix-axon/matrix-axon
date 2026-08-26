@@ -226,6 +226,12 @@ impl ClientManager {
     /// account path. Holding the slot lock across the whole handoff keeps this
     /// single-flight with every lazy connection attempt. The row remains
     /// `deactivated` until the lifecycle finalizer activates it afterward.
+    ///
+    /// A failed first restore after a successful adoption is not a promotion
+    /// failure. The lifecycle finalizer can still activate and supervise the
+    /// durable account, and the ordinary supervisor will retry the cold connect
+    /// with backoff. Returning an error there would strand the committed QR
+    /// breadcrumb until process restart even though no finalization work remains.
     pub(crate) async fn promote_matrix_oauth_acquire(
         &self,
         account: &Account,
@@ -239,8 +245,17 @@ impl ClientManager {
 
         adopt_matrix_oauth_acquire_staging(&self.config, staging_dir_name, account.account_id)
             .await?;
-        let permanent_client = connect_account(&self.store, account, &self.config).await?;
-        *guard = Some(permanent_client);
+        match connect_account(&self.store, account, &self.config).await {
+            Ok(permanent_client) => *guard = Some(permanent_client),
+            Err(error) => {
+                tracing::warn!(
+                    account_id = %account.account_id,
+                    user_id = %account.user_id,
+                    error = %error,
+                    "adopted Matrix OAuth SDK store but initial restore failed; supervisor will retry"
+                );
+            }
+        }
         Ok(())
     }
 

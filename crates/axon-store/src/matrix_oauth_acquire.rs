@@ -209,7 +209,7 @@ impl Store {
 
         let updated = sqlx_core::query::query(
             "UPDATE accounts \
-             SET device_id = $2, auth_kind = 'oauth', verified = false, \
+             SET homeserver_url = $8, device_id = $2, auth_kind = 'oauth', verified = false, \
                  access_token_encrypted = pgp_sym_encrypt($3, $7), \
                  oauth_refresh_token_encrypted = pgp_sym_encrypt($4, $7), \
                  oauth_client_id = $5 \
@@ -222,6 +222,7 @@ impl Store {
         .bind(client_id)
         .bind(expected_user_id)
         .bind(key)
+        .bind(homeserver_url)
         .execute(&mut *tx)
         .await?;
         if updated.rows_affected() != 1 {
@@ -460,6 +461,63 @@ mod tests {
             .unwrap());
         assert!(store.abandon_matrix_oauth_acquire(flow_id).await.unwrap());
 
+        sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+            .bind(account.account_id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn session_commit_updates_a_retained_accounts_homeserver() {
+        let store = store().await;
+        let user_id = user_id();
+        let account = store
+            .upsert_account(&user_id, "https://old.example.org/")
+            .await
+            .unwrap();
+        store
+            .set_account_state(account.account_id, AccountState::Deactivated)
+            .await
+            .unwrap();
+        let flow_id = Uuid::new_v4();
+        assert!(
+            store
+                .create_matrix_oauth_acquire_breadcrumb(
+                    flow_id,
+                    &user_id,
+                    "scan",
+                    &flow_id.to_string(),
+                )
+                .await
+                .unwrap()
+        );
+
+        let committed = match store
+            .commit_matrix_oauth_acquire(
+                flow_id,
+                &user_id,
+                "https://new.example.org/",
+                "DEVICE",
+                "access-secret",
+                "refresh-secret",
+                "public-client",
+                "store-key",
+            )
+            .await
+            .unwrap()
+        {
+            CommitMatrixOAuthAcquire::Committed(account) => account,
+            other => panic!("unexpected commit outcome: {other:?}"),
+        };
+        assert_eq!(committed.account_id, account.account_id);
+        assert_eq!(committed.homeserver_url, "https://new.example.org/");
+
+        assert!(store
+            .finalize_matrix_oauth_acquire(flow_id, account.account_id)
+            .await
+            .unwrap());
         sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
             .bind(account.account_id)
             .execute(store.pool())
