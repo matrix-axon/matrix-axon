@@ -33,6 +33,8 @@ axon.toml
 # Editor
 .vscode/
 .idea/
+# vim/nvim swap files
+.*.sw[a-p]
 
 # Claude Code local tooling state (worktrees, local settings) — never tracked
 .claude/
@@ -53,4 +55,8 @@ axon-data/
 
 # Smoke harness failure artifacts (PTY transcripts, screens, logs, journals)
 smoke-artifacts/
+
+# TUI demo recording output (scripts/demo-stack.sh record --capture) — never
+# tracked; the asset it produces lives on a GitHub release, not in git (ADR 0086).
+demo-artifacts/
 

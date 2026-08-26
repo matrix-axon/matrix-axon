@@ -130,6 +130,22 @@ test('rooms — the room list sorts, filters, and derives a DM title', async ({
   await list.locator('.sort-select select').first().selectOption('recent')
   await expect(first).toHaveAttribute('href', byRecent ?? '')
   await dwell(page, BEAT)
+
+  // Room information (M19): full room-state details and the space this room
+  // belongs to, not just the name and topic the list already shows.
+  await point(page, page.getByRole('button', { name: 'Open room information' }))
+  const info = page.getByRole('complementary', { name: 'Room information' })
+  await expect(info).toBeVisible()
+  await expect(info).toContainText(
+    'Work party planning, trip reports, and tread condition.',
+  )
+  await expect(info).toContainText('Ridgeline Trail Collective')
+  await dwell(page, LONG)
+
+  // Leave the room as the scene found it.
+  await page.keyboard.press('Escape')
+  await expect(info).toBeHidden()
+  await dwell(page, BEAT)
 })
 
 test('spaces — the rail filters the room list by space hierarchy', async ({

@@ -418,17 +418,16 @@ untouched — the lane has its own config, `playwright.demo.config.ts`.
 Needs Docker with Compose v2, so it is Unix-only and is not a CI gate.
 
 ```sh
-# 1. seed a demo world and leave it running (from the repo root)
-cargo run -p axon-smoke-local-stack -- up \
-    --manifest /tmp/demo.json \
-    --corpus smoke/local-stack/corpus/demo.toml --keep-up
-
-# 2. record (from here)
-DEMO_MANIFEST=/tmp/demo.json pnpm demo
-
-# 3. tear the world down (from the repo root)
-cargo run -p axon-smoke-local-stack -- down --manifest /tmp/demo.json
+# from the repo root
+scripts/demo-web.sh up       # seed a demo world and leave it running
+scripts/demo-web.sh record   # record (from here — cds into clients/web itself)
+scripts/demo-web.sh down     # tear the world down
 ```
+
+Under the hood, `up`/`down` are `scripts/demo-stack.sh up`/`down` (shared with the TUI recording — same corpus, same stack),
+and `record` is `DEMO_MANIFEST=<manifest> pnpm demo` run from here.
+Driving those directly still works and is what the "Useful while authoring" env vars below assume —
+`scripts/demo-web.sh` is the shortest path from a clean checkout to uploaded MP4s, not the only one.
 
 Output lands in `demo-artifacts/<test>/video.webm`, one clip per scene, at
 1440×900 for `demo-desktop` and 780×1328 for `demo-mobile` (an iPhone 13
@@ -457,17 +456,33 @@ Useful while authoring:
 `pnpm demo --grep rooms` plays a single scene; `--project demo-mobile` a single
 form factor.
 
-Playwright writes **WebM**. The release assets and `demo.html` are MP4 (ADR
-0086), so convert before uploading:
+Playwright writes **WebM**, one clip per scene.
+`demo.html` and the release each want a single MP4 **per platform** —
+the whole tour, scenes concatenated in the order `demo.html` lists them —
+so converting one `video.webm` at a time is not enough on its own.
+That's what `scripts/demo-web.sh assemble` is for, and `upload` follows it to attach both MP4s to the demo release:
 
 ```sh
-ffmpeg -i video.webm -c:v libx264 -pix_fmt yuv420p -movflags +faststart out.mp4
+scripts/demo-web.sh assemble           # concat + transcode both platforms' tours
+scripts/demo-web.sh upload             # attach both MP4s to the demo release
+
+# or the whole session, start to finish:
+scripts/demo-web.sh all --upload
 ```
 
-Then attach the MP4s to the `demo-2026-08` release and re-run the `api-docs`
-workflow by hand — re-uploading a release asset changes no path in the
-repository, so nothing in the workflow's `paths:` trigger fires and the site
-keeps serving the previous recording.
+`assemble` hard-codes the scene order from `demo.html` and refuses to guess if a scene's clip is missing or its glob is ambiguous —
+see the script header if that order ever needs to change.
+`upload` defaults to the most recently published release (`DEMO_RELEASE_TAG=<tag>` to target a specific one instead),
+matching what `api-docs.yml` pulls from on a normal `main` push by default.
+
+**Every recording landing on the same release its MP4s are pulled from is on you** —
+`upload` attaches to whatever release is newest _at the moment you run it_,
+which after a version bump may not be the release the other two demo MP4s (or the TUI's `tui-demo.mp4`) already live on.
+`api-docs.yml`'s guard step fails loudly if a platform's video is missing from the resolved release, rather than silently publishing a broken player —
+that is the case to check for after `upload`, and to fix by either uploading all three MP4s to the new release together or pointing `demo_release_tag` at the older one that still has them.
+
+After uploading, re-run the `api-docs` workflow by hand —
+re-uploading a release asset changes no path in the repository, so nothing in the workflow's `paths:` trigger fires and the site keeps serving the previous recording.
 
 Adding or changing a scene means updating `docs/demo-coverage.md` in the same
 PR. Two rules the scenes are built on, both learned the hard way (ADR 0086):
