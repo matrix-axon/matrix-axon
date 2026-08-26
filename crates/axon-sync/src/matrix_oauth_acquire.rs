@@ -917,11 +917,13 @@ fn qr_server(qr: &QrCodeData) -> Result<String, DriverFailure> {
         QrCodeIntentData::Msc4108 {
             data: Msc4108IntentData::Reciprocate { server_name },
             ..
-        } => OwnedServerName::try_from(server_name.as_str())
-            .map(|server_name| server_name.to_string())
+        } => validate_qr_server_name_or_url(server_name)
+            .map(|()| server_name.clone())
             .map_err(|_| DriverFailure::InvalidQr),
         QrCodeIntentData::Msc4388 { base_url, .. } if qr.intent() == QrCodeIntent::Reciprocate => {
-            Ok(base_url.to_string())
+            validate_qr_url(base_url)
+                .map(|()| base_url.to_string())
+                .map_err(|_| DriverFailure::InvalidQr)
         }
         _ => Err(DriverFailure::InvalidQr),
     }
@@ -945,11 +947,7 @@ fn parse_qr_payload(value: &str) -> Result<QrCodeData, MatrixOAuthAcquireError> 
             data: Msc4108IntentData::Reciprocate { server_name },
             rendezvous_url,
         } => {
-            OwnedServerName::try_from(server_name.as_str()).map_err(|_| {
-                MatrixOAuthAcquireError::InvalidInput(
-                    "QR payload contains an invalid Matrix server name",
-                )
-            })?;
+            validate_qr_server_name_or_url(server_name)?;
             validate_qr_url(rendezvous_url)?;
         }
         QrCodeIntentData::Msc4388 { base_url, .. } => validate_qr_url(base_url)?,
@@ -960,6 +958,18 @@ fn parse_qr_payload(value: &str) -> Result<QrCodeData, MatrixOAuthAcquireError> 
         }
     }
     Ok(parsed)
+}
+
+fn validate_qr_server_name_or_url(value: &str) -> Result<(), MatrixOAuthAcquireError> {
+    if OwnedServerName::try_from(value).is_ok() {
+        return Ok(());
+    }
+    let url = url::Url::parse(value).map_err(|_| {
+        MatrixOAuthAcquireError::InvalidInput(
+            "QR payload contains an invalid Matrix server name or homeserver URL",
+        )
+    })?;
+    validate_qr_url(&url)
 }
 
 fn validate_qr_url(url: &url::Url) -> Result<(), MatrixOAuthAcquireError> {
@@ -1277,6 +1287,24 @@ mod tests {
         ] {
             validate_qr_url(&url::Url::parse(safe_url).unwrap()).unwrap();
         }
+    }
+
+    #[test]
+    fn msc4108_reciprocate_accepts_element_homeserver_url() {
+        // matrix-rust-sdk's MSC4108 interop vector uses a homeserver URL in
+        // the legacy `server_name` field, as Element X does in production.
+        let payload = concat!(
+            "TUFUUklYAgS0yzZ1QVpQ1jlnoxWX3d5jrWRFfELxjS2gN7pz9y+3PABaaHR0",
+            "cHM6Ly9zeW5hcHNlLW9pZGMubGFiLmVsZW1lbnQuZGV2L19zeW5hcHNlL2Ns",
+            "aWVudC9yZW5kZXp2b3VzLzAxSFg5SzAwUTFINktQRDQ3RUc0RzFUM1hHACVo",
+            "dHRwczovL3N5bmFwc2Utb2lkYy5sYWIuZWxlbWVudC5kZXYv",
+        );
+
+        let qr = parse_qr_payload(payload).expect("Element-style QR payload should be valid");
+        assert_eq!(
+            qr_server(&qr).unwrap(),
+            "https://synapse-oidc.lab.element.dev/"
+        );
     }
 
     #[test]
