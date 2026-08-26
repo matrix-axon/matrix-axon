@@ -8,6 +8,7 @@ import { isValidRecoveryKey } from '../recovery-key'
 import { useServices } from '../services'
 import type { Account } from '../stores/accounts'
 import { ServerStatus } from './ServerStatus'
+import { MatrixOAuthQrAcquisition } from './accounts/MatrixOAuthQrAcquisition'
 
 /**
  * The account lifecycle page (ADR 0046, M-W3): list with state and
@@ -15,15 +16,6 @@ import { ServerStatus } from './ServerStatus'
  * and the active-account switch persisted in settings.
  */
 export function AccountsPage() {
-  return (
-    <div class="page">
-      <h1>Accounts</h1>
-      <AccountLifecycle />
-    </div>
-  )
-}
-
-export function AccountLifecycle() {
   const { accounts } = useServices()
 
   useEffect(() => {
@@ -31,7 +23,12 @@ export function AccountLifecycle() {
   }, [accounts])
 
   return (
-    <>
+    <div class="page accounts-page">
+      <h1>Accounts</h1>
+      <p class="muted">
+        Add Matrix accounts, choose the active account, and manage verification
+        and recovery from one place.
+      </p>
       <ErrorBanner error={accounts.error} />
       {accounts.loading.value ? (
         <p>Loading accounts…</p>
@@ -44,9 +41,9 @@ export function AccountLifecycle() {
           ))}
         </ul>
       )}
-      <AddAccountForm />
+      <AccountAcquisition />
       <ServerStatus />
-    </>
+    </div>
   )
 }
 
@@ -223,7 +220,46 @@ function AccountCard({ account }: { account: Account }) {
   )
 }
 
-function AddAccountForm() {
+function AccountAcquisition() {
+  const [method, setMethod] = useState<'password' | 'qr'>('password')
+
+  return (
+    <section class="account-add panel" aria-labelledby="add-account-heading">
+      <h2 id="add-account-heading">Add account</h2>
+      <div
+        class="acquisition-methods"
+        role="tablist"
+        aria-label="Sign-in method"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={method === 'password'}
+          onClick={() => setMethod('password')}
+        >
+          Sign in with password
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={method === 'qr'}
+          onClick={() => setMethod('qr')}
+        >
+          Sign in and verify with QR
+        </button>
+      </div>
+      <div role="tabpanel">
+        {method === 'password' ? (
+          <PasswordAccountAcquisition />
+        ) : (
+          <MatrixOAuthQrAcquisition />
+        )}
+      </div>
+    </section>
+  )
+}
+
+function PasswordAccountAcquisition() {
   const { accounts } = useServices()
   const location = useLocation()
   const [username, setUsername] = useState('')
@@ -236,8 +272,7 @@ function AddAccountForm() {
   const keyOk = recoveryKey.trim() === '' || isValidRecoveryKey(recoveryKey)
 
   return (
-    <div class="account-add">
-      <h2>Add account</h2>
+    <div class="password-acquisition">
       <form
         class="stack-form"
         onSubmit={(event) => {

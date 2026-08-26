@@ -6,8 +6,10 @@ lockfile.
 
 **Status (through M-W10, plus M19-W1 through M19-W4):** a usable read/write client — SSO sign-in
 through Axon OAuth Path A with token-paste fallback, the full account
-lifecycle (under `/accounts`, including 4S recovery-key import with offline
-key-format validation and success/error feedback), theme +
+lifecycle on the unified `/accounts` page (account list, active-account choice,
+status, recovery, logout, deletion, and password acquisition), Matrix OAuth QR
+account acquisition (display or camera/image scan, check codes, authorization,
+reload resume, and cancellation), theme +
 schema-versioned settings, history routing with the permanent deep-link
 shape `/:accountId/rooms/:roomId?thread=&event=` (signed off), the
 cross-account room list with TUI semantics (pinning ADR 0038, sort/filters
