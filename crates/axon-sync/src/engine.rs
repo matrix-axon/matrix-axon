@@ -1611,11 +1611,13 @@ async fn run_account(
     // keys: keys already in the crypto store don't fire the arrival stream. By
     // default, each row gets one startup attempt; operators can opt into the
     // legacy every-boot full sweep. Raced against cancellation: a large backlog
-    // can take a while (one async decrypt call per row), and the sweep has no
-    // cancel-checks of its own, so without this a shutdown mid-sweep would block
-    // until the engine's hard drain timeout rather than exiting promptly. Safe to
-    // abandon mid-row — rows stay `pending` and are retried on the next boot's
-    // sweep (or the room-key arrival stream).
+    // can take a while (one async decrypt call per row). `sweep_pending_utds`
+    // checks `cancel` between rooms and rows so recover/manual timeouts can stop
+    // mid-backlog, but a decrypt already in flight is not interruptible — this
+    // select still lets a shutdown abandon that await rather than blocking until
+    // the call returns (or the engine's hard drain timeout). Safe to abandon
+    // mid-row — rows stay `pending` and are retried on the next boot's sweep
+    // (or the room-key arrival stream).
     let scope = if config.always_redecrypt_utds_on_startup {
         redecrypt::SweepScope::AllPending
     } else {

@@ -1354,7 +1354,7 @@ impl AccountLifecycle {
             .await
             .map_err(|err| classify_recovery_error(err.into()))?;
 
-        if let Err(err) = secret_store.import_secrets().await {
+        let verified = if let Err(err) = secret_store.import_secrets().await {
             let verified = derive_verified(&client).await;
             if !(verified && is_inconsistent_backup_key(&err)) {
                 return Err(classify_recovery_error(err.into()));
@@ -1363,14 +1363,17 @@ impl AccountLifecycle {
                 %account_id,
                 "4S import left megolm backup key missing or inconsistent; continuing recover tree"
             );
-        }
+            verified
+        } else {
+            derive_verified(&client).await
+        };
 
-        // The cross-signing keys just landed, so the device is now self-cross-
-        // signed: re-derive and persist `verified` straight away so the row the
-        // caller reads back reflects it. The sync watcher (ADR 0026) would also
-        // catch this on the next keys-query, but recover's caller reads the row
-        // immediately, and `verification_state()` lags that round-trip.
-        let verified = derive_verified(&client).await;
+        // Persist `verified` straight away so the row the caller reads back
+        // reflects it. After a successful 4S import the cross-signing keys
+        // just landed and this device is now self-cross-signed. The sync
+        // watcher (ADR 0026) would also catch this on the next keys-query,
+        // but recover's caller reads the row immediately, and
+        // `verification_state()` lags that round-trip.
         self.store
             .set_account_verified(account_id, verified)
             .await?;
