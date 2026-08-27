@@ -2,7 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import { CopyableText } from '../../components/CopyableText'
 import { ErrorBanner } from '../../components/ErrorBanner'
 import { useServices } from '../../services'
-import type { MatrixOAuthQrFlow } from '../../stores/matrix-oauth-qr'
+import { hasActiveAccount } from '../../stores/accounts'
+import {
+  isTerminalMatrixOAuthQrFlow,
+  type MatrixOAuthQrFlow,
+} from '../../stores/matrix-oauth-qr'
 import type { QrCameraDevice, QrCameraSession } from '../../qr/browser-qr'
 
 const STAGE_SUMMARIES: Record<MatrixOAuthQrFlow['stage'], string> = {
@@ -49,8 +53,9 @@ function QrCanvas({ data }: { data: string }) {
       return
     }
     let alive = true
-    void qr
-      .render(target, qr.decodeBase64(data))
+    void Promise.resolve()
+      .then(() => qr.decodeBase64(data))
+      .then((bytes) => qr.render(target, bytes))
       .then(() => alive && setError(null))
       .catch((cause: unknown) => {
         if (alive) {
@@ -426,6 +431,41 @@ function ActiveQrFlow({ flow }: { flow: MatrixOAuthQrFlow }) {
   )
 }
 
+function MismatchedQrFlow({
+  flow,
+  expectedUserId,
+}: {
+  flow: MatrixOAuthQrFlow
+  expectedUserId: string
+}) {
+  const { matrixOAuthQr } = useServices()
+  const cancelling = matrixOAuthQr.operation.value === 'cancelling'
+
+  const clearPreviousFlow = async () => {
+    if (!isTerminalMatrixOAuthQrFlow(flow) && !(await matrixOAuthQr.cancel())) {
+      return
+    }
+    matrixOAuthQr.reset()
+  }
+
+  return (
+    <div class="qr-flow">
+      <p class="qr-stage-summary" role="status">
+        QR sign-in for {flow.expected_user_id} is still active. Cancel it before
+        starting QR reactivation for {expectedUserId}.
+      </p>
+      <ErrorBanner error={matrixOAuthQr.error} />
+      <button
+        type="button"
+        disabled={cancelling}
+        onClick={() => void clearPreviousFlow()}
+      >
+        {cancelling ? 'Cancelling…' : 'Cancel previous QR sign-in'}
+      </button>
+    </div>
+  )
+}
+
 export function MatrixOAuthQrAcquisition({
   expectedUserId,
   onSuccess,
@@ -442,6 +482,10 @@ export function MatrixOAuthQrAcquisition({
   const navigateAfterCompletion = useRef<boolean | null>(null)
   const flow = matrixOAuthQr.flow.value
   const effectiveUserId = expectedUserId ?? userId
+  const flowMatchesExpectedUser =
+    flow === null ||
+    expectedUserId === undefined ||
+    flow.expected_user_id === expectedUserId
 
   useEffect(() => {
     void matrixOAuthQr.resume()
@@ -450,16 +494,22 @@ export function MatrixOAuthQrAcquisition({
   useEffect(() => {
     if (flow === null) {
       completionHandled.current = false
-      navigateAfterCompletion.current = null
+      if (matrixOAuthQr.operation.value !== 'starting') {
+        navigateAfterCompletion.current = null
+      }
+      return
+    }
+    if (!flowMatchesExpectedUser) {
       return
     }
     if (!accounts.loading.value && navigateAfterCompletion.current === null) {
-      navigateAfterCompletion.current = !accounts.accounts.value.some(
-        (account) => account.state === 'active',
+      navigateAfterCompletion.current = !hasActiveAccount(
+        accounts.accounts.value,
       )
     }
     if (
       flow.stage === 'done' &&
+      matrixOAuthQr.operation.value === 'idle' &&
       !accounts.loading.value &&
       navigateAfterCompletion.current !== null &&
       !completionHandled.current
@@ -472,9 +522,19 @@ export function MatrixOAuthQrAcquisition({
       history.pushState(null, '', '/')
       window.dispatchEvent(new PopStateEvent('popstate'))
     }
-  }, [accounts.accounts.value, accounts.loading.value, flow, onSuccess])
+  }, [
+    accounts.accounts.value,
+    accounts.loading.value,
+    flow,
+    flowMatchesExpectedUser,
+    matrixOAuthQr.operation.value,
+    onSuccess,
+  ])
 
   if (flow !== null) {
+    if (!flowMatchesExpectedUser && expectedUserId !== undefined) {
+      return <MismatchedQrFlow flow={flow} expectedUserId={expectedUserId} />
+    }
     return <ActiveQrFlow flow={flow} />
   }
 
@@ -483,8 +543,8 @@ export function MatrixOAuthQrAcquisition({
       class="stack-form qr-start-form"
       onSubmit={(event) => {
         event.preventDefault()
-        navigateAfterCompletion.current = !accounts.accounts.value.some(
-          (account) => account.state === 'active',
+        navigateAfterCompletion.current = !hasActiveAccount(
+          accounts.accounts.value,
         )
         completionHandled.current = false
         void matrixOAuthQr.start(effectiveUserId.trim(), presentation)

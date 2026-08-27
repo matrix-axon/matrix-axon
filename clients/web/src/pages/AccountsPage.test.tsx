@@ -33,6 +33,11 @@ const BOB = {
   state: 'deactivated',
   verified: null,
 }
+const CAROL = {
+  ...BOB,
+  account_id: '6b53f7f0-0000-4000-8000-000000000003',
+  user_id: '@carol:example.org',
+}
 const STATUS = {
   backfill: {
     paused: true,
@@ -137,6 +142,158 @@ describe('AccountsPage', () => {
     expect(
       (getByLabelText('Expected Matrix user ID') as HTMLInputElement).readOnly,
     ).toBe(false)
+  })
+
+  it('cancels an active QR flow before leaving reactivation', async () => {
+    let cancellations = 0
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/login/qr`, () =>
+        HttpResponse.json(
+          {
+            data: {
+              flow_id: '10000000-0000-4000-8000-000000000001',
+              expected_user_id: BOB.user_id,
+              presentation: 'display',
+              stage: 'waiting_for_authorization',
+            },
+          },
+          { status: 201 },
+        ),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/login/qr/:flowId`, () =>
+        HttpResponse.json({
+          data: {
+            flow_id: '10000000-0000-4000-8000-000000000001',
+            expected_user_id: BOB.user_id,
+            presentation: 'display',
+            stage: 'waiting_for_authorization',
+          },
+        }),
+      ),
+      http.delete(`${TEST_BASE_URL}/v1/accounts/login/qr/:flowId`, () => {
+        cancellations += 1
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const { findByRole, findByText, getByRole } = renderPage([BOB])
+
+    fireEvent.click(await findByRole('button', { name: 'Sign in again' }))
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
+    fireEvent.click(getByRole('button', { name: 'Start QR sign-in' }))
+    await findByText(/Approve the Matrix device authorization request/)
+    fireEvent.click(getByRole('tab', { name: 'Sign in with password' }))
+    fireEvent.click(getByRole('button', { name: 'Cancel reactivation' }))
+
+    await waitFor(() => expect(cancellations).toBe(1))
+    expect(getByRole('heading', { name: 'Add account' })).toBeTruthy()
+  })
+
+  it('keeps reactivation open when QR cancellation is unconfirmed', async () => {
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/login/qr`, () =>
+        HttpResponse.json(
+          {
+            data: {
+              flow_id: '10000000-0000-4000-8000-000000000001',
+              expected_user_id: BOB.user_id,
+              presentation: 'display',
+              stage: 'waiting_for_authorization',
+            },
+          },
+          { status: 201 },
+        ),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/login/qr/:flowId`, () =>
+        HttpResponse.json({
+          data: {
+            flow_id: '10000000-0000-4000-8000-000000000001',
+            expected_user_id: BOB.user_id,
+            presentation: 'display',
+            stage: 'waiting_for_authorization',
+          },
+        }),
+      ),
+      http.delete(`${TEST_BASE_URL}/v1/accounts/login/qr/:flowId`, () =>
+        HttpResponse.error(),
+      ),
+    )
+    const { services, findByRole, findByText, getByRole } = renderPage([BOB])
+
+    fireEvent.click(await findByRole('button', { name: 'Sign in again' }))
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
+    fireEvent.click(getByRole('button', { name: 'Start QR sign-in' }))
+    await findByText(/Approve the Matrix device authorization request/)
+    fireEvent.click(getByRole('tab', { name: 'Sign in with password' }))
+    fireEvent.click(getByRole('button', { name: 'Cancel reactivation' }))
+
+    expect(await findByText(/Cancellation was not confirmed/)).toBeTruthy()
+    expect(
+      getByRole('heading', { name: 'Reactivate @bob:example.org' }),
+    ).toBeTruthy()
+    services.matrixOAuthQr.reset()
+  })
+
+  it('does not show one account QR flow under another account heading', async () => {
+    let cancellations = 0
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/login/qr`, () =>
+        HttpResponse.json(
+          {
+            data: {
+              flow_id: '10000000-0000-4000-8000-000000000001',
+              expected_user_id: BOB.user_id,
+              presentation: 'display',
+              stage: 'waiting_for_authorization',
+            },
+          },
+          { status: 201 },
+        ),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/login/qr/:flowId`, () =>
+        HttpResponse.json({
+          data: {
+            flow_id: '10000000-0000-4000-8000-000000000001',
+            expected_user_id: BOB.user_id,
+            presentation: 'display',
+            stage: 'waiting_for_authorization',
+          },
+        }),
+      ),
+      http.delete(`${TEST_BASE_URL}/v1/accounts/login/qr/:flowId`, () => {
+        cancellations += 1
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const { services, findAllByRole, findByText, getByRole, queryByText } =
+      renderPage([BOB, CAROL])
+
+    const [reactivateBob, reactivateCarol] = await findAllByRole('button', {
+      name: 'Sign in again',
+    })
+    fireEvent.click(reactivateBob)
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
+    fireEvent.click(getByRole('button', { name: 'Start QR sign-in' }))
+    await findByText(/Approve the Matrix device authorization request/)
+
+    fireEvent.click(reactivateCarol)
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
+
+    expect(
+      await findByText(/QR sign-in for @bob:example.org is still active/),
+    ).toBeTruthy()
+    expect(
+      queryByText(/Approve the Matrix device authorization request/),
+    ).toBeNull()
+    fireEvent.click(getByRole('button', { name: 'Cancel previous QR sign-in' }))
+    await waitFor(() => expect(cancellations).toBe(1))
+    expect(
+      (
+        getByRole('textbox', {
+          name: 'Expected Matrix user ID',
+        }) as HTMLInputElement
+      ).value,
+    ).toBe(CAROL.user_id)
+    services.matrixOAuthQr.reset()
   })
 
   it('reactivates with the stored identity and routes the first active account', async () => {
@@ -437,6 +594,51 @@ describe('AccountsPage', () => {
     services.matrixOAuthQr.reset()
   })
 
+  it('shows malformed display QR data as a recoverable render error', async () => {
+    const renderQr = vi.fn()
+    const qr: BrowserQrAdapter = {
+      decodeBase64: vi.fn(() => {
+        throw new Error('QR data is not valid base64')
+      }),
+      encodeBase64: vi.fn(),
+      render: renderQr,
+      scanImage: vi.fn(),
+      listCameras: vi.fn().mockResolvedValue([]),
+      watchCameras: vi.fn(() => () => {}),
+      startCamera: vi.fn(),
+    }
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/login/qr`, () =>
+        HttpResponse.json(
+          {
+            data: {
+              flow_id: '10000000-0000-4000-8000-000000000001',
+              expected_user_id: '@alice:example.org',
+              presentation: 'display',
+              stage: 'qr_ready',
+              qr_code_data: 'malformed',
+            },
+          },
+          { status: 201 },
+        ),
+      ),
+    )
+    const { services, findByText, getByLabelText, getByRole } = renderPage(
+      [],
+      qr,
+    )
+
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
+    fireEvent.input(getByLabelText('Expected Matrix user ID'), {
+      target: { value: '@alice:example.org' },
+    })
+    fireEvent.click(getByRole('button', { name: 'Start QR sign-in' }))
+
+    expect(await findByText('QR data is not valid base64')).toBeTruthy()
+    expect(renderQr).not.toHaveBeenCalled()
+    services.matrixOAuthQr.reset()
+  })
+
   it('falls back from camera failure to image scan and submits exact base64', async () => {
     let scanBody: unknown
     const qr: BrowserQrAdapter = {
@@ -716,6 +918,52 @@ describe('AccountsPage', () => {
     fireEvent.click(getByRole('button', { name: 'Start QR sign-in' }))
 
     await waitFor(() => expect(window.location.pathname).toBe('/'))
+  })
+
+  it('waits for the completed QR account refresh before navigating', async () => {
+    window.history.replaceState(null, '', '/accounts')
+    let refreshRequested = false
+    let releaseRefresh: (() => void) | undefined
+    const refreshBlocked = new Promise<void>((resolve) => {
+      releaseRefresh = resolve
+    })
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/login/qr`, () =>
+        HttpResponse.json(
+          {
+            data: {
+              flow_id: '10000000-0000-4000-8000-000000000001',
+              expected_user_id: '@alice:example.org',
+              presentation: 'display',
+              stage: 'done',
+              account_id: ALICE.account_id,
+            },
+          },
+          { status: 201 },
+        ),
+      ),
+    )
+    const { findByText, getByLabelText, getByRole } = renderPage([])
+    await findByText('No accounts yet — add one below.')
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts`, async () => {
+        refreshRequested = true
+        await refreshBlocked
+        return HttpResponse.json({ data: [ALICE] })
+      }),
+    )
+
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
+    fireEvent.input(getByLabelText('Expected Matrix user ID'), {
+      target: { value: '@alice:example.org' },
+    })
+    fireEvent.click(getByRole('button', { name: 'Start QR sign-in' }))
+
+    await waitFor(() => expect(refreshRequested).toBe(true))
+    const pathWhileRefreshing = window.location.pathname
+    releaseRefresh?.()
+    await waitFor(() => expect(window.location.pathname).toBe('/'))
+    expect(pathWhileRefreshing).toBe('/accounts')
   })
 
   it('reactivates by QR and routes when only deactivated accounts existed', async () => {

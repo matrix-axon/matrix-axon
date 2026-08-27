@@ -1,19 +1,13 @@
 import { signal } from '@preact/signals'
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'preact/hooks'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { CopyableText } from '../components/CopyableText'
 import { ErrorBanner } from '../components/ErrorBanner'
 import { NoticeBanner, type Notice } from '../components/NoticeBanner'
 import { isValidRecoveryKey } from '../recovery-key'
 import { useServices } from '../services'
-import type { Account } from '../stores/accounts'
+import { hasActiveAccount, type Account } from '../stores/accounts'
+import { isTerminalMatrixOAuthQrFlow } from '../stores/matrix-oauth-qr'
 import { ServerStatus } from './ServerStatus'
 import { MatrixOAuthQrAcquisition } from './accounts/MatrixOAuthQrAcquisition'
 
@@ -23,9 +17,36 @@ import { MatrixOAuthQrAcquisition } from './accounts/MatrixOAuthQrAcquisition'
  * delete-with-confirm, and the active-account switch persisted in settings.
  */
 export function AccountsPage() {
-  const { accounts } = useServices()
-  const [reactivation, setReactivation] = useState<Account | null>(null)
-  const finishReactivation = useCallback(() => setReactivation(null), [])
+  const { accounts, matrixOAuthQr } = useServices()
+  const [acquisition, setAcquisition] = useState<{
+    reactivation: Account | null
+    method: 'password' | 'qr'
+  }>({ reactivation: null, method: 'password' })
+  const finishReactivation = useCallback(
+    () =>
+      setAcquisition((current) => ({
+        ...current,
+        reactivation: null,
+      })),
+    [],
+  )
+  const beginReactivation = useCallback(
+    (account: Account) =>
+      setAcquisition({ reactivation: account, method: 'password' }),
+    [],
+  )
+  const cancelReactivation = useCallback(async () => {
+    const current = matrixOAuthQr.flow.value
+    if (
+      current !== null &&
+      !isTerminalMatrixOAuthQrFlow(current) &&
+      !(await matrixOAuthQr.cancel())
+    ) {
+      return
+    }
+    matrixOAuthQr.reset()
+    finishReactivation()
+  }, [finishReactivation, matrixOAuthQr])
 
   useEffect(() => {
     void accounts.refresh()
@@ -49,14 +70,18 @@ export function AccountsPage() {
             <AccountCard
               key={account.account_id}
               account={account}
-              onReactivate={setReactivation}
+              onReactivate={beginReactivation}
             />
           ))}
         </ul>
       )}
       <AccountAcquisition
-        reactivation={reactivation}
-        onCancelReactivation={finishReactivation}
+        reactivation={acquisition.reactivation}
+        method={acquisition.method}
+        onMethodChange={(method) =>
+          setAcquisition((current) => ({ ...current, method }))
+        }
+        onCancelReactivation={cancelReactivation}
         onSuccess={finishReactivation}
       />
       <ServerStatus />
@@ -254,24 +279,24 @@ function AccountCard({
 
 function AccountAcquisition({
   reactivation,
+  method,
+  onMethodChange,
   onCancelReactivation,
   onSuccess,
 }: {
   reactivation: Account | null
-  onCancelReactivation: () => void
+  method: 'password' | 'qr'
+  onMethodChange: (method: 'password' | 'qr') => void
+  onCancelReactivation: () => Promise<void>
   onSuccess: () => void
 }) {
-  const [method, setMethod] = useState<'password' | 'qr'>('password')
+  const { matrixOAuthQr } = useServices()
   const section = useRef<HTMLElement>(null)
 
-  // Establish the reactivation default before the updated form paints. A
-  // passive effect can run after a fast user has already selected QR, then
-  // overwrite that choice and unexpectedly return them to the password form.
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (reactivation === null) {
       return
     }
-    setMethod('password')
     section.current?.scrollIntoView?.({ block: 'start' })
   }, [reactivation])
 
@@ -293,8 +318,14 @@ function AccountAcquisition({
             device. Axon will reuse its stored homeserver.
           </p>
           <div class="card-actions">
-            <button type="button" onClick={onCancelReactivation}>
-              Cancel reactivation
+            <button
+              type="button"
+              disabled={matrixOAuthQr.operation.value === 'cancelling'}
+              onClick={() => void onCancelReactivation()}
+            >
+              {matrixOAuthQr.operation.value === 'cancelling'
+                ? 'Cancelling reactivation…'
+                : 'Cancel reactivation'}
             </button>
           </div>
         </>
@@ -308,7 +339,7 @@ function AccountAcquisition({
           type="button"
           role="tab"
           aria-selected={method === 'password'}
-          onClick={() => setMethod('password')}
+          onClick={() => onMethodChange('password')}
         >
           Sign in with password
         </button>
@@ -316,17 +347,20 @@ function AccountAcquisition({
           type="button"
           role="tab"
           aria-selected={method === 'qr'}
-          onClick={() => setMethod('qr')}
+          onClick={() => onMethodChange('qr')}
         >
           Sign in with QR code
         </button>
       </div>
       <div role="tabpanel">
         {method === 'password' ? (
-          <PasswordAccountAcquisition
-            reactivation={reactivation}
-            onSuccess={onSuccess}
-          />
+          <>
+            <ErrorBanner error={matrixOAuthQr.error} />
+            <PasswordAccountAcquisition
+              reactivation={reactivation}
+              onSuccess={onSuccess}
+            />
+          </>
         ) : (
           <MatrixOAuthQrAcquisition
             expectedUserId={reactivation?.user_id}
@@ -374,9 +408,7 @@ function PasswordAccountAcquisition({
         class="stack-form"
         onSubmit={(event) => {
           event.preventDefault()
-          const firstActiveLogin = !accounts.accounts.value.some(
-            (account) => account.state === 'active',
-          )
+          const firstActiveLogin = !hasActiveAccount(accounts.accounts.value)
           void accounts
             .login({
               username: effectiveUsername.trim(),

@@ -1,6 +1,13 @@
 export const MAX_QR_IMAGE_BYTES = 8 * 1024 * 1024
 export const MAX_QR_SCAN_DIMENSION = 2048
 const CAMERA_SCAN_INTERVAL_MS = 250
+type JsQrDecoder = (typeof import('jsqr'))['default']
+let jsQrDecoder: Promise<JsQrDecoder> | null = null
+
+function loadJsQrDecoder(): Promise<JsQrDecoder> {
+  jsQrDecoder ??= import('jsqr').then(({ default: decoder }) => decoder)
+  return jsQrDecoder
+}
 
 export interface QrCameraDevice {
   deviceId: string
@@ -76,15 +83,15 @@ function boundedDimensions(width: number, height: number): [number, number] {
   ]
 }
 
-async function decodeCanvas(
+function decodeCanvas(
   canvas: HTMLCanvasElement,
-): Promise<Uint8Array | null> {
+  jsQR: JsQrDecoder,
+): Uint8Array | null {
   const context = canvas.getContext('2d', { willReadFrequently: true })
   if (context === null) {
     throw new Error('This browser cannot read QR images.')
   }
   const image = context.getImageData(0, 0, canvas.width, canvas.height)
-  const { default: jsQR } = await import('jsqr')
   const result = jsQR(image.data, image.width, image.height, {
     inversionAttempts: 'attemptBoth',
   })
@@ -124,7 +131,7 @@ export function createBrowserQrAdapter(): BrowserQrAdapter {
           throw new Error('This browser cannot read QR images.')
         }
         context.drawImage(bitmap, 0, 0, width, height)
-        const result = await decodeCanvas(canvas)
+        const result = decodeCanvas(canvas, await loadJsQrDecoder())
         if (result === null) {
           throw new Error('No QR code was found in that image.')
         }
@@ -201,6 +208,7 @@ export function createBrowserQrAdapter(): BrowserQrAdapter {
         canvas.height = 0
       }
       try {
+        const jsQR = await loadJsQrDecoder()
         video.srcObject = stream
         await video.play()
         timer = setInterval(() => {
@@ -229,7 +237,7 @@ export function createBrowserQrAdapter(): BrowserQrAdapter {
                 throw new Error('This browser cannot read camera frames.')
               }
               context.drawImage(video, 0, 0, width, height)
-              const result = await decodeCanvas(canvas)
+              const result = decodeCanvas(canvas, jsQR)
               if (result !== null && !latched && !stopped) {
                 latched = true
                 stop()

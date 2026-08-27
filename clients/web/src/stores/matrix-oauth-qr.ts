@@ -19,6 +19,7 @@ export type MatrixOAuthQrOperation =
   | 'polling'
   | 'submitting_scan'
   | 'submitting_check_code'
+  | 'refreshing_accounts'
   | 'cancelling'
 
 export interface MatrixOAuthQrStore {
@@ -77,7 +78,7 @@ const FAILURE_MESSAGES: Record<string, string> = {
     'Axon could not complete QR sign-in. Try again or check the server logs.',
 }
 
-function terminal(flow: MatrixOAuthQrFlow): boolean {
+export function isTerminalMatrixOAuthQrFlow(flow: MatrixOAuthQrFlow): boolean {
   return TERMINAL_STAGES.has(flow.stage)
 }
 
@@ -175,7 +176,7 @@ export function createMatrixOAuthQrStore(
     if (
       owner !== generation ||
       (flow.value === null && storage.getItem(ACTIVE_FLOW_KEY) === null) ||
-      (flow.value !== null && terminal(flow.value))
+      (flow.value !== null && isTerminalMatrixOAuthQrFlow(flow.value))
     ) {
       return
     }
@@ -185,9 +186,18 @@ export function createMatrixOAuthQrStore(
     }, delay)
   }
 
-  function applyFlow(next: MatrixOAuthQrFlow, owner: number): void {
+  async function applyFlow(
+    next: MatrixOAuthQrFlow,
+    owner: number,
+  ): Promise<void> {
     if (owner !== generation) {
       return
+    }
+    const refreshCompletedAccount =
+      next.stage === 'done' && !refreshed.has(next.flow_id)
+    if (refreshCompletedAccount) {
+      refreshed.add(next.flow_id)
+      operation.value = 'refreshing_accounts'
     }
     const retainCurrentError =
       retainedErrorAt?.flow_id === next.flow_id &&
@@ -200,14 +210,16 @@ export function createMatrixOAuthQrStore(
       clearRetainedError()
       error.value = null
     }
-    if (terminal(next)) {
+    if (isTerminalMatrixOAuthQrFlow(next)) {
       clearPoll()
       storage.removeItem(ACTIVE_FLOW_KEY)
-      operation.value = 'idle'
-      if (next.stage === 'done' && !refreshed.has(next.flow_id)) {
-        refreshed.add(next.flow_id)
-        void accounts.refresh()
+      if (refreshCompletedAccount) {
+        await accounts.refresh()
+        if (owner !== generation) {
+          return
+        }
       }
+      operation.value = 'idle'
       return
     }
     storage.setItem(ACTIVE_FLOW_KEY, next.flow_id)
@@ -250,7 +262,7 @@ export function createMatrixOAuthQrStore(
         operation.value = 'idle'
         return false
       }
-      applyFlow(result.data.data, owner)
+      await applyFlow(result.data.data, owner)
       return true
     } catch (cause) {
       if (
@@ -287,7 +299,7 @@ export function createMatrixOAuthQrStore(
     ) => ReturnType<ApiClient['POST']>,
   ): Promise<boolean> {
     const current = flow.value
-    if (current === null || terminal(current)) {
+    if (current === null || isTerminalMatrixOAuthQrFlow(current)) {
       return false
     }
     const owner = generation
@@ -307,7 +319,7 @@ export function createMatrixOAuthQrStore(
         schedulePoll(owner)
         return false
       }
-      applyFlow(result.data.data as MatrixOAuthQrFlow, owner)
+      await applyFlow(result.data.data as MatrixOAuthQrFlow, owner)
       return true
     } catch {
       if (
@@ -339,7 +351,7 @@ export function createMatrixOAuthQrStore(
       error.value = null
       operation.value = 'starting'
       storage.removeItem(ACTIVE_FLOW_KEY)
-      if (previous !== null && !terminal(previous)) {
+      if (previous !== null && !isTerminalMatrixOAuthQrFlow(previous)) {
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), requestTimeoutMs)
         void api
@@ -371,7 +383,7 @@ export function createMatrixOAuthQrStore(
           operation.value = 'idle'
           return false
         }
-        applyFlow(result.data.data, owner)
+        await applyFlow(result.data.data, owner)
         return true
       } catch (cause) {
         if (
