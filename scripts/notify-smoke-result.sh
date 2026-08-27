@@ -25,10 +25,14 @@ SMOKE_LANE="${SMOKE_LANE:-unresolved}"
 
 run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
-# Everything here is GitHub-controlled rather than attacker-controlled, but a
-# branch name can still hold Markdown punctuation, so escape it the same way.
-# The run URL is GitHub-generated and goes in a link target unescaped.
-NOTIFY_MESSAGE="$(jq -rn \
+# Everything here is GitHub-controlled rather than attacker-controlled, and
+# every field is single-line, so the inline escape is enough -- there is no
+# untrusted block structure to worry about. A branch name can still hold
+# Markdown punctuation, though, so it does get escaped. escape_md is shared
+# with the untrusted path in scripts/lib/markdown-escape.jq; see there for why
+# the two levels are separate. The run URL is GitHub-generated and goes in a
+# link target unescaped.
+NOTIFY_MESSAGE="$(jq -rn -L "$(dirname "$0")/lib" \
   --arg job "$JOB_LABEL" \
   --arg status "$STATUS" \
   --arg branch "$GITHUB_REF_NAME" \
@@ -39,7 +43,7 @@ NOTIFY_MESSAGE="$(jq -rn \
   --arg attempt "$GITHUB_RUN_ATTEMPT" \
   --arg run_url "$run_url" \
   '
-  def escape_md: gsub("(?<c>[\\\\`*_\\[\\]])"; "\\\(.c)");
+  include "markdown-escape";
   "# Smoke Test Run\n"
   + "## " + ($job | escape_md) + ": " + ($status | escape_md)
   + "  \n**Branch:** " + ($branch | escape_md)

@@ -117,6 +117,14 @@ CASES: list[tuple[str, set[str]]] = [
     ("THIRDPARTY.md", set()),
     ("LICENSE.md", set()),
     ("scripts/check-hook-filters.py", {"hook-filters"}),
+    # The notification escaping: the module, its test, and every caller that
+    # interpolates through it. Deliberately narrow -- it must not claim the
+    # other scripts/ entries above, which no local hook selects.
+    ("scripts/lib/markdown-escape.jq", {"notify-escaping"}),
+    ("scripts/check-notify-escaping.sh", {"notify-escaping"}),
+    ("scripts/send-matrix-notification.sh", {"notify-escaping"}),
+    ("scripts/notify-smoke-result.sh", {"notify-escaping"}),
+    (".github/workflows/notify-opened.yml", {"notify-escaping"}),
     # Editing the config re-runs everything it could invalidate, including this.
     (
         ".pre-commit-config.yaml",
