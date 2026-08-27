@@ -11,7 +11,7 @@ import {
   unreadCountsChange,
 } from './api/frames'
 import { openLiveSocket } from './api/ws'
-import { setPerfEnabled } from './perf'
+import { setPerfEnabled, setTelemetrySink } from './perf'
 import {
   createCompositeAuthProvider,
   type CompositeAuthProvider,
@@ -51,6 +51,7 @@ import {
 } from './stores/cache-store'
 import { roomTitle } from './stores/room-list'
 import { createRoomListCache } from './stores/room-list-cache'
+import { createTelemetryStore, type TelemetryStore } from './stores/telemetry'
 import { createInvitesStore, type InvitesStore } from './stores/invites'
 import { createRoomsStore, type RoomsStore } from './stores/rooms'
 import { createSearchStore, type SearchStore } from './stores/search'
@@ -117,6 +118,11 @@ export interface AppServices {
    * lifecycle wiring — the sign-out wipe and the setting — and for phase 3.
    */
   cache: CacheStore
+  /**
+   * Durable performance summaries, for reading a slow load back after the
+   * fact rather than needing a screen recording running when it happens.
+   */
+  telemetry: TelemetryStore
   /**
    * Files staged in a composer but not sent (issue #89). Out here rather than
    * in the composer because `RoomPage` unmounts whenever the route leaves a
@@ -789,6 +795,15 @@ export function createServices(
   const qr = createBrowserQrAdapter()
   const cache = createIndexedDbCacheStore()
   requestPersistentStorage()
+  const telemetry = createTelemetryStore({
+    cache,
+    enabled: () =>
+      settings.perfMarks.peek() && settings.persistTelemetry.peek(),
+  })
+  // Registered here rather than imported by `perf.ts`: that module is imported
+  // by stores and components, so reaching the service graph from it would be a
+  // cycle. The sink keeps only what `PERSISTED_MARKS` allows.
+  setTelemetrySink((name, at, detail) => telemetry.record(name, at, detail))
   // Resolved per operation rather than once: token-paste sign-in does not
   // reload the document, so a graph built while signed out would hold `null`
   // for the whole session and never write a thing — leaving the *next* launch
@@ -856,6 +871,7 @@ export function createServices(
     updates,
     timelines,
     cache,
+    telemetry,
     attachments,
     settings,
     accounts,

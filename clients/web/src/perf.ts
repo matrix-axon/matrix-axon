@@ -140,6 +140,32 @@ export function perfMark(
     scheduleTransitionSummary(at)
   }
   noteRoomOpen(name, at, detail)
+  if (sink !== null) {
+    try {
+      sink(name, at, detail)
+    } catch {
+      // A sink must never be able to break the app it is measuring.
+    }
+  }
+}
+
+/**
+ * Where summary marks go to be persisted, registered by the composition root.
+ *
+ * An inverted dependency on purpose: this module is imported by stores and by
+ * `RoomList`, so it cannot reach the service graph without a cycle. The sink
+ * decides for itself what it will keep — see `PERSISTED_MARKS`.
+ */
+type TelemetrySinkFn = (
+  name: string,
+  at: number,
+  detail: Record<string, string | number | boolean | null> | undefined,
+) => void
+
+let sink: TelemetrySinkFn | null = null
+
+export function setTelemetrySink(fn: TelemetrySinkFn | null): void {
+  sink = fn
 }
 
 interface AxonMark {

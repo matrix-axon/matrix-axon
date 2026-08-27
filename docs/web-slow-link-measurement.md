@@ -42,6 +42,15 @@ H1 and H2 are the leading candidates and are not mutually exclusive.
 Enable **Settings → Debug → Performance instrumentation** (not `?perf=1`: that flag latches before any store exists and can silently mask the ordering, see ADR 0077).
 Each cold room open then emits one summary line plus up to three request lines.
 
+**Turn on "Keep performance summaries on this device" as well.** The overlay
+only helps when someone is watching, and the loads worth capturing rarely
+happen while a screen recording is running. With it on, the summaries are kept
+in IndexedDB and **Copy telemetry** puts them on the clipboard — paste them
+into a report instead of screenshotting. Timings only: the marks that carry
+room and account identifiers are never written, and any identifier-shaped value
+is refused even from an allow-listed mark (`stores/telemetry.ts`). Cleared on
+sign-out with the rest of the cache.
+
 ```
 boot:room-open  phase=settled rows=980 net=940 q=780 conn=0 ttfb=120 xfer=40 reqs=31 kb=402 list=3120 pending=null members=8800 threads=610 people=4200 attempts=1 warm=false
 boot:room-open:req  route=accounts/{account}/rooms/{id}/members total=8800 wait=7900 conn=0 ttfb=120 xfer=780 bytes=41000 gzip=true proto=h2 cors=false
