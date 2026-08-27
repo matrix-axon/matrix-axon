@@ -282,6 +282,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let backfill_status = Arc::new(status::BackfillStatusAdapter(sync_engine.backfill_health()));
     let sync_status = Arc::new(status::SyncStatusAdapter(sync_engine.sync_health()));
     let sync_state = Arc::new(status::SyncStateAdapter(sync_engine.sync_health()));
+    let backup_state = Arc::new(status::BackupStateAdapter(sync_engine.backup_health()));
 
     // OAuth 2.0 authorization server (M14, ADR 0054), when enabled. Provider
     // construction is async (discovery-doc fetch), so it happens here rather
@@ -313,6 +314,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     .with_backfill_status(backfill_status)
     .with_sync_status(sync_status)
     .with_sync_state(sync_state)
+    .with_backup_state(backup_state)
     .with_matrix_oauth_acquire(matrix_oauth_acquire)
     .with_build_info(axon_api::BuildInfo {
         version: env!("CARGO_PKG_VERSION").to_owned(),

@@ -14,6 +14,7 @@
 //! connection endpoints and may have multiple valid spellings.
 
 use std::collections::HashMap;
+use std::future::IntoFuture;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ use axon_search::IndexHandle;
 use axon_store::{Account, AccountState, CommitMatrixOAuthAcquire, Store, StoreError};
 use matrix_sdk::authentication::oauth::OAuthSession;
 use matrix_sdk::encryption::recovery::RecoveryError;
+use matrix_sdk::encryption::secret_storage::{SecretStorageError, SecretStore};
 use matrix_sdk::ruma::OwnedUserId;
 use matrix_sdk::Client;
 use tokio::sync::broadcast;
@@ -32,6 +34,11 @@ use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use crate::backfill::BackfillHealth;
+use crate::backup::{
+    current_backup_signed_by_this_device, delete_backup_version, four_s_has_megolm,
+    log_post_create_version, plan_backup, BackupAction, BackupPlan, BackupProbe, BackupVerb,
+    ENABLE_EXPORT_TIMEOUT, UPLOAD_WAIT_TIMEOUT,
+};
 use crate::engine::{spawn_supervised, AccountTask, TaskRegistry};
 use crate::error::{GatewayError, SyncError};
 use crate::manager::ClientManager;
@@ -137,6 +144,12 @@ pub enum LifecycleError {
     /// error, not a silent permanent UTD and not an internal failure. → 400.
     #[error("recovery failed: {0}")]
     RecoveryFailed(String),
+
+    /// The operation cannot proceed because of the account's current backup
+    /// state: unverified device, or a homeserver backup this device is not
+    /// connected to and did not sign (ADR 0098 enable verb). → 409.
+    #[error("{0}")]
+    BackupConflict(String),
 
     /// The homeserver rejected the supplied credentials.
     #[error("authentication failed: {0}")]
@@ -288,9 +301,36 @@ fn classify_recovery_error(err: RecoveryError) -> LifecycleError {
             // verification failure. Keep the detail server-side, return a 500.
             other => LifecycleError::Upstream(other.to_string()),
         },
-        // `Sdk` (upstream/SDK) and `BackupExistsOnServer` (can't arise on the
-        // recover path) are not key-actionable either.
+        // Enable-verb only: a backup already exists on the homeserver.
+        // Recover never maps this join path to 409 (ADR 0098).
+        RecoveryError::BackupExistsOnServer => LifecycleError::BackupConflict(
+            "a megolm backup already exists on the homeserver; recover first to join it".to_owned(),
+        ),
+        // `Sdk` (upstream/SDK) is not key-actionable either.
         other => LifecycleError::Upstream(other.to_string()),
+    }
+}
+
+/// 4S import connected cross-signing but the megolm backup key is missing or
+/// does not match the homeserver version. Recover continues to the backup
+/// tree (arm 3) instead of 400.
+fn is_inconsistent_backup_key(err: &SecretStorageError) -> bool {
+    use matrix_sdk::encryption::secret_storage::SecretStorageError as Ss;
+    matches!(
+        err,
+        Ss::InconsistentBackupDecryptionKey | Ss::MissingOrInvalidBackupDecryptionKey
+    )
+}
+
+/// Opening 4S for enable: no default key means we would have to mint one.
+fn classify_open_store_for_enable(err: SecretStorageError) -> LifecycleError {
+    use matrix_sdk::encryption::secret_storage::SecretStorageError as Ss;
+    match err {
+        Ss::MissingKeyInfo { .. } => LifecycleError::RecoveryFailed(
+            "the account has no Secure Backup (4S); Axon will not mint a new recovery key"
+                .to_owned(),
+        ),
+        other => classify_recovery_error(other.into()),
     }
 }
 
@@ -428,6 +468,263 @@ impl AccountLifecycle {
     /// Shared with the verification watcher via the engine-owned [`IdentityLocks`].
     fn lock_for(&self, user_id: &str, homeserver_url: &str) -> IdentityLock {
         lock_for(&self.locks, user_id, homeserver_url)
+    }
+
+    /// Cancel-aware UTD sweep: on timeout, cancel the token and await the
+    /// partial summary so counts are not zeroed (ADR 0098).
+    async fn sweep_pending_bounded(
+        &self,
+        client: &Client,
+        account_id: Uuid,
+        timeout: Duration,
+    ) -> RedecryptSummary {
+        let cancel = CancellationToken::new();
+        let mut sweep = std::pin::pin!(crate::redecrypt::sweep_pending_utds(
+            client,
+            &self.store,
+            account_id,
+            SweepScope::AllPending,
+            self.index.as_ref(),
+            &cancel,
+        ));
+        tokio::select! {
+            summary = &mut sweep => summary,
+            _ = tokio::time::sleep(timeout) => {
+                tracing::warn!(
+                    %account_id,
+                    timeout_secs = timeout.as_secs(),
+                    "UTD back-fill sweep timed out; returning partial summary"
+                );
+                cancel.cancel();
+                RedecryptSummary::timed_out(sweep.await)
+            }
+        }
+    }
+
+    /// Probe the SDK + 4S + intent, run the recover or enable tree, and
+    /// perform enable/export/replace. Recover maps create/export failures to
+    /// `BackupAction::Failed` at the caller; this method still returns Err
+    /// for enable-verb 409/400 arms.
+    async fn apply_backup_plan(
+        &self,
+        verb: BackupVerb,
+        account: &Account,
+        client: &Client,
+        secret_store: Option<&SecretStore>,
+        recovery_key_present: bool,
+    ) -> Result<BackupAction, LifecycleError> {
+        let backups = client.encryption().backups();
+        let are_enabled = backups.are_enabled().await;
+        let exists_on_server = match backups.fetch_exists_on_server().await {
+            Ok(exists) => exists,
+            Err(err) => {
+                tracing::warn!(
+                    account_id = %account.account_id,
+                    error = %err,
+                    "fetch_exists_on_server failed; treating as unknown"
+                );
+                if verb == BackupVerb::Recover {
+                    return Ok(BackupAction::Failed);
+                }
+                return Err(LifecycleError::Upstream(err.to_string()));
+            }
+        };
+        tracing::info!(
+            account_id = %account.account_id,
+            exists_on_server,
+            are_enabled,
+            "backup decision tree re-fetched exists_on_server"
+        );
+
+        let four_s_has_megolm = match secret_store {
+            Some(store) => Some(four_s_has_megolm(store).await),
+            None => None,
+        };
+
+        let mut signed_by_this_device = None;
+        let mut current_version = None;
+        if exists_on_server && !are_enabled {
+            match current_backup_signed_by_this_device(client, account).await {
+                Ok((version, signed, count)) => {
+                    tracing::info!(
+                        account_id = %account.account_id,
+                        version = %version,
+                        signed,
+                        count,
+                        "inspected current megolm backup auth_data"
+                    );
+                    signed_by_this_device = Some(signed);
+                    current_version = Some(version);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        account_id = %account.account_id,
+                        error = %err,
+                        "failed to inspect current megolm backup version"
+                    );
+                }
+            }
+        }
+
+        let probe = BackupProbe {
+            verified: account.verified,
+            recovery_key_present,
+            are_enabled,
+            exists_on_server,
+            four_s_has_megolm,
+            intent: account.backup_enable_intent,
+            signed_by_this_device,
+        };
+        let plan = plan_backup(verb, &probe);
+        match plan {
+            BackupPlan::Unverified => Err(LifecycleError::BackupConflict(
+                "account is not verified; recover or verify first".to_owned(),
+            )),
+            BackupPlan::NeedRecoveryKey => Err(LifecycleError::RecoveryFailed(
+                "recovery_key is required to create or export megolm backup".to_owned(),
+            )),
+            BackupPlan::RefuseJoin => Err(LifecycleError::BackupConflict(
+                "a megolm backup already exists on the homeserver; recover first to join it"
+                    .to_owned(),
+            )),
+            BackupPlan::AlreadyUploading => Ok(BackupAction::AlreadyUploading),
+            BackupPlan::Joined => Ok(BackupAction::Joined),
+            BackupPlan::Failed => Ok(BackupAction::Failed),
+            BackupPlan::ExportOnly => {
+                let Some(store) = secret_store else {
+                    return Err(LifecycleError::RecoveryFailed(
+                        "recovery_key is required to create or export megolm backup".to_owned(),
+                    ));
+                };
+                self.export_and_clear_intent(account.account_id, store)
+                    .await
+            }
+            BackupPlan::EnableAndExport => {
+                self.enable_and_export(account.account_id, client, secret_store, verb)
+                    .await
+            }
+            BackupPlan::ReplaceThenEnable => {
+                if let Some(version) = current_version {
+                    if let Err(err) = delete_backup_version(client, version).await {
+                        tracing::warn!(
+                            account_id = %account.account_id,
+                            error = %err,
+                            "failed to delete our crashed megolm backup version"
+                        );
+                        return match verb {
+                            BackupVerb::Recover => Ok(BackupAction::Failed),
+                            BackupVerb::Enable => Err(err),
+                        };
+                    }
+                }
+                self.enable_and_export(account.account_id, client, secret_store, verb)
+                    .await
+            }
+        }
+    }
+
+    async fn enable_and_export(
+        &self,
+        account_id: Uuid,
+        client: &Client,
+        secret_store: Option<&SecretStore>,
+        verb: BackupVerb,
+    ) -> Result<BackupAction, LifecycleError> {
+        let Some(store) = secret_store else {
+            return Err(LifecycleError::RecoveryFailed(
+                "recovery_key is required to create or export megolm backup".to_owned(),
+            ));
+        };
+        self.store
+            .set_backup_enable_intent(account_id, true)
+            .await?;
+        let result = tokio::time::timeout(ENABLE_EXPORT_TIMEOUT, async {
+            client
+                .encryption()
+                .recovery()
+                .enable_backup()
+                .await
+                .map_err(classify_recovery_error)?;
+            store
+                .export_secrets()
+                .await
+                .map_err(|err| classify_recovery_error(err.into()))?;
+            Ok::<(), LifecycleError>(())
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {
+                self.store
+                    .set_backup_enable_intent(account_id, false)
+                    .await?;
+                log_post_create_version(client, account_id).await;
+                Ok(BackupAction::Enabled)
+            }
+            Ok(Err(LifecycleError::BackupConflict(_))) if verb == BackupVerb::Recover => {
+                Ok(BackupAction::Failed)
+            }
+            Ok(Err(err)) => {
+                if client.encryption().backups().are_enabled().await {
+                    Ok(BackupAction::ExportPending)
+                } else if verb == BackupVerb::Recover {
+                    tracing::warn!(
+                        %account_id,
+                        error = %err,
+                        "enable_backup failed after 4S import"
+                    );
+                    Ok(BackupAction::Failed)
+                } else {
+                    Err(err)
+                }
+            }
+            Err(_) => {
+                tracing::warn!(
+                    %account_id,
+                    timeout_secs = ENABLE_EXPORT_TIMEOUT.as_secs(),
+                    "enable_backup/export_secrets timed out"
+                );
+                if client.encryption().backups().are_enabled().await {
+                    Ok(BackupAction::ExportPending)
+                } else if verb == BackupVerb::Recover {
+                    Ok(BackupAction::Failed)
+                } else {
+                    Err(LifecycleError::Upstream(
+                        "enabling megolm backup timed out".to_owned(),
+                    ))
+                }
+            }
+        }
+    }
+
+    async fn export_and_clear_intent(
+        &self,
+        account_id: Uuid,
+        store: &SecretStore,
+    ) -> Result<BackupAction, LifecycleError> {
+        match tokio::time::timeout(ENABLE_EXPORT_TIMEOUT, store.export_secrets()).await {
+            Ok(Ok(())) => {
+                self.store
+                    .set_backup_enable_intent(account_id, false)
+                    .await?;
+                Ok(BackupAction::Enabled)
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    %account_id,
+                    "export_secrets failed after local backup enable"
+                );
+                let _ = err;
+                Ok(BackupAction::ExportPending)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    %account_id,
+                    timeout_secs = ENABLE_EXPORT_TIMEOUT.as_secs(),
+                    "export_secrets timed out"
+                );
+                Ok(BackupAction::ExportPending)
+            }
+        }
     }
 
     /// Resolve an account, take its per-identity lock, and get a connected
@@ -1036,70 +1333,159 @@ impl AccountLifecycle {
     ///
     /// A wrong/rotated key, or an account with no Secure Backup, is a readable
     /// [`LifecycleError::RecoveryFailed`] (400) — never a silent permanent UTD.
+    /// A 200 means 4S import succeeded; `backup_action` and the sweep summary
+    /// tell whether megolm backup was enabled/joined and whether the UTD sweep
+    /// timed out with real counts (ADR 0098).
     pub async fn recover(
         &self,
         account_id: Uuid,
         recovery_key: &str,
-    ) -> Result<(), LifecycleError> {
+    ) -> Result<(BackupAction, RedecryptSummary), LifecycleError> {
         // Resolve identity, take the per-identity lock, re-check state under it,
         // and get a connected client — the same preamble `redecrypt_utds` uses.
         let (account, client, _guard) = self.lock_active_account_client(account_id).await?;
 
-        // One SDK call imports the megolm backup + cross-signing keys. The failure
-        // is classified per variant (see `classify_recovery_error`), not blanket-
-        // 400'd: only the specific key/backup-config secret-storage variants are the
-        // caller's to fix (→ readable 400), everything else is internal/upstream
-        // (→ logged generic 500), and no SDK text leaks to the client.
-        client
+        // One SecretStore for the whole verb: import, then maybe enable/export.
+        // `Recovery::recover` would drop the store before we can export.
+        let secret_store = client
             .encryption()
-            .recovery()
-            .recover(recovery_key)
+            .secret_storage()
+            .open_secret_store(recovery_key)
             .await
-            .map_err(classify_recovery_error)?;
+            .map_err(|err| classify_recovery_error(err.into()))?;
 
-        // The cross-signing keys just landed, so the device is now self-cross-
-        // signed: re-derive and persist `verified` straight away so the row the
-        // caller reads back reflects it. The sync watcher (ADR 0026) would also
-        // catch this on the next keys-query, but recover's caller reads the row
-        // immediately, and `verification_state()` lags that round-trip.
-        let verified = derive_verified(&client).await;
+        let verified = if let Err(err) = secret_store.import_secrets().await {
+            let verified = derive_verified(&client).await;
+            if !(verified && is_inconsistent_backup_key(&err)) {
+                return Err(classify_recovery_error(err.into()));
+            }
+            tracing::info!(
+                %account_id,
+                "4S import left megolm backup key missing or inconsistent; continuing recover tree"
+            );
+            verified
+        } else {
+            derive_verified(&client).await
+        };
+
+        // Persist `verified` straight away so the row the caller reads back
+        // reflects it. After a successful 4S import the cross-signing keys
+        // just landed and this device is now self-cross-signed. The sync
+        // watcher (ADR 0026) would also catch this on the next keys-query,
+        // but recover's caller reads the row immediately, and
+        // `verification_state()` lags that round-trip.
         self.store
             .set_account_verified(account_id, verified)
             .await?;
+        let mut account = account;
+        account.verified = verified;
 
-        // Back-fill any stored UTDs the imported keys now unlock — the same sweep
-        // the supervisor runs at boot (`engine::run_account`). Keys already in the
-        // crypto store don't fire the arrival stream, so an explicit sweep is the
-        // only thing that retries them now. Bounded by `RECOVER_SWEEP_TIMEOUT` so a
-        // large backlog or a stalled homeserver can't pin the per-identity lock and
-        // starve a concurrent logout/delete; an overrun leaves the remaining rows
-        // for a manual retry or an operator-enabled every-startup sweep (keys +
-        // `verified` are already saved).
-        let sweep = crate::redecrypt::sweep_pending_utds(
-            &client,
-            &self.store,
-            account_id,
-            SweepScope::AllPending,
-            self.index.as_ref(),
-        );
-        if tokio::time::timeout(RECOVER_SWEEP_TIMEOUT, sweep)
+        let backup_action = self
+            .apply_backup_plan(
+                BackupVerb::Recover,
+                &account,
+                &client,
+                Some(&secret_store),
+                true,
+            )
             .await
-            .is_err()
-        {
-            tracing::warn!(
-                %account_id,
-                timeout_secs = RECOVER_SWEEP_TIMEOUT.as_secs(),
-                "recover UTD back-fill sweep timed out; remaining UTDs require manual retry or every-startup retry config"
-            );
-        }
+            .unwrap_or_else(|err| {
+                // 4S import already succeeded: recover stays 200 with failed.
+                // Enable-verb 409 mapping must not leak onto this path.
+                tracing::warn!(
+                    %account_id,
+                    error = %err,
+                    "recover backup enable/export failed after 4S import"
+                );
+                BackupAction::Failed
+            });
+
+        // Back-fill any stored UTDs the imported keys now unlock. Cancel-aware:
+        // on the 30s cap we cancel the token and await the partial summary so
+        // recover's envelope does not report selected=0 (ADR 0098).
+        let summary = self
+            .sweep_pending_bounded(&client, account_id, RECOVER_SWEEP_TIMEOUT)
+            .await;
 
         tracing::info!(
             %account_id,
             user_id = %account.user_id,
             verified,
+            backup_action = ?backup_action,
+            selected = summary.selected,
+            attempted = summary.attempted,
+            decrypted = summary.decrypted,
+            still_pending = summary.still_pending,
+            timed_out = summary.timed_out,
             "account recovered keys via recovery key"
         );
-        Ok(())
+        Ok((backup_action, summary))
+    }
+
+    /// Originate, export-only resume, crash-resume replace, or kick upload for
+    /// megolm key backup (ADR 0098). Drops the identity lock before the
+    /// bounded `wait_for_steady_state`.
+    pub async fn enable_backup(
+        &self,
+        account_id: Uuid,
+        recovery_key: Option<&str>,
+    ) -> Result<BackupAction, LifecycleError> {
+        let (account, client, guard) = self.lock_active_account_client(account_id).await?;
+
+        let secret_store = if let Some(key) = recovery_key {
+            Some(
+                client
+                    .encryption()
+                    .secret_storage()
+                    .open_secret_store(key)
+                    .await
+                    .map_err(classify_open_store_for_enable)?,
+            )
+        } else {
+            None
+        };
+
+        let action = self
+            .apply_backup_plan(
+                BackupVerb::Enable,
+                &account,
+                &client,
+                secret_store.as_ref(),
+                recovery_key.is_some(),
+            )
+            .await?;
+        drop(guard);
+
+        if matches!(
+            action,
+            BackupAction::Enabled | BackupAction::AlreadyUploading
+        ) {
+            let backups = client.encryption().backups();
+            let wait = backups.wait_for_steady_state().into_future();
+            match tokio::time::timeout(UPLOAD_WAIT_TIMEOUT, wait).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => tracing::warn!(
+                    %account_id,
+                    error = %err,
+                    "backup upload wait ended before Done; SDK continues"
+                ),
+                Err(_) => tracing::info!(
+                    %account_id,
+                    timeout_secs = UPLOAD_WAIT_TIMEOUT.as_secs(),
+                    "backup upload wait timed out; SDK continues uploading"
+                ),
+            }
+        }
+
+        tracing::info!(
+            %account_id,
+            user_id = %account.user_id,
+            backup_action = ?action,
+            verified = account.verified,
+            backup_enable_intent = account.backup_enable_intent,
+            "megolm backup enable verb completed"
+        );
+        Ok(action)
     }
 
     /// Explicitly retry every pending UTD for an active account. This is the
@@ -1111,24 +1497,9 @@ impl AccountLifecycle {
     ) -> Result<RedecryptSummary, LifecycleError> {
         let (_account, client, _guard) = self.lock_active_account_client(account_id).await?;
 
-        let sweep = crate::redecrypt::sweep_pending_utds(
-            &client,
-            &self.store,
-            account_id,
-            SweepScope::AllPending,
-            self.index.as_ref(),
-        );
-        let summary = match tokio::time::timeout(MANUAL_REDECRYPT_TIMEOUT, sweep).await {
-            Ok(summary) => summary,
-            Err(_) => {
-                tracing::warn!(
-                    %account_id,
-                    timeout_secs = MANUAL_REDECRYPT_TIMEOUT.as_secs(),
-                    "manual UTD re-decryption sweep timed out"
-                );
-                RedecryptSummary::timed_out()
-            }
-        };
+        let summary = self
+            .sweep_pending_bounded(&client, account_id, MANUAL_REDECRYPT_TIMEOUT)
+            .await;
         tracing::info!(
             %account_id,
             selected = summary.selected,
@@ -1928,9 +2299,12 @@ mod tests {
             "a nested JSON failure is internal, not a client 400"
         );
 
-        // A non-secret-storage variant is internal/upstream too.
+        // Enable-verb 409: a backup already exists on the homeserver.
         let backup_exists = classify_recovery_error(RecoveryError::BackupExistsOnServer);
-        assert!(matches!(backup_exists, LifecycleError::Upstream(_)));
+        assert!(
+            matches!(backup_exists, LifecycleError::BackupConflict(_)),
+            "BackupExistsOnServer is 409 Conflict on enable, not 500"
+        );
     }
 
     /// Logout on a `deleting` row is a conflict (→ 409): a delete is in flight.

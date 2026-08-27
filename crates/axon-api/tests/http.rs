@@ -1401,6 +1401,12 @@ async fn accounts_read_api() {
     // No `SyncStateProvider` was injected (this router uses the plain `new`
     // constructor), so every account reports the default (ADR 0030, issue #241).
     assert_eq!(active_row["sync_state"], "connecting");
+    // No BackupStateProvider was injected, so every account reports the
+    // deactivated-shaped unknown snapshot (ADR 0098).
+    assert!(active_row["backup"]["exists_on_server"].is_null());
+    assert_eq!(active_row["backup"]["this_device_uploading"], false);
+    assert_eq!(active_row["backup"]["backup_state"], "unknown");
+    assert_eq!(active_row["backup"]["recovery_state"], "unknown");
     // The token is never exposed, under any key.
     assert!(active_row.get("access_token").is_none());
     assert!(active_row.get("access_token_encrypted").is_none());
@@ -2331,6 +2337,13 @@ async fn recover_succeeds_and_envelopes_account_with_verified() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(resp["data"]["account_id"], account.account_id.to_string());
     assert_eq!(resp["data"]["verified"], true);
+    // Flatten keeps account fields at the top level; honesty siblings are additive.
+    assert_eq!(resp["data"]["backup_action"], "joined");
+    assert_eq!(resp["data"]["redecrypt"]["selected"], 0);
+    assert_eq!(resp["data"]["redecrypt"]["timed_out"], false);
+    assert_eq!(resp["data"]["backup"]["this_device_uploading"], false);
+    assert_eq!(resp["data"]["backup"]["backup_state"], "unknown");
+    assert!(resp["data"]["backup"]["exists_on_server"].is_null());
     // The handler forwarded the id + recovery key straight to the port.
     assert_eq!(
         stub.recover_calls(),
@@ -2404,6 +2417,126 @@ async fn recover_error_maps_to_status() {
             &app,
             "POST",
             &format!("/v1/accounts/{id}/recover"),
+            Some(body.clone()),
+            Some(&bearer()),
+        )
+        .await;
+        assert_eq!(status, want_status);
+        assert_eq!(err["error"]["code"], want_code);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn enable_backup_succeeds_and_envelopes_flatten() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let hs = "https://hs.example.org";
+    let user = format!("@backup-enable-{}:localhost", Uuid::new_v4());
+    let account = store.upsert_account(&user, hs).await.expect("seed");
+    store
+        .set_account_verified(account.account_id, true)
+        .await
+        .expect("verify");
+
+    let stub = Arc::new(StubLifecycle::ok(account.account_id));
+    let app = lifecycle_app(store.clone(), stub.clone());
+
+    let (status, resp) = request(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{}/backup/enable", account.account_id),
+        Some(json!({ "recovery_key": "EsTc SomeRecoveryKey" })),
+        Some(&bearer()),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["data"]["account_id"], account.account_id.to_string());
+    assert_eq!(resp["data"]["verified"], true);
+    assert_eq!(resp["data"]["backup_action"], "joined");
+    assert_eq!(
+        stub.enable_backup_calls(),
+        vec![(account.account_id, Some("EsTc SomeRecoveryKey".to_string()))]
+    );
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account.account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn enable_backup_omit_key_is_kick_only() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let user = format!("@backup-kick-{}:localhost", Uuid::new_v4());
+    let account = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("seed");
+    let stub = Arc::new(StubLifecycle::ok(account.account_id));
+    let app = lifecycle_app(store, stub.clone());
+
+    let (status, _) = request(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{}/backup/enable", account.account_id),
+        Some(json!({})),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stub.enable_backup_calls(), vec![(account.account_id, None)]);
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account.account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn enable_backup_error_maps_to_status() {
+    let store = store().await;
+    let id = Uuid::new_v4();
+    let body = json!({ "recovery_key": "k" });
+
+    let cases = [
+        (
+            RecoverOutcome::NotFound("nope".into()),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            RecoverOutcome::Conflict("exists".into()),
+            StatusCode::CONFLICT,
+            "conflict",
+        ),
+        (
+            RecoverOutcome::BadRequest("need key".into()),
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+        ),
+        (
+            RecoverOutcome::Internal,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+    ];
+
+    for (outcome, want_status, want_code) in cases {
+        let app = lifecycle_app(
+            store.clone(),
+            Arc::new(StubLifecycle::enable_backup_failing(outcome)),
+        );
+        let (status, err) = request(
+            &app,
+            "POST",
+            &format!("/v1/accounts/{id}/backup/enable"),
             Some(body.clone()),
             Some(&bearer()),
         )

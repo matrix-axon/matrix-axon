@@ -79,9 +79,10 @@ pub enum RecoverError {
     /// The account can't be recovered right now: it is logged out
     /// (`deactivated` — log in first) or mid-teardown (`deleting`). → `409`.
     Conflict(String),
-    /// The recovery key was wrong/rotated, or the account never set up Secure
-    /// Backup, so key import failed. A client error, not an internal one — and
-    /// never a silent permanent UTD. → `400`.
+    /// The recovery key was wrong/rotated, the account never set up Secure
+    /// Backup, `recovery_key` was required and missing, or enabling would mint
+    /// a new recovery key. A client error, not an internal one — and never a
+    /// silent permanent UTD. → `400`.
     BadRequest(String),
     /// An internal failure (e.g. the store, or the live client could not be
     /// reached). The detail is logged, not returned. → `500`.
@@ -109,6 +110,25 @@ pub struct RedecryptUtdsStats {
     pub decrypted: usize,
     pub still_pending: usize,
     pub timed_out: bool,
+}
+
+/// What a recover or enable-backup request did about megolm backup (ADR 0098).
+/// Mapped onto [`crate::dto::BackupActionDto`] at the handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupAction {
+    Joined,
+    Enabled,
+    ExportPending,
+    Failed,
+    AlreadyUploading,
+}
+
+/// Result of a successful recover: 4S import happened; backup action and the
+/// under-lock UTD sweep summary are honesty, not a second success criterion.
+#[derive(Debug, Clone, Copy)]
+pub struct RecoverResult {
+    pub redecrypt: RedecryptUtdsStats,
+    pub backup_action: BackupAction,
 }
 
 /// Adds, reactivates, stops, or removes a Matrix account at runtime. Implemented
@@ -160,13 +180,32 @@ pub trait AccountLifecycle: Send + Sync {
     async fn logout(&self, account_id: Uuid) -> Result<(), LogoutError>;
 
     /// Acquire E2EE keys for the **active** account `account_id` from its
-    /// Secure-Storage (4S) `recovery_key`: import the megolm key backup +
-    /// cross-signing keys (self-verifying axon's device) and back-fill any stored
-    /// UTDs the keys now unlock. The `recovery_key` is consumed once and never
-    /// persisted. A logged-out (`deactivated`) or mid-teardown (`deleting`) account
-    /// is a [`Conflict`](RecoverError::Conflict); a wrong/rotated key (or no Secure
-    /// Backup) is a [`BadRequest`](RecoverError::BadRequest).
-    async fn recover(&self, account_id: Uuid, recovery_key: &str) -> Result<(), RecoverError>;
+    /// Secure-Storage (4S) `recovery_key`: import cross-signing (self-verifying
+    /// axon's device), auto-enable megolm backup when the homeserver has none
+    /// (ADR 0098), and back-fill any stored UTDs the keys now unlock. The
+    /// `recovery_key` is consumed once and never persisted. A logged-out
+    /// (`deactivated`) or mid-teardown (`deleting`) account is a
+    /// [`Conflict`](RecoverError::Conflict); a wrong/rotated key (or no
+    /// Secure Backup) is a [`BadRequest`](RecoverError::BadRequest). A 200
+    /// means 4S import succeeded — `backup_action` and `redecrypt` tell the
+    /// rest of the truth.
+    async fn recover(
+        &self,
+        account_id: Uuid,
+        recovery_key: &str,
+    ) -> Result<RecoverResult, RecoverError>;
+
+    /// Originate, join-retry (export-only / crash-resume), or kick upload for
+    /// megolm key backup on an **active, verified** account (ADR 0098).
+    /// `recovery_key` is required for create, export-only, and replace; omit
+    /// it to kick an already-enabled upload. Unverified, not-ours HS backup,
+    /// or not-active → [`Conflict`](RecoverError::Conflict). Missing key when
+    /// 4S export is needed, or no 4S at all → [`BadRequest`](RecoverError::BadRequest).
+    async fn enable_backup(
+        &self,
+        account_id: Uuid,
+        recovery_key: Option<&str>,
+    ) -> Result<BackupAction, RecoverError>;
 
     /// Explicitly retry every pending UTD for an active account. This is the
     /// operator path for rows that the default startup sweep already attempted

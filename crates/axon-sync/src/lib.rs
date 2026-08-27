@@ -14,6 +14,7 @@
 //! restarts failed syncs with exponential backoff.
 
 mod backfill;
+mod backup;
 mod client;
 mod devices;
 mod discovery;
@@ -34,6 +35,7 @@ mod trust;
 mod verification;
 
 pub use backfill::BackfillHealth;
+pub use backup::{BackupAction, BackupHealth, BackupSnapshot, BackupStateView, RecoveryStateView};
 pub use devices::{DeviceInfo, DeviceList, DeviceListEngine, DeviceListError};
 pub use engine::SyncEngine;
 pub use error::{GatewayError, SyncError};

@@ -213,6 +213,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/backup/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Originate megolm key backup, export `m.megolm_backup.v1` into existing 4S,
+         *     resume a crashed create, or kick an already-enabled upload (ADR 0098).
+         *     Never mints a new recovery key. Never deletes someone else's backup.
+         * @description `recovery_key` is required for create, export-only, and crash-resume
+         *     replace. Omitting it is kick-upload only. Unverified device or a
+         *     homeserver backup this device is not connected to (and did not sign with
+         *     intent) is a `409`.
+         */
+        post: operations["enable_backup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/devices": {
         parameters: {
             query?: never;
@@ -485,21 +510,22 @@ export interface paths {
         put?: never;
         /**
          * Acquire E2EE keys for an **active** account from its Secure-Storage (4S)
-         *     recovery key, then return the account with its `verified` flag re-derived. One
-         *     SDK call imports the account's megolm key backup + cross-signing keys —
-         *     self-verifying axon's device with no interactive partner — and any
-         *     already-stored UTDs the keys unlock are back-filled. The recovery key is used
-         *     once and never persisted.
-         * @description A `200` means the **keys were imported** (the recovery succeeded); the returned
-         *     `verified` reflects the freshly-derived cross-signing state, which is `true` in
-         *     the normal case but is a *derived observation*, not a guaranteed postcondition
-         *     (e.g. a partial Secure-Backup that imports the megolm key but not the
-         *     cross-signing keys would import successfully yet stay unverified).
+         *     recovery key, then return the account with its `verified` flag re-derived
+         *     and an honest megolm-backup action (ADR 0098). Cross-signing is imported
+         *     from 4S; if the homeserver has no megolm backup, recover auto-enables one
+         *     using this same key (it does not mint a new recovery key). Stored UTDs the
+         *     imported keys unlock are back-filled under a 30s cap. The recovery key is
+         *     used once and never persisted.
+         * @description A `200` means **4S import succeeded**, not that history keys downloaded and
+         *     not that backup enabled. The flattened body keeps `account_id` / `verified`
+         *     at the top level for existing clients; `backup_action` and `redecrypt` are
+         *     additive siblings. `verified` is a derived observation of cross-signing.
          *
          *     The account must be `active`: a logged-out (`deactivated`) account is a `409`
          *     (log in first), as is one mid-deletion (`deleting`). A wrong/rotated key, or an
          *     account that never set up Secure Backup, is a `400` (a readable error, not a
-         *     silent permanent UTD). An unknown id is a `404`.
+         *     silent permanent UTD). An unknown id is a `404`. Recover never 409s because
+         *     an existing homeserver backup needs joining.
          *
          *     Secret-bearing; gated by the bearer-token auth layer like every `/v1/` route
          *     (M7b, ADR 0029).
@@ -1464,6 +1490,13 @@ export interface components {
              * @description Stable Axon account id.
              */
             account_id: string;
+            /**
+             * @description Live megolm-backup observation (ADR 0098), orthogonal to `verified`.
+             *     Always present; `exists_on_server` is nullable when the probe was
+             *     skipped or failed. GET uses a cached homeserver answer that may lag
+             *     another client's backup creation.
+             */
+            backup: components["schemas"]["BackupSnapshotDto"];
             /** @description Row creation time, RFC 3339. */
             created_at: string;
             /** @description Device ID of axon's current session, once it has logged in. */
@@ -1539,6 +1572,13 @@ export interface components {
                  * @description Stable Axon account id.
                  */
                 account_id: string;
+                /**
+                 * @description Live megolm-backup observation (ADR 0098), orthogonal to `verified`.
+                 *     Always present; `exists_on_server` is nullable when the probe was
+                 *     skipped or failed. GET uses a cached homeserver answer that may lag
+                 *     another client's backup creation.
+                 */
+                backup: components["schemas"]["BackupSnapshotDto"];
                 /** @description Row creation time, RFC 3339. */
                 created_at: string;
                 /** @description Device ID of axon's current session, once it has logged in. */
@@ -1631,6 +1671,13 @@ export interface components {
                 };
                 /** @description The namespace read, e.g. `drafts`. */
                 namespace: string;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_EnableBackupResponseDto: {
+            /** @description Flattened enable-backup 200 body: `AccountDto` plus what this request did. */
+            data: components["schemas"]["AccountDto"] & {
+                backup_action: components["schemas"]["BackupActionDto"];
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -1857,6 +1904,18 @@ export interface components {
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_RecoverResponseDto: {
+            /**
+             * @description Flattened recover 200 body (ADR 0098): `AccountDto` at the top level so
+             *     existing clients keep reading `data.account_id` / `data.verified`, plus
+             *     sibling honesty fields.
+             */
+            data: components["schemas"]["AccountDto"] & {
+                backup_action: components["schemas"]["BackupActionDto"];
+                redecrypt: components["schemas"]["RedecryptUtdsResponse"];
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_RedecryptUtdsResponse: {
             /** @description Result of an explicit UTD re-decryption retry. */
             data: {
@@ -2035,6 +2094,13 @@ export interface components {
                  * @description Stable Axon account id.
                  */
                 account_id: string;
+                /**
+                 * @description Live megolm-backup observation (ADR 0098), orthogonal to `verified`.
+                 *     Always present; `exists_on_server` is nullable when the probe was
+                 *     skipped or failed. GET uses a cached homeserver answer that may lag
+                 *     another client's backup creation.
+                 */
+                backup: components["schemas"]["BackupSnapshotDto"];
                 /** @description Row creation time, RFC 3339. */
                 created_at: string;
                 /** @description Device ID of axon's current session, once it has logged in. */
@@ -2417,6 +2483,33 @@ export interface components {
             reason?: string | null;
         };
         /**
+         * @description What this recover / enable-backup request did about megolm backup.
+         * @enum {string}
+         */
+        BackupActionDto: "joined" | "enabled" | "export_pending" | "failed" | "already_uploading";
+        /** @description Live megolm-backup observation. Orthogonal to `verified` (ADR 0098). */
+        BackupSnapshotDto: {
+            backup_state: components["schemas"]["BackupStateDto"];
+            /**
+             * @description Homeserver has a backup version.
+             *     `null` if we did not ask (deactivated/deleting) or the bounded probe
+             *     failed. GET uses the SDK's cached `exists_on_server()` — another
+             *     client creating backup can leave this stale until enable/recover
+             *     re-fetches.
+             */
+            exists_on_server?: boolean | null;
+            /** @description Must not be treated as "megolm keys are in backup." */
+            recovery_state: components["schemas"]["RecoveryStateDto"];
+            /** @description This device has a local backup decryption key + version and can upload. */
+            this_device_uploading: boolean;
+        };
+        /**
+         * @description SDK `BackupState` on the wire (ADR 0098). Closed enum; not inferred from
+         *     `verified` or `RecoveryState`.
+         * @enum {string}
+         */
+        BackupStateDto: "unknown" | "creating" | "enabling" | "resuming" | "enabled" | "downloading" | "disabling";
+        /**
          * @description The running binary's build identity, mirroring the fields logged in the
          *     "axon starting" startup line and reported by `axon -V`.
          */
@@ -2584,6 +2677,23 @@ export interface components {
             description: string;
             /** @description The emoji character(s). */
             symbol: string;
+        };
+        /**
+         * @description Request body for originating or joining megolm key backup
+         *     (`POST /v1/accounts/{account_id}/backup/enable`). `recovery_key` is
+         *     required for create-new, export-only, and crash-resume replace; omitting
+         *     it is kick-upload only. Consumed once, never persisted, never logged.
+         */
+        EnableBackupRequest: {
+            /**
+             * @description The account's Secure-Storage (4S) recovery key. Required when 4S
+             *     export is needed; omit to kick an already-enabled upload.
+             */
+            recovery_key?: string | null;
+        };
+        /** @description Flattened enable-backup 200 body: `AccountDto` plus what this request did. */
+        EnableBackupResponseDto: components["schemas"]["AccountDto"] & {
+            backup_action: components["schemas"]["BackupActionDto"];
         };
         /**
          * @description The error body shape: a machine-readable `code` and a human-readable
@@ -3090,13 +3200,31 @@ export interface components {
          * @description Request body for recovery-key key acquisition
          *     (`POST /v1/accounts/{account_id}/recover`). The Secure-Storage (4S) recovery
          *     key imports the account's megolm key backup + cross-signing keys, self-verifies
-         *     axon's device, and unlocks stored UTDs. Like the login password it is a
-         *     crown-jewel secret: used once to recover and **never persisted** or echoed back.
+         *     axon's device, and unlocks stored UTDs. When 4S has cross-signing but the
+         *     homeserver has no megolm backup, recover auto-enables backup and exports
+         *     `m.megolm_backup.v1` into the existing 4S (ADR 0098). Like the login
+         *     password it is a crown-jewel secret: used once to recover and **never
+         *     persisted** or echoed back.
          */
         RecoverRequest: {
             /** @description The account's Secure-Storage (4S) recovery key. */
             recovery_key: string;
         };
+        /**
+         * @description Flattened recover 200 body (ADR 0098): `AccountDto` at the top level so
+         *     existing clients keep reading `data.account_id` / `data.verified`, plus
+         *     sibling honesty fields.
+         */
+        RecoverResponseDto: components["schemas"]["AccountDto"] & {
+            backup_action: components["schemas"]["BackupActionDto"];
+            redecrypt: components["schemas"]["RedecryptUtdsResponse"];
+        };
+        /**
+         * @description SDK `RecoveryState` on the wire (ADR 0098). Must not be treated as
+         *     "megolm keys are in backup."
+         * @enum {string}
+         */
+        RecoveryStateDto: "unknown" | "enabled" | "disabled" | "incomplete";
         /** @description Result of an explicit UTD re-decryption retry. */
         RedecryptUtdsResponse: {
             /** @description Selected rows that reached a re-decryption attempt. */
@@ -4146,6 +4274,71 @@ export interface operations {
             };
         };
     };
+    enable_backup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnableBackupRequest"];
+            };
+        };
+        responses: {
+            /** @description Flattened account plus `backup_action` */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_EnableBackupResponseDto"];
+                };
+            };
+            /** @description recovery_key required, or the account has no 4S (Axon will not mint a new key) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such account */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not active, unverified, or an existing HS backup this device is not connected to */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     list_devices: {
         parameters: {
             query?: {
@@ -4953,13 +5146,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Keys imported; account returned with `verified` re-derived (normally true) */
+            /** @description 4S import succeeded; flattened account plus `redecrypt` and `backup_action` */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApiResponse_AccountDto"];
+                    "application/json": components["schemas"]["ApiResponse_RecoverResponseDto"];
                 };
             };
             /** @description The recovery key was wrong/rotated, or the account has no Secure Backup */

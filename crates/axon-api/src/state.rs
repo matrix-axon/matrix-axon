@@ -17,6 +17,7 @@ use tokio::sync::broadcast;
 
 use crate::auth::TokenVerifier;
 use crate::backfill::{BackfillStatusProvider, NoBackfillStatus};
+use crate::backup_state::{BackupStateProvider, NoBackupState};
 use crate::build_info::BuildInfo;
 use crate::devices::DeviceListService;
 use crate::lifecycle::AccountLifecycle;
@@ -150,6 +151,11 @@ pub struct AppState {
     /// binary injects an adapter over the sync engine's `SyncHealth` via
     /// [`with_sync_state`](Self::with_sync_state).
     pub sync_state: Arc<dyn SyncStateProvider>,
+    /// Live megolm-backup snapshot port (ADR 0098) for `AccountDto.backup`.
+    /// Defaults to the unknown snapshot (no homeserver call); the binary
+    /// injects an adapter over the sync engine via
+    /// [`with_backup_state`](Self::with_backup_state).
+    pub backup_state: Arc<dyn BackupStateProvider>,
     /// OAuth 2.0 authorization-server runtime for `/v1/oauth/*` (M14, ADR
     /// 0054). `None` when `oauth.enabled = false`, in which case every oauth
     /// handler (and the rate-limiting layer in front of them) returns `404`
@@ -294,6 +300,7 @@ impl AppState {
             build_info: BuildInfo::default(),
             sync_status: Arc::new(NoSyncStatus),
             sync_state: Arc::new(NoSyncState),
+            backup_state: Arc::new(NoBackupState),
             oauth: None,
             bootstrap: None,
         }
@@ -338,6 +345,14 @@ impl AppState {
     /// don't care keep the default no-op (`"connecting"`) provider.
     pub fn with_sync_state(mut self, provider: Arc<dyn SyncStateProvider>) -> Self {
         self.sync_state = provider;
+        self
+    }
+
+    /// Inject the megolm-backup snapshot provider (`AccountDto.backup`;
+    /// ADR 0098). The binary calls this with an adapter over the sync engine;
+    /// tests that don't care keep the default unknown snapshot.
+    pub fn with_backup_state(mut self, provider: Arc<dyn BackupStateProvider>) -> Self {
+        self.backup_state = provider;
         self
     }
 
@@ -947,6 +962,12 @@ impl FromRef<AppState> for Arc<dyn SyncStatusProvider> {
 impl FromRef<AppState> for Arc<dyn SyncStateProvider> {
     fn from_ref(state: &AppState) -> Arc<dyn SyncStateProvider> {
         state.sync_state.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn BackupStateProvider> {
+    fn from_ref(state: &AppState) -> Arc<dyn BackupStateProvider> {
+        state.backup_state.clone()
     }
 }
 

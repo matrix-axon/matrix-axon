@@ -14,15 +14,16 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axon_api::{
-    AccountActionsSender, AccountLifecycle, ApiError, CurrentTrust, DeleteError, DeviceInfo,
-    DeviceList, DeviceListError, DeviceListService, EphemeralSender, FlowStage, FlowSummary,
-    Formatted, LeaveOutcome, LoginError, LogoutError, MediaAttachment, MediaError, MediaProxy,
-    MediaResource, MemberProfile, MemberProfileError, MemberProfileService, MembershipSender,
-    MessageSender, PowerLevelsSender, RecoverError, RedecryptUtdsError, RedecryptUtdsStats,
-    Relation, RoomEntrySender, RoomSettingsSender, SearchHit, SearchHits, SearchQuery,
-    SearchQueryError, SearchQueryParams, SendError, SenderTrustService, StageUploadError,
-    StageUploadRequest, StagedUpload, StagedUploadService, SyncStateProvider, TokenVerifier,
-    TrustBundle, TrustError, TrustSnapshot, UploadStream, VerificationService, VerifyError,
+    AccountActionsSender, AccountLifecycle, ApiError, BackupAction, CurrentTrust, DeleteError,
+    DeviceInfo, DeviceList, DeviceListError, DeviceListService, EphemeralSender, FlowStage,
+    FlowSummary, Formatted, LeaveOutcome, LoginError, LogoutError, MediaAttachment, MediaError,
+    MediaProxy, MediaResource, MemberProfile, MemberProfileError, MemberProfileService,
+    MembershipSender, MessageSender, PowerLevelsSender, RecoverError, RecoverResult,
+    RedecryptUtdsError, RedecryptUtdsStats, Relation, RoomEntrySender, RoomSettingsSender,
+    SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SendError,
+    SenderTrustService, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,
+    SyncStateProvider, TokenVerifier, TrustBundle, TrustError, TrustSnapshot, UploadStream,
+    VerificationService, VerifyError,
 };
 use axon_core::{
     CreateRoomRequest, MatrixProfile, PowerLevelChanges, PublicRoomsPage, PublicRoomsQuery,
@@ -1299,9 +1300,12 @@ pub enum RecoverOutcome {
 }
 
 impl RecoverOutcome {
-    fn to_result(&self) -> Result<(), RecoverError> {
+    fn to_result(&self) -> Result<RecoverResult, RecoverError> {
         match self {
-            RecoverOutcome::Ok => Ok(()),
+            RecoverOutcome::Ok => Ok(RecoverResult {
+                redecrypt: RedecryptUtdsStats::default(),
+                backup_action: BackupAction::Joined,
+            }),
             RecoverOutcome::NotFound(m) => Err(RecoverError::NotFound(m.clone())),
             RecoverOutcome::Conflict(m) => Err(RecoverError::Conflict(m.clone())),
             RecoverOutcome::BadRequest(m) => Err(RecoverError::BadRequest(m.clone())),
@@ -1341,12 +1345,14 @@ pub struct StubLifecycle {
     delete_outcome: DeleteOutcome,
     recover_outcome: RecoverOutcome,
     redecrypt_outcome: RedecryptOutcome,
+    enable_backup_outcome: RecoverOutcome,
     login_calls: Mutex<Vec<LoginCall>>,
     import_token_calls: Mutex<Vec<ImportTokenCall>>,
     logout_calls: Mutex<Vec<Uuid>>,
     delete_calls: Mutex<Vec<Uuid>>,
     recover_calls: Mutex<Vec<(Uuid, String)>>,
     redecrypt_calls: Mutex<Vec<Uuid>>,
+    enable_backup_calls: Mutex<Vec<(Uuid, Option<String>)>>,
 }
 
 impl StubLifecycle {
@@ -1365,6 +1371,8 @@ impl StubLifecycle {
             recover_calls: Mutex::new(Vec::new()),
             redecrypt_outcome: RedecryptOutcome::Ok(RedecryptUtdsStats::default()),
             redecrypt_calls: Mutex::new(Vec::new()),
+            enable_backup_outcome: RecoverOutcome::Ok,
+            enable_backup_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -1383,6 +1391,8 @@ impl StubLifecycle {
             recover_calls: Mutex::new(Vec::new()),
             redecrypt_outcome: RedecryptOutcome::Ok(RedecryptUtdsStats::default()),
             redecrypt_calls: Mutex::new(Vec::new()),
+            enable_backup_outcome: RecoverOutcome::Ok,
+            enable_backup_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -1402,6 +1412,8 @@ impl StubLifecycle {
             recover_calls: Mutex::new(Vec::new()),
             redecrypt_outcome: RedecryptOutcome::Ok(RedecryptUtdsStats::default()),
             redecrypt_calls: Mutex::new(Vec::new()),
+            enable_backup_outcome: RecoverOutcome::Ok,
+            enable_backup_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -1420,6 +1432,8 @@ impl StubLifecycle {
             recover_calls: Mutex::new(Vec::new()),
             redecrypt_outcome: RedecryptOutcome::Ok(RedecryptUtdsStats::default()),
             redecrypt_calls: Mutex::new(Vec::new()),
+            enable_backup_outcome: RecoverOutcome::Ok,
+            enable_backup_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -1438,6 +1452,8 @@ impl StubLifecycle {
             recover_calls: Mutex::new(Vec::new()),
             redecrypt_outcome: RedecryptOutcome::Ok(RedecryptUtdsStats::default()),
             redecrypt_calls: Mutex::new(Vec::new()),
+            enable_backup_outcome: RecoverOutcome::Ok,
+            enable_backup_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -1456,6 +1472,8 @@ impl StubLifecycle {
             recover_calls: Mutex::new(Vec::new()),
             redecrypt_outcome: RedecryptOutcome::Ok(RedecryptUtdsStats::default()),
             redecrypt_calls: Mutex::new(Vec::new()),
+            enable_backup_outcome: RecoverOutcome::Ok,
+            enable_backup_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -1474,6 +1492,8 @@ impl StubLifecycle {
             delete_calls: Mutex::new(Vec::new()),
             recover_calls: Mutex::new(Vec::new()),
             redecrypt_calls: Mutex::new(Vec::new()),
+            enable_backup_outcome: RecoverOutcome::Ok,
+            enable_backup_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -1505,6 +1525,18 @@ impl StubLifecycle {
     /// The account ids passed to manual UTD retry, in order.
     pub fn redecrypt_calls(&self) -> Vec<Uuid> {
         self.redecrypt_calls.lock().unwrap().clone()
+    }
+
+    /// A stub whose enable-backup returns the given failure.
+    pub fn enable_backup_failing(outcome: RecoverOutcome) -> Self {
+        let mut s = Self::ok(Uuid::nil());
+        s.enable_backup_outcome = outcome;
+        s
+    }
+
+    /// The `(account_id, recovery_key)` pairs passed to enable-backup, in order.
+    pub fn enable_backup_calls(&self) -> Vec<(Uuid, Option<String>)> {
+        self.enable_backup_calls.lock().unwrap().clone()
     }
 }
 
@@ -1718,12 +1750,30 @@ impl AccountLifecycle for StubLifecycle {
         self.delete_outcome.to_result()
     }
 
-    async fn recover(&self, account_id: Uuid, recovery_key: &str) -> Result<(), RecoverError> {
+    async fn recover(
+        &self,
+        account_id: Uuid,
+        recovery_key: &str,
+    ) -> Result<RecoverResult, RecoverError> {
         self.recover_calls
             .lock()
             .unwrap()
             .push((account_id, recovery_key.to_owned()));
         self.recover_outcome.to_result()
+    }
+
+    async fn enable_backup(
+        &self,
+        account_id: Uuid,
+        recovery_key: Option<&str>,
+    ) -> Result<BackupAction, RecoverError> {
+        self.enable_backup_calls
+            .lock()
+            .unwrap()
+            .push((account_id, recovery_key.map(str::to_owned)));
+        self.enable_backup_outcome
+            .to_result()
+            .map(|r| r.backup_action)
     }
 
     async fn redecrypt_utds(

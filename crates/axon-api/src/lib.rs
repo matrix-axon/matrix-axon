@@ -12,6 +12,7 @@
 
 mod auth;
 mod backfill;
+mod backup_state;
 mod build_info;
 mod cursor;
 mod devices;
@@ -38,12 +39,13 @@ mod ws;
 pub use auth::{StoreTokenVerifier, TokenVerifier};
 pub use axon_core::{Formatted, MediaAttachment, MediaSendKind, Relation};
 pub use backfill::{BackfillStatusProvider, BackfillStatusSnapshot};
+pub use backup_state::BackupStateProvider;
 pub use build_info::BuildInfo;
 pub use devices::{DeviceInfo, DeviceList, DeviceListError, DeviceListService};
-pub use dto::MediaUploadKindDto;
+pub use dto::{BackupSnapshotDto, BackupStateDto, MediaUploadKindDto, RecoveryStateDto};
 pub use lifecycle::{
-    AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError, RedecryptUtdsError,
-    RedecryptUtdsStats,
+    AccountLifecycle, BackupAction, DeleteError, LoginError, LogoutError, RecoverError,
+    RecoverResult, RedecryptUtdsError, RedecryptUtdsStats,
 };
 pub use matrix_oauth_acquire::{
     MatrixOAuthQrAcquireService, MatrixOAuthQrError, MatrixOAuthQrFlowDto,
@@ -136,6 +138,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/recover",
             post(routes::accounts::recover),
+        )
+        .route(
+            "/v1/accounts/{account_id}/backup/enable",
+            post(routes::accounts::enable_backup),
         )
         .route(
             "/v1/accounts/{account_id}/utds/redecrypt",

@@ -7,10 +7,13 @@
 
 use async_trait::async_trait;
 use axon_api::{
-    AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError, RedecryptUtdsError,
-    RedecryptUtdsStats,
+    AccountLifecycle, BackupAction, DeleteError, LoginError, LogoutError, RecoverError,
+    RecoverResult, RedecryptUtdsError, RedecryptUtdsStats,
 };
-use axon_sync::{AccountLifecycle as SyncLifecycle, LifecycleError, RedecryptSummary};
+use axon_sync::{
+    AccountLifecycle as SyncLifecycle, BackupAction as SyncBackupAction, LifecycleError,
+    RedecryptSummary,
+};
 use uuid::Uuid;
 
 /// Wraps the sync engine's lifecycle so it satisfies the API's `AccountLifecycle`
@@ -51,7 +54,7 @@ fn map_login_err(err: LifecycleError) -> LoginError {
             tracing::error!(%id, "unexpected lifecycle error from account login");
             LoginError::Internal
         }
-        LifecycleError::RecoveryFailed(msg) => {
+        LifecycleError::RecoveryFailed(msg) | LifecycleError::BackupConflict(msg) => {
             tracing::error!(error = %msg, "unexpected recovery error from account login");
             LoginError::Internal
         }
@@ -141,6 +144,7 @@ fn map_recover_err(err: LifecycleError) -> RecoverError {
         // UTD). The sync layer already replaces the SDK's text with a stable message
         // here, so nothing secret-storage-internal leaks.
         LifecycleError::RecoveryFailed(msg) => RecoverError::BadRequest(msg),
+        LifecycleError::BackupConflict(msg) => RecoverError::Conflict(msg),
         // The live client couldn't be reached, or the SDK failed the import for a
         // reason the caller can't fix by changing the key (a non-secret-storage
         // `RecoveryError`). Not the caller's fault → a generic 500, detail logged
@@ -207,6 +211,16 @@ fn map_redecrypt_summary(summary: RedecryptSummary) -> RedecryptUtdsStats {
     }
 }
 
+fn map_backup_action(action: SyncBackupAction) -> BackupAction {
+    match action {
+        SyncBackupAction::Joined => BackupAction::Joined,
+        SyncBackupAction::Enabled => BackupAction::Enabled,
+        SyncBackupAction::ExportPending => BackupAction::ExportPending,
+        SyncBackupAction::Failed => BackupAction::Failed,
+        SyncBackupAction::AlreadyUploading => BackupAction::AlreadyUploading,
+    }
+}
+
 #[async_trait]
 impl AccountLifecycle for LifecycleAdapter {
     async fn login(
@@ -242,10 +256,30 @@ impl AccountLifecycle for LifecycleAdapter {
         self.0.delete(account_id).await.map_err(map_delete_err)
     }
 
-    async fn recover(&self, account_id: Uuid, recovery_key: &str) -> Result<(), RecoverError> {
+    async fn recover(
+        &self,
+        account_id: Uuid,
+        recovery_key: &str,
+    ) -> Result<RecoverResult, RecoverError> {
         self.0
             .recover(account_id, recovery_key)
             .await
+            .map(|(backup_action, summary)| RecoverResult {
+                redecrypt: map_redecrypt_summary(summary),
+                backup_action: map_backup_action(backup_action),
+            })
+            .map_err(map_recover_err)
+    }
+
+    async fn enable_backup(
+        &self,
+        account_id: Uuid,
+        recovery_key: Option<&str>,
+    ) -> Result<BackupAction, RecoverError> {
+        self.0
+            .enable_backup(account_id, recovery_key)
+            .await
+            .map(map_backup_action)
             .map_err(map_recover_err)
     }
 

@@ -177,6 +177,15 @@ impl ClientManager {
         map.entry(account_id).or_default().clone()
     }
 
+    /// Peek the cached client for `account_id` without connecting and without
+    /// waiting on an in-flight connect. Used by the GET/list backup snapshot
+    /// (ADR 0098): a cold connect or a hung slot lock must not pin account
+    /// reads. `None` if nothing is cached or the slot is currently locked.
+    pub fn cached(&self, account_id: Uuid) -> Option<Client> {
+        let slot = self.slot(account_id);
+        slot.try_lock().ok().and_then(|guard| guard.clone())
+    }
+
     /// Return the cached client for `account_id`, building and authenticating one
     /// if the account isn't connected yet. Single-flight per account: concurrent
     /// callers coalesce onto a single connect.
