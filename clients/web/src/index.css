@@ -2374,6 +2374,16 @@ p.timeline-edge {
   font-style: italic;
 }
 
+a.utd-recover {
+  color: var(--accent);
+  font-style: normal;
+  text-decoration: none;
+}
+
+a.utd-recover:hover {
+  text-decoration: underline;
+}
+
 .event-inspector {
   margin-top: 0.35rem;
   border: 1px solid var(--border);

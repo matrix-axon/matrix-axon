@@ -50,6 +50,24 @@ function unsupportedEventLabel(event: TimelineEvent): string {
   return `unsupported event: ${event.type}`
 }
 
+export const UTD_RECOVER_HINT =
+  'This device does not have the megolm key for this message. Recover keys on the Accounts page if you have a recovery key. Messages stay undecryptable if those session keys were never uploaded to backup.'
+
+function UtdPlaceholder() {
+  return (
+    <span class="utd-placeholder">
+      <span class="muted placeholder">unable to decrypt</span>
+      <span class="muted" aria-hidden="true">
+        {' '}
+        ·{' '}
+      </span>
+      <a href="/accounts" class="utd-recover" title={UTD_RECOVER_HINT}>
+        Recover keys
+      </a>
+    </span>
+  )
+}
+
 function hasVisibleText(body: string | null | undefined): boolean {
   return body !== null && body !== undefined && body.trim() !== ''
 }
@@ -118,7 +136,7 @@ export function EventBody({
   }
   if (event.content === null || event.content === undefined) {
     // The decrypted content never reached the store — a UTD (ADR 0015).
-    return <span class="muted placeholder">unable to decrypt</span>
+    return <UtdPlaceholder />
   }
 
   if (resolved !== null) {

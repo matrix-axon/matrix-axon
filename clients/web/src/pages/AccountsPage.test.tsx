@@ -168,7 +168,7 @@ describe('AccountsPage', () => {
     ).toMatch(/keeping the local archive/i)
     expect(
       (getByRole('button', { name: 'Delete' }) as HTMLButtonElement).title,
-    ).toMatch(/homeserver is not deleted/i)
+    ).toMatch(/homeserver is not affected/i)
   })
 
   it('shows the megolm backup snapshot independently of verified', async () => {
