@@ -157,6 +157,9 @@ pub(crate) enum Mode {
 pub(crate) enum RecoveryOrigin {
     PostLogin,
     Command,
+    /// `/backup enable` reuses the masked recovery-key prompt. Empty Enter
+    /// kicks upload only; it does not skip.
+    BackupEnable,
 }
 
 /// Which side started the SAS flow (ADR 0028 §1).
@@ -1110,6 +1113,7 @@ pub(crate) struct InputState {
     pub(crate) room_command_completion: Option<(String, usize)>,
     pub(crate) logout_command_completion: Option<(String, usize)>,
     pub(crate) recover_command_completion: Option<(String, usize)>,
+    pub(crate) backup_command_completion: Option<(String, usize)>,
     pub(crate) delete_command_completion: Option<(String, usize)>,
     pub(crate) account_command_completion: Option<(String, usize)>,
     pub(crate) verify_command_completion: Option<(String, usize)>,
@@ -1681,6 +1685,7 @@ impl App {
         self.input.room_command_completion = None;
         self.input.logout_command_completion = None;
         self.input.recover_command_completion = None;
+        self.input.backup_command_completion = None;
         self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
         self.input.verify_command_completion = None;
@@ -1873,6 +1878,7 @@ impl App {
             }
             Command::Logout(target) => self.start_logout(target),
             Command::Recover(target) => self.start_recover(target),
+            Command::BackupEnable(target) => self.start_backup_enable(target),
             Command::Delete(target) => self.start_delete(target),
             Command::Room(target) => self.switch_room(&target).await,
             Command::Pin(target) => self.pin_room(target.as_deref()),

@@ -2,7 +2,9 @@ use ruma::OwnedUserId;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::api::{AccountDto, AccountState, FlowDto, VerificationFrameDto};
+use crate::api::{
+    AccountDto, AccountState, BackupAction, EnableBackupResponse, FlowDto, VerificationFrameDto,
+};
 
 use super::{
     AccountSelection, App, Mode, RecoveryOrigin, RoomKey, Status, VerificationDirection,
@@ -57,6 +59,14 @@ pub(crate) enum LifecycleOutcome {
     Recover {
         user_id: String,
         result: Result<AccountDto, String>,
+    },
+    BackupEnableReady {
+        target: Option<String>,
+        result: Result<Vec<AccountDto>, String>,
+    },
+    BackupEnable {
+        user_id: String,
+        result: Result<EnableBackupResponse, String>,
     },
     /// Account list fetched off-loop as the first phase of delete; the main
     /// loop resolves the target and dispatches to confirm/perform from here.
@@ -234,6 +244,12 @@ impl App {
 
     pub(crate) fn submit_recovery_key(&mut self, account: AccountDto, origin: RecoveryOrigin) {
         let recovery_key = self.take_input_for_submit();
+        if origin == RecoveryOrigin::BackupEnable {
+            let recovery_key = recovery_key.trim();
+            let recovery_key = (!recovery_key.is_empty()).then(|| recovery_key.to_owned());
+            self.perform_enable_backup(account, recovery_key);
+            return;
+        }
         if recovery_key.trim().is_empty() {
             self.mode = Mode::Compose;
             self.status = Status::from(match origin {
@@ -242,6 +258,9 @@ impl App {
                 }
                 RecoveryOrigin::Command => {
                     format!("recovery cancelled for {}", account.user_id)
+                }
+                RecoveryOrigin::BackupEnable => {
+                    format!("backup enable cancelled for {}", account.user_id)
                 }
             });
             return;
@@ -314,12 +333,38 @@ impl App {
         });
     }
 
+    pub(super) fn start_backup_enable(&mut self, target: Option<String>) {
+        if self.reject_if_lifecycle_busy() {
+            return;
+        }
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        self.status = Status::from(match &target {
+            Some(t) if !t.is_empty() => format!("preparing backup enable for {t}…"),
+            _ => "preparing backup enable…".to_owned(),
+        });
+        self.lifecycle_busy = true;
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = client.list_accounts().await.map_err(|err| err.to_string());
+            let _ = tx.send(LifecycleOutcome::BackupEnableReady { target, result });
+        });
+    }
+
     fn request_recovery(&mut self, account: AccountDto, origin: RecoveryOrigin) {
         self.clear_lifecycle_input();
-        self.status = Status::from(format!(
-            "Recovery key for {}: input is hidden; Enter submits, empty Enter or Esc skips",
-            account.user_id
-        ));
+        self.status = Status::from(match origin {
+            RecoveryOrigin::PostLogin | RecoveryOrigin::Command => format!(
+                "Recovery key for {}: input is hidden; Enter submits, empty Enter or Esc skips",
+                account.user_id
+            ),
+            RecoveryOrigin::BackupEnable => format!(
+                "Recovery key for {}: input is hidden; Enter submits, empty Enter kicks upload \
+                 only, Esc cancels",
+                account.user_id
+            ),
+        });
         self.mode = Mode::RecoveryKey { account, origin };
     }
 
@@ -343,6 +388,27 @@ impl App {
                 .await
                 .map_err(|err| err.to_string());
             let _ = tx.send(LifecycleOutcome::Recover { user_id, result });
+        });
+    }
+
+    fn perform_enable_backup(&mut self, account: AccountDto, recovery_key: Option<String>) {
+        let user_id = account.user_id.clone();
+        let recovery_key = recovery_key.map(Zeroizing::new);
+        self.clear_lifecycle_input();
+        self.mode = Mode::Compose;
+        self.status = Status::from(format!("enabling megolm backup for {user_id}…"));
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        self.lifecycle_busy = true;
+        let client = self.client.clone();
+        let account_id = account.account_id;
+        tokio::spawn(async move {
+            let result = client
+                .enable_backup(account_id, recovery_key.as_ref().map(|key| key.as_str()))
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(LifecycleOutcome::BackupEnable { user_id, result });
         });
     }
 
@@ -896,6 +962,60 @@ impl App {
                     self.status = Status::from(format!("recovery failed for {user_id}: {error}"));
                 }
             },
+            LifecycleOutcome::BackupEnableReady { target, result } => {
+                self.lifecycle_busy = false;
+                match result {
+                    Ok(accounts) => {
+                        self.set_accounts(accounts);
+                        match self.resolve_recover_target(target.as_deref()) {
+                            RecoverResolution::Match(account) => {
+                                if account.verified != Some(true) {
+                                    self.restore_backup_enable_input(target.as_deref());
+                                    self.status = Status::from(format!(
+                                        "account is not verified; recover or verify first: {}",
+                                        account.user_id
+                                    ));
+                                } else {
+                                    self.request_recovery(account, RecoveryOrigin::BackupEnable);
+                                }
+                            }
+                            RecoverResolution::Ambiguous(options) => {
+                                self.restore_backup_enable_input(target.as_deref());
+                                self.status = Status::from(format!(
+                                    "backup enable target is ambiguous: {} - press Tab to choose",
+                                    options.join(", ")
+                                ));
+                            }
+                            RecoverResolution::Missing => {
+                                self.restore_backup_enable_input(target.as_deref());
+                                self.status = if target.as_deref().is_some_and(|v| !v.is_empty()) {
+                                    Status::from(format!(
+                                        "no active account matches: {}",
+                                        target.unwrap_or_default()
+                                    ))
+                                } else {
+                                    Status::from("no active accounts".to_owned())
+                                };
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        self.restore_backup_enable_input(target.as_deref());
+                        self.status = Status::from(format!("backup enable failed: {err}"));
+                    }
+                }
+            }
+            LifecycleOutcome::BackupEnable { user_id, result } => match result {
+                Ok(response) => {
+                    let warning = self.refresh_after_lifecycle_change().await;
+                    self.status =
+                        backup_enable_success_status(&user_id, response.backup_action, warning);
+                }
+                Err(error) => {
+                    self.status =
+                        Status::from(format!("backup enable failed for {user_id}: {error}"));
+                }
+            },
             LifecycleOutcome::DeleteReady { target, result } => {
                 self.lifecycle_busy = false;
                 match result {
@@ -1178,6 +1298,15 @@ impl App {
         self.move_cursor_to_end();
     }
 
+    fn restore_backup_enable_input(&mut self, target: Option<&str>) {
+        self.mode = Mode::Compose;
+        self.input.buffer = match target.filter(|value| !value.is_empty()) {
+            Some(target) => format!("/backup enable {target}"),
+            None => "/backup enable".to_owned(),
+        };
+        self.move_cursor_to_end();
+    }
+
     fn restore_logout_input(&mut self, target: Option<&str>) {
         self.mode = Mode::Compose;
         self.input.buffer = match target.filter(|value| !value.is_empty()) {
@@ -1344,6 +1473,9 @@ impl App {
         self.status = Status::from(match origin {
             RecoveryOrigin::PostLogin => format!("recovery skipped for {}", account.user_id),
             RecoveryOrigin::Command => format!("recovery cancelled for {}", account.user_id),
+            RecoveryOrigin::BackupEnable => {
+                format!("backup enable cancelled for {}", account.user_id)
+            }
         });
     }
 
@@ -1351,6 +1483,7 @@ impl App {
         self.clear_input_buffer();
         self.input.logout_command_completion = None;
         self.input.recover_command_completion = None;
+        self.input.backup_command_completion = None;
         self.input.delete_command_completion = None;
     }
 }
@@ -1472,6 +1605,30 @@ fn lifecycle_login_status(already_active: bool, user_id: &str, warning: Option<S
     })
 }
 
+fn backup_enable_success_status(
+    user_id: &str,
+    action: BackupAction,
+    warning: Option<String>,
+) -> Status {
+    let summary = match action {
+        BackupAction::Joined => format!("joined existing megolm backup: {user_id}"),
+        BackupAction::Enabled => format!("enabled megolm backup: {user_id}"),
+        BackupAction::ExportPending => {
+            format!("megolm backup export pending for {user_id}; retry /backup enable")
+        }
+        BackupAction::Failed => {
+            format!("megolm backup enable failed for {user_id}; retry /backup enable")
+        }
+        BackupAction::AlreadyUploading => {
+            format!("already uploading megolm keys to backup: {user_id}")
+        }
+    };
+    Status::from(match warning {
+        Some(warning) => format!("{summary}; {warning}"),
+        None => summary,
+    })
+}
+
 fn recovery_success_status(
     user_id: &str,
     verified: Option<bool>,
@@ -1497,6 +1654,7 @@ fn should_offer_post_login_recovery(already_active: bool, verified: Option<bool>
 mod tests {
     use super::*;
     use crate::api::AxonClient;
+    use crate::app::{Mode, RecoveryOrigin};
     use crate::config::TuiConfig;
 
     #[test]
@@ -1557,6 +1715,7 @@ mod tests {
             state,
             device_id: None,
             verified: Some(false),
+            backup: Default::default(),
         };
         // Two active and one deactivated account come back from list_accounts.
         // Empty target resolves to Ambiguous (two active), so the handler stops
@@ -1624,6 +1783,103 @@ mod tests {
         assert_eq!(
             recovery_success_status("@alice:example.com", Some(false), None).text(false),
             "recovered encryption keys: @alice:example.com (device remains unverified)"
+        );
+    }
+
+    #[test]
+    fn backup_enable_success_reports_action() {
+        assert_eq!(
+            backup_enable_success_status("@alice:example.com", BackupAction::Enabled, None)
+                .text(false),
+            "enabled megolm backup: @alice:example.com"
+        );
+        assert_eq!(
+            backup_enable_success_status("@alice:example.com", BackupAction::Joined, None)
+                .text(false),
+            "joined existing megolm backup: @alice:example.com"
+        );
+        assert_eq!(
+            backup_enable_success_status("@alice:example.com", BackupAction::ExportPending, None)
+                .text(false),
+            "megolm backup export pending for @alice:example.com; retry /backup enable"
+        );
+        assert_eq!(
+            backup_enable_success_status(
+                "@alice:example.com",
+                BackupAction::AlreadyUploading,
+                None
+            )
+            .text(false),
+            "already uploading megolm keys to backup: @alice:example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_enable_ready_refuses_unverified_account() {
+        let mut app = App::new(
+            AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+        let mut account = AccountDto {
+            account_id: Uuid::from_u128(1),
+            user_id: "@alice:example.com".to_owned(),
+            state: AccountState::Active,
+            device_id: None,
+            verified: Some(false),
+            backup: Default::default(),
+        };
+
+        app.handle_lifecycle_outcome(LifecycleOutcome::BackupEnableReady {
+            target: None,
+            result: Ok(vec![account.clone()]),
+        })
+        .await;
+
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(app
+            .status
+            .text(false)
+            .contains("account is not verified; recover or verify first"));
+
+        account.verified = Some(true);
+        app.handle_lifecycle_outcome(LifecycleOutcome::BackupEnableReady {
+            target: None,
+            result: Ok(vec![account.clone()]),
+        })
+        .await;
+
+        assert!(matches!(
+            app.mode,
+            Mode::RecoveryKey {
+                origin: RecoveryOrigin::BackupEnable,
+                ..
+            }
+        ));
+        assert!(app.status.text(false).contains("kicks upload only"));
+    }
+
+    #[tokio::test]
+    async fn backup_enable_failure_is_queued_for_overflow_handling() {
+        let mut app = App::new(
+            AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+
+        app.handle_lifecycle_outcome(LifecycleOutcome::BackupEnable {
+            user_id: "@alice:example.com".to_owned(),
+            result: Err("conflict: account is not verified; recover or verify first".to_owned()),
+        })
+        .await;
+
+        assert_eq!(
+            app.pending_command_response.as_deref(),
+            Some(
+                "backup enable failed for @alice:example.com: conflict: account is not verified; recover or verify first"
+            )
         );
     }
 

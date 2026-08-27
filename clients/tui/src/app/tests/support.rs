@@ -4,7 +4,10 @@
 //! `use super::support::*;` — a helper moving between modules then does not
 //! drag an import list with it.
 
-pub(super) use crate::api::{AccountDto, AccountState, MemberDto, TimelinePage, VerificationFrame};
+pub(super) use crate::api::{
+    AccountDto, AccountState, BackupSnapshot, BackupState, MemberDto, RecoveryState, TimelinePage,
+    VerificationFrame,
+};
 pub(super) use crate::app::render::{message_layout, SELECTED_MARKER, UNSELECTED_MARKER};
 pub(super) use crate::app::search_flow::{SearchJumpAction, SearchJumpThreadLoad, SearchOutcome};
 pub(super) use crate::command::HELP_COMMANDS;
@@ -243,5 +246,6 @@ pub(super) fn account_with_id(account_id: Uuid, user_id: &str, state: AccountSta
         state,
         device_id: None,
         verified: Some(false),
+        backup: BackupSnapshot::default(),
     }
 }
