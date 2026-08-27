@@ -1276,6 +1276,16 @@ export function RoomPage() {
    */
   const rows = useMemo(() => groupMediaRuns(visible), [visible])
 
+  // The user-visible moment of a room open: when messages replace "Loading
+  // messages…". `hasRows` is the gate — the pane also renders with nothing in
+  // it, and counting that as a paint would flatter every cold open, which is
+  // the same trap `room-list:render` records for the room list.
+  perfMark('room-page:timeline-render', {
+    loading: timeline.loading.value,
+    visible: visible.length,
+    hasRows: !timeline.loading.value && visible.length > 0,
+  })
+
   const handleComposerCommandFor = ({
     body,
     timeline: commandTimeline,

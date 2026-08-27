@@ -5,6 +5,7 @@ import {
   type Signal,
 } from '@preact/signals'
 import { apiErrorMessage, inBackground, type ApiClient } from '../api/client'
+import { perfMark } from '../perf'
 import type { components } from '../api/schema'
 import type { EventDto } from './timeline'
 
@@ -78,6 +79,10 @@ export function createThreadsStore(
     error,
 
     async refresh() {
+      // Third of the four requests a room open fires at once; marked for the
+      // same reason as the members list, which is that on a weak link the
+      // question is which of them the timeline page is competing with.
+      perfMark('threads:refresh:start', { roomId })
       try {
         const { data, error: apiError } = await api.GET(
           '/v1/accounts/{account_id}/rooms/{room_id}/threads',
@@ -98,6 +103,11 @@ export function createThreadsStore(
         error.value = cause instanceof Error ? cause.message : String(cause)
       } finally {
         loading.value = false
+        perfMark('threads:refresh:end', {
+          roomId,
+          threads: summaries.value.size,
+          ok: error.value === null,
+        })
       }
     },
   }
