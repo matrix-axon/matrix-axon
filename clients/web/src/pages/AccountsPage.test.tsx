@@ -160,6 +160,10 @@ describe('AccountsPage', () => {
       ).title,
     ).toMatch(/unlocks megolm backup so stored encrypted messages can decrypt/i)
     expect(
+      (getByRole('button', { name: 'Recover keys' }) as HTMLButtonElement)
+        .title,
+    ).toMatch(/never uploaded to backup/i)
+    expect(
       (getByRole('button', { name: 'Log out' }) as HTMLButtonElement).title,
     ).toMatch(/keeping the local archive/i)
     expect(
