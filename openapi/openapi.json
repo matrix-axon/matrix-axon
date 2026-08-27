@@ -210,6 +210,400 @@
         }
       }
     },
+    "/v1/accounts/login/qr": {
+      "post": {
+        "tags": [
+          "matrix-oauth"
+        ],
+        "summary": "Start a QR login that creates and verifies Axon's Matrix device without a\nMatrix password, imported access token, or recovery key.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMatrixOAuthQrRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "QR login flow created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_MatrixOAuthQrFlowDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Matrix user ID or presentation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A flow or active lifecycle operation already owns this identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the QR-login limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Global active or retained QR flow capacity reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/login/qr/{flow_id}": {
+      "get": {
+        "tags": [
+          "matrix-oauth"
+        ],
+        "summary": "Read the current replayable flow stage and only its stage-appropriate data.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "QR login flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current QR login state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_MatrixOAuthQrFlowDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or expired flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "matrix-oauth"
+        ],
+        "summary": "Cancel a flow idempotently, including an unknown or already-expired id.",
+        "operationId": "cancel",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "QR login flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Flow cancelled or already absent/terminal"
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/login/qr/{flow_id}/check-code": {
+      "post": {
+        "tags": [
+          "matrix-oauth"
+        ],
+        "summary": "Supply one two-digit check code to a display-presentation flow.",
+        "operationId": "submit_check_code",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "QR login flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitMatrixOAuthCheckCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Check code accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_MatrixOAuthQrFlowDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Check code is not exactly two decimal digits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or expired flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Wrong presentation/stage or check code already consumed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the QR-login limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/login/qr/{flow_id}/scan": {
+      "post": {
+        "tags": [
+          "matrix-oauth"
+        ],
+        "summary": "Supply one decoded QR payload to a scan-presentation flow.",
+        "operationId": "submit_scan",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "QR login flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitMatrixOAuthQrRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "QR payload accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_MatrixOAuthQrFlowDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed, oversized, or wrong-intent QR payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or expired flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Wrong presentation/stage or QR input already consumed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the QR-login limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}": {
       "get": {
         "tags": [
@@ -7170,6 +7564,77 @@
           }
         }
       },
+      "ApiResponse_MatrixOAuthQrFlowDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Replayable, presentation-safe state of one QR login flow. Optional fields\nare omitted unless they belong to the current stage.",
+            "required": [
+              "flow_id",
+              "expected_user_id",
+              "presentation",
+              "stage"
+            ],
+            "properties": {
+              "account_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "authorization_user_code": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "check_code": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error_code": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "expected_user_id": {
+                "type": "string"
+              },
+              "flow_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "presentation": {
+                "$ref": "#/components/schemas/MatrixOAuthQrPresentation"
+              },
+              "qr_code_data": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "stage": {
+                "$ref": "#/components/schemas/MatrixOAuthQrStage"
+              },
+              "verification_uri": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_MatrixProfileDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -8495,6 +8960,25 @@
           }
         }
       },
+      "CreateMatrixOAuthQrRequest": {
+        "type": "object",
+        "description": "Create one pre-account QR login flow.",
+        "required": [
+          "expected_user_id",
+          "presentation"
+        ],
+        "properties": {
+          "expected_user_id": {
+            "type": "string",
+            "description": "Canonical Matrix user ID the completed OAuth session must belong to.",
+            "maxLength": 1024
+          },
+          "presentation": {
+            "$ref": "#/components/schemas/MatrixOAuthQrPresentation"
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateRoomRequestDto": {
         "type": "object",
         "description": "Request body for creating a room (`POST …/rooms`; ADR 0068 M19c) — the\nminimal-but-useful subset of the Matrix `createRoom` endpoint exposed to\nAPI clients. An empty body is valid: it creates a private, unencrypted,\nunnamed room.",
@@ -9183,6 +9667,91 @@
             "description": "Full Matrix user ID, e.g. `@alice:example.org`. A user ID written with\nthe homeserver's hostname as its domain (`@alice:matrix.example.org`)\nis rejected with a 400 whose message suggests the canonical spelling."
           }
         }
+      },
+      "MatrixOAuthQrFlowDto": {
+        "type": "object",
+        "description": "Replayable, presentation-safe state of one QR login flow. Optional fields\nare omitted unless they belong to the current stage.",
+        "required": [
+          "flow_id",
+          "expected_user_id",
+          "presentation",
+          "stage"
+        ],
+        "properties": {
+          "account_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "authorization_user_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "check_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_user_id": {
+            "type": "string"
+          },
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "presentation": {
+            "$ref": "#/components/schemas/MatrixOAuthQrPresentation"
+          },
+          "qr_code_data": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stage": {
+            "$ref": "#/components/schemas/MatrixOAuthQrStage"
+          },
+          "verification_uri": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "MatrixOAuthQrPresentation": {
+        "type": "string",
+        "description": "Which device presents the QR image.",
+        "enum": [
+          "display",
+          "scan"
+        ]
+      },
+      "MatrixOAuthQrStage": {
+        "type": "string",
+        "description": "Stable flow stages exposed by `/v1/`.",
+        "enum": [
+          "starting",
+          "qr_ready",
+          "check_code_to_display",
+          "check_code_required",
+          "waiting_for_authorization",
+          "syncing_secrets",
+          "done",
+          "failed",
+          "cancelled"
+        ]
       },
       "MatrixProfileDto": {
         "type": "object",
@@ -10204,6 +10773,36 @@
           }
         }
       },
+      "SubmitMatrixOAuthCheckCodeRequest": {
+        "type": "object",
+        "description": "Submit the two decimal digits shown by the scanning device.",
+        "required": [
+          "check_code"
+        ],
+        "properties": {
+          "check_code": {
+            "type": "string",
+            "maxLength": 2,
+            "minLength": 2,
+            "pattern": "^[0-9]{2}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SubmitMatrixOAuthQrRequest": {
+        "type": "object",
+        "description": "Submit decoded, unpadded-base64 QR data to a scan presentation.",
+        "required": [
+          "qr_code_data"
+        ],
+        "properties": {
+          "qr_code_data": {
+            "type": "string",
+            "maxLength": 8192
+          }
+        },
+        "additionalProperties": false
+      },
       "SyncStateDto": {
         "type": "string",
         "description": "Sync-engine readiness on the wire (ADR 0030, issue #241) — the constrained\nenum form of the four values `axon-sync`'s `SyncHealth` derives, so the\nOpenAPI schema advertises the closed set and generated clients can model it\nexhaustively. See [`AccountDto::sync_state`] for what each value means.",
@@ -10412,6 +11011,10 @@
     {
       "name": "accounts",
       "description": "The Matrix accounts this Axon manages"
+    },
+    {
+      "name": "matrix-oauth",
+      "description": "Matrix OAuth QR login flows"
     },
     {
       "name": "rooms",

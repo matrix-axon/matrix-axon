@@ -8,6 +8,7 @@ pub mod devices;
 pub mod ephemeral;
 pub mod events;
 pub mod invites;
+pub mod matrix_oauth_acquire;
 pub mod media;
 pub mod membership;
 pub mod messages;

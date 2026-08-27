@@ -45,6 +45,7 @@ use crate::gateway::SdkGateway;
 use crate::lifecycle::{lock_for, AccountLifecycle, IdentityLock, IdentityLocks};
 use crate::manager::ClientManager;
 use crate::matrix_oauth;
+use crate::matrix_oauth_acquire::MatrixOAuthAcquireEngine;
 use crate::redecrypt;
 use crate::sync_health::SyncHealth;
 use crate::verification::{
@@ -150,6 +151,10 @@ pub struct SyncEngine {
     /// task (they write it, on every state transition) and the API status
     /// surface (which reads it).
     sync_health: SyncHealth,
+    /// Pre-account Matrix OAuth QR-login registry and SDK driver (ADR 0097).
+    /// Shared by every API accessor; flows are process-ephemeral while their
+    /// non-secret crash-recovery breadcrumbs live in Postgres.
+    matrix_oauth_acquire: MatrixOAuthAcquireEngine,
 }
 
 impl SyncEngine {
@@ -223,12 +228,17 @@ impl SyncEngine {
             backfill_health.clone(),
             sync_health.clone(),
         );
+        crate::reconcile::reconcile_matrix_oauth_acquires(&config, &store).await?;
         crate::reconcile::reconcile_deleting(&lifecycle, &store).await;
         crate::reconcile::prune_orphan_store_dirs(&config, &store).await;
         crate::reconcile::prune_orphan_media_dirs(&media, &store).await;
-        // Explicit drop so the async state machine doesn't carry the IndexHandle
-        // clone inside `lifecycle` across the remaining await points in this fn.
-        drop(lifecycle);
+        let matrix_oauth_acquire = MatrixOAuthAcquireEngine::new(
+            store.clone(),
+            config.clone(),
+            lifecycle.clone(),
+            tracker.clone(),
+            cancel.clone(),
+        );
 
         // `list_accounts` returns only `active` rows, so a `deactivated` or
         // `deleting` account never gets a supervised task (ADR 0022). Listed after
@@ -265,6 +275,7 @@ impl SyncEngine {
             verifications.clone(),
             cancel.child_token(),
         ));
+        tracker.spawn(matrix_oauth_acquire.clone().reap_loop(cancel.child_token()));
 
         Ok(SyncEngine {
             tracker,
@@ -281,6 +292,7 @@ impl SyncEngine {
             media,
             backfill_health,
             sync_health,
+            matrix_oauth_acquire,
         })
     }
 
@@ -328,6 +340,12 @@ impl SyncEngine {
             self.backfill_health.clone(),
             self.sync_health.clone(),
         )
+    }
+
+    /// The pre-account Matrix OAuth QR-login flow engine for `/v1/` acquire
+    /// routes. Cloning preserves the single shared registry and global limit.
+    pub fn matrix_oauth_acquire(&self) -> MatrixOAuthAcquireEngine {
+        self.matrix_oauth_acquire.clone()
     }
 
     /// The backfill engine's disk-space health, for the API status surface

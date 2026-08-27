@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
-use crate::error::{sdk_err, SyncError};
+use crate::error::SyncError;
 
 const MAX_STATIC_REGISTRATIONS: usize = 64;
 const MAX_SERVER_URL_BYTES: usize = 2_048;
@@ -64,9 +64,7 @@ impl MatrixOAuthRegistrationManager {
     /// dynamically register Axon and persist the result.
     pub async fn prepare(&self, client: &Client) -> Result<ClientId, SyncError> {
         if client.oauth().client_id().is_some() {
-            return Err(SyncError::Sdk(
-                "Matrix OAuth registration requires an unregistered client".to_owned(),
-            ));
+            return Err(SyncError::MatrixOAuthLocalState);
         }
         validate_config(&self.config)?;
         let timeout = Duration::from_secs(self.config.request_timeout_secs);
@@ -75,7 +73,7 @@ impl MatrixOAuthRegistrationManager {
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(sdk_err)?;
+            .map_err(|_| SyncError::MatrixOAuthConfiguration)?;
         let metadata = discover_metadata(&http, &client.homeserver(), timeout).await?;
         let issuer = metadata.issuer;
         let issuer_url = issuer.as_str();
@@ -92,14 +90,11 @@ impl MatrixOAuthRegistrationManager {
         // concurrent flows may discover together, but only one can register.
         let _guard = self.registration_lock.lock().await;
         if let Some(registration) = self.store.matrix_oauth_registration(issuer_url).await? {
-            validate_client_id(&registration.client_id)?;
+            validate_client_id(&registration.client_id)
+                .map_err(|_| SyncError::MatrixOAuthLocalState)?;
             let client_id = ClientId::new(registration.client_id);
             client.oauth().restore_registered_client(client_id.clone());
-            tracing::debug!(
-                issuer = issuer_url,
-                homeserver = homeserver.as_str(),
-                "restored persisted Matrix OAuth client registration"
-            );
+            tracing::debug!("restored persisted Matrix OAuth client registration");
             return Ok(client_id);
         }
 
@@ -110,11 +105,7 @@ impl MatrixOAuthRegistrationManager {
                 self.persist(&issuer, &homeserver, &client_id),
             )
             .await?;
-            tracing::info!(
-                issuer = issuer_url,
-                homeserver = homeserver.as_str(),
-                "restored operator-provided Matrix OAuth client registration"
-            );
+            tracing::info!("restored operator-provided Matrix OAuth client registration");
             return Ok(client_id);
         }
 
@@ -124,7 +115,7 @@ impl MatrixOAuthRegistrationManager {
                     .to_owned(),
             )
         })?;
-        let client_metadata = client_metadata()?;
+        let client_metadata = client_metadata().map_err(|_| SyncError::MatrixOAuthLocalState)?;
         let body = client_metadata.json().get().as_bytes().to_vec();
         let response = http
             .post(registration_endpoint)
@@ -132,8 +123,16 @@ impl MatrixOAuthRegistrationManager {
             .body(body)
             .send()
             .await
-            .map_err(|err| oauth_http_error("dynamic registration", timeout, err))?;
+            .map_err(|err| {
+                oauth_http_error("oauth_registration", "dynamic registration", timeout, err)
+            })?;
         if !response.status().is_success() {
+            tracing::warn!(
+                phase = "oauth_registration",
+                error_class = "upstream",
+                http_status = response.status().as_u16(),
+                "Matrix OAuth dynamic registration failed"
+            );
             return Err(SyncError::Sdk(format!(
                 "Matrix OAuth dynamic registration returned HTTP {}",
                 response.status()
@@ -142,20 +141,27 @@ impl MatrixOAuthRegistrationManager {
         let body = bounded_body(response, MAX_REGISTRATION_RESPONSE_BYTES).await?;
         let response: matrix_sdk::authentication::oauth::registration::ClientRegistrationResponse =
             serde_json::from_slice(&body).map_err(|err| {
+                tracing::warn!(
+                    phase = "oauth_registration",
+                    error_class = "invalid_response",
+                    "Matrix OAuth dynamic registration response was invalid"
+                );
                 SyncError::Sdk(format!("invalid Matrix OAuth registration response: {err}"))
             })?;
-        validate_client_id(response.client_id.as_str())?;
+        validate_client_id(response.client_id.as_str()).inspect_err(|_| {
+            tracing::warn!(
+                phase = "oauth_registration",
+                error_class = "invalid_response",
+                "Matrix OAuth dynamic registration returned an invalid client ID"
+            );
+        })?;
         persist_then_restore_registration(
             client,
             &response.client_id,
             self.persist(&issuer, &homeserver, &response.client_id),
         )
         .await?;
-        tracing::info!(
-            issuer = issuer_url,
-            homeserver = homeserver.as_str(),
-            "dynamically registered Matrix OAuth client"
-        );
+        tracing::info!("dynamically registered Matrix OAuth client");
         Ok(response.client_id)
     }
 
@@ -165,7 +171,7 @@ impl MatrixOAuthRegistrationManager {
         homeserver: &Url,
         client_id: &ClientId,
     ) -> Result<(), SyncError> {
-        validate_client_id(client_id.as_str())?;
+        validate_client_id(client_id.as_str()).map_err(|_| SyncError::MatrixOAuthLocalState)?;
         self.store
             .upsert_matrix_oauth_registration(&MatrixOAuthRegistration {
                 issuer_url: issuer.to_string(),
@@ -203,27 +209,66 @@ async fn discover_metadata(
         .get(stable)
         .send()
         .await
-        .map_err(|err| oauth_http_error("discovery", timeout, err))?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        .map_err(|err| oauth_http_error("oauth_discovery", "discovery", timeout, err))?;
+    let stable_status = response.status();
+    if stable_status == reqwest::StatusCode::NOT_FOUND {
         response = http
             .get(unstable)
             .send()
             .await
-            .map_err(|err| oauth_http_error("discovery", timeout, err))?;
+            .map_err(|err| oauth_http_error("oauth_discovery", "discovery", timeout, err))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            tracing::warn!(
+                phase = "oauth_discovery",
+                error_class = "unsupported",
+                stable_http_status = stable_status.as_u16(),
+                unstable_http_status = response.status().as_u16(),
+                "homeserver does not advertise Matrix OAuth authentication"
+            );
+            return Err(SyncError::MatrixOAuthUnavailable);
+        }
     }
     if !response.status().is_success() {
+        tracing::warn!(
+            phase = "oauth_discovery",
+            error_class = "upstream",
+            endpoint = if stable_status == reqwest::StatusCode::NOT_FOUND {
+                "unstable"
+            } else {
+                "stable"
+            },
+            http_status = response.status().as_u16(),
+            "Matrix OAuth discovery failed"
+        );
         return Err(SyncError::Sdk(format!(
             "Matrix OAuth discovery returned HTTP {}",
             response.status()
         )));
     }
     let body = bounded_body(response, MAX_OAUTH_METADATA_BYTES).await?;
-    let raw: Raw<AuthorizationServerMetadata> = serde_json::from_slice(&body)
-        .map_err(|err| SyncError::Sdk(format!("invalid Matrix OAuth metadata: {err}")))?;
-    let metadata = raw
-        .deserialize()
-        .map_err(|err| SyncError::Sdk(format!("invalid Matrix OAuth metadata: {err}")))?;
-    validate_metadata_urls(homeserver, &metadata)?;
+    let raw: Raw<AuthorizationServerMetadata> = serde_json::from_slice(&body).map_err(|err| {
+        tracing::warn!(
+            phase = "oauth_discovery",
+            error_class = "invalid_response",
+            "Matrix OAuth discovery response was invalid"
+        );
+        SyncError::Sdk(format!("invalid Matrix OAuth metadata: {err}"))
+    })?;
+    let metadata = raw.deserialize().map_err(|err| {
+        tracing::warn!(
+            phase = "oauth_discovery",
+            error_class = "invalid_metadata",
+            "Matrix OAuth discovery metadata was invalid"
+        );
+        SyncError::Sdk(format!("invalid Matrix OAuth metadata: {err}"))
+    })?;
+    validate_metadata_urls(homeserver, &metadata).inspect_err(|_| {
+        tracing::warn!(
+            phase = "oauth_discovery",
+            error_class = "unsafe_metadata",
+            "Matrix OAuth discovery metadata contains unsafe URLs"
+        );
+    })?;
     Ok(metadata)
 }
 
@@ -276,13 +321,28 @@ async fn bounded_body(
     Ok(body)
 }
 
-fn oauth_http_error(operation: &str, timeout: Duration, err: reqwest::Error) -> SyncError {
+fn oauth_http_error(
+    phase: &'static str,
+    operation: &str,
+    timeout: Duration,
+    err: reqwest::Error,
+) -> SyncError {
     if err.is_timeout() {
+        tracing::warn!(
+            phase,
+            error_class = "timeout",
+            "Matrix OAuth request timed out"
+        );
         SyncError::Sdk(format!(
             "Matrix OAuth {operation} timed out after {} seconds",
             timeout.as_secs()
         ))
     } else {
+        tracing::warn!(
+            phase,
+            error_class = "network",
+            "Matrix OAuth request failed"
+        );
         SyncError::Sdk(format!("Matrix OAuth {operation} request failed: {err}"))
     }
 }
@@ -298,22 +358,17 @@ fn validate_client_id(client_id: &str) -> Result<(), SyncError> {
 
 fn validate_config(config: &MatrixOAuthConfig) -> Result<(), SyncError> {
     if config.request_timeout_secs == 0 {
-        return Err(SyncError::Sdk(
-            "sync.matrix_oauth.request_timeout_secs must be greater than zero".to_owned(),
-        ));
+        return Err(SyncError::MatrixOAuthConfiguration);
     }
     if config.static_registrations.len() > MAX_STATIC_REGISTRATIONS {
-        return Err(SyncError::Sdk(format!(
-            "sync.matrix_oauth.static_registrations exceeds the {MAX_STATIC_REGISTRATIONS}-entry limit"
-        )));
+        return Err(SyncError::MatrixOAuthConfiguration);
     }
     for registration in config.static_registrations.values() {
         if registration.server_url.len() > MAX_SERVER_URL_BYTES {
-            return Err(SyncError::Sdk(
-                "Matrix OAuth static registration URL is too long".to_owned(),
-            ));
+            return Err(SyncError::MatrixOAuthConfiguration);
         }
-        validate_client_id(&registration.client_id)?;
+        validate_client_id(&registration.client_id)
+            .map_err(|_| SyncError::MatrixOAuthConfiguration)?;
     }
     Ok(())
 }
@@ -324,11 +379,8 @@ fn static_client_id(
     issuer: &Url,
 ) -> Result<Option<ClientId>, SyncError> {
     for registration in config.static_registrations.values() {
-        let server_url = Url::parse(&registration.server_url).map_err(|_| {
-            SyncError::Sdk(
-                "sync.matrix_oauth.static_registrations contains an invalid server_url".to_owned(),
-            )
-        })?;
+        let server_url = Url::parse(&registration.server_url)
+            .map_err(|_| SyncError::MatrixOAuthConfiguration)?;
         if server_url == *homeserver || server_url == *issuer {
             return Ok(Some(ClientId::new(registration.client_id.clone())));
         }
@@ -364,15 +416,29 @@ pub(crate) async fn watch_session_changes(
     mut changes: broadcast::Receiver<SessionChange>,
     cancel: CancellationToken,
 ) {
-    persist_latest_with_retry(&client, &store, account_id, &store_key, &cancel).await;
+    let _ = persist_latest_with_retry(&client, &store, account_id, &store_key, &cancel).await;
 
     loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => break,
             change = changes.recv() => match change {
-                Ok(SessionChange::TokensRefreshed) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                    persist_latest_with_retry(
+                Ok(SessionChange::TokensRefreshed) => {
+                    if persist_latest_with_retry(
+                        &client,
+                        &store,
+                        account_id,
+                        &store_key,
+                        &cancel,
+                    ).await {
+                        tracing::info!(
+                            %account_id,
+                            "Matrix OAuth tokens refreshed and persisted"
+                        );
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = persist_latest_with_retry(
                         &client,
                         &store,
                         account_id,
@@ -413,7 +479,7 @@ async fn persist_latest_with_retry(
     account_id: Uuid,
     store_key: &str,
     cancel: &CancellationToken,
-) {
+) -> bool {
     let mut degraded = false;
     for (attempt, retry_delay) in PERSIST_RETRY_DELAYS
         .iter()
@@ -424,7 +490,7 @@ async fn persist_latest_with_retry(
     {
         let Some(session) = client.oauth().full_session() else {
             tracing::warn!(%account_id, "OAuth session snapshot is unavailable");
-            return;
+            return false;
         };
         match persist_snapshot(store, account_id, store_key, session).await {
             Ok(()) => {
@@ -434,14 +500,14 @@ async fn persist_latest_with_retry(
                         "Matrix OAuth session durability recovered"
                     );
                 }
-                return;
+                return true;
             }
             Err(SyncError::Store(StoreError::OAuthSessionNotCurrent)) => {
                 tracing::debug!(
                     %account_id,
                     "stopped persisting an OAuth session that is no longer current"
                 );
-                return;
+                return false;
             }
             Err(err) => match retry_delay {
                 Some(delay) => {
@@ -455,7 +521,7 @@ async fn persist_latest_with_retry(
                     }
                     tokio::select! {
                         biased;
-                        _ = cancel.cancelled() => return,
+                        _ = cancel.cancelled() => return false,
                         _ = tokio::time::sleep(delay) => {}
                     }
                 }
@@ -466,11 +532,12 @@ async fn persist_latest_with_retry(
                         attempts = attempt + 1,
                         "failed to persist refreshed Matrix OAuth session; a crash may require fresh login"
                     );
-                    return;
+                    return false;
                 }
             },
         }
     }
+    false
 }
 
 async fn persist_snapshot(
@@ -500,6 +567,7 @@ mod tests {
     use axon_core::MatrixOAuthStaticRegistration;
     use axum::{
         extract::State,
+        http::StatusCode,
         routing::{get, post},
         Json, Router,
     };
@@ -536,7 +604,10 @@ mod tests {
             request_timeout_secs: 0,
             ..MatrixOAuthConfig::default()
         };
-        assert!(validate_config(&config).is_err());
+        assert!(matches!(
+            validate_config(&config),
+            Err(SyncError::MatrixOAuthConfiguration)
+        ));
 
         let config = MatrixOAuthConfig {
             static_registrations: (0..=MAX_STATIC_REGISTRATIONS)
@@ -552,7 +623,10 @@ mod tests {
                 .collect(),
             ..MatrixOAuthConfig::default()
         };
-        assert!(validate_config(&config).is_err());
+        assert!(matches!(
+            validate_config(&config),
+            Err(SyncError::MatrixOAuthConfiguration)
+        ));
     }
 
     #[test]
@@ -664,6 +738,37 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("65536-byte limit"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn missing_stable_and_unstable_metadata_is_unsupported() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route(
+                "/_matrix/client/v1/auth_metadata",
+                get(|| async { StatusCode::NOT_FOUND }),
+            )
+            .route(
+                "/_matrix/client/unstable/org.matrix.msc2965/auth_metadata",
+                get(|| async { StatusCode::NOT_FOUND }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+
+        let error = discover_metadata(
+            &http,
+            &Url::parse(&base_url).unwrap(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, SyncError::MatrixOAuthUnavailable));
         server.abort();
     }
 

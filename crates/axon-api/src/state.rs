@@ -20,6 +20,7 @@ use crate::backfill::{BackfillStatusProvider, NoBackfillStatus};
 use crate::build_info::BuildInfo;
 use crate::devices::DeviceListService;
 use crate::lifecycle::AccountLifecycle;
+use crate::matrix_oauth_acquire::{MatrixOAuthQrAcquireService, NoopMatrixOAuthQrAcquire};
 use crate::media::MediaProxy;
 use crate::member_profiles::{MemberProfileService, NoopMemberProfileService};
 use crate::oauth::OAuthRuntime;
@@ -91,6 +92,8 @@ pub struct AppState {
     /// Injected by the binary via an adapter over the sync engine, same as
     /// `sender`.
     pub lifecycle: Arc<dyn AccountLifecycle>,
+    /// Pre-account Matrix OAuth QR-login flow driver (ADR 0097).
+    pub matrix_oauth_acquire: Arc<dyn MatrixOAuthQrAcquireService>,
     /// Device-verification port for the `/v1/accounts/{id}/verify` handlers.
     /// Injected by the binary via an adapter over the sync engine, same as
     /// `lifecycle`.
@@ -277,6 +280,7 @@ impl AppState {
             power_levels: Arc::new(NoopPowerLevelsSender),
             account_actions: Arc::new(NoopAccountActionsSender),
             lifecycle,
+            matrix_oauth_acquire: Arc::new(NoopMatrixOAuthQrAcquire),
             verify,
             trust,
             devices,
@@ -334,6 +338,15 @@ impl AppState {
     /// don't care keep the default no-op (`"connecting"`) provider.
     pub fn with_sync_state(mut self, provider: Arc<dyn SyncStateProvider>) -> Self {
         self.sync_state = provider;
+        self
+    }
+
+    /// Inject the Matrix OAuth QR account-acquisition driver.
+    pub fn with_matrix_oauth_acquire(
+        mut self,
+        service: Arc<dyn MatrixOAuthQrAcquireService>,
+    ) -> Self {
+        self.matrix_oauth_acquire = service;
         self
     }
 
@@ -856,6 +869,12 @@ impl FromRef<AppState> for Arc<dyn AccountActionsSender> {
 impl FromRef<AppState> for Arc<dyn AccountLifecycle> {
     fn from_ref(state: &AppState) -> Arc<dyn AccountLifecycle> {
         state.lifecycle.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn MatrixOAuthQrAcquireService> {
+    fn from_ref(state: &AppState) -> Arc<dyn MatrixOAuthQrAcquireService> {
+        state.matrix_oauth_acquire.clone()
     }
 }
 

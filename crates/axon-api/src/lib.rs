@@ -18,6 +18,7 @@ mod devices;
 mod dto;
 mod extract;
 mod lifecycle;
+mod matrix_oauth_acquire;
 mod media;
 mod member_profiles;
 mod oauth;
@@ -43,6 +44,10 @@ pub use dto::MediaUploadKindDto;
 pub use lifecycle::{
     AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError, RedecryptUtdsError,
     RedecryptUtdsStats,
+};
+pub use matrix_oauth_acquire::{
+    MatrixOAuthQrAcquireService, MatrixOAuthQrError, MatrixOAuthQrFlowDto,
+    MatrixOAuthQrPresentation, MatrixOAuthQrStage,
 };
 pub use media::{MediaError, MediaProxy, MediaResource};
 pub use member_profiles::{
@@ -71,6 +76,7 @@ pub use verification::{FlowStage, FlowSummary, VerificationService, VerifyError}
 
 use axum::{
     body::Body,
+    extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
     response::Html,
     routing::{any, get, post, put},
@@ -96,7 +102,28 @@ pub fn router(state: AppState) -> Router {
     // verbs that were loopback-restricted before auth existed. `/healthz` and the
     // WebSocket are assembled outside it (below).
     let verifier = state.verifier.clone();
+    // The scan body carries bounded base64 QR data. Cap the JSON body before
+    // allocation/parsing rather than relying only on the post-parse field check.
+    let matrix_oauth_qr = Router::new()
+        .route(
+            "/v1/accounts/login/qr",
+            post(routes::matrix_oauth_acquire::create),
+        )
+        .route(
+            "/v1/accounts/login/qr/{flow_id}",
+            get(routes::matrix_oauth_acquire::get).delete(routes::matrix_oauth_acquire::cancel),
+        )
+        .route(
+            "/v1/accounts/login/qr/{flow_id}/scan",
+            post(routes::matrix_oauth_acquire::submit_scan),
+        )
+        .route(
+            "/v1/accounts/login/qr/{flow_id}/check-code",
+            post(routes::matrix_oauth_acquire::submit_check_code),
+        )
+        .layer(DefaultBodyLimit::max(10 * 1024));
     let authed = Router::new()
+        .merge(matrix_oauth_qr)
         // Account read API: the cross-account list and a single account.
         .route("/v1/accounts", get(routes::accounts::list_accounts))
         // Runtime login / logout / recover — the secret-bearing lifecycle verbs.

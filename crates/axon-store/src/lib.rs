@@ -12,6 +12,7 @@ mod device_state;
 mod error;
 mod events;
 mod invites;
+mod matrix_oauth_acquire;
 mod media_uploads;
 mod migrations;
 mod oauth_authorization_requests;
@@ -38,6 +39,9 @@ pub use events::{
     ThreadSummary, TimelineCursor, TimelineRow,
 };
 pub use invites::{RoomInvite, RoomInviteSnapshot};
+pub use matrix_oauth_acquire::{
+    CommitMatrixOAuthAcquire, MatrixOAuthAcquireBreadcrumb, MatrixOAuthAcquireFinalization,
+};
 pub use media_uploads::{MediaUpload, MediaUploadKind, MediaUploadState, NewMediaUpload};
 pub use migrations::{embedded_migrations, EmbeddedMigration};
 pub use oauth_authorization_requests::{AuthorizationRequest, NewAuthorizationRequest};

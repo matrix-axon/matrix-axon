@@ -20,10 +20,95 @@ use std::collections::HashSet;
 
 use axon_core::SyncConfig;
 use axon_media::MediaCacheHandle;
-use axon_store::Store;
+use axon_store::{MatrixOAuthAcquireFinalization, Store};
 use uuid::Uuid;
 
 use crate::lifecycle::AccountLifecycle;
+use crate::SyncError;
+
+/// Reconcile every pre-account Matrix OAuth QR-login breadcrumb before normal
+/// account lifecycle recovery. A pre-commit staging store is abandoned; a
+/// committed encrypted session has its staging store adopted and account
+/// activated. A failure leaves that breadcrumb durable and therefore keeps
+/// ordinary login/import and another QR flow from replacing the affected
+/// identity, but does not prevent unrelated healthy accounts from starting.
+pub(crate) async fn reconcile_matrix_oauth_acquires(
+    config: &SyncConfig,
+    store: &Store,
+) -> Result<(), SyncError> {
+    let breadcrumbs = store.list_matrix_oauth_acquire_breadcrumbs().await?;
+    for breadcrumb in breadcrumbs {
+        let flow_id = breadcrumb.flow_id;
+        let account_id = breadcrumb.account_id;
+        if let Err(err) = reconcile_matrix_oauth_acquire(config, store, breadcrumb).await {
+            tracing::error!(
+                %flow_id,
+                ?account_id,
+                error = %err,
+                "reconcile: Matrix OAuth QR login finalization failed; will retry next boot"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn reconcile_matrix_oauth_acquire(
+    config: &SyncConfig,
+    store: &Store,
+    breadcrumb: axon_store::MatrixOAuthAcquireBreadcrumb,
+) -> Result<(), SyncError> {
+    match breadcrumb.finalization {
+        MatrixOAuthAcquireFinalization::Staging => {
+            crate::client::remove_matrix_oauth_acquire_staging(
+                config,
+                &breadcrumb.staging_dir_name,
+            )
+            .await?;
+            if !store
+                .abandon_matrix_oauth_acquire(breadcrumb.flow_id)
+                .await?
+            {
+                return Err(SyncError::Sdk(
+                    "Matrix OAuth acquire breadcrumb changed during boot cleanup".to_owned(),
+                ));
+            }
+            tracing::info!(
+                flow_id = %breadcrumb.flow_id,
+                presentation = %breadcrumb.presentation,
+                "reconcile: removed abandoned Matrix OAuth QR login staging store"
+            );
+        }
+        MatrixOAuthAcquireFinalization::SessionCommitted => {
+            let account_id = breadcrumb.account_id.ok_or_else(|| {
+                SyncError::Sdk(
+                    "committed Matrix OAuth acquire breadcrumb has no account".to_owned(),
+                )
+            })?;
+            crate::client::adopt_matrix_oauth_acquire_staging(
+                config,
+                &breadcrumb.staging_dir_name,
+                account_id,
+            )
+            .await?;
+            if !store
+                .finalize_matrix_oauth_acquire(breadcrumb.flow_id, account_id)
+                .await?
+            {
+                return Err(SyncError::Sdk(
+                    "committed Matrix OAuth acquire breadcrumb changed during boot finalization"
+                        .to_owned(),
+                ));
+            }
+            tracing::info!(
+                flow_id = %breadcrumb.flow_id,
+                %account_id,
+                presentation = %breadcrumb.presentation,
+                "reconcile: completed Matrix OAuth QR login store adoption"
+            );
+        }
+    }
+    Ok(())
+}
 
 /// Drive every account left in `deleting` to completion via the runtime delete
 /// verb. Resilient by construction: each row is independent, and a row that fails
@@ -161,7 +246,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
-    use axon_store::AccountState;
+    use axon_store::{AccountState, CommitMatrixOAuthAcquire};
     use tokio::sync::broadcast;
     use tokio_util::sync::CancellationToken;
     use tokio_util::task::TaskTracker;
@@ -258,6 +343,146 @@ mod tests {
 
         assert!(store.get_account(acct.account_id).await.unwrap().is_none());
         assert!(!store_dir.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reconcile_abandons_precommit_and_finishes_committed_qr_stores() {
+        let store = connect_store().await;
+        let dir = temp_data_dir();
+        let config = config(dir.clone());
+
+        let abandoned_flow = Uuid::new_v4();
+        let abandoned_user = format!("@qr{}:localhost", Uuid::new_v4().simple());
+        let abandoned_name = abandoned_flow.to_string();
+        store
+            .create_matrix_oauth_acquire_breadcrumb(
+                abandoned_flow,
+                &abandoned_user,
+                "scan",
+                &abandoned_name,
+            )
+            .await
+            .unwrap();
+        let abandoned_dir = crate::client::matrix_oauth_acquire_root(&config).join(&abandoned_name);
+        std::fs::create_dir_all(&abandoned_dir).unwrap();
+        std::fs::write(abandoned_dir.join("partial"), b"partial").unwrap();
+
+        reconcile_matrix_oauth_acquires(&config, &store)
+            .await
+            .unwrap();
+        assert!(!abandoned_dir.exists());
+        assert!(!store
+            .has_matrix_oauth_acquire_for_user(&abandoned_user)
+            .await
+            .unwrap());
+
+        let committed_flow = Uuid::new_v4();
+        let committed_user = format!("@qr{}:localhost", Uuid::new_v4().simple());
+        let committed_name = committed_flow.to_string();
+        store
+            .create_matrix_oauth_acquire_breadcrumb(
+                committed_flow,
+                &committed_user,
+                "display",
+                &committed_name,
+            )
+            .await
+            .unwrap();
+        let staging = crate::client::matrix_oauth_acquire_root(&config).join(&committed_name);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("new-store"), b"new").unwrap();
+        let account = match store
+            .commit_matrix_oauth_acquire(
+                committed_flow,
+                &committed_user,
+                "https://hs.example.org/",
+                "DEVICE",
+                "access",
+                "refresh",
+                "client",
+                "test-key",
+            )
+            .await
+            .unwrap()
+        {
+            CommitMatrixOAuthAcquire::Committed(account) => account,
+            other => panic!("unexpected commit outcome: {other:?}"),
+        };
+        let permanent = dir.join(account.account_id.to_string());
+        std::fs::create_dir_all(&permanent).unwrap();
+        std::fs::write(permanent.join("old-store"), b"old").unwrap();
+
+        reconcile_matrix_oauth_acquires(&config, &store)
+            .await
+            .unwrap();
+        let active = store
+            .get_account(account.account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.state, AccountState::Active);
+        assert!(permanent.join("new-store").exists());
+        assert!(!permanent.join("old-store").exists());
+        assert!(
+            crate::client::matrix_oauth_acquire_root(&config)
+                .join(format!("{}.previous", account.account_id))
+                .join("old-store")
+                .exists(),
+            "boot adoption must retain the old store until the new one opens"
+        );
+        assert!(!store
+            .has_matrix_oauth_acquire_for_user(&committed_user)
+            .await
+            .unwrap());
+
+        delete_row(&store, account.account_id).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn failed_qr_reconcile_does_not_block_an_unrelated_flow() {
+        let store = connect_store().await;
+        let dir = temp_data_dir();
+        let config = config(dir.clone());
+
+        let bad_flow = Uuid::new_v4();
+        let bad_user = format!("@qr{}:localhost", Uuid::new_v4().simple());
+        store
+            .create_matrix_oauth_acquire_breadcrumb(bad_flow, &bad_user, "scan", "not-a-uuid")
+            .await
+            .unwrap();
+
+        let good_flow = Uuid::new_v4();
+        let good_user = format!("@qr{}:localhost", Uuid::new_v4().simple());
+        let good_name = good_flow.to_string();
+        store
+            .create_matrix_oauth_acquire_breadcrumb(good_flow, &good_user, "display", &good_name)
+            .await
+            .unwrap();
+        let good_dir = crate::client::matrix_oauth_acquire_root(&config).join(&good_name);
+        std::fs::create_dir_all(&good_dir).unwrap();
+
+        reconcile_matrix_oauth_acquires(&config, &store)
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .has_matrix_oauth_acquire_for_user(&bad_user)
+                .await
+                .unwrap(),
+            "the failed breadcrumb remains retryable"
+        );
+        assert!(!store
+            .has_matrix_oauth_acquire_for_user(&good_user)
+            .await
+            .unwrap());
+        assert!(!good_dir.exists());
+
+        assert!(store.abandon_matrix_oauth_acquire(bad_flow).await.unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

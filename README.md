@@ -184,7 +184,9 @@ Sign-in with Apple is not yet supported (deferred to the iOS client work).
 The Matrix OAuth session foundation for Axon's own homeserver sessions is configured separately under `sync.matrix_oauth` (ADR 0097).
 It dynamically registers a public client when the discovered authorization server permits it; operators can configure a static public client ID for issuers that disable dynamic registration.
 Access and refresh tokens are encrypted with `sync.store_key`, and client secrets are not supported.
-The QR acquisition API and client UI land in later slices; the existing password and token-import account routes are unchanged by this foundation.
+The authenticated QR acquisition API is available at `POST /v1/accounts/login/qr` and its flow-specific polling/input routes; it supports either displaying QR data or submitting a decoded scan and activates the account only after Axon independently confirms that its new device is cross-signed.
+Web and TUI presentation work lands in later client-specific slices, so this server release has no end-user QR screen by itself.
+The existing password and token-import account routes remain available.
 
 For first launch only, an interactive server can mint the first credential from the one-time `/bootstrap/<code>` URL printed at startup instead of requiring `axon token issue` in another shell.
 The bootstrap page is loopback-only by default.

@@ -67,7 +67,47 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         match axum::Json::<T>::from_request(req, state).await {
             Ok(axum::Json(value)) => Ok(Json(value)),
+            Err(rejection) if rejection.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE => {
+                Err(ApiError::payload_too_large("request body too large"))
+            }
             Err(rejection) => Err(ApiError::bad_request(rejection.body_text())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::{to_bytes, Body},
+        extract::DefaultBodyLimit,
+        http::{Request, StatusCode},
+        routing::post,
+        Router,
+    };
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    use super::Json;
+
+    async fn accept_json(Json(_): Json<Value>) {}
+
+    #[tokio::test]
+    async fn json_body_limit_uses_the_api_error_envelope() {
+        let app = Router::new()
+            .route("/", post(accept_json))
+            .layer(DefaultBodyLimit::max(8));
+        let response = app
+            .oneshot(
+                Request::post("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"long":"body"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "payload_too_large");
     }
 }
