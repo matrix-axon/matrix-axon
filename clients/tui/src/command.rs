@@ -197,7 +197,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "Alt+Enter",
         insert_text: "",
-        description: "insert a line break for a multi-line message (rebindable via shortcuts.newline, e.g. shift-enter)",
+        description: "insert a line break for a multi-line message",
     },
     HelpCommand {
         label: "//<text>",
@@ -207,7 +207,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/html <html>",
         insert_text: "/html ",
-        description: "send raw HTML as a formatted message (plain body is auto-stripped)",
+        description: "send raw HTML as a formatted message",
     },
     HelpCommand {
         label: "/literal <text>",
@@ -222,12 +222,12 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/spoiler [reason |] <text>",
         insert_text: "/spoiler ",
-        description: "send text as a spoiler; optional reason before \" | \" becomes the label",
+        description: "send text as a spoiler; label optional reason before \" | \"",
     },
     HelpCommand {
         label: "/send <path> [caption]",
         insert_text: "/send ",
-        description: "upload a local file (Tab-completes paths; drag-and-drop also fills the path) and send it, with an optional caption",
+        description: "upload a local file, tab-complete or drag-and-drop to fill path",
     },
     // ── Navigation ───────────────────────────────────────────────────────────
     HelpCommand {
@@ -238,7 +238,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/pin [room], /unpin [room]",
         insert_text: "/pin ",
-        description: "pin (or unpin) a room to the top of the list; defaults to the selected room",
+        description: "pin (or unpin) a room to the top of list; default current room",
     },
     HelpCommand {
         label: "/filter [all|dms|groups|unread|fav|<text>]",
@@ -264,33 +264,33 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/login [user] [password] [homeserver]",
         insert_text: "/login ",
-        description: "log in a Matrix account; prompts for missing credentials",
+        description: "log into a Matrix account",
     },
     HelpCommand {
         label: "/logout [user]",
         insert_text: "/logout ",
-        description: "log out an active account while retaining its archive",
+        description: "log out an active account (retains messages)",
     },
     HelpCommand {
         label: "/recover [user]",
         insert_text: "/recover ",
-        description: "import encryption keys for an active account from a hidden prompt",
+        description: "import encryption keys for an active account",
     },
     HelpCommand {
         label: "/backup enable [user]",
         insert_text: "/backup enable ",
-        description: "enable megolm key backup for a verified account from a hidden prompt",
+        description: "enable megolm key backup for a verified account",
     },
     HelpCommand {
         label: "/delete [user]",
         insert_text: "/delete ",
-        description: "permanently delete an account and all its data (requires typing YES)",
+        description: "permanently delete an account and all its data",
     },
     // ── Information ──────────────────────────────────────────────────────────
     HelpCommand {
         label: "/status",
         insert_text: "/status",
-        description: "show server connectivity, account state, and megolm backup snapshot",
+        description: "server connectivity, accounts, and megolm backup state",
     },
     HelpCommand {
         label: "/event <id>",
@@ -311,7 +311,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/search [field:value...] <query>",
         insert_text: "/search ",
-        description: "search indexed history; bare /search opens a field form; /search ? shows syntax",
+        description: "search history; bare /search for interactive; /search ? for syntax",
     },
     HelpCommand {
         label: "/react [emoji]",
