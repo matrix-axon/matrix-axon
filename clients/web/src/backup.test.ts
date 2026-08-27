@@ -56,8 +56,15 @@ describe('backupSnapshotLines', () => {
 describe('backupBadge', () => {
   it('badges uploading, missing, and elsewhere; skips unknown', () => {
     expect(backupBadge(UPLOADING)?.label).toBe('backup')
+    expect(backupBadge(UPLOADING)?.title).toMatch(
+      /uploading megolm session keys/i,
+    )
     expect(backupBadge(NONE_ON_SERVER)?.label).toBe('no backup')
+    expect(backupBadge(NONE_ON_SERVER)?.title).toMatch(
+      /does not mean history keys are backed up/i,
+    )
     expect(backupBadge(ELSEWHERE)?.label).toBe('backup elsewhere')
+    expect(backupBadge(ELSEWHERE)?.title).toMatch(/not uploading/i)
     expect(backupBadge(UNKNOWN)).toBeNull()
   })
 })

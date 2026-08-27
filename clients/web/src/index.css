@@ -1083,6 +1083,11 @@ h2 {
   margin-top: 0;
 }
 
+.account-display-name {
+  color: var(--fg);
+  font-weight: 600;
+}
+
 .card-actions {
   display: flex;
   align-items: center;

@@ -92,6 +92,19 @@ function renderPage(
     http.get(`${TEST_BASE_URL}/v1/status`, () =>
       HttpResponse.json({ data: status }),
     ),
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/:accountId/users/:userId/profile`,
+      ({ params }) => {
+        const userId = String(params.userId)
+        return HttpResponse.json({
+          data: {
+            user_id: userId,
+            display_name: userId === ALICE.user_id ? 'Alice Example' : null,
+            avatar_url: null,
+          },
+        })
+      },
+    ),
   )
   const services: AppServices = testServices({ qr })
   const utils = render(
@@ -112,6 +125,28 @@ describe('AccountsPage', () => {
     expect(getByText('@bob:example.org')).toBeTruthy()
     expect(getByText('verified')).toBeTruthy()
     expect(getByText('deactivated')).toBeTruthy()
+  })
+
+  it('shows a fetched display name below the Matrix user ID', async () => {
+    const { findByText, getByText } = renderPage()
+
+    expect(await findByText('Alice Example')).toBeTruthy()
+    expect(getByText('@alice:example.org')).toBeTruthy()
+    expect(getByText(ALICE.account_id)).toBeTruthy()
+  })
+
+  it('gives each account-head badge an explanatory tooltip', async () => {
+    const { findByText, getByLabelText } = renderPage([
+      { ...ALICE, sync_state: 'syncing' },
+    ])
+
+    await findByText('@alice:example.org')
+    expect(getByLabelText(/logged in to axon/i)).toBeTruthy()
+    expect(
+      getByLabelText(/cross-signed. this is independent of megolm key backup/i),
+    ).toBeTruthy()
+    expect(getByLabelText(/uploading megolm session keys/i)).toBeTruthy()
+    expect(getByLabelText(/first sync has not finished/i)).toBeTruthy()
   })
 
   it('shows the megolm backup snapshot independently of verified', async () => {
@@ -1166,6 +1201,44 @@ describe('AccountsPage', () => {
     expect(await findByText(/this device is now verified/i)).toBeTruthy()
     expect(await findByText(/enabled megolm backup/i)).toBeTruthy()
     expect(queryByText(/keys recovered/i)).toBeNull()
+  })
+
+  it('shows recovering progress while the recover request is in flight', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { findByRole, getByLabelText, getByRole, findByText, queryByText } =
+      renderPage([ALICE])
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ALICE.account_id}/recover`,
+        async () => {
+          await gate
+          return HttpResponse.json({
+            data: {
+              ...ALICE,
+              verified: true,
+              backup_action: 'enabled',
+            },
+          })
+        },
+      ),
+    )
+
+    fireEvent.click(await findByRole('button', { name: 'Recover keys' }))
+    fireEvent.input(getByLabelText('Recovery key'), {
+      target: { value: VALID_KEY },
+    })
+    fireEvent.click(getByRole('button', { name: 'Recover' }))
+
+    expect(await findByRole('button', { name: 'Recovering…' })).toBeTruthy()
+    expect(await findByText(/importing secure storage/i)).toBeTruthy()
+    expect(queryByText(/keys recovered/i)).toBeNull()
+
+    release()
+    expect(await findByText(/this device is now verified/i)).toBeTruthy()
+    expect(queryByText(/importing secure storage/i)).toBeNull()
   })
 
   it('reports keys imported but device still unverified', async () => {

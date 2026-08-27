@@ -12,7 +12,11 @@ import { ErrorBanner } from '../components/ErrorBanner'
 import { NoticeBanner, type Notice } from '../components/NoticeBanner'
 import { isValidRecoveryKey } from '../recovery-key'
 import { useServices } from '../services'
-import { hasActiveAccount, type Account } from '../stores/accounts'
+import {
+  hasActiveAccount,
+  type Account,
+  type SyncState,
+} from '../stores/accounts'
 import { isTerminalMatrixOAuthQrFlow } from '../stores/matrix-oauth-qr'
 import { ServerStatus } from './ServerStatus'
 import { MatrixOAuthQrAcquisition } from './accounts/MatrixOAuthQrAcquisition'
@@ -96,20 +100,54 @@ export function AccountsPage() {
   )
 }
 
+function Badge({
+  className,
+  title,
+  children,
+}: {
+  className: string
+  title: string
+  children: string
+}) {
+  return (
+    <span class={`badge ${className}`} title={title} aria-label={title}>
+      {children}
+    </span>
+  )
+}
+
+function accountStateTitle(state: Account['state']): string {
+  switch (state) {
+    case 'active':
+      return 'Logged in to Axon. Messages sync while this account stays active.'
+    case 'deactivated':
+      return 'Logged out of Axon. The local archive is kept until you sign in again or delete the account.'
+    case 'deleting':
+      return 'Axon is removing this account and its local data.'
+  }
+}
+
+function syncStateTitle(state: Exclude<SyncState, 'ready'>): string {
+  switch (state) {
+    case 'offline':
+      return 'Axon lost the homeserver connection and is retrying. Sending may fail until it reconnects.'
+    case 'connecting':
+      return 'Sync is starting. Sending may be unreliable until the first cycle finishes.'
+    case 'syncing':
+      return 'First sync has not finished. Sending may be unreliable until it completes.'
+  }
+}
+
 /** Sync-readiness per ADR 0030 — hidden once the account is `ready`. */
 function SyncBadge({ account }: { account: Account }) {
   const state = account.sync_state
-  if (state === 'ready') {
+  if (state === 'ready' || state === undefined) {
     return null
   }
-  const hint =
-    state === 'offline'
-      ? 'server lost the homeserver connection and is retrying'
-      : 'first sync not finished — sending may be unreliable'
   return (
-    <span class={`badge sync-${state}`} title={hint}>
+    <Badge className={`sync-${state}`} title={syncStateTitle(state)}>
       {state}
-    </span>
+    </Badge>
   )
 }
 
@@ -120,12 +158,13 @@ function AccountCard({
   account: Account
   onReactivate: (account: Account) => void
 }) {
-  const { accounts, settings } = useServices()
+  const { accounts, settings, api } = useServices()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [secretForm, setSecretForm] = useState<'recover' | 'enable' | null>(
     null,
   )
   const [secretKey, setSecretKey] = useState('')
+  const [displayName, setDisplayName] = useState<string | null>(null)
   // Per-card recover / enable outcome, held in a signal so it survives the
   // form closing on success; `NoticeBanner` reads and dismisses it (same idiom
   // as the store error signals feeding `ErrorBanner`).
@@ -134,6 +173,8 @@ function AccountCard({
   const id = account.account_id
   const pending = accounts.pending.value
   const busy = pending !== null
+  const recovering = pending?.kind === 'recover' && pending.accountId === id
+  const enabling = pending?.kind === 'enable-backup' && pending.accountId === id
   const isActiveChoice = settings.activeAccountId.value === id
   const keyValid = isValidRecoveryKey(secretKey)
   const enableKeyOk = secretKey.trim() === '' || keyValid
@@ -158,25 +199,70 @@ function AccountCard({
     setSecretKey('')
   }
 
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const { data, error } = await api.GET(
+          '/v1/accounts/{account_id}/users/{user_id}/profile',
+          {
+            params: {
+              path: {
+                account_id: account.account_id,
+                user_id: account.user_id,
+              },
+            },
+          },
+        )
+        if (cancelled || error !== undefined) {
+          return
+        }
+        const name = data.data.display_name?.trim() ?? ''
+        if (name !== '' && name !== account.user_id) {
+          setDisplayName(name)
+        }
+      } catch {
+        // Best-effort: the MXID is already on the card.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [api, account.account_id, account.user_id])
+
   return (
-    <li class={`card account-${account.state}`}>
+    <li
+      class={`card account-${account.state}`}
+      aria-busy={recovering || enabling}
+    >
       <div class="card-head">
         <CopyableText text={account.user_id} label="user ID">
           <strong>{account.user_id}</strong>
         </CopyableText>
-        <span class={`badge state-${account.state}`}>{account.state}</span>
+        <Badge
+          className={`state-${account.state}`}
+          title={accountStateTitle(account.state)}
+        >
+          {account.state}
+        </Badge>
         {account.verified === true && (
-          <span class="badge verified" title="axon's device is cross-signed">
+          <Badge
+            className="verified"
+            title="Axon's Matrix device is cross-signed. This is independent of megolm key backup."
+          >
             verified
-          </span>
+          </Badge>
         )}
         {badge !== null && (
-          <span class={`badge ${badge.className}`} title={badge.title}>
+          <Badge className={badge.className} title={badge.title}>
             {badge.label}
-          </span>
+          </Badge>
         )}
         {account.state === 'active' && <SyncBadge account={account} />}
       </div>
+      {displayName !== null && (
+        <div class="card-meta account-display-name">{displayName}</div>
+      )}
       <div class="card-meta">
         <CopyableText text={id} label="account ID">
           <code>{id}</code>
@@ -298,13 +384,19 @@ function AccountCard({
                 type="password"
                 value={secretKey}
                 placeholder="EsTc …"
+                disabled={recovering}
                 onInput={(event) => setSecretKey(event.currentTarget.value)}
               />
             </label>
             <button type="submit" disabled={busy || !keyValid}>
-              Recover
+              {recovering ? 'Recovering…' : 'Recover'}
             </button>
           </form>
+          {recovering && (
+            <p class="field-hint" role="status" aria-live="polite">
+              Importing secure storage — this can take a while.
+            </p>
+          )}
           {secretKey.trim() !== '' && !keyValid && (
             <p class="field-hint error">
               That doesn&rsquo;t look like a valid recovery key — check for a
@@ -334,19 +426,26 @@ function AccountCard({
                 type="password"
                 value={secretKey}
                 placeholder="EsTc …"
+                disabled={enabling}
                 onInput={(event) => setSecretKey(event.currentTarget.value)}
               />
             </label>
             <button type="submit" disabled={busy || !enableKeyOk}>
-              Enable
+              {enabling ? 'Enabling…' : 'Enable'}
             </button>
-            <button type="button" onClick={closeSecretForm}>
+            <button type="button" disabled={enabling} onClick={closeSecretForm}>
               Cancel
             </button>
           </form>
-          <p class="field-hint">
-            Leave blank to retry an already-enabled upload.
-          </p>
+          {enabling ? (
+            <p class="field-hint" role="status" aria-live="polite">
+              Enabling megolm backup — this can take a while.
+            </p>
+          ) : (
+            <p class="field-hint">
+              Leave blank to retry an already-enabled upload.
+            </p>
+          )}
           {secretKey.trim() !== '' && !keyValid && (
             <p class="field-hint error">
               That doesn&rsquo;t look like a valid recovery key — check for a
@@ -531,6 +630,7 @@ function PasswordAccountAcquisition({
             value={effectiveUsername}
             placeholder="@alice:example.org"
             readOnly={reactivation !== null}
+            disabled={busy}
             onInput={(event) => setUsername(event.currentTarget.value)}
           />
         </label>
@@ -540,6 +640,7 @@ function PasswordAccountAcquisition({
             ref={passwordInput}
             type="password"
             value={password}
+            disabled={busy}
             onInput={(event) => setPassword(event.currentTarget.value)}
           />
         </label>
@@ -550,6 +651,7 @@ function PasswordAccountAcquisition({
             type="password"
             value={recoveryKey}
             placeholder="EsTc …"
+            disabled={busy}
             onInput={(event) => setRecoveryKey(event.currentTarget.value)}
           />
         </label>
@@ -566,6 +668,7 @@ function PasswordAccountAcquisition({
             <input
               value={homeserver}
               placeholder="https://matrix.example.org"
+              disabled={busy}
               onInput={(event) => setHomeserver(event.currentTarget.value)}
             />
           </label>
@@ -576,7 +679,13 @@ function PasswordAccountAcquisition({
             busy || effectiveUsername.trim() === '' || password === '' || !keyOk
           }
         >
-          {reactivation === null ? 'Log in' : 'Reactivate account'}
+          {accounts.pending.value?.kind === 'login'
+            ? reactivation === null
+              ? 'Logging in…'
+              : 'Reactivating…'
+            : reactivation === null
+              ? 'Log in'
+              : 'Reactivate account'}
         </button>
       </form>
       <p class="muted">

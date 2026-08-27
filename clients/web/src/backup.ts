@@ -44,21 +44,31 @@ export function backupSnapshotLines(backup: BackupSnapshot): {
 /**
  * Compact badge for the account card head. Unknown snapshots (deactivated,
  * probe skipped) skip the badge — the two-line snapshot still renders.
+ * Titles explain the badge; they do not repeat the snapshot lines below.
  */
 export function backupBadge(backup: BackupSnapshot): BackupBadge | null {
-  const lines = backupSnapshotLines(backup)
-  const title = `${lines.megolm}. ${lines.secretStorage}.`
   if (backup.this_device_uploading) {
-    return { label: 'backup', className: 'backup-uploading', title }
+    return {
+      label: 'backup',
+      className: 'backup-uploading',
+      title:
+        'This Axon device is uploading megolm session keys to the homeserver backup. Keys it holds from now on can be recovered after a new login.',
+    }
   }
   if (backup.exists_on_server === false) {
-    return { label: 'no backup', className: 'backup-missing', title }
+    return {
+      label: 'no backup',
+      className: 'backup-missing',
+      title:
+        'No megolm key backup on the homeserver. 4S secret storage being enabled does not mean history keys are backed up.',
+    }
   }
   if (backup.exists_on_server === true) {
     return {
       label: 'backup elsewhere',
       className: 'backup-elsewhere',
-      title,
+      title:
+        'A megolm backup exists on the homeserver, but this Axon device is not uploading to it. Recover or Enable backup to join.',
     }
   }
   return null
