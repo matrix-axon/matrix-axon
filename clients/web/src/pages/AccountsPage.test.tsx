@@ -179,7 +179,9 @@ describe('AccountsPage', () => {
         'Megolm backup: on homeserver; this device uploading; state enabled',
       ),
     ).toBeTruthy()
-    expect(getByText('4S secret storage: enabled')).toBeTruthy()
+    expect(
+      getByText('Matrix Server-Side Secret Storage (4S): enabled'),
+    ).toBeTruthy()
     expect(document.querySelector('.badge.backup-uploading')?.textContent).toBe(
       'backup',
     )
@@ -201,7 +203,9 @@ describe('AccountsPage', () => {
     expect(await findByText('verified')).toBeTruthy()
     expect(getByText('no backup')).toBeTruthy()
     expect(getByText(/none on homeserver/)).toBeTruthy()
-    expect(getByText('4S secret storage: enabled')).toBeTruthy()
+    expect(
+      getByText('Matrix Server-Side Secret Storage (4S): enabled'),
+    ).toBeTruthy()
     expect(queryByText(/keys recovered/i)).toBeNull()
   })
 
@@ -1255,12 +1259,16 @@ describe('AccountsPage', () => {
     fireEvent.click(getByRole('button', { name: 'Recover' }))
 
     expect(await findByRole('button', { name: 'Recovering…' })).toBeTruthy()
-    expect(await findByText(/importing secure storage/i)).toBeTruthy()
+    expect(
+      await findByText(/importing matrix server-side secret storage \(4s\)/i),
+    ).toBeTruthy()
     expect(queryByText(/keys recovered/i)).toBeNull()
 
     release()
     expect(await findByText(/this device is now verified/i)).toBeTruthy()
-    expect(queryByText(/importing secure storage/i)).toBeNull()
+    expect(
+      queryByText(/importing matrix server-side secret storage \(4s\)/i),
+    ).toBeNull()
   })
 
   it('reports keys imported but device still unverified', async () => {
@@ -1281,7 +1289,9 @@ describe('AccountsPage', () => {
     fireEvent.click(getByRole('button', { name: 'Recover' }))
 
     expect(await findByText(/still unverified/i)).toBeTruthy()
-    expect(await findByText(/secure storage imported/i)).toBeTruthy()
+    expect(
+      await findByText(/server-side secret storage \(4s\) imported/i),
+    ).toBeTruthy()
   })
 
   it('gates the Recover button and hints on a malformed key', async () => {
@@ -1464,7 +1474,9 @@ describe('AccountsPage', () => {
     })
     fireEvent.click(getByRole('button', { name: 'Log in' }))
 
-    expect(await findByText(/secure storage imported/i)).toBeTruthy()
+    expect(
+      await findByText(/server-side secret storage \(4s\) imported/i),
+    ).toBeTruthy()
     expect(await findByText(/joined the existing megolm backup/i)).toBeTruthy()
     expect(queryByText(/keys recovered/i)).toBeNull()
     expect(window.location.pathname).toBe('/accounts')

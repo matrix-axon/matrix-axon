@@ -118,13 +118,13 @@ function Badge({
 }
 
 const RECOVER_KEYS_HINT =
-  'Import 4S with a recovery key. That unlocks megolm backup so stored encrypted messages can decrypt, and verifies this Axon device when cross-signing keys are present. Messages stay undecryptable if those session keys were never uploaded to backup.'
+  'Import Matrix Server-Side Secret Storage (4S) with a recovery key. That unlocks megolm backup so stored encrypted messages can decrypt, and verifies this Axon device when cross-signing keys are present. Messages stay undecryptable if those session keys were never uploaded to backup.'
 
 const LOG_OUT_HINT =
   'Log out of Axon while keeping the local archive. Sign in again later to resume. A new login creates a fresh Matrix device.'
 
 const DELETE_HINT =
-  'Permanently remove this account and its local Axon data. The Matrix account on the homeserver is not deleted.'
+  'Permanently remove this account and its Axon data. The Matrix account on the homeserver is not affected.'
 
 function accountStateTitle(state: Account['state']): string {
   switch (state) {
@@ -412,7 +412,8 @@ function AccountCard({
           </form>
           {recovering && (
             <p class="field-hint" role="status" aria-live="polite">
-              Importing secure storage — this can take a while.
+              Importing Matrix Server-Side Secret Storage (4S) — this can take a
+              while.
             </p>
           )}
           {secretKey.trim() !== '' && !keyValid && (

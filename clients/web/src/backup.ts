@@ -16,7 +16,7 @@ export const UNVERIFIED_BACKUP_ENABLE_MESSAGE =
  * (kick-upload, export-only resume). The web control stays clickable.
  */
 export const BACKUP_ALREADY_UPLOADING_HINT =
-  'Megolm backup is already enabled on this device. Click to retry upload or re-export into 4S.'
+  'Megolm backup is already enabled on this device. Click to retry upload or re-export into Matrix Server-Side Secret Storage (4S).'
 
 export interface BackupBadge {
   label: string
@@ -44,7 +44,7 @@ export function backupSnapshotLines(backup: BackupSnapshot): {
     : 'this device not uploading'
   return {
     megolm: `Megolm backup: ${exists}; ${uploading}; state ${backup.backup_state}`,
-    secretStorage: `4S secret storage: ${backup.recovery_state}`,
+    secretStorage: `Matrix Server-Side Secret Storage (4S): ${backup.recovery_state}`,
   }
 }
 
@@ -67,7 +67,7 @@ export function backupBadge(backup: BackupSnapshot): BackupBadge | null {
       label: 'no backup',
       className: 'backup-missing',
       title:
-        'No megolm key backup on the homeserver. 4S secret storage being enabled does not mean history keys are backed up.',
+        'No megolm key backup on the homeserver. Matrix Server-Side Secret Storage (4S) being enabled does not mean history keys are backed up.',
     }
   }
   if (backup.exists_on_server === true) {
@@ -121,8 +121,8 @@ export function recoverHonestyNotice(
 ): Notice {
   const imported =
     verified === true
-      ? 'Secure storage imported — this device is now verified.'
-      : 'Secure storage imported. This device is still unverified — the recovery data may not include cross-signing keys.'
+      ? 'Matrix Server-Side Secret Storage (4S) imported — this device is now verified.'
+      : 'Matrix Server-Side Secret Storage (4S) imported. This device is still unverified — the recovery data may not include cross-signing keys.'
   if (action === undefined) {
     return {
       tone: verified === true ? 'success' : 'info',

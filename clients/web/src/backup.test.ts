@@ -42,14 +42,14 @@ describe('backupSnapshotLines', () => {
     expect(backupSnapshotLines(UPLOADING)).toEqual({
       megolm:
         'Megolm backup: on homeserver; this device uploading; state enabled',
-      secretStorage: '4S secret storage: enabled',
+      secretStorage: 'Matrix Server-Side Secret Storage (4S): enabled',
     })
     expect(backupSnapshotLines(NONE_ON_SERVER).megolm).toContain(
       'none on homeserver',
     )
     expect(backupSnapshotLines(UNKNOWN).megolm).toContain('existence unknown')
     expect(backupSnapshotLines(UNKNOWN).secretStorage).toBe(
-      '4S secret storage: unknown',
+      'Matrix Server-Side Secret Storage (4S): unknown',
     )
   })
 })
@@ -91,7 +91,9 @@ describe('recoverHonestyNotice', () => {
   it('never says keys recovered', () => {
     const verified = recoverHonestyNotice(true, 'enabled')
     expect(verified.message).not.toMatch(/keys recovered/i)
-    expect(verified.message).toMatch(/secure storage imported/i)
+    expect(verified.message).toMatch(
+      /server-side secret storage \(4s\) imported/i,
+    )
     expect(verified.message).toMatch(/now verified/i)
     expect(verified.message).toMatch(/enabled megolm backup/i)
     expect(verified.tone).toBe('success')
@@ -104,7 +106,7 @@ describe('recoverHonestyNotice', () => {
 
   it('keeps the 4S sentence when backup_action is absent', () => {
     expect(recoverHonestyNotice(true).message).toBe(
-      'Secure storage imported — this device is now verified.',
+      'Matrix Server-Side Secret Storage (4S) imported — this device is now verified.',
     )
     expect(recoverHonestyNotice(true).message).not.toMatch(/keys recovered/i)
   })
