@@ -221,6 +221,19 @@ impl From<crate::lifecycle::LoginError> for ApiError {
     }
 }
 
+impl From<crate::matrix_oauth_acquire::MatrixOAuthQrError> for ApiError {
+    fn from(err: crate::matrix_oauth_acquire::MatrixOAuthQrError) -> Self {
+        use crate::matrix_oauth_acquire::MatrixOAuthQrError;
+        match err {
+            MatrixOAuthQrError::InvalidRequest(msg) => ApiError::bad_request(msg),
+            MatrixOAuthQrError::Conflict(msg) => ApiError::conflict(msg),
+            MatrixOAuthQrError::NotFound(msg) => ApiError::not_found(msg),
+            MatrixOAuthQrError::TooMany(msg) => ApiError::too_many_requests(msg),
+            MatrixOAuthQrError::Internal => ApiError::internal(),
+        }
+    }
+}
+
 impl From<crate::lifecycle::LogoutError> for ApiError {
     fn from(err: crate::lifecycle::LogoutError) -> Self {
         use crate::lifecycle::LogoutError;
