@@ -72,6 +72,7 @@ shows it.
 | Message actions: edit, redact, reply                    | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Room actions: invite, leave, pin (M19)                  | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Device verification (SAS)                               | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Megolm key backup snapshot and enable (ADR 0098)        | **not covered**       | **not covered** — `/accounts` is not a demo scene                                                         | **not covered** |
 | Matrix OAuth QR account acquisition                     | **n/a**               | **not covered** — demo stack has no MAS or second trusted device                                          | **not covered** |
 | Typing indicators and read receipts (M18)               | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Inline image whose terminal encode failed (placeholder) | **not covered**       | **n/a**                                                                                                   | **n/a**         |

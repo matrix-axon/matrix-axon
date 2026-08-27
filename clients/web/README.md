@@ -10,7 +10,8 @@ the centralized `/accounts` portal.
 **Status (through M-W10, plus M19-W1 through M19-W4):** a usable read/write client — SSO sign-in
 through Axon OAuth Path A with token-paste fallback, the full account
 lifecycle on the unified `/accounts` page (account list, active-account choice,
-status, recovery, logout, reactivation, deletion, and password acquisition),
+status, recovery, megolm backup snapshot and enable, logout, reactivation,
+deletion, and password acquisition),
 Matrix OAuth QR account acquisition (display or selectable-camera/image scan,
 check codes, authorization, reload resume, and cancellation), theme +
 schema-versioned settings, history routing with the permanent deep-link

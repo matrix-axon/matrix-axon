@@ -1,0 +1,106 @@
+import { describe, expect, it } from 'vitest'
+import {
+  backupActionMessage,
+  backupBadge,
+  backupSnapshotLines,
+  enableBackupNotice,
+  recoverHonestyNotice,
+  type BackupSnapshot,
+} from './backup'
+
+const UPLOADING: BackupSnapshot = {
+  exists_on_server: true,
+  this_device_uploading: true,
+  backup_state: 'enabled',
+  recovery_state: 'enabled',
+}
+
+const NONE_ON_SERVER: BackupSnapshot = {
+  exists_on_server: false,
+  this_device_uploading: false,
+  backup_state: 'unknown',
+  recovery_state: 'enabled',
+}
+
+const ELSEWHERE: BackupSnapshot = {
+  exists_on_server: true,
+  this_device_uploading: false,
+  backup_state: 'enabled',
+  recovery_state: 'enabled',
+}
+
+const UNKNOWN: BackupSnapshot = {
+  exists_on_server: null,
+  this_device_uploading: false,
+  backup_state: 'unknown',
+  recovery_state: 'unknown',
+}
+
+describe('backupSnapshotLines', () => {
+  it('matches the TUI /status split of megolm backup vs 4S', () => {
+    expect(backupSnapshotLines(UPLOADING)).toEqual({
+      megolm:
+        'Megolm backup: on homeserver; this device uploading; state enabled',
+      secretStorage: '4S secret storage: enabled',
+    })
+    expect(backupSnapshotLines(NONE_ON_SERVER).megolm).toContain(
+      'none on homeserver',
+    )
+    expect(backupSnapshotLines(UNKNOWN).megolm).toContain('existence unknown')
+    expect(backupSnapshotLines(UNKNOWN).secretStorage).toBe(
+      '4S secret storage: unknown',
+    )
+  })
+})
+
+describe('backupBadge', () => {
+  it('badges uploading, missing, and elsewhere; skips unknown', () => {
+    expect(backupBadge(UPLOADING)?.label).toBe('backup')
+    expect(backupBadge(NONE_ON_SERVER)?.label).toBe('no backup')
+    expect(backupBadge(ELSEWHERE)?.label).toBe('backup elsewhere')
+    expect(backupBadge(UNKNOWN)).toBeNull()
+  })
+})
+
+describe('backupActionMessage', () => {
+  it('covers every closed enum member', () => {
+    expect(backupActionMessage('enabled')).toMatch(/enabled megolm backup/i)
+    expect(backupActionMessage('joined')).toMatch(/joined the existing/i)
+    expect(backupActionMessage('already_uploading')).toMatch(
+      /already uploading/i,
+    )
+    expect(backupActionMessage('export_pending')).toMatch(/export pending/i)
+    expect(backupActionMessage('failed')).toMatch(/enable failed/i)
+  })
+})
+
+describe('recoverHonestyNotice', () => {
+  it('never says keys recovered', () => {
+    const verified = recoverHonestyNotice(true, 'enabled')
+    expect(verified.message).not.toMatch(/keys recovered/i)
+    expect(verified.message).toMatch(/secure storage imported/i)
+    expect(verified.message).toMatch(/now verified/i)
+    expect(verified.message).toMatch(/enabled megolm backup/i)
+    expect(verified.tone).toBe('success')
+
+    const unverified = recoverHonestyNotice(false, 'failed')
+    expect(unverified.message).toMatch(/still unverified/i)
+    expect(unverified.message).toMatch(/enable failed/i)
+    expect(unverified.tone).toBe('info')
+  })
+
+  it('keeps the 4S sentence when backup_action is absent', () => {
+    expect(recoverHonestyNotice(true).message).toBe(
+      'Secure storage imported — this device is now verified.',
+    )
+    expect(recoverHonestyNotice(true).message).not.toMatch(/keys recovered/i)
+  })
+})
+
+describe('enableBackupNotice', () => {
+  it('uses info tone for failed and export-pending', () => {
+    expect(enableBackupNotice('enabled').tone).toBe('success')
+    expect(enableBackupNotice('failed').tone).toBe('info')
+    expect(enableBackupNotice('export_pending').tone).toBe('info')
+  })
+})

@@ -1,6 +1,12 @@
 import { signal } from '@preact/signals'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
+import {
+  backupBadge,
+  backupSnapshotLines,
+  enableBackupNotice,
+  recoverHonestyNotice,
+} from '../backup'
 import { CopyableText } from '../components/CopyableText'
 import { ErrorBanner } from '../components/ErrorBanner'
 import { NoticeBanner, type Notice } from '../components/NoticeBanner'
@@ -13,8 +19,9 @@ import { MatrixOAuthQrAcquisition } from './accounts/MatrixOAuthQrAcquisition'
 
 /**
  * The account lifecycle page (ADR 0046, M-W3): list with state and
- * sync-readiness, login (add or reactivate), logout, recover,
- * delete-with-confirm, and the active-account switch persisted in settings.
+ * sync-readiness, login (add or reactivate), logout, recover, megolm backup
+ * snapshot and enable (ADR 0098), delete-with-confirm, and the active-account
+ * switch persisted in settings.
  */
 export function AccountsPage() {
   const { accounts, matrixOAuthQr } = useServices()
@@ -115,17 +122,41 @@ function AccountCard({
 }) {
   const { accounts, settings } = useServices()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
-  const [recoverKey, setRecoverKey] = useState<string | null>(null)
-  // Per-card recovery outcome, held in a signal so it survives the form closing
-  // on success; `NoticeBanner` reads and dismisses it (same idiom as the store
-  // error signals feeding `ErrorBanner`).
+  const [secretForm, setSecretForm] = useState<'recover' | 'enable' | null>(
+    null,
+  )
+  const [secretKey, setSecretKey] = useState('')
+  // Per-card recover / enable outcome, held in a signal so it survives the
+  // form closing on success; `NoticeBanner` reads and dismisses it (same idiom
+  // as the store error signals feeding `ErrorBanner`).
   const notice = useMemo(() => signal<Notice | null>(null), [])
 
   const id = account.account_id
   const pending = accounts.pending.value
   const busy = pending !== null
   const isActiveChoice = settings.activeAccountId.value === id
-  const keyValid = recoverKey !== null && isValidRecoveryKey(recoverKey)
+  const keyValid = isValidRecoveryKey(secretKey)
+  const enableKeyOk = secretKey.trim() === '' || keyValid
+  const snapshot = account.backup
+  const badge = snapshot !== undefined ? backupBadge(snapshot) : null
+  const snapshotLines =
+    snapshot !== undefined ? backupSnapshotLines(snapshot) : null
+
+  const openSecretForm = (kind: 'recover' | 'enable') => {
+    notice.value = null
+    if (secretForm === kind) {
+      setSecretForm(null)
+      setSecretKey('')
+      return
+    }
+    setSecretForm(kind)
+    setSecretKey('')
+  }
+
+  const closeSecretForm = () => {
+    setSecretForm(null)
+    setSecretKey('')
+  }
 
   return (
     <li class={`card account-${account.state}`}>
@@ -137,6 +168,11 @@ function AccountCard({
         {account.verified === true && (
           <span class="badge verified" title="axon's device is cross-signed">
             verified
+          </span>
+        )}
+        {badge !== null && (
+          <span class={`badge ${badge.className}`} title={badge.title}>
+            {badge.label}
           </span>
         )}
         {account.state === 'active' && <SyncBadge account={account} />}
@@ -151,6 +187,12 @@ function AccountCard({
           <CopyableText text={account.homeserver_url} label="homeserver URL">
             {account.homeserver_url}
           </CopyableText>
+        </div>
+      )}
+      {snapshotLines !== null && (
+        <div class="card-meta backup-snapshot">
+          <div>{snapshotLines.megolm}</div>
+          <div>{snapshotLines.secretStorage}</div>
         </div>
       )}
 
@@ -178,13 +220,19 @@ function AccountCard({
             <button
               type="button"
               disabled={busy}
-              onClick={() => {
-                notice.value = null
-                setRecoverKey(recoverKey === null ? '' : null)
-              }}
+              onClick={() => openSecretForm('recover')}
             >
               Recover keys
             </button>
+            {account.verified === true && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => openSecretForm('enable')}
+              >
+                Enable backup
+              </button>
+            )}
             <button
               type="button"
               disabled={busy}
@@ -226,28 +274,21 @@ function AccountCard({
           ))}
       </div>
 
-      {recoverKey !== null && account.state === 'active' && (
+      {secretForm === 'recover' && account.state === 'active' && (
         <>
           <form
             class="inline-form"
             onSubmit={(event) => {
               event.preventDefault()
-              void accounts.recover(id, recoverKey).then((result) => {
+              void accounts.recover(id, secretKey).then((result) => {
                 if (!result.ok) {
                   return
                 }
-                setRecoverKey(null)
-                notice.value = result.verified
-                  ? {
-                      tone: 'success',
-                      message: 'Keys recovered — this device is now verified.',
-                    }
-                  : {
-                      tone: 'info',
-                      message:
-                        'Keys recovered. This device is still unverified — the ' +
-                        'recovery data may not include cross-signing keys.',
-                    }
+                closeSecretForm()
+                notice.value = recoverHonestyNotice(
+                  result.verified,
+                  result.backupAction,
+                )
               })
             }}
           >
@@ -255,16 +296,58 @@ function AccountCard({
               Recovery key
               <input
                 type="password"
-                value={recoverKey}
+                value={secretKey}
                 placeholder="EsTc …"
-                onInput={(event) => setRecoverKey(event.currentTarget.value)}
+                onInput={(event) => setSecretKey(event.currentTarget.value)}
               />
             </label>
             <button type="submit" disabled={busy || !keyValid}>
               Recover
             </button>
           </form>
-          {recoverKey.trim() !== '' && !keyValid && (
+          {secretKey.trim() !== '' && !keyValid && (
+            <p class="field-hint error">
+              That doesn&rsquo;t look like a valid recovery key — check for a
+              missing or extra character.
+            </p>
+          )}
+        </>
+      )}
+      {secretForm === 'enable' && account.state === 'active' && (
+        <>
+          <form
+            class="inline-form"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void accounts.enableBackup(id, secretKey).then((result) => {
+                if (!result.ok || result.backupAction === undefined) {
+                  return
+                }
+                closeSecretForm()
+                notice.value = enableBackupNotice(result.backupAction)
+              })
+            }}
+          >
+            <label>
+              Recovery key
+              <input
+                type="password"
+                value={secretKey}
+                placeholder="EsTc …"
+                onInput={(event) => setSecretKey(event.currentTarget.value)}
+              />
+            </label>
+            <button type="submit" disabled={busy || !enableKeyOk}>
+              Enable
+            </button>
+            <button type="button" onClick={closeSecretForm}>
+              Cancel
+            </button>
+          </form>
+          <p class="field-hint">
+            Leave blank to retry an already-enabled upload.
+          </p>
+          {secretKey.trim() !== '' && !keyValid && (
             <p class="field-hint error">
               That doesn&rsquo;t look like a valid recovery key — check for a
               missing or extra character.
@@ -386,6 +469,7 @@ function PasswordAccountAcquisition({
   const [password, setPassword] = useState('')
   const [recoveryKey, setRecoveryKey] = useState('')
   const [homeserver, setHomeserver] = useState('')
+  const notice = useMemo(() => signal<Notice | null>(null), [])
   const busy = accounts.pending.value !== null
   const effectiveUsername = reactivation?.user_id ?? username
   // The key is optional here (SAS or a later recover can supply it), so an
@@ -420,15 +504,22 @@ function PasswordAccountAcquisition({
                   ? undefined
                   : homeserver.trim(),
             })
-            .then((ok) => {
+            .then((result) => {
               setPassword('')
               setRecoveryKey('')
-              if (ok) {
+              if (result.ok) {
                 setUsername('')
                 setHomeserver('')
                 onSuccess()
                 if (firstActiveLogin) {
                   location.route('/')
+                  return
+                }
+                if (result.recover?.ok === true) {
+                  notice.value = recoverHonestyNotice(
+                    result.recover.verified,
+                    result.recover.backupAction,
+                  )
                 }
               }
             })
@@ -492,6 +583,7 @@ function PasswordAccountAcquisition({
         The password authenticates once with the homeserver and is never stored.
         Logging in with a logged-out account's user ID reactivates it.
       </p>
+      <NoticeBanner notice={notice} />
     </div>
   )
 }

@@ -1302,6 +1302,22 @@ h2 {
   border-color: var(--accent);
 }
 
+.badge.backup-uploading {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.badge.backup-missing,
+.badge.backup-elsewhere {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.backup-snapshot {
+  display: grid;
+  gap: 0.1rem;
+}
+
 .badge.sync-connecting,
 .badge.sync-syncing,
 .badge.sync-idle {
