@@ -117,6 +117,15 @@ function Badge({
   )
 }
 
+const RECOVER_KEYS_HINT =
+  'Import 4S with a recovery key. That unlocks megolm backup so stored encrypted messages can decrypt, and verifies this Axon device when cross-signing keys are present. Messages stay undecryptable if those session keys were never uploaded to backup.'
+
+const LOG_OUT_HINT =
+  'Log out of Axon while keeping the local archive. Sign in again later to resume. A new login creates a fresh Matrix device.'
+
+const DELETE_HINT =
+  'Permanently remove this account and its local Axon data. The Matrix account on the homeserver is not deleted.'
+
 function accountStateTitle(state: Account['state']): string {
   switch (state) {
     case 'active':
@@ -308,6 +317,7 @@ function AccountCard({
             <button
               type="button"
               disabled={busy}
+              title={RECOVER_KEYS_HINT}
               onClick={() => openSecretForm('recover')}
             >
               Recover keys
@@ -328,6 +338,7 @@ function AccountCard({
             <button
               type="button"
               disabled={busy}
+              title={LOG_OUT_HINT}
               onClick={() => void accounts.logout(id)}
             >
               Log out
@@ -359,6 +370,7 @@ function AccountCard({
               type="button"
               class="danger"
               disabled={busy}
+              title={DELETE_HINT}
               onClick={() => setConfirmingDelete(true)}
             >
               Delete

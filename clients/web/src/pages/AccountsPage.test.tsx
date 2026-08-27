@@ -149,6 +149,24 @@ describe('AccountsPage', () => {
     expect(getByLabelText(/first sync has not finished/i)).toBeTruthy()
   })
 
+  it('gives recover, log out, and delete explanatory tooltips', async () => {
+    const { findByRole, getByRole } = renderPage([ALICE])
+
+    expect(
+      (
+        (await findByRole('button', {
+          name: 'Recover keys',
+        })) as HTMLButtonElement
+      ).title,
+    ).toMatch(/unlocks megolm backup so stored encrypted messages can decrypt/i)
+    expect(
+      (getByRole('button', { name: 'Log out' }) as HTMLButtonElement).title,
+    ).toMatch(/keeping the local archive/i)
+    expect(
+      (getByRole('button', { name: 'Delete' }) as HTMLButtonElement).title,
+    ).toMatch(/homeserver is not deleted/i)
+  })
+
   it('shows the megolm backup snapshot independently of verified', async () => {
     const { findByText, getByText } = renderPage()
 
