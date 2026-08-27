@@ -1297,6 +1297,40 @@ describe('AccountsPage', () => {
     expect(queryByRole('button', { name: 'Enable backup' })).toBeNull()
   })
 
+  it('mutes Enable backup when this device is already uploading, but still opens the form', async () => {
+    const { findByRole, getByLabelText } = renderPage([ALICE])
+
+    const enable = (await findByRole('button', {
+      name: 'Enable backup',
+    })) as HTMLButtonElement
+    expect(enable.disabled).toBe(false)
+    expect(enable.classList.contains('quiet')).toBe(true)
+    expect(enable.title).toMatch(/already enabled/i)
+
+    fireEvent.click(enable)
+    expect(getByLabelText('Recovery key')).toBeTruthy()
+  })
+
+  it('does not mute Enable backup when this device is not uploading', async () => {
+    const { findByRole } = renderPage([
+      {
+        ...ALICE,
+        backup: {
+          exists_on_server: false,
+          this_device_uploading: false,
+          backup_state: 'unknown',
+          recovery_state: 'enabled',
+        },
+      },
+    ])
+
+    const enable = (await findByRole('button', {
+      name: 'Enable backup',
+    })) as HTMLButtonElement
+    expect(enable.classList.contains('quiet')).toBe(false)
+    expect(enable.title).toBe('')
+  })
+
   it('enable backup empty submit omits the key (kick-upload)', async () => {
     let enableBody: unknown
     const { findByRole, getByRole, findByText } = renderPage([ALICE])

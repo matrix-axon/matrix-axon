@@ -2,6 +2,7 @@ import { signal } from '@preact/signals'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import {
+  BACKUP_ALREADY_UPLOADING_HINT,
   backupBadge,
   backupSnapshotLines,
   enableBackupNotice,
@@ -182,6 +183,7 @@ function AccountCard({
   const badge = snapshot !== undefined ? backupBadge(snapshot) : null
   const snapshotLines =
     snapshot !== undefined ? backupSnapshotLines(snapshot) : null
+  const alreadyUploading = snapshot?.this_device_uploading === true
 
   const openSecretForm = (kind: 'recover' | 'enable') => {
     notice.value = null
@@ -313,7 +315,11 @@ function AccountCard({
             {account.verified === true && (
               <button
                 type="button"
+                class={alreadyUploading ? 'quiet' : undefined}
                 disabled={busy}
+                title={
+                  alreadyUploading ? BACKUP_ALREADY_UPLOADING_HINT : undefined
+                }
                 onClick={() => openSecretForm('enable')}
               >
                 Enable backup

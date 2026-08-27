@@ -11,6 +11,13 @@ export type BackupSnapshot = components['schemas']['BackupSnapshotDto']
 export const UNVERIFIED_BACKUP_ENABLE_MESSAGE =
   'account is not verified; recover or verify first'
 
+/**
+ * Enable backup is still useful when this device is already uploading
+ * (kick-upload, export-only resume). The web control stays clickable.
+ */
+export const BACKUP_ALREADY_UPLOADING_HINT =
+  'Megolm backup is already enabled on this device. Click to retry upload or re-export into 4S.'
+
 export interface BackupBadge {
   label: string
   className: string

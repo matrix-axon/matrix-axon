@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  BACKUP_ALREADY_UPLOADING_HINT,
   backupActionMessage,
   backupBadge,
   backupSnapshotLines,
@@ -66,6 +67,11 @@ describe('backupBadge', () => {
     expect(backupBadge(ELSEWHERE)?.label).toBe('backup elsewhere')
     expect(backupBadge(ELSEWHERE)?.title).toMatch(/not uploading/i)
     expect(backupBadge(UNKNOWN)).toBeNull()
+  })
+
+  it('explains that Enable backup is still a retry when already uploading', () => {
+    expect(BACKUP_ALREADY_UPLOADING_HINT).toMatch(/already enabled/i)
+    expect(BACKUP_ALREADY_UPLOADING_HINT).toMatch(/click to retry/i)
   })
 })
 

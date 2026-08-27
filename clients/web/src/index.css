@@ -3973,6 +3973,16 @@ button:disabled {
   cursor: default;
 }
 
+/* Looks inactive but stays a real button — kick-upload / export-resume
+   still need Enable backup after this device is already uploading. */
+button.quiet:not(:disabled) {
+  opacity: 0.5;
+}
+
+button.quiet:hover:not(:disabled) {
+  opacity: 0.8;
+}
+
 button.danger {
   color: var(--danger);
   border-color: var(--danger);
