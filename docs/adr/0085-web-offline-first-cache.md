@@ -942,6 +942,16 @@ Four PRs, in order, each independently shippable:
   latter loses script-writable storage after 7 idle days. Quota turned out not
   to constrain anything, but eviction policy still does, and this is unaffected
   by the 41 GB figure.
+
+  **Partly answered, and it cuts both ways.** The reporter's actual use is the
+  home-screen PWA, which is exempt from that 7-day eviction — so the risk this
+  question was asked about does not apply to them. But a PWA on iOS is a
+  **separate container**: its own HTTP cache and its own IndexedDB, sharing
+  neither with Safari. So a cache measurement taken in one says nothing about
+  the other, every device figure in this ADR was taken in Safari, and a PWA's
+  first launch is cold on both counts however much the site has been used in
+  the browser. Anything measuring this cache must record which it ran in.
+
 - ~~**Needs an explicit yes, not silence: the timeline-body cache's opt-in
   default.**~~ **Answered, and the answer is no.** Review (PR #84) declined to
   accept a plaintext-at-rest default inherited from an ADR, which was the right

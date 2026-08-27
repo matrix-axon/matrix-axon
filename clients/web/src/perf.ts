@@ -28,6 +28,10 @@ export function setPerfEnabled(on: boolean): void {
   if (!on) {
     perfOverlayEntries.value = []
     recentMarks = []
+    // The boot breakdown is memoised against `prepareResourceBuffer`'s clear,
+    // so it has to be released here too — otherwise turning instrumentation
+    // off and on again reports the *previous* session's startup.
+    bootAssets = null
   }
 }
 
@@ -299,11 +303,20 @@ function summariseBoot(): void {
   // lists as never having been measured on a cold start.
   const readStart = at('rooms:cache:read:start')
   const readEnd = at('rooms:cache:read:end')
+  const assets = captureBootAssets()
   perfMark('boot:room-list', {
     saved: net === null || rowsAt === null ? null : net - rowsAt,
     hydrate,
     read: readStart === null || readEnd === null ? null : readEnd - readStart,
     boot: readStart,
+    // `boot` decomposed. Every request the app makes waits on this, so when it
+    // dominates, none of the network-side findings apply and the cache cannot
+    // help — it is not even read until `boot` has elapsed.
+    html: assets.html,
+    js: assets.js,
+    jskb: assets.bytes === null ? null : Math.round(assets.bytes / 1000),
+    exec:
+      readStart === null || assets.js === null ? null : readStart - assets.js,
     rows: rowsAt,
     net,
     rooms: detailNumber(
@@ -713,6 +726,10 @@ function emitRoomOpen(phase: 'settled' | 'waiting'): void {
  * busier account.
  */
 function prepareResourceBuffer(): void {
+  // Before the clear below, not after: a deep link can open a room before the
+  // first room-list refresh settles, and the boot assets would be gone by the
+  // time `summariseBoot` looked for them.
+  captureBootAssets()
   try {
     performance.setResourceTimingBufferSize?.(1000)
     // Entries for requests still in flight are added on completion, after
@@ -919,6 +936,76 @@ function shortRoute(url: string): string {
     )
     .replace(/\/[!@$][^/]+/g, '/{id}')
     .replace(/^\/v1\//, '')
+}
+
+/**
+ * When the documents and code the app boots from finished arriving.
+ *
+ * Captured **once** and memoised, because `prepareResourceBuffer` clears
+ * resource timings at each room open: a deep link that opens a room before the
+ * first room-list refresh settles would otherwise wipe the boot assets before
+ * anything read them.
+ *
+ * - `html` — the navigation response, i.e. when the document itself was in.
+ * - `js` — the last script or stylesheet the boot needed. `boot - js` is
+ *   therefore parse, execute, first render and service construction: main
+ *   thread, not network.
+ * - `bytes` — what those assets actually cost on the wire. Near zero means
+ *   they came from the HTTP cache, which makes a large `exec` unambiguous;
+ *   a large figure means a genuine cold download and the split matters.
+ *
+ * A home-screen PWA has its own HTTP cache and its own storage, separate from
+ * Safari's, so its first launch is cold on both counts however much the same
+ * site has been used in the browser.
+ */
+let bootAssets: {
+  html: number | null
+  js: number | null
+  bytes: number | null
+} | null = null
+
+function captureBootAssets(): {
+  html: number | null
+  js: number | null
+  bytes: number | null
+} {
+  if (bootAssets !== null) {
+    return bootAssets
+  }
+  let html: number | null = null
+  let js: number | null = null
+  let bytes: number | null = null
+  try {
+    const [navigation] = performance.getEntriesByType('navigation')
+    const responseEnd = (navigation as PerformanceNavigationTiming | undefined)
+      ?.responseEnd
+    html = typeof responseEnd === 'number' ? Math.round(responseEnd) : null
+    const boot = performance
+      .getEntriesByType('resource')
+      .filter((entry): entry is PerformanceResourceTiming =>
+        bootAsset((entry as PerformanceResourceTiming).name),
+      )
+    if (boot.length > 0) {
+      js = Math.round(
+        boot.reduce((latest, entry) => Math.max(latest, entry.responseEnd), 0),
+      )
+      const sized = boot.filter((entry) => entry.transferSize > 0)
+      bytes =
+        sized.length === 0
+          ? null
+          : sized.reduce((total, entry) => total + entry.transferSize, 0)
+    }
+  } catch {
+    // No navigation or resource timing; the rest of the summary still reads.
+  }
+  bootAssets = { html, js, bytes }
+  return bootAssets
+}
+
+/** Scripts and stylesheets, which are what the boot actually waits on. */
+function bootAsset(url: string): boolean {
+  const path = url.split('?')[0]
+  return path.endsWith('.js') || path.endsWith('.css')
 }
 
 export function perfMarkFrames(name: string): void {

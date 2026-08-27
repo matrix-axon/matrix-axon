@@ -65,6 +65,14 @@ other requests it shared the link with.
 - `list` / `members` / `threads` — when the three fired beside it settled.
   **`net` landing well after these is H1.**
 - `people` — member count, since that list is unpaginated.
+- `html` / `js` / `jskb` / `exec` (on `boot:room-list`) — startup decomposed.
+  `html` is when the document arrived, `js` when the last script or stylesheet
+  did, `jskb` what those cost on the wire, and `exec` the main-thread time
+  after them: parse, execute, first render, service construction. **Every
+  request waits on this**, so when `boot` dominates, none of the network
+  findings apply and the cache cannot help — it is not read until `boot` has
+  elapsed. A near-zero `jskb` means the assets came from the HTTP cache, which
+  makes a large `exec` unambiguous.
 - `q` / `conn` / `ttfb` / `xfer` — the head fetch's own phases. `q` is
   queueing, of which `conn` is connection setup: **`q` high with `conn` near
   zero is contention on an established connection (H1); `q` ≈ `conn` is a
@@ -123,6 +131,13 @@ In rough order of usefulness:
    throttling, and makes the overlay a convenience rather than a necessity.
 3. **Opportunistically**, on a genuinely bad connection, with a screen
    recording. This is what ADR 0077 built the overlay for.
+
+**Record whether the capture came from Safari or the home-screen PWA.** They
+are different containers on iOS: a PWA has its own HTTP cache _and_ its own
+IndexedDB, so its first launch is cold on both counts however much the same
+site has been used in the browser. A `hydrate=null` from a PWA says nothing
+about whether the cache works in Safari, and a large `jskb` there is a first
+launch rather than a caching failure.
 
 ## What to capture
 

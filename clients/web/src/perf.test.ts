@@ -135,6 +135,61 @@ describe('room-list boot summary (ADR 0085 phase 2)', () => {
     expect(summary!.boot).not.toBeNull()
   })
 
+  it('splits startup into assets arriving and the main thread after', async () => {
+    // `boot` alone cannot say whether a slow startup is a big download or slow
+    // execution, and those have nothing in common as fixes. Measured on a
+    // phone at 5,242 ms on a good connection, where it dwarfed the 740 ms the
+    // room list then took — so every network finding was downstream of a
+    // number nothing decomposed.
+    const original = performance.getEntriesByType.bind(performance)
+    vi.spyOn(performance, 'getEntriesByType').mockImplementation((type) => {
+      if (type === 'navigation') {
+        return [
+          { type: 'navigate', responseEnd: 300 },
+        ] as unknown as PerformanceEntryList
+      }
+      if (type === 'resource') {
+        return [
+          {
+            name: 'https://a.example/assets/index-abc.js?v=1',
+            responseEnd: 1200,
+            transferSize: 144_000,
+          },
+          {
+            name: 'https://a.example/assets/index-abc.css',
+            responseEnd: 900,
+            transferSize: 6_000,
+          },
+          // Not a boot asset: an API call must not be mistaken for one.
+          {
+            name: 'https://a.example/v1/rooms',
+            responseEnd: 5_000,
+            transferSize: 261_000,
+          },
+        ] as unknown as PerformanceEntryList
+      }
+      return original(type)
+    })
+    try {
+      perfMark('rooms:cache:read:start')
+      perfMark('rooms:cache:read:end', { hit: false, rooms: 0 })
+      perfMark('rooms:refresh:end', { ok: true, rooms: 2 })
+      perfMarkBootRoomList()
+      await frames()
+
+      const summary = bootSummary()
+      expect(summary!.html).toBe(300)
+      // The *last* asset the boot waited on, not the first.
+      expect(summary!.js).toBe(1200)
+      expect(summary!.jskb).toBe(150)
+      // `exec` is main-thread time after the assets were in, so it must be
+      // measured from `js` rather than from navigation start.
+      expect(summary!.exec).toBe((summary!.boot as number) - 1200)
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
   it('waits for the render the refresh has not triggered yet', async () => {
     // Preact flushes after the signal write, so at the moment a refresh settles
     // the row render has not happened. Summarising inline here reported
