@@ -49,3 +49,4 @@ sqlx-core = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["net"] }
+tracing-subscriber = { workspace = true, features = ["fmt"] }

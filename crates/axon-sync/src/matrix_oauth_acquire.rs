@@ -41,7 +41,7 @@ use crate::{
 
 const MAX_CONCURRENT_FLOWS: usize = 8;
 const MAX_RETAINED_FLOWS: usize = 256;
-const MAX_QR_BASE64_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_QR_BASE64_BYTES: usize = 8 * 1024;
 const MAX_USER_ID_BYTES: usize = 1024;
 const FLOW_TTL: Duration = Duration::from_secs(10 * 60);
 const TERMINAL_RETENTION: Duration = Duration::from_secs(2 * 60);
@@ -55,7 +55,7 @@ const REVOCATION_TIMEOUT: Duration = Duration::from_secs(10);
 /// future may still be running when progress closes, so returning `None` again
 /// would leave an always-ready branch in `tokio::select!` and busy-spin until
 /// completion, cancellation, or timeout.
-struct ProgressUntilClosed<S> {
+pub(crate) struct ProgressUntilClosed<S> {
     inner: S,
     closed: bool,
 }
@@ -64,14 +64,14 @@ impl<S> ProgressUntilClosed<S>
 where
     S: Stream + Unpin,
 {
-    fn new(inner: S) -> Self {
+    pub(crate) fn new(inner: S) -> Self {
         Self {
             inner,
             closed: false,
         }
     }
 
-    async fn next(&mut self) -> Option<S::Item> {
+    pub(crate) async fn next(&mut self) -> Option<S::Item> {
         if self.closed {
             return std::future::pending().await;
         }
@@ -954,7 +954,7 @@ fn qr_server(qr: &QrCodeData) -> Result<String, DriverFailure> {
     }
 }
 
-fn parse_qr_payload(value: &str) -> Result<QrCodeData, MatrixOAuthAcquireError> {
+pub(crate) fn parse_qr_payload(value: &str) -> Result<QrCodeData, MatrixOAuthAcquireError> {
     if value.is_empty() || value.len() > MAX_QR_BASE64_BYTES {
         return Err(MatrixOAuthAcquireError::InvalidInput(
             "QR payload has an invalid size",
@@ -997,7 +997,7 @@ fn validate_qr_server_name_or_url(value: &str) -> Result<(), MatrixOAuthAcquireE
     validate_qr_url(&url)
 }
 
-fn validate_qr_url(url: &url::Url) -> Result<(), MatrixOAuthAcquireError> {
+pub(crate) fn validate_qr_url(url: &url::Url) -> Result<(), MatrixOAuthAcquireError> {
     let host = url.host_str().ok_or(MatrixOAuthAcquireError::InvalidInput(
         "QR payload contains a URL without a host",
     ))?;
@@ -1015,7 +1015,7 @@ fn validate_qr_url(url: &url::Url) -> Result<(), MatrixOAuthAcquireError> {
     Ok(())
 }
 
-fn parse_check_code(value: &str) -> Result<u8, MatrixOAuthAcquireError> {
+pub(crate) fn parse_check_code(value: &str) -> Result<u8, MatrixOAuthAcquireError> {
     if value.len() != 2 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(MatrixOAuthAcquireError::InvalidInput(
             "check code must contain exactly two digits",

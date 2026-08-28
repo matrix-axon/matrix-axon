@@ -306,6 +306,7 @@ mod tests {
             media,
             crate::backfill::BackfillHealth::new(None),
             crate::sync_health::SyncHealth::new(),
+            crate::matrix_oauth_grant::MatrixOAuthGrantRegistry::new(),
         )
     }
 
