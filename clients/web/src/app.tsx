@@ -63,7 +63,7 @@ import {
 } from './stores/settings'
 import { roomKey } from './stores/room-list'
 import { orderedSpaces } from './stores/spaces'
-import type { Account } from './stores/accounts'
+import { hasActiveAccount, type Account } from './stores/accounts'
 import type { RoomEntryResult, RoomsStore } from './stores/rooms'
 
 /**
@@ -595,7 +595,7 @@ function ShellChrome() {
   // The search overlay is URL-addressed (ADR 0066): mounted while `?search=`
   // is present (even empty), so a shared link restores it and Back closes it.
   const searchOpen = typeof query.search === 'string'
-  const accountCount = accounts.accounts.value.length
+  const activeAccountExists = hasActiveAccount(accounts.accounts.value)
   const accountsLoading = accounts.loading.value
   const accountsError = accounts.error.value
   const roomListLoading = rooms.loading.value
@@ -744,12 +744,12 @@ function ShellChrome() {
     if (
       !accountsLoading &&
       accountsError === null &&
-      accountCount === 0 &&
+      !activeAccountExists &&
       path !== '/accounts'
     ) {
       location.route('/accounts', true)
     }
-  }, [accountCount, accountsError, accountsLoading, location, path])
+  }, [accountsError, accountsLoading, activeAccountExists, location, path])
   useEffect(() => {
     const raw =
       typeof query.matrixLink === 'string'

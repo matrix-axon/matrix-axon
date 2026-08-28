@@ -7,6 +7,7 @@ import {
   connectCacheReset,
   connectCacheSetting,
   connectRoomsSessionReset,
+  connectMatrixOAuthQrSessionReset,
   connectInvitesSessionReset,
   connectLiveInvites,
   connectLiveRooms,
@@ -22,6 +23,7 @@ import {
 } from '../services'
 import { setPerfEnabled } from '../perf'
 import { createAccountsStore } from '../stores/accounts'
+import { createMatrixOAuthQrStore } from '../stores/matrix-oauth-qr'
 import { createDeviceStateStore } from '../stores/device-state'
 import { createEphemeralStore } from '../stores/ephemeral'
 import { createEphemeralSender } from '../stores/ephemeral-sender'
@@ -44,6 +46,7 @@ import {
   type VersionManifest,
 } from '../stores/update-check'
 import { createAttachmentStaging } from '../media/attachment-staging'
+import { createBrowserQrAdapter, type BrowserQrAdapter } from '../qr/browser-qr'
 import { FakeWebSocket } from './fake-socket'
 import { memoryStorage } from './memory-storage'
 
@@ -81,6 +84,8 @@ export function testServices(
     versionManifest?: () => Promise<VersionManifest | null>
     /** The build the bundle claims to be, for update comparisons. */
     currentVersion?: string
+    /** Injectable browser boundary for QR page interaction tests. */
+    qr?: BrowserQrAdapter
   } = {},
 ): AppServices & { sockets: FakeWebSocket[] } {
   const storage =
@@ -110,6 +115,10 @@ export function testServices(
     setPerfEnabled(true)
   }
   const accounts = createAccountsStore(api)
+  const matrixOAuthQr = createMatrixOAuthQrStore(api, accounts, {
+    storage: options.pendingStorage ?? memoryStorage(),
+  })
+  const qr = options.qr ?? createBrowserQrAdapter()
   const cache = options.cache ?? createMemoryCacheStore()
   const rooms = createRoomsStore(
     api,
@@ -162,6 +171,7 @@ export function testServices(
   connectTimelineCacheReset(auth, timelines)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
+  connectMatrixOAuthQrSessionReset(auth, matrixOAuthQr)
   connectCacheSetting(settings, cache)
   connectUpdateChecks(live, updates)
   connectAttachmentReset(auth, attachments)
@@ -175,6 +185,8 @@ export function testServices(
     attachments,
     settings,
     accounts,
+    matrixOAuthQr,
+    qr,
     rooms,
     invites,
     spaces,

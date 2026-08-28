@@ -4,10 +4,15 @@ Preact + TypeScript + Vite SPA for axon (ADR 0046). This package is
 self-contained: it is not a Cargo workspace member and has its own pnpm
 lockfile.
 
+Authenticated Axon sessions with no active Matrix account always default to
+the centralized `/accounts` portal.
+
 **Status (through M-W10, plus M19-W1 through M19-W4):** a usable read/write client — SSO sign-in
 through Axon OAuth Path A with token-paste fallback, the full account
-lifecycle (under `/accounts`, including 4S recovery-key import with offline
-key-format validation and success/error feedback), theme +
+lifecycle on the unified `/accounts` page (account list, active-account choice,
+status, recovery, logout, reactivation, deletion, and password acquisition),
+Matrix OAuth QR account acquisition (display or selectable-camera/image scan,
+check codes, authorization, reload resume, and cancellation), theme +
 schema-versioned settings, history routing with the permanent deep-link
 shape `/:accountId/rooms/:roomId?thread=&event=` (signed off), the
 cross-account room list with TUI semantics (pinning ADR 0038, sort/filters

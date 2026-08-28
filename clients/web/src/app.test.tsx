@@ -807,12 +807,38 @@ describe('App', () => {
       ),
     )
     const services = testServices()
-    const { findByText, getByRole } = render(<App services={services} />)
+    const { findByText, getByRole, queryByRole } = render(
+      <App services={services} />,
+    )
 
     expect(await findByText('No accounts yet — add one below.')).toBeTruthy()
     expect(getByRole('heading', { name: 'Accounts' })).toBeTruthy()
     expect(getByRole('button', { name: 'Log in' })).toBeTruthy()
+    expect(getByRole('tab', { name: 'Sign in with QR code' })).toBeTruthy()
+    expect(queryByRole('heading', { name: 'Theme' })).toBeNull()
+    expect(queryByRole('heading', { name: 'Rooms' })).toBeNull()
     expect(window.location.pathname).toBe('/accounts')
+  })
+
+  it('keeps a signed-in user with no active account in the Accounts portal', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
+        HttpResponse.json({
+          data: [{ ...ACCOUNT_DTO, state: 'deactivated', verified: null }],
+        }),
+      ),
+    )
+    history.replaceState(null, '', '/settings')
+
+    const { findByRole, queryByRole } = render(
+      <App services={testServices()} />,
+    )
+
+    await waitFor(() => expect(window.location.pathname).toBe('/accounts'))
+    expect(await findByRole('heading', { name: 'Accounts' })).toBeTruthy()
+    await waitFor(() =>
+      expect(queryByRole('heading', { name: 'Theme' })).toBeNull(),
+    )
   })
 
   it('sign out drops back to the login bootstrap', async () => {
@@ -836,6 +862,17 @@ describe('App', () => {
     fireEvent.keyDown(document.body, { key: 'Escape' })
 
     await waitFor(() => expect(window.location.pathname).toBe('/'))
+  })
+
+  it('navigates from Settings to unified account management', async () => {
+    const services = testServices()
+    history.replaceState(null, '', '/settings')
+    const { findByRole } = render(<App services={services} />)
+
+    fireEvent.click(await findByRole('link', { name: 'Manage accounts' }))
+
+    expect(await findByRole('heading', { name: 'Accounts' })).toBeTruthy()
+    expect(window.location.pathname).toBe('/accounts')
   })
 
   it('completes an OAuth callback and renders the signed-in shell', async () => {

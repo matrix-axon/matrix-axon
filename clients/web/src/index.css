@@ -1094,6 +1094,179 @@ h2 {
   margin-top: 1rem;
 }
 
+.accounts-page {
+  max-width: 56rem;
+}
+
+.acquisition-methods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.acquisition-methods [role='tab'][aria-selected='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.qr-start-form fieldset {
+  display: grid;
+  gap: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.qr-start-form fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.qr-flow {
+  display: grid;
+  gap: 1rem;
+}
+
+.qr-stage-summary {
+  margin: 0;
+  font-weight: 600;
+}
+
+.qr-display {
+  display: grid;
+  justify-items: start;
+}
+
+.qr-display canvas {
+  display: block;
+  width: min(100%, 320px);
+  height: auto;
+  border: 0.75rem solid white;
+  border-radius: 8px;
+}
+
+.qr-scanner video {
+  display: block;
+  width: min(100%, 32rem);
+  min-height: 12rem;
+  margin-bottom: 0.75rem;
+  border-radius: 8px;
+  background: #111;
+  object-fit: cover;
+}
+
+.qr-camera-picker {
+  display: grid;
+  gap: 0.25rem;
+  width: min(100%, 24rem);
+  margin-bottom: 0.75rem;
+}
+
+.button-like {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.25rem;
+  padding: 0.35rem 0.75rem;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.button-like:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.qr-check-code,
+.authorization-code {
+  font-size: clamp(2rem, 8vw, 3.5rem);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+}
+
+.segmented-code-label {
+  flex: none;
+}
+
+.segmented-code {
+  position: relative;
+  display: block;
+  width: max-content;
+  margin-top: 0.35rem;
+}
+
+.segmented-code-cells {
+  display: grid;
+  grid-template-columns: repeat(2, 3rem);
+  gap: 0.5rem;
+}
+
+.segmented-code-cell {
+  display: grid;
+  width: 3rem;
+  height: 3rem;
+  box-sizing: border-box;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 2rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.segmented-code-cell.filled {
+  background: var(--bg-raised);
+}
+
+.segmented-code:focus-within .segmented-code-cell {
+  border-color: var(--accent);
+}
+
+.segmented-code:focus-within .segmented-code-cell.current {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.segmented-code-input {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  cursor: text;
+}
+
+.segmented-code-input:focus {
+  outline: 0;
+}
+
+@media (max-width: 600px) {
+  .account-add {
+    padding: 0.75rem;
+  }
+
+  .acquisition-methods {
+    display: grid;
+  }
+
+  .acquisition-methods button {
+    width: 100%;
+  }
+}
+
 .account-deactivated .card-head strong {
   color: var(--muted);
 }
@@ -3753,7 +3926,8 @@ kbd {
 
 /* ---- forms & buttons ---- */
 
-button {
+button,
+a.button-link {
   font: inherit;
   padding: 0.35rem 0.8rem;
   border: 1px solid var(--border);
@@ -3763,8 +3937,14 @@ button {
   cursor: pointer;
 }
 
-button:hover:not(:disabled) {
+button:hover:not(:disabled),
+a.button-link:hover {
   border-color: var(--accent);
+}
+
+a.button-link {
+  display: inline-block;
+  text-decoration: none;
 }
 
 button:disabled {

@@ -71,3 +71,36 @@ test('the timeline checkboxes render as checkboxes, not full-width text fields',
   expect(box.width).toBeLessThan(32)
   expect(box.rowHeight).toBeLessThan(40) // one line, not a wrapped label
 })
+
+test('the account-management link matches the Settings buttons', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.goto('/settings')
+
+  const controls = [
+    page.getByRole('link', { name: 'Manage accounts' }),
+    page.getByRole('button', { name: 'Mark all as read' }),
+    page.getByRole('button', { name: 'Debug' }),
+  ]
+  const appearances = await Promise.all(
+    controls.map((control) =>
+      control.evaluate((element) => {
+        const style = getComputedStyle(element)
+        return {
+          backgroundColor: style.backgroundColor,
+          border: style.border,
+          borderRadius: style.borderRadius,
+          color: style.color,
+          cursor: style.cursor,
+          font: style.font,
+          padding: style.padding,
+          textDecoration: style.textDecoration,
+        }
+      }),
+    ),
+  )
+
+  expect(appearances[0]).toEqual(appearances[1])
+  expect(appearances[0]).toEqual(appearances[2])
+})
