@@ -46,6 +46,10 @@ What it does, with no manual steps:
    requests its MXC URL through `GET /v1/media/{account_id}/{server}/{media_id}`,
    and compares the response byte-for-byte with the original PNG.
 
+This script is the **consume / join** path: the seeder created `m.key_backup`, and Axon imports it.
+Axon can also **originate** megolm backup (ADR 0098) once it is a verified device holding sessions.
+That is a different success criterion and is **not** a gate of this script — see [Axon-originated megolm backup](#axon-originated-megolm-backup-adr-0098) below.
+
 On success it prints `PASS …`; on failure it dumps the tail of axon's log and
 exits non-zero. It tears the containers + test DB down at the end.
 
@@ -173,9 +177,11 @@ docker exec matrix-axon-postgres-1 psql -U axon -d axon -tAc \
 ## 4. E2EE re-decryption test (the M3c prize), by hand
 
 This is what the automated script does; here's the manual version using the
-**seeder** binary as the "device A" that creates encrypted history + a key backup
-(axon can't seed that itself — it's the unverified device under test). Set
-`SEED_MEDIA_FILE` to also send an encrypted attachment; the automated script
+**seeder** binary as the "device A" that creates encrypted history + a key backup.
+The seeder still plays device A because this walkthrough is the consume path:
+Axon starts as an unverified fresh device and must import keys the seeder uploaded.
+Once Axon is verified, it can originate megolm backup itself (ADR 0098) — that path is the next section, not this script.
+Set `SEED_MEDIA_FILE` to also send an encrypted attachment; the automated script
 uses this to verify the media proxy after recovery.
 
 Build it and seed against a freshly registered user:
@@ -217,12 +223,49 @@ Grab the `recovery_key` and `room_id` from that JSON, then:
      -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d '{"recovery_key":"<recovery_key from the seeder JSON>"}'
    ```
-   Watch for `account recovered keys via recovery key`, then `re-decrypted UTD`
-   lines, and re-run the query — the `m.room.encrypted / decrypted=f` count falls
-   as real types with `decrypted=t` rise.
+   Watch for `account recovered keys via recovery key` (the message is unchanged; structured fields `backup_action`, `selected`, `decrypted`, `timed_out` are on the same line), then `re-decrypted UTD` lines, and re-run the query — the `m.room.encrypted / decrypted=f` count falls as real types with `decrypted=t` rise.
+   On this consume path `backup_action` is `joined` or `already_uploading`, not `enabled`.
 
 > The recovery key here is a _fresh, local_ one minted by the seeder on this
 > Synapse — not any key you may have used elsewhere.
+
+## Axon-originated megolm backup (ADR 0098)
+
+The script and walkthrough above prove Axon can **consume** a backup another device created.
+They do not prove Axon can **originate** one, and they do not decrypt history no device uploaded.
+ADR 0011 named this gap ("revisit if we need accounts without Secure Backup"); ADR 0098 is that revisit.
+The recover verb no longer uses the single `Recovery::recover` call ADR 0026 described; one `SecretStore` lifetime, then enable/join/export.
+
+`recovery().enable_backup()` creates a homeserver backup version and a local decryption key.
+It does **not** write `m.megolm_backup.v1` into 4S; `SecretStore::export_secrets()` does that.
+After a successful 4S import, recover auto-enables megolm backup with the existing recovery key when the homeserver has none (`backup_action=enabled`).
+If a backup already exists, recover joins it (`joined` / `already_uploading` / export-only) and never 409s that join.
+`POST /v1/accounts/{id}/backup/enable` is the dedicated verb after SAS (gossip does not populate 4S).
+
+Recover 200 means 4S import succeeded, not "history keys downloaded."
+Read `data.backup_action` and `data.redecrypt` (`selected`, `decrypted`, `timed_out`).
+`verified: true` with 4S `recovery_state: enabled` and `backup.exists_on_server: false` is _not_ "history keys imported."
+
+**What originating backup will not decrypt.**
+Sessions no device still holding those inbound keys has uploaded stay UTD.
+Pre-Axon history, and history from before this device enabled backup, is in that set.
+That is success, not a sweep bug.
+
+**Optional hand-test** (4S without megolm backup; not a CI gate):
+
+1. An account that has 4S / cross-signing and **no** `m.key_backup`.
+   After a CS-only recover, `GET /v1/accounts/{id}` shows `backup.exists_on_server: false` (GET uses a cache that may lag another client's create).
+2. `POST …/recover` with the existing recovery key.
+   Expect 200 `backup_action=enabled` (or `export_pending` / `failed`, then retry `POST …/backup/enable` with the same key).
+   Do not mint a new recovery key.
+3. Confirm `this_device_uploading: true` once enable finishes.
+4. Send a message in an encrypted room, logout, login as a fresh Axon device, recover with the same key.
+5. That _post-enable_ message decrypts.
+   Earlier UTDs staying UTD is success.
+
+TUI: `/backup enable [user]` (masked key; empty Enter kicks upload) and `/status` for the snapshot.
+Web: account-card badge and Enable backup on `/accounts`.
+There is no `account.backup` WebSocket yet (#292); GET is the reconnect source of truth.
 
 ## Teardown
 
