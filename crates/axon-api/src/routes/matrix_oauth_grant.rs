@@ -22,10 +22,12 @@ use crate::{
     request_body = CreateMatrixOAuthQrGrantRequest,
     responses(
         (status = 201, description = "QR login-grant flow created", body = ApiResponse<MatrixOAuthQrGrantFlowDto>),
+        (status = 400, description = "Invalid presentation or request shape", body = crate::response::ErrorResponse),
         (status = 404, description = "Account not found", body = crate::response::ErrorResponse),
         (status = 409, description = "Account is inactive, untrusted, unable to export secrets, or already owns a grant", body = crate::response::ErrorResponse),
+        (status = 413, description = "Request body exceeds the QR-flow limit", body = crate::response::ErrorResponse),
         (status = 429, description = "Global active or retained QR grant capacity reached", body = crate::response::ErrorResponse),
-        (status = 503, description = "The current account client could not be acquired within the boundary timeout", body = crate::response::ErrorResponse),
+        (status = 503, description = "Account lifecycle changed or the current client is temporarily unavailable", body = crate::response::ErrorResponse),
     ),
     tag = "matrix-oauth",
 )]

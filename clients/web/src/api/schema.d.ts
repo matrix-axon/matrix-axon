@@ -4848,6 +4848,15 @@ export interface operations {
                     "application/json": components["schemas"]["ApiResponse_MatrixOAuthQrGrantFlowDto"];
                 };
             };
+            /** @description Invalid presentation or request shape */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Missing, malformed, or revoked bearer token */
             401: {
                 headers: {
@@ -4877,6 +4886,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description Request body exceeds the QR-flow limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Global active or retained QR grant capacity reached */
             429: {
                 headers: {
@@ -4886,7 +4904,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The current account client could not be acquired within the boundary timeout */
+            /** @description Account lifecycle changed or the current client is temporarily unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;

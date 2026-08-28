@@ -1835,6 +1835,24 @@ async fn matrix_oauth_qr_grant_routes_are_account_scoped_and_preserve_stage_fiel
         "invalid JSON rejects before the port"
     );
 
+    let oversized_create = "A".repeat(11 * 1024);
+    let (status, _) = request(
+        &app,
+        "POST",
+        &base,
+        Some(json!({
+            "presentation": "display",
+            "padding": oversized_create,
+        })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        service.calls().is_empty(),
+        "oversized create body rejects before the port"
+    );
+
     let oversized = "A".repeat(11 * 1024);
     let (status, _) = request(
         &app,

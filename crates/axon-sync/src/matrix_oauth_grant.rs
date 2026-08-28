@@ -4,9 +4,11 @@
 //! account's identity lock only while the SDK protocol is live: sync continues,
 //! while logout, deletion, and supervised-client replacement cancel the grant
 //! before waiting for that lock. Before every poll that can advance the SDK
-//! future, Axon re-reads active/current/trusted authority under the lock. This
-//! puts the second trust derivation directly in front of the SDK poll that may
-//! export or transmit the secrets bundle.
+//! future, Axon revalidates the current client and re-derives trust under the
+//! lock. Active-account reads are cached for five seconds; lifecycle
+//! invalidation cancels the same flow token before waiting for the lock, so the
+//! cache cannot delay teardown. This puts the second trust derivation directly
+//! in front of the SDK poll that may export or transmit the secrets bundle.
 
 use std::{
     collections::HashMap,
@@ -51,6 +53,25 @@ const REAPER_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(15);
 const TRUST_TIMEOUT: Duration = Duration::from_secs(10);
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(15);
+const ACTIVE_ACCOUNT_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+struct ActiveAccountRecheck {
+    next_check: Instant,
+}
+
+impl ActiveAccountRecheck {
+    fn due_now(now: Instant) -> Self {
+        Self { next_check: now }
+    }
+
+    fn is_due(&self, now: Instant) -> bool {
+        now >= self.next_check
+    }
+
+    fn record_success(&mut self, now: Instant) {
+        self.next_check = now + ACTIVE_ACCOUNT_RECHECK_INTERVAL;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatrixOAuthGrantPresentation {
@@ -312,10 +333,11 @@ impl MatrixOAuthGrantRegistry {
             .inner
             .lock()
             .expect("Matrix OAuth grant registry poisoned");
-        if inner.account_owners.get(&state.account_id) != Some(&state.flow_id)
-            || inner.flows.len() >= MAX_RETAINED_FLOWS
-        {
-            return Err(MatrixOAuthGrantError::AccountNotActive(state.account_id));
+        if inner.account_owners.get(&state.account_id) != Some(&state.flow_id) {
+            return Err(MatrixOAuthGrantError::Unavailable);
+        }
+        if inner.flows.len() >= MAX_RETAINED_FLOWS {
+            return Err(MatrixOAuthGrantError::Capacity);
         }
         inner.flows.insert(state.flow_id, flow);
         Ok(())
@@ -530,6 +552,17 @@ impl MatrixOAuthGrantEngine {
         account_id: Uuid,
         expected_client: Option<&Client>,
     ) -> Result<(axon_store::Account, Client), MatrixOAuthGrantError> {
+        let account = self.load_active_account(account_id).await?;
+        let client = self
+            .validate_current_trusted_client(account_id, expected_client)
+            .await?;
+        Ok((account, client))
+    }
+
+    async fn load_active_account(
+        &self,
+        account_id: Uuid,
+    ) -> Result<axon_store::Account, MatrixOAuthGrantError> {
         let account = self
             .inner
             .store
@@ -541,6 +574,14 @@ impl MatrixOAuthGrantEngine {
             })?
             .ok_or(MatrixOAuthGrantError::AccountNotFound(account_id))?;
         require_active_account(account_id, account.state)?;
+        Ok(account)
+    }
+
+    async fn validate_current_trusted_client(
+        &self,
+        account_id: Uuid,
+        expected_client: Option<&Client>,
+    ) -> Result<Client, MatrixOAuthGrantError> {
         let client = tokio::time::timeout(
             CLIENT_TIMEOUT,
             self.inner.manager.get_or_connect(account_id),
@@ -562,7 +603,22 @@ impl MatrixOAuthGrantEngine {
             .await
             .unwrap_or(false);
         require_trusted_device(trusted)?;
-        Ok((account, client))
+        Ok(client)
+    }
+
+    async fn validate_poll_authority(
+        &self,
+        account_id: Uuid,
+        expected_client: &Client,
+        active_account: &mut ActiveAccountRecheck,
+    ) -> Result<(), MatrixOAuthGrantError> {
+        if active_account.is_due(Instant::now()) {
+            self.load_active_account(account_id).await?;
+            active_account.record_success(Instant::now());
+        }
+        self.validate_current_trusted_client(account_id, Some(expected_client))
+            .await?;
+        Ok(())
     }
 
     async fn validate_exportable(
@@ -778,6 +834,11 @@ impl MatrixOAuthGrantEngine {
         let signal = Arc::new(PollSignal::default());
         let mut progress = Box::pin(progress);
         let mut check_sender: Option<CheckCodeSender> = None;
+        // The first SDK poll can follow a long wait for a scanned QR payload,
+        // so it always gets an active-account read. Subsequent wakeups reuse
+        // that result briefly while still revalidating client identity and
+        // re-deriving trust before every poll.
+        let mut active_account = ActiveAccountRecheck::due_now(Instant::now());
 
         loop {
             let notified = signal.notify.notified();
@@ -786,10 +847,13 @@ impl MatrixOAuthGrantEngine {
             // still held, and every poll capable of exporting/sending secrets is
             // preceded by this active/current/trusted check.
             let authority = async {
-                self.validate_authority(flow.snapshot().account_id, Some(expected_client))
-                    .await
-                    .map(|_| ())
-                    .map_err(classify_authority_error)
+                self.validate_poll_authority(
+                    flow.snapshot().account_id,
+                    expected_client,
+                    &mut active_account,
+                )
+                .await
+                .map_err(classify_authority_error)
             };
             if let Poll::Ready(result) =
                 authorize_and_poll_once(flow, deadline, grant.as_mut(), &signal, authority).await?
@@ -1172,6 +1236,21 @@ mod tests {
     ) {
         let semaphore = Arc::new(Semaphore::new(1));
         let permit = semaphore.clone().try_acquire_owned().unwrap();
+        let (flow, scan_rx, check_code_rx) =
+            test_flow_with_permit(account_id, flow_id, presentation, permit);
+        (flow, scan_rx, check_code_rx, semaphore)
+    }
+
+    fn test_flow_with_permit(
+        account_id: Uuid,
+        flow_id: Uuid,
+        presentation: MatrixOAuthGrantPresentation,
+        permit: OwnedSemaphorePermit,
+    ) -> (
+        Arc<Flow>,
+        oneshot::Receiver<QrCodeData>,
+        oneshot::Receiver<u8>,
+    ) {
         let (scan_tx, scan_rx) = oneshot::channel();
         let (check_code_tx, check_code_rx) = oneshot::channel();
         let flow = Arc::new(Flow {
@@ -1185,7 +1264,30 @@ mod tests {
             cancel: CancellationToken::new(),
             identity_lock: Arc::new(tokio::sync::Mutex::new(())),
         });
-        (flow, scan_rx, check_code_rx, semaphore)
+        (flow, scan_rx, check_code_rx)
+    }
+
+    fn retain_terminal_flows(
+        registry: &MatrixOAuthGrantRegistry,
+        count: usize,
+        terminal_at: Instant,
+    ) {
+        let mut inner = registry
+            .inner
+            .lock()
+            .expect("Matrix OAuth grant registry poisoned");
+        for _ in 0..count {
+            let account_id = Uuid::new_v4();
+            let flow_id = Uuid::new_v4();
+            let (flow, _, _, _) =
+                test_flow(account_id, flow_id, MatrixOAuthGrantPresentation::Display);
+            assert!(flow.terminal(MatrixOAuthGrantStage::Done, None));
+            flow.mutable
+                .lock()
+                .expect("Matrix OAuth grant flow poisoned")
+                .terminal_at = Some(terminal_at);
+            inner.flows.insert(flow_id, flow);
+        }
     }
 
     #[derive(Clone, Default)]
@@ -1252,6 +1354,22 @@ mod tests {
             require_trusted_device(false),
             Err(MatrixOAuthGrantError::DeviceNotTrusted)
         ));
+    }
+
+    #[test]
+    fn active_account_reads_are_cached_for_a_bounded_interval() {
+        let start = Instant::now();
+        let mut recheck = ActiveAccountRecheck::due_now(start);
+        assert!(recheck.is_due(start));
+
+        recheck.record_success(start);
+        assert!(!recheck.is_due(start));
+        assert!(!recheck.is_due(start + ACTIVE_ACCOUNT_RECHECK_INTERVAL - Duration::from_millis(1)));
+        assert!(recheck.is_due(start + ACTIVE_ACCOUNT_RECHECK_INTERVAL));
+
+        let second_check = start + ACTIVE_ACCOUNT_RECHECK_INTERVAL;
+        recheck.record_success(second_check);
+        assert!(!recheck.is_due(second_check));
     }
 
     #[test]
@@ -1514,24 +1632,7 @@ mod tests {
     fn retained_capacity_and_terminal_grace_period_are_bounded() {
         let registry = MatrixOAuthGrantRegistry::new();
         let now = Instant::now();
-        {
-            let mut inner = registry
-                .inner
-                .lock()
-                .expect("Matrix OAuth grant registry poisoned");
-            for _ in 0..MAX_RETAINED_FLOWS {
-                let account_id = Uuid::new_v4();
-                let flow_id = Uuid::new_v4();
-                let (flow, _, _, _) =
-                    test_flow(account_id, flow_id, MatrixOAuthGrantPresentation::Display);
-                assert!(flow.terminal(MatrixOAuthGrantStage::Done, None));
-                flow.mutable
-                    .lock()
-                    .expect("Matrix OAuth grant flow poisoned")
-                    .terminal_at = Some(now);
-                inner.flows.insert(flow_id, flow);
-            }
-        }
+        retain_terminal_flows(&registry, MAX_RETAINED_FLOWS, now);
 
         assert!(matches!(
             registry.reserve(Uuid::new_v4()),
@@ -1555,6 +1656,45 @@ mod tests {
             .flows
             .is_empty());
         assert!(registry.reserve(Uuid::new_v4()).is_ok());
+    }
+
+    #[test]
+    fn retained_capacity_race_is_reported_as_capacity() {
+        let registry = MatrixOAuthGrantRegistry::new();
+        let account_id = Uuid::new_v4();
+        let (flow_id, permit) = registry.reserve(account_id).unwrap();
+        let (flow, _, _) = test_flow_with_permit(
+            account_id,
+            flow_id,
+            MatrixOAuthGrantPresentation::Display,
+            permit,
+        );
+        retain_terminal_flows(&registry, MAX_RETAINED_FLOWS, Instant::now());
+
+        assert!(matches!(
+            registry.commit_reservation(flow),
+            Err(MatrixOAuthGrantError::Capacity)
+        ));
+    }
+
+    #[test]
+    fn lifecycle_invalidated_reservation_is_temporarily_unavailable() {
+        let registry = MatrixOAuthGrantRegistry::new();
+        let account_id = Uuid::new_v4();
+        let (flow_id, permit) = registry.reserve(account_id).unwrap();
+        let (flow, _, _) = test_flow_with_permit(
+            account_id,
+            flow_id,
+            MatrixOAuthGrantPresentation::Display,
+            permit,
+        );
+
+        registry.cancel_account(account_id);
+
+        assert!(matches!(
+            registry.commit_reservation(flow),
+            Err(MatrixOAuthGrantError::Unavailable)
+        ));
     }
 
     #[test]

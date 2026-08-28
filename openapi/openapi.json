@@ -1428,6 +1428,16 @@
               }
             }
           },
+          "400": {
+            "description": "Invalid presentation or request shape",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Missing, malformed, or revoked bearer token",
             "headers": {
@@ -1466,6 +1476,16 @@
               }
             }
           },
+          "413": {
+            "description": "Request body exceeds the QR-flow limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Global active or retained QR grant capacity reached",
             "content": {
@@ -1477,7 +1497,7 @@
             }
           },
           "503": {
-            "description": "The current account client could not be acquired within the boundary timeout",
+            "description": "Account lifecycle changed or the current client is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
