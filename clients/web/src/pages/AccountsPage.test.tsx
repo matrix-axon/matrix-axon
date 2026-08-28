@@ -1046,6 +1046,8 @@ describe('AccountsPage', () => {
 
     expect(await findByText(/Account signed in.*verified/i)).toBeTruthy()
     expect(window.location.pathname).toBe('/accounts')
+    fireEvent.click(getByRole('button', { name: 'Add another account' }))
+    expect(getByRole('button', { name: 'Start QR sign-in' })).toBeTruthy()
   })
 
   it('delete requires a confirmation step', async () => {

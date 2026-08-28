@@ -427,6 +427,11 @@ function ActiveQrFlow({ flow }: { flow: MatrixOAuthQrFlow }) {
           Start again
         </button>
       )}
+      {flow.stage === 'done' && (
+        <button type="button" onClick={() => matrixOAuthQr.reset()}>
+          Add another account
+        </button>
+      )}
     </div>
   )
 }

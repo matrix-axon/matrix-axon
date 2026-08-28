@@ -2,12 +2,23 @@ export const MAX_QR_IMAGE_BYTES = 8 * 1024 * 1024
 export const MAX_QR_SCAN_DIMENSION = 2048
 const CAMERA_SCAN_INTERVAL_MS = 250
 type JsQrDecoder = (typeof import('jsqr'))['default']
-let jsQrDecoder: Promise<JsQrDecoder> | null = null
 
-function loadJsQrDecoder(): Promise<JsQrDecoder> {
-  jsQrDecoder ??= import('jsqr').then(({ default: decoder }) => decoder)
-  return jsQrDecoder
+export function createRetryableLazyLoader<T>(
+  load: () => Promise<T>,
+): () => Promise<T> {
+  let pending: Promise<T> | null = null
+  return () => {
+    pending ??= load().catch((cause: unknown) => {
+      pending = null
+      throw cause
+    })
+    return pending
+  }
 }
+
+const loadJsQrDecoder = createRetryableLazyLoader<JsQrDecoder>(() =>
+  import('jsqr').then(({ default: decoder }) => decoder),
+)
 
 export interface QrCameraDevice {
   deviceId: string

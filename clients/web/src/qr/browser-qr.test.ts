@@ -9,6 +9,7 @@ vi.mock('jsqr', () => ({ default: mocks.jsQr }))
 vi.mock('qrcode', () => ({ toCanvas: mocks.toCanvas }))
 
 import {
+  createRetryableLazyLoader,
   createBrowserQrAdapter,
   decodeUnpaddedBase64,
   encodeUnpaddedBase64,
@@ -40,6 +41,20 @@ function mockCanvas() {
 }
 
 describe('browser QR adapter', () => {
+  it('reuses a pending lazy load but retries after rejection', async () => {
+    const load = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new Error('chunk offline'))
+      .mockResolvedValue('decoder')
+    const retryableLoad = createRetryableLazyLoader(load)
+
+    const first = retryableLoad()
+    expect(retryableLoad()).toBe(first)
+    await expect(first).rejects.toThrow('chunk offline')
+    await expect(retryableLoad()).resolves.toBe('decoder')
+    expect(load).toHaveBeenCalledTimes(2)
+  })
+
   it('round-trips padded, unpadded, URL-safe, and arbitrary binary bytes', () => {
     const bytes = Uint8Array.from([0, 1, 2, 127, 128, 254, 255])
     const unpadded = encodeUnpaddedBase64(bytes)
