@@ -471,9 +471,10 @@ impl MatrixOAuthGrantEngine {
             .ok_or(MatrixOAuthGrantError::AccountNotFound(account_id))?;
         let identity_lock = lock_for(&self.locks(), &account.user_id, &account.homeserver_url);
         let _guard = identity_lock.clone().lock_owned().await;
-        let (_account, client) = self.validate_authority(account_id, None).await?;
+        let (account, client) = self.validate_authority(account_id, None).await?;
         self.validate_exportable(flow_id, account_id, &client)
             .await?;
+        let expected_user_id = account.user_id;
 
         let (scan_tx, scan_rx) = oneshot::channel();
         let (check_code_tx, check_code_rx) = oneshot::channel();
@@ -496,18 +497,23 @@ impl MatrixOAuthGrantEngine {
             "matrix_oauth_qr_grant",
             %flow_id,
             %account_id,
+            %expected_user_id,
             role = "grant",
             presentation = presentation.as_str()
         );
+        let task_expected_user_id = expected_user_id.clone();
         self.inner.tracker.spawn(
             async move {
-                driver.drive(task_flow, scan_rx, check_code_rx).await;
+                driver
+                    .drive(task_flow, scan_rx, check_code_rx, task_expected_user_id)
+                    .await;
             }
             .instrument(span),
         );
         tracing::info!(
             %flow_id,
             %account_id,
+            %expected_user_id,
             role = "grant",
             presentation = presentation.as_str(),
             "Matrix OAuth QR grant flow created"
@@ -662,17 +668,19 @@ impl MatrixOAuthGrantEngine {
         flow: Arc<Flow>,
         scan_rx: oneshot::Receiver<QrCodeData>,
         check_code_rx: oneshot::Receiver<u8>,
+        expected_user_id: String,
     ) {
         let state = flow.snapshot();
         let deadline = tokio::time::Instant::now() + FLOW_TTL;
         let result = self
             .drive_under_identity_lock(flow.clone(), scan_rx, check_code_rx, deadline)
             .await;
-        let (stage, code) = match result {
+        let (stage, failure) = match result {
             Ok(()) => (MatrixOAuthGrantStage::Done, None),
             Err(DriverFailure::Cancelled) => (MatrixOAuthGrantStage::Cancelled, None),
-            Err(error) => (MatrixOAuthGrantStage::Failed, Some(error.code())),
+            Err(error) => (MatrixOAuthGrantStage::Failed, Some(error)),
         };
+        let code = failure.as_ref().map(DriverFailure::code);
         if flow.terminal(stage, code) {
             self.inner
                 .registry
@@ -682,19 +690,16 @@ impl MatrixOAuthGrantEngine {
                 MatrixOAuthGrantStage::Done => tracing::info!(
                     flow_id = %state.flow_id,
                     account_id = %state.account_id,
+                    %expected_user_id,
                     role = "grant",
                     presentation = state.presentation.as_str(),
                     stage = "done",
                     "Matrix OAuth QR grant completed"
                 ),
-                MatrixOAuthGrantStage::Failed => tracing::warn!(
-                    flow_id = %state.flow_id,
-                    account_id = %state.account_id,
-                    role = "grant",
-                    presentation = state.presentation.as_str(),
-                    stage = "failed",
-                    error_code = code.unwrap_or("internal"),
-                    "Matrix OAuth QR grant failed"
+                MatrixOAuthGrantStage::Failed => log_terminal_failure(
+                    &state,
+                    &expected_user_id,
+                    failure.as_ref().expect("failed grant has a failure"),
                 ),
                 _ => {}
             }
@@ -998,6 +1003,37 @@ impl DriverFailure {
             Self::Upstream => "upstream",
             Self::Internal => "internal",
         }
+    }
+}
+
+fn log_terminal_failure(
+    state: &MatrixOAuthGrantState,
+    expected_user_id: &str,
+    failure: &DriverFailure,
+) {
+    if matches!(failure, DriverFailure::DeviceNotFound) {
+        tracing::warn!(
+            flow_id = %state.flow_id,
+            account_id = %state.account_id,
+            expected_user_id,
+            role = "grant",
+            presentation = state.presentation.as_str(),
+            stage = "failed",
+            error_code = failure.code(),
+            possible_cause = "wrong_account_or_device_provisioning",
+            "Matrix OAuth QR grant device was not registered for the expected account"
+        );
+    } else {
+        tracing::warn!(
+            flow_id = %state.flow_id,
+            account_id = %state.account_id,
+            expected_user_id,
+            role = "grant",
+            presentation = state.presentation.as_str(),
+            stage = "failed",
+            error_code = failure.code(),
+            "Matrix OAuth QR grant failed"
+        );
     }
 }
 
@@ -1839,8 +1875,9 @@ mod tests {
     }
 
     #[test]
-    fn secret_bearing_upstream_and_store_errors_are_redacted_from_logs() {
+    fn grant_diagnostics_are_actionable_and_secret_safe() {
         const SENTINEL: &str = "SECRET-access-token-and-recovery-key";
+        const EXPECTED_USER_ID: &str = "@alice:example.org";
         let captured = CapturedLogs::default();
         let subscriber = tracing_subscriber::fmt()
             .without_time()
@@ -1858,10 +1895,22 @@ mod tests {
             "test",
             &axon_store::StoreError::InvalidAccountSession(SENTINEL.to_owned()),
         );
+        let mut state = MatrixOAuthGrantState::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            MatrixOAuthGrantPresentation::Display,
+        );
+        state.qr_code_data = Some(SENTINEL.to_owned());
+        state.check_code = Some(SENTINEL.to_owned());
+        state.verification_uri = Some(format!("https://auth.example.org/{SENTINEL}"));
+        log_terminal_failure(&state, EXPECTED_USER_ID, &DriverFailure::DeviceNotFound);
 
         let logs = captured.text();
         assert!(!logs.contains(SENTINEL));
         assert!(logs.contains("error_class=\"upstream\""));
         assert!(logs.contains("error_class=\"store\""));
+        assert!(logs.contains("expected_user_id=\"@alice:example.org\""));
+        assert!(logs.contains("error_code=\"device_not_found\""));
+        assert!(logs.contains("possible_cause=\"wrong_account_or_device_provisioning\""));
     }
 }
