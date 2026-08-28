@@ -139,6 +139,16 @@ repos:
         files: '^(\.github/workflows/web-lint-and-test\.yml|openapi/openapi\.json|clients/web/(package\.json|pnpm-lock\.yaml|scripts/check-api-schema\.mjs|src/api/schema\.d\.ts))$'
         pass_filenames: false
         stages: [pre-push]
+      - id: openapi-compat
+        name: openapi spec has no unacknowledged breaking change
+        language: system
+        # No base ref: the script searches base/main, upstream/main,
+        # origin/main, main. `git fetch upstream main` before trusting a clean
+        # result (ADR 0098).
+        entry: scripts/check-openapi-compat.sh
+        files: '^openapi/openapi\.json$'
+        pass_filenames: false
+        stages: [pre-push]
       - id: web-lint
         name: web lint
         language: system
