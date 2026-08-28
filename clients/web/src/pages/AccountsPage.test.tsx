@@ -68,6 +68,8 @@ const STATUS = {
 // Recover button gates on this shape, so the form tests must use a real one.
 const VALID_KEY = 'EsT1 t3bE JPZs Bz9H xApv jfQh PY9X gmGM bhbN Kz2L 2t9n aeKB'
 
+let profileAccountIds: string[] = []
+
 const server = setupServer()
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
@@ -83,6 +85,7 @@ function renderPage(
   qr?: BrowserQrAdapter,
   status: unknown = STATUS,
 ) {
+  profileAccountIds = []
   server.use(
     http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
       HttpResponse.json({
@@ -96,6 +99,7 @@ function renderPage(
       `${TEST_BASE_URL}/v1/accounts/:accountId/users/:userId/profile`,
       ({ params }) => {
         const userId = String(params.userId)
+        profileAccountIds.push(String(params.accountId))
         return HttpResponse.json({
           data: {
             user_id: userId,
@@ -133,6 +137,13 @@ describe('AccountsPage', () => {
     expect(await findByText('Alice Example')).toBeTruthy()
     expect(getByText('@alice:example.org')).toBeTruthy()
     expect(getByText(ALICE.account_id)).toBeTruthy()
+  })
+
+  it('does not fetch a display name for a deactivated account', async () => {
+    const { findByText } = renderPage()
+
+    expect(await findByText('Alice Example')).toBeTruthy()
+    await waitFor(() => expect(profileAccountIds).toEqual([ALICE.account_id]))
   })
 
   it('gives each account-head badge an explanatory tooltip', async () => {

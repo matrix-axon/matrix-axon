@@ -211,6 +211,12 @@ function AccountCard({
   }
 
   useEffect(() => {
+    // Deactivated/deleting accounts have no live homeserver session;
+    // GET profile always 503s (`Account not reachable`).
+    if (account.state !== 'active') {
+      setDisplayName(null)
+      return
+    }
     let cancelled = false
     void (async () => {
       try {
@@ -239,7 +245,7 @@ function AccountCard({
     return () => {
       cancelled = true
     }
-  }, [api, account.account_id, account.user_id])
+  }, [api, account.account_id, account.user_id, account.state])
 
   return (
     <li
