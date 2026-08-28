@@ -5900,6 +5900,7 @@
           "accounts"
         ],
         "summary": "Explicitly retry every pending UTD for an active account. The default startup\npolicy attempts each stored UTD once, then waits for fresh room-key arrivals;\nthis endpoint is the authenticated operator escape hatch for rows whose keys\nare already in the crypto store or whose initial startup attempt predated key\nacquisition.",
+        "description": "The identity lock is held only for the active check and client lookup;\nlogout can proceed and cancels this retry. The HTTP cap is 10 minutes\n(a reverse proxy may cut it earlier). A cap or cancel returns 200 with\npartial counts and `timed_out=true`, not 504.",
         "operationId": "redecrypt_utds",
         "parameters": [
           {
@@ -5915,7 +5916,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Manual UTD re-decryption retry completed or timed out",
+            "description": "Manual UTD re-decryption retry completed or timed out (10-minute cap or logout cancel)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7999,7 +8000,7 @@
               },
               "timed_out": {
                 "type": "boolean",
-                "description": "Whether the server stopped waiting before the retry completed."
+                "description": "Whether the server stopped waiting before the retry completed.\nManual redecrypt: 10-minute cap or logout cancel. Recover: 30-second\nunder-lock cap."
               }
             }
           }
@@ -10477,7 +10478,7 @@
           },
           "timed_out": {
             "type": "boolean",
-            "description": "Whether the server stopped waiting before the retry completed."
+            "description": "Whether the server stopped waiting before the retry completed.\nManual redecrypt: 10-minute cap or logout cancel. Recover: 30-second\nunder-lock cap."
           }
         }
       },

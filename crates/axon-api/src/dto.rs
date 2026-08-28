@@ -1440,6 +1440,8 @@ pub struct RedecryptUtdsResponse {
     /// Selected rows that are still UTDs after the retry.
     pub still_pending: usize,
     /// Whether the server stopped waiting before the retry completed.
+    /// Manual redecrypt: 10-minute cap or logout cancel. Recover: 30-second
+    /// under-lock cap.
     pub timed_out: bool,
 }
 
