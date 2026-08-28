@@ -19,6 +19,10 @@ import {
 import { parseOAuthProviders } from './auth/oauth'
 import { createAccountsStore, type AccountsStore } from './stores/accounts'
 import {
+  createMatrixOAuthQrStore,
+  type MatrixOAuthQrStore,
+} from './stores/matrix-oauth-qr'
+import {
   createDeviceStateStore,
   parseThreadReadMarker,
   READ_MARKERS_NAMESPACE,
@@ -72,6 +76,7 @@ import {
   createAttachmentStaging,
   type AttachmentStaging,
 } from './media/attachment-staging'
+import { createBrowserQrAdapter, type BrowserQrAdapter } from './qr/browser-qr'
 
 /**
  * The app's service graph — auth seam, API client, and stores — built once at
@@ -83,6 +88,8 @@ export interface AppServices {
   api: ApiClient
   settings: SettingsStore
   accounts: AccountsStore
+  matrixOAuthQr: MatrixOAuthQrStore
+  qr: BrowserQrAdapter
   rooms: RoomsStore
   invites: InvitesStore
   spaces: SpacesStore
@@ -623,6 +630,18 @@ export function connectRoomsSessionReset(
   })
 }
 
+/** Drop every QR flow and presentation byte when the Axon session ends. */
+export function connectMatrixOAuthQrSessionReset(
+  auth: CompositeAuthProvider,
+  matrixOAuthQr: MatrixOAuthQrStore,
+): () => void {
+  return effect(() => {
+    if (!auth.signedIn.value) {
+      matrixOAuthQr.reset()
+    }
+  })
+}
+
 export function connectInvitesSessionReset(
   auth: CompositeAuthProvider,
   invites: InvitesStore,
@@ -764,6 +783,10 @@ export function createServices(
     setPerfEnabled(true)
   }
   const accounts = createAccountsStore(api)
+  const matrixOAuthQr = createMatrixOAuthQrStore(api, accounts, {
+    storage: sessionStorage,
+  })
+  const qr = createBrowserQrAdapter()
   const cache = createIndexedDbCacheStore()
   requestPersistentStorage()
   // Resolved per operation rather than once: token-paste sign-in does not
@@ -822,6 +845,7 @@ export function createServices(
   connectTimelineCacheReset(auth, timelines)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
+  connectMatrixOAuthQrSessionReset(auth, matrixOAuthQr)
   connectCacheSetting(settings, cache)
   connectUpdateChecks(live, updates)
   connectAttachmentReset(auth, attachments)
@@ -835,6 +859,8 @@ export function createServices(
     attachments,
     settings,
     accounts,
+    matrixOAuthQr,
+    qr,
     rooms,
     invites,
     spaces,

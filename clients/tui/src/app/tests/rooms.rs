@@ -207,6 +207,7 @@ fn room_refresh_drops_rooms_for_logged_out_accounts() {
             state: AccountState::Active,
             device_id: None,
             verified: Some(false),
+            backup: Default::default(),
         },
         AccountDto {
             account_id: logged_out_id,
@@ -214,6 +215,7 @@ fn room_refresh_drops_rooms_for_logged_out_accounts() {
             state: AccountState::Deactivated,
             device_id: None,
             verified: Some(false),
+            backup: Default::default(),
         },
     ]);
 
@@ -383,6 +385,46 @@ fn status_disambiguates_duplicate_matrix_ids_with_account_ids() {
     let status = popup_status_lines(&app).join("\n");
     assert!(status.contains(&format!("@alice:example.com  [{first_id}]  (logged in")));
     assert!(status.contains(&format!("@alice:example.com  [{second_id}]  (logged out")));
+}
+
+#[test]
+fn status_shows_honest_megolm_backup_snapshot() {
+    let mut uploading = account_with_id(
+        Uuid::from_u128(1),
+        "@alice:example.com",
+        AccountState::Active,
+    );
+    uploading.verified = Some(true);
+    uploading.backup = BackupSnapshot {
+        exists_on_server: Some(true),
+        this_device_uploading: true,
+        backup_state: BackupState::Enabled,
+        recovery_state: RecoveryState::Enabled,
+    };
+    let mut none_on_server = account_with_id(
+        Uuid::from_u128(2),
+        "@bob:example.com",
+        AccountState::Deactivated,
+    );
+    none_on_server.backup = BackupSnapshot {
+        exists_on_server: Some(false),
+        this_device_uploading: false,
+        backup_state: BackupState::Unknown,
+        recovery_state: RecoveryState::Incomplete,
+    };
+    let mut app = app_with_rooms(Vec::new());
+    app.set_accounts(vec![uploading, none_on_server]);
+
+    let status = popup_status_lines(&app).join("\n");
+    assert!(status.contains("megolm backup: on homeserver; this device uploading; state enabled"));
+    assert!(status.contains("4S secret storage: enabled"));
+    assert!(status
+        .contains("megolm backup: none on homeserver; this device not uploading; state unknown"));
+    assert!(status.contains("4S secret storage: incomplete"));
+    assert!(
+        !status.to_ascii_lowercase().contains("keys recovered"),
+        "recovery_state must not be presented as history-key import"
+    );
 }
 
 #[test]

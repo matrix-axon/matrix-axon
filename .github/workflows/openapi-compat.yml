@@ -1,0 +1,39 @@
+name: OpenAPI is backward-compatible
+
+# Deliberately `pull_request` rather than `push`, and deliberately its own
+# workflow: the check needs the *canonical* main as its base, and this is the
+# only trigger that supplies one without a credential. See
+# migrations-immutable.yml for the fuller rationale (same shape, same reason).
+#
+# `pull_request` alone, deliberately: every step below is driven by the
+# event's `head.sha`/`base.ref`, which are unset for a manual dispatch, so
+# adding `workflow_dispatch` would only offer a run that cannot do the job. To
+# check a tree by hand, run the script directly — it takes a base ref.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  openapi-compat:
+    runs-on: ubuntu-latest
+    steps:
+      # The PR head, not the default merge ref, and full history: the script
+      # walks base.sha..HEAD looking for an API-Breaking-Change trailer.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: OpenAPI spec has no unacknowledged breaking change
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          base="$BASE_SHA"
+          if [ -n "$BASE_REF" ] && git rev-parse --verify --quiet "origin/$BASE_REF^{commit}" >/dev/null; then
+            base="origin/$BASE_REF"
+          fi
+          echo "base: $base ($(git rev-parse --short "${base:-HEAD}"))"
+          scripts/check-openapi-compat.sh "$base"

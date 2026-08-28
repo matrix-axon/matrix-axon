@@ -135,11 +135,15 @@ this table is the orientation copy.
 - **OpenAPI:** the spec is the source of truth.
   Handler types must compile against it (utoipa).
   Drift between spec and generated stubs is a bug.
+  Evolve `/v1/` additively — an independently-distributed `axon-tui` binary can run against a server for a long time without upgrading. `scripts/check-openapi-compat.sh` (CI: `openapi-compat`) fails a PR that breaks compatibility; a deliberate exception declares itself with an `API-Breaking-Change: <reason>` commit trailer (ADR 0099).
 - **Component separation:** the code is separated into three silos: `crates/` (server-side infrastructure), `clients/` (client-side infrastructure, separated into `tui` and `web`), and `smoke/` (testing infrastructure).
-  Commits and pull requests should **not** change multiple silos at once.
-  Each PR should be limited to its own silo.
-  Files can be added to `docs/` combined with other silos where they are directly related to the change in that silo.
+  Behavioral changes — anything that changes logic, functionality, or intent — must stay within a single silo per commit/PR.
   Typically, changes to the `web` and `tui` clients should be separate PRs except where a global change impacts both clients.
+  If a behavioral server change breaks client compatibility, ship the server change on its own; don't bundle a client-side fix into the same PR even to keep `main` working, even temporarily — open a separate, immediate follow-up PR for the client side.
+  Exception for generated sync artifacts: a PR may cross the `crates/` ↔ `clients/web` boundary only to keep a generated file in sync with its source of truth (e.g. regenerating `schema.ts` from `openapi/openapi.json` via `pnpm check:api`) — this is mechanical, not behavioral, and does not violate this rule.
+  Server-first sequencing: for a large feature spanning server and client (e.g. QR sign-in, encryption key backup), do not touch client code until the server-side implementation is settled; land and stabilize the server piece first.
+  If a bug in another silo is discovered mid-task, do not fix it inline — stop, return to the appropriate silo, and address it as its own separate change.
+  Files can be added to `docs/` combined with other silos where they are directly related to the change in that silo.
   The user can override this rule, but the agent should never do this on its own.
 - **`axon-crypto` stays a stub.**
   Verification and all crypto-adjacent logic live in `axon-sync` — the engine can't be thin, it needs `ClientManager`, the per-identity locks, and supervision (ADR 0027).

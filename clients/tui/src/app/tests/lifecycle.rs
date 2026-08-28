@@ -103,6 +103,11 @@ async fn in_flight_lifecycle_rejects_new_login_and_logout() {
     app.status = Status::Info(String::new());
     app.handle_command(Command::Logout(None)).await;
     assert!(app.status.text(false).contains("already in progress"));
+
+    app.status = Status::Info(String::new());
+    app.handle_command(Command::BackupEnable(None)).await;
+    assert_eq!(app.mode, Mode::Compose);
+    assert!(app.status.text(false).contains("already in progress"));
 }
 
 #[tokio::test]
@@ -188,6 +193,48 @@ async fn account_navigation_clears_recovery_key_input() {
         .await;
 
     assert_eq!(app.mode, Mode::Compose);
+    assert!(app.input.buffer.is_empty());
+}
+
+#[tokio::test]
+async fn empty_backup_enable_key_kicks_upload_instead_of_cancelling() {
+    let mut app = app_with_rooms(Vec::new());
+    let mut account = account("@alice:example.com", AccountState::Active);
+    account.verified = Some(true);
+    app.mode = Mode::RecoveryKey {
+        account,
+        origin: RecoveryOrigin::BackupEnable,
+    };
+
+    app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+
+    assert_eq!(app.mode, Mode::Compose);
+    assert_eq!(
+        app.status.text(false),
+        "enabling megolm backup for @alice:example.com…"
+    );
+    assert!(app.input.buffer.is_empty());
+}
+
+#[tokio::test]
+async fn escape_cancels_backup_enable_and_clears_secret() {
+    let mut app = app_with_rooms(Vec::new());
+    let mut account = account("@alice:example.com", AccountState::Active);
+    account.verified = Some(true);
+    app.mode = Mode::RecoveryKey {
+        account,
+        origin: RecoveryOrigin::BackupEnable,
+    };
+    app.input.buffer = "secret recovery key".to_owned();
+    app.input.cursor = app.input.buffer.len();
+
+    app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+
+    assert_eq!(app.mode, Mode::Compose);
+    assert_eq!(
+        app.status.text(false),
+        "backup enable cancelled for @alice:example.com"
+    );
     assert!(app.input.buffer.is_empty());
 }
 

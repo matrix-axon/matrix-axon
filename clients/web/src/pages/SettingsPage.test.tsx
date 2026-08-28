@@ -18,7 +18,6 @@ import {
 } from '../install-prompt'
 import { BUILD_INFO } from '../build-info'
 import { TEST_BASE_URL, testServices } from '../test/services'
-import { formatServerBuildLine } from './ServerStatus'
 import { SettingsPage } from './SettingsPage'
 
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
@@ -143,78 +142,23 @@ describe('SettingsPage', () => {
     expect(box.checked).toBe(true)
   })
 
-  it('includes account management and browser sign-out controls', async () => {
+  it('links to unified account management and keeps browser sign-out', () => {
     const services = testServices()
-    const { findByRole, getByRole } = render(
+    const { getByRole, queryByRole } = render(
       <ServicesContext.Provider value={services}>
         <SettingsPage />
       </ServicesContext.Provider>,
     )
 
     expect(getByRole('heading', { name: 'Accounts' })).toBeTruthy()
-    expect(await findByRole('button', { name: 'Log in' })).toBeTruthy()
+    const manageAccounts = getByRole('link', { name: 'Manage accounts' })
+    expect(manageAccounts).toHaveProperty('pathname', '/accounts')
+    expect(manageAccounts.classList.contains('button-link')).toBe(true)
+    expect(queryByRole('button', { name: 'Log in' })).toBeNull()
+    expect(queryByRole('button', { name: 'Delete' })).toBeNull()
 
     fireEvent.click(getByRole('button', { name: 'Sign out' }))
     expect(services.auth.signedIn.value).toBe(false)
-  })
-
-  it('keeps older server status responses quiet', async () => {
-    const services = testServices()
-    const { findByRole, queryByRole, queryByText } = render(
-      <ServicesContext.Provider value={services}>
-        <SettingsPage />
-      </ServicesContext.Provider>,
-    )
-
-    expect(await findByRole('heading', { name: 'Server status' })).toBeTruthy()
-    expect(queryByText('Axon server')).toBeNull()
-    expect(queryByRole('heading', { name: 'Sync service' })).toBeNull()
-  })
-
-  it('shows build and sync details from newer server status responses', async () => {
-    const since = Date.UTC(2026, 6, 22, 12, 0, 0)
-    server.use(
-      http.get(`${TEST_BASE_URL}/v1/status`, () =>
-        HttpResponse.json({
-          data: {
-            backfill: { paused: false, free_bytes: 0, accounts: [] },
-            build: {
-              version: '0.15.0',
-              git_hash: 'abcdef1234567890',
-              profile: 'release',
-              build_time: '2026-07-22T12:34:56Z',
-              rustc_version: 'rustc 1.89.0',
-            },
-            sync: [
-              {
-                account_id: ACCOUNT,
-                state: 'running',
-                since_ms: since,
-              },
-            ],
-          },
-        }),
-      ),
-    )
-    const services = testServices()
-    const { container, findByRole, findByText, getByText } = render(
-      <ServicesContext.Provider value={services}>
-        <SettingsPage />
-      </ServicesContext.Provider>,
-    )
-
-    expect(await findByText('0.15.0')).toBeTruthy()
-    expect(getByText('abcdef123456')).toBeTruthy()
-    expect(container.textContent).toContain('release')
-    expect(getByText('rustc 1.89.0')).toBeTruthy()
-    expect(await findByRole('heading', { name: 'Sync service' })).toBeTruthy()
-    expect(getByText('running')).toBeTruthy()
-    expect(getByText(ACCOUNT.slice(0, 8))).toBeTruthy()
-    expect(
-      container.querySelector(
-        `time[datetime="${new Date(since).toISOString()}"]`,
-      ),
-    ).toBeTruthy()
   })
 
   it('registers the browser matrix protocol handler from the opt-in checkbox', () => {
@@ -521,48 +465,6 @@ describe('SettingsPage', () => {
       expect(writeText).toHaveBeenCalledWith(BUILD_INFO.displayVersion),
     )
     expect((await findByRole('status')).textContent).toBe('Copied')
-  })
-
-  it('copies the axon server version from server status', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText },
-    })
-    server.use(
-      http.get(`${TEST_BASE_URL}/v1/status`, () =>
-        HttpResponse.json({
-          data: {
-            backfill: { paused: false, free_bytes: 0, accounts: [] },
-            build: {
-              version: '0.15.0',
-              git_hash: 'abcdef1234567890',
-              profile: 'release',
-              build_time: '2026-07-22T12:34:56Z',
-              rustc_version: 'rustc 1.89.0',
-            },
-          },
-        }),
-      ),
-    )
-    const { findByRole } = render(
-      <ServicesContext.Provider value={testServices()}>
-        <SettingsPage />
-      </ServicesContext.Provider>,
-    )
-
-    fireEvent.click(await findByRole('button', { name: 'Copy server status' }))
-    await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith(
-        formatServerBuildLine({
-          version: '0.15.0',
-          git_hash: 'abcdef1234567890',
-          profile: 'release',
-          build_time: '2026-07-22T12:34:56Z',
-          rustc_version: 'rustc 1.89.0',
-        }),
-      ),
-    )
   })
 })
 

@@ -28,6 +28,12 @@ const ROOM_ID = '!room:hs'
 const ACCOUNT_ID_2 = '22222222-2222-4222-8222-222222222222'
 const USER_ID_2 = '@other:hs'
 const LONG_ROOM_ID = '!vQZGkFhTnLxWpRdCmYbA:hs'
+const QR_FLOW_ID = '33333333-3333-4333-8333-333333333333'
+const QR_BINARY_BASE64 = Buffer.from([0, 1, 2, 3, 127, 128, 254, 255])
+  .toString('base64')
+  .replace(/=+$/, '')
+let qrFlow = null
+let submittedQrBase64 = null
 
 function account(id, userId) {
   return {
@@ -515,6 +521,75 @@ async function handleApi(req, res, url) {
       data: [account(ACCOUNT_ID, USER_ID), account(ACCOUNT_ID_2, USER_ID_2)],
     })
   }
+  if (method === 'POST' && pathname === '/v1/accounts/login/qr') {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      const request = JSON.parse(raw || '{}')
+      qrFlow = {
+        flow_id: QR_FLOW_ID,
+        expected_user_id: request.expected_user_id,
+        presentation: request.presentation,
+        stage: request.presentation === 'display' ? 'qr_ready' : 'starting',
+        ...(request.presentation === 'display'
+          ? { qr_code_data: QR_BINARY_BASE64 }
+          : {}),
+      }
+      json(res, { data: qrFlow }, 201)
+    })
+    return
+  }
+  if (method === 'GET' && pathname === `/v1/accounts/login/qr/${QR_FLOW_ID}`) {
+    return qrFlow === null
+      ? json(
+          res,
+          { error: { code: 'not_found', message: 'unknown QR flow' } },
+          404,
+        )
+      : json(res, { data: qrFlow })
+  }
+  if (
+    method === 'POST' &&
+    pathname === `/v1/accounts/login/qr/${QR_FLOW_ID}/scan`
+  ) {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      const request = JSON.parse(raw || '{}')
+      submittedQrBase64 = request.qr_code_data
+      qrFlow = {
+        flow_id: QR_FLOW_ID,
+        expected_user_id: qrFlow?.expected_user_id ?? USER_ID,
+        presentation: 'scan',
+        stage: 'check_code_to_display',
+        check_code: '42',
+      }
+      json(res, { data: qrFlow })
+    })
+    return
+  }
+  if (
+    method === 'POST' &&
+    pathname === `/v1/accounts/login/qr/${QR_FLOW_ID}/check-code`
+  ) {
+    qrFlow = {
+      flow_id: QR_FLOW_ID,
+      expected_user_id: qrFlow?.expected_user_id ?? USER_ID,
+      presentation: 'display',
+      stage: 'waiting_for_authorization',
+      authorization_user_code: 'ABCD-EFGH',
+      verification_uri: 'https://auth.example/device',
+    }
+    return json(res, { data: qrFlow })
+  }
+  if (
+    method === 'DELETE' &&
+    pathname === `/v1/accounts/login/qr/${QR_FLOW_ID}`
+  ) {
+    qrFlow = null
+    res.writeHead(204).end()
+    return
+  }
   if (method === 'GET' && pathname === '/v1/status') {
     return json(res, {
       data: { backfill: { paused: false, free_bytes: 0, accounts: [] } },
@@ -919,6 +994,14 @@ const server = createServer((req, res) => {
         // would be lossy — an equal digest is exact byte identity.
         sha1: createHash('sha1').update(upload.bytes).digest('hex'),
       })),
+    })
+  }
+  if (req.method === 'GET' && url.pathname === '/__e2e/qr-submission') {
+    return json(res, {
+      data: {
+        expected: QR_BINARY_BASE64,
+        submitted: submittedQrBase64,
+      },
     })
   }
   if (req.method === 'POST' && url.pathname === '/__e2e/search-503') {

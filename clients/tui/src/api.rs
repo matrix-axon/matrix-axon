@@ -132,6 +132,28 @@ impl AxonClient {
         self.send(lifecycle(request)).await
     }
 
+    /// Originate, export-resume, or kick megolm backup upload (ADR 0098).
+    /// `recovery_key` is required for create/export/replace; `None` is
+    /// kick-upload only. The key is consumed once and never persisted.
+    pub async fn enable_backup(
+        &self,
+        account_id: Uuid,
+        recovery_key: Option<&str>,
+    ) -> Result<EnableBackupResponse, ApiError> {
+        let body = match recovery_key {
+            Some(recovery_key) => serde_json::json!({ "recovery_key": recovery_key }),
+            None => serde_json::json!({}),
+        };
+        let request = self
+            .http
+            .post(format!(
+                "{}/v1/accounts/{account_id}/backup/enable",
+                self.base_url
+            ))
+            .json(&body);
+        self.send(lifecycle(request)).await
+    }
+
     pub async fn delete_account(&self, account_id: Uuid) -> Result<(), ApiError> {
         let request = self
             .http
@@ -1187,6 +1209,93 @@ pub struct AccountDto {
     pub device_id: Option<String>,
     #[serde(default)]
     pub verified: Option<bool>,
+    /// Live megolm-backup snapshot (ADR 0098). Orthogonal to `verified`.
+    /// Absent on older Axon servers; defaults to the unknown snapshot.
+    #[serde(default)]
+    pub backup: BackupSnapshot,
+}
+
+/// Live megolm-backup observation from `AccountDto.backup`.
+/// `recovery_state` is 4S completeness, not "history keys imported."
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct BackupSnapshot {
+    #[serde(default)]
+    pub exists_on_server: Option<bool>,
+    #[serde(default)]
+    pub this_device_uploading: bool,
+    #[serde(default)]
+    pub backup_state: BackupState,
+    #[serde(default)]
+    pub recovery_state: RecoveryState,
+}
+
+/// SDK backup machine state on the wire (ADR 0098).
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupState {
+    #[default]
+    Unknown,
+    Creating,
+    Enabling,
+    Resuming,
+    Enabled,
+    Downloading,
+    Disabling,
+}
+
+impl BackupState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Creating => "creating",
+            Self::Enabling => "enabling",
+            Self::Resuming => "resuming",
+            Self::Enabled => "enabled",
+            Self::Downloading => "downloading",
+            Self::Disabling => "disabling",
+        }
+    }
+}
+
+/// SDK `RecoveryState` on the wire (ADR 0098). Not "keys recovered."
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryState {
+    #[default]
+    Unknown,
+    Enabled,
+    Disabled,
+    Incomplete,
+}
+
+impl RecoveryState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+            Self::Incomplete => "incomplete",
+        }
+    }
+}
+
+/// What `POST …/backup/enable` did about megolm backup (ADR 0098).
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupAction {
+    Joined,
+    Enabled,
+    ExportPending,
+    Failed,
+    AlreadyUploading,
+}
+
+/// Flattened enable-backup 200 body: `AccountDto` plus `backup_action`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct EnableBackupResponse {
+    #[serde(flatten)]
+    pub account: AccountDto,
+    pub backup_action: BackupAction,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -2172,6 +2281,43 @@ mod tests {
         assert_eq!(response.data.user_id, "@alice:example.com");
         assert_eq!(response.data.state, AccountState::Active);
         assert_eq!(response.data.device_id.as_deref(), Some("DEVICE"));
+        assert_eq!(response.data.backup, BackupSnapshot::default());
+    }
+
+    #[test]
+    fn deserializes_enable_backup_response_flatten() {
+        let body = r#"{
+            "data": {
+                "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "user_id": "@alice:example.com",
+                "homeserver_url": "https://example.com",
+                "device_id": "DEVICE",
+                "state": "active",
+                "verified": true,
+                "backup": {
+                    "exists_on_server": true,
+                    "this_device_uploading": true,
+                    "backup_state": "enabled",
+                    "recovery_state": "enabled"
+                },
+                "backup_action": "enabled",
+                "created_at": "2026-06-10T00:00:00Z",
+                "updated_at": "2026-06-10T00:00:00Z"
+            }
+        }"#;
+        let response: ApiResponse<EnableBackupResponse> = serde_json::from_str(body).unwrap();
+        assert_eq!(response.data.account.user_id, "@alice:example.com");
+        assert_eq!(response.data.backup_action, BackupAction::Enabled);
+        assert_eq!(response.data.account.backup.exists_on_server, Some(true));
+        assert!(response.data.account.backup.this_device_uploading);
+        assert_eq!(
+            response.data.account.backup.backup_state,
+            BackupState::Enabled
+        );
+        assert_eq!(
+            response.data.account.backup.recovery_state,
+            RecoveryState::Enabled
+        );
     }
 
     #[test]

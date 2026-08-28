@@ -2323,6 +2323,31 @@ fn known_room_members(app: &App) -> Vec<KnownRoomMember> {
     members
 }
 
+/// Honest `/status` lines for `AccountDto.backup` (ADR 0098).
+/// `recovery_state` is 4S completeness, not history-key import.
+fn account_backup_status_lines(backup: &crate::api::BackupSnapshot) -> [String; 2] {
+    let exists = match backup.exists_on_server {
+        Some(true) => "on homeserver",
+        Some(false) => "none on homeserver",
+        None => "existence unknown",
+    };
+    let uploading = if backup.this_device_uploading {
+        "this device uploading"
+    } else {
+        "this device not uploading"
+    };
+    [
+        format!(
+            "      megolm backup: {exists}; {uploading}; state {}",
+            backup.backup_state.as_str()
+        ),
+        format!(
+            "      4S secret storage: {}",
+            backup.recovery_state.as_str()
+        ),
+    ]
+}
+
 pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
     use crate::app::ConnectionState;
 
@@ -2428,15 +2453,10 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
                 "  {marker} {identity}  ({state_label}, {rooms_for_account} rooms)",
             ));
             lines.push(format!("      device: {device_str}  [{verified_str}]",));
+            lines.extend(account_backup_status_lines(&account.backup));
         }
     }
 
-    // Diagnostics, behind `display.debug`. These are internal counters and
-    // timings — nothing a user acts on, and noise in the summary `/status` is
-    // otherwise meant to be. Three things already described this as gated while
-    // it was not: `App::protocol_drops`' own doc comment, #189's overlay work,
-    // and the `Debug overlay diagnostics (display.debug)` row in
-    // docs/demo-coverage.md. One switch, and new telemetry joins it here.
     // Diagnostics, behind `display.debug`. These are internal counters and
     // timings — nothing a user acts on, and noise in the summary `/status` is
     // otherwise meant to be. Three things already described this as gated while

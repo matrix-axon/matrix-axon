@@ -9,6 +9,8 @@ pub enum Command {
     },
     Logout(Option<String>),
     Recover(Option<String>),
+    /// `/backup enable [user]` — originate or kick megolm key backup.
+    BackupEnable(Option<String>),
     Delete(Option<String>),
     Room(String),
     /// /pin [room] — pin the given room (or the selected room) to the top.
@@ -125,6 +127,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/login", true),
     SlashCommand::supported("/logout", true),
     SlashCommand::supported("/recover", true),
+    SlashCommand::supported("/backup", true),
     SlashCommand::supported("/delete", true),
     SlashCommand::supported("/room", true),
     SlashCommand::supported("/switch", true),
@@ -176,12 +179,12 @@ pub(crate) const HELP_COMMAND_GROUPS: &[(usize, &str)] = &[
     (0, "Messaging"),
     (8, "Navigation"),
     (14, "Account management"),
-    (18, "Information"),
-    (22, "Message actions"),
-    (27, "Room actions"),
-    (34, "Verification"),
-    (36, "System"),
-    (42, "Pending"),
+    (19, "Information"),
+    (23, "Message actions"),
+    (28, "Room actions"),
+    (35, "Verification"),
+    (37, "System"),
+    (43, "Pending"),
 ];
 
 pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
@@ -194,7 +197,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "Alt+Enter",
         insert_text: "",
-        description: "insert a line break for a multi-line message (rebindable via shortcuts.newline, e.g. shift-enter)",
+        description: "insert a line break for a multi-line message",
     },
     HelpCommand {
         label: "//<text>",
@@ -204,7 +207,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/html <html>",
         insert_text: "/html ",
-        description: "send raw HTML as a formatted message (plain body is auto-stripped)",
+        description: "send raw HTML as a formatted message",
     },
     HelpCommand {
         label: "/literal <text>",
@@ -219,12 +222,12 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/spoiler [reason |] <text>",
         insert_text: "/spoiler ",
-        description: "send text as a spoiler; optional reason before \" | \" becomes the label",
+        description: "send text as a spoiler; label optional reason before \" | \"",
     },
     HelpCommand {
         label: "/send <path> [caption]",
         insert_text: "/send ",
-        description: "upload a local file (Tab-completes paths; drag-and-drop also fills the path) and send it, with an optional caption",
+        description: "upload a local file, tab-complete or drag-and-drop to fill path",
     },
     // ── Navigation ───────────────────────────────────────────────────────────
     HelpCommand {
@@ -235,7 +238,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/pin [room], /unpin [room]",
         insert_text: "/pin ",
-        description: "pin (or unpin) a room to the top of the list; defaults to the selected room",
+        description: "pin (or unpin) a room to the top of list; default current room",
     },
     HelpCommand {
         label: "/filter [all|dms|groups|unread|fav|<text>]",
@@ -261,28 +264,33 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/login [user] [password] [homeserver]",
         insert_text: "/login ",
-        description: "log in a Matrix account; prompts for missing credentials",
+        description: "log into a Matrix account",
     },
     HelpCommand {
         label: "/logout [user]",
         insert_text: "/logout ",
-        description: "log out an active account while retaining its archive",
+        description: "log out an active account (retains messages)",
     },
     HelpCommand {
         label: "/recover [user]",
         insert_text: "/recover ",
-        description: "import encryption keys for an active account from a hidden prompt",
+        description: "import encryption keys for an active account",
+    },
+    HelpCommand {
+        label: "/backup enable [user]",
+        insert_text: "/backup enable ",
+        description: "enable megolm key backup for a verified account",
     },
     HelpCommand {
         label: "/delete [user]",
         insert_text: "/delete ",
-        description: "permanently delete an account and all its data (requires typing YES)",
+        description: "permanently delete an account and all its data",
     },
     // ── Information ──────────────────────────────────────────────────────────
     HelpCommand {
         label: "/status",
         insert_text: "/status",
-        description: "show server connectivity and account state",
+        description: "server connectivity, accounts, and megolm backup state",
     },
     HelpCommand {
         label: "/event <id>",
@@ -303,7 +311,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/search [field:value...] <query>",
         insert_text: "/search ",
-        description: "search indexed history; bare /search opens a field form; /search ? shows syntax",
+        description: "search history; bare /search for interactive; /search ? for syntax",
     },
     HelpCommand {
         label: "/react [emoji]",
@@ -470,6 +478,7 @@ pub fn parse(input: &str) -> Command {
                 Command::Recover(target)
             }
         }
+        "backup" => parse_backup_command(arg),
         "delete" => Command::Delete((!arg.is_empty()).then(|| arg.to_owned())),
         "room" | "switch" if !arg.is_empty() => Command::Room(arg.to_owned()),
         "room" | "switch" => {
@@ -575,6 +584,28 @@ pub fn parse(input: &str) -> Command {
                 Command::Unknown(format!("unknown command: {command_name}"))
             }
         }
+    }
+}
+
+fn parse_backup_command(arg: &str) -> Command {
+    let mut tokens = arg.split_whitespace();
+    match tokens.next() {
+        Some("enable") => {
+            let target = tokens.next().map(str::to_owned);
+            if tokens.next().is_some() {
+                Command::Invalid(
+                    "/backup enable takes at most one account target; the recovery key is \
+                     entered at the hidden prompt"
+                        .to_owned(),
+                )
+            } else {
+                Command::BackupEnable(target)
+            }
+        }
+        Some(other) => Command::Invalid(format!(
+            "unknown /backup subcommand: {other}; try /backup enable"
+        )),
+        None => Command::Invalid("usage: /backup enable [user]".to_owned()),
     }
 }
 
@@ -997,6 +1028,27 @@ mod tests {
         );
         assert!(matches!(
             parse("/recover @me:example.com inline-key"),
+            Command::Invalid(message) if message.contains("hidden prompt")
+        ));
+    }
+
+    #[test]
+    fn parses_backup_enable_forms_and_rejects_inline_keys() {
+        assert_eq!(parse("/backup enable"), Command::BackupEnable(None));
+        assert_eq!(
+            parse("/backup enable @me:example.com"),
+            Command::BackupEnable(Some("@me:example.com".to_owned()))
+        );
+        assert!(matches!(
+            parse("/backup"),
+            Command::Invalid(message) if message.contains("/backup enable")
+        ));
+        assert!(matches!(
+            parse("/backup status"),
+            Command::Invalid(message) if message.contains("unknown /backup subcommand")
+        ));
+        assert!(matches!(
+            parse("/backup enable @me:example.com inline-key"),
             Command::Invalid(message) if message.contains("hidden prompt")
         ));
     }

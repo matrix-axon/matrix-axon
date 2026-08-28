@@ -24,7 +24,6 @@ import type {
   Theme,
   TimeFormat,
 } from '../stores/settings'
-import { AccountLifecycle } from './AccountsPage'
 
 const THEMES: { value: Theme; label: string }[] = [
   { value: 'system', label: 'System' },
@@ -236,7 +235,13 @@ export function SettingsPage() {
       </section>
       <section class="panel">
         <h2>Accounts</h2>
-        <AccountLifecycle />
+        <p>
+          Add Matrix accounts, choose the active account, and manage recovery,
+          verification, logout, and deletion on the dedicated accounts page.
+        </p>
+        <a href="/accounts" class="button-link">
+          Manage accounts
+        </a>
       </section>
       <DebugSettings />
       <section class="panel">

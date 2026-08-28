@@ -72,6 +72,7 @@ shows it.
 | Message actions: edit, redact, reply                    | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Room actions: invite, leave, pin (M19)                  | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Device verification (SAS)                               | **not covered**       | **not covered**                                                                                           | **not covered** |
+| Matrix OAuth QR account acquisition                     | **n/a**               | **not covered** — demo stack has no MAS or second trusted device                                          | **not covered** |
 | Typing indicators and read receipts (M18)               | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Inline image whose terminal encode failed (placeholder) | **not covered**       | **n/a**                                                                                                   | **n/a**         |
 | Debug overlay diagnostics (`display.debug`)             | **not covered**       | **n/a**                                                                                                   | **n/a**         |
@@ -97,6 +98,8 @@ shows it.
   vacuously the second time, on the badge the first run left behind.
 - **Device verification.** Needs a second device to verify against, which the
   corpus does not stand up.
+- **Matrix OAuth QR account acquisition.** Needs MAS and a second trusted
+  Matrix device; the demo stack provides neither.
 - **Room list loading state.** The panel names the startup stage it is on
   (ADR 0093) while accounts, rooms, and device state load. Against the demo
   stack all three land in well under a frame, so a scene would either catch

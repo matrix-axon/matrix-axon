@@ -234,6 +234,44 @@ fn delete_completion_selects_duplicate_user_ids_by_account_id() {
 }
 
 #[test]
+fn backup_completion_fills_enable_then_cycles_active_accounts() {
+    let mut app = app_with_rooms(Vec::new());
+    app.accounts.accounts = vec![
+        account("@alice:example.com", AccountState::Active),
+        account("@bob:example.com", AccountState::Active),
+        account("@old:example.com", AccountState::Deactivated),
+    ];
+
+    app.input.buffer = "/backup".to_owned();
+    app.complete_input();
+    assert_eq!(app.input.buffer, "/backup enable");
+    assert!(app.status.text(false).contains("completed subcommand"));
+
+    app.complete_input();
+    assert_eq!(app.input.buffer, "/backup enable @alice:example.com");
+    assert!(app.status.text(false).contains("[1/2]"));
+    app.complete_input();
+    assert_eq!(app.input.buffer, "/backup enable @bob:example.com");
+}
+
+#[test]
+fn backup_enable_completion_selects_duplicate_user_ids_by_account_id() {
+    let first_id = Uuid::from_u128(1);
+    let second_id = Uuid::from_u128(2);
+    let mut app = app_with_rooms(Vec::new());
+    app.accounts.accounts = vec![
+        account_with_id(first_id, "@alice:example.com", AccountState::Active),
+        account_with_id(second_id, "@alice:example.com", AccountState::Active),
+    ];
+    app.input.buffer = "/backup enable alice".to_owned();
+
+    app.complete_input();
+    assert_eq!(app.input.buffer, format!("/backup enable {first_id}"));
+    app.complete_input();
+    assert_eq!(app.input.buffer, format!("/backup enable {second_id}"));
+}
+
+#[test]
 fn verify_completion_matches_room_users_and_excludes_self() {
     let r = room("!dm:example.com", None, Some("DM"));
     let mut app = app_with_rooms(vec![r.clone()]);

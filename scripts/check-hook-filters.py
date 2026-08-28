@@ -80,7 +80,7 @@ CASES: list[tuple[str, set[str]]] = [
     ("clients/web/src/api/schema.d.ts", {"web-api-schema", "web-lint", "web-test", "web-build"}),
     ("clients/web/dist/index.html", {"web-lint", "web-test", "web-build"}),
     # The schema contract is consumed by the build, not by lint or unit tests.
-    ("openapi/openapi.json", {"web-api-schema", "web-build"}),
+    ("openapi/openapi.json", {"web-api-schema", "web-build", "openapi-compat"}),
     # Rust sources reach every rust hook...
     ("crates/axon-store/src/lib.rs", {"rustfmt", "rust-clippy", "cargo-test"}),
     ("clients/tui/src/app/rooms.rs", {"rustfmt", "rust-clippy", "cargo-test"}),

@@ -42,6 +42,9 @@ impl App {
         if self.complete_recover_command_input(reverse) {
             return;
         }
+        if self.complete_backup_command_input(reverse) {
+            return;
+        }
         if self.complete_delete_command_input(reverse) {
             return;
         }
@@ -218,6 +221,64 @@ impl App {
         self.input.recover_command_completion = Some((query, selected));
         self.status = Status::Info(format!(
             "[{}/{}] {} - Tab/Shift-Tab to cycle, Enter to recover",
+            selected + 1,
+            candidates.len(),
+            user_id
+        ));
+        true
+    }
+
+    pub(crate) fn complete_backup_command_input(&mut self, reverse: bool) -> bool {
+        if let Some(target) = command_target_prefix(&self.input.buffer, "/backup enable") {
+            let target = target.to_owned();
+            return self.complete_backup_enable_account(&target, reverse);
+        }
+        let Some(target) = command_target_prefix(&self.input.buffer, "/backup") else {
+            return false;
+        };
+        if target.is_empty()
+            || ("enable".starts_with(target) && !target.chars().any(char::is_whitespace))
+        {
+            self.input.buffer = "/backup enable".to_owned();
+            self.move_cursor_to_end();
+            self.input.backup_command_completion = None;
+            self.status = Status::Info("completed subcommand: /backup enable".to_owned());
+            return true;
+        }
+        false
+    }
+
+    fn complete_backup_enable_account(&mut self, target: &str, reverse: bool) -> bool {
+        let query = self
+            .input
+            .backup_command_completion
+            .as_ref()
+            .map(|(query, _)| query.clone())
+            .unwrap_or_else(|| target.to_owned());
+        let candidates = self.active_recover_candidates(&query);
+        if candidates.is_empty() {
+            self.input.backup_command_completion = None;
+            self.status = Status::Info(if query.is_empty() {
+                "no active accounts".to_owned()
+            } else {
+                format!("no active account matches: {query}")
+            });
+            return true;
+        }
+
+        let selected = if let Some((_, current)) = self.input.backup_command_completion.as_ref() {
+            cycle_index(*current, candidates.len(), reverse)
+        } else if reverse {
+            candidates.len() - 1
+        } else {
+            0
+        };
+        let user_id = &candidates[selected];
+        self.input.buffer = format!("/backup enable {user_id}");
+        self.move_cursor_to_end();
+        self.input.backup_command_completion = Some((query, selected));
+        self.status = Status::Info(format!(
+            "[{}/{}] {} - Tab/Shift-Tab to cycle, Enter to enable backup",
             selected + 1,
             candidates.len(),
             user_id
@@ -879,8 +940,8 @@ fn target_after_command_name(rest: &str) -> Option<&str> {
 }
 
 /// `/<command> <target>` prefix extraction for the many commands that share
-/// this exact shape (`/send`, `/logout`, `/delete`, `/recover`, `/account`,
-/// `/verify`; `/room`'s `/switch` alias and `/filter`'s extra
+/// this exact shape (`/send`, `/logout`, `/delete`, `/recover`, `/backup enable`,
+/// `/account`, `/verify`; `/room`'s `/switch` alias and `/filter`'s extra
 /// no-embedded-whitespace constraint build on [`target_after_command_name`]
 /// directly instead, since they aren't quite this shape).
 fn command_target_prefix<'a>(input: &'a str, command: &str) -> Option<&'a str> {

@@ -13,6 +13,10 @@ export type AccountDto = components['schemas']['AccountDto']
 export type SyncState = AccountDto['sync_state']
 export type Account = AccountDto
 
+export function hasActiveAccount(accounts: readonly Account[]): boolean {
+  return accounts.some((account) => account.state === 'active')
+}
+
 /**
  * Outcome of a recover call. `verified` is the cross-signing state the server
  * re-derives and returns on success (ADR 0026); it distinguishes a full
