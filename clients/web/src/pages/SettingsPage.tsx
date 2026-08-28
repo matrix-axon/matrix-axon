@@ -459,6 +459,21 @@ function DebugSettings() {
             the app — the numbers a screen recording needs on a phone, where
             there is no console to read marks from.
           </p>
+          <label class="setting-row">
+            <input
+              type="checkbox"
+              checked={settings.perfOverlay.value}
+              onChange={(event) =>
+                (settings.perfOverlay.value = event.currentTarget.checked)
+              }
+            />
+            Show the live readout on screen
+          </label>
+          <p class="muted">
+            Draws the numbers over the app. Turn this off to record during
+            ordinary use — the summaries are still collected, and still kept
+            below if that is enabled.
+          </p>
           <TelemetrySettings />
           <label class="setting-row">
             <input

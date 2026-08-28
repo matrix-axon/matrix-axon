@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  perfActive,
   perfMark,
   perfMarkBootRoomList,
   perfOverlayEntries,
   setPerfEnabled,
+  setPerfOverlay,
 } from './perf'
 
 /** The detail of the one `transition:back` mark, or `null` if none was made. */
@@ -838,5 +840,49 @@ describe('room-open summary', () => {
     } finally {
       vi.restoreAllMocks()
     }
+  })
+})
+
+describe('readout visibility', () => {
+  afterEach(() => {
+    setPerfOverlay(false)
+    setPerfEnabled(false)
+  })
+
+  it('records with the readout hidden, which is the ordinary-use case', () => {
+    // The two were one flag, so instrumentation cost a box of numbers over the
+    // app all day. Recording has to work without it, or nobody leaves it on
+    // long enough to catch a slow load they were not watching for.
+    setPerfEnabled(true)
+    setPerfOverlay(false)
+    expect(perfActive.value).toBe(false)
+
+    perfMark('boot:room-open', { rows: 5 })
+
+    expect(
+      perfOverlayEntries.value.some((entry) => entry.name === 'boot:room-open'),
+    ).toBe(true)
+  })
+
+  it('refuses to show a readout with nothing behind it', () => {
+    // Recording off means there is nothing to draw, whatever the setting says.
+    setPerfEnabled(false)
+    setPerfOverlay(true)
+    expect(perfActive.value).toBe(false)
+  })
+
+  it('can be shown and hidden within one session', () => {
+    setPerfEnabled(true)
+    setPerfOverlay(true)
+    expect(perfActive.value).toBe(true)
+    setPerfOverlay(false)
+    expect(perfActive.value).toBe(false)
+  })
+
+  it('hides the readout when recording stops', () => {
+    setPerfEnabled(true)
+    setPerfOverlay(true)
+    setPerfEnabled(false)
+    expect(perfActive.value).toBe(false)
   })
 })

@@ -15,7 +15,12 @@ export function setPerfEnabled(on: boolean): void {
     return
   }
   enabled = on
-  perfActive.value = on
+  if (!on) {
+    // Recording off means there is nothing for the readout to draw, whatever
+    // its own setting says. Turning recording back on does not re-show it —
+    // that is `setPerfOverlay`'s to decide.
+    perfActive.value = false
+  }
   try {
     if (on) {
       window.sessionStorage.setItem(STORAGE_KEY, '1')
@@ -81,8 +86,24 @@ export interface PerfOverlayEntry {
  */
 export const perfOverlayEntries = signal<readonly PerfOverlayEntry[]>([])
 
-/** Reactive mirror of `perfEnabled()`, so the readout can mount and unmount. */
+/**
+ * Whether the on-screen readout is drawn — **not** whether marks are recorded.
+ *
+ * The two were one flag, which made the overlay the price of instrumentation:
+ * recording during ordinary use meant a box of numbers over the app all day.
+ * Now that summaries are kept on disk and can be read back afterwards, the
+ * readout is the optional half, and recording quietly in the background is the
+ * useful default for catching a slow load nobody was watching for.
+ */
 export const perfActive = signal(false)
+
+/**
+ * Show or hide the readout. Ignored while recording is off, since there would
+ * be nothing to draw.
+ */
+export function setPerfOverlay(on: boolean): void {
+  perfActive.value = on && perfEnabled()
+}
 
 export function perfEnabled(): boolean {
   if (enabled !== null) {
@@ -90,6 +111,8 @@ export function perfEnabled(): boolean {
   }
   const params = new URLSearchParams(window.location.search)
   if (params.get('perf') === '1') {
+    // The URL flag is the harness and one-off-session path, and it means "show
+    // me everything" — readout included, without a second setting to find.
     enabled = true
     perfActive.value = true
     try {
@@ -104,7 +127,6 @@ export function perfEnabled(): boolean {
   } catch {
     enabled = false
   }
-  perfActive.value = enabled
   return enabled
 }
 

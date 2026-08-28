@@ -42,11 +42,14 @@ H1 and H2 are the leading candidates and are not mutually exclusive.
 Enable **Settings → Debug → Performance instrumentation** (not `?perf=1`: that flag latches before any store exists and can silently mask the ordering, see ADR 0077).
 Each cold room open then emits one summary line plus up to three request lines.
 
-**Turn on "Keep performance summaries on this device" as well.** The overlay
+**Turn off "Show the live readout on screen" and turn on "Keep performance
+summaries on this device".** The overlay
 only helps when someone is watching, and the loads worth capturing rarely
-happen while a screen recording is running. With it on, the summaries are kept
-in IndexedDB and **Copy telemetry** puts them on the clipboard — paste them
-into a report instead of screenshotting. Timings only: the marks that carry
+happen while a screen recording is running. That combination is what makes instrumentation
+usable during ordinary use: the summaries are recorded and kept in IndexedDB
+with no box of numbers over the app, and **Copy telemetry** puts them on the
+clipboard afterwards — paste them into a report instead of screenshotting.
+Leave the readout on only when you intend to watch for something live. Timings only: the marks that carry
 room and account identifiers are never written, and any identifier-shaped value
 is refused even from an allow-listed mark (`stores/telemetry.ts`). Cleared on
 sign-out with the rest of the cache.
