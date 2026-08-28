@@ -2,15 +2,12 @@
 
 ## Status
 
-Accepted. **Phase 1 shipped** (#90), **phase 2 shipped** (#106), **phase 3
-declined on measurement** (see "What the weak-link captures show" below),
-phase 4 still contingent on issue #23.
+Accepted.
+**Phase 1 shipped** (#90), **phase 2 shipped** (#106), **phase 3 declined on measurement** (see "What the weak-link captures show" below), phase 4 still contingent on issue #23.
 
-Every latency figure in the Context below was measured **before** PR #206
-(ADR 0095, which cut `GET /v1/rooms` TTFB from 12–21 s to 29–80 ms) and PR
-#231 (response compression). They are kept because the decisions rest on
-them, but they no longer describe the server. The weak-link section below is
-the current picture.
+Every latency figure in the Context below was measured **before** PR #206 (ADR 0095, which cut `GET /v1/rooms` TTFB from 12–21 s to 29–80 ms) and PR #231 (response compression).
+They are kept because the decisions rest on them, but they no longer describe the server.
+The weak-link section below is the current picture.
 
 ## In brief
 
@@ -308,10 +305,7 @@ Two things this settles, and one it does not:
 
 ### What the weak-link captures show (2026-08-27, after #206 and #231)
 
-A dozen captures from an iPhone against a production account — now **3,638
-rooms** — under Network Link Conditioner, reading `boot:room-list` and the
-`boot:room-open` summary added for this work
-(`docs/web-slow-link-measurement.md`).
+A dozen captures from an iPhone against a production account — now **3,638 rooms** — under Network Link Conditioner, reading `boot:room-list` and the `boot:room-open` summary added for this work (`docs/web-slow-link-measurement.md`).
 
 | Condition            | room paints | timeline `ttfb` | queueing     | room list settles | cache `saved` |
 | -------------------- | ----------- | --------------- | ------------ | ----------------- | ------------- |
@@ -323,50 +317,38 @@ rooms** — under Network Link Conditioner, reading `boot:room-list` and the
 Four things follow, two of which change this ADR's own conclusions.
 
 - **Phase 2's justification moved, and survives.** `saved` was 1,255–1,639 ms
-  as shipped; against a fixed server it is **217 ms**. The argument this ADR
-  was built on — that the room list costs 1.3 s of server think-time — is
-  gone. But on the links the feature was actually meant for it is worth
+  as shipped; against a fixed server it is **217 ms**.
+  The argument this ADR was built on — that the room list costs 1.3 s of server think-time — is gone.
+  But on the links the feature was actually meant for it is worth
   **5.3–14.7 s**, because the 261 KB body still has to cross the wire. Phase 2
-  is now justified by transfer rather than by TTFB, and more strongly than
-  before.
+  is now justified by transfer rather than by TTFB, and more strongly than before.
 - **The cold IndexedDB read is 25–131 ms** at 3,638 rooms, against the 31–44 ms
-  this ADR recorded at 2,204. Still three orders of magnitude inside the
-  network arm it replaces; still not the ~1 ms the synthetic harness claimed.
+  this ADR recorded at 2,204.
+  Still three orders of magnitude inside the network arm it replaces; still not the ~1 ms the synthetic harness claimed.
 - **The bottleneck at a room open is neither the timeline page nor queueing.**
-  The timeline page is 9.4 KB — the _smallest_ thing on the wire — and
-  consistently reports `q` in single-digit milliseconds with the connection
-  reused (`conn=0`). What delays it is contention for a shared HTTP/2
-  connection carrying 90 KB of account-wide read markers (#280) and one
-  preview request per visible room-list row (#278). On a lossy link, four
-  independent requests were observed reporting _identical_ TTFB — head-of-line
-  blocking releasing every stream at once — and the client has no timeout to
-  bound it (#281).
+  The timeline page is 9.4 KB — the _smallest_ thing on the wire — and consistently reports `q` in single-digit milliseconds with the connection reused (`conn=0`).
+  What delays it is contention for a shared HTTP/2 connection carrying 90 KB of account-wide read markers (#280) and one preview request per visible room-list row (#278).
+  On a lossy link, four independent requests were observed reporting _identical_ TTFB — head-of-line blocking releasing every stream at once — and the client has no timeout to bound it (#281).
 - **A negative `saved` is obtainable and was obtained.** A cold-cache control
-  reported `saved=-5` with `hydrate=null`: nothing to paint, so rows land after
-  the response. The honest failure signal this ADR asked for works.
+  reported `saved=-5` with `hydrate=null`: nothing to paint, so rows land after the response.
+  The honest failure signal this ADR asked for works.
 
 #### Phase 3 is declined
 
 The timeline-body cache is not built, and on this evidence should not be.
 
-It caches the newest page of a room **already visited**. The complaint that
-prompted this re-measurement is a _newly opened_ room, which by definition has
-nothing cached — so phase 3 does not address it at all. And where a cache
-would apply, the body it saves is the smallest one in the exchange: 9.4 KB,
-against 90 KB of read markers and 25 preview round trips fired in the same
-breath. Fixing those (#278, #280) removes far more of the wait than caching
-the timeline would, and neither writes message plaintext to disk.
+It caches the newest page of a room **already visited**.
+The complaint that prompted this re-measurement is a _newly opened_ room, which by definition has nothing cached — so phase 3 does not address it at all.
+And where a cache would apply, the body it saves is the smallest one in the exchange:
+9.4 KB, against 90 KB of read markers and 25 preview round trips fired in the same breath.
+Fixing those (#278, #280) removes far more of the wait than caching the timeline would, and neither writes message plaintext to disk.
 
-The [Privacy](#privacy) section asks for "an explicit yes, not silence" on the
-timeline-body default. **The answer is no**: the trade was plaintext at rest
-for tens of milliseconds when this ADR was written, and the measurements make
-it plaintext at rest for the smallest term in a room open. Phase 1's in-memory
-store cache already covers the re-entry case it would have shared.
+The [Privacy](#privacy) section asks for "an explicit yes, not silence" on the timeline-body default.
+**The answer is no**: the trade was plaintext at rest for tens of milliseconds when this ADR was written, and the measurements make it plaintext at rest for the smallest term in a room open.
+Phase 1's in-memory store cache already covers the re-entry case it would have shared.
 
-Reviving it would be an _offline_ feature rather than a latency one — a
-different design, wanting the retained slice rather than one page, and
-probably the service worker this ADR deliberately refuses to introduce. That
-is a new ADR, not this one.
+Reviving it would be an _offline_ feature rather than a latency one — a different design, wanting the retained slice rather than one page, and probably the service worker this ADR deliberately refuses to introduce.
+That is a new ADR, not this one.
 
 ### The room list had a server-side problem this ADR could not fix
 

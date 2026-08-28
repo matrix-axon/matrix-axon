@@ -413,12 +413,15 @@ export function createTimelineStore(
           : 'head'
     perfMark('timeline:fetch:start', {
       kind,
+      roomId,
       thread: threadRoot !== undefined,
     })
     type Page = { events: EventDto[]; next: string | null }
     const settled = (page: Page | null): Page | null => {
       perfMark('timeline:fetch:end', {
         kind,
+        roomId,
+        thread: threadRoot !== undefined,
         ok: page !== null,
         events: page?.events.length ?? null,
       })

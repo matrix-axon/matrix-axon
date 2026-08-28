@@ -371,6 +371,18 @@ const ROOM_OPEN_SLOW_REQUESTS = 3
 interface RoomOpen {
   start: number
   warm: boolean
+  /**
+   * The room this open measures, so a *previous* room's late marks cannot be
+   * written into it.
+   *
+   * Nothing cancels an in-flight request when the user leaves a room — there
+   * is no `AbortController` in any of the stores (#281) — so on a slow link,
+   * switching from A to B while A's timeline, members or threads are still
+   * outstanding stamped B's summary with A's timings.
+   * A capture silently attributed to the wrong room is worse than no capture,
+   * because the whole readout exists to be trusted.
+   */
+  roomId: string | null
   /** Head fetches issued for this open. More than one is the reconnect-loop signal. */
   attempts: number
   /** When the head fetch settled — the request that alone gates first paint. */
@@ -500,6 +512,7 @@ function noteRoomOpen(
     roomOpen = {
       start: at,
       warm: detail?.warm === true,
+      roomId: typeof detail?.roomId === 'string' ? detail.roomId : null,
       attempts: 0,
       head: null,
       headAt: null,
@@ -527,6 +540,13 @@ function noteRoomOpen(
   }
   const open = roomOpen
   if (open === null) {
+    return
+  }
+  // A mark that names a room must name *this* one.
+  // Marks carrying no room — the cross-account room list — belong to whichever
+  // open is current by definition, since there is only ever one of them.
+  const marked = detail?.roomId
+  if (typeof marked === 'string' && marked !== open.roomId) {
     return
   }
   const since = (): number => Math.round(at - open.start)
@@ -669,8 +689,16 @@ function emitRoomOpen(phase: 'settled' | 'waiting'): void {
     clearTimeout(open.grace)
     open.grace = null
   }
-  const load = linkLoad(open.start)
-  const head = headTiming(open)
+  // Scanned once and shared. Three independent `getEntriesByType('resource')`
+  // passes over up to a thousand entries, back to back, is work this readout
+  // was putting on the very path it measures — and worse, `headTiming` and the
+  // pinned `:req` line each chose the room's timeline request *by a different
+  // rule*, so the summary and the line below it could describe two different
+  // physical requests while claiming to describe one.
+  const entries = resourceEntries(open.start)
+  const headEntry = roomHeadEntry(open, entries)
+  const load = linkLoad(entries)
+  const head = headTiming(headEntry)
   perfMark('boot:room-open', {
     phase,
     via: open.via,
@@ -704,7 +732,7 @@ function emitRoomOpen(phase: 'settled' | 'waiting'): void {
     attempts: open.attempts,
     warm: open.warm,
   })
-  summariseRequests(open.start)
+  summariseRequests(entries, headEntry)
   if (phase === 'settled') {
     open.emitted = true
     roomOpen = null
@@ -749,49 +777,72 @@ function prepareResourceBuffer(): void {
  * `shortRoute` renders them identically. The head fetch is the one whose
  * `responseEnd` coincides with the `timeline:fetch:end` mark.
  */
-function headTiming(open: RoomOpen): {
+function headTiming(entry: PerformanceResourceTiming | null): {
   wait: number | null
   conn: number | null
   ttfb: number | null
   xfer: number | null
 } {
-  const none = { wait: null, conn: null, ttfb: null, xfer: null }
-  if (open.headAt === null) {
-    return none
+  if (entry === null) {
+    return { wait: null, conn: null, ttfb: null, xfer: null }
   }
-  const headAt = open.headAt
-  let entries: PerformanceResourceTiming[]
+  return {
+    wait: Math.round(entry.requestStart - entry.startTime),
+    conn: Math.round(entry.connectEnd - entry.connectStart),
+    ttfb: Math.round(entry.responseStart - entry.requestStart),
+    xfer: Math.round(entry.responseEnd - entry.responseStart),
+  }
+}
+
+/** Every `/v1/` request that overlapped this open, read from the buffer once. */
+function resourceEntries(since: number): PerformanceResourceTiming[] {
   try {
-    entries = performance
+    return performance
       .getEntriesByType('resource')
       .filter(
         (entry): entry is PerformanceResourceTiming =>
-          entry.startTime >= open.start && roomTimelinePage(entry.name),
+          entry.startTime >= since && entry.name.includes('/v1/'),
       )
-      // A withheld breakdown reads 0 across the board, which would win the
-      // nearest-settle match with meaningless numbers.
-      .filter((entry) => entry.requestStart > 0)
   } catch {
-    return none
+    // Not every engine exposes resource timing; the summary still reads.
+    return []
   }
+}
+
+/**
+ * The room's own head fetch, matched to its resource entry by settle time.
+ *
+ * **The one place this is decided.** Route matching alone is not enough: the
+ * room list resolves a preview per room, so several `.../rooms/{id}/timeline`
+ * entries can overlap one open and `shortRoute` renders them identically.
+ * Choosing by duration instead — which the pinned `:req` line used to do —
+ * picks whichever was slowest, which is routinely a different room's preview,
+ * and then the summary and the line beneath it describe two different physical
+ * requests while claiming to describe one.
+ */
+function roomHeadEntry(
+  open: RoomOpen,
+  entries: readonly PerformanceResourceTiming[],
+): PerformanceResourceTiming | null {
+  if (open.headAt === null) {
+    return null
+  }
+  const headAt = open.headAt
   let best: PerformanceResourceTiming | null = null
   let bestGap = Number.POSITIVE_INFINITY
   for (const entry of entries) {
+    // A withheld breakdown reads 0 across the board, which would win the
+    // nearest-settle match with meaningless numbers.
+    if (!roomTimelinePage(entry.name) || entry.requestStart <= 0) {
+      continue
+    }
     const gap = Math.abs(entry.responseEnd - headAt)
     if (gap < bestGap) {
       best = entry
       bestGap = gap
     }
   }
-  if (best === null) {
-    return none
-  }
-  return {
-    wait: Math.round(best.requestStart - best.startTime),
-    conn: Math.round(best.connectEnd - best.connectStart),
-    ttfb: Math.round(best.responseStart - best.requestStart),
-    xfer: Math.round(best.responseEnd - best.responseStart),
-  }
+  return best
 }
 
 /** The requested-but-unsettled competitors at emit time, or `null` if none. */
@@ -812,18 +863,10 @@ function pendingOf(open: RoomOpen): string | null {
  * identically and a burst of them is invisible. `bytes` is `null` when no
  * entry exposed a transfer size, which is not the same as zero.
  */
-function linkLoad(since: number): { count: number; bytes: number | null } {
-  let entries: PerformanceResourceTiming[]
-  try {
-    entries = performance
-      .getEntriesByType('resource')
-      .filter(
-        (entry): entry is PerformanceResourceTiming =>
-          entry.startTime >= since && entry.name.includes('/v1/'),
-      )
-  } catch {
-    return { count: 0, bytes: null }
-  }
+function linkLoad(entries: readonly PerformanceResourceTiming[]): {
+  count: number
+  bytes: number | null
+} {
   const sized = entries.filter((entry) => entry.transferSize > 0)
   return {
     count: entries.length,
@@ -849,30 +892,22 @@ function linkLoad(since: number): { count: number; bytes: number | null } {
  * A cross-origin deployment reports `cors: true` and gives up only the
  * breakdown, not the total.
  */
-function summariseRequests(since: number): void {
-  let entries: PerformanceResourceTiming[]
-  try {
-    entries = performance
-      .getEntriesByType('resource')
-      .filter(
-        (entry): entry is PerformanceResourceTiming =>
-          entry.startTime >= since && entry.name.includes('/v1/'),
-      )
-  } catch {
-    // Not every engine exposes resource timing; the summary above still reads.
-    return
-  }
-  // The timeline page is pinned in whether or not it ranks, because it is the
-  // one request that gates the paint and it is *fastest* exactly when the room
-  // opens well — so ranking by duration drops the baseline reading and keeps
-  // only the requests that beat it. It has to be in every line-up to be
-  // comparable across conditions.
+function summariseRequests(
+  entries: readonly PerformanceResourceTiming[],
+  head: PerformanceResourceTiming | null,
+): void {
+  // The head fetch is pinned in whether or not it ranks, because it is the one
+  // request that gates the paint and it is *fastest* exactly when the room
+  // opens well — so ranking by duration alone drops the baseline reading and
+  // keeps only the requests that beat it.
+  // It is the entry `roomHeadEntry` chose, not a second guess at which request
+  // that was: picking it again here by duration is what let this line and the
+  // summary above disagree about the same request.
   const byDuration = [...entries].sort((a, b) => b.duration - a.duration)
-  const timeline = byDuration.find((entry) => timelinePage(entry.name))
   const shown = [
-    ...(timeline === undefined ? [] : [timeline]),
-    ...byDuration.filter((entry) => entry !== timeline),
-  ].slice(0, ROOM_OPEN_SLOW_REQUESTS + (timeline === undefined ? 0 : 1))
+    ...(head === null ? [] : [head]),
+    ...byDuration.filter((entry) => entry !== head),
+  ].slice(0, ROOM_OPEN_SLOW_REQUESTS + (head === null ? 0 : 1))
   for (const entry of shown) {
     // `requestStart` reads 0 when timing detail is withheld, and reporting that
     // as "no queueing at all" would argue against the very cause being tested.

@@ -250,10 +250,13 @@ describe('room-open summary', () => {
     }
   }
 
+  /** The room every mark in these tests belongs to, since identity now gates. */
+  const ROOM = '!r:example.org'
+
   function openRoom(warm = false): void {
     perfMark('room-page:initial-load-effect', {
       accountId: 'a',
-      roomId: '!r:example.org',
+      roomId: ROOM,
       highlighted: false,
       warm,
     })
@@ -267,15 +270,15 @@ describe('room-open summary', () => {
   function settleCompetitors(members = 4200): void {
     startCompetitors()
     perfMark('rooms:refresh:end', { ok: true, rooms: 2 })
-    perfMark('members:refresh:end', { roomId: 'r', members, ok: true })
-    perfMark('threads:refresh:end', { roomId: 'r', threads: 3, ok: true })
+    perfMark('members:refresh:end', { roomId: ROOM, members, ok: true })
+    perfMark('threads:refresh:end', { roomId: ROOM, threads: 3, ok: true })
   }
 
   /** The three requests going out, without any of them coming back. */
   function startCompetitors(): void {
     perfMark('rooms:refresh:start')
-    perfMark('members:refresh:start', { roomId: 'r' })
-    perfMark('threads:refresh:start', { roomId: 'r' })
+    perfMark('members:refresh:start', { roomId: ROOM })
+    perfMark('threads:refresh:start', { roomId: ROOM })
   }
 
   it('names the three requests the timeline page competed with', async () => {
@@ -356,7 +359,7 @@ describe('room-open summary', () => {
       openRoom()
       startCompetitors()
       perfMark('rooms:refresh:end', { ok: true, rooms: 2 })
-      perfMark('threads:refresh:end', { roomId: 'r', threads: 3, ok: true })
+      perfMark('threads:refresh:end', { roomId: ROOM, threads: 3, ok: true })
       // Members never answers — the summary must still go out, or one hung
       // request would take the whole reading with it.
       perfMark('timeline:fetch:end', { kind: 'head', thread: false, ok: true })
@@ -393,6 +396,76 @@ describe('room-open summary', () => {
     await frames()
 
     expect(roomOpenSummary()!.previews).toBe(24)
+  })
+
+  it("refuses a previous room's late marks", async () => {
+    // Nothing cancels an in-flight request when the user leaves a room, so on
+    // a slow link A's timeline and members can land after B has opened. They
+    // used to be written straight into B's record, producing a line for B
+    // stamped with A's timings — a capture silently attributed to the wrong
+    // room, which is worse than no capture at all.
+    const OTHER = '!a:example.org'
+    perfMark('room-page:initial-load-effect', {
+      accountId: 'a',
+      roomId: OTHER,
+      highlighted: false,
+      warm: false,
+    })
+    perfMark('timeline:fetch:start', {
+      kind: 'head',
+      roomId: OTHER,
+      thread: false,
+    })
+
+    // The user switches to B before any of A's requests come back.
+    openRoom()
+    settleCompetitors(7)
+
+    // A's marks arrive late.
+    perfMark('timeline:fetch:end', {
+      kind: 'head',
+      roomId: OTHER,
+      thread: false,
+      ok: true,
+    })
+    perfMark('members:refresh:end', {
+      roomId: OTHER,
+      members: 9999,
+      ok: true,
+    })
+    perfMark('room-page:timeline-render', {
+      roomId: OTHER,
+      hasRows: true,
+      visible: 40,
+    })
+    await frames()
+
+    // None of that may settle B, and none of it may be reported as B's.
+    expect(roomOpenSummary()).toBeNull()
+
+    perfMark('timeline:fetch:start', {
+      kind: 'head',
+      roomId: ROOM,
+      thread: false,
+    })
+    perfMark('timeline:fetch:end', {
+      kind: 'head',
+      roomId: ROOM,
+      thread: false,
+      ok: true,
+    })
+    perfMark('room-page:timeline-render', {
+      roomId: ROOM,
+      hasRows: true,
+      visible: 3,
+    })
+    await frames()
+
+    const summary = roomOpenSummary()
+    expect(summary).not.toBeNull()
+    expect(summary!.people).toBe(7)
+    // One attempt, B's. A's `timeline:fetch:start` must not have counted.
+    expect(summary!.attempts).toBe(1)
   })
 
   it('settles on a jump fetch, which is how a deep link fills the pane', async () => {
@@ -511,10 +584,10 @@ describe('room-open summary', () => {
     // `pending` said nothing was outstanding. Found on a phone, at 3G.
     perfMark('rooms:refresh:start')
     openRoom()
-    perfMark('members:refresh:start', { roomId: 'r' })
-    perfMark('threads:refresh:start', { roomId: 'r' })
-    perfMark('members:refresh:end', { roomId: 'r', members: 4, ok: true })
-    perfMark('threads:refresh:end', { roomId: 'r', threads: 1, ok: true })
+    perfMark('members:refresh:start', { roomId: ROOM })
+    perfMark('threads:refresh:start', { roomId: ROOM })
+    perfMark('members:refresh:end', { roomId: ROOM, members: 4, ok: true })
+    perfMark('threads:refresh:end', { roomId: ROOM, threads: 1, ok: true })
     perfMark('timeline:fetch:end', { kind: 'head', thread: false, ok: true })
     await frames()
 
@@ -535,10 +608,10 @@ describe('room-open summary', () => {
     // that is merely slow — on a saturated link the two look identical, and
     // reading one as the other turns a starved link into a quiet one.
     openRoom()
-    perfMark('members:refresh:start', { roomId: 'r' })
-    perfMark('threads:refresh:start', { roomId: 'r' })
-    perfMark('members:refresh:end', { roomId: 'r', members: 4, ok: true })
-    perfMark('threads:refresh:end', { roomId: 'r', threads: 1, ok: true })
+    perfMark('members:refresh:start', { roomId: ROOM })
+    perfMark('threads:refresh:start', { roomId: ROOM })
+    perfMark('members:refresh:end', { roomId: ROOM, members: 4, ok: true })
+    perfMark('threads:refresh:end', { roomId: ROOM, threads: 1, ok: true })
     perfMark('timeline:fetch:end', { kind: 'head', thread: false, ok: true })
     await frames()
 
