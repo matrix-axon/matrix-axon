@@ -51,6 +51,7 @@ function accountsMock(): AccountsStore {
     login: vi.fn(),
     logout: vi.fn(),
     recover: vi.fn(),
+    enableBackup: vi.fn(),
     remove: vi.fn(),
   }
 }

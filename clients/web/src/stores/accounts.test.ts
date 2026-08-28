@@ -104,12 +104,12 @@ describe('login', () => {
     )
 
     const store = makeStore()
-    const ok = await store.login({
+    const result = await store.login({
       username: '@alice:example.org',
       password: 'hunter2',
     })
 
-    expect(ok).toBe(true)
+    expect(result).toEqual({ ok: true })
     expect(body).toEqual({
       username: '@alice:example.org',
       password: 'hunter2',
@@ -133,19 +133,28 @@ describe('login', () => {
         `${BASE_URL}/v1/accounts/${ALICE.account_id}/recover`,
         async ({ request }) => {
           recoverBody = await request.json()
-          return HttpResponse.json({ data: { ...ALICE, verified: true } })
+          return HttpResponse.json({
+            data: {
+              ...ALICE,
+              verified: true,
+              backup_action: 'enabled',
+            },
+          })
         },
       ),
     )
 
     const store = makeStore()
-    const ok = await store.login({
+    const result = await store.login({
       username: '@alice:example.org',
       password: 'hunter2',
       recovery_key: ' EsTc secret ',
     })
 
-    expect(ok).toBe(true)
+    expect(result).toEqual({
+      ok: true,
+      recover: { ok: true, verified: true, backupAction: 'enabled' },
+    })
     expect(loginBody).toEqual({
       username: '@alice:example.org',
       password: 'hunter2',
@@ -172,13 +181,13 @@ describe('login', () => {
     )
 
     const store = makeStore()
-    const ok = await store.login({
+    const result = await store.login({
       username: '@alice:example.org',
       password: 'hunter2',
       recovery_key: 'EsTc bad',
     })
 
-    expect(ok).toBe(false)
+    expect(result.ok).toBe(false)
     expect(counter.calls).toBe(1)
     expect(store.accounts.value).toHaveLength(1)
     expect(store.error.value).toBe('wrong recovery key')
@@ -196,9 +205,9 @@ describe('login', () => {
     )
 
     const store = makeStore()
-    const ok = await store.login({ username: '@a:b.c', password: 'x' })
+    const result = await store.login({ username: '@a:b.c', password: 'x' })
 
-    expect(ok).toBe(false)
+    expect(result.ok).toBe(false)
     expect(store.error.value).toBe('homeserver unreachable')
     expect(counter.calls).toBe(0)
   })
@@ -226,7 +235,13 @@ describe('logout / recover / remove', () => {
         `${BASE_URL}/v1/accounts/${ALICE.account_id}/recover`,
         async ({ request }) => {
           body = await request.json()
-          return HttpResponse.json({ data: { ...ALICE, verified: true } })
+          return HttpResponse.json({
+            data: {
+              ...ALICE,
+              verified: true,
+              backup_action: 'joined',
+            },
+          })
         },
       ),
     )
@@ -234,7 +249,11 @@ describe('logout / recover / remove', () => {
     const store = makeStore()
     const result = await store.recover(ALICE.account_id, '  EsTc secret \n')
 
-    expect(result).toEqual({ ok: true, verified: true })
+    expect(result).toEqual({
+      ok: true,
+      verified: true,
+      backupAction: 'joined',
+    })
     expect(body).toEqual({ recovery_key: 'EsTc secret' })
     expect(counter.calls).toBe(1)
     expect(store.error.value).toBeNull()
@@ -252,6 +271,7 @@ describe('logout / recover / remove', () => {
     expect(await store.recover(ALICE.account_id, 'EsTc secret')).toEqual({
       ok: true,
       verified: false,
+      backupAction: undefined,
     })
   })
 
@@ -298,8 +318,118 @@ describe('logout / recover / remove', () => {
     const first = store.login({ username: '@a:b.c', password: 'x' })
     await vi.waitFor(() => expect(store.pending.value).not.toBeNull())
 
-    expect(await store.login({ username: '@a:b.c', password: 'x' })).toBe(false)
-    expect(await first).toBe(true)
+    expect(await store.login({ username: '@a:b.c', password: 'x' })).toEqual({
+      ok: false,
+    })
+    expect(await first).toEqual({ ok: true })
     expect(store.pending.value).toBeNull()
+  })
+})
+
+describe('enableBackup', () => {
+  it('omits recovery_key when the buffer is empty', async () => {
+    let body: unknown
+    listAccounts([{ ...ALICE, verified: true }])
+    server.use(
+      http.post(
+        `${BASE_URL}/v1/accounts/${ALICE.account_id}/backup/enable`,
+        async ({ request }) => {
+          body = await request.json()
+          return HttpResponse.json({
+            data: {
+              ...ALICE,
+              verified: true,
+              backup_action: 'already_uploading',
+            },
+          })
+        },
+      ),
+    )
+
+    const store = makeStore()
+    await store.refresh()
+    const result = await store.enableBackup(ALICE.account_id, '  ')
+
+    expect(result).toEqual({
+      ok: true,
+      backupAction: 'already_uploading',
+    })
+    expect(body).toEqual({})
+  })
+
+  it('trims and sends the recovery key for create/export', async () => {
+    let body: unknown
+    listAccounts([{ ...ALICE, verified: true }])
+    server.use(
+      http.post(
+        `${BASE_URL}/v1/accounts/${ALICE.account_id}/backup/enable`,
+        async ({ request }) => {
+          body = await request.json()
+          return HttpResponse.json({
+            data: { ...ALICE, verified: true, backup_action: 'enabled' },
+          })
+        },
+      ),
+    )
+
+    const store = makeStore()
+    await store.refresh()
+    const result = await store.enableBackup(
+      ALICE.account_id,
+      '  EsTc secret \n',
+    )
+
+    expect(result).toEqual({ ok: true, backupAction: 'enabled' })
+    expect(body).toEqual({ recovery_key: 'EsTc secret' })
+  })
+
+  it('refuses an unverified account before the key is sent', async () => {
+    let sent = false
+    listAccounts([{ ...ALICE, verified: false }])
+    server.use(
+      http.post(
+        `${BASE_URL}/v1/accounts/${ALICE.account_id}/backup/enable`,
+        () => {
+          sent = true
+          return HttpResponse.json({ data: ALICE })
+        },
+      ),
+    )
+
+    const store = makeStore()
+    await store.refresh()
+    const result = await store.enableBackup(ALICE.account_id, 'EsTc secret')
+
+    expect(result.ok).toBe(false)
+    expect(sent).toBe(false)
+    expect(store.error.value).toMatch(/not verified/)
+  })
+
+  it('surfaces a 409 without refreshing', async () => {
+    const counter = listAccounts([{ ...ALICE, verified: true }])
+    server.use(
+      http.post(
+        `${BASE_URL}/v1/accounts/${ALICE.account_id}/backup/enable`,
+        () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: 'conflict',
+                message: 'recover first to join',
+              },
+            },
+            { status: 409 },
+          ),
+      ),
+    )
+
+    const store = makeStore()
+    await store.refresh()
+    expect(counter.calls).toBe(1)
+    expect((await store.enableBackup(ALICE.account_id, 'EsTc secret')).ok).toBe(
+      false,
+    )
+    expect(store.error.value).toBe('recover first to join')
+    expect(counter.calls).toBe(1)
   })
 })

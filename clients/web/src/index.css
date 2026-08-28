@@ -1083,6 +1083,11 @@ h2 {
   margin-top: 0;
 }
 
+.account-display-name {
+  color: var(--fg);
+  font-weight: 600;
+}
+
 .card-actions {
   display: flex;
   align-items: center;
@@ -1300,6 +1305,22 @@ h2 {
 .badge.verified {
   color: var(--accent);
   border-color: var(--accent);
+}
+
+.badge.backup-uploading {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.badge.backup-missing,
+.badge.backup-elsewhere {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.backup-snapshot {
+  display: grid;
+  gap: 0.1rem;
 }
 
 .badge.sync-connecting,
@@ -2351,6 +2372,16 @@ p.timeline-edge {
 
 .placeholder {
   font-style: italic;
+}
+
+a.utd-recover {
+  color: var(--accent);
+  font-style: normal;
+  text-decoration: none;
+}
+
+a.utd-recover:hover {
+  text-decoration: underline;
 }
 
 .event-inspector {
@@ -3950,6 +3981,16 @@ a.button-link {
 button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* Looks inactive but stays a real button — kick-upload / export-resume
+   still need Enable backup after this device is already uploading. */
+button.quiet:not(:disabled) {
+  opacity: 0.5;
+}
+
+button.quiet:hover:not(:disabled) {
+  opacity: 0.8;
 }
 
 button.danger {

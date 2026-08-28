@@ -1021,7 +1021,7 @@ describe('RoomPage', () => {
   })
 
   it('shows placeholders for UTDs and redacted events', async () => {
-    const { findByText } = renderRoom([
+    const { findByText, getByRole } = renderRoom([
       event('$utd', T0, {
         type: 'm.room.encrypted',
         content: null,
@@ -1037,6 +1037,10 @@ describe('RoomPage', () => {
 
     expect(await findByText('unable to decrypt')).toBeTruthy()
     expect(await findByText('message deleted')).toBeTruthy()
+    const recover = getByRole('link', {
+      name: 'Recover keys',
+    }) as HTMLAnchorElement
+    expect(recover.getAttribute('href')).toBe('/accounts')
   })
 
   it('loads the destination timeline after clicking a room hyperlink', async () => {

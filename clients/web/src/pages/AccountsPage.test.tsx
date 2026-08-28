@@ -13,9 +13,16 @@ import {
 } from 'vitest'
 import { ServicesContext, type AppServices } from '../services'
 import type { BrowserQrAdapter } from '../qr/browser-qr'
-import { TEST_BASE_URL, testServices } from '../test/services'
+import { TEST_BASE_URL, UNKNOWN_BACKUP, testServices } from '../test/services'
 import { AccountsPage } from './AccountsPage'
 import { formatServerBuildLine } from './ServerStatus'
+
+const ENABLED_BACKUP = {
+  exists_on_server: true,
+  this_device_uploading: true,
+  backup_state: 'enabled',
+  recovery_state: 'enabled',
+} as const
 
 const ALICE = {
   account_id: '6b53f7f0-0000-4000-8000-000000000001',
@@ -23,6 +30,7 @@ const ALICE = {
   homeserver_url: 'https://matrix.example.org',
   state: 'active',
   verified: true,
+  backup: ENABLED_BACKUP,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 }
@@ -32,6 +40,7 @@ const BOB = {
   user_id: '@bob:example.org',
   state: 'deactivated',
   verified: null,
+  backup: UNKNOWN_BACKUP,
 }
 const CAROL = {
   ...BOB,
@@ -59,6 +68,8 @@ const STATUS = {
 // Recover button gates on this shape, so the form tests must use a real one.
 const VALID_KEY = 'EsT1 t3bE JPZs Bz9H xApv jfQh PY9X gmGM bhbN Kz2L 2t9n aeKB'
 
+let profileAccountIds: string[] = []
+
 const server = setupServer()
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
@@ -74,6 +85,7 @@ function renderPage(
   qr?: BrowserQrAdapter,
   status: unknown = STATUS,
 ) {
+  profileAccountIds = []
   server.use(
     http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
       HttpResponse.json({
@@ -82,6 +94,20 @@ function renderPage(
     ),
     http.get(`${TEST_BASE_URL}/v1/status`, () =>
       HttpResponse.json({ data: status }),
+    ),
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/:accountId/users/:userId/profile`,
+      ({ params }) => {
+        const userId = String(params.userId)
+        profileAccountIds.push(String(params.accountId))
+        return HttpResponse.json({
+          data: {
+            user_id: userId,
+            display_name: userId === ALICE.user_id ? 'Alice Example' : null,
+            avatar_url: null,
+          },
+        })
+      },
     ),
   )
   const services: AppServices = testServices({ qr })
@@ -103,6 +129,95 @@ describe('AccountsPage', () => {
     expect(getByText('@bob:example.org')).toBeTruthy()
     expect(getByText('verified')).toBeTruthy()
     expect(getByText('deactivated')).toBeTruthy()
+  })
+
+  it('shows a fetched display name below the Matrix user ID', async () => {
+    const { findByText, getByText } = renderPage()
+
+    expect(await findByText('Alice Example')).toBeTruthy()
+    expect(getByText('@alice:example.org')).toBeTruthy()
+    expect(getByText(ALICE.account_id)).toBeTruthy()
+  })
+
+  it('does not fetch a display name for a deactivated account', async () => {
+    const { findByText } = renderPage()
+
+    expect(await findByText('Alice Example')).toBeTruthy()
+    await waitFor(() => expect(profileAccountIds).toEqual([ALICE.account_id]))
+  })
+
+  it('gives each account-head badge an explanatory tooltip', async () => {
+    const { findByText, getByLabelText } = renderPage([
+      { ...ALICE, sync_state: 'syncing' },
+    ])
+
+    await findByText('@alice:example.org')
+    expect(getByLabelText(/logged in to axon/i)).toBeTruthy()
+    expect(
+      getByLabelText(/cross-signed. this is independent of megolm key backup/i),
+    ).toBeTruthy()
+    expect(getByLabelText(/uploading megolm session keys/i)).toBeTruthy()
+    expect(getByLabelText(/first sync has not finished/i)).toBeTruthy()
+  })
+
+  it('gives recover, log out, and delete explanatory tooltips', async () => {
+    const { findByRole, getByRole } = renderPage([ALICE])
+
+    expect(
+      (
+        (await findByRole('button', {
+          name: 'Recover keys',
+        })) as HTMLButtonElement
+      ).title,
+    ).toMatch(/unlocks megolm backup so stored encrypted messages can decrypt/i)
+    expect(
+      (getByRole('button', { name: 'Recover keys' }) as HTMLButtonElement)
+        .title,
+    ).toMatch(/never uploaded to backup/i)
+    expect(
+      (getByRole('button', { name: 'Log out' }) as HTMLButtonElement).title,
+    ).toMatch(/keeping the local archive/i)
+    expect(
+      (getByRole('button', { name: 'Delete' }) as HTMLButtonElement).title,
+    ).toMatch(/homeserver is not affected/i)
+  })
+
+  it('shows the megolm backup snapshot independently of verified', async () => {
+    const { findByText, getByText } = renderPage()
+
+    expect(
+      await findByText(
+        'Megolm backup: on homeserver; this device uploading; state enabled',
+      ),
+    ).toBeTruthy()
+    expect(
+      getByText('Matrix Server-Side Secret Storage (4S): enabled'),
+    ).toBeTruthy()
+    expect(document.querySelector('.badge.backup-uploading')?.textContent).toBe(
+      'backup',
+    )
+  })
+
+  it('does not treat 4S-enabled verified as keys recovered when backup is missing', async () => {
+    const { findByText, getByText, queryByText } = renderPage([
+      {
+        ...ALICE,
+        backup: {
+          exists_on_server: false,
+          this_device_uploading: false,
+          backup_state: 'unknown',
+          recovery_state: 'enabled',
+        },
+      },
+    ])
+
+    expect(await findByText('verified')).toBeTruthy()
+    expect(getByText('no backup')).toBeTruthy()
+    expect(getByText(/none on homeserver/)).toBeTruthy()
+    expect(
+      getByText('Matrix Server-Side Secret Storage (4S): enabled'),
+    ).toBeTruthy()
+    expect(queryByText(/keys recovered/i)).toBeNull()
   })
 
   it('does not show sync readiness for a deactivated account', async () => {
@@ -1092,15 +1207,20 @@ describe('AccountsPage', () => {
 
   it('recover reveals the form, submits a valid key, and reports success', async () => {
     let recoverBody: unknown
-    const { findByRole, getByLabelText, getByRole, findByText } = renderPage([
-      ALICE,
-    ])
+    const { findByRole, getByLabelText, getByRole, findByText, queryByText } =
+      renderPage([ALICE])
     server.use(
       http.post(
         `${TEST_BASE_URL}/v1/accounts/${ALICE.account_id}/recover`,
         async ({ request }) => {
           recoverBody = await request.json()
-          return HttpResponse.json({ data: { ...ALICE, verified: true } })
+          return HttpResponse.json({
+            data: {
+              ...ALICE,
+              verified: true,
+              backup_action: 'enabled',
+            },
+          })
         },
       ),
     )
@@ -1116,6 +1236,50 @@ describe('AccountsPage', () => {
     )
     // Success surfaces an inline notice; the form input is gone.
     expect(await findByText(/this device is now verified/i)).toBeTruthy()
+    expect(await findByText(/enabled megolm backup/i)).toBeTruthy()
+    expect(queryByText(/keys recovered/i)).toBeNull()
+  })
+
+  it('shows recovering progress while the recover request is in flight', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { findByRole, getByLabelText, getByRole, findByText, queryByText } =
+      renderPage([ALICE])
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ALICE.account_id}/recover`,
+        async () => {
+          await gate
+          return HttpResponse.json({
+            data: {
+              ...ALICE,
+              verified: true,
+              backup_action: 'enabled',
+            },
+          })
+        },
+      ),
+    )
+
+    fireEvent.click(await findByRole('button', { name: 'Recover keys' }))
+    fireEvent.input(getByLabelText('Recovery key'), {
+      target: { value: VALID_KEY },
+    })
+    fireEvent.click(getByRole('button', { name: 'Recover' }))
+
+    expect(await findByRole('button', { name: 'Recovering…' })).toBeTruthy()
+    expect(
+      await findByText(/importing matrix server-side secret storage \(4s\)/i),
+    ).toBeTruthy()
+    expect(queryByText(/keys recovered/i)).toBeNull()
+
+    release()
+    expect(await findByText(/this device is now verified/i)).toBeTruthy()
+    expect(
+      queryByText(/importing matrix server-side secret storage \(4s\)/i),
+    ).toBeNull()
   })
 
   it('reports keys imported but device still unverified', async () => {
@@ -1136,6 +1300,9 @@ describe('AccountsPage', () => {
     fireEvent.click(getByRole('button', { name: 'Recover' }))
 
     expect(await findByText(/still unverified/i)).toBeTruthy()
+    expect(
+      await findByText(/server-side secret storage \(4s\) imported/i),
+    ).toBeTruthy()
   })
 
   it('gates the Recover button and hints on a malformed key', async () => {
@@ -1162,6 +1329,168 @@ describe('AccountsPage', () => {
     })
     expect(recover.disabled).toBe(false)
     expect(queryByText(/valid recovery key/i)).toBeNull()
+  })
+
+  it('hides Enable backup until the account is verified', async () => {
+    const { findByRole, queryByRole } = renderPage([
+      { ...ALICE, verified: false },
+    ])
+
+    await findByRole('button', { name: 'Recover keys' })
+    expect(queryByRole('button', { name: 'Enable backup' })).toBeNull()
+  })
+
+  it('mutes Enable backup when this device is already uploading, but still opens the form', async () => {
+    const { findByRole, getByLabelText } = renderPage([ALICE])
+
+    const enable = (await findByRole('button', {
+      name: 'Enable backup',
+    })) as HTMLButtonElement
+    expect(enable.disabled).toBe(false)
+    expect(enable.classList.contains('quiet')).toBe(true)
+    expect(enable.title).toMatch(/already enabled/i)
+
+    fireEvent.click(enable)
+    expect(getByLabelText('Recovery key')).toBeTruthy()
+  })
+
+  it('does not mute Enable backup when this device is not uploading', async () => {
+    const { findByRole } = renderPage([
+      {
+        ...ALICE,
+        backup: {
+          exists_on_server: false,
+          this_device_uploading: false,
+          backup_state: 'unknown',
+          recovery_state: 'enabled',
+        },
+      },
+    ])
+
+    const enable = (await findByRole('button', {
+      name: 'Enable backup',
+    })) as HTMLButtonElement
+    expect(enable.classList.contains('quiet')).toBe(false)
+    expect(enable.title).toBe('')
+  })
+
+  it('enable backup empty submit omits the key (kick-upload)', async () => {
+    let enableBody: unknown
+    const { findByRole, getByRole, findByText } = renderPage([ALICE])
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ALICE.account_id}/backup/enable`,
+        async ({ request }) => {
+          enableBody = await request.json()
+          return HttpResponse.json({
+            data: { ...ALICE, backup_action: 'already_uploading' },
+          })
+        },
+      ),
+    )
+
+    fireEvent.click(await findByRole('button', { name: 'Enable backup' }))
+    fireEvent.click(getByRole('button', { name: 'Enable' }))
+
+    await waitFor(() => expect(enableBody).toEqual({}))
+    expect(await findByText(/already uploading megolm keys/i)).toBeTruthy()
+  })
+
+  it('enable backup sends a valid key and cancel closes without submitting', async () => {
+    let enableBody: unknown
+    const { findByRole, getByLabelText, getByRole, queryByLabelText } =
+      renderPage([ALICE])
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ALICE.account_id}/backup/enable`,
+        async ({ request }) => {
+          enableBody = await request.json()
+          return HttpResponse.json({
+            data: { ...ALICE, backup_action: 'enabled' },
+          })
+        },
+      ),
+    )
+
+    fireEvent.click(await findByRole('button', { name: 'Enable backup' }))
+    expect(getByLabelText('Recovery key')).toBeTruthy()
+    fireEvent.click(getByRole('button', { name: 'Cancel' }))
+    expect(queryByLabelText('Recovery key')).toBeNull()
+    expect(enableBody).toBeUndefined()
+
+    fireEvent.click(getByRole('button', { name: 'Enable backup' }))
+    fireEvent.input(getByLabelText('Recovery key'), {
+      target: { value: VALID_KEY },
+    })
+    fireEvent.click(getByRole('button', { name: 'Enable' }))
+
+    await waitFor(() => expect(enableBody).toEqual({ recovery_key: VALID_KEY }))
+  })
+
+  it('gates Enable on a malformed key but allows an empty one', async () => {
+    const { findByRole, getByLabelText, getByRole, queryByText } = renderPage([
+      ALICE,
+    ])
+
+    fireEvent.click(await findByRole('button', { name: 'Enable backup' }))
+    const enable = getByRole('button', { name: 'Enable' }) as HTMLButtonElement
+    expect(enable.disabled).toBe(false)
+    expect(queryByText(/leave blank/i)).toBeTruthy()
+
+    fireEvent.input(getByLabelText('Recovery key'), {
+      target: { value: 'not-a-real-key' },
+    })
+    expect(enable.disabled).toBe(true)
+    expect(queryByText(/valid recovery key/i)).toBeTruthy()
+
+    fireEvent.input(getByLabelText('Recovery key'), {
+      target: { value: '' },
+    })
+    expect(enable.disabled).toBe(false)
+    expect(queryByText(/valid recovery key/i)).toBeNull()
+  })
+
+  it('login with a recovery key reports backup honesty when staying on Accounts', async () => {
+    window.history.replaceState(null, '', '/accounts')
+    const { findByText, getByLabelText, getByRole, queryByText } = renderPage([
+      ALICE,
+    ])
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/login`, () =>
+        HttpResponse.json({
+          data: { ...BOB, state: 'active', verified: true },
+        }),
+      ),
+      http.post(`${TEST_BASE_URL}/v1/accounts/${BOB.account_id}/recover`, () =>
+        HttpResponse.json({
+          data: {
+            ...BOB,
+            state: 'active',
+            verified: true,
+            backup_action: 'joined',
+          },
+        }),
+      ),
+    )
+
+    await findByText('@alice:example.org')
+    fireEvent.input(getByLabelText(/Matrix user ID/), {
+      target: { value: '@bob:example.org' },
+    })
+    fireEvent.input(getByLabelText('Password'), {
+      target: { value: 'hunter2' },
+    })
+    fireEvent.input(getByLabelText(/Matrix Recovery Key/), {
+      target: { value: VALID_KEY },
+    })
+    fireEvent.click(getByRole('button', { name: 'Log in' }))
+
+    expect(
+      await findByText(/server-side secret storage \(4s\) imported/i),
+    ).toBeTruthy()
+    expect(await findByText(/joined the existing megolm backup/i)).toBeTruthy()
+    expect(queryByText(/keys recovered/i)).toBeNull()
+    expect(window.location.pathname).toBe('/accounts')
   })
 
   it('the account switch persists to settings', async () => {

@@ -6,6 +6,7 @@ import {
 } from '@preact/signals'
 import { apiErrorMessage, type ApiClient } from '../api/client'
 import type { components } from '../api/schema'
+import { UNVERIFIED_BACKUP_ENABLE_MESSAGE, type BackupAction } from '../backup'
 
 export type AccountDto = components['schemas']['AccountDto']
 
@@ -19,20 +20,34 @@ export function hasActiveAccount(accounts: readonly Account[]): boolean {
 
 /**
  * Outcome of a recover call. `verified` is the cross-signing state the server
- * re-derives and returns on success (ADR 0026); it distinguishes a full
- * recovery from a partial Secure-Backup that imported the megolm key but not
- * the cross-signing keys (keys unlocked, device still unverified). Absent when
- * the call failed — the reason is on the store's `error` signal, as usual.
+ * re-derives and returns on success (ADR 0026); it is orthogonal to megolm
+ * backup (ADR 0098). `backupAction` is what this recover did about backup —
+ * absent when the call failed (the reason is on the store's `error` signal)
+ * or when an older server omitted the sibling field.
  */
 export interface RecoverResult {
   ok: boolean
   verified?: boolean | null
+  backupAction?: BackupAction
+}
+
+export interface LoginResult {
+  ok: boolean
+  recover?: RecoverResult
+}
+
+export interface EnableBackupResult {
+  ok: boolean
+  backupAction?: BackupAction
 }
 
 /** One in-flight lifecycle action, so the UI can disable just that control. */
 export type PendingAction =
   | { kind: 'login' }
-  | { kind: 'logout' | 'recover' | 'delete'; accountId: string }
+  | {
+      kind: 'logout' | 'recover' | 'enable-backup' | 'delete'
+      accountId: string
+    }
 
 export interface AccountsStore {
   accounts: ReadonlySignal<Account[]>
@@ -50,11 +65,20 @@ export interface AccountsStore {
     password: string
     homeserver_url?: string
     recovery_key?: string
-  }): Promise<boolean>
+  }): Promise<LoginResult>
   /** POST /v1/accounts/{id}/logout — deactivate. */
   logout(accountId: string): Promise<boolean>
   /** POST /v1/accounts/{id}/recover — import keys with a 4S recovery key. */
   recover(accountId: string, recoveryKey: string): Promise<RecoverResult>
+  /**
+   * POST /v1/accounts/{id}/backup/enable — originate, export-resume, or kick
+   * megolm backup. Empty `recoveryKey` omits the field (kick-upload only).
+   * Unverified accounts are refused before the key is sent.
+   */
+  enableBackup(
+    accountId: string,
+    recoveryKey?: string,
+  ): Promise<EnableBackupResult>
   /** DELETE /v1/accounts/{id} — permanent removal. */
   remove(accountId: string): Promise<boolean>
 }
@@ -124,11 +148,12 @@ export function createAccountsStore(api: ApiClient): AccountsStore {
 
     login: async (req) => {
       if (pending.value !== null) {
-        return false
+        return { ok: false }
       }
       pending.value = { kind: 'login' }
       let shouldRefresh = false
       let operationError: string | null = null
+      let recover: RecoverResult | undefined
       try {
         const { data, error: apiError } = await api.POST('/v1/accounts/login', {
           body: {
@@ -139,13 +164,13 @@ export function createAccountsStore(api: ApiClient): AccountsStore {
         })
         if (apiError !== undefined) {
           error.value = apiErrorMessage(apiError)
-          return false
+          return { ok: false }
         }
 
         shouldRefresh = true
         const recoveryKey = req.recovery_key?.trim() ?? ''
         if (recoveryKey !== '') {
-          const { error: recoverError } = await api.POST(
+          const { data: recoverData, error: recoverError } = await api.POST(
             '/v1/accounts/{account_id}/recover',
             {
               params: { path: { account_id: data.data.account_id } },
@@ -154,14 +179,20 @@ export function createAccountsStore(api: ApiClient): AccountsStore {
           )
           if (recoverError !== undefined) {
             operationError = apiErrorMessage(recoverError)
+          } else {
+            recover = {
+              ok: true,
+              verified: recoverData.data.verified,
+              backupAction: recoverData.data.backup_action,
+            }
           }
         }
 
         error.value = null
-        return operationError === null
+        return operationError === null ? { ok: true, recover } : { ok: false }
       } catch (cause) {
         operationError = cause instanceof Error ? cause.message : String(cause)
-        return false
+        return { ok: false }
       } finally {
         if (shouldRefresh) {
           await refresh()
@@ -204,7 +235,45 @@ export function createAccountsStore(api: ApiClient): AccountsStore {
         }
         error.value = null
         await refresh()
-        return { ok: true, verified: data.data.verified }
+        return {
+          ok: true,
+          verified: data.data.verified,
+          backupAction: data.data.backup_action,
+        }
+      } catch (cause) {
+        error.value = cause instanceof Error ? cause.message : String(cause)
+        return { ok: false }
+      } finally {
+        pending.value = null
+      }
+    },
+
+    enableBackup: async (accountId, recoveryKey) => {
+      if (pending.value !== null) {
+        return { ok: false }
+      }
+      const account = accounts.value.find((row) => row.account_id === accountId)
+      if (account !== undefined && account.verified !== true) {
+        error.value = UNVERIFIED_BACKUP_ENABLE_MESSAGE
+        return { ok: false }
+      }
+      pending.value = { kind: 'enable-backup', accountId }
+      const trimmed = recoveryKey?.trim() ?? ''
+      try {
+        const { data, error: apiError } = await api.POST(
+          '/v1/accounts/{account_id}/backup/enable',
+          {
+            params: { path: { account_id: accountId } },
+            body: trimmed === '' ? {} : { recovery_key: trimmed },
+          },
+        )
+        if (apiError !== undefined) {
+          error.value = apiErrorMessage(apiError)
+          return { ok: false }
+        }
+        error.value = null
+        await refresh()
+        return { ok: true, backupAction: data.data.backup_action }
       } catch (cause) {
         error.value = cause instanceof Error ? cause.message : String(cause)
         return { ok: false }

@@ -521,6 +521,16 @@ async function handleApi(req, res, url) {
       data: [account(ACCOUNT_ID, USER_ID), account(ACCOUNT_ID_2, USER_ID_2)],
     })
   }
+  if (method === 'GET' && /\/users\/[^/]+\/profile$/.test(pathname)) {
+    const userId = decodeURIComponent(pathname.split('/').at(-2))
+    return json(res, {
+      data: {
+        user_id: userId,
+        display_name: userId === USER_ID ? 'Me' : 'Other',
+        avatar_url: null,
+      },
+    })
+  }
   if (method === 'POST' && pathname === '/v1/accounts/login/qr') {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
