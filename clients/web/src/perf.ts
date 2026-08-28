@@ -361,6 +361,12 @@ function summariseBoot(): void {
     // dominates, none of the network-side findings apply and the cache cannot
     // help — it is not even read until `boot` has elapsed.
     html: assets.html,
+    stall: assets.stall,
+    dns: assets.dns,
+    tcp: assets.tcp,
+    tls: assets.tls,
+    ttfb: assets.ttfb,
+    hxfer: assets.hxfer,
     js: assets.js,
     jskb: assets.bytes === null ? null : Math.round(assets.bytes / 1000),
     exec:
@@ -1041,28 +1047,35 @@ function shortRoute(url: string): string {
  * Safari's, so its first launch is cold on both counts however much the same
  * site has been used in the browser.
  */
-let bootAssets: {
+interface BootAssets {
   html: number | null
   js: number | null
   bytes: number | null
-} | null = null
+  /** The document fetch decomposed — see `documentPhases`. */
+  stall: number | null
+  dns: number | null
+  tcp: number | null
+  tls: number | null
+  ttfb: number | null
+  hxfer: number | null
+}
 
-function captureBootAssets(): {
-  html: number | null
-  js: number | null
-  bytes: number | null
-} {
+let bootAssets: BootAssets | null = null
+
+function captureBootAssets(): BootAssets {
   if (bootAssets !== null) {
     return bootAssets
   }
   let html: number | null = null
   let js: number | null = null
   let bytes: number | null = null
+  let phases = documentPhases(undefined)
   try {
     const [navigation] = performance.getEntriesByType('navigation')
-    const responseEnd = (navigation as PerformanceNavigationTiming | undefined)
-      ?.responseEnd
+    const entry = navigation as PerformanceNavigationTiming | undefined
+    const responseEnd = entry?.responseEnd
     html = typeof responseEnd === 'number' ? Math.round(responseEnd) : null
+    phases = documentPhases(entry)
     const boot = performance
       .getEntriesByType('resource')
       .filter((entry): entry is PerformanceResourceTiming =>
@@ -1081,8 +1094,67 @@ function captureBootAssets(): {
   } catch {
     // No navigation or resource timing; the rest of the summary still reads.
   }
-  bootAssets = { html, js, bytes }
+  bootAssets = { html, js, bytes, ...phases }
   return bootAssets
+}
+
+/**
+ * The document fetch, broken into the phases that can dominate it.
+ *
+ * `html` on its own says the document took 41 seconds and not why — the same
+ * shape of gap `boot` had before it was decomposed. Each of these fails for a
+ * different reason and has a different fix, so they are worth separating:
+ *
+ * - `stall` — navigation start to the first DNS work. A sleeping cell radio
+ *   negotiating its way back onto the network lands here, and nothing the app
+ *   or the server does can shorten it.
+ * - `dns`, `tcp`, `tls` — name resolution and connection setup. A protocol
+ *   negotiation that has to time out and retry (an HTTP/3 attempt on a link
+ *   where UDP is degraded, falling back to TCP) shows up in these two rather
+ *   than in the request itself.
+ * - `ttfb` — the server's own think-time, which the room-list and room-open
+ *   figures alongside can be compared against: fast requests after a slow
+ *   document mean the server was never the problem.
+ * - `hxfer` — moving the document's bytes, which for a small HTML shell should
+ *   be negligible on any link that is working at all.
+ */
+function documentPhases(entry: PerformanceNavigationTiming | undefined): {
+  stall: number | null
+  dns: number | null
+  tcp: number | null
+  tls: number | null
+  ttfb: number | null
+  hxfer: number | null
+} {
+  if (entry === undefined) {
+    return {
+      stall: null,
+      dns: null,
+      tcp: null,
+      tls: null,
+      ttfb: null,
+      hxfer: null,
+    }
+  }
+  const span = (from: number, to: number): number | null =>
+    // A phase that did not happen reports both marks as zero — a reused
+    // connection has no DNS or handshake — and reporting that as a real 0 is
+    // right, but a *partial* entry must not turn into a negative span.
+    typeof from === 'number' && typeof to === 'number' && to >= from
+      ? Math.round(to - from)
+      : null
+  return {
+    stall: span(entry.fetchStart, entry.domainLookupStart),
+    dns: span(entry.domainLookupStart, entry.domainLookupEnd),
+    tcp: span(entry.connectStart, entry.connectEnd),
+    // Zero when the handshake was not part of this connection.
+    tls:
+      entry.secureConnectionStart > 0
+        ? span(entry.secureConnectionStart, entry.connectEnd)
+        : null,
+    ttfb: span(entry.requestStart, entry.responseStart),
+    hxfer: span(entry.responseStart, entry.responseEnd),
+  }
 }
 
 /** Scripts and stylesheets, which are what the boot actually waits on. */

@@ -68,6 +68,15 @@ The `:req` lines below add the other requests it shared the link with.
 - `list` / `members` / `threads` — when the three fired beside it settled.
   **`net` landing well after these is H1.**
 - `people` — member count, since that list is unpaginated.
+- `stall` / `dns` / `tcp` / `tls` / `ttfb` / `hxfer` (on `boot:room-list`) —
+  the **document fetch** decomposed, which on a poor real-world link is the
+  single largest term in a cold start. `stall` is navigation start to the first
+  DNS work, where a sleeping cell radio negotiating back onto the network
+  lands; `tcp`/`tls` are connection setup, where a protocol negotiation that
+  has to time out and retry shows up; `ttfb` is the server's think-time, which
+  can be compared against the room-list and room-open figures on the same
+  capture. Fast requests after a slow document mean the server was never the
+  problem.
 - `html` / `js` / `jskb` / `exec` (on `boot:room-list`) — startup decomposed.
   `html` is when the document arrived, `js` when the last script or stylesheet did, `jskb` what those cost on the wire, and `exec` the main-thread time after them: parse, execute, first render, service construction.
   **Every request waits on this**, so when `boot` dominates, none of the network findings apply and the cache cannot help — it is not read until `boot` has elapsed.

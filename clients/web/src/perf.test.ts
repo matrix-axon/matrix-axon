@@ -137,6 +137,89 @@ describe('room-list boot summary (ADR 0085 phase 2)', () => {
     expect(summary!.boot).not.toBeNull()
   })
 
+  it('splits the document fetch into the phases that can dominate it', async () => {
+    // Measured on a real poor 5G link: the document alone took 41.6 s of a
+    // 44 s cold start, with everything after it — cached assets, 34 ms of
+    // execution, and room opens at 150-708 ms — perfectly healthy. `html`
+    // said so and could not say why, which is the same gap `boot` had.
+    const original = performance.getEntriesByType.bind(performance)
+    vi.spyOn(performance, 'getEntriesByType').mockImplementation((type) => {
+      if (type === 'navigation') {
+        return [
+          {
+            type: 'navigate',
+            fetchStart: 10,
+            domainLookupStart: 1_000,
+            domainLookupEnd: 1_200,
+            connectStart: 1_200,
+            secureConnectionStart: 1_500,
+            connectEnd: 40_000,
+            requestStart: 40_000,
+            responseStart: 41_500,
+            responseEnd: 41_605,
+          },
+        ] as unknown as PerformanceEntryList
+      }
+      return type === 'resource' ? [] : original(type)
+    })
+    try {
+      perfMark('rooms:cache:read:start')
+      perfMark('rooms:refresh:end', { ok: true, rooms: 2 })
+      perfMarkBootRoomList()
+      await frames()
+
+      const summary = bootSummary()
+      expect(summary!.stall).toBe(990)
+      expect(summary!.dns).toBe(200)
+      // 38.8 s inside connection setup, which is where a protocol negotiation
+      // that has to time out and retry lands — not in the request.
+      expect(summary!.tcp).toBe(38_800)
+      expect(summary!.tls).toBe(38_500)
+      expect(summary!.ttfb).toBe(1_500)
+      expect(summary!.hxfer).toBe(105)
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('reports a reused connection as no handshake rather than a bad span', async () => {
+    const original = performance.getEntriesByType.bind(performance)
+    vi.spyOn(performance, 'getEntriesByType').mockImplementation((type) => {
+      if (type === 'navigation') {
+        return [
+          {
+            type: 'navigate',
+            fetchStart: 0,
+            domainLookupStart: 0,
+            domainLookupEnd: 0,
+            connectStart: 0,
+            // Zero means the handshake was not part of this connection.
+            secureConnectionStart: 0,
+            connectEnd: 0,
+            requestStart: 5,
+            responseStart: 60,
+            responseEnd: 62,
+          },
+        ] as unknown as PerformanceEntryList
+      }
+      return type === 'resource' ? [] : original(type)
+    })
+    try {
+      perfMark('rooms:cache:read:start')
+      perfMark('rooms:refresh:end', { ok: true, rooms: 2 })
+      perfMarkBootRoomList()
+      await frames()
+
+      const summary = bootSummary()
+      expect(summary!.dns).toBe(0)
+      expect(summary!.tcp).toBe(0)
+      expect(summary!.tls).toBeNull()
+      expect(summary!.ttfb).toBe(55)
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
   it('splits startup into assets arriving and the main thread after', async () => {
     // `boot` alone cannot say whether a slow startup is a big download or slow
     // execution, and those have nothing in common as fixes. Measured on a
