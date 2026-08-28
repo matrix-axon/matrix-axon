@@ -81,6 +81,14 @@ trail'
   $'true-local: FAILED\r===\r'
   $'text\r   ## FAILED\r'
   $'   ## true-local: FAILED\r'
+  # Every hash count CommonMark accepts. A lookahead anchored after the *first*
+  # `#` rather than the whole run passes `# FAILED` and silently leaves these
+  # unescaped, which is the original heading-forgery hole.
+  '## true-local: FAILED'
+  '### true-local: FAILED'
+  '###### true-local: FAILED'
+  '#'
+  '#	true-local: FAILED'
 )
 
 for body in "${hostile[@]}"; do
@@ -101,6 +109,13 @@ benign=(
 2. two'
   'Hi, see line 3 of foo.rs -- item #42 costs $5.'
   '    # four-space indent is a code block, not a heading'
+  # CommonMark needs whitespace or end-of-line after the hashes, so none of
+  # these is a heading and none may be escaped. Reported in review: `#42` was
+  # picking up a visible backslash in an otherwise-ordinary notification.
+  '#42 is fixed by this PR'
+  '#hashtag'
+  '   #123 and #456 both landed'
+  '####### seven hashes is not a heading'
 )
 
 for body in "${benign[@]}"; do

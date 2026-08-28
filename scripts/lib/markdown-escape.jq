@@ -35,8 +35,13 @@ def escape_md:
 #
 # Two shapes, both of which CommonMark turns into a heading:
 #
-#   ATX      up to three leading spaces, then `#`. Four or more is an indented
-#            code block, so it forges nothing and is left alone.
+#   ATX      up to three leading spaces, then one to six `#` followed by a
+#            space, tab, or end of line. Four or more leading spaces is an
+#            indented code block, and seven or more hashes is not a heading at
+#            all, so neither forges anything and both are left alone. The
+#            trailing condition matters for ordinary prose as much as for
+#            safety: `#42 is fixed by this PR` opens no heading, and escaping
+#            it would put a visible stray backslash in the notification.
 #   setext   a line of only `=` or only `-` promotes the paragraph above it to
 #            <h1>/<h2>. Escaping the first character breaks the underline; a
 #            real bullet (`- item`) has content after the dash and so does not
@@ -52,7 +57,7 @@ def escape_blocks:
   gsub("\r\n?"; "\n")
   | split("\n")
   | map(
-      if test("^ {0,3}#") then
+      if test("^ {0,3}#{1,6}([ \t]|$)") then
         sub("(?<p>^ {0,3})(?<h>#)"; "\(.p)\\\(.h)")
       elif test("^ {0,3}(=+|-+)[ \t]*$") then
         sub("(?<p>^ {0,3})(?<c>[=-])"; "\(.p)\\\(.c)")
