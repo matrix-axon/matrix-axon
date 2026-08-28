@@ -22,6 +22,17 @@ def escape_md:
 # anchors `^` to the start of the *string*, not the line, which is precisely
 # the bug that shipped in the first version of this.
 #
+# Line endings are normalised to LF first, because "per line" has to mean the
+# same thing here as it does in the renderer. CommonMark ends a line on LF,
+# CRLF, or a lone CR (measured against the parser: nothing else counts, not
+# U+2028, U+2029, FF, VT or NEL), and normalises them all before parsing.
+# Splitting on "\n" alone left two holes: a CRLF body put a trailing CR on
+# every line, so `===\r` failed the setext match and stayed unescaped, and a
+# lone-CR body arrived as one long line this never split at all -- which
+# defeats the ATX branch too, not just setext. Matching the renderer's own
+# model closes the class; patching the end-anchor with `\r?$` would only have
+# closed the first.
+#
 # Two shapes, both of which CommonMark turns into a heading:
 #
 #   ATX      up to three leading spaces, then `#`. Four or more is an indented
@@ -38,7 +49,8 @@ def escape_md:
 # CommonMark at all -- Jinja autoescape turns a leading `>` into `&gt;` first --
 # so there is nothing here to do about them either way.
 def escape_blocks:
-  split("\n")
+  gsub("\r\n?"; "\n")
+  | split("\n")
   | map(
       if test("^ {0,3}#") then
         sub("(?<p>^ {0,3})(?<h>#)"; "\(.p)\\\(.h)")

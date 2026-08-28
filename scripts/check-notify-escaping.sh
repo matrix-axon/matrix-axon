@@ -36,7 +36,17 @@ escape() {
 
 # Anything CommonMark would read as a heading opener: ATX with up to three
 # leading spaces, or a setext underline of only `=` or only `-`.
+# [[:space:]] covers the CR that a CRLF line leaves behind, so this catches an
+# unescaped underline whether or not the escaping normalised line endings.
 heading_line='^ {0,3}(#|(=+|-+)[[:space:]]*$)'
+
+# grep splits on LF, which is the same wrong line model that caused the bug
+# being tested for: against a CR-only body the whole text is one grep "line"
+# and an unescaped heading hides inside it. Fold CR to LF first so the
+# assertion sees the lines CommonMark sees, whatever the escaping did.
+opens_heading() {
+  printf '%s' "$1" | tr '\r' '\n' | grep -qE "$heading_line"
+}
 
 # Must not survive escaping as a heading.
 hostile=(
@@ -60,11 +70,22 @@ hostile=(
 ---
 
 trail'
+  # Line endings other than LF. An issue opened through the API can carry CRLF,
+  # and these bypassed the first version of the block escape entirely: the
+  # trailing CR broke the setext match, and a lone CR was never split on at all,
+  # which defeats the ATX branch too. $'...' so the shell emits real control
+  # characters rather than backslash-r.
+  $'true-local: FAILED\r\n===\r'
+  $'true-local: FAILED\r\n---\r'
+  $'true-local: FAILED\r\n===  \r'
+  $'true-local: FAILED\r===\r'
+  $'text\r   ## FAILED\r'
+  $'   ## true-local: FAILED\r'
 )
 
 for body in "${hostile[@]}"; do
   escaped="$(escape "$body")"
-  if grep -qE "$heading_line" <<<"$escaped"; then
+  if opens_heading "$escaped"; then
     fail "escaped text still opens a heading" "$body" "$escaped"
   fi
 done
@@ -89,6 +110,24 @@ for body in "${benign[@]}"; do
   fi
 done
 
+# Normalising line endings to LF is the one rewrite the escaping is allowed to
+# make to otherwise-benign text -- it is what makes "per line" mean the same
+# thing here as in the renderer. Assert that it does exactly that and no more,
+# so a future fix cannot buy safety by over-escaping CRLF bodies.
+normalised=(
+  $'plain\r\ntext\r\nhere'
+  $'plain\rtext\rhere'
+)
+
+for body in "${normalised[@]}"; do
+  want="${body//$'\r\n'/$'\n'}"
+  want="${want//$'\r'/$'\n'}"
+  escaped="$(escape "$body")"
+  if [ "$escaped" != "$want" ]; then
+    fail "line-ending normalisation altered more than the line endings" "$body" "$escaped"
+  fi
+done
+
 # The inline escape must stay byte-equivalent to the plugin's own escape_md
 # filter, which is the thing it is a port of.
 # shellcheck disable=SC2016
@@ -106,4 +145,4 @@ if [ "$failures" -ne 0 ]; then
   exit 1
 fi
 
-echo "notify escaping: $(( ${#hostile[@]} + ${#benign[@]} + 1 )) checks passed"
+echo "notify escaping: $(( ${#hostile[@]} + ${#benign[@]} + ${#normalised[@]} + 1 )) checks passed"
