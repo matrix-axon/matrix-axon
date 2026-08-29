@@ -1368,7 +1368,18 @@ test('narrow: sparse thread messages remain visible when composing', async ({
     route.fulfill({
       json: {
         data: {
-          events: [sparseEvent('$sparse-thread', 'short thread')],
+          // `$seed-image:hs` (this thread's root, seeded in mock-server.mjs)
+          // is timestamped `Date.now() - 3_600_000`. Anchor this reply to the
+          // same moment rather than a bare `Date.now()`, which can land on
+          // the next UTC calendar day and insert an unexpected day
+          // separator between root and reply (issue #272).
+          events: [
+            sparseEvent(
+              '$sparse-thread',
+              'short thread',
+              Date.now() - 3_600_000 + 1_000,
+            ),
+          ],
           next_cursor: null,
         },
       },
@@ -1502,14 +1513,14 @@ async function mobileActionGeometry(actions: Locator) {
   })
 }
 
-function sparseEvent(eventId: string, body: string) {
+function sparseEvent(eventId: string, body: string, originTs = Date.now()) {
   return {
     account_id: '@alice:hs',
     event_id: eventId,
     room_id: '!room:hs',
     sender: '@alice:hs',
     state_key: null,
-    origin_ts: Date.now(),
+    origin_ts: originTs,
     type: 'm.room.message',
     content: { msgtype: 'm.text', body },
     body,
