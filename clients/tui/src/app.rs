@@ -1892,7 +1892,7 @@ impl App {
             }
             Command::Status => self.open_popup(PopupKind::Status),
             Command::Event(event_id) => self.show_event(&event_id).await,
-            Command::Whoami => self.show_whoami(),
+            Command::Whoami => self.show_whoami().await,
             Command::Whereami => self.show_whereami(),
             Command::Search(input) => self.open_or_run_search(input).await,
             Command::React(None) => {
@@ -2060,7 +2060,7 @@ impl App {
         self.open_popup(PopupKind::RoomInfo);
     }
 
-    fn show_whoami(&mut self) {
+    async fn show_whoami(&mut self) {
         let Some(room) = self.selected_room() else {
             self.status = Status::Info("select a room before using /whoami".to_owned());
             return;
@@ -2079,8 +2079,33 @@ impl App {
             .filter(|name| !name.trim().is_empty())
             .map(String::as_str)
             .unwrap_or("unknown");
+        let account = self
+            .accounts
+            .client_visible
+            .iter()
+            .find(|account| account.account_id == room.account_id)
+            .cloned();
+        let device_id = account
+            .as_ref()
+            .and_then(|account| account.device_id.as_deref())
+            .filter(|id| !id.is_empty());
+        let mut device_label = device_id.unwrap_or("unknown").to_owned();
+        if let (Some(account), Some(device_id)) = (account.as_ref(), device_id) {
+            if let Ok(list) = self.client.list_devices(account.account_id).await {
+                if let Some(name) = list
+                    .devices
+                    .iter()
+                    .find(|device| device.device_id == device_id)
+                    .and_then(|device| device.display_name.as_deref())
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                {
+                    device_label = format!("{name} ({device_id})");
+                }
+            }
+        }
         self.status = Status::Info(format!(
-            "Matrix ID: {user_id}; Display Name: {display_name}"
+            "Matrix ID: {user_id}; Display Name: {display_name}; Device: {device_label}"
         ));
     }
 
