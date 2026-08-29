@@ -120,6 +120,13 @@ function renderPage(
     http.get(`${TEST_BASE_URL}/v1/invites`, () =>
       HttpResponse.json({ data: [] }),
     ),
+    http.get(`${TEST_BASE_URL}/v1/accounts/:accountId/verify`, () =>
+      HttpResponse.json({ data: [] }),
+    ),
+    http.post(
+      `${TEST_BASE_URL}/v1/accounts/:accountId/verify/:flowId/cancel`,
+      () => new HttpResponse(null, { status: 204 }),
+    ),
     http.get(
       `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/space/children`,
       ({ params }) =>
@@ -362,6 +369,24 @@ function roomPointerEvent(
 }
 
 describe('RoomList', () => {
+  it('renders a verification row above Invites and Decline drops it', async () => {
+    const { findByRole, queryByRole, services } = renderPage()
+    await findByRole('searchbox', { name: 'Filter by name' })
+    services.verification.noteFrame(ACCOUNT, 'requested', {
+      flowId: '$f',
+      userId: '@me:example.org',
+      deviceId: 'PHONE',
+      emoji: null,
+      decimals: null,
+      reason: null,
+    })
+    expect(await findByRole('button', { name: /Verify PHONE/ })).toBeTruthy()
+    fireEvent.click(await findByRole('button', { name: 'Decline' }))
+    await waitFor(() =>
+      expect(queryByRole('button', { name: /Verify PHONE/ })).toBeNull(),
+    )
+  })
+
   it('lists rooms with member-derived DM titles and deep-link hrefs', async () => {
     const { findByText, container } = renderPage()
 

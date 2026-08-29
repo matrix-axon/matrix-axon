@@ -34,6 +34,7 @@ import {
   type ActiveFilter,
   type RoomDto,
 } from '../stores/room-list'
+import { flowKey, flowStageLabel, flowTitle } from '../stores/verification'
 import {
   nextIn,
   ROOM_FILTERS,
@@ -105,6 +106,7 @@ export function RoomList() {
     accounts: accountStore,
     rooms,
     invites,
+    verification,
     settings,
     spaces,
     activeRoom,
@@ -128,6 +130,15 @@ export function RoomList() {
   useEffect(() => {
     void invites.ensureLoaded()
   }, [invites])
+  const activeAccountKey = accountStore.accounts.value
+    .filter((account) => account.state === 'active')
+    .map((account) => account.account_id)
+    .sort()
+    .join('\0')
+  useEffect(() => {
+    const ids = activeAccountKey === '' ? [] : activeAccountKey.split('\0')
+    void verification.ensureLoaded(ids)
+  }, [verification, activeAccountKey])
   useEffect(() => {
     if (accountStore.loading.value) {
       void accountStore.refresh()
@@ -497,14 +508,49 @@ export function RoomList() {
    * window's edge scrolls the next row in rather than running out of links.
    */
   const moveFocus = (delta: number) => {
+    const verificationRows = [
+      ...document.querySelectorAll<HTMLButtonElement>(
+        '[data-verification-row]',
+      ),
+    ]
     const invitesLink =
       document.querySelector<HTMLAnchorElement>('a.invites-link')
     const active = document.activeElement
+    const verificationIndex =
+      active instanceof HTMLElement
+        ? verificationRows.findIndex((row) => row === active)
+        : -1
+    if (verificationIndex >= 0) {
+      if (delta < 0) {
+        if (verificationIndex === 0) {
+          filterInput.current?.focus()
+          return
+        }
+        verificationRows[verificationIndex - 1]?.focus()
+        return
+      }
+      if (verificationIndex < verificationRows.length - 1) {
+        verificationRows[verificationIndex + 1]?.focus()
+        return
+      }
+      if (invitesLink !== null) {
+        invitesLink.focus()
+        return
+      }
+      if (visible.length > 0) {
+        focusRow(0)
+      }
+      return
+    }
     if (
       active instanceof HTMLElement &&
       active.classList.contains('invites-link')
     ) {
       if (delta < 0) {
+        if (verificationRows.length > 0) {
+          verificationRows[verificationRows.length - 1]?.focus()
+          return
+        }
         filterInput.current?.focus()
         return
       }
@@ -514,8 +560,20 @@ export function RoomList() {
       return
     }
     if (visible.length === 0) {
+      if (delta > 0) {
+        if (verificationRows.length > 0) {
+          verificationRows[0]?.focus()
+          return
+        }
+        invitesLink?.focus()
+        return
+      }
       if (invitesLink !== null) {
         invitesLink.focus()
+        return
+      }
+      if (verificationRows.length > 0) {
+        verificationRows[verificationRows.length - 1]?.focus()
       }
       return
     }
@@ -524,6 +582,16 @@ export function RoomList() {
         ? active.getAttribute('data-index')
         : null
     const current = attribute === null ? -1 : Number(attribute)
+    if (current < 0 && delta > 0) {
+      if (verificationRows.length > 0) {
+        verificationRows[0]?.focus()
+        return
+      }
+      if (invitesLink !== null) {
+        invitesLink.focus()
+        return
+      }
+    }
     if (current < 0 && invitesLink !== null) {
       invitesLink.focus()
       return
@@ -531,6 +599,10 @@ export function RoomList() {
     if (current === 0 && delta < 0) {
       if (invitesLink !== null) {
         invitesLink.focus()
+        return
+      }
+      if (verificationRows.length > 0) {
+        verificationRows[verificationRows.length - 1]?.focus()
         return
       }
       filterInput.current?.focus()
@@ -912,6 +984,61 @@ export function RoomList() {
           a cached list that flinches on every load is worse than the 1.3 s
           wait it replaces (ADR 0085 phase 2). `aria-live="polite"` lets a
           screen reader hear the update settle without interrupting. */}
+      {verification.inbox.value.length > 0 && (
+        <div class="verification-band">
+          {verification.inbox.value.map((flow) => {
+            const key = flowKey(flow)
+            const done = flow.stage === 'done'
+            const showAccount =
+              accountStore.accounts.value.filter(
+                (account) => account.state === 'active',
+              ).length > 1
+            return (
+              <div class="verification-row" key={key}>
+                <button
+                  type="button"
+                  class="verification-link"
+                  data-verification-row
+                  data-verification-key={key}
+                  onClick={() => verification.open(key)}
+                  onKeyDown={onListKeyDown}
+                >
+                  <span class="room-copy">
+                    <span class="room-title">
+                      <span class="room-title-main">
+                        <span class="room-name">{flowTitle(flow)}</span>
+                        <span class="badge">{flowStageLabel(flow)}</span>
+                      </span>
+                      {showAccount && (
+                        <span class="room-account muted">
+                          {flow.userId !== '' ? flow.userId : flow.accountId}
+                        </span>
+                      )}
+                    </span>
+                  </span>
+                </button>
+                {done ? (
+                  <button
+                    type="button"
+                    class="ghost verification-decline"
+                    onClick={() => verification.dismissTerminal(key)}
+                  >
+                    Dismiss
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    class="ghost verification-decline"
+                    onClick={() => void verification.requestCancel(key)}
+                  >
+                    Decline
+                  </button>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
       {invites.count.value > 0 && (
         <a
           href="/invites"

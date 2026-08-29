@@ -276,3 +276,139 @@ export function inviteRemoved(frame: LiveFrame): InviteRemoved | null {
   const { room_id: roomId } = frame.payload as Record<string, unknown>
   return typeof roomId === 'string' ? { roomId } : null
 }
+
+/** The `type` tag for a peer-initiated SAS request (ADR 0027). */
+export const VERIFICATION_REQUESTED = 'verification.requested'
+
+/** The `type` tag for SAS emoji/decimals becoming available. */
+export const VERIFICATION_SAS = 'verification.sas'
+
+/** The `type` tag for a completed SAS flow. */
+export const VERIFICATION_DONE = 'verification.done'
+
+/** The `type` tag for a cancelled SAS flow. */
+export const VERIFICATION_CANCELLED = 'verification.cancelled'
+
+export type VerificationFrameKind = 'requested' | 'sas' | 'done' | 'cancelled'
+
+export interface VerificationEmoji {
+  symbol: string
+  description: string
+}
+
+/**
+ * Decoded `verification.*` payload. `deviceId` is null for cross-user
+ * inbound (wire `device_id` omitted or null). `emoji`/`decimals` are only
+ * populated on `verification.sas`; `reason` only on `verification.cancelled`.
+ */
+export interface VerificationFramePayload {
+  flowId: string
+  userId: string
+  deviceId: string | null
+  emoji: VerificationEmoji[] | null
+  decimals: [number, number, number] | null
+  reason: string | null
+}
+
+const VERIFICATION_KIND: Record<string, VerificationFrameKind> = {
+  [VERIFICATION_REQUESTED]: 'requested',
+  [VERIFICATION_SAS]: 'sas',
+  [VERIFICATION_DONE]: 'done',
+  [VERIFICATION_CANCELLED]: 'cancelled',
+}
+
+function optionalStringOrNull(value: unknown): string | null | false {
+  if (value === undefined || value === null) {
+    return null
+  }
+  return typeof value === 'string' ? value : false
+}
+
+function decodeFrameEmoji(value: unknown): VerificationEmoji[] | null | false {
+  if (value === undefined || value === null) {
+    return null
+  }
+  if (!Array.isArray(value)) {
+    return false
+  }
+  const emoji: VerificationEmoji[] = []
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null) {
+      return false
+    }
+    const { symbol, description } = item as Record<string, unknown>
+    if (typeof symbol !== 'string' || typeof description !== 'string') {
+      return false
+    }
+    emoji.push({ symbol, description })
+  }
+  return emoji
+}
+
+function decodeFrameDecimals(
+  value: unknown,
+): [number, number, number] | null | false {
+  if (value === undefined || value === null) {
+    return null
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length !== 3 ||
+    !value.every(
+      (entry) => typeof entry === 'number' && Number.isSafeInteger(entry),
+    )
+  ) {
+    return false
+  }
+  return [value[0], value[1], value[2]]
+}
+
+/**
+ * A `verification.*` frame, or `null` for any other tag or a malformed
+ * payload. One bad frame must not tear the socket down (same as `inviteAdded`).
+ */
+export function verificationFrame(
+  frame: LiveFrame,
+): { kind: VerificationFrameKind; payload: VerificationFramePayload } | null {
+  const kind = VERIFICATION_KIND[frame.type]
+  if (kind === undefined) {
+    return null
+  }
+  if (typeof frame.payload !== 'object' || frame.payload === null) {
+    return null
+  }
+  const payload = frame.payload as Record<string, unknown>
+  if (
+    typeof payload.flow_id !== 'string' ||
+    typeof payload.user_id !== 'string'
+  ) {
+    return null
+  }
+  const deviceId = optionalStringOrNull(payload.device_id)
+  if (deviceId === false) {
+    return null
+  }
+  const emoji = decodeFrameEmoji(payload.emoji)
+  if (emoji === false) {
+    return null
+  }
+  const decimals = decodeFrameDecimals(payload.decimals)
+  if (decimals === false) {
+    return null
+  }
+  const reason = optionalStringOrNull(payload.reason)
+  if (reason === false) {
+    return null
+  }
+  return {
+    kind,
+    payload: {
+      flowId: payload.flow_id,
+      userId: payload.user_id,
+      deviceId,
+      emoji,
+      decimals,
+      reason,
+    },
+  }
+}

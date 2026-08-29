@@ -63,6 +63,9 @@ const server = setupServer(
   http.get(`${TEST_BASE_URL}/v1/invites`, () =>
     HttpResponse.json({ data: [] }),
   ),
+  http.get(`${TEST_BASE_URL}/v1/accounts/:accountId/verify`, () =>
+    HttpResponse.json({ data: [] }),
+  ),
   http.get(`${TEST_BASE_URL}/v1/status`, () =>
     HttpResponse.json({
       data: { backfill: { paused: false, free_bytes: 0, accounts: [] } },

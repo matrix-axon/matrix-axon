@@ -397,6 +397,43 @@ function synthTimeline(n) {
  *  toggled via `/__e2e/search-503` and reset by the spec that sets it. */
 let searchDisabled = false
 
+/** In-memory SAS flows, keyed by `${accountId}\0${flowId}`. Isolated via
+ *  `/__e2e/verify-reset` so other specs keep an empty list. */
+const verifyFlows = new Map()
+/** Optional device-list override per account id. */
+const verifyDevices = new Map()
+const SAS_EMOJI = [
+  { symbol: '🐶', description: 'Dog' },
+  { symbol: '🐱', description: 'Cat' },
+  { symbol: '🦁', description: 'Lion' },
+  { symbol: '🐴', description: 'Horse' },
+  { symbol: '🦄', description: 'Unicorn' },
+  { symbol: '🐷', description: 'Pig' },
+  { symbol: '🐘', description: 'Elephant' },
+]
+
+function defaultDevices(accountId) {
+  const userId = accountId === ACCOUNT_ID_2 ? USER_ID_2 : USER_ID
+  return {
+    user_id: userId,
+    devices: [
+      {
+        device_id: 'DEVICE',
+        display_name: 'Axon',
+        algorithms: ['m.megolm.v1.aes-sha2'],
+        is_verified: true,
+        is_cross_signed_by_owner: true,
+        local_trust_state: 'verified',
+      },
+    ],
+  }
+}
+
+function resetVerifyState() {
+  verifyFlows.clear()
+  verifyDevices.clear()
+}
+
 /** Manifest `/version.json` reports instead of `dist/`'s; `null` = the real one.
  *  Set via `/__e2e/version` to stage a deploy without rebuilding (ADR 0087). */
 let versionOverride = null
@@ -605,6 +642,81 @@ async function handleApi(req, res, url) {
     return json(res, {
       data: { backfill: { paused: false, free_bytes: 0, accounts: [] } },
     })
+  }
+  if (method === 'GET' && /\/accounts\/[^/]+\/devices$/.test(pathname)) {
+    const accountId = pathname.split('/')[3]
+    const override = verifyDevices.get(accountId)
+    return json(res, {
+      data: override ?? defaultDevices(accountId),
+    })
+  }
+  if (method === 'GET' && /\/accounts\/[^/]+\/verify$/.test(pathname)) {
+    const accountId = pathname.split('/')[3]
+    const flows = [...verifyFlows.values()].filter(
+      (flow) => flow.account_id === accountId,
+    )
+    return json(res, { data: flows.map((flow) => flow.dto) })
+  }
+  if (
+    method === 'GET' &&
+    /\/accounts\/[^/]+\/verify\/[^/]+$/.test(pathname)
+  ) {
+    const flowId = decodeURIComponent(pathname.split('/').pop())
+    const accountId = pathname.split('/')[3]
+    const flow = verifyFlows.get(`${accountId}\0${flowId}`)
+    if (flow === undefined) {
+      return json(res, { error: { code: 'not_found', message: 'no such flow' } }, 404)
+    }
+    return json(res, { data: flow.dto })
+  }
+  if (method === 'POST' && /\/accounts\/[^/]+\/verify$/.test(pathname)) {
+    const accountId = pathname.split('/')[3]
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}')
+      const flowId = `flow-${randomUUID()}`
+      const dto = {
+        flow_id: flowId,
+        user_id: accountId === ACCOUNT_ID_2 ? USER_ID_2 : USER_ID,
+        device_id: body.device_id ?? null,
+        stage: 'requested',
+        emoji: null,
+        decimals: null,
+        cancel_reason: null,
+      }
+      verifyFlows.set(`${accountId}\0${flowId}`, { account_id: accountId, dto })
+      json(res, { data: { flow_id: flowId } })
+    })
+    return
+  }
+  if (
+    method === 'POST' &&
+    /\/accounts\/[^/]+\/verify\/[^/]+\/confirm$/.test(pathname)
+  ) {
+    const flowId = decodeURIComponent(pathname.split('/').at(-2))
+    const accountId = pathname.split('/')[3]
+    const flow = verifyFlows.get(`${accountId}\0${flowId}`)
+    if (flow === undefined) {
+      return json(res, { error: { code: 'not_found', message: 'no such flow' } }, 404)
+    }
+    flow.dto.stage = 'confirmed'
+    res.writeHead(204).end()
+    return
+  }
+  if (
+    method === 'POST' &&
+    /\/accounts\/[^/]+\/verify\/[^/]+\/cancel$/.test(pathname)
+  ) {
+    const flowId = decodeURIComponent(pathname.split('/').at(-2))
+    const accountId = pathname.split('/')[3]
+    const flow = verifyFlows.get(`${accountId}\0${flowId}`)
+    if (flow !== undefined) {
+      flow.dto.stage = 'cancelled'
+      flow.dto.cancel_reason = 'user cancelled'
+    }
+    res.writeHead(204).end()
+    return
   }
   if (method === 'GET' && pathname === '/v1/invites') {
     return json(res, { data: [] })
@@ -1045,6 +1157,75 @@ const server = createServer((req, res) => {
       'cache-control': 'no-store',
     })
     return res.end(JSON.stringify(versionOverride))
+  }
+  if (req.method === 'POST' && url.pathname === '/__e2e/verify-reset') {
+    resetVerifyState()
+    return json(res, { data: { reset: true } })
+  }
+  if (req.method === 'POST' && url.pathname === '/__e2e/verify-devices') {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}')
+      verifyDevices.set(body.account_id, {
+        user_id: body.user_id ?? USER_ID,
+        devices: body.devices ?? [],
+      })
+      json(res, { data: { ok: true } })
+    })
+    return
+  }
+  if (req.method === 'POST' && url.pathname === '/__e2e/push-verification') {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}')
+      const accountId = body.account_id ?? ACCOUNT_ID
+      const flowId = body.flow_id ?? `flow-${randomUUID()}`
+      const kind = body.kind ?? 'requested'
+      const userId = body.user_id ?? USER_ID
+      const deviceId = body.device_id ?? 'ELEMENT'
+      const type =
+        kind === 'sas'
+          ? 'verification.sas'
+          : kind === 'done'
+            ? 'verification.done'
+            : kind === 'cancelled'
+              ? 'verification.cancelled'
+              : 'verification.requested'
+      const dto = {
+        flow_id: flowId,
+        user_id: userId,
+        device_id: deviceId,
+        stage:
+          kind === 'sas'
+            ? 'keys_exchanged'
+            : kind === 'done'
+              ? 'done'
+              : kind === 'cancelled'
+                ? 'cancelled'
+                : 'requested',
+        emoji: kind === 'sas' ? SAS_EMOJI : null,
+        decimals: kind === 'sas' ? [1, 2, 3] : null,
+        cancel_reason: kind === 'cancelled' ? (body.reason ?? 'cancelled') : null,
+      }
+      verifyFlows.set(`${accountId}\0${flowId}`, { account_id: accountId, dto })
+      const payload = {
+        flow_id: flowId,
+        user_id: userId,
+        device_id: deviceId,
+      }
+      if (kind === 'sas') {
+        payload.emoji = SAS_EMOJI
+        payload.decimals = [1, 2, 3]
+      }
+      if (kind === 'cancelled') {
+        payload.reason = dto.cancel_reason
+      }
+      broadcast({ type, account_id: accountId, payload })
+      json(res, { data: { flow_id: flowId, type } })
+    })
+    return
   }
   if (req.method === 'POST' && url.pathname === '/__e2e/drop-sockets') {
     const blockMs = Number(url.searchParams.get('block_ms') ?? 0)

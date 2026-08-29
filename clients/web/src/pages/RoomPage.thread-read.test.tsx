@@ -227,6 +227,9 @@ function renderRoom(
     http.get(`${TEST_BASE_URL}/v1/invites`, () =>
       HttpResponse.json({ data: [] }),
     ),
+    http.get(`${TEST_BASE_URL}/v1/accounts/:accountId/verify`, () =>
+      HttpResponse.json({ data: [] }),
+    ),
     // Faithful to the report: the room summary's newest event *is* the thread
     // reply, since `last_activity_ts` is `MAX(origin_ts)` over every event.
     http.get(`${TEST_BASE_URL}/v1/rooms`, () =>

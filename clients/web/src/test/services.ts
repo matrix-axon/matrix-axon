@@ -10,6 +10,8 @@ import {
   connectMatrixOAuthQrSessionReset,
   connectInvitesSessionReset,
   connectLiveInvites,
+  connectLiveVerification,
+  connectVerificationSessionReset,
   connectLiveRooms,
   connectLiveThreadUnread,
   connectEphemeralPassthrough,
@@ -33,6 +35,7 @@ import { cacheNamespace, createMemoryCacheStore } from '../stores/cache-store'
 import { createTelemetryStore } from '../stores/telemetry'
 import { createRoomListCache } from '../stores/room-list-cache'
 import { createInvitesStore } from '../stores/invites'
+import { createVerificationStore } from '../stores/verification'
 import { createRoomsStore } from '../stores/rooms'
 import { createSearchStore } from '../stores/search'
 import { createSettingsStore } from '../stores/settings'
@@ -118,6 +121,10 @@ export function testServices(
   const accounts = createAccountsStore(api)
   const matrixOAuthQr = createMatrixOAuthQrStore(api, accounts, {
     storage: options.pendingStorage ?? memoryStorage(),
+    // Interaction tests finish inside Testing Library's 1s waitFor. The
+    // production 1s poll races that window once the service graph does any
+    // extra mount work (verification store). e2e covers live polling.
+    pollDelayMs: 30_000,
   })
   const qr = options.qr ?? createBrowserQrAdapter()
   const cache = options.cache ?? createMemoryCacheStore()
@@ -165,10 +172,13 @@ export function testServices(
     fetchManifest: options.versionManifest ?? (() => Promise.resolve(null)),
   })
   const invites = createInvitesStore(api, rooms)
+  const verification = createVerificationStore(api)
   connectUnreadCounts(live, rooms)
   connectLiveRooms(live, rooms)
   connectLiveInvites(live, invites)
   connectInvitesSessionReset(auth, invites)
+  connectLiveVerification(live, verification, accounts)
+  connectVerificationSessionReset(auth, verification)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
@@ -195,6 +205,7 @@ export function testServices(
     qr,
     rooms,
     invites,
+    verification,
     spaces,
     search,
     threadUnread,

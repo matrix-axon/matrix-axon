@@ -5278,3 +5278,96 @@ audio.media-player {
 .invites-header .muted {
   margin: 0.2rem 0 0;
 }
+
+/* ---- SAS verification (web M-W9) ---- */
+
+.verification-band {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin: 0 0 0.35rem;
+}
+
+.verification-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+}
+
+.verification-link {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: var(--surface, transparent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  cursor: pointer;
+}
+
+.verification-link:focus {
+  outline: 2px solid var(--accent, #6cf);
+  outline-offset: -2px;
+}
+
+.verification-decline {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.sas-emoji {
+  list-style: none;
+  margin: 0.75rem 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.sas-emoji-symbol {
+  font-size: 1.5rem;
+}
+
+.device-picker-list {
+  list-style: none;
+  margin: 0.75rem 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.device-picker-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 0.5rem;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+}
+
+.device-picker-id {
+  font-size: 0.8em;
+}
+
+.device-picker-paste {
+  margin-top: 0.75rem;
+}
+
+.verification-inbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem 0;
+  overflow-y: auto;
+}
+
+.verification-inbox-row {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  padding: 0.35rem 0;
+}
+
+.verification-chip .topbar-count-badge {
+  min-width: 1.25rem;
+}

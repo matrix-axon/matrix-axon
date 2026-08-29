@@ -9,6 +9,7 @@ import {
   inviteRemoved,
   timelineEvent,
   unreadCountsChange,
+  verificationFrame,
 } from './api/frames'
 import { openLiveSocket } from './api/ws'
 import { setPerfEnabled, setTelemetrySink } from './perf'
@@ -53,6 +54,10 @@ import { roomTitle } from './stores/room-list'
 import { createRoomListCache } from './stores/room-list-cache'
 import { createTelemetryStore, type TelemetryStore } from './stores/telemetry'
 import { createInvitesStore, type InvitesStore } from './stores/invites'
+import {
+  createVerificationStore,
+  type VerificationStore,
+} from './stores/verification'
 import { createRoomsStore, type RoomsStore } from './stores/rooms'
 import { createSearchStore, type SearchStore } from './stores/search'
 import { createSettingsStore, type SettingsStore } from './stores/settings'
@@ -93,6 +98,7 @@ export interface AppServices {
   qr: BrowserQrAdapter
   rooms: RoomsStore
   invites: InvitesStore
+  verification: VerificationStore
   spaces: SpacesStore
   search: SearchStore
   threadUnread: ThreadUnreadStore
@@ -659,6 +665,93 @@ export function connectInvitesSessionReset(
   })
 }
 
+/** Wipe SAS flows when the Axon session ends. */
+export function connectVerificationSessionReset(
+  auth: CompositeAuthProvider,
+  verification: VerificationStore,
+): () => void {
+  return effect(() => {
+    if (!auth.signedIn.value) {
+      verification.resetSession()
+    }
+  })
+}
+
+/**
+ * Keep SAS verification live (ADR 0027/0061). GET is the source of truth on
+ * reconnect and visibility; the first-load GET is `ensureLoaded` from the
+ * always-mounted RoomList (same shape as invites), so constructing the
+ * service graph does not fire `GET …/verify` in every test harness.
+ * WS frames overlay that list.
+ */
+export function connectLiveVerification(
+  live: LiveConnection,
+  verification: VerificationStore,
+  accounts: AccountsStore,
+): () => void {
+  /** One shared accounts refresh when reconnect beats the store's first load. */
+  let accountsLoad: Promise<void> | null = null
+
+  const activeIds = (): string[] =>
+    accounts.accounts.value
+      .filter((account) => account.state === 'active')
+      .map((account) => account.account_id)
+      .sort()
+
+  const hydrate = (ids: readonly string[]): void => {
+    verification.applyOwnUserMap(accounts.accounts.value)
+    void verification.refreshAll(ids)
+  }
+
+  const unsubscribe = live.subscribe((frame) => {
+    const decoded = verificationFrame(frame)
+    if (decoded === null) {
+      return
+    }
+    verification.noteFrame(frame.accountId, decoded.kind, decoded.payload)
+    if (decoded.kind === 'done') {
+      inBackground(accounts.refresh())
+    }
+  })
+
+  const accountsDispose = effect(() => {
+    verification.applyOwnUserMap(accounts.accounts.value)
+  })
+
+  const reconnectDispose = effect(() => {
+    if (live.reconnects.value === 0) {
+      return
+    }
+    const ids = activeIds()
+    if (ids.length === 0) {
+      accountsLoad ??= accounts.refresh().catch(() => {})
+      void accountsLoad.then(() => {
+        hydrate(activeIds())
+      })
+      return
+    }
+    hydrate(ids)
+  })
+
+  const onVisibility = (): void => {
+    if (document.visibilityState !== 'visible') {
+      return
+    }
+    if (verification.inboxCount.value === 0) {
+      return
+    }
+    void verification.refreshAll(activeIds())
+  }
+  document.addEventListener('visibilitychange', onVisibility)
+
+  return () => {
+    unsubscribe()
+    accountsDispose()
+    reconnectDispose()
+    document.removeEventListener('visibilitychange', onVisibility)
+  }
+}
+
 /** Keep the invite inbox live (ADR 0091). Reconnect re-reads the list. */
 export function connectLiveInvites(
   live: LiveConnection,
@@ -847,10 +940,13 @@ export function createServices(
   const deviceState = createDeviceStateStore(api, live, storage)
   const spaces = createSpacesStore(api, rooms, live)
   const invites = createInvitesStore(api, rooms)
+  const verification = createVerificationStore(api)
   connectUnreadCounts(live, rooms)
   connectLiveRooms(live, rooms)
   connectLiveInvites(live, invites)
   connectInvitesSessionReset(auth, invites)
+  connectLiveVerification(live, verification, accounts)
+  connectVerificationSessionReset(auth, verification)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
@@ -879,6 +975,7 @@ export function createServices(
     qr,
     rooms,
     invites,
+    verification,
     spaces,
     search,
     threadUnread,

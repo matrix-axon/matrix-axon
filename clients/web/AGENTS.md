@@ -602,7 +602,8 @@ SPDisplaysDataType` before debugging the simulator itself.
 M-W1–M-W8.5 are done (M-W7 was built before M-W6
 deliberately — messaging is pure HTTP; M-W8.5, media send, was unblocked late
 by M15's upload API and so sits between M-W8 and M-W9). Remaining: **M-W9**
-(verification/SAS + trust glyphs), **M-W10** (search UI over `GET /v1/search`, deep-linking via
+(sender-trust glyphs / bundle inspector, plus optional cross-user outbound SAS;
+self-verification SAS has landed), **M-W10** (search UI over `GET /v1/search`, deep-linking via
 `?event=`), **M-W11** (hardening/a11y/parity audit), **M-W12** (Tauri —
 no service workers, `document.cookie`, or `window.open` anywhere, ever).
 

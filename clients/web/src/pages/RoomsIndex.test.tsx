@@ -40,6 +40,9 @@ const server = setupServer(
   http.get(`${TEST_BASE_URL}/v1/invites`, () =>
     HttpResponse.json({ data: [] }),
   ),
+  http.get(`${TEST_BASE_URL}/v1/accounts/:accountId/verify`, () =>
+    HttpResponse.json({ data: [] }),
+  ),
 )
 let localStorageMock: Storage
 let originalLocalStorage: PropertyDescriptor | undefined

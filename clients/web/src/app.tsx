@@ -14,6 +14,8 @@ import { SpaceList } from './components/SpaceList'
 import { SearchOverlay } from './components/SearchOverlay'
 import { ShortcutsHelp } from './components/ShortcutsHelp'
 import { UnreadThreadsPanel } from './components/UnreadThreadsPanel'
+import { SasModal } from './components/SasModal'
+import { VerificationInboxPanel } from './components/VerificationInboxPanel'
 import { UpdateBanner } from './components/UpdateBanner'
 import { useModalFocus } from './components/use-modal-focus'
 import { layoutMode, SINGLE_PANE_QUERY, useMediaQuery } from './layout'
@@ -26,6 +28,7 @@ import {
 import {
   currentRoomFromPath,
   serializeSearchTokens,
+  withoutSearchParam,
   withSearchParam,
 } from './search-tokens'
 import { ShellActionsContext } from './shell-actions'
@@ -70,6 +73,7 @@ import {
 import { roomKey } from './stores/room-list'
 import { orderedSpaces } from './stores/spaces'
 import { hasActiveAccount, type Account } from './stores/accounts'
+import { flowKey } from './stores/verification'
 import type { RoomEntryResult, RoomsStore } from './stores/rooms'
 
 /**
@@ -584,14 +588,22 @@ function SidebarPaneHandle({
 function ShellChrome() {
   const location = useLocation()
   const { path, query } = location
-  const { accounts, rooms, search, settings, spaces, threadUnread } =
-    useServices()
+  const {
+    accounts,
+    rooms,
+    search,
+    settings,
+    spaces,
+    threadUnread,
+    verification,
+  } = useServices()
   const mode = layoutMode(path)
   perfMark('shell:render', { path, mode })
   const collapsed = settings.sidebarCollapsed.value
   const sidebarWidth = settings.sidebarWidth.value
   const [helpOpen, setHelpOpen] = useState(false)
   const [unreadThreadsOpen, setUnreadThreadsOpen] = useState(false)
+  const [verificationInboxOpen, setVerificationInboxOpen] = useState(false)
   const [jumpAction, setJumpActionState] = useState<(() => void) | null>(null)
   const [roomLinkJoinError, setRoomLinkJoinError] = useState<string | null>(
     null,
@@ -606,6 +618,20 @@ function ShellChrome() {
   // The search overlay is URL-addressed (ADR 0066): mounted while `?search=`
   // is present (even empty), so a shared link restores it and Back closes it.
   const searchOpen = typeof query.search === 'string'
+  const sasOpen = verification.openFlow.value !== null
+  const verificationInboxCount = verification.inboxCount.value
+
+  useEffect(() => {
+    if (!sasOpen) {
+      return
+    }
+    setHelpOpen(false)
+    setUnreadThreadsOpen(false)
+    setVerificationInboxOpen(false)
+    if (searchOpen) {
+      location.route(withoutSearchParam(location.url))
+    }
+  }, [sasOpen, searchOpen, location])
   const activeAccountExists = hasActiveAccount(accounts.accounts.value)
   const accountsLoading = accounts.loading.value
   const accountsError = accounts.error.value
@@ -655,11 +681,19 @@ function ShellChrome() {
   }, [path, search])
 
   const openHelp = (event: KeyboardEvent) => {
+    if (sasOpen) {
+      event.preventDefault()
+      return
+    }
     event.preventDefault()
     setHelpOpen(true)
   }
 
   const openSearch = (event?: KeyboardEvent) => {
+    if (sasOpen) {
+      event?.preventDefault()
+      return
+    }
     event?.preventDefault()
     if (!searchOpen) {
       const lastQuery = search.lastQuery.value
@@ -1038,6 +1072,28 @@ function ShellChrome() {
             </button>
           )}
           <div class="topbar-actions">
+            {verificationInboxCount > 0 && (
+              <button
+                type="button"
+                class="ghost topbar-icon-button verification-chip"
+                title="Device verification"
+                aria-label={`Device verification, ${verificationInboxCount} pending`}
+                aria-haspopup="dialog"
+                onClick={() => {
+                  const live = verification.inbox.value.filter(
+                    (flow) => flow.stage !== 'done',
+                  )
+                  if (live.length === 1) {
+                    verification.open(flowKey(live[0]))
+                    return
+                  }
+                  setVerificationInboxOpen(true)
+                }}
+              >
+                <span class="topbar-count-badge">{verificationInboxCount}</span>
+                <span class="topbar-label">Verification</span>
+              </button>
+            )}
             <button
               type="button"
               class="ghost topbar-icon-button unread-threads-button"
@@ -1168,18 +1224,24 @@ function ShellChrome() {
           </main>
         </div>
 
-        {searchOpen && <SearchOverlay />}
-        {unreadThreadsOpen && (
+        {sasOpen && <SasModal />}
+        {searchOpen && !sasOpen && <SearchOverlay />}
+        {unreadThreadsOpen && !sasOpen && (
           <UnreadThreadsPanel onClose={() => setUnreadThreadsOpen(false)} />
         )}
-        {pendingMatrixJoin !== null && (
+        {verificationInboxOpen && !sasOpen && (
+          <VerificationInboxPanel
+            onClose={() => setVerificationInboxOpen(false)}
+          />
+        )}
+        {pendingMatrixJoin !== null && !sasOpen && (
           <MatrixJoinPrompt
             pending={pendingMatrixJoin}
             onCancel={cancelPendingMatrixJoin}
             onJoin={confirmPendingMatrixJoin}
           />
         )}
-        {helpOpen && (
+        {helpOpen && !sasOpen && (
           <ShortcutsHelp
             mobile={singlePane}
             onClose={() => setHelpOpen(false)}
