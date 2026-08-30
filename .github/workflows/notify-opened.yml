@@ -23,10 +23,9 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
-      - name: Notify axon-developer room
+      - name: Notify axon-developer room of new issue or PR
         env:
-          NOTIFY_HOMESERVER: ${{ secrets.NOTIFY_HOMESERVER }}
-          NOTIFY_ROOM: ${{ secrets.NOTIFY_ROOM }}
+          NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
           NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
@@ -54,16 +53,30 @@ jobs:
             AUTHOR="$PR_AUTHOR"
           fi
 
-          MATRIX_BODY="$(jq -nr \
+          # The title, body and author are attacker-controlled: anyone can open
+          # an issue, and pull_request_target fires for any fork. The webhook
+          # renders Markdown, so it is escaped before interpolation -- otherwise
+          # a body can forge a CI-looking notice: a link whose label reads as a
+          # github.com URL and whose target is not, or a heading matching the
+          # smoke notices posted in the same room. Raw HTML needs no handling
+          # here; the plugin's Jinja autoescape covers it.
+          #
+          # The escaping lives in scripts/lib/markdown-escape.jq so there is one
+          # copy of it, and scripts/check-notify-escaping.sh pins what it must
+          # catch. Only the URL is trusted enough to put in a link.
+          NOTIFY_MESSAGE="$(jq -nr -L scripts/lib \
             --arg kind "$KIND" \
             --arg author "$AUTHOR" \
             --arg title "$TITLE" \
             --arg body "$BODY" \
             --arg url "$URL" \
-            '(("New " + $kind + " opened by @" + $author + ": " + $title)
-              + "\n" + $url
-              + "\n\n"
-              + ($body[0:4000]))')"
+            '
+            include "markdown-escape";
+            ("New " + $kind + " opened by @" + ($author | escape_untrusted)
+              + ": " + ($title[0:200] | escape_untrusted))
+              + "  \n[" + $url + "](" + $url + ")"
+              + "  \n\n"
+              + ($body[0:4000] | escape_untrusted)')"
 
-          export MATRIX_BODY
+          export NOTIFY_MESSAGE
           ./scripts/send-matrix-notification.sh

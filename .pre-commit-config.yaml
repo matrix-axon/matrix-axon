@@ -60,6 +60,16 @@ repos:
         files: "^docs/adr/"
         pass_filenames: false
         stages: [pre-push]
+      # Sub-second jq. The notification escaping is security-relevant and its
+      # first version silently missed three of the four ways CommonMark lets
+      # you write a heading, so the invariant is tested rather than reviewed.
+      - id: notify-escaping
+        name: notification Markdown escaping holds
+        language: system
+        entry: scripts/check-notify-escaping.sh
+        files: '^(scripts/(lib/markdown-escape\.jq|check-notify-escaping\.sh|notify-smoke-result\.sh|send-matrix-notification\.sh)|\.github/workflows/notify-opened\.yml)$'
+        pass_filenames: false
+        stages: [pre-push]
       # A hook whose filter matches nothing passes forever without running --
       # #180. This asserts the filters below select what they claim, and that
       # every `SKIP=<id>` example in the docs still names a hook that exists.
