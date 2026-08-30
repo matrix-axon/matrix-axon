@@ -23,7 +23,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axon_api::{
     AccountLifecycle, AppState, MatrixOAuthQrAcquireService, MatrixOAuthQrError,
-    MatrixOAuthQrFlowDto, MatrixOAuthQrPresentation, MatrixOAuthQrStage, MediaProxy,
+    MatrixOAuthQrFlowDto, MatrixOAuthQrGrantError, MatrixOAuthQrGrantFlowDto,
+    MatrixOAuthQrGrantService, MatrixOAuthQrPresentation, MatrixOAuthQrStage, MediaProxy,
     RedecryptUtdsStats,
 };
 use axon_store::{AccountState, NewEvent, RoomInviteSnapshot, RoomStateUpsert, Store};
@@ -392,6 +393,140 @@ fn matrix_oauth_qr_app(store: Store, service: Arc<StubMatrixOAuthQr>) -> axum::R
             None,
         )
         .with_matrix_oauth_acquire(service),
+    )
+}
+
+struct StubMatrixOAuthQrGrant {
+    account_id: Uuid,
+    flow_id: Uuid,
+    calls: Mutex<Vec<&'static str>>,
+}
+
+impl StubMatrixOAuthQrGrant {
+    fn new(account_id: Uuid, flow_id: Uuid) -> Self {
+        Self {
+            account_id,
+            flow_id,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn flow(
+        &self,
+        presentation: MatrixOAuthQrPresentation,
+        stage: MatrixOAuthQrStage,
+    ) -> MatrixOAuthQrGrantFlowDto {
+        MatrixOAuthQrGrantFlowDto {
+            flow_id: self.flow_id,
+            account_id: self.account_id,
+            presentation,
+            stage,
+            qr_code_data: (stage == MatrixOAuthQrStage::QrReady)
+                .then(|| "opaque-grant-qr".to_owned()),
+            check_code: (stage == MatrixOAuthQrStage::CheckCodeToDisplay).then(|| "42".to_owned()),
+            verification_uri: (stage == MatrixOAuthQrStage::WaitingForAuthorization)
+                .then(|| "https://auth.example.org/device".to_owned()),
+            error_code: None,
+        }
+    }
+
+    fn calls(&self) -> Vec<&'static str> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl MatrixOAuthQrGrantService for StubMatrixOAuthQrGrant {
+    async fn create(
+        &self,
+        account_id: Uuid,
+        presentation: MatrixOAuthQrPresentation,
+    ) -> Result<MatrixOAuthQrGrantFlowDto, MatrixOAuthQrGrantError> {
+        assert_eq!(account_id, self.account_id);
+        self.calls.lock().unwrap().push("create");
+        Ok(self.flow(presentation, MatrixOAuthQrStage::Starting))
+    }
+
+    async fn get(
+        &self,
+        account_id: Uuid,
+        flow_id: Uuid,
+    ) -> Result<MatrixOAuthQrGrantFlowDto, MatrixOAuthQrGrantError> {
+        if (account_id, flow_id) != (self.account_id, self.flow_id) {
+            return Err(MatrixOAuthQrGrantError::NotFound(
+                "Matrix OAuth QR grant flow not found".to_owned(),
+            ));
+        }
+        self.calls.lock().unwrap().push("get");
+        Ok(self.flow(
+            MatrixOAuthQrPresentation::Display,
+            MatrixOAuthQrStage::QrReady,
+        ))
+    }
+
+    async fn submit_scan(
+        &self,
+        account_id: Uuid,
+        flow_id: Uuid,
+        qr_code_data: &str,
+    ) -> Result<MatrixOAuthQrGrantFlowDto, MatrixOAuthQrGrantError> {
+        if (account_id, flow_id) != (self.account_id, self.flow_id) {
+            return Err(MatrixOAuthQrGrantError::NotFound(
+                "Matrix OAuth QR grant flow not found".to_owned(),
+            ));
+        }
+        assert_eq!(qr_code_data, "opaque-grant-qr");
+        self.calls.lock().unwrap().push("scan");
+        Ok(self.flow(
+            MatrixOAuthQrPresentation::Scan,
+            MatrixOAuthQrStage::CheckCodeToDisplay,
+        ))
+    }
+
+    async fn submit_check_code(
+        &self,
+        account_id: Uuid,
+        flow_id: Uuid,
+        check_code: &str,
+    ) -> Result<MatrixOAuthQrGrantFlowDto, MatrixOAuthQrGrantError> {
+        if (account_id, flow_id) != (self.account_id, self.flow_id) {
+            return Err(MatrixOAuthQrGrantError::NotFound(
+                "Matrix OAuth QR grant flow not found".to_owned(),
+            ));
+        }
+        assert_eq!(check_code, "42");
+        self.calls.lock().unwrap().push("check");
+        Ok(self.flow(
+            MatrixOAuthQrPresentation::Display,
+            MatrixOAuthQrStage::WaitingForAuthorization,
+        ))
+    }
+
+    async fn cancel(&self, account_id: Uuid, flow_id: Uuid) -> Result<(), MatrixOAuthQrGrantError> {
+        if (account_id, flow_id) != (self.account_id, self.flow_id) {
+            return Ok(());
+        }
+        self.calls.lock().unwrap().push("cancel");
+        Ok(())
+    }
+}
+
+fn matrix_oauth_qr_grant_app(store: Store, service: Arc<StubMatrixOAuthQrGrant>) -> axum::Router {
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    axon_api::router(
+        AppState::new(
+            store,
+            live,
+            Arc::new(StubSender::ok("$unused:localhost")),
+            Arc::new(StubLifecycle::ok(Uuid::nil())),
+            Arc::new(StubVerification::ok("$unused-flow")),
+            Arc::new(StubTrust::ok()),
+            Arc::new(StubDeviceList::ok()),
+            Arc::new(StubTokenVerifier::ok()),
+            Arc::new(StubMediaProxy),
+            None,
+        )
+        .with_matrix_oauth_grant(service),
     )
 }
 
@@ -1652,6 +1787,162 @@ async fn matrix_oauth_qr_routes_are_authenticated_and_preserve_stage_fields() {
         &app,
         "DELETE",
         &format!("/v1/accounts/login/qr/{flow_id}"),
+        None,
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(body, Value::Null);
+    assert_eq!(
+        service.calls(),
+        ["create", "get", "scan", "check", "cancel"]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn matrix_oauth_qr_grant_routes_are_account_scoped_and_preserve_stage_fields() {
+    let store = store().await;
+    let account_id = Uuid::new_v4();
+    let flow_id = Uuid::new_v4();
+    let service = Arc::new(StubMatrixOAuthQrGrant::new(account_id, flow_id));
+    let app = matrix_oauth_qr_grant_app(store, service.clone());
+    let base = format!("/v1/accounts/{account_id}/login-grants/qr");
+
+    let (status, _) = request(
+        &app,
+        "POST",
+        &base,
+        Some(json!({ "presentation": "display" })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(service.calls().is_empty(), "auth rejects before the port");
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        &base,
+        Some(json!({ "presentation": "display", "approve": true })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request");
+    assert!(
+        service.calls().is_empty(),
+        "invalid JSON rejects before the port"
+    );
+
+    let oversized_create = "A".repeat(11 * 1024);
+    let (status, _) = request(
+        &app,
+        "POST",
+        &base,
+        Some(json!({
+            "presentation": "display",
+            "padding": oversized_create,
+        })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        service.calls().is_empty(),
+        "oversized create body rejects before the port"
+    );
+
+    let oversized = "A".repeat(11 * 1024);
+    let (status, _) = request(
+        &app,
+        "POST",
+        &format!("{base}/{flow_id}/scan"),
+        Some(json!({ "qr_code_data": oversized })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        service.calls().is_empty(),
+        "oversized body rejects before the port"
+    );
+
+    let other_account = Uuid::new_v4();
+    let (status, body) = get(
+        &app,
+        &format!("/v1/accounts/{other_account}/login-grants/qr/{flow_id}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+
+    let (status, body) = request(
+        &app,
+        "DELETE",
+        &format!("/v1/accounts/{other_account}/login-grants/qr/{flow_id}"),
+        None,
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(body, Value::Null);
+    assert!(
+        service.calls().is_empty(),
+        "unknown cancellation is idempotent"
+    );
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        &base,
+        Some(json!({ "presentation": "display" })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["data"]["account_id"], account_id.to_string());
+    assert_eq!(body["data"]["stage"], "starting");
+
+    let (status, body) = get(&app, &format!("{base}/{flow_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["stage"], "qr_ready");
+    assert_eq!(body["data"]["qr_code_data"], "opaque-grant-qr");
+    assert!(body["data"].get("check_code").is_none());
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        &format!("{base}/{flow_id}/scan"),
+        Some(json!({ "qr_code_data": "opaque-grant-qr" })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["stage"], "check_code_to_display");
+    assert_eq!(body["data"]["check_code"], "42");
+    assert!(body["data"].get("qr_code_data").is_none());
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        &format!("{base}/{flow_id}/check-code"),
+        Some(json!({ "check_code": "42" })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["stage"], "waiting_for_authorization");
+    assert_eq!(
+        body["data"]["verification_uri"],
+        "https://auth.example.org/device"
+    );
+    assert!(body["data"].get("authorization_user_code").is_none());
+
+    let (status, body) = request(
+        &app,
+        "DELETE",
+        &format!("{base}/{flow_id}"),
         None,
         Some(&bearer()),
     )

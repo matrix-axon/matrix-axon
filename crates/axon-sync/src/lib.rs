@@ -25,6 +25,8 @@ mod lifecycle;
 mod manager;
 mod matrix_oauth;
 mod matrix_oauth_acquire;
+mod matrix_oauth_flow;
+mod matrix_oauth_grant;
 mod media;
 mod member_profiles;
 mod meta;
@@ -45,6 +47,10 @@ pub use matrix_oauth::MatrixOAuthRegistrationManager;
 pub use matrix_oauth_acquire::{
     MatrixOAuthAcquireEngine, MatrixOAuthAcquireError, MatrixOAuthAcquirePresentation,
     MatrixOAuthAcquireStage, MatrixOAuthAcquireState,
+};
+pub use matrix_oauth_grant::{
+    MatrixOAuthGrantEngine, MatrixOAuthGrantError, MatrixOAuthGrantPresentation,
+    MatrixOAuthGrantStage, MatrixOAuthGrantState,
 };
 pub use media::SdkMediaProxy;
 pub use member_profiles::{MemberProfile, MemberProfileEngine, MemberProfileError};
