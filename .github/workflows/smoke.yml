@@ -118,6 +118,11 @@ jobs:
         # definition of what S1 means.
         env:
           SMOKE_LANE: ${{ steps.lane.outputs.lane }}
+          # Hosted runners are slower and noisier than a dev box, so the 20s
+          # default scenario wait (smoke/tui runner.rs) occasionally trips on a
+          # heavier scenario like room_sort_filter_surface. Give CI more
+          # headroom; local runs and the pre-push hook keep the 20s default.
+          SMOKE_TIMEOUT: "45"
         run: ./scripts/smoke-gate.sh "$SMOKE_LANE"
 
       - name: Upload failure artifacts
