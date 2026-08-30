@@ -193,9 +193,25 @@ export function connectUnreadCounts(
 }
 
 /**
+ * How far before this connection was wired a live reply's `origin_ts` may sit
+ * and still badge. Covers homeserver clock skew and the gap between graph
+ * construction and the first frame; anything older is a replay, not news.
+ */
+const LIVE_THREAD_REPLAY_SLACK_MS = 5 * 60_000
+
+/**
  * Feed live thread replies into the unread-thread store. The open thread is
  * skipped: `ThreadPanel` is the read surface for hidden replies, matching the
  * TUI's unread-thread semantics.
+ *
+ * A `timeline.event` frame is not proof the event is new. After an axon restart
+ * or a gappy sliding-sync resume the initial per-room sync window is replayed on
+ * the live bus (only back-pagination is suppressed server-side, `engine.rs`), so
+ * a room dormant for months re-delivers its last reply as if it just arrived —
+ * enough on its own to light up a years-old thread here. The live badge
+ * therefore speaks only for replies stamped at or after this connection was
+ * wired; `reconcileSummary`, which weighs a summary against the read markers on
+ * room entry, is what surfaces anything older.
  */
 export function connectLiveThreadUnread(
   live: LiveConnection,
@@ -203,10 +219,15 @@ export function connectLiveThreadUnread(
   accounts: AccountsStore,
   threadUnread: ThreadUnreadStore,
   activeThread: Signal<ActiveThread | null>,
+  now: () => number = () => Date.now(),
 ): () => void {
+  const liveSince = now() - LIVE_THREAD_REPLAY_SLACK_MS
   return live.subscribe((frame) => {
     const event = timelineEvent(frame)
     if (event === null) {
+      return
+    }
+    if (event.origin_ts < liveSince) {
       return
     }
     const room = rooms.rooms.value.find(
