@@ -511,6 +511,152 @@ describe('verification store', () => {
     expect(flow.stage).toBe('compare')
   })
 
+  it('a completed flow survives a GET that has forgotten it', async () => {
+    server.use(
+      http.get(`${BASE}/v1/accounts/${ACCOUNT}/verify`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    )
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'requested', payload())
+    verification.noteFrame(ACCOUNT, 'done', payload())
+    verification.open(flowKey(verification.flows.value[0]))
+    await verification.refresh(ACCOUNT)
+    expect(verification.openFlow.value?.stage).toBe('done')
+    expect(verification.openFlow.value?.cancelReason).toBeNull()
+    expect(verification.inbox.value).toHaveLength(1)
+  })
+
+  it('a declined flow is not resurrected by a GET issued before the cancel', async () => {
+    let release: (() => void) | undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(`${BASE}/v1/accounts/${ACCOUNT}/verify`, async () => {
+        await held
+        return HttpResponse.json({
+          data: [flowDto({ stage: 'keys_exchanged', emoji: sevenEmoji() })],
+        })
+      }),
+      http.post(
+        `${BASE}/v1/accounts/${ACCOUNT}/verify/:flowId/cancel`,
+        () => new HttpResponse(null, { status: 204 }),
+      ),
+    )
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    const pending = verification.refresh(ACCOUNT)
+    await verification.cancel(ACCOUNT, '$flow')
+    expect(verification.flows.value).toEqual([])
+    release?.()
+    await pending
+    expect(verification.flows.value).toEqual([])
+  })
+
+  it('a dismissed done flow is not resurrected by the terminal grace window', async () => {
+    server.use(
+      http.get(`${BASE}/v1/accounts/${ACCOUNT}/verify`, () =>
+        HttpResponse.json({ data: [flowDto({ stage: 'done' })] }),
+      ),
+    )
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'requested', payload())
+    verification.noteFrame(ACCOUNT, 'done', payload())
+    verification.dismissTerminal(flowKey(verification.flows.value[0]))
+    await verification.refresh(ACCOUNT)
+    expect(verification.flows.value).toEqual([])
+    verification.noteFrame(ACCOUNT, 'done', payload())
+    expect(verification.flows.value).toEqual([])
+  })
+
+  it('a tombstone is retired once the server stops listing the flow', async () => {
+    let rows: FlowDto[] = [flowDto({ stage: 'done' })]
+    server.use(
+      http.get(`${BASE}/v1/accounts/${ACCOUNT}/verify`, () =>
+        HttpResponse.json({ data: rows }),
+      ),
+    )
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'requested', payload())
+    verification.noteFrame(ACCOUNT, 'done', payload())
+    verification.dismissTerminal(flowKey(verification.flows.value[0]))
+    await verification.refresh(ACCOUNT)
+    rows = []
+    await verification.refresh(ACCOUNT)
+    verification.noteFrame(ACCOUNT, 'requested', payload())
+    expect(verification.flows.value).toHaveLength(1)
+  })
+
+  it('ensureLoaded fetches only the accounts it has not settled', async () => {
+    let getsA = 0
+    let getsB = 0
+    server.use(
+      http.get(`${BASE}/v1/accounts/${ACCOUNT}/verify`, () => {
+        getsA += 1
+        return HttpResponse.json({ data: [] })
+      }),
+      http.get(`${BASE}/v1/accounts/${ACCOUNT_B}/verify`, () => {
+        getsB += 1
+        return HttpResponse.json({ data: [] })
+      }),
+    )
+    const verification = store()
+    await verification.ensureLoaded([ACCOUNT])
+    await verification.ensureLoaded([ACCOUNT, ACCOUNT_B])
+    expect(getsA).toBe(1)
+    expect(getsB).toBe(1)
+  })
+
+  it('resetSession clears a device load that its own generation bump orphaned', async () => {
+    let release: (() => void) | undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(`${BASE}/v1/accounts/${ACCOUNT}/devices`, async () => {
+        await held
+        return HttpResponse.json({ data: { devices: [device(SIBLING)] } })
+      }),
+    )
+    const verification = store()
+    const pending = verification.loadDevices(ACCOUNT)
+    expect(verification.devicesLoading.value[ACCOUNT]).toBe(true)
+    verification.resetSession()
+    release?.()
+    await pending
+    expect(verification.devicesLoading.value[ACCOUNT]).toBeUndefined()
+  })
+
+  it('the incomplete-emoji warning clears when the full set arrives', () => {
+    const verification = store()
+    verification.noteFrame(
+      ACCOUNT,
+      'sas',
+      payload({ emoji: sevenEmoji().slice(0, 1) }),
+    )
+    expect(verification.flows.value[0].stage).toBe('waiting')
+    expect(verification.flows.value[0].error).toBe(INCOMPLETE_EMOJI_MESSAGE)
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    expect(verification.flows.value[0].stage).toBe('compare')
+    expect(verification.flows.value[0].error).toBeNull()
+  })
+
+  it('a replayed requested frame does not rewind a flow already at compare', async () => {
+    server.use(
+      http.post(
+        `${BASE}/v1/accounts/${ACCOUNT}/verify/:flowId/confirm`,
+        () => new HttpResponse(null, { status: 204 }),
+      ),
+    )
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    verification.noteFrame(ACCOUNT, 'requested', payload())
+    expect(verification.flows.value[0].stage).toBe('compare')
+    expect(verification.flows.value[0].emoji).toHaveLength(7)
+    expect(await verification.confirm(ACCOUNT, '$flow')).toEqual({ ok: true })
+  })
+
   it('ensureLoaded is a no-op after a successful refresh of the same set', async () => {
     let gets = 0
     server.use(

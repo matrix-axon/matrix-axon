@@ -94,6 +94,11 @@ test('Escape parks a live flow on /accounts and the chip restores it', async ({
   await page.getByRole('button', { name: /Element/ }).click()
   const dialog = page.getByRole('dialog', { name: /Verifying/ })
   await expect(dialog).toBeVisible()
+  // The Escape binding registers in the same effect flush that pulls focus
+  // into the dialog, and Preact runs effects after paint. Waiting on the
+  // dialog alone leaves a frame where a keypress lands on nothing and is gone
+  // — keys, unlike clicks, are not retried.
+  await expect(dialog.getByRole('button', { name: 'Close' })).toBeFocused()
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
   await expect(

@@ -335,6 +335,14 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
   const ownUserMap = new Map<string, string>()
   /** Per-account overlay of frames that arrived during an in-flight GET. */
   const liveAdds = new Map<string, Map<string, VerificationFlow>>()
+  /**
+   * Per-account flow ids removed locally (declined, dismissed, cancelled).
+   * `liveAdds` keeps a GET from losing rows it never saw; this is the mirror
+   * image, keeping a GET computed before the removal — or one landing inside
+   * the server's terminal grace window — from resurrecting them. Retired as
+   * soon as a refresh confirms the server has stopped listing the flow.
+   */
+  const tombstones = new Map<string, Set<string>>()
 
   function publish(): void {
     flows.value = [...flowMap.values()]
@@ -360,7 +368,20 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
     return key
   }
 
+  function tombstone(flow: VerificationFlow | undefined): void {
+    if (flow === undefined || flow.flowId === null || flow.flowId === '') {
+      return
+    }
+    let ids = tombstones.get(flow.accountId)
+    if (ids === undefined) {
+      ids = new Set<string>()
+      tombstones.set(flow.accountId, ids)
+    }
+    ids.add(flow.flowId)
+  }
+
   function drop(key: string): void {
+    tombstone(flowMap.get(key))
     flowMap.delete(key)
     for (const adds of liveAdds.values()) {
       adds.delete(key)
@@ -431,13 +452,19 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
       cancelReason ?? flow.cancelReason,
       flow.stage,
     )
+    // `stageFrom` re-derives the incomplete-emoji warning from the snapshot in
+    // hand, so carrying the old one forward would latch it: the full seven
+    // emoji would arrive and render the compare UI under a stale red alert.
+    // Mutation errors are not derived here and stay until something clears
+    // them.
+    const carried = flow.error === INCOMPLETE_EMOJI_MESSAGE ? null : flow.error
     return {
       ...flow,
       serverStage: serverStage ?? flow.serverStage,
       emoji: nextEmoji,
       decimals: nextDecimals,
       stage: mapped.stage,
-      error: mapped.error ?? flow.error,
+      error: mapped.error ?? carried,
       cancelReason: mapped.cancelReason,
     }
   }
@@ -503,6 +530,12 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
   }
 
   function implicitCancel(flow: VerificationFlow): void {
+    // A flow that already succeeded is not a cancel just because the server
+    // has since forgotten it: completed flows stay as dismiss-only rows, and
+    // an open modal must keep saying the verification completed.
+    if (flow.stage === 'done' || flow.serverStage === 'done') {
+      return
+    }
     const key = flowKey(flow)
     if (openKey.value === key) {
       put({
@@ -559,13 +592,19 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
 
   function resetSession(): void {
     sessionGeneration += 1
-    if (
-      flowMap.size === 0 &&
-      openKey.value === null &&
-      Object.keys(devicesByAccount.value).length === 0
-    ) {
+    // `devicesLoading`/`devicesError` have to count towards "nothing to
+    // clear": bumping the generation orphans an in-flight `loadDevices`, whose
+    // `finally` then declines to reset its own loading flag. Taking the fast
+    // path on those would strand DevicePicker on "Loading devices…" with Retry
+    // disabled for the rest of the session.
+    const devicesEmpty =
+      Object.keys(devicesByAccount.value).length === 0 &&
+      Object.keys(devicesLoading.value).length === 0 &&
+      Object.keys(devicesError.value).length === 0
+    if (flowMap.size === 0 && openKey.value === null && devicesEmpty) {
       settledAccounts.clear()
       liveAdds.clear()
+      tombstones.clear()
       requestGeneration.clear()
       deviceGeneration.clear()
       ownUserMap.clear()
@@ -573,6 +612,7 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
     }
     flowMap.clear()
     liveAdds.clear()
+    tombstones.clear()
     settledAccounts.clear()
     requestGeneration.clear()
     deviceGeneration.clear()
@@ -606,12 +646,29 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
       }
       const serverRows = data.data
       const serverIds = new Set(serverRows.map((row) => capFlowId(row.flow_id)))
+      // Retire before suppressing: once the server has stopped listing a flow
+      // there is nothing left to resurrect, and holding the id forever would
+      // grow the set for the life of the session.
+      const buried = tombstones.get(accountId)
+      if (buried !== undefined) {
+        for (const flowId of [...buried]) {
+          if (!serverIds.has(flowId)) {
+            buried.delete(flowId)
+          }
+        }
+        if (buried.size === 0) {
+          tombstones.delete(accountId)
+        }
+      }
       const existing = [...flowMap.values()].filter(
         (flow) => flow.accountId === accountId,
       )
       const seen = new Set<string>()
       for (const dto of serverRows) {
         const flowId = capFlowId(dto.flow_id)
+        if (buried?.has(flowId) === true) {
+          continue
+        }
         const previous =
           findByFlowId(accountId, flowId) ??
           existing.find(
@@ -653,6 +710,9 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
         implicitCancel(flowMap.get(key) ?? flow)
       }
       for (const [key, overlay] of added) {
+        if (buried?.has(overlay.flowId ?? '') === true) {
+          continue
+        }
         if (!flowMap.has(key) && !serverIds.has(overlay.flowId ?? '')) {
           put(overlay)
         }
@@ -674,7 +734,7 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
     if (missing.length === 0) {
       return
     }
-    await refreshAll(accountIds)
+    await refreshAll(missing)
   }
 
   async function loadDevices(accountId: string): Promise<void> {
@@ -904,6 +964,11 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
         : undefined)
 
     if (flow === undefined) {
+      // Same invariant as the GET path: a flow the user removed here does not
+      // come back because a frame for it was already in flight.
+      if (tombstones.get(accountId)?.has(flowId) === true) {
+        return
+      }
       if (kind === 'requested' || kind === 'sas') {
         flow = {
           accountId,
@@ -931,7 +996,10 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
     flow = withIdentity(bindFlowId(flow, flowId), userId, deviceId)
 
     if (kind === 'requested') {
-      if (!['done', 'ended', 'confirming'].includes(flow.stage)) {
+      // `compare` belongs here too: a replayed request frame must not rewind a
+      // flow whose emoji are already on screen, or `confirm()` rejects the
+      // user's "They match" as an incomplete emoji set.
+      if (!['done', 'ended', 'confirming', 'compare'].includes(flow.stage)) {
         flow = { ...flow, stage: 'waiting', serverStage: 'requested' }
       }
     } else if (kind === 'sas') {

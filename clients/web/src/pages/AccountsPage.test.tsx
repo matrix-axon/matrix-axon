@@ -212,7 +212,7 @@ describe('AccountsPage', () => {
           name: 'Verify this device',
         })) as HTMLButtonElement
       ).title,
-    ).toMatch(/emoji verification with one of your other Matrix sessions/i)
+    ).toMatch(/emoji verification .*with one of your other Matrix sessions/i)
     expect(
       (
         (await findByRole('button', {

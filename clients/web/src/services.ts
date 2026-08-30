@@ -1,4 +1,4 @@
-import { effect, signal, type Signal } from '@preact/signals'
+import { effect, signal, untracked, type Signal } from '@preact/signals'
 import { createContext } from 'preact'
 import { useContext } from 'preact/hooks'
 import { createApiClient, inBackground, type ApiClient } from './api/client'
@@ -722,15 +722,21 @@ export function connectLiveVerification(
     if (live.reconnects.value === 0) {
       return
     }
-    const ids = activeIds()
-    if (ids.length === 0) {
-      accountsLoad ??= accounts.refresh().catch(() => {})
-      void accountsLoad.then(() => {
-        hydrate(activeIds())
-      })
-      return
-    }
-    hydrate(ids)
+    // Reconnects are the only trigger. Reading the accounts signal tracked
+    // would subscribe this effect to it from the first reconnect on, and since
+    // a `verification.done` frame refreshes accounts, one completed
+    // verification would then loop back into a full verify refresh.
+    untracked(() => {
+      const ids = activeIds()
+      if (ids.length === 0) {
+        accountsLoad ??= accounts.refresh().catch(() => {})
+        void accountsLoad.then(() => {
+          hydrate(activeIds())
+        })
+        return
+      }
+      hydrate(ids)
+    })
   })
 
   const onVisibility = (): void => {

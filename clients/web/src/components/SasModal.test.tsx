@@ -71,4 +71,26 @@ describe('SasModal', () => {
     expect(services.verification.openFlow.value).toBeNull()
     expect(services.verification.inboxCount.value).toBe(1)
   })
+
+  it('Escape parks a live flow and keeps it in the inbox', async () => {
+    const services = testServices()
+    services.verification.noteFrame(ACCOUNT, 'requested', {
+      flowId: '$f',
+      userId: '@me:hs',
+      deviceId: 'DEV',
+      emoji: null,
+      decimals: null,
+      reason: null,
+    })
+    services.verification.open(`${ACCOUNT}\0$f`)
+    render(
+      <ServicesContext.Provider value={services}>
+        <SasModal />
+      </ServicesContext.Provider>,
+    )
+    expect(await screen.findByRole('dialog')).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(services.verification.openFlow.value).toBeNull()
+    expect(services.verification.inboxCount.value).toBe(1)
+  })
 })

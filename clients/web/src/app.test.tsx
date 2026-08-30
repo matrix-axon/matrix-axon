@@ -1303,6 +1303,30 @@ describe('shell keyboard shortcuts (ADR 0078)', () => {
     expect(await findByRole('dialog', { name: 'Help' })).toBeTruthy()
   })
 
+  it('a verification request closes search by replacing, not pushing', async () => {
+    history.replaceState(null, '', '/?search=')
+    const services = testServices()
+    const { findByRole } = render(<App services={services} />)
+    await findByRole('dialog', { name: 'Search messages' })
+
+    const pushState = vi.spyOn(history, 'pushState')
+    services.verification.noteFrame(ACCOUNT, 'requested', {
+      flowId: '$flow',
+      userId: '@alice:example.org',
+      deviceId: 'ELEMENT',
+      emoji: null,
+      decimals: null,
+      reason: null,
+    })
+    services.verification.open(`${ACCOUNT}\0$flow`)
+
+    await waitFor(() => expect(window.location.search).toBe(''))
+    // Back belongs to whatever the user was doing before search, not to the
+    // overlay a verification request took away from them.
+    expect(pushState).not.toHaveBeenCalled()
+    pushState.mockRestore()
+  })
+
   it('the sidebar toggle advertises its chord', () => {
     const { getByRole } = render(<App services={testServices()} />)
     const toggle = getByRole('button', { name: 'Hide rooms' })

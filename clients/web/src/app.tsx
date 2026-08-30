@@ -629,7 +629,9 @@ function ShellChrome() {
     setUnreadThreadsOpen(false)
     setVerificationInboxOpen(false)
     if (searchOpen) {
-      location.route(withoutSearchParam(location.url))
+      // Replace, not push: the user did not close search, a verification
+      // request did. A pushed entry would make Back re-open the overlay.
+      location.route(withoutSearchParam(location.url), true)
     }
   }, [sasOpen, searchOpen, location])
   const activeAccountExists = hasActiveAccount(accounts.accounts.value)

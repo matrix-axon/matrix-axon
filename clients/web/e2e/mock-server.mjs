@@ -657,15 +657,16 @@ async function handleApi(req, res, url) {
     )
     return json(res, { data: flows.map((flow) => flow.dto) })
   }
-  if (
-    method === 'GET' &&
-    /\/accounts\/[^/]+\/verify\/[^/]+$/.test(pathname)
-  ) {
+  if (method === 'GET' && /\/accounts\/[^/]+\/verify\/[^/]+$/.test(pathname)) {
     const flowId = decodeURIComponent(pathname.split('/').pop())
     const accountId = pathname.split('/')[3]
     const flow = verifyFlows.get(`${accountId}\0${flowId}`)
     if (flow === undefined) {
-      return json(res, { error: { code: 'not_found', message: 'no such flow' } }, 404)
+      return json(
+        res,
+        { error: { code: 'not_found', message: 'no such flow' } },
+        404,
+      )
     }
     return json(res, { data: flow.dto })
   }
@@ -698,7 +699,11 @@ async function handleApi(req, res, url) {
     const accountId = pathname.split('/')[3]
     const flow = verifyFlows.get(`${accountId}\0${flowId}`)
     if (flow === undefined) {
-      return json(res, { error: { code: 'not_found', message: 'no such flow' } }, 404)
+      return json(
+        res,
+        { error: { code: 'not_found', message: 'no such flow' } },
+        404,
+      )
     }
     flow.dto.stage = 'confirmed'
     res.writeHead(204).end()
@@ -1207,7 +1212,8 @@ const server = createServer((req, res) => {
                 : 'requested',
         emoji: kind === 'sas' ? SAS_EMOJI : null,
         decimals: kind === 'sas' ? [1, 2, 3] : null,
-        cancel_reason: kind === 'cancelled' ? (body.reason ?? 'cancelled') : null,
+        cancel_reason:
+          kind === 'cancelled' ? (body.reason ?? 'cancelled') : null,
       }
       verifyFlows.set(`${accountId}\0${flowId}`, { account_id: accountId, dto })
       const payload = {
