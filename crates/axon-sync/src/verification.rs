@@ -722,6 +722,67 @@ fn sas_state_label(state: &SasState) -> &'static str {
     }
 }
 
+/// SAS-object stage for [`snapshot`]. `Done` here is the MAC verdict.
+fn flow_stage_from_sas(sas: &SasVerification) -> FlowStage {
+    match sas.state() {
+        SasState::Created { .. } | SasState::Started { .. } | SasState::Accepted { .. } => {
+            FlowStage::Ready
+        }
+        SasState::KeysExchanged { .. } => FlowStage::KeysExchanged,
+        SasState::Confirmed => FlowStage::Confirmed,
+        SasState::Done { .. } => FlowStage::Done,
+        SasState::Cancelled(_) => FlowStage::Cancelled,
+    }
+}
+
+/// Request-only stage when no SAS object is in hand.
+///
+/// A request-level [`VerificationRequestState::Done`] is the peer's
+/// `m.key.verification.done`, not a MAC. Reporting [`FlowStage::Done`] from it
+/// would let `GET /v1/verify/{flow}` say the device is verified with nothing
+/// verified. Treat it as cancelled instead; the SAS path is the only way to
+/// reach [`FlowStage::Done`] without a retained [`TerminalOutcome::Done`].
+fn flow_stage_from_request_without_sas(state: &VerificationRequestState) -> FlowStage {
+    match state {
+        VerificationRequestState::Created { .. } | VerificationRequestState::Requested { .. } => {
+            FlowStage::Requested
+        }
+        VerificationRequestState::Ready { .. } | VerificationRequestState::Transitioned { .. } => {
+            FlowStage::Ready
+        }
+        VerificationRequestState::Done | VerificationRequestState::Cancelled(_) => {
+            FlowStage::Cancelled
+        }
+    }
+}
+
+/// SAS currently attached to this request, if the request is still
+/// `Transitioned`. Once the request itself is `Done` the SDK drops that object
+/// from the request state; it then lives only on [`FlowEntry::sas`].
+fn sas_from_request(request: &VerificationRequest) -> Option<SasVerification> {
+    match request.state() {
+        VerificationRequestState::Transitioned { verification } => verification.sas(),
+        _ => None,
+    }
+}
+
+fn snapshot_from_sas(
+    flow_id: String,
+    target_user_id: String,
+    target_device_id: Option<String>,
+    sas: &SasVerification,
+) -> FlowState {
+    FlowState {
+        flow_id,
+        target_user_id,
+        target_device_id,
+        stage: flow_stage_from_sas(sas),
+        emoji: emoji_pairs(sas),
+        decimals: sas.decimals(),
+        cancel_reason: sas.cancel_info().map(|c| c.reason().to_owned()),
+    }
+}
+
 /// Re-derive a flow's replayable state from its live SDK object, or its retained
 /// terminal outcome.
 fn snapshot(entry: &FlowEntry) -> FlowState {
@@ -746,38 +807,15 @@ fn snapshot(entry: &FlowEntry) -> FlowState {
     }
 
     if let Some(sas) = &entry.sas {
-        let stage = match sas.state() {
-            SasState::Created { .. } | SasState::Started { .. } | SasState::Accepted { .. } => {
-                FlowStage::Ready
-            }
-            SasState::KeysExchanged { .. } => FlowStage::KeysExchanged,
-            SasState::Confirmed => FlowStage::Confirmed,
-            SasState::Done { .. } => FlowStage::Done,
-            SasState::Cancelled(_) => FlowStage::Cancelled,
-        };
-        FlowState {
-            flow_id,
-            target_user_id,
-            target_device_id,
-            stage,
-            emoji: emoji_pairs(sas),
-            decimals: sas.decimals(),
-            cancel_reason: sas.cancel_info().map(|c| c.reason().to_owned()),
-        }
+        snapshot_from_sas(flow_id, target_user_id, target_device_id, sas)
+    } else if let Some(sas) = sas_from_request(&entry.request) {
+        snapshot_from_sas(flow_id, target_user_id, target_device_id, &sas)
     } else {
-        let stage = match entry.request.state() {
-            VerificationRequestState::Created { .. }
-            | VerificationRequestState::Requested { .. } => FlowStage::Requested,
-            VerificationRequestState::Ready { .. }
-            | VerificationRequestState::Transitioned { .. } => FlowStage::Ready,
-            VerificationRequestState::Done => FlowStage::Done,
-            VerificationRequestState::Cancelled(_) => FlowStage::Cancelled,
-        };
         FlowState {
             flow_id,
             target_user_id,
             target_device_id,
-            stage,
+            stage: flow_stage_from_request_without_sas(&entry.request.state()),
             emoji: None,
             decimals: None,
             cancel_reason: entry.request.cancel_info().map(|c| c.reason().to_owned()),
@@ -1137,6 +1175,30 @@ struct FlowDriverCtx {
     cancel: CancellationToken,
 }
 
+/// Stamp the registry terminal marker and publish the matching frame. Shared by
+/// every Done/Cancelled exit so a request-level `Done` cannot be published as
+/// verified from one path while another path requires the SAS MAC.
+fn finish_flow(ctx: &FlowDriverCtx, key: &(Uuid, String), flow_id: &str, outcome: TerminalOutcome) {
+    let (kind, reason) = match &outcome {
+        TerminalOutcome::Done => (VerificationFrameKind::Done, None),
+        TerminalOutcome::Cancelled(reason) => (VerificationFrameKind::Cancelled, reason.clone()),
+    };
+    if mark_terminal(&ctx.registry, key, outcome) {
+        ctx.rooms.wake(ctx.account_id);
+    }
+    publish(
+        &ctx.live_tx,
+        ctx.account_id,
+        flow_id,
+        &ctx.target_user_id,
+        ctx.target_device_id.as_deref(),
+        kind,
+        None,
+        None,
+        reason,
+    );
+}
+
 /// Drive one verification request from its current state through to a
 /// `SasVerification`, then hand off to [`drive_sas`]. Publishes the
 /// `verification.requested` frame, accepts a peer-initiated request, and starts
@@ -1342,24 +1404,32 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
                 }
             }
             VerificationRequestState::Done => {
+                // A coalesced `changes()` burst can skip `Transitioned` and
+                // land on request-level `Done`. If a SAS is still on the
+                // request, drive it — that is the MAC path. Otherwise this is
+                // the peer's `m.key.verification.done` with no SAS object, and
+                // publishing `Done` would let clients render "device verified"
+                // with zero MAC exchange.
+                if let Some(sas) = sas_from_request(&request) {
+                    tracing::info!(
+                        account_id = %ctx.account_id,
+                        %flow_id,
+                        "verification request reported done with a SAS already present"
+                    );
+                    break sas;
+                }
                 tracing::info!(
                     account_id = %ctx.account_id,
                     %flow_id,
-                    "verification request completed before SAS"
+                    "verification request completed before SAS; not treating as verified"
                 );
-                if mark_terminal(&ctx.registry, &key, TerminalOutcome::Done) {
-                    ctx.rooms.wake(ctx.account_id);
-                }
-                publish(
-                    &ctx.live_tx,
-                    ctx.account_id,
+                finish_flow(
+                    &ctx,
+                    &key,
                     &flow_id,
-                    &ctx.target_user_id,
-                    ctx.target_device_id.as_deref(),
-                    VerificationFrameKind::Done,
-                    None,
-                    None,
-                    None,
+                    TerminalOutcome::Cancelled(Some(
+                        "request completed before SAS verification".to_owned(),
+                    )),
                 );
                 return;
             }
@@ -1371,23 +1441,11 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
                     reason = %reason,
                     "verification request cancelled"
                 );
-                if mark_terminal(
-                    &ctx.registry,
+                finish_flow(
+                    &ctx,
                     &key,
-                    TerminalOutcome::Cancelled(Some(reason.clone())),
-                ) {
-                    ctx.rooms.wake(ctx.account_id);
-                }
-                publish(
-                    &ctx.live_tx,
-                    ctx.account_id,
                     &flow_id,
-                    &ctx.target_user_id,
-                    ctx.target_device_id.as_deref(),
-                    VerificationFrameKind::Cancelled,
-                    None,
-                    None,
-                    Some(reason),
+                    TerminalOutcome::Cancelled(Some(reason)),
                 );
                 return;
             }
@@ -1543,23 +1601,11 @@ async fn drive_sas(
                                 reason = %reason,
                                 "verification request cancelled"
                             );
-                            if mark_terminal(
-                                &ctx.registry,
+                            finish_flow(
+                                &ctx,
                                 &key,
-                                TerminalOutcome::Cancelled(Some(reason.clone())),
-                            ) {
-                                ctx.rooms.wake(ctx.account_id);
-                            }
-                            publish(
-                                &ctx.live_tx,
-                                ctx.account_id,
                                 &flow_id,
-                                &ctx.target_user_id,
-                                ctx.target_device_id.as_deref(),
-                                VerificationFrameKind::Cancelled,
-                                None,
-                                None,
-                                Some(reason),
+                                TerminalOutcome::Cancelled(Some(reason)),
                             );
                             return;
                         }
@@ -1579,21 +1625,7 @@ async fn drive_sas(
                                 %flow_id,
                                 "verification request completed"
                             );
-                            if mark_terminal(&ctx.registry, &key, TerminalOutcome::Done)
-                            {
-                                ctx.rooms.wake(ctx.account_id);
-                            }
-                            publish(
-                                &ctx.live_tx,
-                                ctx.account_id,
-                                &flow_id,
-                                &ctx.target_user_id,
-                                ctx.target_device_id.as_deref(),
-                                VerificationFrameKind::Done,
-                                None,
-                                None,
-                                None,
-                            );
+                            finish_flow(&ctx, &key, &flow_id, TerminalOutcome::Done);
                             return;
                         }
                         Some(_) => continue,
@@ -1648,20 +1680,7 @@ async fn drive_sas(
                         %flow_id,
                         "SAS verification completed"
                     );
-                    if mark_terminal(&ctx.registry, &key, TerminalOutcome::Done) {
-                        ctx.rooms.wake(ctx.account_id);
-                    }
-                    publish(
-                        &ctx.live_tx,
-                        ctx.account_id,
-                        &flow_id,
-                        &ctx.target_user_id,
-                        ctx.target_device_id.as_deref(),
-                        VerificationFrameKind::Done,
-                        None,
-                        None,
-                        None,
-                    );
+                    finish_flow(&ctx, &key, &flow_id, TerminalOutcome::Done);
                     return;
                 }
                 SasState::Cancelled(info) => {
@@ -1672,23 +1691,11 @@ async fn drive_sas(
                         reason = %reason,
                         "SAS verification cancelled"
                     );
-                    if mark_terminal(
-                        &ctx.registry,
+                    finish_flow(
+                        &ctx,
                         &key,
-                        TerminalOutcome::Cancelled(Some(reason.clone())),
-                    ) {
-                        ctx.rooms.wake(ctx.account_id);
-                    }
-                    publish(
-                        &ctx.live_tx,
-                        ctx.account_id,
                         &flow_id,
-                        &ctx.target_user_id,
-                        ctx.target_device_id.as_deref(),
-                        VerificationFrameKind::Cancelled,
-                        None,
-                        None,
-                        Some(reason),
+                        TerminalOutcome::Cancelled(Some(reason)),
                     );
                     return;
                 }
@@ -2244,6 +2251,22 @@ mod tests {
         assert!(
             !request_done_is_verified(false),
             "a peer's m.key.verification.done must not stand in for the SAS verdict"
+        );
+    }
+
+    /// Pre-SAS request-level `Done` (drive_request before any SAS object, and
+    /// snapshot's request-only fallback) is the same signal as above — not
+    /// verification. The poll path would otherwise report `FlowStage::Done` for
+    /// a flow that never exchanged MACs.
+    #[test]
+    fn request_done_without_sas_is_not_a_verified_snapshot() {
+        assert_eq!(
+            flow_stage_from_request_without_sas(&VerificationRequestState::Done),
+            FlowStage::Cancelled
+        );
+        assert!(
+            !request_done_is_verified(false),
+            "drive_request must not publish Done when no SAS exists to agree"
         );
     }
 
