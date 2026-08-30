@@ -313,8 +313,18 @@ export async function stage(page: Page, url: string): Promise<void> {
 /**
  * Playwright renders no cursor into video, so without this the UI appears to
  * operate itself (ADR 0086). Drawn as a DOM overlay in a `pointer-events: none`
- * layer: it follows real `mousemove`, flashes on `mousedown`, and shows a
- * touch ripple on a `pointerdown` whose type is `touch`.
+ * layer.
+ *
+ * Two modes, chosen by the recording's own pointer media query rather than by a
+ * flag, so a scene file cannot forget to set it:
+ *
+ * - **Fine pointer** (the desktop take): an arrow that follows `pointermove`
+ *   and flashes a small ring on `pointerdown`.
+ * - **Coarse pointer** (the mobile take): no arrow at all, only a touch ripple
+ *   on `pointerdown`. Gating the arrow on `event.pointerType === 'mouse'` is
+ *   *not* enough here — under Playwright's mobile emulation a `.tap()` emits a
+ *   compatibility `pointermove` that still reports `pointerType: 'mouse'`, so
+ *   the only reliable fix is to never create the arrow on a touch device.
  *
  * Registered as an init script so it survives a reload; the app is an SPA, so
  * in-app navigation never tears it down.
@@ -322,68 +332,78 @@ export async function stage(page: Page, url: string): Promise<void> {
 async function installPointer(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const draw = () => {
+      const coarse = matchMedia('(pointer: coarse)').matches
+
       const layer = document.createElement('div')
       layer.id = 'demo-pointer-layer'
       layer.setAttribute('aria-hidden', 'true')
       layer.style.cssText =
         'position:fixed;inset:0;pointer-events:none;z-index:2147483647'
-
-      const cursor = document.createElement('div')
-      cursor.style.cssText =
-        'position:absolute;width:22px;height:22px;margin:-2px 0 0 -2px;' +
-        'opacity:0;transition:opacity 120ms linear;' +
-        // A plain arrow, drawn rather than imported: an inline SVG data URI
-        // keeps this self-contained and immune to the app's own asset paths.
-        "background:no-repeat center/contain url('data:image/svg+xml;utf8," +
-        encodeURIComponent(
-          '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">' +
-            '<path d="M4 2 L4 20 L9 15.5 L12.2 22 L15.6 20.4 L12.4 14 L19 14 Z" ' +
-            'fill="#fff" stroke="#111" stroke-width="1.4" stroke-linejoin="round"/>' +
-            '</svg>',
-        ) +
-        "')"
-      layer.append(cursor)
       document.body.append(layer)
+
+      let cursor: HTMLDivElement | null = null
+      if (!coarse) {
+        cursor = document.createElement('div')
+        cursor.style.cssText =
+          'position:absolute;width:22px;height:22px;margin:-2px 0 0 -2px;' +
+          'opacity:0;transition:opacity 120ms linear;' +
+          // A plain arrow, drawn rather than imported: an inline SVG data URI
+          // keeps this self-contained and immune to the app's own asset paths.
+          "background:no-repeat center/contain url('data:image/svg+xml;utf8," +
+          encodeURIComponent(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">' +
+              '<path d="M4 2 L4 20 L9 15.5 L12.2 22 L15.6 20.4 L12.4 14 L19 14 Z" ' +
+              'fill="#fff" stroke="#111" stroke-width="1.4" stroke-linejoin="round"/>' +
+              '</svg>',
+          ) +
+          "')"
+        layer.append(cursor)
+      }
 
       const pulse = (x: number, y: number, touch: boolean) => {
         const ring = document.createElement('div')
-        const size = touch ? 46 : 30
+        const size = touch ? 60 : 34
         ring.style.cssText =
           `position:absolute;left:${x}px;top:${y}px;width:${size}px;` +
           `height:${size}px;margin:${-size / 2}px 0 0 ${-size / 2}px;` +
-          'border-radius:50%;border:2px solid rgba(255,255,255,.9);' +
-          'background:rgba(255,255,255,.22);transform:scale(.4);opacity:1'
+          'border-radius:50%;box-sizing:border-box;' +
+          // Dark ink plus a white halo, so the tap reads on a light or a dark
+          // background alike — the recording pins the light theme, where the
+          // old all-white ring was nearly invisible.
+          'border:3px solid rgba(20,20,22,.6);' +
+          'background:rgba(20,20,22,.12);' +
+          'box-shadow:0 0 0 2px rgba(255,255,255,.85);' +
+          'transform:scale(.3);opacity:1'
         layer.append(ring)
         ring.animate(
           [
-            { transform: 'scale(.4)', opacity: 1 },
+            { transform: 'scale(.3)', opacity: 1 },
             { transform: 'scale(1)', opacity: 0 },
           ],
-          { duration: 420, easing: 'ease-out' },
+          { duration: touch ? 550 : 420, easing: 'ease-out' },
         ).onfinish = () => ring.remove()
       }
 
-      // `pointermove`, gated on the pointer *type* — not `mousemove`. Under a
-      // touch device descriptor a tap still emits compatibility mouse events,
-      // so a `mousemove` listener draws a desktop arrow cursor onto the phone
-      // recording, hovering next to the finger that supposedly did the work.
-      addEventListener(
-        'pointermove',
-        (event) => {
-          if (event.pointerType !== 'mouse') {
-            return
-          }
-          cursor.style.opacity = '1'
-          cursor.style.left = `${event.clientX}px`
-          cursor.style.top = `${event.clientY}px`
-        },
-        { capture: true, passive: true },
-      )
+      if (cursor !== null) {
+        const arrow = cursor
+        addEventListener(
+          'pointermove',
+          (event) => {
+            if (event.pointerType !== 'mouse') {
+              return
+            }
+            arrow.style.opacity = '1'
+            arrow.style.left = `${event.clientX}px`
+            arrow.style.top = `${event.clientY}px`
+          },
+          { capture: true, passive: true },
+        )
+      }
       addEventListener(
         'pointerdown',
         (event) => {
-          const touch = event.pointerType !== 'mouse'
-          if (touch) {
+          const touch = coarse || event.pointerType !== 'mouse'
+          if (cursor !== null && touch) {
             cursor.style.opacity = '0'
           }
           pulse(event.clientX, event.clientY, touch)
@@ -459,5 +479,25 @@ export async function typeInto(
   delay = 55,
 ): Promise<void> {
   await target.click()
+  await target.pressSequentially(text, { delay })
+}
+
+/**
+ * {@link typeInto}, but focusing the field with a touch tap — the mobile
+ * counterpart, paired the way {@link point} and {@link tap} are.
+ *
+ * `typeInto` opens with `target.click()`, which drives `page.mouse` even under
+ * a device descriptor (Playwright only emits touch through `.tap()`). On a
+ * phone recording that wakes the pointer overlay's mouse branch and leaves an
+ * arrow cursor parked on screen for the rest of the take — the overlay only
+ * hides the arrow again on a *touch* `pointerdown`. Tapping to focus keeps the
+ * take touch-only.
+ */
+export async function tapType(
+  target: Locator,
+  text: string,
+  delay = 55,
+): Promise<void> {
+  await target.tap()
   await target.pressSequentially(text, { delay })
 }
