@@ -49,6 +49,103 @@ export async function unthrottle(cdp: CDPSession | null): Promise<void> {
   }
 }
 
+/**
+ * A weak mobile link, as DevTools models one: throughput in **bytes** per
+ * second, latency in milliseconds added to every request.
+ *
+ * `slow-3g` is the profile that matters here — the complaint this lane exists
+ * for is a room that takes tens of seconds to paint on a bad cell connection,
+ * and the hypothesis is that the timeline page is queued behind the three
+ * larger bodies `RoomPage` requests in the same breath. That only shows up
+ * when the link cannot carry them all at once.
+ */
+export const NETWORK_PROFILES = {
+  'slow-3g': { latency: 400, download: 50_000, upload: 20_000 },
+  'fast-3g': { latency: 150, download: 180_000, upload: 84_000 },
+  offline: { latency: 0, download: 0, upload: 0 },
+} as const
+
+export type NetworkProfile = keyof typeof NETWORK_PROFILES
+
+/**
+ * Emulate a slow network via DevTools `Network.emulateNetworkConditions`.
+ *
+ * Chromium-only, with the same no-op-returning-`null` shape `throttleCpu`
+ * uses, and undone by the same `unthrottle`. Note this throttles the *whole
+ * context*, the app bundle included — so a spec that wants to measure a room
+ * open on a slow link should load the app first and throttle afterwards,
+ * or it measures the bundle download instead.
+ */
+export async function throttleNetwork(
+  page: Page,
+  profile: NetworkProfile,
+): Promise<CDPSession | null> {
+  const engine = page.context().browser()?.browserType().name()
+  if (engine !== 'chromium') {
+    return null
+  }
+  const { latency, download, upload } = NETWORK_PROFILES[profile]
+  const cdp = await page.context().newCDPSession(page)
+  await cdp.send('Network.enable')
+  await cdp.send('Network.emulateNetworkConditions', {
+    offline: profile === 'offline',
+    latency,
+    downloadThroughput: download,
+    uploadThroughput: upload,
+  })
+  return cdp
+}
+
+/**
+ * Undo `throttleNetwork`. Separate from `unthrottle` because the two send
+ * different CDP domains, and a leaked network throttle is far worse than a
+ * leaked CPU one — every later spec in the shard would time out.
+ */
+export async function unthrottleNetwork(cdp: CDPSession | null): Promise<void> {
+  if (cdp !== null) {
+    await cdp.send('Network.emulateNetworkConditions', {
+      offline: false,
+      latency: 0,
+      downloadThroughput: -1,
+      uploadThroughput: -1,
+    })
+    await cdp.detach()
+  }
+}
+
+/**
+ * The detail of the last `boot:room-open` summary the page emitted, or `null`.
+ *
+ * Read from `performance` rather than the overlay, so a spec does not depend on
+ * how many lines the overlay happens to keep.
+ */
+export async function roomOpenSummary(
+  page: Page,
+): Promise<Record<string, unknown> | null> {
+  return page.evaluate(() => {
+    const marks = performance
+      .getEntriesByType('mark')
+      .filter((mark) => mark.name === 'axon:boot:room-open')
+    const last = marks[marks.length - 1] as PerformanceMark | undefined
+    return (last?.detail as Record<string, unknown> | undefined) ?? null
+  })
+}
+
+/** Every `boot:room-open:req` detail the page emitted, oldest first. */
+export async function roomOpenRequests(
+  page: Page,
+): Promise<Record<string, unknown>[]> {
+  return page.evaluate(() =>
+    performance
+      .getEntriesByType('mark')
+      .filter((mark) => mark.name === 'axon:boot:room-open:req')
+      .map(
+        (mark) =>
+          ((mark as PerformanceMark).detail as Record<string, unknown>) ?? {},
+      ),
+  )
+}
+
 /** Every `axon:*` mark currently on the timeline, name-stripped of the prefix. */
 export async function readAxonMarks(page: Page): Promise<AxonMark[]> {
   return page.evaluate(() =>
