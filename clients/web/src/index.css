@@ -1099,6 +1099,16 @@ h2 {
   margin-top: 1rem;
 }
 
+.account-grant {
+  margin-top: 1rem;
+}
+
+.expected-account-guidance {
+  padding: 0.75rem 1rem;
+  border-left: 3px solid var(--accent);
+  background: var(--bg-raised);
+}
+
 .accounts-page {
   max-width: 56rem;
 }
