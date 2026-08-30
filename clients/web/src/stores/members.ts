@@ -5,6 +5,7 @@ import {
   type Signal,
 } from '@preact/signals'
 import { apiErrorCode, apiErrorMessage, type ApiClient } from '../api/client'
+import { perfMark } from '../perf'
 import { memberDisplay, type MemberDto } from './room-list'
 
 export type MemberMutationResult =
@@ -44,6 +45,10 @@ export function createMembersStore(
   const error = signal<string | null>(null)
 
   async function refresh() {
+    // The member list is unpaginated, so on a weak link it is one of the two
+    // large bodies a room open puts on the wire alongside the timeline page
+    // that actually gates first paint. `members` is the size that matters.
+    perfMark('members:refresh:start', { roomId })
     try {
       const { data, error: apiError } = await api.GET(
         '/v1/accounts/{account_id}/rooms/{room_id}/members',
@@ -61,6 +66,11 @@ export function createMembersStore(
       error.value = cause instanceof Error ? cause.message : String(cause)
     } finally {
       loading.value = false
+      perfMark('members:refresh:end', {
+        roomId,
+        members: members.value.size,
+        ok: error.value === null,
+      })
     }
   }
 
