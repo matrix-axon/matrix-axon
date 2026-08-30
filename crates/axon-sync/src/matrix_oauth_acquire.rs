@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     future::IntoFuture,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use axon_core::SyncConfig;
@@ -24,7 +24,7 @@ use matrix_sdk::{
     ruma::{OwnedServerName, OwnedUserId},
     Client,
 };
-use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{oneshot, Semaphore};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::Instrument;
 use uuid::Uuid;
@@ -36,16 +36,14 @@ use crate::{
     },
     error::SyncError,
     lifecycle::{AccountLifecycle, LifecycleError},
+    matrix_oauth_flow::{
+        run_reaper, FlowLease, FLOW_TTL, MAX_CONCURRENT_FLOWS, MAX_RETAINED_FLOWS,
+    },
     MatrixOAuthRegistrationManager,
 };
 
-const MAX_CONCURRENT_FLOWS: usize = 8;
-const MAX_RETAINED_FLOWS: usize = 256;
-const MAX_QR_BASE64_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_QR_BASE64_BYTES: usize = 8 * 1024;
 const MAX_USER_ID_BYTES: usize = 1024;
-const FLOW_TTL: Duration = Duration::from_secs(10 * 60);
-const TERMINAL_RETENTION: Duration = Duration::from_secs(2 * 60);
-const REAPER_INTERVAL: Duration = Duration::from_secs(5);
 const WHOAMI_TIMEOUT: Duration = Duration::from_secs(15);
 const REVOCATION_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -55,7 +53,7 @@ const REVOCATION_TIMEOUT: Duration = Duration::from_secs(10);
 /// future may still be running when progress closes, so returning `None` again
 /// would leave an always-ready branch in `tokio::select!` and busy-spin until
 /// completion, cancellation, or timeout.
-struct ProgressUntilClosed<S> {
+pub(crate) struct ProgressUntilClosed<S> {
     inner: S,
     closed: bool,
 }
@@ -64,14 +62,14 @@ impl<S> ProgressUntilClosed<S>
 where
     S: Stream + Unpin,
 {
-    fn new(inner: S) -> Self {
+    pub(crate) fn new(inner: S) -> Self {
         Self {
             inner,
             closed: false,
         }
     }
 
-    async fn next(&mut self) -> Option<S::Item> {
+    pub(crate) async fn next(&mut self) -> Option<S::Item> {
         if self.closed {
             return std::future::pending().await;
         }
@@ -211,15 +209,9 @@ fn create_lifecycle_error(error: LifecycleError) -> MatrixOAuthAcquireError {
 
 struct FlowMutable {
     state: MatrixOAuthAcquireState,
-    terminal_at: Option<Instant>,
     scan_tx: Option<oneshot::Sender<QrCodeData>>,
     check_code_tx: Option<oneshot::Sender<u8>>,
-    /// Once the successful driver claims finalization, cancellation no longer
-    /// competes with the crash-safe database/filesystem commit sequence.
-    finalizing: bool,
-    /// Released at the first terminal transition while the snapshot remains in
-    /// the registry for its retention window.
-    permit: Option<OwnedSemaphorePermit>,
+    lease: FlowLease,
 }
 
 struct Flow {
@@ -252,11 +244,7 @@ impl Flow {
             .mutable
             .lock()
             .expect("Matrix OAuth acquire flow poisoned");
-        if mutable.state.stage.is_terminal() || mutable.finalizing {
-            return false;
-        }
-        mutable.finalizing = true;
-        true
+        mutable.lease.claim_finalization()
     }
 
     fn terminal(
@@ -269,16 +257,14 @@ impl Flow {
             .mutable
             .lock()
             .expect("Matrix OAuth acquire flow poisoned");
-        if mutable.state.stage.is_terminal() {
+        if !mutable.lease.finish(std::time::Instant::now()) {
             return;
         }
         mutable.state.set_stage(stage);
         mutable.state.account_id = account_id;
         mutable.state.error_code = error_code.map(str::to_owned);
-        mutable.terminal_at = Some(Instant::now());
         mutable.scan_tx.take();
         mutable.check_code_tx.take();
-        mutable.permit.take();
     }
 
     fn cancel(&self) -> bool {
@@ -286,14 +272,12 @@ impl Flow {
             .mutable
             .lock()
             .expect("Matrix OAuth acquire flow poisoned");
-        if mutable.finalizing || mutable.state.stage.is_terminal() {
+        if !mutable.lease.cancel(std::time::Instant::now()) {
             return false;
         }
         mutable.state.set_stage(MatrixOAuthAcquireStage::Cancelled);
-        mutable.terminal_at = Some(Instant::now());
         mutable.scan_tx.take();
         mutable.check_code_tx.take();
-        mutable.permit.take();
         drop(mutable);
         self.cancel.cancel();
         true
@@ -391,11 +375,9 @@ impl MatrixOAuthAcquireEngine {
                     expected_user_id.to_owned(),
                     presentation,
                 ),
-                terminal_at: None,
                 scan_tx: Some(scan_tx),
                 check_code_tx: Some(check_code_tx),
-                finalizing: false,
-                permit: Some(permit),
+                lease: FlowLease::new(permit),
             }),
             cancel,
             staging_dir_name,
@@ -484,7 +466,7 @@ impl MatrixOAuthAcquireEngine {
             .expect("Matrix OAuth acquire flow poisoned");
         if mutable.state.presentation != MatrixOAuthAcquirePresentation::Scan
             || mutable.state.stage != MatrixOAuthAcquireStage::Starting
-            || mutable.finalizing
+            || mutable.lease.is_finalizing()
         {
             return Err(MatrixOAuthAcquireError::WrongStage);
         }
@@ -510,7 +492,7 @@ impl MatrixOAuthAcquireEngine {
             .expect("Matrix OAuth acquire flow poisoned");
         if mutable.state.presentation != MatrixOAuthAcquirePresentation::Display
             || mutable.state.stage != MatrixOAuthAcquireStage::CheckCodeRequired
-            || mutable.finalizing
+            || mutable.lease.is_finalizing()
         {
             return Err(MatrixOAuthAcquireError::WrongStage);
         }
@@ -541,12 +523,7 @@ impl MatrixOAuthAcquireEngine {
     }
 
     pub(crate) async fn reap_loop(self, cancel: CancellationToken) {
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(REAPER_INTERVAL) => self.reap_expired(),
-            }
-        }
+        run_reaper(cancel, || self.reap_expired()).await;
     }
 
     fn flow(&self, flow_id: Uuid) -> Result<Arc<Flow>, MatrixOAuthAcquireError> {
@@ -560,7 +537,7 @@ impl MatrixOAuthAcquireEngine {
     }
 
     fn reap_expired(&self) {
-        let now = Instant::now();
+        let now = std::time::Instant::now();
         self.inner
             .flows
             .lock()
@@ -569,8 +546,8 @@ impl MatrixOAuthAcquireEngine {
                 flow.mutable
                     .lock()
                     .expect("Matrix OAuth acquire flow poisoned")
-                    .terminal_at
-                    .is_none_or(|terminal_at| now.duration_since(terminal_at) < TERMINAL_RETENTION)
+                    .lease
+                    .is_retained_at(now)
             });
     }
 
@@ -954,7 +931,18 @@ fn qr_server(qr: &QrCodeData) -> Result<String, DriverFailure> {
     }
 }
 
-fn parse_qr_payload(value: &str) -> Result<QrCodeData, MatrixOAuthAcquireError> {
+pub(crate) fn parse_qr_payload(value: &str) -> Result<QrCodeData, MatrixOAuthAcquireError> {
+    parse_qr_payload_for_intent(value, QrCodeIntent::Reciprocate)
+}
+
+pub(crate) fn parse_grant_qr_payload(value: &str) -> Result<QrCodeData, MatrixOAuthAcquireError> {
+    parse_qr_payload_for_intent(value, QrCodeIntent::Login)
+}
+
+fn parse_qr_payload_for_intent(
+    value: &str,
+    expected_intent: QrCodeIntent,
+) -> Result<QrCodeData, MatrixOAuthAcquireError> {
     if value.is_empty() || value.len() > MAX_QR_BASE64_BYTES {
         return Err(MatrixOAuthAcquireError::InvalidInput(
             "QR payload has an invalid size",
@@ -962,7 +950,7 @@ fn parse_qr_payload(value: &str) -> Result<QrCodeData, MatrixOAuthAcquireError> 
     }
     let parsed = QrCodeData::from_base64(value)
         .map_err(|_| MatrixOAuthAcquireError::InvalidInput("QR payload is malformed"))?;
-    if parsed.intent() != QrCodeIntent::Reciprocate {
+    if parsed.intent() != expected_intent {
         return Err(MatrixOAuthAcquireError::InvalidInput(
             "QR payload has the wrong intent",
         ));
@@ -975,12 +963,11 @@ fn parse_qr_payload(value: &str) -> Result<QrCodeData, MatrixOAuthAcquireError> 
             validate_qr_server_name_or_url(server_name)?;
             validate_qr_url(rendezvous_url)?;
         }
+        QrCodeIntentData::Msc4108 {
+            data: Msc4108IntentData::Login,
+            rendezvous_url,
+        } => validate_qr_url(rendezvous_url)?,
         QrCodeIntentData::Msc4388 { base_url, .. } => validate_qr_url(base_url)?,
-        _ => {
-            return Err(MatrixOAuthAcquireError::InvalidInput(
-                "QR payload has the wrong intent",
-            ))
-        }
     }
     Ok(parsed)
 }
@@ -997,7 +984,7 @@ fn validate_qr_server_name_or_url(value: &str) -> Result<(), MatrixOAuthAcquireE
     validate_qr_url(&url)
 }
 
-fn validate_qr_url(url: &url::Url) -> Result<(), MatrixOAuthAcquireError> {
+pub(crate) fn validate_qr_url(url: &url::Url) -> Result<(), MatrixOAuthAcquireError> {
     let host = url.host_str().ok_or(MatrixOAuthAcquireError::InvalidInput(
         "QR payload contains a URL without a host",
     ))?;
@@ -1015,7 +1002,7 @@ fn validate_qr_url(url: &url::Url) -> Result<(), MatrixOAuthAcquireError> {
     Ok(())
 }
 
-fn parse_check_code(value: &str) -> Result<u8, MatrixOAuthAcquireError> {
+pub(crate) fn parse_check_code(value: &str) -> Result<u8, MatrixOAuthAcquireError> {
     if value.len() != 2 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(MatrixOAuthAcquireError::InvalidInput(
             "check code must contain exactly two digits",
@@ -1382,11 +1369,9 @@ mod tests {
                     "@alice:example.org".to_owned(),
                     MatrixOAuthAcquirePresentation::Display,
                 ),
-                terminal_at: None,
                 scan_tx: Some(scan_tx),
                 check_code_tx: Some(check_code_tx),
-                finalizing: false,
-                permit: Some(permit),
+                lease: FlowLease::new(permit),
             }),
             cancel: CancellationToken::new(),
             staging_dir_name: Uuid::new_v4().to_string(),

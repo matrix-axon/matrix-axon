@@ -9,6 +9,7 @@ pub mod ephemeral;
 pub mod events;
 pub mod invites;
 pub mod matrix_oauth_acquire;
+pub mod matrix_oauth_grant;
 pub mod media;
 pub mod membership;
 pub mod messages;
