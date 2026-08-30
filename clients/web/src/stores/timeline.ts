@@ -13,6 +13,7 @@ import {
   type MediaService,
   type UploadKind,
 } from '../media/media-service'
+import { perfMark } from '../perf'
 
 export type EventDto = components['schemas']['EventDto']
 
@@ -387,10 +388,45 @@ export function createTimelineStore(
     return [...history.slice(0, RETAINED_EVENT_LIMIT), ...echoes]
   }
 
+  /**
+   * Every timeline page fetch — head, scroll-back, forward, and jump — goes
+   * through here, which makes it the one place a slow link shows up as a
+   * number rather than as a placeholder that will not go away. `kind`
+   * separates them without a signature change: a head load is the one carrying
+   * neither a cursor nor a timestamp, and it is the one that gates first paint.
+   *
+   * Marked at the exits rather than around an inner call, deliberately: an
+   * extra `await` here is an extra microtask before every page resolves, and
+   * the scroll-anchoring and auto-paging effects are tight enough to that
+   * ordering that wrapping this function moved measured scroll positions and
+   * broke nine tests. Instrumentation must not perturb what it measures.
+   */
   async function fetchPage(query: {
     cursor?: string
     at_ts?: number
   }): Promise<{ events: EventDto[]; next: string | null } | null> {
+    const kind =
+      query.at_ts !== undefined
+        ? 'jump'
+        : query.cursor !== undefined
+          ? 'paged'
+          : 'head'
+    perfMark('timeline:fetch:start', {
+      kind,
+      roomId,
+      thread: threadRoot !== undefined,
+    })
+    type Page = { events: EventDto[]; next: string | null }
+    const settled = (page: Page | null): Page | null => {
+      perfMark('timeline:fetch:end', {
+        kind,
+        roomId,
+        thread: threadRoot !== undefined,
+        ok: page !== null,
+        events: page?.events.length ?? null,
+      })
+      return page
+    }
     try {
       const pageQuery = { limit: PAGE_LIMIT, ...query }
       const { data, error: apiError } =
@@ -419,17 +455,17 @@ export function createTimelineStore(
             )
       if (apiError !== undefined) {
         error.value = apiErrorMessage(apiError)
-        return null
+        return settled(null)
       }
       error.value = null
-      return {
+      return settled({
         // Server order is newest-first; display order is oldest-first.
         events: [...data.data.events].reverse(),
         next: data.data.next_cursor ?? null,
-      }
+      })
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : String(cause)
-      return null
+      return settled(null)
     }
   }
 

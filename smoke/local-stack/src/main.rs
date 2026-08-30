@@ -673,6 +673,35 @@ namespaces:
     Ok(compose_override)
 }
 
+/// Retry `op` up to `attempts` times, sleeping `backoff * attempt` between tries.
+///
+/// Used for the Docker steps that reach Docker Hub: an anonymous image pull can
+/// time out or hit the unauthenticated rate limit, and a single transient
+/// failure should not red the smoke gate.
+fn with_retries(
+    attempts: u32,
+    backoff: Duration,
+    label: &str,
+    mut op: impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let mut last_error = None;
+    for attempt in 1..=attempts {
+        match op() {
+            Ok(()) => return Ok(()),
+            Err(err) if attempt < attempts => {
+                let wait = backoff * attempt;
+                eprintln!(
+                    "axon-smoke-local-stack: {label} failed on attempt {attempt}/{attempts}; retrying in {wait:?}: {err:#}"
+                );
+                std::thread::sleep(wait);
+                last_error = Some(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("{label} exhausted {attempts} retries")))
+}
+
 fn compose_up(
     project: &str,
     compose_override: &Path,
@@ -680,31 +709,55 @@ fn compose_up(
     synapse_port: u16,
 ) -> anyhow::Result<()> {
     let base_compose = workspace_root()?.join("docker-compose.yml");
-    command_status(
-        Command::new("docker")
-            .args([
-                "compose",
-                "-f",
-                base_compose
-                    .to_str()
-                    .ok_or_else(|| anyhow!("docker-compose.yml path is not UTF-8"))?,
-                "-f",
-                compose_override
-                    .to_str()
-                    .ok_or_else(|| anyhow!("compose override path is not UTF-8"))?,
-                "-p",
-                project,
-                "--profile",
-                "integration",
-                "up",
-                "-d",
-                "postgres",
-                "synapse",
-            ])
-            .env("POSTGRES_PORT", postgres_port.to_string())
-            .env("SYNAPSE_PORT", synapse_port.to_string()),
-        "docker compose up",
-    )
+    let base_compose = base_compose
+        .to_str()
+        .ok_or_else(|| anyhow!("docker-compose.yml path is not UTF-8"))?
+        .to_owned();
+    let override_path = compose_override
+        .to_str()
+        .ok_or_else(|| anyhow!("compose override path is not UTF-8"))?
+        .to_owned();
+
+    // `-f base -f override -p project --profile integration`, shared by every
+    // compose invocation below.
+    let compose = || {
+        let mut cmd = Command::new("docker");
+        cmd.args([
+            "compose",
+            "-f",
+            base_compose.as_str(),
+            "-f",
+            override_path.as_str(),
+            "-p",
+            project,
+            "--profile",
+            "integration",
+        ]);
+        cmd
+    };
+
+    // Pull first, with retries. `up -d` below still fetches anything missed, so
+    // this is belt-and-braces against a flaky registry, not the only fetch.
+    with_retries(3, Duration::from_secs(5), "docker compose pull", || {
+        command_status(
+            compose().args(["pull", "--quiet", "postgres", "synapse"]),
+            "docker compose pull",
+        )
+    })?;
+
+    with_retries(3, Duration::from_secs(5), "docker compose up", || {
+        command_status(
+            compose()
+                .args(["up", "-d", "postgres", "synapse"])
+                .env("POSTGRES_PORT", postgres_port.to_string())
+                .env("SYNAPSE_PORT", synapse_port.to_string()),
+            "docker compose up",
+        )
+        .inspect_err(|_| {
+            // Tear down a half-started project so the retry starts clean.
+            let _ = command_status(compose().args(["down", "-v"]), "docker compose down");
+        })
+    })
 }
 
 fn compose_container(project: &str, service: &str) -> anyhow::Result<String> {
