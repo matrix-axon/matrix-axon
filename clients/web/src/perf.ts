@@ -1085,11 +1085,7 @@ function captureBootAssets(): BootAssets {
       js = Math.round(
         boot.reduce((latest, entry) => Math.max(latest, entry.responseEnd), 0),
       )
-      const sized = boot.filter((entry) => entry.transferSize > 0)
-      bytes =
-        sized.length === 0
-          ? null
-          : sized.reduce((total, entry) => total + entry.transferSize, 0)
+      bytes = boot.reduce((total, entry) => total + entry.transferSize, 0)
     }
   } catch {
     // No navigation or resource timing; the rest of the summary still reads.

@@ -177,6 +177,7 @@ describe('room-list boot summary (ADR 0085 phase 2)', () => {
       expect(summary!.tls).toBe(38_500)
       expect(summary!.ttfb).toBe(1_500)
       expect(summary!.hxfer).toBe(105)
+      expect(summary!.jskb).toBeNull()
     } finally {
       vi.restoreAllMocks()
     }
@@ -270,6 +271,37 @@ describe('room-list boot summary (ADR 0085 phase 2)', () => {
       // `exec` is main-thread time after the assets were in, so it must be
       // measured from `js` rather than from navigation start.
       expect(summary!.exec).toBe((summary!.boot as number) - 1200)
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('reports a full HTTP-cache hit as zero bytes, not missing timing data', async () => {
+    const original = performance.getEntriesByType.bind(performance)
+    vi.spyOn(performance, 'getEntriesByType').mockImplementation((type) => {
+      if (type === 'resource') {
+        return [
+          {
+            name: 'https://a.example/assets/index-abc.js',
+            responseEnd: 120,
+            transferSize: 0,
+          },
+          {
+            name: 'https://a.example/assets/index-abc.css',
+            responseEnd: 90,
+            transferSize: 0,
+          },
+        ] as unknown as PerformanceEntryList
+      }
+      return type === 'navigation' ? [] : original(type)
+    })
+    try {
+      perfMark('rooms:cache:read:start')
+      perfMark('rooms:refresh:end', { ok: true, rooms: 2 })
+      perfMarkBootRoomList()
+      await frames()
+
+      expect(bootSummary()!.jskb).toBe(0)
     } finally {
       vi.restoreAllMocks()
     }
