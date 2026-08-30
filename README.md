@@ -8,7 +8,7 @@ This "middle" layer aims to solve that challenge.
 It is similar to the [back-end for front-end](https://philcalcado.com/2015/09/18/the_back_end_for_front_end_pattern_bff.html) concept, with the added wrinkle that it is intended to run as a separate instance per user.
 Old-timers may find a familiar with analogy with [ZNC Bouncer](https://en.wikipedia.org/wiki/ZNC), an agent that sits between an IRC client and an IRC server.
 
-Axon differs from most clients by cleanly separating the end-user interface from the "hard" parts of the Matrix ecosystem: sync, E2EE decryption, and a full-history search index all live in Axon itself, not duplicated in every client — so a client can be wiped and reinstalled and be back to full functionality immediately, with no history to re-sync and no on-device index to rebuild.
+Axon differs from most clients by cleanly separating the end-user interface from the harder parts of the Matrix ecosystem: login (password/QR code), sync, E2EE device verification and message decryption, keys backup, and a full-history search index all live in Axon itself, not duplicated in every client — so a client can be wiped and reinstalled and be back to full functionality immediately, with no history to re-sync and no on-device index to rebuild.
 That one persistent brain also covers multiple Matrix accounts (personal and work, even on different homeservers) under a single search index and open API, and resolves edits, reactions, and threads server-side so a late reaction to an old message is never silently dropped just because a client's timeline window has moved on.
 Start composing a message on the mobile web app and continue that same draft instantly via the TUI on desktop.
 No saving required.

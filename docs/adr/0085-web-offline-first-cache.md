@@ -1,5 +1,14 @@
 # ADR 0085 — Web client offline-first content cache
 
+## Status
+
+Accepted.
+**Phase 1 shipped** (#90), **phase 2 shipped** (#106), **phase 3 declined on measurement** (see "What the weak-link captures show" below), phase 4 still contingent on issue #23.
+
+Every latency figure in the Context below was measured **before** PR #206 (ADR 0095, which cut `GET /v1/rooms` TTFB from 12–21 s to 29–80 ms) and PR #231 (response compression).
+They are kept because the decisions rest on them, but they no longer describe the server.
+The weak-link section below is the current picture.
+
 ## In brief
 
 Persist the room list and each room's newest timeline page in IndexedDB, paint
@@ -9,17 +18,20 @@ already implements for ADR 0061's reconnect gap-fill. Ship it in four phases,
 
 The measured case, on a 1,752-room production account: `/v1/rooms` costs
 **1,298 ms of server-side TTFB**, so the room list is blank for ~1.5 s on a
-*fast desktop connection*; reading the same list back from IndexedDB on an
+_fast desktop connection_; reading the same list back from IndexedDB on an
 iPhone costs **31-44 ms** as shipped (a synthetic warm harness said ~1 ms; the
 real cold read is slower and still three orders of magnitude inside the wait it
 replaces). Storage constrains nothing (41.2 GB of quota on the phone),
 and no long task appears at the 1,752-row render, so the delay is removed
 rather than relocated.
 
-Two problems this ADR deliberately does **not** fix, both filed: the room-list
-query recomputes every summary from the whole `events` table (#85), and API
-responses are uncompressed (#86). The cache paints over both and replaces
-neither.
+Two problems this ADR deliberately did **not** fix, both since fixed: the
+room-list query recomputed every summary from the whole `events` table (#85,
+fixed by PR #206 / ADR 0095) and API responses were uncompressed (#86, fixed
+by PR #231). The cache painted over both and replaced neither — and once they
+were fixed, most of the delay this ADR was written to hide went away at the
+source. What remains is transfer on a weak link, which is a different
+argument for the same feature; see below.
 
 Defaults differ by phase, because the data does: the **room-list cache is on by
 default** (metadata, of a kind already persisted today) while the
@@ -45,8 +57,8 @@ The blocking resource is a network round trip, not a device: a laptop on hotel
 wi-fi, a tether, or a VPN paints the same empty panes. What differs is **how
 often the blank state is reached**, and there the platforms diverge sharply. A
 desktop tab lives for days, so its in-memory stores stay warm and a genuine
-cold start is rare — the cost a desktop user pays repeatedly is the *room
-switch*, which discards a loaded timeline within a single session. A phone
+cold start is rare — the cost a desktop user pays repeatedly is the _room
+switch_, which discards a loaded timeline within a single session. A phone
 browser discards backgrounded tabs aggressively, so on mobile nearly every
 return to the app is a cold start.
 
@@ -59,21 +71,21 @@ cheapest thing here in any case.
 
 Every `localStorage` key the client writes:
 
-| Key | Written by | Contents |
-| --- | --- | --- |
-| `axon.settings` | `stores/settings.ts:13` | user preferences |
-| `axon.room_titles.v1` | `stores/rooms.ts:113` | room *display names* only |
-| `axon.device_id` | `stores/device-state.ts:8` | this install's device id (ADR 0048) |
-| `axon.publicRoomDirectoryServers` | `pages/RoomsIndex.tsx:26` | directory-server recents |
-| `axon.token`, `axon.oauth.*` | `auth/token-paste.tsx`, `auth/oauth.tsx` | credentials |
-| `axon.perf` | `perf.ts:3` | perf-readout opt-in (ADR 0077) |
+| Key                               | Written by                               | Contents                            |
+| --------------------------------- | ---------------------------------------- | ----------------------------------- |
+| `axon.settings`                   | `stores/settings.ts:13`                  | user preferences                    |
+| `axon.room_titles.v1`             | `stores/rooms.ts:113`                    | room _display names_ only           |
+| `axon.device_id`                  | `stores/device-state.ts:8`               | this install's device id (ADR 0048) |
+| `axon.publicRoomDirectoryServers` | `pages/RoomsIndex.tsx:26`                | directory-server recents            |
+| `axon.token`, `axon.oauth.*`      | `auth/token-paste.tsx`, `auth/oauth.tsx` | credentials                         |
+| `axon.perf`                       | `perf.ts:3`                              | perf-readout opt-in (ADR 0077)      |
 
 That is the whole of it. The room list, room previews, unread counts, timeline
 events, and decoded media are held only in memory:
 
 - `createRoomsStore` starts at `rooms = signal([])` with `loading = true`
   (`stores/rooms.ts:126,130`), and `RoomList` gates its rows on that flag
-  (`components/RoomList.tsx:788`). The title cache makes the rows *correct*
+  (`components/RoomList.tsx:788`). The title cache makes the rows _correct_
   once the list arrives; it cannot make a list appear early.
 - `createTimelineStore` starts at `events = signal([])` with `loading = true`
   (`stores/timeline.ts:271-272`), and `RoomPage.tsx:1340` renders
@@ -87,7 +99,7 @@ events, and decoded media are held only in memory:
   support conditional GETs — `ETag` and `If-None-Match`
   (`crates/axon-api/src/routes/media.rs:284-287,462-465`), plus `Range` and
   `Accept-Ranges` — but no route anywhere sets `Cache-Control`, so a reload
-  *revalidates* rather than serving from cache: still a round trip per
+  _revalidates_ rather than serving from cache: still a round trip per
   thumbnail on the connection that hurts most, and nothing at all offline.
   A further wrinkle is that the bearer-guarded proxy is fetched into a blob and
   handed to the DOM as an object URL, so the browser cache is keyed on requests
@@ -102,15 +114,15 @@ measured what a cache would have to hold and what it would paint over
 (`scripts/cache-sizing-sweep.sh`, 40 rooms stride-sampled across the recency
 order):
 
-| | |
-| --- | --- |
-| Rooms | 1,752 |
-| `/v1/rooms` payload | **660 KB**, 377 B/room |
-| `/v1/rooms` wall time | **1.52 s** |
-| Timeline page (`limit=50`) | median **17.4 KB**, mean 21.0 KB, p95 35.5 KB, max 38.3 KB |
-| Per event | 806 B |
-| Timeline fetch time | 6–68 ms |
-| Rooms hitting the 50-event limit | **4 of 40 (10%)** |
+|                                  |                                                            |
+| -------------------------------- | ---------------------------------------------------------- |
+| Rooms                            | 1,752                                                      |
+| `/v1/rooms` payload              | **660 KB**, 377 B/room                                     |
+| `/v1/rooms` wall time            | **1.52 s**                                                 |
+| Timeline page (`limit=50`)       | median **17.4 KB**, mean 21.0 KB, p95 35.5 KB, max 38.3 KB |
+| Per event                        | 806 B                                                      |
+| Timeline fetch time              | 6–68 ms                                                    |
+| Rooms hitting the 50-event limit | **4 of 40 (10%)**                                          |
 
 Four things follow, one of which contradicts what an earlier draft of this ADR
 predicted:
@@ -122,7 +134,7 @@ predicted:
   rooms. A client cache paints over it; nothing else the client can do will.
 - **Timeline pages are cheap and fast** — 17 KB median, under 70 ms. The
   per-room cache is a nicety on a fast link and matters on a slow one; the
-  room-list cache matters on *every* link. If only one phase ships, it is the
+  room-list cache matters on _every_ link. If only one phase ships, it is the
   room list.
 - **90% of rooms do not fill a page.** An earlier draft predicted the opposite
   ("a real account inverts this: most rooms will fill the page") and was
@@ -145,14 +157,14 @@ a filter over a partial cache would silently search 200 of 1,752 rooms.
 
 The same account, measured from the client with resource and paint timing:
 
-| | |
-| --- | --- |
+|                        |                                         |
+| ---------------------- | --------------------------------------- |
 | First contentful paint | 176 ms (the shell and "Loading rooms…") |
-| `/v1/rooms` starts | 238 ms |
-| `/v1/rooms` TTFB | **1,298 ms** |
-| `/v1/rooms` total | 1,422 ms — so rows arrive at ~1.66 s |
-| Transferred / decoded | **660,671 / 660,371 bytes** |
-| Storage quota / usage | 10.74 GB / 2.02 MB |
+| `/v1/rooms` starts     | 238 ms                                  |
+| `/v1/rooms` TTFB       | **1,298 ms**                            |
+| `/v1/rooms` total      | 1,422 ms — so rows arrive at ~1.66 s    |
+| Transferred / decoded  | **660,671 / 660,371 bytes**             |
+| Storage quota / usage  | 10.74 GB / 2.02 MB                      |
 
 Three things fall out, and two of them are not about caching:
 
@@ -172,7 +184,7 @@ Three things fall out, and two of them are not about caching:
   use means nothing in this ADR is quota-limited there. iOS will not look like
   this, which is why the phone capture is the one that matters.
 
-The user-visible blank window on a *fast desktop connection* is therefore
+The user-visible blank window on a _fast desktop connection_ is therefore
 ~176 ms to ~1.66 s — about **1.5 seconds of "Loading rooms…" with no network
 problem at all**, which is the clearest statement of the case for phase 2.
 
@@ -192,15 +204,15 @@ A standalone IndexedDB harness served from the client's own origin (quota is
 per-origin, so this had to run there), writing synthetic records at the shapes
 measured above and reading them back — median of 5:
 
-| | |
-| --- | --- |
-| Storage quota | **41.2 GB** (3.08 MB in use) |
-| Full room list, structured clone | **1 ms** (record: 870 KB) |
-| Full room list, string + `JSON.parse` | 1 ms |
-| 200-room slice, either encoding | 0–1 ms |
-| One timeline page | 0 ms (22 KB) |
-| Open database | 0 ms |
-| Write everything (~1.5 MB) | 5–8 ms |
+|                                       |                              |
+| ------------------------------------- | ---------------------------- |
+| Storage quota                         | **41.2 GB** (3.08 MB in use) |
+| Full room list, structured clone      | **1 ms** (record: 870 KB)    |
+| Full room list, string + `JSON.parse` | 1 ms                         |
+| 200-room slice, either encoding       | 0–1 ms                       |
+| One timeline page                     | 0 ms (22 KB)                 |
+| Open database                         | 0 ms                         |
+| Write everything (~1.5 MB)            | 5–8 ms                       |
 
 **The race is not close.** Hydrating the entire room list costs ~1 ms against a
 1,298 ms network floor — a margin of three orders of magnitude. Three
@@ -211,7 +223,7 @@ consequences, and the first two close open questions outright:
   all of it keeps offline filtering complete over every room, which a slice
   would have silently made partial.
 - **Storage is not a constraint on any target.** 41.2 GB on the phone against
-  10.74 GB on the desktop — the phone's quota is *four times larger*. An
+  10.74 GB on the desktop — the phone's quota is _four times larger_. An
   earlier draft of this ADR assumed iOS would be tight and warned that its
   quota might not permit phases 2-3; that assumption was wrong, and modern iOS
   grants quota as a fraction of disk. The LRU cap survives on different
@@ -237,21 +249,19 @@ These are the built feature on a real account, read off the `boot:room-list`
 overlay after two app relaunches (`nav=navigate`, so a genuinely fresh document
 each time, which is what iOS gives you).
 
-
-
 Against the **production bundle** (`pnpm preview`), on a 2,234-room account:
 
-| | Cold | Warm | Warm |
-| --- | --- | --- | --- |
-| Startup before the read (`boot`) | 148 ms | 82 ms | 169 ms |
-| The IndexedDB read itself (`read`) | 4 ms (empty) | **31 ms** | **44 ms** |
-| Cached rows in the store (`hydrate`) | — | 115 ms | 216 ms |
-| First painted rows (`rows`) | 14,088 ms | **119 ms** | **219 ms** |
-| Room list settled (`net`) | 14,084 ms | 1,758 ms | 1,474 ms |
-| Blank time removed (`saved`) | −4 ms | **1,639 ms** | **1,255 ms** |
+|                                      | Cold         | Warm         | Warm         |
+| ------------------------------------ | ------------ | ------------ | ------------ |
+| Startup before the read (`boot`)     | 148 ms       | 82 ms        | 169 ms       |
+| The IndexedDB read itself (`read`)   | 4 ms (empty) | **31 ms**    | **44 ms**    |
+| Cached rows in the store (`hydrate`) | —            | 115 ms       | 216 ms       |
+| First painted rows (`rows`)          | 14,088 ms    | **119 ms**   | **219 ms**   |
+| Room list settled (`net`)            | 14,084 ms    | 1,758 ms     | 1,474 ms     |
+| Blank time removed (`saved`)         | −4 ms        | **1,639 ms** | **1,255 ms** |
 
 **Time-to-content is 119-219 ms against a 1.5-1.8 s network arm.** The cold
-column is the control — rows land 4 ms *after* the network, because there is
+column is the control — rows land 4 ms _after_ the network, because there is
 nothing to paint until it answers — and it also caught `/v1/rooms` taking
 **14 seconds**, which is issue #85 on a bad day and the strongest single
 argument in this document for painting over it.
@@ -280,7 +290,7 @@ Two things this settles, and one it does not:
   earlier figures:
 
   The **synthetic ~1 ms hydrate was optimistic by ~30x.** That harness measured
-  a *warm* read moments after its own write; a real cold start pays disk. The
+  a _warm_ read moments after its own write; a real cold start pays disk. The
   cold column decomposes even that: a read against an **empty** store costs
   4 ms, so the database open is cheap and the remaining ~27-40 ms is genuinely
   reading and deserialising the ~800 KB record. Nothing about the decision
@@ -290,10 +300,74 @@ Two things this settles, and one it does not:
 
   **This is the number phase 3 should budget from.** A timeline page is ~22 KB
   against the room list's ~800 KB, so a per-room read should land in single-digit
-  milliseconds; but it is paid *per room entry* rather than once per boot, so the
+  milliseconds; but it is paid _per room entry_ rather than once per boot, so the
   4 ms floor for opening the database is the part to watch, not the record size.
 
-### The room list has a server-side problem this ADR cannot fix
+### What the weak-link captures show (2026-08-27, after #206 and #231)
+
+A dozen captures from an iPhone against a production account — now **3,638 rooms** — under Network Link Conditioner, reading `boot:room-list` and the `boot:room-open` summary added for this work (`docs/web-slow-link-measurement.md`).
+
+| Condition            | room paints | timeline `ttfb` | queueing     | room list settles | cache `saved` |
+| -------------------- | ----------- | --------------- | ------------ | ----------------- | ------------- |
+| Unthrottled          | 116 ms      | —               | —            | 487 ms            | **217 ms**    |
+| NLC 3G, warm cache   | 1,160 ms    | 1,138 ms        | `q=3`        | 5,916 ms          | 5,321 ms      |
+| NLC Very Bad Network | 4,097 ms    | 2,101 ms        | `q=9`        | 21,045 ms         | **14,742 ms** |
+| A worse real link    | 10,917 ms   | —               | `wait=6,021` | 28,731 ms         | 17,782 ms     |
+
+Four things follow, two of which change this ADR's own conclusions.
+
+- **Phase 2's justification moved, and survives.** `saved` was 1,255–1,639 ms
+  as shipped; against a fixed server it is **217 ms**.
+  The argument this ADR was built on — that the room list costs 1.3 s of server think-time — is gone.
+  But on the links the feature was actually meant for it is worth
+  **5.3–14.7 s**, because the 261 KB body still has to cross the wire. Phase 2
+  is now justified by transfer rather than by TTFB, and more strongly than before.
+- **The cold IndexedDB read is 25–131 ms** at 3,638 rooms, against the 31–44 ms
+  this ADR recorded at 2,204.
+  Still three orders of magnitude inside the network arm it replaces; still not the ~1 ms the synthetic harness claimed.
+- **The bottleneck at a room open is neither the timeline page nor queueing.**
+  The timeline page is 9.4 KB — the _smallest_ thing on the wire — and consistently reports `q` in single-digit milliseconds with the connection reused (`conn=0`).
+  What delays it is contention for a shared HTTP/2 connection carrying 90 KB of account-wide read markers (#280) and one preview request per visible room-list row (#278).
+  On a lossy link, four independent requests were observed reporting _identical_ TTFB — head-of-line blocking releasing every stream at once — and the client has no timeout to bound it (#281).
+- **A negative `saved` is obtainable and was obtained.** A cold-cache control
+  reported `saved=-5` with `hydrate=null`: nothing to paint, so rows land after the response.
+  The honest failure signal this ADR asked for works.
+
+#### Phase 3 is declined
+
+The timeline-body cache is not built, and on this evidence should not be.
+
+It caches the newest page of a room **already visited**.
+The complaint that prompted this re-measurement is a _newly opened_ room, which by definition has nothing cached — so phase 3 does not address it at all.
+And where a cache would apply, the body it saves is the smallest one in the exchange:
+9.4 KB, against 90 KB of read markers and 25 preview round trips fired in the same breath.
+Fixing those (#278, #280) removes far more of the wait than caching the timeline would, and neither writes message plaintext to disk.
+
+The [Privacy](#privacy) section asks for "an explicit yes, not silence" on the timeline-body default.
+**The answer is no**: the trade was plaintext at rest for tens of milliseconds when this ADR was written, and the measurements make it plaintext at rest for the smallest term in a room open.
+Phase 1's in-memory store cache already covers the re-entry case it would have shared.
+
+Reviving it would be an _offline_ feature rather than a latency one — a different design, wanting the retained slice rather than one page, and probably the service worker this ADR deliberately refuses to introduce.
+That is a new ADR, not this one.
+
+### The room list had a server-side problem this ADR could not fix
+
+**Fixed since, by PR #206 (ADR 0095).** `Store::list_rooms` now scans a
+materialized `room_summaries` row per `(account_id, room_id)`; TTFB fell from
+12–21 s to 29–80 ms at 3,601 rooms. The diagnosis below stands as written and
+the proposed direction was the one taken. What remains of the room list's cost
+is transfer, not think-time — issue #279.
+
+`RoomsQuery` still accepts only `account_id` — no `limit`, no cursor — and
+**that is deliberate**. Pagination would break this ADR's own reconcile
+contract: the cache stores one whole-list record and `refresh()` replaces it
+wholesale so a room left elsewhere is pruned (guardrail 5), and against a
+paginated endpoint "absent from the response" stops meaning "gone". It would
+also make offline filtering partial, which is the exact failure this ADR
+rejected a _sliced_ cache for. Conditional GET, not pagination, is the fix for
+transfer (#279).
+
+The original diagnosis follows.
 
 `RoomsQuery` (`crates/axon-api/src/routes/rooms.rs:30-34`) accepts only
 `account_id` — no `limit`, no cursor — and `list_rooms` returns every room as
@@ -347,14 +421,14 @@ Three pieces of existing design do most of the work:
   newest page into an already-populated slice: overlapping rows win by event id
   (picking up edits and redactions missed while disconnected), older history and
   the cursor chain survive, local echoes stay at the tail, and a head that
-  shares *nothing* with the loaded slice replaces it, because the gap is real.
+  shares _nothing_ with the loaded slice replaces it, because the gap is real.
   That is exactly the reconciliation a restored cache needs — a cache hit is
   indistinguishable, from the store's point of view, from a slice that sat idle
   while the socket was down.
 - **The reconnect gap-fill contract** (ADR 0061): the live bus has no resume
   cursor, so consumers watch `live.reconnects` and re-read. Live frames are
   ingested only for the mounted room (`pages/RoomPage.tsx:435-463`), which means
-  *any* store that outlives its mount — cached in memory or restored from disk —
+  _any_ store that outlives its mount — cached in memory or restored from disk —
   is already required to gap-fill on re-entry. One rule covers both.
 - **The pagination cursor is stateless.** `cursor::encode`
   (`crates/axon-api/src/cursor.rs:23`) is base64url of `"{origin_ts}.{id}"`, a
@@ -376,10 +450,10 @@ already substitute `src/test/memory-storage.ts`:
 
 ```ts
 export interface CacheStore {
-  read<T>(store: CacheArea, key: string): Promise<T | undefined>
-  write<T>(store: CacheArea, key: string, value: T): Promise<void>
-  drop(store: CacheArea, key: string): Promise<void>
-  clear(): Promise<void>
+  read<T>(store: CacheArea, key: string): Promise<T | undefined>;
+  write<T>(store: CacheArea, key: string, value: T): Promise<void>;
+  drop(store: CacheArea, key: string): Promise<void>;
+  clear(): Promise<void>;
 }
 ```
 
@@ -394,7 +468,7 @@ settings; IndexedDB was measured at 41.2 GB of quota on the target phone. And
 `localStorage` is synchronous, so every read blocks the main thread by
 construction, whatever it costs.
 
-Note that the *cost* argument this originally rested on did not survive
+Note that the _cost_ argument this originally rested on did not survive
 measurement: hydrating the full list is ~1 ms on the phone (below), so
 main-thread parse expense is not why `localStorage` loses. Quota is the
 disqualifying constraint; synchrony is the design objection.
@@ -413,7 +487,7 @@ error banner over a successful load.
 
   **The "reader" is a fingerprint of the bearer token, not an `account_id`** —
   a correction to an earlier draft, which specified `account_id` and could not
-  have worked. `GET /v1/rooms` is *cross-account*: one list spanning every
+  have worked. `GET /v1/rooms` is _cross-account_: one list spanning every
   account on the server, with no account id to key on (`RoomsQuery` takes one,
   the client calls it bare). The token is what actually identifies the reader,
   and keying on it closes a hole the logout wipe leaves open: a token replaced
@@ -428,6 +502,7 @@ error banner over a successful load.
   non-cryptographic fallback acceptable where `crypto.subtle` is unavailable
   (insecure origins, so plain-http development), and a cache that silently
   stopped working there would be the worse outcome.
+
 - `meta` holds a schema version. A version mismatch drops the database rather
   than migrating it; the cache is an optimization and re-fetching is always
   correct.
@@ -458,11 +533,11 @@ error banner over a successful load.
 
 `createRoomsStore` gains a cache-seeded start. Because the read is async it
 cannot land before the very first frame paints, but it beats the network by
-~1,000x — and, as measured, on *every* connection rather than only a poor one,
+~1,000x — and, as measured, on _every_ connection rather than only a poor one,
 because the latency it replaces is server-side.
 
 The store gains a `stale: ReadonlySignal<boolean>` alongside `loading`.
-`loading` keeps its current meaning — *nothing to show* — and becomes false as
+`loading` keeps its current meaning — _nothing to show_ — and becomes false as
 soon as cached rows are installed; `stale` is true from that moment until the
 first successful `refresh()`. `RoomList` renders cached rows with a quiet
 staleness affordance instead of "Loading rooms…", and keeps the existing
@@ -523,7 +598,7 @@ event arrives through the same door. If that rule were ever weakened to "keep
 what we have when the ids match", UTD placeholders would become sticky across
 restarts. The rule is load-bearing; treat it as such.
 
-Note that this makes the *restore* self-correcting but not instantaneous: the
+Note that this makes the _restore_ self-correcting but not instantaneous: the
 placeholder is visible for the duration of the head fetch, exactly as stale
 content is. The existing one-shot redecrypt kick (`RoomPage.tsx`) is
 independent and unaffected.
@@ -533,7 +608,7 @@ independent and unaffected.
 A restored slice carries **no cursor**. The encoding is stateless, so a
 persisted cursor would decode cleanly in a later session — but its `id` half is
 a `BIGSERIAL` local to that server's Postgres. A store rebuilt or re-synced
-reassigns those ids, and the stale cursor then decodes *successfully* and
+reassigns those ids, and the stale cursor then decodes _successfully_ and
 points at the wrong row: a silent gap spliced into history with no error
 anywhere. That is the worst failure shape available to us, and the fix is
 cheap, because the head fetch that immediately follows a restore supplies a
@@ -599,7 +674,7 @@ different defaults:
 
 - **Room-list cache: on by default.** It holds room names, topics, avatars,
   aliases, unread counts, and last-activity timestamps — metadata, not message
-  text. It adds no new *category* of data at rest: the client already persists
+  text. It adds no new _category_ of data at rest: the client already persists
   resolved room titles, DM titles among them, in `localStorage` under
   `axon.room_titles.v1` (`stores/rooms.ts:113`). And it is where essentially
   all of the measured benefit lives, because the 1,298 ms is the room list's.
@@ -625,7 +700,7 @@ and it should be agreed to out loud.
 
 ## Alternatives considered
 
-- **Service worker / Workbox precache.** Caches the *application shell*, not
+- **Service worker / Workbox precache.** Caches the _application shell_, not
   the data — it makes the bundle load offline while the screen stays empty, so
   it does not substitute for anything here. It is nonetheless the largest
   adjacent decision: **issue #23** already proposes registering a service
@@ -664,10 +739,10 @@ Four PRs, in order, each independently shippable:
    think-time, `/__e2e/timeline-delay`):
 
    | Server hold | Extra events | Cold entry | Warm re-entry (median of 6) |
-   | --- | --- | --- | --- |
-   | 0 ms | 0 | 25.8 ms | 11.6 ms |
-   | 300 ms | 0 | 326.0 ms | 11.9 ms |
-   | 300 ms | 300 | 364.8 ms | 34.6 ms |
+   | ----------- | ------------ | ---------- | --------------------------- |
+   | 0 ms        | 0            | 25.8 ms    | 11.6 ms                     |
+   | 300 ms      | 0            | 326.0 ms   | 11.9 ms                     |
+   | 300 ms      | 300          | 364.8 ms   | 34.6 ms                     |
 
    Two things fall out. **Cold entry tracks latency 1:1 while warm re-entry does
    not move at all** (11.6 ms against 11.9 ms across a 300 ms swing), and the
@@ -684,6 +759,7 @@ Four PRs, in order, each independently shippable:
    is desktop — the phone number wants the ADR 0071 harness, whose single-pane
    navigation goes through the room-list transition and so measures something
    different.
+
 2. **`CacheStore` port + IDB adapter + room-list cache**, including the
    `stale` signal, `RoomList`'s stale affordance, a setting to disable it, and
    the logout wipe. Metadata only — no message bodies reach disk in this phase,
@@ -697,24 +773,35 @@ Four PRs, in order, each independently shippable:
    message body text, so the ADR's own "metadata only" claim required it); and
    the phase turned up **two latent bugs that the cache exposes rather than
    causes** (#101, #102). Both are the same shape and worth stating as a rule:
-   *once a list can be restored, "has rows" stops meaning "has been fetched"* —
+   _once a list can be restored, "has rows" stops meaning "has been fetched"_ —
    every guard that conflated them silently became "never refresh", and a bulk
    mutation computed from the list would have written to a stale copy of it and
    reported success. A phase-3 timeline restore will meet the same distinction.
 
    **Measured as shipped** on a 2,204-room account (iPhone, two app
    relaunches): time-to-content falls from **1,371 ms to 226 ms**, `saved =
-   1,190 ms`, with the render costing 7 ms at that room count — see "What the
+1,190 ms`, with the render costing 7 ms at that room count — see "What the
    shipped phase 2 measures on the device" above. The open worry that the
    bottleneck would merely move is answered there and withdrawn for the room
    list. One number remains undecomposed: `hydrate` is a timestamp carrying the
    whole bundle boot, so how much of its 219 ms is storage rather than startup
    is still unread.
-3. **Timeline tail cache**, including the cursor-unknown state, **and the
+
+3. ~~**Timeline tail cache**, including the cursor-unknown state, **and the
    opt-in setting that gates it** (off by default — see Privacy). This is the
-   phase that needs explicit sign-off before it ships.
+   phase that needs explicit sign-off before it ships.~~ **Declined on
+   measurement** — see "Phase 3 is declined" above. The sign-off this asked
+   for was given, and it was a no.
+
+   Not wasted: phase 1 built the state phase 3 needed. `resumeAtHead()`
+   (`stores/timeline.ts`) implements exactly the **cursor-unknown** restore
+   this ADR specifies — parked history and cursor chain dropped, echoes kept,
+   `atStart` false until a settled load says otherwise — and `CacheArea` still
+   reserves a `'timelines'` store. A revival would inherit both.
+
 4. **Media Cache API layer — only if issue #23 stays deferred** (section 5).
-   Phases 1-3 are unaffected by that decision and need not wait on it.
+   Unchanged: #23 is still open, so this is still contingent. Phases 1-2 are
+   unaffected by that decision and never waited on it.
 
 ## Testing
 
@@ -742,15 +829,16 @@ Four PRs, in order, each independently shippable:
 - A warm client paints content immediately and corrects it in place; the price
   is that users can now be shown stale content, which is why the staleness
   affordance is part of the decision rather than a follow-up.
-- Both principal views gain an explicit freshness story: *restore cached →
+- Both principal views gain an explicit freshness story: _restore cached →
   render stale → fetch head → merge by event id → prune what the server no
-  longer lists*, with `live.reconnects` re-running the last three steps.
+  longer lists_, with `live.reconnects` re-running the last three steps.
 - A restore bug can show content from the wrong account or room. Cache keying
   and the logout wipe are correctness requirements with dedicated tests.
 - **The two phases carry different privacy weight, and the phasing reflects it.**
   Phase 2 puts only metadata on disk, of a kind already persisted today; phase 3
-  is the first time message plaintext is written, and it is opt-in. A future
-  change that flips phase 3's default is a privacy decision, not a UX tweak.
+  would have been the first time message plaintext was written. It was declined,
+  so **nothing this ADR ships writes message plaintext to disk**. Any future
+  change that does is a privacy decision, not a UX tweak, and wants its own ADR.
 - Storage grows to a bounded ceiling per origin; quota rejection is a
   no-op path, already exercised by the title cache's precedent.
 - A `Cache-Control` header on the media routes becomes worthwhile either way
@@ -760,9 +848,11 @@ Four PRs, in order, each independently shippable:
 
 ## Open questions
 
-- Should the room-list cache survive a *server* change (different `apiBaseUrl`)
-  as a separate namespace, or be dropped? Proposed: separate namespace, dropped
-  by the LRU like anything else.
+- ~~Should the room-list cache survive a _server_ change (different
+  `apiBaseUrl`) as a separate namespace, or be dropped?~~ **Settled by what
+  shipped.** `cacheNamespace` keys on `` `${baseUrl}\0${fingerprint(token)}` ``
+  and `room-list-cache.ts`'s `write()` drops every non-matching key in the
+  area, so a server change is dropped immediately rather than aged out.
 - ~~Wipe granularity, UTD events, concurrent tabs, storage persistence.~~
   **All four settled in the Decision above**: whole-cache wipe on any logout or
   token change; UTD placeholders self-correct through the merge's win-by-id
@@ -801,18 +891,19 @@ Four PRs, in order, each independently shippable:
   honest failure signal** — the network beat the cache and the phase bought
   nothing — which is the reading this ADR must not make hard to obtain.
 
-  The boot counter is the mark's *existence*, which is cheaper than the
+  The boot counter is the mark's _existence_, which is cheaper than the
   counter the earlier draft imagined and answers the same question: a tab
   resumed from the app switcher runs no new document and emits nothing, so
   opens that produce a `boot:room-list` are exactly the cold ones, and the
   ratio of those to app opens is what sets phase 1's value against phases 2-3.
   Two traps found while building it: the summary must outlast its caller by a
   frame (Preact has not painted the rows when the refresh settles, so an inline
-  summary reports `rows: null` for every *cold* load — the arm the cached one
+  summary reports `rows: null` for every _cold_ load — the arm the cached one
   is compared against), and it must ignore a render with no rows, or the empty
   first render of a cold load counts as a paint and flatters the comparison.
   Note also that `getEntriesByType('largest-contentful-paint')` is deprecated
   in Chrome and returns nothing; LCP needs a buffered `PerformanceObserver`.
+
 - ~~Cold-start hydrate is unmeasured.~~ **Measured, and the synthetic figure
   was optimistic.** A real cold read of the room list is **31-44 ms**, not the
   ~1 ms a warm synthetic harness reported — of which ~4 ms is opening the
@@ -823,7 +914,7 @@ Four PRs, in order, each independently shippable:
 - **Re-running the harness on a slower phone would not change anything here.**
   The margin is ~1,000x and the network arm it beats is server-side and
   therefore device-independent; a device would have to be three orders of
-  magnitude slower to lose. What a slower device *would* expose is the step
+  magnitude slower to lose. What a slower device _would_ expose is the step
   after hydrate — painting 1,752 rows — which is the room-list rendering path,
   not the cache, and is tracked separately (issues #26, #32). **A cache that
   hydrates in 1 ms and then hands an unwindowed list to a slow phone has moved
@@ -833,10 +924,33 @@ Four PRs, in order, each independently shippable:
   latter loses script-writable storage after 7 idle days. Quota turned out not
   to constrain anything, but eviction policy still does, and this is unaffected
   by the 41 GB figure.
-- **Needs an explicit yes, not silence: the timeline-body cache's opt-in
-  default.** Review (PR #84) declined to accept a plaintext-at-rest default
-  inherited from an ADR, which was the right call — the ADR now splits the
-  defaults so phase 2 carries none of that weight, and phase 3 must be signed
-  off before it ships. Whether opt-in is *sufficient* (as against not caching
-  bodies at all, or encrypting the cache with a key held outside it) is the
-  open part.
+
+  **Partly answered, and it cuts both ways.** The reporter's actual use is the
+  home-screen PWA, which is exempt from that 7-day eviction — so the risk this
+  question was asked about does not apply to them. But a PWA on iOS is a
+  **separate container**: its own HTTP cache and its own IndexedDB, sharing
+  neither with Safari. So a cache measurement taken in one says nothing about
+  the other, every device figure in this ADR was taken in Safari, and a PWA's
+  first launch is cold on both counts however much the site has been used in
+  the browser. Anything measuring this cache must record which it ran in.
+
+- ~~**Needs an explicit yes, not silence: the timeline-body cache's opt-in
+  default.**~~ **Answered, and the answer is no.** Review (PR #84) declined to
+  accept a plaintext-at-rest default inherited from an ADR, which was the right
+  call — the defaults were split so phase 2 carried none of that weight, and
+  phase 3 was gated on re-measurement. The measurements came in (above) and do
+  not support the trade: the timeline page is the smallest body in a room open,
+  and phase 3 does nothing at all for the _newly opened_ room that prompted the
+  exercise. **Nothing this ADR ships writes message plaintext to disk.**
+- **What the weak-link work left open**, all filed, none of them this ADR's to
+  fix: one preview request per visible room-list row (#278), the 261 KB room
+  list transferred in full on every cold start (#279), 90 KB of account-wide
+  read markers on the first room open (#280), and an API client with no timeout
+  or retry, so a stalled request hangs the UI indefinitely (#281).
+- **The original report is not reproduced.** A minute-long wait for a newly
+  opened room prompted this measurement work; the worst emulated condition
+  reached 10.9 s, and Network Link Conditioner does not go further. The
+  instrumentation is left in place (`boot:room-open`, and
+  `docs/web-slow-link-measurement.md`) so that a real capture, when one occurs,
+  says which of #278–#281 was responsible instead of restarting the
+  investigation.
