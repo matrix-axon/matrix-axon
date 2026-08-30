@@ -114,7 +114,9 @@ Export-only resume: `are_enabled()` and 4S missing `m.megolm_backup.v1` (recover
 On the 30s recover cap, cancel that token and **await** the partial `RedecryptSummary`.
 `timed_out(summary)` preserves `selected` / `attempted` / `decrypted`.
 The recover sweep stays under the per-identity lock (ADR 0026).
-A later PR raises the **manual** redecrypt cap and drops that lock.
+Manual redecrypt uses a 10-minute HTTP cap, drops the identity lock after
+`get_or_connect`, and cancels via a child of `AccountTask.cancel` so logout
+is not pinned for the sweep.
 
 Do not set `EncryptionSettings.auto_enable_backups = true`.
 Login remains a fresh device / fresh crypto store (ADR 0022).
@@ -133,10 +135,9 @@ GET `exists_on_server` can lag another client; enable then 409s — documented s
 Pre-Axon history stays UTD unless some other device uploads it; that is success, not a bug.
 
 **Follow-ups (not this ADR's PR).**
-Manual redecrypt 10-minute cap and lock scope.
-TUI `/backup enable` and status copy.
-Web backup badge vs "Keys recovered."
-`account.backup` WebSocket frames.
+TUI `/backup enable` and status copy (landed, #276).
+Web backup badge vs "Keys recovered" (landed, #277).
+`account.backup` WebSocket frames (deferred: #292).
 Optional integration lane: 4S without megolm backup; Axon recover auto-enables; logout; login; recover; post-enable messages decrypt.
 Redacted-encrypted events rendered as redactions rather than UTDs.
 
