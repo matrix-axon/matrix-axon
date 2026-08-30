@@ -8,7 +8,7 @@ import {
   spaceName,
   stage,
   tap,
-  typeInto,
+  tapType,
 } from './demo'
 
 /**
@@ -175,7 +175,7 @@ test('search — finding a message and landing on it', async ({ page }) => {
   // 0066) — opened from #general, an unqualified query would search #general,
   // and "turbidity" lives in #water-quality.
   const query = page.getByLabel('Search query')
-  await typeInto(query, 'turbidity all:true')
+  await tapType(query, 'turbidity all:true')
   await page.keyboard.press('Enter')
 
   const hits = page.locator('a.search-hit')
@@ -203,7 +203,7 @@ test('send — a message and its undo, from a phone', async ({ page }) => {
 
   const body = 'On the bus now — I can bring the orange dry bag Saturday.'
   const composer = page.getByRole('textbox', { name: /^Message/ })
-  await typeInto(composer, body, 45)
+  await tapType(composer, body, 45)
   await dwell(page, BEAT)
   // The Send button, not Enter: it is what a phone keyboard puts under a
   // thumb, and it is the only send affordance a touch-only user has.

@@ -8,6 +8,7 @@ import { readFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { extname, join, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { SEED_IMAGE_ROOT_OFFSET_MS } from './fixture-times.mjs'
 
 const PORT = Number(process.env.PORT ?? 4599)
 const DIST = fileURLToPath(new URL('../dist', import.meta.url))
@@ -204,8 +205,8 @@ timeline.push({
   room_id: ROOM_ID,
   sender: '@bob:hs',
   state_key: null,
-  origin_ts: Date.now() - 3_600_000,
-  arrival_order: Date.now() - 3_600_000,
+  origin_ts: Date.now() - SEED_IMAGE_ROOT_OFFSET_MS,
+  arrival_order: Date.now() - SEED_IMAGE_ROOT_OFFSET_MS,
   type: 'm.room.message',
   content: {
     msgtype: 'm.image',
