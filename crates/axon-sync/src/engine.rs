@@ -46,6 +46,7 @@ use crate::lifecycle::{lock_for, AccountLifecycle, IdentityLock, IdentityLocks};
 use crate::manager::ClientManager;
 use crate::matrix_oauth;
 use crate::matrix_oauth_acquire::MatrixOAuthAcquireEngine;
+use crate::matrix_oauth_grant::{MatrixOAuthGrantEngine, MatrixOAuthGrantRegistry};
 use crate::redecrypt;
 use crate::sync_health::SyncHealth;
 use crate::verification::{
@@ -155,6 +156,8 @@ pub struct SyncEngine {
     /// Shared by every API accessor; flows are process-ephemeral while their
     /// non-secret crash-recovery breadcrumbs live in Postgres.
     matrix_oauth_acquire: MatrixOAuthAcquireEngine,
+    /// Account-scoped Matrix OAuth QR grant registry and SDK driver (ADR 0097).
+    matrix_oauth_grant: MatrixOAuthGrantEngine,
 }
 
 impl SyncEngine {
@@ -192,6 +195,7 @@ impl SyncEngine {
         // Owned here (not inside `AccountLifecycle`) so the reconcile-time port, the
         // API-time port, and the supervised watchers all share one lock per identity.
         let locks: IdentityLocks = Arc::new(Mutex::new(HashMap::new()));
+        let matrix_oauth_grants = MatrixOAuthGrantRegistry::new();
         // Shared by the verification port and every account's incoming-request
         // listener. Ephemeral — lives only as long as the engine.
         let verifications = new_registry();
@@ -227,6 +231,7 @@ impl SyncEngine {
             media.clone(),
             backfill_health.clone(),
             sync_health.clone(),
+            matrix_oauth_grants.clone(),
         );
         crate::reconcile::reconcile_matrix_oauth_acquires(&config, &store).await?;
         crate::reconcile::reconcile_deleting(&lifecycle, &store).await;
@@ -236,6 +241,15 @@ impl SyncEngine {
             store.clone(),
             config.clone(),
             lifecycle.clone(),
+            tracker.clone(),
+            cancel.clone(),
+        );
+        let matrix_oauth_grant = MatrixOAuthGrantEngine::new(
+            store.clone(),
+            config.clone(),
+            manager.clone(),
+            locks.clone(),
+            matrix_oauth_grants.clone(),
             tracker.clone(),
             cancel.clone(),
         );
@@ -264,6 +278,7 @@ impl SyncEngine {
                 index.clone(),
                 backfill_health.clone(),
                 sync_health.clone(),
+                matrix_oauth_grants.clone(),
             );
         }
 
@@ -276,6 +291,7 @@ impl SyncEngine {
             cancel.child_token(),
         ));
         tracker.spawn(matrix_oauth_acquire.clone().reap_loop(cancel.child_token()));
+        tracker.spawn(matrix_oauth_grant.clone().reap_loop(cancel.child_token()));
 
         Ok(SyncEngine {
             tracker,
@@ -293,6 +309,7 @@ impl SyncEngine {
             backfill_health,
             sync_health,
             matrix_oauth_acquire,
+            matrix_oauth_grant,
         })
     }
 
@@ -339,6 +356,7 @@ impl SyncEngine {
             self.media.clone(),
             self.backfill_health.clone(),
             self.sync_health.clone(),
+            self.matrix_oauth_grant.registry(),
         )
     }
 
@@ -346,6 +364,12 @@ impl SyncEngine {
     /// routes. Cloning preserves the single shared registry and global limit.
     pub fn matrix_oauth_acquire(&self) -> MatrixOAuthAcquireEngine {
         self.matrix_oauth_acquire.clone()
+    }
+
+    /// The account-scoped Matrix OAuth QR grant engine. Cloning preserves the
+    /// shared per-account ownership registry and global flow bounds.
+    pub fn matrix_oauth_grant(&self) -> MatrixOAuthGrantEngine {
+        self.matrix_oauth_grant.clone()
     }
 
     /// The backfill engine's disk-space health, for the API status surface
@@ -462,6 +486,7 @@ pub(crate) fn spawn_supervised(
     index: Option<IndexHandle>,
     backfill_health: BackfillHealth,
     sync_health: SyncHealth,
+    matrix_oauth_grants: MatrixOAuthGrantRegistry,
 ) {
     let task_cancel = cancel.child_token();
     let account_id = account.account_id;
@@ -479,6 +504,7 @@ pub(crate) fn spawn_supervised(
         index,
         backfill_health,
         sync_health,
+        matrix_oauth_grants,
     ));
     if let Some(stale) = tasks.lock().expect("task registry poisoned").insert(
         account_id,
@@ -508,6 +534,7 @@ async fn supervise_account(
     index: Option<IndexHandle>,
     backfill_health: BackfillHealth,
     sync_health: SyncHealth,
+    matrix_oauth_grants: MatrixOAuthGrantRegistry,
 ) {
     let mut backoff = BACKOFF_START;
 
@@ -538,6 +565,23 @@ async fn supervise_account(
                 return;
             }
             Err(err) => {
+                // Every failed supervised run currently evicts its cached
+                // client before retrying. Cancel any secret-bearing grant
+                // before waiting for the identity lock its driver holds, then
+                // serialize the eviction behind it. Preserving a grant across
+                // a transient same-identity restart requires different
+                // supervisor semantics and is tracked in #309.
+                let identity_lock = lock_for(&locks, &account.user_id, &account.homeserver_url);
+                let Some(_identity_guard) = matrix_oauth_grants
+                    .cancel_before_identity_lock_or_cancel(
+                        account.account_id,
+                        identity_lock,
+                        &cancel,
+                    )
+                    .await
+                else {
+                    return;
+                };
                 // Drop the cached client so the next attempt reconnects cleanly
                 // (a stale session/connection won't be reused across a restart).
                 // This awaits the slot lock (see `evict`'s doc), so it can block

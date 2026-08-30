@@ -42,6 +42,7 @@ use crate::backup::{
 use crate::engine::{spawn_supervised, AccountTask, TaskRegistry};
 use crate::error::{GatewayError, SyncError};
 use crate::manager::ClientManager;
+use crate::matrix_oauth_grant::MatrixOAuthGrantRegistry;
 use crate::redecrypt::{RedecryptSummary, SweepScope};
 use crate::sync_health::SyncHealth;
 use crate::verification::{FlowRegistry, VerificationRooms};
@@ -416,6 +417,10 @@ pub struct AccountLifecycle {
     /// account's supervised task reports into the same handle the API reads, and
     /// so logout/delete can clear the entry via [`sever_session`](Self::sever_session).
     sync_health: SyncHealth,
+    /// The single QR-grant ownership registry. Teardown cancels the account's
+    /// grant before waiting for its identity lock, so secret release cannot
+    /// outlive logout or deletion.
+    matrix_oauth_grants: MatrixOAuthGrantRegistry,
 }
 
 /// Outcome of [`AccountLifecycle::resolve_login_target`], the identity
@@ -450,6 +455,7 @@ impl AccountLifecycle {
         media: MediaCacheHandle,
         backfill_health: BackfillHealth,
         sync_health: SyncHealth,
+        matrix_oauth_grants: MatrixOAuthGrantRegistry,
     ) -> Self {
         Self {
             store,
@@ -467,6 +473,7 @@ impl AccountLifecycle {
             media,
             backfill_health,
             sync_health,
+            matrix_oauth_grants,
         }
     }
 
@@ -1056,6 +1063,7 @@ impl AccountLifecycle {
             self.index.clone(),
             self.backfill_health.clone(),
             self.sync_health.clone(),
+            self.matrix_oauth_grants.clone(),
         );
         account_id
     }
@@ -1291,7 +1299,10 @@ impl AccountLifecycle {
             .ok_or(LifecycleError::NotFound(account_id))?;
 
         let lock = self.lock_for(&account.user_id, &account.homeserver_url);
-        let _guard = lock.lock().await;
+        let _guard = self
+            .matrix_oauth_grants
+            .cancel_before_identity_lock(account_id, lock)
+            .await;
 
         // Re-read under the lock: the state may have moved between the unlocked
         // resolve above and acquiring the lock.
@@ -1646,7 +1657,10 @@ impl AccountLifecycle {
             .ok_or(LifecycleError::NotFound(account_id))?;
 
         let lock = self.lock_for(&account.user_id, &account.homeserver_url);
-        let _guard = lock.lock().await;
+        let _guard = self
+            .matrix_oauth_grants
+            .cancel_before_identity_lock(account_id, lock.clone())
+            .await;
 
         // Re-read under the lock: a concurrent verb may have moved or removed the
         // row between the unlocked resolve and acquiring the lock.
@@ -1857,6 +1871,7 @@ mod tests {
             test_media_handle().await,
             crate::backfill::BackfillHealth::new(None),
             crate::sync_health::SyncHealth::new(),
+            crate::matrix_oauth_grant::MatrixOAuthGrantRegistry::new(),
         )
     }
 
