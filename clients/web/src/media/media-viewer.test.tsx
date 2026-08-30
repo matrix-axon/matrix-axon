@@ -82,6 +82,19 @@ function image(id: string, ts: number): TimelineEvent {
   } as unknown as TimelineEvent
 }
 
+/** The same event, declared as the format an iPhone actually sends. */
+function heicImage(id: string, ts: number): TimelineEvent {
+  const base = image(id, ts) as unknown as { content: Record<string, unknown> }
+  return {
+    ...base,
+    content: {
+      ...base.content,
+      body: `${id}.HEIC`,
+      info: { mimetype: 'image/heic', size: 10, w: 80, h: 60 },
+    },
+  } as unknown as TimelineEvent
+}
+
 function text(id: string, ts: number): TimelineEvent {
   return {
     ...image(id, ts),
@@ -857,7 +870,10 @@ describe('MediaViewerProvider', () => {
       await waitFor(() => expect(saveButton()).not.toBeNull())
     })
 
-    it('withdraws the save button when the image fails to decode', async () => {
+    it('withdraws the save button for bytes that match no known format', async () => {
+      // Nothing identifies these bytes, so they are most likely the
+      // ciphertext-fallback 200 and saving them helps nobody. The event is
+      // plaintext, so the placeholder must NOT blame decryption either.
       serveBytes()
       const { container } = render(
         <Surface events={[image('$1', 10), image('$2', 20)]} atStart />,
@@ -873,9 +889,33 @@ describe('MediaViewerProvider', () => {
 
       fireEvent.error(img)
       await waitFor(() => expect(saveButton()).toBeNull())
-      expect(document.querySelector('.lightbox-image')?.textContent).toContain(
-        'could not decrypt',
+      const shown = document.querySelector('.lightbox-image')?.textContent
+      expect(shown).toContain('Could not display this image')
+      expect(shown).not.toContain('decrypt')
+    })
+
+    it('keeps the save button for a HEIC, which is the only remedy left', async () => {
+      // A HEIC is a real file another application will open, so withdrawing
+      // Save — the old behaviour for any decode failure — removed the one
+      // action that helps (ADR 0101).
+      serveBytes()
+      const { container } = render(
+        <Surface events={[heicImage('$1', 10), image('$2', 20)]} atStart />,
       )
+      await openAt(container, '$1')
+      const img = await waitFor(() => {
+        const found = document.querySelector('.lightbox-image img')
+        expect(found).not.toBeNull()
+        return found!
+      })
+      fireEvent.error(img)
+
+      await waitFor(() =>
+        expect(
+          document.querySelector('.lightbox-image')?.textContent,
+        ).toContain("HEIC image — this browser can't display it"),
+      )
+      expect(saveButton()).not.toBeNull()
     })
 
     it('says so when the save fails, rather than looking like it worked', async () => {

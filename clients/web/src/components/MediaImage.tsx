@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'preact/hooks'
 import type { ParsedMedia } from '../media/parse-media'
 import { useMediaBlob } from '../media/use-media-blob'
+import { imageDecodeFailureMessage } from '../media/image-format'
+import { downloadMedia, isDownloadable } from '../media/download-media'
+import { useServices } from '../services'
 import {
   useThumbnailFallback,
   THUMBNAIL_MAX,
@@ -30,9 +33,13 @@ function thumbnailWidth(w: number, h: number): number {
  * timeline is not re-anchored after mount, so an image that grew on load would
  * shove scrolled-back content around.
  *
- * The media proxy returns raw ciphertext with a 200 when it lacks the
- * decryption key, so the fetch succeeds but the bytes are not an image; that
- * surfaces only at `<img>` decode, caught by `onError` (matching the TUI).
+ * A ready blob is not necessarily a picture. The media proxy returns raw
+ * ciphertext with a 200 when it lacks the decryption key, and a format this
+ * browser cannot decode (HEIC, most often) arrives perfectly intact and still
+ * will not paint. Both surface only at `<img>` decode, caught by `onError`;
+ * `imageDecodeFailureMessage` decides which of them to report, and the
+ * placeholder offers Download either way so the bytes are never a dead end
+ * (ADR 0101).
  */
 export function MediaImage({
   accountId,
@@ -60,6 +67,7 @@ export function MediaImage({
   content?: unknown
 }) {
   const viewer = useMediaViewer()
+  const { media: service } = useServices()
   const [status, setStatus] = useState<'idle' | 'error'>('idle')
   const { displayUrl, thumbnail } = useThumbnailFallback(media, status)
   // A null url makes the hook a no-op, so a local preview skips the proxy fetch
@@ -75,6 +83,18 @@ export function MediaImage({
   }, [state.status])
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const [decodeFailed, setDecodeFailed] = useState(false)
+  const [downloading, setDownloading] = useState(false)
+  const [downloadError, setDownloadError] = useState<string | null>(null)
+
+  const saveUndisplayable = async () => {
+    setDownloading(true)
+    setDownloadError(null)
+    const outcome = await downloadMedia(service, accountId, media)
+    setDownloading(false)
+    if (outcome === 'failed') {
+      setDownloadError('Download failed')
+    }
+  }
 
   const hasDimensions = media.w !== undefined && media.h !== undefined
   // Cap the inline thumbnail to a modest box (never upscaling), so a large
@@ -120,9 +140,29 @@ export function MediaImage({
               decoding="async"
             />
           ) : decodeFailed ? (
-            <p class="muted placeholder">
-              Encrypted media — server could not decrypt
-            </p>
+            // Not a dead end: whatever the cause, the bytes are on the server
+            // and a local tool may well open them, so the placeholder carries
+            // the same Download the attachment card would have offered.
+            <div class="media-undisplayable">
+              <p class="muted placeholder">
+                {imageDecodeFailureMessage(media)}
+              </p>
+              {isDownloadable(media) && (
+                <button
+                  type="button"
+                  class="ghost"
+                  disabled={downloading}
+                  onClick={() => void saveUndisplayable()}
+                >
+                  {downloading ? 'Downloading…' : 'Download'}
+                </button>
+              )}
+              {downloadError !== null && (
+                <p class="muted placeholder" role="alert">
+                  {downloadError}
+                </p>
+              )}
+            </div>
           ) : state.status === 'error' ? (
             <p class="muted placeholder">Could not load image</p>
           ) : state.status === 'ready' && state.url !== undefined ? (
@@ -182,7 +222,7 @@ export function MediaImage({
           }
           onClose={() => setLightboxOpen(false)}
         >
-          <LightboxImage accountId={accountId} mxcUrl={media.url} alt={alt} />
+          <LightboxImage accountId={accountId} media={media} />
         </Lightbox>
       )}
     </>
