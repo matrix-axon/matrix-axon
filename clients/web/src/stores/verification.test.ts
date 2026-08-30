@@ -657,6 +657,102 @@ describe('verification store', () => {
     expect(await verification.confirm(ACCOUNT, '$flow')).toEqual({ ok: true })
   })
 
+  it('a late sas or cancelled frame does not rewind a done flow', () => {
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'requested', payload())
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    verification.noteFrame(ACCOUNT, 'done', payload())
+    expect(verification.flows.value[0].stage).toBe('done')
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    expect(verification.flows.value[0].stage).toBe('done')
+    verification.noteFrame(ACCOUNT, 'cancelled', payload({ reason: 'timeout' }))
+    expect(verification.flows.value[0].stage).toBe('done')
+  })
+
+  it('a stale GET at ready does not rewind a flow already at compare', async () => {
+    server.use(
+      http.get(`${BASE}/v1/accounts/${ACCOUNT}/verify`, () =>
+        HttpResponse.json({ data: [flowDto({ stage: 'ready' })] }),
+      ),
+    )
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    expect(verification.flows.value[0].stage).toBe('compare')
+    expect(verification.flows.value[0].emoji).toHaveLength(7)
+    await verification.refresh(ACCOUNT)
+    expect(verification.flows.value[0].stage).toBe('compare')
+    expect(verification.flows.value[0].emoji).toHaveLength(7)
+    expect(verification.flows.value[0].error).toBeNull()
+  })
+
+  it('a second confirm after success does not revert to compare', async () => {
+    let confirms = 0
+    server.use(
+      http.post(`${BASE}/v1/accounts/${ACCOUNT}/verify/:flowId/confirm`, () => {
+        confirms += 1
+        if (confirms === 1) {
+          return new HttpResponse(null, { status: 204 })
+        }
+        return HttpResponse.json(
+          {
+            error: {
+              code: 'conflict',
+              message:
+                'The flow has not reached the SAS stage, or is already terminal',
+            },
+          },
+          { status: 409 },
+        )
+      }),
+    )
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    expect(await verification.confirm(ACCOUNT, '$flow')).toEqual({ ok: true })
+    expect(verification.flows.value[0].stage).toBe('confirming')
+    expect(await verification.confirm(ACCOUNT, '$flow')).toEqual({ ok: true })
+    expect(verification.flows.value[0].stage).toBe('confirming')
+    expect(verification.flows.value[0].error).toBeNull()
+    expect(confirms).toBe(1)
+  })
+
+  it('a mutation error clears when the flow advances', async () => {
+    server.use(
+      http.post(`${BASE}/v1/accounts/${ACCOUNT}/verify/:flowId/confirm`, () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: 'conflict',
+              message:
+                'The flow has not reached the SAS stage, or is already terminal',
+            },
+          },
+          { status: 409 },
+        ),
+      ),
+      http.get(`${BASE}/v1/accounts/${ACCOUNT}/verify`, () =>
+        HttpResponse.json({
+          data: [
+            flowDto({
+              stage: 'confirmed',
+              emoji: sevenEmoji(),
+            }),
+          ],
+        }),
+      ),
+    )
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    const result = await verification.confirm(ACCOUNT, '$flow')
+    expect(result.ok).toBe(false)
+    expect(verification.flows.value[0].stage).toBe('compare')
+    expect(verification.flows.value[0].error).toContain(
+      'has not reached the SAS stage',
+    )
+    await verification.refresh(ACCOUNT)
+    expect(verification.flows.value[0].stage).toBe('confirming')
+    expect(verification.flows.value[0].error).toBeNull()
+  })
+
   it('ensureLoaded is a no-op after a successful refresh of the same set', async () => {
     let gets = 0
     server.use(

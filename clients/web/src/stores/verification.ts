@@ -241,6 +241,15 @@ function stageFrom(
       return { stage: 'confirming', error: null, cancelReason }
     }
   }
+  if (previous === 'compare') {
+    if (
+      serverStage === 'requested' ||
+      serverStage === 'ready' ||
+      serverStage === null
+    ) {
+      return { stage: 'compare', error: null, cancelReason }
+    }
+  }
   if (serverStage === 'requested' || serverStage === 'ready') {
     return { stage: 'waiting', error: null, cancelReason }
   }
@@ -455,9 +464,13 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
     // `stageFrom` re-derives the incomplete-emoji warning from the snapshot in
     // hand, so carrying the old one forward would latch it: the full seven
     // emoji would arrive and render the compare UI under a stale red alert.
-    // Mutation errors are not derived here and stay until something clears
-    // them.
-    const carried = flow.error === INCOMPLETE_EMOJI_MESSAGE ? null : flow.error
+    // Mutation errors (a 409 from confirm, and so on) stay only while the UI
+    // stage does not change; a later legitimate advance must not keep the
+    // stale banner.
+    const carried =
+      mapped.stage !== flow.stage || flow.error === INCOMPLETE_EMOJI_MESSAGE
+        ? null
+        : flow.error
     return {
       ...flow,
       serverStage: serverStage ?? flow.serverStage,
@@ -869,6 +882,9 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
     if (flow === undefined) {
       return { ok: false, message: 'No such verification flow' }
     }
+    if (flow.stage === 'confirming' || flow.stage === 'done') {
+      return { ok: true }
+    }
     if (
       flow.stage !== 'compare' ||
       flow.emoji === null ||
@@ -876,6 +892,7 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
     ) {
       return { ok: false, message: INCOMPLETE_EMOJI_MESSAGE }
     }
+    put({ ...flow, stage: 'confirming', error: null })
     try {
       const { error: apiError, response } = await api.POST(
         '/v1/accounts/{account_id}/verify/{flow_id}/confirm',
@@ -887,12 +904,26 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
       if (current === undefined) {
         return { ok: false, message: 'No such verification flow' }
       }
+      if (current.stage === 'done' || current.stage === 'ended') {
+        if (apiError !== undefined || !response.ok) {
+          return {
+            ok: false,
+            message:
+              apiError !== undefined
+                ? apiErrorMessage(apiError)
+                : 'unexpected server response',
+          }
+        }
+        return { ok: true }
+      }
       if (apiError !== undefined || !response.ok) {
         const message =
           apiError !== undefined
             ? apiErrorMessage(apiError)
             : 'unexpected server response'
-        put({ ...current, error: message, stage: 'compare' })
+        if (current.stage === 'confirming') {
+          put({ ...current, error: message, stage: 'compare' })
+        }
         return { ok: false, message }
       }
       put({
@@ -905,7 +936,7 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
     } catch (cause) {
       const current = flowMap.get(key)
       const message = cause instanceof Error ? cause.message : String(cause)
-      if (current !== undefined) {
+      if (current !== undefined && current.stage === 'confirming') {
         put({ ...current, error: message, stage: 'compare' })
       }
       return { ok: false, message }
@@ -994,6 +1025,12 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
 
     const previousKey = flowKey(flow)
     flow = withIdentity(bindFlowId(flow, flowId), userId, deviceId)
+
+    // A completed verification is terminal: a redelivered `sas` or a late
+    // `cancelled` must not flip the UI back to compare / ended.
+    if (flow.stage === 'done' && (kind === 'sas' || kind === 'cancelled')) {
+      return
+    }
 
     if (kind === 'requested') {
       // `compare` belongs here too: a replayed request frame must not rewind a
