@@ -79,7 +79,13 @@ const UPSTREAM_LOGOUT_TIMEOUT: Duration = Duration::from_secs(10);
 /// operator can retry the remaining rows explicitly or enable every-startup
 /// retries in config.
 const RECOVER_SWEEP_TIMEOUT: Duration = Duration::from_secs(30);
-const MANUAL_REDECRYPT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cap on the **manual** `POST …/utds/redecrypt` sweep (ADR 0098). Recover stays
+/// at [`RECOVER_SWEEP_TIMEOUT`] under the identity lock. This verb drops that
+/// lock after `get_or_connect` and cancels via a child of `AccountTask.cancel`,
+/// so logout is not pinned for the duration. A reverse proxy or a client HTTP
+/// timeout (TUI lifecycle is 300s) may still cut the wait earlier; the handler
+/// returns 200 with a partial summary at this cap, never 504.
+const MANUAL_REDECRYPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const QR_TRUST_DERIVATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What can go wrong running a lifecycle verb. Wire-neutral, like
@@ -470,15 +476,21 @@ impl AccountLifecycle {
         lock_for(&self.locks, user_id, homeserver_url)
     }
 
-    /// Cancel-aware UTD sweep: on timeout, cancel the token and await the
-    /// partial summary so counts are not zeroed (ADR 0098).
+    /// Cancel-aware UTD sweep: on timeout or parent cancel, cancel the (child)
+    /// token and await the partial summary so counts are not zeroed (ADR 0098).
+    ///
+    /// When `parent` is `Some`, the sweep token is `parent.child_token()`, so a
+    /// timeout here does **not** cancel the supervised account task. Logout
+    /// cancels `AccountTask.cancel`, which cascades to the child. Recover
+    /// passes `None` (own token, still under the identity lock).
     async fn sweep_pending_bounded(
         &self,
         client: &Client,
         account_id: Uuid,
         timeout: Duration,
+        parent: Option<&CancellationToken>,
     ) -> RedecryptSummary {
-        let cancel = CancellationToken::new();
+        let cancel = parent.map(|token| token.child_token()).unwrap_or_default();
         let mut sweep = std::pin::pin!(crate::redecrypt::sweep_pending_utds(
             client,
             &self.store,
@@ -488,7 +500,15 @@ impl AccountLifecycle {
             &cancel,
         ));
         tokio::select! {
+            biased;
             summary = &mut sweep => summary,
+            _ = cancel.cancelled() => {
+                tracing::info!(
+                    %account_id,
+                    "UTD back-fill sweep cancelled; returning partial summary"
+                );
+                RedecryptSummary::timed_out(sweep.await)
+            }
             _ = tokio::time::sleep(timeout) => {
                 tracing::warn!(
                     %account_id,
@@ -499,6 +519,17 @@ impl AccountLifecycle {
                 RedecryptSummary::timed_out(sweep.await)
             }
         }
+    }
+
+    /// The supervised task's cancel token, if this account still has one.
+    /// Cloned out from under the registry mutex so the caller can drop that
+    /// lock before awaiting the sweep.
+    fn account_task_cancel(&self, account_id: Uuid) -> Option<CancellationToken> {
+        self.tasks
+            .lock()
+            .expect("task registry poisoned")
+            .get(&account_id)
+            .map(|task| task.cancel.clone())
     }
 
     /// Probe the SDK + 4S + intent, run the recover or enable tree, and
@@ -729,9 +760,13 @@ impl AccountLifecycle {
 
     /// Resolve an account, take its per-identity lock, and get a connected
     /// client — the shared preamble for verbs that must serialize against
-    /// login/logout/delete and refuse a non-`Active` account: `recover()` and
-    /// `redecrypt_utds()`. The returned guard must be held for the verb's
-    /// entire body so the account can't change state underneath it.
+    /// login/logout/delete and refuse a non-`Active` account: `recover()`,
+    /// `enable_backup()`, and `redecrypt_utds()`.
+    ///
+    /// `recover()` holds the returned guard for its entire body (ADR 0026).
+    /// `enable_backup()` and `redecrypt_utds()` drop it after the SDK work
+    /// that must not race logout, then continue off-lock (upload wait and
+    /// the UTD sweep respectively).
     async fn lock_active_account_client(
         &self,
         account_id: Uuid,
@@ -1404,7 +1439,7 @@ impl AccountLifecycle {
         // on the 30s cap we cancel the token and await the partial summary so
         // recover's envelope does not report selected=0 (ADR 0098).
         let summary = self
-            .sweep_pending_bounded(&client, account_id, RECOVER_SWEEP_TIMEOUT)
+            .sweep_pending_bounded(&client, account_id, RECOVER_SWEEP_TIMEOUT, None)
             .await;
 
         tracing::info!(
@@ -1491,14 +1526,27 @@ impl AccountLifecycle {
     /// Explicitly retry every pending UTD for an active account. This is the
     /// operator escape hatch for the default startup policy, which attempts each
     /// UTD only once at boot and then waits for fresh room-key arrivals.
+    ///
+    /// Holds the identity lock only for the active check + `get_or_connect`
+    /// (ADR 0098). The sweep runs on a cloned `Client` (`Arc`) under a child of
+    /// the account's `AccountTask` cancel token, so logout can proceed and will
+    /// cancel this retry. A 10-minute HTTP cap returns a partial summary;
+    /// cancel and post-logout SDK I/O failures are `timed_out=true`, not 500.
     pub async fn redecrypt_utds(
         &self,
         account_id: Uuid,
     ) -> Result<RedecryptSummary, LifecycleError> {
-        let (_account, client, _guard) = self.lock_active_account_client(account_id).await?;
+        let (_account, client, guard) = self.lock_active_account_client(account_id).await?;
+        let parent_cancel = self.account_task_cancel(account_id);
+        drop(guard);
 
         let summary = self
-            .sweep_pending_bounded(&client, account_id, MANUAL_REDECRYPT_TIMEOUT)
+            .sweep_pending_bounded(
+                &client,
+                account_id,
+                MANUAL_REDECRYPT_TIMEOUT,
+                parent_cancel.as_ref(),
+            )
             .await;
         tracing::info!(
             %account_id,
@@ -1818,6 +1866,44 @@ mod tests {
             .execute(store.pool())
             .await
             .expect("cleanup");
+    }
+
+    async fn offline_client() -> Client {
+        Client::builder()
+            .homeserver_url("http://127.0.0.1:9")
+            .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11])
+            .build()
+            .await
+            .expect("offline client")
+    }
+
+    async fn insert_pending_utd(store: &Store, account_id: Uuid) {
+        let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+        let event_id = format!("$evt-{}:localhost", Uuid::new_v4());
+        let session_id = format!("session-{}", Uuid::new_v4());
+        let raw_event = serde_json::json!({
+            "type": "m.room.encrypted",
+            "event_id": event_id,
+            "sender": "@alice:localhost",
+            "content": { "algorithm": "m.megolm.v1.aes-sha2", "session_id": session_id }
+        });
+        store
+            .upsert_event(&axon_store::NewEvent {
+                event_id: &event_id,
+                room_id: &room_id,
+                account_id,
+                sender: "@alice:localhost",
+                origin_ts: 1_700_000_000_000,
+                event_type: "m.room.encrypted",
+                content: None,
+                raw_event,
+                megolm_session_id: Some(&session_id),
+                redacts: None,
+                relates_to: None,
+                decrypted_body_text: None,
+            })
+            .await
+            .expect("insert pending UTD");
     }
 
     #[tokio::test]
@@ -2884,5 +2970,155 @@ mod tests {
             !lc.locks.lock().unwrap().contains_key(&key),
             "uncontended prune removes the entry"
         );
+    }
+
+    #[test]
+    fn manual_redecrypt_timeout_is_ten_minutes_and_recover_stays_thirty_seconds() {
+        assert_eq!(MANUAL_REDECRYPT_TIMEOUT, Duration::from_secs(10 * 60));
+        assert_eq!(RECOVER_SWEEP_TIMEOUT, Duration::from_secs(30));
+    }
+
+    /// A cancelled `AccountTask` token must stop the manual sweep with a
+    /// partial `timed_out=true` summary, not `LifecycleError::Upstream` (ADR
+    /// 0098). The token stays in the registry so `redecrypt_utds` still finds
+    /// it as the parent; production logout cancels then reaps.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn manual_redecrypt_cancelled_task_returns_timed_out_not_upstream() {
+        use crate::engine::AccountTask;
+
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@redecrypt-cancel-{}:localhost", Uuid::new_v4());
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap();
+        insert_pending_utd(&lc.store, acct.account_id).await;
+        lc.manager
+            .inject_for_test(acct.account_id, offline_client().await)
+            .await;
+
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                cancel.cancelled().await;
+            }
+        });
+        cancel.cancel();
+        lc.tasks
+            .lock()
+            .unwrap()
+            .insert(acct.account_id, AccountTask { cancel, handle });
+
+        let summary = lc
+            .redecrypt_utds(acct.account_id)
+            .await
+            .expect("cancelled sweep is 200 with partial counts, not 500");
+        assert!(
+            summary.timed_out,
+            "parent cancel must surface as timed_out, not a completed empty sweep"
+        );
+        assert_eq!(summary.selected, 1);
+        assert_eq!(summary.decrypted, 0);
+
+        delete_account(&lc.store, acct.account_id).await;
+    }
+
+    /// After `redecrypt_utds` drops the identity lock, logout can take the
+    /// cloned `Client` out of its slot. SDK I/O on that clone must not become
+    /// `Upstream` 500 — the sweep returns a summary (possibly `timed_out`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires Postgres"]
+    async fn manual_redecrypt_logged_out_client_is_not_upstream() {
+        use crate::engine::AccountTask;
+
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@redecrypt-logout-{}:localhost", Uuid::new_v4());
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap();
+        insert_pending_utd(&lc.store, acct.account_id).await;
+        lc.manager
+            .inject_for_test(acct.account_id, offline_client().await)
+            .await;
+
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                cancel.cancelled().await;
+            }
+        });
+        lc.tasks
+            .lock()
+            .unwrap()
+            .insert(acct.account_id, AccountTask { cancel, handle });
+
+        let lock = lc.lock_for(&user, hs);
+        let guard = lock.lock().await;
+
+        let lc_re = lc.clone();
+        let id = acct.account_id;
+        let mut redecrypt = tokio::spawn(async move { lc_re.redecrypt_utds(id).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut redecrypt)
+                .await
+                .is_err(),
+            "redecrypt must wait for the identity lock preamble"
+        );
+
+        let lc_lo = lc.clone();
+        let logout = tokio::spawn(async move { lc_lo.logout(id).await });
+        drop(guard);
+
+        let redecrypt_result = tokio::time::timeout(Duration::from_secs(2), redecrypt)
+            .await
+            .expect("redecrypt must not wait the 10-minute cap")
+            .expect("redecrypt task join");
+        logout
+            .await
+            .expect("logout task join")
+            .expect("logout succeeds");
+
+        match redecrypt_result {
+            Ok(summary) => {
+                assert_eq!(summary.decrypted, 0);
+            }
+            Err(LifecycleError::NotActive(err_id)) => assert_eq!(err_id, id),
+            other => {
+                panic!("logged-out Client clone must be Ok(timed_out) or NotActive, not {other:?}")
+            }
+        }
+
+        delete_account(&lc.store, acct.account_id).await;
+    }
+
+    /// Directly: a cancelled parent token makes `sweep_pending_bounded` return
+    /// `timed_out` while preserving `selected`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn sweep_parent_cancel_preserves_selected() {
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@redecrypt-parent-{}:localhost", Uuid::new_v4());
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap();
+        insert_pending_utd(&lc.store, acct.account_id).await;
+
+        let parent = CancellationToken::new();
+        parent.cancel();
+        let client = offline_client().await;
+        let summary = lc
+            .sweep_pending_bounded(
+                &client,
+                acct.account_id,
+                MANUAL_REDECRYPT_TIMEOUT,
+                Some(&parent),
+            )
+            .await;
+        assert!(summary.timed_out);
+        assert_eq!(summary.selected, 1);
+        assert_eq!(summary.attempted, 0);
+        assert_eq!(summary.decrypted, 0);
+        assert_eq!(summary.still_pending, 1);
+
+        delete_account(&lc.store, acct.account_id).await;
     }
 }

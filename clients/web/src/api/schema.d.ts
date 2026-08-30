@@ -1189,6 +1189,10 @@ export interface paths {
          *     this endpoint is the authenticated operator escape hatch for rows whose keys
          *     are already in the crypto store or whose initial startup attempt predated key
          *     acquisition.
+         * @description The identity lock is held only for the active check and client lookup;
+         *     logout can proceed and cancels this retry. The HTTP cap is 10 minutes
+         *     (a reverse proxy may cut it earlier). A cap or cancel returns 200 with
+         *     partial counts and `timed_out=true`, not 504.
          */
         post: operations["redecrypt_utds"];
         delete?: never;
@@ -1927,7 +1931,11 @@ export interface components {
                 selected: number;
                 /** @description Selected rows that are still UTDs after the retry. */
                 still_pending: number;
-                /** @description Whether the server stopped waiting before the retry completed. */
+                /**
+                 * @description Whether the server stopped waiting before the retry completed.
+                 *     Manual redecrypt: 10-minute cap or logout cancel. Recover: 30-second
+                 *     under-lock cap.
+                 */
                 timed_out: boolean;
             };
         };
@@ -3235,7 +3243,11 @@ export interface components {
             selected: number;
             /** @description Selected rows that are still UTDs after the retry. */
             still_pending: number;
-            /** @description Whether the server stopped waiting before the retry completed. */
+            /**
+             * @description Whether the server stopped waiting before the retry completed.
+             *     Manual redecrypt: 10-minute cap or logout cancel. Recover: 30-second
+             *     under-lock cap.
+             */
             timed_out: boolean;
         };
         /**
@@ -7862,7 +7874,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Manual UTD re-decryption retry completed or timed out */
+            /** @description Manual UTD re-decryption retry completed or timed out (10-minute cap or logout cancel) */
             200: {
                 headers: {
                     [name: string]: unknown;

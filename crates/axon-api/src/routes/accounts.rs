@@ -338,6 +338,11 @@ pub async fn enable_backup(
 /// this endpoint is the authenticated operator escape hatch for rows whose keys
 /// are already in the crypto store or whose initial startup attempt predated key
 /// acquisition.
+///
+/// The identity lock is held only for the active check and client lookup;
+/// logout can proceed and cancels this retry. The HTTP cap is 10 minutes
+/// (a reverse proxy may cut it earlier). A cap or cancel returns 200 with
+/// partial counts and `timed_out=true`, not 504.
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/utds/redecrypt",
@@ -345,7 +350,7 @@ pub async fn enable_backup(
         ("account_id" = Uuid, Path, description = "Axon account id"),
     ),
     responses(
-        (status = 200, description = "Manual UTD re-decryption retry completed or timed out", body = ApiResponse<RedecryptUtdsResponse>),
+        (status = 200, description = "Manual UTD re-decryption retry completed or timed out (10-minute cap or logout cancel)", body = ApiResponse<RedecryptUtdsResponse>),
         (status = 404, description = "No such account", body = crate::response::ErrorResponse),
         (status = 409, description = "The account is not active (logged out — log in first) or is being deleted", body = crate::response::ErrorResponse),
     ),
