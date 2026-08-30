@@ -1276,6 +1276,30 @@ export function RoomPage() {
    */
   const rows = useMemo(() => groupMediaRuns(visible), [visible])
 
+  // The user-visible moment of a room open: when messages replace "Loading
+  // messages…". `hasRows` is the gate — the pane also renders with nothing in
+  // it, and counting that as a paint would flatter every cold open, which is
+  // the same trap `room-list:render` records for the room list.
+  //
+  // Emitted on *transitions only*, not on every render. The summary wants the
+  // first render that put rows on screen; composer keystrokes, reactions and
+  // receipt churn re-render this component constantly, and each one was
+  // calling native `performance.mark()`, whose entries nothing ever clears.
+  // Marking what did not change is the instrumentation perturbing what it
+  // measures.
+  const hasTimelineRows = !timeline.loading.value && visible.length > 0
+  const renderState = roomId + timeline.loading.value + hasTimelineRows
+  const lastRenderState = useRef<string | null>(null)
+  if (lastRenderState.current !== renderState) {
+    lastRenderState.current = renderState
+    perfMark('room-page:timeline-render', {
+      roomId,
+      loading: timeline.loading.value,
+      visible: visible.length,
+      hasRows: hasTimelineRows,
+    })
+  }
+
   const handleComposerCommandFor = ({
     body,
     timeline: commandTimeline,
