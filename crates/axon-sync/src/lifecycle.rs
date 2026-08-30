@@ -1263,10 +1263,11 @@ impl AccountLifecycle {
             .await?
             .ok_or(LifecycleError::NotFound(account_id))?;
 
-        self.matrix_oauth_grants.cancel_account(account_id);
-
         let lock = self.lock_for(&account.user_id, &account.homeserver_url);
-        let _guard = lock.lock().await;
+        let _guard = self
+            .matrix_oauth_grants
+            .cancel_before_identity_lock(account_id, lock)
+            .await;
 
         // Re-read under the lock: the state may have moved between the unlocked
         // resolve above and acquiring the lock.
@@ -1607,10 +1608,11 @@ impl AccountLifecycle {
             .await?
             .ok_or(LifecycleError::NotFound(account_id))?;
 
-        self.matrix_oauth_grants.cancel_account(account_id);
-
         let lock = self.lock_for(&account.user_id, &account.homeserver_url);
-        let _guard = lock.lock().await;
+        let _guard = self
+            .matrix_oauth_grants
+            .cancel_before_identity_lock(account_id, lock.clone())
+            .await;
 
         // Re-read under the lock: a concurrent verb may have moved or removed the
         // row between the unlocked resolve and acquiring the lock.

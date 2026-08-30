@@ -565,14 +565,22 @@ async fn supervise_account(
                 return;
             }
             Err(err) => {
-                // A replacement client is a different supervised run. Cancel
-                // any secret-bearing grant before waiting for the identity lock
-                // its driver holds, then serialize the eviction behind it.
-                matrix_oauth_grants.cancel_account(account.account_id);
+                // Every failed supervised run currently evicts its cached
+                // client before retrying. Cancel any secret-bearing grant
+                // before waiting for the identity lock its driver holds, then
+                // serialize the eviction behind it. Preserving a grant across
+                // a transient same-identity restart requires different
+                // supervisor semantics and is tracked in #309.
                 let identity_lock = lock_for(&locks, &account.user_id, &account.homeserver_url);
-                let _identity_guard = tokio::select! {
-                    guard = identity_lock.lock() => guard,
-                    () = cancel.cancelled() => return,
+                let Some(_identity_guard) = matrix_oauth_grants
+                    .cancel_before_identity_lock_or_cancel(
+                        account.account_id,
+                        identity_lock,
+                        &cancel,
+                    )
+                    .await
+                else {
+                    return;
                 };
                 // Drop the cached client so the next attempt reconnects cleanly
                 // (a stale session/connection won't be reused across a restart).

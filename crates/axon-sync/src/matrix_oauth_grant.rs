@@ -32,7 +32,7 @@ use matrix_sdk::{
     },
     Client,
 };
-use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{oneshot, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::Instrument;
 use uuid::Uuid;
@@ -41,15 +41,13 @@ use crate::{
     lifecycle::{derive_verified, lock_for, IdentityLock, IdentityLocks},
     manager::ClientManager,
     matrix_oauth_acquire::{
-        parse_check_code, parse_qr_payload, validate_qr_url, MatrixOAuthAcquireError,
+        parse_check_code, parse_grant_qr_payload, validate_qr_url, MatrixOAuthAcquireError,
+    },
+    matrix_oauth_flow::{
+        run_reaper, FlowLease, FLOW_TTL, MAX_CONCURRENT_FLOWS, MAX_RETAINED_FLOWS,
     },
 };
 
-const MAX_CONCURRENT_FLOWS: usize = 8;
-const MAX_RETAINED_FLOWS: usize = 256;
-const FLOW_TTL: Duration = Duration::from_secs(10 * 60);
-const TERMINAL_RETENTION: Duration = Duration::from_secs(2 * 60);
-const REAPER_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(15);
 const TRUST_TIMEOUT: Duration = Duration::from_secs(10);
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -170,16 +168,11 @@ pub enum MatrixOAuthGrantError {
     Internal,
 }
 
-struct FlowOwner {
-    _permit: OwnedSemaphorePermit,
-}
-
 struct FlowMutable {
     state: MatrixOAuthGrantState,
-    terminal_at: Option<Instant>,
     scan_tx: Option<oneshot::Sender<QrCodeData>>,
     check_code_tx: Option<oneshot::Sender<u8>>,
-    owner: Option<FlowOwner>,
+    lease: FlowLease,
 }
 
 struct Flow {
@@ -202,7 +195,7 @@ impl Flow {
             .mutable
             .lock()
             .expect("Matrix OAuth grant flow poisoned");
-        if mutable.owner.is_some() && !mutable.state.stage.is_terminal() {
+        if mutable.lease.is_live() && !mutable.state.stage.is_terminal() {
             update(&mut mutable.state);
         }
     }
@@ -210,16 +203,24 @@ impl Flow {
     /// Consume the only live owner. Completion, timeout, lifecycle invalidation,
     /// and DELETE can race, but exactly one of them can publish a terminal state.
     fn terminal(&self, stage: MatrixOAuthGrantStage, error_code: Option<&'static str>) -> bool {
+        self.terminal_at(stage, error_code, Instant::now())
+    }
+
+    fn terminal_at(
+        &self,
+        stage: MatrixOAuthGrantStage,
+        error_code: Option<&'static str>,
+        now: Instant,
+    ) -> bool {
         let mut mutable = self
             .mutable
             .lock()
             .expect("Matrix OAuth grant flow poisoned");
-        if mutable.owner.take().is_none() {
+        if !mutable.lease.finish(now) {
             return false;
         }
         mutable.state.set_stage(stage);
         mutable.state.error_code = error_code.map(str::to_owned);
-        mutable.terminal_at = Some(Instant::now());
         mutable.scan_tx.take();
         mutable.check_code_tx.take();
         true
@@ -243,7 +244,7 @@ impl Flow {
             .expect("Matrix OAuth grant flow poisoned");
         if mutable.state.presentation != MatrixOAuthGrantPresentation::Scan
             || mutable.state.stage != MatrixOAuthGrantStage::Starting
-            || mutable.owner.is_none()
+            || !mutable.lease.is_live()
         {
             return Err(MatrixOAuthGrantError::WrongStage);
         }
@@ -263,7 +264,7 @@ impl Flow {
             .expect("Matrix OAuth grant flow poisoned");
         if mutable.state.presentation != MatrixOAuthGrantPresentation::Display
             || mutable.state.stage != MatrixOAuthGrantStage::CheckCodeRequired
-            || mutable.owner.is_none()
+            || !mutable.lease.is_live()
         {
             return Err(MatrixOAuthGrantError::WrongStage);
         }
@@ -398,6 +399,33 @@ impl MatrixOAuthGrantRegistry {
         }
     }
 
+    /// Cancel identity-lock-owning secret flows before a lifecycle operation
+    /// waits for that lock.
+    ///
+    /// Logout, deletion, and supervised-client replacement all use this one
+    /// barrier. Future secret-bearing flows that hold the identity lock must be
+    /// added here, not rediscovered at each lifecycle call site.
+    pub(crate) async fn cancel_before_identity_lock(
+        &self,
+        account_id: Uuid,
+        identity_lock: IdentityLock,
+    ) -> OwnedMutexGuard<()> {
+        self.cancel_account(account_id);
+        identity_lock.lock_owned().await
+    }
+
+    pub(crate) async fn cancel_before_identity_lock_or_cancel(
+        &self,
+        account_id: Uuid,
+        identity_lock: IdentityLock,
+        cancel: &CancellationToken,
+    ) -> Option<OwnedMutexGuard<()>> {
+        tokio::select! {
+            guard = self.cancel_before_identity_lock(account_id, identity_lock) => Some(guard),
+            _ = cancel.cancelled() => None,
+        }
+    }
+
     fn reap_expired(&self) {
         self.reap_expired_at(Instant::now());
     }
@@ -411,8 +439,8 @@ impl MatrixOAuthGrantRegistry {
                 flow.mutable
                     .lock()
                     .expect("Matrix OAuth grant flow poisoned")
-                    .terminal_at
-                    .is_none_or(|at| now.duration_since(at) < TERMINAL_RETENTION)
+                    .lease
+                    .is_retained_at(now)
             });
     }
 }
@@ -503,10 +531,9 @@ impl MatrixOAuthGrantEngine {
         let flow = Arc::new(Flow {
             mutable: Mutex::new(FlowMutable {
                 state: MatrixOAuthGrantState::new(flow_id, account_id, presentation),
-                terminal_at: None,
                 scan_tx: Some(scan_tx),
                 check_code_tx: Some(check_code_tx),
-                owner: Some(FlowOwner { _permit: permit }),
+                lease: FlowLease::new(permit),
             }),
             cancel: self.inner.engine_cancel.child_token(),
             identity_lock,
@@ -676,7 +703,7 @@ impl MatrixOAuthGrantEngine {
         flow_id: Uuid,
         qr_code_data: &str,
     ) -> Result<MatrixOAuthGrantState, MatrixOAuthGrantError> {
-        let parsed = parse_qr_payload(qr_code_data).map_err(map_acquire_input)?;
+        let parsed = parse_grant_qr_payload(qr_code_data).map_err(map_acquire_input)?;
         let flow = self.inner.registry.flow(account_id, flow_id)?;
         flow.accept_scan(parsed)
     }
@@ -711,12 +738,7 @@ impl MatrixOAuthGrantEngine {
     }
 
     pub(crate) async fn reap_loop(self, cancel: CancellationToken) {
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(REAPER_INTERVAL) => self.inner.registry.reap_expired(),
-            }
-        }
+        run_reaper(cancel, || self.inner.registry.reap_expired()).await;
     }
 
     async fn drive(
@@ -834,6 +856,7 @@ impl MatrixOAuthGrantEngine {
         let signal = Arc::new(PollSignal::default());
         let mut progress = Box::pin(progress);
         let mut check_sender: Option<CheckCodeSender> = None;
+        let account_id = flow.snapshot().account_id;
         // The first SDK poll can follow a long wait for a scanned QR payload,
         // so it always gets an active-account read. Subsequent wakeups reuse
         // that result briefly while still revalidating client identity and
@@ -847,13 +870,9 @@ impl MatrixOAuthGrantEngine {
             // still held, and every poll capable of exporting/sending secrets is
             // preceded by this active/current/trusted check.
             let authority = async {
-                self.validate_poll_authority(
-                    flow.snapshot().account_id,
-                    expected_client,
-                    &mut active_account,
-                )
-                .await
-                .map_err(classify_authority_error)
+                self.validate_poll_authority(account_id, expected_client, &mut active_account)
+                    .await
+                    .map_err(classify_authority_error)
             };
             if let Poll::Ready(result) =
                 authorize_and_poll_once(flow, deadline, grant.as_mut(), &signal, authority).await?
@@ -1215,8 +1234,14 @@ mod tests {
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::*;
+    use crate::matrix_oauth_flow::TERMINAL_RETENTION;
     use matrix_sdk::authentication::oauth::qrcode::LoginProtocolType;
 
+    const VALID_LOGIN_QR: &str = concat!(
+        "TUFUUklYAgPYhmhqshl7eA4wCp1KIUdIBwDXkp85qzG55RQ3AkjtawBHaHR0",
+        "cHM6Ly9yZW5kZXp2b3VzLmxhYi5lbGVtZW50LmRldi9lOGRhNjM1NS01NTBi",
+        "LTRhMzItYTE5My0xNjE5ZDk4MzA2Njg=",
+    );
     const VALID_RECIPROCATE_QR: &str = concat!(
         "TUFUUklYAgS0yzZ1QVpQ1jlnoxWX3d5jrWRFfELxjS2gN7pz9y+3PABaaHR0",
         "cHM6Ly9zeW5hcHNlLW9pZGMubGFiLmVsZW1lbnQuZGV2L19zeW5hcHNlL2Ns",
@@ -1256,10 +1281,9 @@ mod tests {
         let flow = Arc::new(Flow {
             mutable: Mutex::new(FlowMutable {
                 state: MatrixOAuthGrantState::new(flow_id, account_id, presentation),
-                terminal_at: None,
                 scan_tx: Some(scan_tx),
                 check_code_tx: Some(check_code_tx),
-                owner: Some(FlowOwner { _permit: permit }),
+                lease: FlowLease::new(permit),
             }),
             cancel: CancellationToken::new(),
             identity_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -1281,11 +1305,7 @@ mod tests {
             let flow_id = Uuid::new_v4();
             let (flow, _, _, _) =
                 test_flow(account_id, flow_id, MatrixOAuthGrantPresentation::Display);
-            assert!(flow.terminal(MatrixOAuthGrantStage::Done, None));
-            flow.mutable
-                .lock()
-                .expect("Matrix OAuth grant flow poisoned")
-                .terminal_at = Some(terminal_at);
+            assert!(flow.terminal_at(MatrixOAuthGrantStage::Done, None, terminal_at));
             inner.flows.insert(flow_id, flow);
         }
     }
@@ -1469,10 +1489,10 @@ mod tests {
             Uuid::new_v4(),
             MatrixOAuthGrantPresentation::Scan,
         );
-        let qr = parse_qr_payload(VALID_RECIPROCATE_QR).expect("valid reciprocate QR");
+        let qr = parse_grant_qr_payload(VALID_LOGIN_QR).expect("valid login QR");
         scan.accept_scan(qr).expect("first scan accepted");
         scan_rx.try_recv().expect("driver receives parsed QR");
-        let replay = parse_qr_payload(VALID_RECIPROCATE_QR).expect("valid reciprocate QR");
+        let replay = parse_grant_qr_payload(VALID_LOGIN_QR).expect("valid login QR");
         assert!(matches!(
             scan.accept_scan(replay),
             Err(MatrixOAuthGrantError::WrongStage)
@@ -1491,7 +1511,7 @@ mod tests {
             Err(MatrixOAuthGrantError::WrongStage)
         ));
 
-        let wrong_presentation = parse_qr_payload(VALID_RECIPROCATE_QR).unwrap();
+        let wrong_presentation = parse_grant_qr_payload(VALID_LOGIN_QR).unwrap();
         assert!(matches!(
             display.accept_scan(wrong_presentation),
             Err(MatrixOAuthGrantError::WrongStage)
@@ -1503,13 +1523,26 @@ mod tests {
     }
 
     #[test]
+    fn scanned_grant_qr_requires_the_new_devices_login_intent() {
+        let qr = parse_grant_qr_payload(VALID_LOGIN_QR).expect("valid login-intent QR");
+        assert_eq!(
+            qr.intent(),
+            matrix_sdk::authentication::oauth::qrcode::QrCodeIntent::Login
+        );
+        assert!(matches!(
+            parse_grant_qr_payload(VALID_RECIPROCATE_QR),
+            Err(MatrixOAuthAcquireError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
     fn malformed_and_oversized_grant_inputs_fail_before_flow_use() {
         for invalid_qr in [
             "not base64 or QR data".to_owned(),
             "A".repeat(crate::matrix_oauth_acquire::MAX_QR_BASE64_BYTES + 1),
         ] {
             assert!(matches!(
-                parse_qr_payload(&invalid_qr).map_err(map_acquire_input),
+                parse_grant_qr_payload(&invalid_qr).map_err(map_acquire_input),
                 Err(MatrixOAuthGrantError::InvalidInput(_))
             ));
         }
@@ -1534,10 +1567,9 @@ mod tests {
                     Uuid::new_v4(),
                     MatrixOAuthGrantPresentation::Scan,
                 ),
-                terminal_at: None,
                 scan_tx: Some(scan_tx),
                 check_code_tx: Some(check_code_tx),
-                owner: Some(FlowOwner { _permit: permit }),
+                lease: FlowLease::new(permit),
             }),
             cancel: CancellationToken::new(),
             identity_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -1721,10 +1753,9 @@ mod tests {
                     account_id,
                     MatrixOAuthGrantPresentation::Display,
                 ),
-                terminal_at: None,
                 scan_tx: Some(scan_tx),
                 check_code_tx: Some(check_code_tx),
-                owner: Some(FlowOwner { _permit: permit }),
+                lease: FlowLease::new(permit),
             }),
             cancel: CancellationToken::new(),
             identity_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -1752,10 +1783,9 @@ mod tests {
                     account_id,
                     MatrixOAuthGrantPresentation::Display,
                 ),
-                terminal_at: None,
                 scan_tx: Some(scan_tx),
                 check_code_tx: Some(check_code_tx),
-                owner: Some(FlowOwner { _permit: permit }),
+                lease: FlowLease::new(permit),
             }),
             cancel: CancellationToken::new(),
             identity_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -1784,10 +1814,9 @@ mod tests {
                     account_id,
                     MatrixOAuthGrantPresentation::Display,
                 ),
-                terminal_at: None,
                 scan_tx: Some(scan_tx),
                 check_code_tx: Some(check_code_tx),
-                owner: Some(FlowOwner { _permit: permit }),
+                lease: FlowLease::new(permit),
             }),
             cancel: CancellationToken::new(),
             identity_lock: identity_lock.clone(),
@@ -1803,10 +1832,12 @@ mod tests {
         });
         locked_rx.await.unwrap();
 
-        registry.cancel_account(account_id);
-        let _eviction_guard = tokio::time::timeout(Duration::from_secs(1), identity_lock.lock())
-            .await
-            .expect("lifecycle eviction acquires the released identity lock");
+        let _eviction_guard = tokio::time::timeout(
+            Duration::from_secs(1),
+            registry.cancel_before_identity_lock(account_id, identity_lock),
+        )
+        .await
+        .expect("lifecycle eviction acquires the released identity lock");
         driver.await.unwrap();
         assert_eq!(flow.snapshot().stage, MatrixOAuthGrantStage::Cancelled);
     }
@@ -1856,10 +1887,9 @@ mod tests {
                     Uuid::new_v4(),
                     MatrixOAuthGrantPresentation::Scan,
                 ),
-                terminal_at: None,
                 scan_tx: Some(scan_tx),
                 check_code_tx: Some(check_code_tx),
-                owner: Some(FlowOwner { _permit: permit }),
+                lease: FlowLease::new(permit),
             }),
             cancel: CancellationToken::new(),
             identity_lock: Arc::new(tokio::sync::Mutex::new(())),

@@ -25,6 +25,7 @@ mod lifecycle;
 mod manager;
 mod matrix_oauth;
 mod matrix_oauth_acquire;
+mod matrix_oauth_flow;
 mod matrix_oauth_grant;
 mod media;
 mod member_profiles;
