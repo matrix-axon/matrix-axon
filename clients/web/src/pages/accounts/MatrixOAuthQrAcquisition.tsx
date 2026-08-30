@@ -6,6 +6,9 @@ import { hasActiveAccount } from '../../stores/accounts'
 import {
   isTerminalMatrixOAuthQrFlow,
   type MatrixOAuthQrFlow,
+  type MatrixOAuthQrGrantFlow,
+  type MatrixOAuthQrGrantStore,
+  type MatrixOAuthQrStore,
 } from '../../stores/matrix-oauth-qr'
 import type { QrCameraDevice, QrCameraSession } from '../../qr/browser-qr'
 
@@ -42,7 +45,22 @@ function safeVerificationUri(value: string | null | undefined): string | null {
   }
 }
 
-function QrCanvas({ data }: { data: string }) {
+type QrFlow = MatrixOAuthQrFlow | MatrixOAuthQrGrantFlow
+type QrFlowStore = MatrixOAuthQrStore | MatrixOAuthQrGrantStore
+
+export interface MatrixOAuthQrFlowCopy {
+  stageSummaries: Record<QrFlow['stage'], string>
+  qrAriaLabel: string
+  scannerSource: string
+  cancel: string
+  cancelling: string
+  startAgain: string
+  doneAction: string
+  unsafeVerificationLink: string
+  authorizationGuidance?: string
+}
+
+function QrCanvas({ data, ariaLabel }: { data: string; ariaLabel: string }) {
   const { qr } = useServices()
   const canvas = useRef<HTMLCanvasElement>(null)
   const [error, setError] = useState<string | null>(null)
@@ -75,14 +93,20 @@ function QrCanvas({ data }: { data: string }) {
 
   return (
     <div class="qr-display">
-      <canvas ref={canvas} aria-label="Matrix sign-in QR code" role="img" />
+      <canvas ref={canvas} aria-label={ariaLabel} role="img" />
       {error !== null && <p class="field-hint error">{error}</p>}
     </div>
   )
 }
 
-function QrScanner() {
-  const { matrixOAuthQr, qr } = useServices()
+function QrScanner({
+  store,
+  sourceDevice,
+}: {
+  store: QrFlowStore
+  sourceDevice: string
+}) {
+  const { qr } = useServices()
   const video = useRef<HTMLVideoElement>(null)
   const session = useRef<QrCameraSession | null>(null)
   const cameraGeneration = useRef(0)
@@ -166,7 +190,7 @@ function QrScanner() {
 
   const submitBytes = (bytes: Uint8Array) => {
     stopCamera()
-    void matrixOAuthQr.submitScan(qr.encodeBase64(bytes))
+    void store.submitScan(qr.encodeBase64(bytes))
   }
 
   const startCamera = async (
@@ -215,7 +239,7 @@ function QrScanner() {
     <div class="qr-scanner">
       <p>
         Start a camera, or choose an image containing the QR code from your
-        trusted device. Camera choices appear after permission is granted.
+        {sourceDevice}. Camera choices appear after permission is granted.
       </p>
       <video
         ref={video}
@@ -229,9 +253,7 @@ function QrScanner() {
           <select
             aria-label="Camera"
             value={selectedCamera ?? cameras[0].deviceId}
-            disabled={
-              cameraStarting || matrixOAuthQr.operation.value !== 'idle'
-            }
+            disabled={cameraStarting || store.operation.value !== 'idle'}
             onChange={(event) => {
               const deviceId = event.currentTarget.value
               selectCamera(deviceId)
@@ -249,7 +271,7 @@ function QrScanner() {
       <div class="card-actions">
         <button
           type="button"
-          disabled={cameraStarting || matrixOAuthQr.operation.value !== 'idle'}
+          disabled={cameraStarting || store.operation.value !== 'idle'}
           onClick={() => void startCamera()}
         >
           {cameraStarting ? 'Starting camera…' : 'Start camera'}
@@ -265,7 +287,7 @@ function QrScanner() {
             class="visually-hidden"
             type="file"
             accept="image/*"
-            disabled={decodingImage || matrixOAuthQr.operation.value !== 'idle'}
+            disabled={decodingImage || store.operation.value !== 'idle'}
             onChange={(event) => {
               const input = event.currentTarget
               const file = input.files?.[0]
@@ -304,26 +326,33 @@ function QrScanner() {
   )
 }
 
-function ActiveQrFlow({ flow }: { flow: MatrixOAuthQrFlow }) {
-  const { matrixOAuthQr } = useServices()
+export function MatrixOAuthQrFlowPanel({
+  flow,
+  store,
+  copy,
+}: {
+  flow: QrFlow
+  store: QrFlowStore
+  copy: MatrixOAuthQrFlowCopy
+}) {
   const [checkCode, setCheckCode] = useState('')
-  const operation = matrixOAuthQr.operation.value
+  const operation = store.operation.value
   const busy = operation !== 'idle' && operation !== 'polling'
   const verificationUri = safeVerificationUri(flow.verification_uri)
 
   return (
     <div class="qr-flow">
       <p class="qr-stage-summary" aria-live="polite" aria-atomic="true">
-        {STAGE_SUMMARIES[flow.stage]}
+        {copy.stageSummaries[flow.stage]}
       </p>
 
       {flow.stage === 'starting' && flow.presentation === 'scan' && (
-        <QrScanner />
+        <QrScanner store={store} sourceDevice={copy.scannerSource} />
       )}
       {flow.stage === 'qr_ready' &&
         flow.qr_code_data !== null &&
         flow.qr_code_data !== undefined && (
-          <QrCanvas data={flow.qr_code_data} />
+          <QrCanvas data={flow.qr_code_data} ariaLabel={copy.qrAriaLabel} />
         )}
       {flow.stage === 'check_code_required' && (
         <form
@@ -331,7 +360,7 @@ function ActiveQrFlow({ flow }: { flow: MatrixOAuthQrFlow }) {
           onSubmit={(event) => {
             event.preventDefault()
             if (/^[0-9]{2}$/.test(checkCode)) {
-              void matrixOAuthQr.submitCheckCode(checkCode)
+              void store.submitCheckCode(checkCode)
             }
           }}
         >
@@ -386,7 +415,8 @@ function ActiveQrFlow({ flow }: { flow: MatrixOAuthQrFlow }) {
         )}
       {flow.stage === 'waiting_for_authorization' && (
         <div class="authorization-step">
-          {flow.authorization_user_code !== null &&
+          {'authorization_user_code' in flow &&
+            flow.authorization_user_code !== null &&
             flow.authorization_user_code !== undefined && (
               <CopyableText
                 text={flow.authorization_user_code}
@@ -403,33 +433,33 @@ function ActiveQrFlow({ flow }: { flow: MatrixOAuthQrFlow }) {
             </p>
           ) : flow.verification_uri !== null &&
             flow.verification_uri !== undefined ? (
-            <p class="field-hint error">
-              Axon returned an unsafe verification link. Open your authorization
-              service directly instead.
-            </p>
+            <p class="field-hint error">{copy.unsafeVerificationLink}</p>
           ) : null}
+          {copy.authorizationGuidance !== undefined && (
+            <p>{copy.authorizationGuidance}</p>
+          )}
         </div>
       )}
 
-      <ErrorBanner error={matrixOAuthQr.error} />
+      <ErrorBanner error={store.error} />
 
       {!['done', 'failed', 'cancelled'].includes(flow.stage) && (
         <button
           type="button"
           disabled={operation === 'cancelling'}
-          onClick={() => void matrixOAuthQr.cancel()}
+          onClick={() => void store.cancel()}
         >
-          {operation === 'cancelling' ? 'Cancelling…' : 'Cancel QR sign-in'}
+          {operation === 'cancelling' ? copy.cancelling : copy.cancel}
         </button>
       )}
       {['failed', 'cancelled'].includes(flow.stage) && (
-        <button type="button" onClick={() => matrixOAuthQr.reset()}>
-          Start again
+        <button type="button" onClick={() => store.reset()}>
+          {copy.startAgain}
         </button>
       )}
       {flow.stage === 'done' && (
-        <button type="button" onClick={() => matrixOAuthQr.reset()}>
-          Add another account
+        <button type="button" onClick={() => store.reset()}>
+          {copy.doneAction}
         </button>
       )}
     </div>
@@ -540,7 +570,23 @@ export function MatrixOAuthQrAcquisition({
     if (!flowMatchesExpectedUser && expectedUserId !== undefined) {
       return <MismatchedQrFlow flow={flow} expectedUserId={expectedUserId} />
     }
-    return <ActiveQrFlow flow={flow} />
+    return (
+      <MatrixOAuthQrFlowPanel
+        flow={flow}
+        store={matrixOAuthQr}
+        copy={{
+          stageSummaries: STAGE_SUMMARIES,
+          qrAriaLabel: 'Matrix sign-in QR code',
+          scannerSource: 'your trusted device',
+          cancel: 'Cancel QR sign-in',
+          cancelling: 'Cancelling…',
+          startAgain: 'Start again',
+          doneAction: 'Add another account',
+          unsafeVerificationLink:
+            'Axon returned an unsafe verification link. Open your authorization service directly instead.',
+        }}
+      />
+    )
   }
 
   return (

@@ -74,6 +74,7 @@ shows it.
 | Device verification (SAS)                               | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Megolm key backup snapshot and enable (ADR 0098)        | **not covered**       | **not covered** — `/accounts` is not a demo scene                                                         | **not covered** |
 | Matrix OAuth QR account acquisition                     | **n/a**               | **not covered** — demo stack has no MAS or second trusted device                                          | **not covered** |
+| Matrix OAuth QR device authorization                    | **n/a**               | **not covered** — demo stack has no MAS or second client to authorize                                     | **not covered** |
 | Typing indicators and read receipts (M18)               | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Inline image whose terminal encode failed (placeholder) | **not covered**       | **n/a**                                                                                                   | **n/a**         |
 | Debug overlay diagnostics (`display.debug`)             | **not covered**       | **n/a**                                                                                                   | **n/a**         |
@@ -101,6 +102,8 @@ shows it.
   corpus does not stand up.
 - **Matrix OAuth QR account acquisition.** Needs MAS and a second trusted
   Matrix device; the demo stack provides neither.
+- **Matrix OAuth QR device authorization.** Needs MAS and a second Matrix
+  client to authorize; the demo stack provides neither.
 - **Room list loading state.** The panel names the startup stage it is on
   (ADR 0093) while accounts, rooms, and device state load. Against the demo
   stack all three land in well under a frame, so a scene would either catch
