@@ -3391,6 +3391,108 @@ span.composer-attachment-thumb {
   color: var(--danger);
 }
 
+/* ---- room settings editing (M19-W6, ADR 0100) ---- */
+
+.room-info-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.room-settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--border);
+  /* Containing block for `.drop-overlay`, which is `position: absolute`. */
+  position: relative;
+}
+
+.room-settings-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0;
+  min-width: 0;
+}
+
+.room-settings-form textarea {
+  width: 100%;
+  max-width: 26rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--fg);
+  padding: 0.4rem 0.5rem;
+  font: inherit;
+  resize: vertical;
+}
+
+.room-settings-avatar {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  min-width: 0;
+}
+
+.room-settings-avatar .room-avatar {
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 12px;
+  font-size: 1.35rem;
+  flex: 0 0 auto;
+}
+
+.room-settings-avatar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+/* The identity avatar as a viewer trigger: a bare button around the image,
+   with a focus ring so keyboard users can see it is reachable. */
+.room-info-avatar-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  border-radius: 12px;
+  cursor: zoom-in;
+  flex: 0 0 auto;
+  line-height: 0;
+}
+
+.room-info-avatar-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Hidden from sight but kept in the accessibility tree and focusable, unlike
+   the `hidden` attribute. Used both for text kept only for assistive tech
+   while a glyph carries the visual, and for inputs wrapped in a styled label
+   (the room-settings avatar picker, the QR image picker). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.room-settings-file {
+  font-size: 0.9rem;
+}
+
+.room-settings-hint {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
 .room-invite-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -4502,7 +4604,8 @@ audio.media-player {
 
 .lightbox button.lightbox-close,
 .lightbox button.lightbox-save,
-.lightbox button.lightbox-action {
+.lightbox button.lightbox-action,
+.lightbox label.lightbox-action {
   /* 44px: the smallest reliable touch target, and this is the control you
      reach for when the tap-outside gesture is not obvious. */
   width: 2.75rem;
@@ -4522,8 +4625,15 @@ audio.media-player {
 }
 
 .lightbox button.lightbox-save,
-.lightbox button.lightbox-action {
+.lightbox button.lightbox-action,
+.lightbox label.lightbox-action {
   font-size: 1.3rem;
+}
+
+/* A label opening a file picker is still a control: give it the pointer the
+   sibling buttons have. */
+.lightbox label.lightbox-action {
+  cursor: pointer;
 }
 
 /* Timeline-row action icons are text-label replacements only on mobile.

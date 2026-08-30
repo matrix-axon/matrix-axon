@@ -11,6 +11,7 @@ import {
 } from '../matrix-to'
 import { parseUserIdList } from '../matrix-user'
 import { joinRoomError } from '../room-entry'
+import { maySetRoomState, powerLevelCaution } from '../room-power'
 import { useServices } from '../services'
 import type { MembersStore } from '../stores/members'
 import {
@@ -25,7 +26,9 @@ import { useShortcuts } from '../shortcuts'
 import { formatInviteeList, inviteErrorMessage } from '../invite'
 import { BodyPortal } from './BodyPortal'
 import { CopyableText, useCopyFeedback } from './CopyableText'
+import { Lightbox, LightboxImage } from './Lightbox'
 import { RoomAvatar, roomAvatarColor } from './RoomAvatar'
+import { RoomSettingsForm } from './RoomSettingsForm'
 import { ErrorBanner } from './ErrorBanner'
 import { useModalFocus } from './use-modal-focus'
 import { UserAvatar } from './UserAvatar'
@@ -34,9 +37,11 @@ type RoomInfoDto = components['schemas']['RoomInfoDto']
 type RoomUpgradeDto = components['schemas']['RoomUpgradeDto']
 type SpaceChildDto = components['schemas']['SpaceChildDto']
 type SpaceParentDto = components['schemas']['SpaceParentDto']
+type PowerLevelsDto = components['schemas']['PowerLevelsDto']
 type EventDto = components['schemas']['EventDto']
 
-type RoomStateKey = 'info' | 'pinned' | 'children' | 'parents' | 'upgrade'
+type RoomStateKey =
+  'info' | 'pinned' | 'children' | 'parents' | 'upgrade' | 'powerLevels'
 
 interface RoomStateSlice {
   /** `accountId/roomId` the rest of this slice was loaded for. */
@@ -46,6 +51,7 @@ interface RoomStateSlice {
   children: readonly SpaceChildDto[] | null
   parents: readonly SpaceParentDto[] | null
   upgrade: RoomUpgradeDto | null
+  powerLevels: PowerLevelsDto | null
   errors: Partial<Record<RoomStateKey, string>>
 }
 
@@ -57,6 +63,7 @@ function emptyRoomState(key: string): RoomStateSlice {
     children: null,
     parents: null,
     upgrade: null,
+    powerLevels: null,
     errors: {},
   }
 }
@@ -129,10 +136,66 @@ export function RoomInfoPanel({
     return roomState.errors.info === undefined ? 'Loading…' : 'Unavailable'
   }
   const [roomStateVersion, setRoomStateVersion] = useState(0)
+  // Keyed by room for the same reason `RoomStateSlice` is: `RoomPage` keeps
+  // one panel instance across room navigation, so an unkeyed `editing` flag
+  // would carry a half-typed rename from the room it was opened for onto
+  // whichever room the panel moved to — and save it there.
+  const [editingKey, setEditingKey] = useState<string | null>(null)
+  const [settingsDirty, setSettingsDirty] = useState(false)
+  const [settingsSaving, setSettingsSaving] = useState(false)
+  const [settingsStatus, setSettingsStatus] = useState<string | null>(null)
+  // 'close' also dismisses the panel; 'edit' just leaves edit mode.
+  const [discardIntent, setDiscardIntent] = useState<'close' | 'edit' | null>(
+    null,
+  )
+  const editing = editingKey === roomStateKey
+  const [avatarViewerOpen, setAvatarViewerOpen] = useState(false)
+  /**
+   * An image chosen from the avatar viewer, handed to the form to validate
+   * and stage. The viewer deliberately does not write it: the form owns the
+   * decode/size checks and the Save step, so a replace from either entry
+   * point gets the same preview-then-confirm treatment.
+   */
+  const [handoffAvatar, setHandoffAvatar] = useState<File | null>(null)
   const displayTitle =
     room !== undefined ? roomTitle(room, roomTitles) || roomId : roomId
   const ownUserId = room?.account_user_id ?? null
   const homeServerName = serverNameFromRoomReference(ownUserId ?? roomId ?? '')
+  /**
+   * Whether the power levels *suggest* editing will be allowed — a hint for
+   * wording, never a gate.
+   *
+   * Editing is deliberately never disabled on it. The hint is known to be
+   * wrong in both directions: `PowerLevelsDto` carries no `events` map, and
+   * from room version 12 a room's creators hold infinite power yet cannot
+   * appear in `users`, so a creator reads here as `users_default` — usually
+   * 0. Blocking on that locked a room's own owner out of their settings. The
+   * failure is asymmetric: showing a form to someone who cannot save costs
+   * them one clear 403, while blocking someone who can costs them the
+   * feature entirely.
+   */
+  const editLikelyAllowed =
+    roomState.powerLevels === null ||
+    ownUserId === null ||
+    maySetRoomState(roomState.powerLevels, ownUserId)
+  const editCaution =
+    editLikelyAllowed || ownUserId === null || roomState.powerLevels === null
+      ? null
+      : powerLevelCaution(roomState.powerLevels, ownUserId)
+  /**
+   * What the identity block shows: the room's avatar, falling back to the DM
+   * peer's profile picture (`roomListAvatarUrl`), exactly as the room list
+   * does.
+   */
+  const displayAvatarMxc =
+    room !== undefined ? roomListAvatarUrl(room, rooms.dmAvatars.value) : null
+  /**
+   * What is actually editable. Deliberately *not* the display fallback: a DM
+   * peer's profile picture is not this room's `m.room.avatar`, and treating it
+   * as one made the form offer "Remove avatar" for a room that has none —
+   * where DELETE clears nothing and the peer's picture stays on screen.
+   */
+  const roomAvatarMxc = room?.avatar_url ?? null
   const dmTitle =
     room !== undefined && roomTitles.has(roomKey(room))
       ? (roomTitles.get(roomKey(room)) ?? null)
@@ -169,6 +232,26 @@ export function RoomInfoPanel({
       inviteInput.current?.focus()
     }
   }, [inviteOpen])
+  useShortcuts(
+    {
+      Escape: (event) => {
+        if (!editing || discardIntent !== null) {
+          return
+        }
+        event.preventDefault()
+        if (settingsSaving) {
+          // A save is in flight; leave the form up to report its outcome.
+          return
+        }
+        if (settingsDirty) {
+          setDiscardIntent('edit')
+          return
+        }
+        leaveEditMode(null)
+      },
+    },
+    { whileTyping: true, capture: true },
+  )
   useEffect(() => {
     let cancelled = false
     const stateKey = `${accountId}/${roomId}`
@@ -231,6 +314,12 @@ export function RoomInfoPanel({
       'upgrade',
       api.GET('/v1/accounts/{account_id}/rooms/{room_id}/upgrade', params),
     )
+    // Read for the edit gate only (M19-W6). The power-levels *editor* is
+    // M19-W8; this PR reads the levels and never writes them.
+    load(
+      'powerLevels',
+      api.GET('/v1/accounts/{account_id}/rooms/{room_id}/power_levels', params),
+    )
     return () => {
       cancelled = true
     }
@@ -252,6 +341,8 @@ export function RoomInfoPanel({
           'm.space.parent',
           'm.room.tombstone',
           'm.room.create',
+          // A promotion or demotion has to re-evaluate the edit gate.
+          'm.room.power_levels',
         ].includes(event.type)
       ) {
         setRoomStateVersion((version) => version + 1)
@@ -367,6 +458,25 @@ export function RoomInfoPanel({
     location.route('/', true)
   }
 
+  /** Close, but never silently drop a half-typed rename. */
+  const requestClose = () => {
+    // Not while saving: the requests are already out, so the changes are not
+    // unsaved and "Discard changes?" would be describing something that has
+    // already happened. Closing does not cancel them.
+    if (editing && settingsDirty && !settingsSaving) {
+      setDiscardIntent('close')
+      return
+    }
+    onClose()
+  }
+  const leaveEditMode = (status: string | null) => {
+    setEditingKey(null)
+    setSettingsDirty(false)
+    setSettingsSaving(false)
+    setDiscardIntent(null)
+    setSettingsStatus(status)
+  }
+
   const joinLinkedRoom = async (target: {
     roomId: string
     via: readonly string[]
@@ -392,36 +502,95 @@ export function RoomInfoPanel({
     >
       <div class="overlay-head">
         <h2>Room information</h2>
-        <button type="button" class="ghost" onClick={onClose}>
-          Close
-        </button>
-      </div>
-
-      <div class="room-info-identity">
-        <RoomAvatar
-          accountId={accountId}
-          mxcUrl={
-            room !== undefined
-              ? roomListAvatarUrl(room, rooms.dmAvatars.value)
-              : null
-          }
-          title={displayTitle}
-          color={roomAvatarColor(roomStateKey)}
-        />
-        <div class="room-info-identity-copy">
-          <p class="room-info-identity-name">{displayTitle}</p>
-          {room?.topic !== undefined &&
-            room.topic !== null &&
-            room.topic.trim() !== '' && (
-              <p class="room-info-identity-topic muted">{room.topic}</p>
-            )}
+        <div class="room-info-head-actions">
+          {!editing && (
+            <button
+              type="button"
+              class="ghost"
+              title="Edit name, topic and avatar"
+              onClick={() => {
+                setSettingsStatus(null)
+                setEditingKey(roomStateKey)
+              }}
+            >
+              Edit
+            </button>
+          )}
+          <button type="button" class="ghost" onClick={requestClose}>
+            Close
+          </button>
         </div>
       </div>
+
+      {editing ? (
+        <RoomSettingsForm
+          key={roomStateKey}
+          accountId={accountId}
+          roomId={roomId}
+          room={room}
+          displayTitle={displayTitle}
+          avatarMxc={roomAvatarMxc}
+          peerAvatarShown={roomAvatarMxc === null && displayAvatarMxc !== null}
+          avatarColor={roomAvatarColor(roomStateKey)}
+          initialAvatar={handoffAvatar}
+          onAvatarTaken={() => setHandoffAvatar(null)}
+          onDone={leaveEditMode}
+          onDirtyChange={setSettingsDirty}
+          onSavingChange={setSettingsSaving}
+          onRequestCancel={() => setDiscardIntent('edit')}
+        />
+      ) : (
+        <div class="room-info-identity">
+          {displayAvatarMxc === null ? (
+            <RoomAvatar
+              accountId={accountId}
+              mxcUrl={null}
+              title={displayTitle}
+              color={roomAvatarColor(roomStateKey)}
+            />
+          ) : (
+            // Only a real image is worth opening: the fallback is a coloured
+            // letter, and a viewer over that shows nothing.
+            <button
+              type="button"
+              class="room-info-avatar-button"
+              aria-label={`View the ${displayTitle} avatar at full size`}
+              onClick={() => setAvatarViewerOpen(true)}
+            >
+              <RoomAvatar
+                accountId={accountId}
+                mxcUrl={displayAvatarMxc}
+                title={displayTitle}
+                color={roomAvatarColor(roomStateKey)}
+              />
+            </button>
+          )}
+          <div class="room-info-identity-copy">
+            <p class="room-info-identity-name">{displayTitle}</p>
+            {room?.topic !== undefined &&
+              room.topic !== null &&
+              room.topic.trim() !== '' && (
+                <p class="room-info-identity-topic muted">{room.topic}</p>
+              )}
+          </div>
+        </div>
+      )}
+      {settingsStatus !== null && (
+        <p class="room-info-status" role="status">
+          {settingsStatus}
+        </p>
+      )}
+      {!editing && editCaution !== null && (
+        <p class="room-info-status muted">{editCaution}</p>
+      )}
 
       <section class="room-info-section" aria-labelledby="room-info-details">
         <h3 id="room-info-details">Details</h3>
         <dl class="detail-list">
-          <DetailRow label="Name" value={displayTitle} />
+          {/* While editing, the form above owns these three fields; leaving
+              the read-only rows up would show stale values beside the inputs
+              and duplicate their labels. */}
+          {!editing && <DetailRow label="Name" value={displayTitle} />}
           {dmTitle !== null && dmTitle !== displayTitle && (
             <DetailRow label="DM name" value={dmTitle} />
           )}
@@ -448,8 +617,12 @@ export function RoomInfoPanel({
             label="Full alias list"
             value="Unavailable from current API"
           />
-          <DetailRow label="Topic" value={room?.topic ?? 'None'} />
-          <DetailRow label="Avatar" value={room?.avatar_url ?? 'None'} code />
+          {!editing && (
+            <DetailRow label="Topic" value={room?.topic ?? 'None'} />
+          )}
+          {!editing && (
+            <DetailRow label="Avatar" value={room?.avatar_url ?? 'None'} code />
+          )}
           <DetailRow
             label="Last activity"
             value={
@@ -757,6 +930,63 @@ export function RoomInfoPanel({
           onConfirm={() => void joinLinkedRoom(joinLink)}
         />
       )}
+      {avatarViewerOpen && displayAvatarMxc !== null && (
+        <Lightbox
+          label={`${displayTitle} avatar`}
+          caption={null}
+          onClose={() => setAvatarViewerOpen(false)}
+          actions={
+            // Offered regardless of the power-level hint, for the same
+            // reason Edit is: the hint cannot see a room-version-12 creator.
+            //
+            // A label wrapping the input, not a button calling `.click()`: a
+            // synthetic click loses the user gesture browsers require before
+            // opening a file dialog.
+            <label
+              class="lightbox-action room-info-avatar-replace"
+              title="Replace this avatar"
+            >
+              <span class="visually-hidden">Replace this avatar</span>
+              <span aria-hidden="true">✎</span>
+              <input
+                class="visually-hidden"
+                type="file"
+                accept="image/*"
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0]
+                  if (file === undefined) {
+                    return
+                  }
+                  // Straight into the edit form, which validates it and
+                  // shows it as a preview awaiting Save.
+                  setAvatarViewerOpen(false)
+                  setSettingsStatus(null)
+                  setHandoffAvatar(file)
+                  setEditingKey(roomStateKey)
+                }}
+              />
+            </label>
+          }
+        >
+          <LightboxImage
+            accountId={accountId}
+            mxcUrl={displayAvatarMxc}
+            alt={`${displayTitle} avatar`}
+          />
+        </Lightbox>
+      )}
+      {discardIntent !== null && (
+        <DiscardSettingsDialog
+          onCancel={() => setDiscardIntent(null)}
+          onConfirm={() => {
+            const alsoClose = discardIntent === 'close'
+            leaveEditMode(null)
+            if (alsoClose) {
+              onClose()
+            }
+          }}
+        />
+      )}
       {cancelInviteMember !== null && (
         <CancelInviteDialog
           member={cancelInviteMember}
@@ -961,6 +1191,52 @@ function RoomStateLinks({
         </p>
       )}
     </section>
+  )
+}
+
+function DiscardSettingsDialog({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const { containerRef } = useModalFocus<HTMLDivElement>()
+  useShortcuts(
+    {
+      Escape: (event) => {
+        event.preventDefault()
+        onCancel()
+      },
+    },
+    { whileTyping: true, capture: true },
+  )
+  return (
+    <BodyPortal>
+      <div
+        ref={containerRef}
+        class="overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Discard unsaved room settings"
+      >
+        <div class="overlay-panel leave-room-dialog">
+          <h2>Discard changes?</h2>
+          <p>
+            This room&rsquo;s name, topic or avatar has unsaved changes. Leaving
+            now discards them.
+          </p>
+          <div class="dialog-actions">
+            <button type="button" class="ghost" onClick={onCancel}>
+              Keep editing
+            </button>
+            <button type="button" class="danger" onClick={onConfirm}>
+              Discard changes
+            </button>
+          </div>
+        </div>
+      </div>
+    </BodyPortal>
   )
 }
 

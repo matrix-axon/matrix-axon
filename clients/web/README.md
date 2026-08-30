@@ -7,7 +7,7 @@ lockfile.
 Authenticated Axon sessions with no active Matrix account always default to
 the centralized `/accounts` portal.
 
-**Status (through M-W10, plus M19-W1 through M19-W4):** a usable read/write client — SSO sign-in
+**Status (through M-W10, plus M19-W1 through M19-W4 and M19-W6):** a usable read/write client — SSO sign-in
 through Axon OAuth Path A with token-paste fallback, the full account
 lifecycle on the unified `/accounts` page (account list, active-account choice,
 status, recovery, megolm backup snapshot and enable, logout, reactivation,
@@ -54,7 +54,10 @@ ID/alias/Matrix-link entry, public room-directory search defaulting to the
 account homeserver, DM creation/opening, and room creation), Room Information
 actions for copying a room link, inviting users, canceling pending invites,
 leaving with confirmation, opening member DMs, room-state details (access,
-encryption, pinned messages, space relationships, and upgrade links), and a
+encryption, pinned messages, space relationships, and upgrade links), editing
+the room's name, topic and avatar (M19-W6/ADR 0100: an Edit button beside
+Close, offered only when your power level allows it, with avatar images staged
+through the existing upload flow), and a
 browser-local Spaces picker that filters the room list, TUI-parity keyboard
 shortcuts with a `/shortcuts` help overlay (ADR 0078, web keyboard shortcuts),
 live WebSocket updates for timelines/room previews/unread state, live

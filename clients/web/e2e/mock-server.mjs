@@ -393,6 +393,17 @@ function synthTimeline(n) {
     reactions: null,
   }))
 }
+/**
+ * Room settings written through M19d (`PUT .../name`, `.../topic`,
+ * `.../avatar`). `/v1/rooms` reads these back, so a spec can assert the whole
+ * round trip rather than just that a request was sent. `power_levels` below
+ * decides whether the client offers the edit affordance at all.
+ */
+const roomSettings = { name: null, topic: null, avatarUrl: null }
+
+/** This account's own level in `ROOM_ID`; `/__e2e/power-level` demotes it. */
+let ownPowerLevel = 100
+
 /** `/v1/search` answers 503 while set (the search-disabled server state);
  *  toggled via `/__e2e/search-503` and reset by the spec that sets it. */
 let searchDisabled = false
@@ -638,7 +649,9 @@ async function handleApi(req, res, url) {
           account_id: ACCOUNT_ID,
           account_user_id: USER_ID,
           room_id: ROOM_ID,
-          name: 'E2E Room',
+          name: roomSettings.name ?? 'E2E Room',
+          topic: roomSettings.topic ?? undefined,
+          avatar_url: roomSettings.avatarUrl ?? undefined,
           last_activity_ts: now,
         },
         {
@@ -789,6 +802,71 @@ async function handleApi(req, res, url) {
       ? json(res, { data: event })
       : json(res, { error: 'not_found' }, 404)
   }
+  // Room settings (ADR 0068 M19d). `power_levels` is a read the client makes
+  // on every Room Information open, to decide whether to offer editing.
+  if (method === 'GET' && /\/rooms\/[^/]+\/power_levels$/.test(pathname)) {
+    return json(res, {
+      data: {
+        ban: 50,
+        invite: 0,
+        kick: 50,
+        redact: 50,
+        events_default: 0,
+        state_default: 50,
+        users_default: 0,
+        users: { [USER_ID]: ownPowerLevel },
+      },
+    })
+  }
+  if (method === 'PUT' && /\/rooms\/[^/]+\/(name|topic)$/.test(pathname)) {
+    const field = pathname.endsWith('/name') ? 'name' : 'topic'
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      const request = JSON.parse(raw || '{}')
+      // An empty string is the documented clear signal, not a no-op.
+      roomSettings[field] = request[field] === '' ? null : request[field]
+      json(res, { data: {} })
+    })
+    return
+  }
+  if (method === 'PUT' && /\/rooms\/[^/]+\/avatar$/.test(pathname)) {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      const request = JSON.parse(raw || '{}')
+      const staged = uploads.get(request.upload_id)
+      if (staged === undefined) {
+        return json(
+          res,
+          { error: { code: 'not_found', message: 'unknown upload' } },
+          404,
+        )
+      }
+      // The real server refuses an upload with no declared image type; a
+      // client that validates first should never reach this.
+      if (!(staged.contentType ?? '').startsWith('image/')) {
+        return json(
+          res,
+          {
+            error: {
+              code: 'bad_request',
+              message: 'image uploads must have an image/* content type',
+            },
+          },
+          400,
+        )
+      }
+      roomSettings.avatarUrl = `mxc://hs/${request.upload_id}`
+      json(res, { data: {} })
+    })
+    return
+  }
+  if (method === 'DELETE' && /\/rooms\/[^/]+\/avatar$/.test(pathname)) {
+    roomSettings.avatarUrl = null
+    return json(res, { data: {} })
+  }
+
   // The two-step media send (ADR 0059/0065): stage raw bytes, then claim the
   // staged id. Staging records what actually arrived — the query metadata, the
   // content type, and the byte count — so the spec can assert a real browser
@@ -956,6 +1034,18 @@ const server = createServer((req, res) => {
   // spec ever starts counting history length, it should call this too — and if a
   // third does, that is the point to promote it to a shared fixture rather than
   // let each spec remember.
+  // What the client actually wrote, and a lever to demote it. Mirrors
+  // `/__e2e/uploads`: the unit tests cannot prove a real browser round trip.
+  if (req.method === 'GET' && url.pathname === '/__e2e/room-settings') {
+    return json(res, { data: roomSettings })
+  }
+  if (req.method === 'POST' && url.pathname === '/__e2e/power-level') {
+    ownPowerLevel = Number(url.searchParams.get('level') ?? 100)
+    roomSettings.name = null
+    roomSettings.topic = null
+    roomSettings.avatarUrl = null
+    return json(res, { data: { ownPowerLevel } })
+  }
   if (req.method === 'POST' && url.pathname === '/__e2e/reset-timeline') {
     const dropped = timeline.length - SEEDED_TIMELINE_LENGTH
     timeline.length = SEEDED_TIMELINE_LENGTH

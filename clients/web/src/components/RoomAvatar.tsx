@@ -18,26 +18,35 @@ export function RoomAvatar({
   mxcUrl,
   title,
   color,
+  previewUrl = null,
 }: {
   accountId: string
   mxcUrl: string | null
   title: string
   color: number
+  /**
+   * A local object URL to show instead of the resolved `mxcUrl` — the image
+   * the user just picked, before the write has round-tripped through sync.
+   * When set, no media fetch is started; the caller owns revoking the URL.
+   */
+  previewUrl?: string | null
 }) {
-  const { ref, state } = useMediaBlob<HTMLSpanElement>(accountId, mxcUrl)
+  const { ref, state } = useMediaBlob<HTMLSpanElement>(
+    accountId,
+    previewUrl === null ? mxcUrl : null,
+  )
   const label = roomAvatarLabel(title)
+  const shown =
+    previewUrl ??
+    (state.status === 'ready' && state.url !== undefined ? state.url : null)
   return (
     <span
       ref={ref}
       class={`room-avatar room-avatar-color-${color}`}
       aria-hidden="true"
-      title={mxcUrl === null ? undefined : `${title} avatar`}
+      title={shown === null ? undefined : `${title} avatar`}
     >
-      {state.status === 'ready' && state.url !== undefined ? (
-        <img src={state.url} alt="" />
-      ) : (
-        <span>{label}</span>
-      )}
+      {shown !== null ? <img src={shown} alt="" /> : <span>{label}</span>}
     </span>
   )
 }

@@ -9,8 +9,14 @@ import { useModalFocus } from './use-modal-focus'
 /**
  * Elements a click must *not* dismiss on: the media being viewed, its caption,
  * and any control. Everything else in the overlay counts as backdrop.
+ *
+ * `label` and `input` are here because a file picker in the `actions` slot is
+ * a label wrapping a hidden input — the only way to open a picker from the
+ * user's own click, since a synthetic `.click()` loses the gesture. Without
+ * them the lightbox would dismiss itself out from under the file dialog.
  */
-const DISMISS_EXEMPT = 'video, audio, img, iframe, figcaption, button, a'
+const DISMISS_EXEMPT =
+  'video, audio, img, iframe, figcaption, button, a, label, input'
 
 /**
  * How long after toggling immersive mode a further tap on the image is

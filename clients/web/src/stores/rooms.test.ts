@@ -13,7 +13,7 @@ import {
 import { createApiClient } from '../api/client'
 import { memoryStorage } from '../test/memory-storage'
 import { isLikelyDm, roomKey, roomTitle } from './room-list'
-import { createRoomsStore } from './rooms'
+import { createRoomsStore, roomMetadataPatch } from './rooms'
 
 const BASE_URL = 'http://axon.test'
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
@@ -1025,4 +1025,250 @@ describe('createRoomsStore', () => {
     store.noteUnreadCounts(ACCOUNT, NAMED.room_id, 0, 0)
     expect(store.unreadTotal.value).toBe(2)
   })
+})
+
+/**
+ * A live state event as `/v1/ws` delivers it. Content shapes are the ones a
+ * real homeserver was observed sending (M19-W6), not invented for the test.
+ */
+function stateEvent(type: string, content: unknown) {
+  return {
+    event_id: `$${type}:hs`,
+    account_id: ACCOUNT,
+    room_id: NAMED.room_id,
+    sender: '@me:example.org',
+    type,
+    state_key: '',
+    origin_ts: 50,
+    content,
+  } as unknown as Parameters<
+    ReturnType<typeof makeStore>['noteTimelineEvent']
+  >[0]
+}
+
+describe('roomMetadataPatch', () => {
+  it('reads the observed name, topic and avatar shapes', () => {
+    expect(
+      roomMetadataPatch(stateEvent('m.room.name', { name: 'Ops' })),
+    ).toEqual({ field: 'name', value: 'Ops' })
+    expect(
+      roomMetadataPatch(
+        stateEvent('m.room.topic', {
+          topic: 'a new topic',
+          'm.topic': { 'm.text': [{ body: 'a new topic' }] },
+        }),
+      ),
+    ).toEqual({ field: 'topic', value: 'a new topic' })
+    expect(
+      roomMetadataPatch(
+        stateEvent('m.room.avatar', {
+          url: 'mxc://hs/abc',
+          info: { mimetype: 'image/png' },
+        }),
+      ),
+    ).toEqual({ field: 'avatar_url', value: 'mxc://hs/abc' })
+  })
+
+  it('treats the observed cleared forms as null', () => {
+    // Exactly what the server was seen to emit on a clear.
+    expect(roomMetadataPatch(stateEvent('m.room.name', { name: '' }))).toEqual({
+      field: 'name',
+      value: null,
+    })
+    expect(
+      roomMetadataPatch(stateEvent('m.room.avatar', { url: null })),
+    ).toEqual({ field: 'avatar_url', value: null })
+  })
+
+  it('treats a missing key as unset, not as unchanged', () => {
+    // A state event's content is the whole new state, so another client
+    // clearing an avatar with `{}` means "no avatar", not "leave it alone".
+    expect(roomMetadataPatch(stateEvent('m.room.avatar', {}))).toEqual({
+      field: 'avatar_url',
+      value: null,
+    })
+  })
+
+  it('skips unrelated types and content-less events', () => {
+    expect(roomMetadataPatch(stateEvent('m.room.join_rules', {}))).toBeNull()
+    // Redacted: genuinely unknown, unlike an absent key within real content.
+    expect(roomMetadataPatch(stateEvent('m.room.name', null))).toBeNull()
+  })
+})
+
+describe('room settings (M19-W6)', () => {
+  it('patches a live rename into the room list without a refresh', async () => {
+    useTitleHandlers()
+    const store = makeStore()
+    await store.refresh()
+    const named = () =>
+      store.rooms.value.find((room) => room.room_id === NAMED.room_id)
+    expect(named()?.name).toBe('Ops')
+
+    // No `/v1/rooms` handler is added for a second call: if this needed a
+    // refresh, msw's `onUnhandledRequest: 'error'` would not be the thing
+    // that caught it — the assertion below would simply still read "Ops".
+    store.noteTimelineEvent(stateEvent('m.room.name', { name: 'Operations' }))
+    expect(named()?.name).toBe('Operations')
+
+    store.noteTimelineEvent(stateEvent('m.room.topic', { topic: 'on call' }))
+    expect(named()?.topic).toBe('on call')
+
+    store.noteTimelineEvent(
+      stateEvent('m.room.avatar', { url: 'mxc://hs/pic' }),
+    )
+    expect(named()?.avatar_url).toBe('mxc://hs/pic')
+
+    store.noteTimelineEvent(stateEvent('m.room.avatar', { url: null }))
+    expect(named()?.avatar_url).toBeNull()
+  })
+
+  it('does not let a metadata event bump room activity', async () => {
+    useTitleHandlers()
+    const store = makeStore()
+    await store.refresh()
+    const before = store.rooms.value.find(
+      (room) => room.room_id === NAMED.room_id,
+    )?.last_activity_ts
+    store.noteTimelineEvent(stateEvent('m.room.name', { name: 'Operations' }))
+    const after = store.rooms.value.find(
+      (room) => room.room_id === NAMED.room_id,
+    )
+    expect(after?.last_activity_ts).toBe(before)
+    expect(after?.name).toBe('Operations')
+  })
+
+  it('writes name, topic and avatar, and reports the server error code', async () => {
+    useTitleHandlers()
+    const store = makeStore()
+    await store.refresh()
+    const room = `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(NAMED.room_id)}`
+    const bodies: Record<string, unknown> = {}
+    server.use(
+      http.put(`${room}/name`, async ({ request }) => {
+        bodies.name = await request.json()
+        return HttpResponse.json({ data: {} })
+      }),
+      http.put(`${room}/topic`, async ({ request }) => {
+        bodies.topic = await request.json()
+        return HttpResponse.json({ data: {} })
+      }),
+      http.put(`${room}/avatar`, async ({ request }) => {
+        bodies.avatar = await request.json()
+        return HttpResponse.json({ data: {} })
+      }),
+      http.delete(`${room}/avatar`, () => HttpResponse.json({ data: {} })),
+    )
+
+    expect(
+      await store.setRoomName(ACCOUNT, NAMED.room_id, 'Operations'),
+    ).toEqual({ ok: true })
+    expect(bodies.name).toEqual({ name: 'Operations' })
+    // Empty string is the documented clear signal, not a skipped write.
+    expect(await store.setRoomTopic(ACCOUNT, NAMED.room_id, '')).toEqual({
+      ok: true,
+    })
+    expect(bodies.topic).toEqual({ topic: '' })
+    expect(
+      await store.setRoomAvatar(ACCOUNT, NAMED.room_id, 'upload-1'),
+    ).toEqual({ ok: true })
+    expect(bodies.avatar).toEqual({ upload_id: 'upload-1' })
+    expect(await store.removeRoomAvatar(ACCOUNT, NAMED.room_id)).toEqual({
+      ok: true,
+    })
+  })
+
+  it('surfaces a forbidden write with its code so the caller can explain it', async () => {
+    useTitleHandlers()
+    const store = makeStore()
+    await store.refresh()
+    const room = `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(NAMED.room_id)}`
+    server.use(
+      http.put(`${room}/name`, () =>
+        HttpResponse.json(
+          { error: { code: 'forbidden', message: 'not permitted' } },
+          { status: 403 },
+        ),
+      ),
+    )
+    const result = await store.setRoomName(ACCOUNT, NAMED.room_id, 'Nope')
+    expect(result).toEqual({
+      ok: false,
+      message: 'not permitted',
+      code: 'forbidden',
+    })
+    // The write must not have been applied locally on the way out.
+    expect(
+      store.rooms.value.find((r) => r.room_id === NAMED.room_id)?.name,
+    ).toBe('Ops')
+  })
+})
+
+it('does not let a slow refresh overwrite a live metadata patch', async () => {
+  // The exact sequence a save produces: the write returns, the client fires a
+  // fallback refresh, the server has not caught up yet, and the live frame
+  // arrives while that refresh is still in flight. Measured against a real
+  // Axon, `/v1/rooms` needs ~400-600ms to report a new avatar, so the refresh
+  // reliably reads a stale value.
+  let release: (() => void) | undefined
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let call = 0
+  server.use(
+    http.get(`${BASE_URL}/v1/rooms`, async () => {
+      call += 1
+      if (call === 2) {
+        await held // the stale, in-flight refresh
+      }
+      // The server does not know about the new avatar yet, either time.
+      return HttpResponse.json({ data: [NAMED, UNNAMED] })
+    }),
+    http.get(
+      `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
+      () => HttpResponse.json({ data: [] }),
+    ),
+  )
+  const store = makeStore()
+  await store.refresh()
+
+  const slow = store.refresh()
+  store.noteTimelineEvent(
+    stateEvent('m.room.avatar', { url: 'mxc://hs/fresh' }),
+  )
+  expect(
+    store.rooms.value.find((r) => r.room_id === NAMED.room_id)?.avatar_url,
+  ).toBe('mxc://hs/fresh')
+
+  release?.()
+  await slow
+
+  // The refresh response predates the frame, so applying it wholesale would
+  // erase the avatar the user just set and leave them wondering whether the
+  // upload worked at all.
+  expect(
+    store.rooms.value.find((r) => r.room_id === NAMED.room_id)?.avatar_url,
+  ).toBe('mxc://hs/fresh')
+})
+
+it('ignores a same-type state event under another state key', () => {
+  // `m.room.name`/`topic`/`avatar` are singleton state: only the empty state
+  // key is canonical. Anyone able to send state could otherwise rename or
+  // re-avatar the room in every client that trusted the type alone.
+  const spoof = {
+    ...stateEvent('m.room.name', { name: 'Spoofed' }),
+    state_key: '@mallory:hs',
+  }
+  expect(roomMetadataPatch(spoof)).toBeNull()
+  const avatar = {
+    ...stateEvent('m.room.avatar', { url: 'mxc://hs/evil' }),
+    state_key: 'alt',
+  }
+  expect(roomMetadataPatch(avatar)).toBeNull()
+  // A member event legitimately carries a user id and is not room metadata.
+  const member = {
+    ...stateEvent('m.room.member', { displayname: 'x' }),
+    state_key: '@a:hs',
+  }
+  expect(roomMetadataPatch(member)).toBeNull()
 })

@@ -1541,3 +1541,267 @@ function sparseEvent(eventId: string, body: string, originTs = Date.now()) {
     reactions: null,
   }
 }
+
+/** A real 1x1 PNG — small, but genuinely decodable by a real engine. */
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+)
+
+/**
+ * The edit round trip in a real browser: a rename must reach the server and
+ * come back through the room list, and the avatar picker must put real bytes
+ * on the wire. jsdom can prove neither (ADR 0100).
+ */
+test('narrow: room settings save a rename and an avatar', async ({ page }) => {
+  await signIn(page)
+  await page.request.post('/__e2e/power-level?level=100')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(ROOM_URL)
+
+  await page.getByRole('button', { name: 'Open room information' }).click()
+  const panel = page.getByRole('complementary', { name: 'Room information' })
+  await expect(panel).toBeVisible()
+
+  const edit = panel.getByRole('button', { name: 'Edit' })
+  await expect(edit).toBeEnabled()
+  await edit.click()
+
+  await panel.getByRole('textbox', { name: 'Name' }).fill('Renamed In Browser')
+  await panel.getByRole('textbox', { name: 'Topic' }).fill('a browser topic')
+
+  // A real file, through the real picker: this is the part only a browser can
+  // exercise, and it is the path the avatar `upload_id` flow depends on.
+  await panel.getByLabel('Change avatar…').setInputFiles({
+    name: 'avatar.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    ),
+  })
+
+  await panel.getByRole('button', { name: 'Save' }).click()
+
+  // Poll for all three: the avatar is written last (a staged upload, then the
+  // claim that turns it into an mxc), so a poll waiting only on name/topic can
+  // pass while the avatar is still in flight — which is exactly how this raced
+  // on Firefox but not Chromium.
+  await expect
+    .poll(async () => {
+      const body = await (await page.request.get('/__e2e/room-settings')).json()
+      return {
+        name: body.data.name,
+        topic: body.data.topic,
+        avatar: String(body.data.avatarUrl ?? '').startsWith('mxc://hs/'),
+      }
+    })
+    .toEqual({
+      name: 'Renamed In Browser',
+      topic: 'a browser topic',
+      avatar: true,
+    })
+
+  // The rename reaches the UI, not just the server: the panel has left edit
+  // mode and its identity header shows the new name, which it can only have
+  // got from the refreshed room list.
+  await expect(panel.getByRole('button', { name: 'Edit' })).toBeVisible()
+  await expect(panel.locator('.room-info-identity-name')).toHaveText(
+    'Renamed In Browser',
+  )
+
+  // Restore the shared fixture: this mock server outlives the test, and the
+  // browser projects run in sequence against it, so a room left renamed here
+  // is a renamed room for the next engine's very first test.
+  await page.request.post('/__e2e/power-level?level=100')
+})
+
+test('a low power level cautions but does not block editing', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.request.post('/__e2e/power-level?level=0')
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.goto(ROOM_URL)
+
+  await page.getByRole('button', { name: 'Open room information' }).click()
+  const panel = page.getByRole('complementary', { name: 'Room information' })
+  await expect(panel).toContainText('appears as 0')
+  await expect(panel).toContainText('homeserver decides')
+
+  // Not blocked: this is exactly what a room-version-12 creator looks like
+  // over this API — infinite power, but absent from `users` and so resolved
+  // to `users_default`. Disabling here locked room owners out (#324).
+  const edit = panel.getByRole('button', { name: 'Edit' })
+  await expect(edit).toBeEnabled()
+  await edit.click()
+  await expect(panel.getByRole('textbox', { name: 'Name' })).toBeVisible()
+
+  // Leave the fixture as the other specs expect to find it.
+  await page.request.post('/__e2e/power-level?level=100')
+})
+
+/**
+ * The byte-level check, in a real engine. `file.type` is derived from the
+ * extension, so this file arrives as a perfectly valid `image/jpeg` and
+ * clears every cheap check — Axon's server accepts these too (verified: a
+ * 30-byte ASCII file staged fine as `image/jpeg`). Only actually decoding the
+ * bytes catches it, and only a real browser can decode.
+ */
+test('a file named like an image but corrupt is refused, not uploaded', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.request.post('/__e2e/power-level?level=100')
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.goto(ROOM_URL)
+
+  await page.getByRole('button', { name: 'Open room information' }).click()
+  const panel = page.getByRole('complementary', { name: 'Room information' })
+  const edit = panel.getByRole('button', { name: 'Edit' })
+  await expect(edit).toBeEnabled()
+  await edit.click()
+
+  await panel.getByLabel(/Change avatar/).setInputFiles({
+    name: 'holiday.jpg',
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from('this is definitely not a jpeg'),
+  })
+
+  // Scoped to the form: the panel's other sections render their own alerts
+  // (the e2e mock serves no `/info`, `/pinned` or `/upgrade`), so an
+  // unscoped alert lookup is ambiguous.
+  const formAlert = panel.locator('.room-settings-form').getByRole('alert')
+  await expect(formAlert).toContainText('could not be read')
+  await expect(formAlert).toContainText('holiday.jpg')
+
+  // Nothing was staged, so Save has nothing to do and the room's avatar on
+  // the server is untouched.
+  await expect(panel.getByRole('button', { name: 'Save' })).toBeDisabled()
+  const settings = await (await page.request.get('/__e2e/room-settings')).json()
+  expect(settings.data.avatarUrl).toBeNull()
+})
+
+/**
+ * Drag-and-drop in a real engine. jsdom's `DataTransfer` is hand-built in the
+ * unit tests, so only this proves a genuine drop reaches the same validated
+ * path the picker uses.
+ */
+test('an avatar can be dropped onto the room settings form', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.request.post('/__e2e/power-level?level=100')
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.goto(ROOM_URL)
+
+  await page.getByRole('button', { name: 'Open room information' }).click()
+  const panel = page.getByRole('complementary', { name: 'Room information' })
+  const edit = panel.getByRole('button', { name: 'Edit' })
+  await expect(edit).toBeEnabled()
+  await edit.click()
+
+  // Build a real DataTransfer in the page and drop it on the form.
+  const dataTransfer = await page.evaluateHandle(() => {
+    const data = new DataTransfer()
+    const png = Uint8Array.from(
+      atob(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      ),
+      (c) => c.charCodeAt(0),
+    )
+    data.items.add(new File([png], 'dropped.png', { type: 'image/png' }))
+    return data
+  })
+  await panel.locator('.room-settings-form').dispatchEvent('drop', {
+    dataTransfer,
+  })
+
+  await expect(panel.getByRole('button', { name: 'Save' })).toBeEnabled()
+
+  // The composer has its own drop target on `.room-stream`. The panel is a
+  // sibling of that pane, not a child, so this drop must not also stage an
+  // attachment to send into the room — which is what a page-wide drop target
+  // would have done (ADR 0065's reason for scoping drops per pane).
+  await expect(page.locator('.composer-attachment')).toHaveCount(0)
+
+  await panel.getByRole('button', { name: 'Save' }).click()
+
+  await expect
+    .poll(async () => {
+      const body = await (await page.request.get('/__e2e/room-settings')).json()
+      return String(body.data.avatarUrl ?? '').startsWith('mxc://hs/')
+    })
+    .toBe(true)
+
+  // Leave the shared mock fixture as the next test expects to find it: this
+  // server process outlives the test, and the projects run in sequence.
+  await page.request.post('/__e2e/power-level?level=100')
+})
+
+/**
+ * Viewing the avatar full size, and replacing it from that view. The replace
+ * hands the file to the edit form rather than writing it, so the user gets
+ * the same preview-then-Save step either entry point gives them.
+ */
+test('the room avatar opens full size and can be replaced from there', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.request.post('/__e2e/power-level?level=100')
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.goto(ROOM_URL)
+
+  // Give the room an avatar to view, through the UI's own path.
+  await page.getByRole('button', { name: 'Open room information' }).click()
+  const panel = page.getByRole('complementary', { name: 'Room information' })
+  const edit = panel.getByRole('button', { name: 'Edit' })
+  await expect(edit).toBeEnabled()
+  await edit.click()
+  await panel.getByLabel(/Change avatar/).setInputFiles({
+    name: 'first.png',
+    mimeType: 'image/png',
+    buffer: PNG_1X1,
+  })
+  await panel.getByRole('button', { name: 'Save' }).click()
+  await expect(edit).toBeVisible()
+
+  // The identity avatar is now a control that opens the image full size.
+  const view = panel.getByRole('button', {
+    name: /View the .* avatar at full size/,
+  })
+  await expect(view).toBeVisible()
+  await view.click()
+  const viewer = page.getByRole('dialog', { name: /avatar/ })
+  await expect(viewer).toBeVisible()
+  await expect(viewer.locator('img')).toBeVisible()
+
+  // Replacing from the viewer drops into the edit form with the new image
+  // staged — nothing is written until Save.
+  const before = await (await page.request.get('/__e2e/room-settings')).json()
+  await viewer
+    .getByTitle('Replace this avatar')
+    .locator('input[type="file"]')
+    .setInputFiles({
+      name: 'second.png',
+      mimeType: 'image/png',
+      buffer: PNG_1X1,
+    })
+
+  await expect(viewer).toHaveCount(0)
+  const save = panel.getByRole('button', { name: 'Save' })
+  await expect(save).toBeEnabled()
+
+  const midway = await (await page.request.get('/__e2e/room-settings')).json()
+  expect(midway.data.avatarUrl).toBe(before.data.avatarUrl)
+
+  await save.click()
+  await expect
+    .poll(async () => {
+      const body = await (await page.request.get('/__e2e/room-settings')).json()
+      return body.data.avatarUrl !== before.data.avatarUrl
+    })
+    .toBe(true)
+
+  await page.request.post('/__e2e/power-level?level=100')
+})

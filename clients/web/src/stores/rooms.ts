@@ -33,6 +33,14 @@ export interface RoomUnreadCounts {
 }
 
 export type RoomMembershipResult = { ok: true } | { ok: false; message: string }
+/**
+ * M19d room-settings write. Unlike `RoomMembershipResult` this carries the
+ * error `code`, because the caller needs to tell a `forbidden` (the power
+ * level was not enough after all — see `room-power`'s advisory gate) from an
+ * ordinary failure.
+ */
+export type RoomSettingsResult =
+  { ok: true } | { ok: false; message: string; code: string | null }
 export type RoomEntryResult =
   | { ok: true; roomId: string }
   | { ok: false; message: string; code: string | null }
@@ -108,6 +116,29 @@ export interface RoomsStore {
   leaveRoom(accountId: string, roomId: string): Promise<RoomMembershipResult>
   /** Forget one left/banned room through M19b, then refresh room state. */
   forgetRoom(accountId: string, roomId: string): Promise<RoomMembershipResult>
+  /** Set this room's name through M19d. An empty string clears it. */
+  setRoomName(
+    accountId: string,
+    roomId: string,
+    name: string,
+  ): Promise<RoomSettingsResult>
+  /** Set this room's topic through M19d. An empty string clears it. */
+  setRoomTopic(
+    accountId: string,
+    roomId: string,
+    topic: string,
+  ): Promise<RoomSettingsResult>
+  /** Claim an already-staged upload as this room's avatar through M19d. */
+  setRoomAvatar(
+    accountId: string,
+    roomId: string,
+    uploadId: string,
+  ): Promise<RoomSettingsResult>
+  /** Clear this room's avatar through M19d. */
+  removeRoomAvatar(
+    accountId: string,
+    roomId: string,
+  ): Promise<RoomSettingsResult>
   /** Join a room by id or alias through M19c, then refresh room state. */
   joinRoom(
     accountId: string,
@@ -192,6 +223,20 @@ export function createRoomsStore(
   const members = new Map<string, Promise<MemberDto[]>>()
   /** Rooms this session successfully left/forgot before sync caught up. */
   const locallyHiddenRooms = new Set<string>()
+  /**
+   * Monotonic counter of live metadata patches, and the value each room was
+   * last patched at. `doRefresh` compares against the value it captured when
+   * it started, so a response that predates a frame cannot overwrite it.
+   *
+   * The race this closes: setting an avatar returns before the homeserver has
+   * told Axon about it (measured at ~400-600ms), so the fallback refresh fired
+   * on save reads a room with no avatar. The `m.room.avatar` frame lands
+   * meanwhile and patches it in — and then the older response arrives and, in
+   * replacing the list wholesale, erases it. The user sees their upload
+   * silently do nothing.
+   */
+  let metadataPatchSeq = 0
+  const metadataPatchedAt = new Map<string, number>()
   /**
    * Room creation can return before sync has reflected the m.room.name/topic
    * events into `/v1/rooms`. Keep the user's explicit create-room metadata as
@@ -307,6 +352,39 @@ export function createRoomsStore(
       return { ...room, name, topic }
     })
     return changed ? next : current
+  }
+
+  /**
+   * Keep name/topic/avatar from a live frame that arrived after this refresh
+   * was issued. Only those three fields: everything else on the row (activity,
+   * unread counts, membership) is the server's to state, and a stale value
+   * there self-corrects on the next refresh rather than looking like a write
+   * that did not happen.
+   */
+  function keepFresherMetadata(
+    incoming: RoomDto[],
+    seqAtStart: number,
+  ): RoomDto[] {
+    if (metadataPatchSeq === seqAtStart) {
+      return incoming
+    }
+    const live = new Map(rooms.value.map((room) => [roomKey(room), room]))
+    return incoming.map((room) => {
+      const key = roomKey(room)
+      if ((metadataPatchedAt.get(key) ?? 0) <= seqAtStart) {
+        return room
+      }
+      const patched = live.get(key)
+      if (patched === undefined) {
+        return room
+      }
+      return {
+        ...room,
+        name: patched.name,
+        topic: patched.topic,
+        avatar_url: patched.avatar_url,
+      }
+    })
   }
 
   async function resolveUnnamedTitles(
@@ -566,6 +644,8 @@ export function createRoomsStore(
     // it has ended belongs to a reader who is no longer here (WCR-03's
     // request-generation guard, applied to identity rather than to ordering).
     const generation = sessionGeneration
+    // Anything patched after this point is newer than whatever comes back.
+    const metadataSeqAtStart = metadataPatchSeq
     try {
       const { data, error: apiError } = await api.GET('/v1/rooms')
       if (generation !== sessionGeneration) {
@@ -583,8 +663,11 @@ export function createRoomsStore(
         error.value = apiErrorMessage(apiError)
         return
       }
-      const visibleRooms = applyLocalRoomMetadata(
-        data.data.filter((room) => !locallyHiddenRooms.has(roomKey(room))),
+      const visibleRooms = keepFresherMetadata(
+        applyLocalRoomMetadata(
+          data.data.filter((room) => !locallyHiddenRooms.has(roomKey(room))),
+        ),
+        metadataSeqAtStart,
       )
       // Wholesale replacement, not a merge into the cached set: a room left or
       // forgotten on another client has to disappear (guardrail 5's
@@ -675,6 +758,7 @@ export function createRoomsStore(
     members.clear()
     locallyHiddenRooms.clear()
     locallyCreatedRoomMetadata.clear()
+    metadataPatchedAt.clear()
     settled = false
     stale.value = false
     error.value = null
@@ -788,6 +872,84 @@ export function createRoomsStore(
   ): Promise<RoomMembershipResult> {
     return membershipMutation(accountId, roomId, () =>
       api.POST('/v1/accounts/{account_id}/rooms/{room_id}/forget', {
+        params: { path: { account_id: accountId, room_id: roomId } },
+      }),
+    )
+  }
+
+  /**
+   * An M19d room-settings write. Shaped like `membershipMutation` but without
+   * its `hideRoomLocally` step (that only makes sense for leave/forget) and
+   * without awaiting a refresh: the resulting `m.room.*` state event comes
+   * back over the live socket and `noteTimelineEvent` patches the row, so
+   * blocking the Save button on a whole room-list fetch would be pure latency.
+   * Callers issuing several field writes fire one background `refresh()` once
+   * they have all settled, as the socket-down fallback.
+   */
+  async function settingsMutation(
+    call: () => Promise<{ error?: unknown }>,
+  ): Promise<RoomSettingsResult> {
+    try {
+      const { error: apiError } = await call()
+      if (apiError !== undefined) {
+        const message = apiErrorMessage(apiError)
+        error.value = message
+        return { ok: false, message, code: apiErrorCode(apiError) }
+      }
+      error.value = null
+      return { ok: true }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      error.value = message
+      return { ok: false, message, code: null }
+    }
+  }
+
+  function setRoomName(
+    accountId: string,
+    roomId: string,
+    name: string,
+  ): Promise<RoomSettingsResult> {
+    return settingsMutation(() =>
+      api.PUT('/v1/accounts/{account_id}/rooms/{room_id}/name', {
+        params: { path: { account_id: accountId, room_id: roomId } },
+        body: { name },
+      }),
+    )
+  }
+
+  function setRoomTopic(
+    accountId: string,
+    roomId: string,
+    topic: string,
+  ): Promise<RoomSettingsResult> {
+    return settingsMutation(() =>
+      api.PUT('/v1/accounts/{account_id}/rooms/{room_id}/topic', {
+        params: { path: { account_id: accountId, room_id: roomId } },
+        body: { topic },
+      }),
+    )
+  }
+
+  function setRoomAvatar(
+    accountId: string,
+    roomId: string,
+    uploadId: string,
+  ): Promise<RoomSettingsResult> {
+    return settingsMutation(() =>
+      api.PUT('/v1/accounts/{account_id}/rooms/{room_id}/avatar', {
+        params: { path: { account_id: accountId, room_id: roomId } },
+        body: { upload_id: uploadId },
+      }),
+    )
+  }
+
+  function removeRoomAvatar(
+    accountId: string,
+    roomId: string,
+  ): Promise<RoomSettingsResult> {
+    return settingsMutation(() =>
+      api.DELETE('/v1/accounts/{account_id}/rooms/{room_id}/avatar', {
         params: { path: { account_id: accountId, room_id: roomId } },
       }),
     )
@@ -995,6 +1157,32 @@ export function createRoomsStore(
     noteActivityRoom(accountId, roomId, ts)
   }
 
+  /**
+   * Patch one room's `name`/`topic`/`avatar_url` from a live `m.room.*` state
+   * event, so a rename lands in the room list and the room header without
+   * waiting for the next full refresh. Without this the change is invisible
+   * until the socket reconnects — including a rename this client just made.
+   *
+   * A signal write, not the in-place mutation `noteActivityRoom` uses for the
+   * newest row: these events are rare, and the row genuinely has to re-render.
+   */
+  function applyRoomMetadata(index: number, event: EventDto): void {
+    const patch = roomMetadataPatch(event)
+    if (patch === null) {
+      return
+    }
+    const current = rooms.value
+    const room = current[index]
+    if (room[patch.field] === patch.value) {
+      return
+    }
+    metadataPatchSeq += 1
+    metadataPatchedAt.set(roomKey(room), metadataPatchSeq)
+    rooms.value = current.map((entry, i) =>
+      i === index ? { ...entry, [patch.field]: patch.value } : entry,
+    )
+  }
+
   function noteTimelineEvent(event: EventDto): void {
     if (!isPreviewEvent(event)) {
       // Membership changes, redactions, state events, reactions, etc. must
@@ -1004,9 +1192,12 @@ export function createRoomsStore(
       // needs discovering even from a non-content event (e.g. the join that
       // first tells us about a freshly joined, message-less room), so that
       // path runs regardless of event type.
-      if (findRoomIndex(event.account_id, event.room_id) === -1) {
+      const index = findRoomIndex(event.account_id, event.room_id)
+      if (index === -1) {
         void refresh()
+        return
       }
+      applyRoomMetadata(index, event)
       return
     }
     const room = noteActivityRoom(
@@ -1054,6 +1245,10 @@ export function createRoomsStore(
     resetSession,
     leaveRoom,
     forgetRoom,
+    setRoomName,
+    setRoomTopic,
+    setRoomAvatar,
+    removeRoomAvatar,
     joinRoom,
     knockRoom,
     createRoom,
@@ -1155,6 +1350,63 @@ function clearTitleCache(storage: Storage): void {
     // Storage-denied: same policy as `saveTitleCache` — a failure here must not
     // reject sign-out. The in-memory wipe still happens; only an already-broken
     // storage can leave the record behind.
+  }
+}
+
+/** One room-metadata field a live `m.room.*` state event sets. */
+export type RoomMetadataPatch =
+  | { field: 'name'; value: string | null }
+  | { field: 'topic'; value: string | null }
+  | { field: 'avatar_url'; value: string | null }
+
+/**
+ * The `RoomDto` field a live state event changes, or `null` if it changes none.
+ *
+ * Shapes verified against a live homeserver rather than assumed (M19-W6), since
+ * `EventDto.content` is raw Matrix content passed straight through:
+ *
+ * - `m.room.name`   -> `{"name": "x"}`,  cleared as `{"name": ""}`
+ * - `m.room.topic`  -> `{"topic": "x", "m.topic": {...}}`, cleared as `{"topic": ""}`
+ * - `m.room.avatar` -> `{"url": "mxc://...", "info": {...}}`, cleared as `{"url": null}`
+ *
+ * `topic` is read rather than the richer `m.topic` block beside it: the spec
+ * requires `topic` to duplicate that block's plain text, and `RoomDto.topic`
+ * is plain text.
+ *
+ * A **state** event's content is the complete new state, so a missing key
+ * means "unset", not "unchanged" — that is why an absent value maps to `null`
+ * rather than being skipped, and it keeps this correct for other clients that
+ * clear an avatar with `{}` instead of the `{"url": null}` Axon itself sends.
+ * Content that is absent entirely (a redacted event) is the one genuinely
+ * unknown case, and is skipped.
+ */
+export function roomMetadataPatch(event: EventDto): RoomMetadataPatch | null {
+  // These three are *singleton* state: the room's name is the `m.room.name`
+  // event with an empty state key, and only that one. A same-type event under
+  // another state key is not canonical and must not rename or re-avatar the
+  // room — anyone able to send state could otherwise spoof room metadata in
+  // every client that trusted the type alone. The server's own projections
+  // already require the empty state key; this matches them.
+  if (event.state_key !== '') {
+    return null
+  }
+  const content = event.content
+  if (typeof content !== 'object' || content === null) {
+    return null
+  }
+  const read = (key: string): string | null => {
+    const value = (content as Record<string, unknown>)[key]
+    return typeof value === 'string' && value !== '' ? value : null
+  }
+  switch (event.type) {
+    case 'm.room.name':
+      return { field: 'name', value: read('name') }
+    case 'm.room.topic':
+      return { field: 'topic', value: read('topic') }
+    case 'm.room.avatar':
+      return { field: 'avatar_url', value: read('url') }
+    default:
+      return null
   }
 }
 
