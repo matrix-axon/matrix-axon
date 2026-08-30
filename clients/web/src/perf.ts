@@ -15,7 +15,12 @@ export function setPerfEnabled(on: boolean): void {
     return
   }
   enabled = on
-  perfActive.value = on
+  if (!on) {
+    // Recording off means there is nothing for the readout to draw, whatever
+    // its own setting says. Turning recording back on does not re-show it —
+    // that is `setPerfOverlay`'s to decide.
+    perfActive.value = false
+  }
   try {
     if (on) {
       window.sessionStorage.setItem(STORAGE_KEY, '1')
@@ -81,8 +86,24 @@ export interface PerfOverlayEntry {
  */
 export const perfOverlayEntries = signal<readonly PerfOverlayEntry[]>([])
 
-/** Reactive mirror of `perfEnabled()`, so the readout can mount and unmount. */
+/**
+ * Whether the on-screen readout is drawn — **not** whether marks are recorded.
+ *
+ * The two were one flag, which made the overlay the price of instrumentation:
+ * recording during ordinary use meant a box of numbers over the app all day.
+ * Now that summaries are kept on disk and can be read back afterwards, the
+ * readout is the optional half, and recording quietly in the background is the
+ * useful default for catching a slow load nobody was watching for.
+ */
 export const perfActive = signal(false)
+
+/**
+ * Show or hide the readout. Ignored while recording is off, since there would
+ * be nothing to draw.
+ */
+export function setPerfOverlay(on: boolean): void {
+  perfActive.value = on && perfEnabled()
+}
 
 export function perfEnabled(): boolean {
   if (enabled !== null) {
@@ -90,6 +111,8 @@ export function perfEnabled(): boolean {
   }
   const params = new URLSearchParams(window.location.search)
   if (params.get('perf') === '1') {
+    // The URL flag is the harness and one-off-session path, and it means "show
+    // me everything" — readout included, without a second setting to find.
     enabled = true
     perfActive.value = true
     try {
@@ -104,7 +127,6 @@ export function perfEnabled(): boolean {
   } catch {
     enabled = false
   }
-  perfActive.value = enabled
   return enabled
 }
 
@@ -140,6 +162,32 @@ export function perfMark(
     scheduleTransitionSummary(at)
   }
   noteRoomOpen(name, at, detail)
+  if (sink !== null) {
+    try {
+      sink(name, at, detail)
+    } catch {
+      // A sink must never be able to break the app it is measuring.
+    }
+  }
+}
+
+/**
+ * Where summary marks go to be persisted, registered by the composition root.
+ *
+ * An inverted dependency on purpose: this module is imported by stores and by
+ * `RoomList`, so it cannot reach the service graph without a cycle. The sink
+ * decides for itself what it will keep — see `PERSISTED_MARKS`.
+ */
+type TelemetrySinkFn = (
+  name: string,
+  at: number,
+  detail: Record<string, string | number | boolean | null> | undefined,
+) => void
+
+let sink: TelemetrySinkFn | null = null
+
+export function setTelemetrySink(fn: TelemetrySinkFn | null): void {
+  sink = fn
 }
 
 interface AxonMark {
@@ -313,6 +361,12 @@ function summariseBoot(): void {
     // dominates, none of the network-side findings apply and the cache cannot
     // help — it is not even read until `boot` has elapsed.
     html: assets.html,
+    stall: assets.stall,
+    dns: assets.dns,
+    tcp: assets.tcp,
+    tls: assets.tls,
+    ttfb: assets.ttfb,
+    hxfer: assets.hxfer,
     js: assets.js,
     jskb: assets.bytes === null ? null : Math.round(assets.bytes / 1000),
     exec:
@@ -993,28 +1047,35 @@ function shortRoute(url: string): string {
  * Safari's, so its first launch is cold on both counts however much the same
  * site has been used in the browser.
  */
-let bootAssets: {
+interface BootAssets {
   html: number | null
   js: number | null
   bytes: number | null
-} | null = null
+  /** The document fetch decomposed — see `documentPhases`. */
+  stall: number | null
+  dns: number | null
+  tcp: number | null
+  tls: number | null
+  ttfb: number | null
+  hxfer: number | null
+}
 
-function captureBootAssets(): {
-  html: number | null
-  js: number | null
-  bytes: number | null
-} {
+let bootAssets: BootAssets | null = null
+
+function captureBootAssets(): BootAssets {
   if (bootAssets !== null) {
     return bootAssets
   }
   let html: number | null = null
   let js: number | null = null
   let bytes: number | null = null
+  let phases = documentPhases(undefined)
   try {
     const [navigation] = performance.getEntriesByType('navigation')
-    const responseEnd = (navigation as PerformanceNavigationTiming | undefined)
-      ?.responseEnd
+    const entry = navigation as PerformanceNavigationTiming | undefined
+    const responseEnd = entry?.responseEnd
     html = typeof responseEnd === 'number' ? Math.round(responseEnd) : null
+    phases = documentPhases(entry)
     const boot = performance
       .getEntriesByType('resource')
       .filter((entry): entry is PerformanceResourceTiming =>
@@ -1024,17 +1085,72 @@ function captureBootAssets(): {
       js = Math.round(
         boot.reduce((latest, entry) => Math.max(latest, entry.responseEnd), 0),
       )
-      const sized = boot.filter((entry) => entry.transferSize > 0)
-      bytes =
-        sized.length === 0
-          ? null
-          : sized.reduce((total, entry) => total + entry.transferSize, 0)
+      bytes = boot.reduce((total, entry) => total + entry.transferSize, 0)
     }
   } catch {
     // No navigation or resource timing; the rest of the summary still reads.
   }
-  bootAssets = { html, js, bytes }
+  bootAssets = { html, js, bytes, ...phases }
   return bootAssets
+}
+
+/**
+ * The document fetch, broken into the phases that can dominate it.
+ *
+ * `html` on its own says the document took 41 seconds and not why — the same
+ * shape of gap `boot` had before it was decomposed. Each of these fails for a
+ * different reason and has a different fix, so they are worth separating:
+ *
+ * - `stall` — navigation start to the first DNS work. A sleeping cell radio
+ *   negotiating its way back onto the network lands here, and nothing the app
+ *   or the server does can shorten it.
+ * - `dns`, `tcp`, `tls` — name resolution and connection setup. A protocol
+ *   negotiation that has to time out and retry (an HTTP/3 attempt on a link
+ *   where UDP is degraded, falling back to TCP) shows up in these two rather
+ *   than in the request itself.
+ * - `ttfb` — the server's own think-time, which the room-list and room-open
+ *   figures alongside can be compared against: fast requests after a slow
+ *   document mean the server was never the problem.
+ * - `hxfer` — moving the document's bytes, which for a small HTML shell should
+ *   be negligible on any link that is working at all.
+ */
+function documentPhases(entry: PerformanceNavigationTiming | undefined): {
+  stall: number | null
+  dns: number | null
+  tcp: number | null
+  tls: number | null
+  ttfb: number | null
+  hxfer: number | null
+} {
+  if (entry === undefined) {
+    return {
+      stall: null,
+      dns: null,
+      tcp: null,
+      tls: null,
+      ttfb: null,
+      hxfer: null,
+    }
+  }
+  const span = (from: number, to: number): number | null =>
+    // A phase that did not happen reports both marks as zero — a reused
+    // connection has no DNS or handshake — and reporting that as a real 0 is
+    // right, but a *partial* entry must not turn into a negative span.
+    typeof from === 'number' && typeof to === 'number' && to >= from
+      ? Math.round(to - from)
+      : null
+  return {
+    stall: span(entry.fetchStart, entry.domainLookupStart),
+    dns: span(entry.domainLookupStart, entry.domainLookupEnd),
+    tcp: span(entry.connectStart, entry.connectEnd),
+    // Zero when the handshake was not part of this connection.
+    tls:
+      entry.secureConnectionStart > 0
+        ? span(entry.secureConnectionStart, entry.connectEnd)
+        : null,
+    ttfb: span(entry.requestStart, entry.responseStart),
+    hxfer: span(entry.responseStart, entry.responseEnd),
+  }
 }
 
 /** Scripts and stylesheets, which are what the boot actually waits on. */

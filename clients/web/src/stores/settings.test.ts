@@ -29,6 +29,8 @@ describe('createSettingsStore', () => {
       recentReactions: [],
       developerMode: false,
       perfMarks: false,
+      persistTelemetry: false,
+      perfOverlay: true,
       pageScrollReset: false,
       appBadgeEnabled: true,
       cacheRoomList: true,

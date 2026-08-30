@@ -42,6 +42,13 @@ H1 and H2 are the leading candidates and are not mutually exclusive.
 Enable **Settings → Debug → Performance instrumentation** (not `?perf=1`: that flag latches before any store exists and can silently mask the ordering, see ADR 0077).
 Each cold room open then emits one summary line plus up to three request lines.
 
+**Turn off "Show the live readout on screen" and turn on "Keep performance summaries on this device".**
+The overlay only helps when someone is watching, and the loads worth capturing rarely happen while a screen recording is running.
+That combination is what makes instrumentation usable during ordinary use: the summaries are recorded and kept in IndexedDB with no box of numbers over the app, and **Copy telemetry** puts them on the clipboard afterwards — paste them into a report instead of screenshotting.
+Leave the readout on only when you intend to watch for something live.
+Timings only: the marks that carry room and account identifiers are never written, and any identifier-shaped value is refused even from an allow-listed mark (`stores/telemetry.ts`).
+Cleared on sign-out with the rest of the cache.
+
 ```
 boot:room-open  phase=settled rows=980 net=940 q=780 conn=0 ttfb=120 xfer=40 reqs=31 kb=402 list=3120 pending=null members=8800 threads=610 people=4200 attempts=1 warm=false
 boot:room-open:req  route=accounts/{account}/rooms/{id}/members total=8800 wait=7900 conn=0 ttfb=120 xfer=780 bytes=41000 gzip=true proto=h2 cors=false
@@ -56,6 +63,9 @@ The `:req` lines below add the other requests it shared the link with.
 - `list` / `members` / `threads` — when the three fired beside it settled.
   **`net` landing well after these is H1.**
 - `people` — member count, since that list is unpaginated.
+- `stall` / `dns` / `tcp` / `tls` / `ttfb` / `hxfer` (on `boot:room-list`) — the **document fetch** decomposed, which on a poor real-world link is the single largest term in a cold start.
+  `stall` is navigation start to the first DNS work, where a sleeping cell radio negotiating back onto the network lands; `tcp`/`tls` are connection setup, where a protocol negotiation that has to time out and retry shows up; `ttfb` is the server's think-time, which can be compared against the room-list and room-open figures on the same capture.
+  Fast requests after a slow document mean the server was never the problem.
 - `html` / `js` / `jskb` / `exec` (on `boot:room-list`) — startup decomposed.
   `html` is when the document arrived, `js` when the last script or stylesheet did, `jskb` what those cost on the wire, and `exec` the main-thread time after them: parse, execute, first render, service construction.
   **Every request waits on this**, so when `boot` dominates, none of the network findings apply and the cache cannot help — it is not read until `boot` has elapsed.

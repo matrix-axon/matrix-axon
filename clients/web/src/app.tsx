@@ -38,7 +38,13 @@ import { SettingsPage } from './pages/SettingsPage'
 import { applyAppBadge } from './app-badge'
 import { BUILD_INFO } from './build-info'
 import { startAutoRefresh } from './update-refresh'
-import { perfEnabled, perfMark, perfMarkFrames, setPerfEnabled } from './perf'
+import {
+  perfEnabled,
+  perfMark,
+  perfMarkFrames,
+  setPerfEnabled,
+  setPerfOverlay,
+} from './perf'
 import { setupInstallPromptCapture } from './install-prompt'
 import { SLASH_COMMAND } from './slash-commands'
 import {
@@ -143,6 +149,11 @@ export function App({ services }: { services?: AppServices }) {
       setPerfEnabled(svc.settings.perfMarks.value)
     }
   }, [svc, svc.settings.perfMarks.value])
+  // The readout is a separate choice from recording, and unlike recording it
+  // is not latched: it can be shown and hidden within a session.
+  useEffect(() => {
+    setPerfOverlay(svc.settings.perfOverlay.value)
+  }, [svc, svc.settings.perfOverlay.value, svc.settings.perfMarks.value])
   useVisualViewportShell(svc.settings)
   useStandaloneKeyboardAccessoryInset()
   useInstallPromptCapture()

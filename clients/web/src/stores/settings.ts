@@ -119,6 +119,24 @@ export interface SettingsV1 {
    */
   perfMarks: boolean
   /**
+   * Whether performance summaries are kept on disk as well as on screen.
+   *
+   * Separate from `perfMarks` deliberately, and off by default: recording
+   * numbers in memory and writing them to the browser profile are different
+   * choices, and only the second one outlives the session. Same split-default
+   * reasoning as ADR 0085's room-list/timeline caches.
+   */
+  persistTelemetry: boolean
+  /**
+   * Whether the live readout is drawn over the app while instrumentation runs.
+   *
+   * On by default, which is the behaviour before it was a separate setting.
+   * Turning it off is what makes instrumentation usable during *ordinary* use:
+   * the summaries still record and still persist, so a slow load nobody was
+   * watching for is captured without a box of numbers over the app all day.
+   */
+  perfOverlay: boolean
+  /**
    * Whether the reactive `window.scroll` reset in `app.tsx` corrects the iOS
    * soft-keyboard document drift. **Off by default**: a mark-proven A/B on a
    * real iPhone showed the correction was itself driving the jitter it was
@@ -175,6 +193,8 @@ const DEFAULTS: SettingsV1 = {
   recentReactions: [],
   developerMode: false,
   perfMarks: false,
+  persistTelemetry: false,
+  perfOverlay: true,
   pageScrollReset: false,
   appBadgeEnabled: true,
   cacheRoomList: true,
@@ -321,6 +341,14 @@ function parse(raw: string | null): SettingsV1 {
         : DEFAULTS.developerMode,
     perfMarks:
       typeof v1.perfMarks === 'boolean' ? v1.perfMarks : DEFAULTS.perfMarks,
+    persistTelemetry:
+      typeof v1.persistTelemetry === 'boolean'
+        ? v1.persistTelemetry
+        : DEFAULTS.persistTelemetry,
+    perfOverlay:
+      typeof v1.perfOverlay === 'boolean'
+        ? v1.perfOverlay
+        : DEFAULTS.perfOverlay,
     pageScrollReset:
       typeof v1.pageScrollReset === 'boolean'
         ? v1.pageScrollReset
@@ -356,6 +384,8 @@ export interface SettingsStore {
   recentReactions: Signal<string[]>
   developerMode: Signal<boolean>
   perfMarks: Signal<boolean>
+  persistTelemetry: Signal<boolean>
+  perfOverlay: Signal<boolean>
   pageScrollReset: Signal<boolean>
   appBadgeEnabled: Signal<boolean>
   cacheRoomList: Signal<boolean>
@@ -409,6 +439,8 @@ export function createSettingsStore(
   const recentReactions = signal<string[]>(initial.recentReactions)
   const developerMode = signal<boolean>(initial.developerMode)
   const perfMarks = signal<boolean>(initial.perfMarks)
+  const persistTelemetry = signal<boolean>(initial.persistTelemetry)
+  const perfOverlay = signal<boolean>(initial.perfOverlay)
   const pageScrollReset = signal<boolean>(initial.pageScrollReset)
   const appBadgeEnabled = signal<boolean>(initial.appBadgeEnabled)
   const cacheRoomList = signal<boolean>(initial.cacheRoomList)
@@ -435,6 +467,8 @@ export function createSettingsStore(
       recentReactions: recentReactions.value,
       developerMode: developerMode.value,
       perfMarks: perfMarks.value,
+      persistTelemetry: persistTelemetry.value,
+      perfOverlay: perfOverlay.value,
       pageScrollReset: pageScrollReset.value,
       appBadgeEnabled: appBadgeEnabled.value,
       cacheRoomList: cacheRoomList.value,
@@ -467,6 +501,8 @@ export function createSettingsStore(
     recentReactions,
     developerMode,
     perfMarks,
+    persistTelemetry,
+    perfOverlay,
     pageScrollReset,
     appBadgeEnabled,
     cacheRoomList,

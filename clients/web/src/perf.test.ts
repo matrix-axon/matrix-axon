@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  perfActive,
   perfMark,
   perfMarkBootRoomList,
   perfOverlayEntries,
   setPerfEnabled,
+  setPerfOverlay,
 } from './perf'
 
 /** The detail of the one `transition:back` mark, or `null` if none was made. */
@@ -135,6 +137,90 @@ describe('room-list boot summary (ADR 0085 phase 2)', () => {
     expect(summary!.boot).not.toBeNull()
   })
 
+  it('splits the document fetch into the phases that can dominate it', async () => {
+    // Measured on a real poor 5G link: the document alone took 41.6 s of a
+    // 44 s cold start, with everything after it — cached assets, 34 ms of
+    // execution, and room opens at 150-708 ms — perfectly healthy. `html`
+    // said so and could not say why, which is the same gap `boot` had.
+    const original = performance.getEntriesByType.bind(performance)
+    vi.spyOn(performance, 'getEntriesByType').mockImplementation((type) => {
+      if (type === 'navigation') {
+        return [
+          {
+            type: 'navigate',
+            fetchStart: 10,
+            domainLookupStart: 1_000,
+            domainLookupEnd: 1_200,
+            connectStart: 1_200,
+            secureConnectionStart: 1_500,
+            connectEnd: 40_000,
+            requestStart: 40_000,
+            responseStart: 41_500,
+            responseEnd: 41_605,
+          },
+        ] as unknown as PerformanceEntryList
+      }
+      return type === 'resource' ? [] : original(type)
+    })
+    try {
+      perfMark('rooms:cache:read:start')
+      perfMark('rooms:refresh:end', { ok: true, rooms: 2 })
+      perfMarkBootRoomList()
+      await frames()
+
+      const summary = bootSummary()
+      expect(summary!.stall).toBe(990)
+      expect(summary!.dns).toBe(200)
+      // 38.8 s inside connection setup, which is where a protocol negotiation
+      // that has to time out and retry lands — not in the request.
+      expect(summary!.tcp).toBe(38_800)
+      expect(summary!.tls).toBe(38_500)
+      expect(summary!.ttfb).toBe(1_500)
+      expect(summary!.hxfer).toBe(105)
+      expect(summary!.jskb).toBeNull()
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('reports a reused connection as no handshake rather than a bad span', async () => {
+    const original = performance.getEntriesByType.bind(performance)
+    vi.spyOn(performance, 'getEntriesByType').mockImplementation((type) => {
+      if (type === 'navigation') {
+        return [
+          {
+            type: 'navigate',
+            fetchStart: 0,
+            domainLookupStart: 0,
+            domainLookupEnd: 0,
+            connectStart: 0,
+            // Zero means the handshake was not part of this connection.
+            secureConnectionStart: 0,
+            connectEnd: 0,
+            requestStart: 5,
+            responseStart: 60,
+            responseEnd: 62,
+          },
+        ] as unknown as PerformanceEntryList
+      }
+      return type === 'resource' ? [] : original(type)
+    })
+    try {
+      perfMark('rooms:cache:read:start')
+      perfMark('rooms:refresh:end', { ok: true, rooms: 2 })
+      perfMarkBootRoomList()
+      await frames()
+
+      const summary = bootSummary()
+      expect(summary!.dns).toBe(0)
+      expect(summary!.tcp).toBe(0)
+      expect(summary!.tls).toBeNull()
+      expect(summary!.ttfb).toBe(55)
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
   it('splits startup into assets arriving and the main thread after', async () => {
     // `boot` alone cannot say whether a slow startup is a big download or slow
     // execution, and those have nothing in common as fixes. Measured on a
@@ -185,6 +271,37 @@ describe('room-list boot summary (ADR 0085 phase 2)', () => {
       // `exec` is main-thread time after the assets were in, so it must be
       // measured from `js` rather than from navigation start.
       expect(summary!.exec).toBe((summary!.boot as number) - 1200)
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('reports a full HTTP-cache hit as zero bytes, not missing timing data', async () => {
+    const original = performance.getEntriesByType.bind(performance)
+    vi.spyOn(performance, 'getEntriesByType').mockImplementation((type) => {
+      if (type === 'resource') {
+        return [
+          {
+            name: 'https://a.example/assets/index-abc.js',
+            responseEnd: 120,
+            transferSize: 0,
+          },
+          {
+            name: 'https://a.example/assets/index-abc.css',
+            responseEnd: 90,
+            transferSize: 0,
+          },
+        ] as unknown as PerformanceEntryList
+      }
+      return type === 'navigation' ? [] : original(type)
+    })
+    try {
+      perfMark('rooms:cache:read:start')
+      perfMark('rooms:refresh:end', { ok: true, rooms: 2 })
+      perfMarkBootRoomList()
+      await frames()
+
+      expect(bootSummary()!.jskb).toBe(0)
     } finally {
       vi.restoreAllMocks()
     }
@@ -838,5 +955,49 @@ describe('room-open summary', () => {
     } finally {
       vi.restoreAllMocks()
     }
+  })
+})
+
+describe('readout visibility', () => {
+  afterEach(() => {
+    setPerfOverlay(false)
+    setPerfEnabled(false)
+  })
+
+  it('records with the readout hidden, which is the ordinary-use case', () => {
+    // The two were one flag, so instrumentation cost a box of numbers over the
+    // app all day. Recording has to work without it, or nobody leaves it on
+    // long enough to catch a slow load they were not watching for.
+    setPerfEnabled(true)
+    setPerfOverlay(false)
+    expect(perfActive.value).toBe(false)
+
+    perfMark('boot:room-open', { rows: 5 })
+
+    expect(
+      perfOverlayEntries.value.some((entry) => entry.name === 'boot:room-open'),
+    ).toBe(true)
+  })
+
+  it('refuses to show a readout with nothing behind it', () => {
+    // Recording off means there is nothing to draw, whatever the setting says.
+    setPerfEnabled(false)
+    setPerfOverlay(true)
+    expect(perfActive.value).toBe(false)
+  })
+
+  it('can be shown and hidden within one session', () => {
+    setPerfEnabled(true)
+    setPerfOverlay(true)
+    expect(perfActive.value).toBe(true)
+    setPerfOverlay(false)
+    expect(perfActive.value).toBe(false)
+  })
+
+  it('hides the readout when recording stops', () => {
+    setPerfEnabled(true)
+    setPerfOverlay(true)
+    setPerfEnabled(false)
+    expect(perfActive.value).toBe(false)
   })
 })

@@ -30,6 +30,7 @@ import { createEphemeralSender } from '../stores/ephemeral-sender'
 import { createMediaService } from '../media/media-service'
 import { createLiveConnection } from '../stores/live-connection'
 import { cacheNamespace, createMemoryCacheStore } from '../stores/cache-store'
+import { createTelemetryStore } from '../stores/telemetry'
 import { createRoomListCache } from '../stores/room-list-cache'
 import { createInvitesStore } from '../stores/invites'
 import { createRoomsStore } from '../stores/rooms'
@@ -120,6 +121,10 @@ export function testServices(
   })
   const qr = options.qr ?? createBrowserQrAdapter()
   const cache = options.cache ?? createMemoryCacheStore()
+  const telemetry = createTelemetryStore({
+    cache,
+    enabled: () => false,
+  })
   const rooms = createRoomsStore(
     api,
     storage,
@@ -182,6 +187,7 @@ export function testServices(
     updates,
     timelines,
     cache,
+    telemetry,
     attachments,
     settings,
     accounts,

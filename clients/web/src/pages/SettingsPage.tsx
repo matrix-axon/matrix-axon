@@ -17,6 +17,7 @@ import {
   registerMatrixProtocolHandler,
 } from '../matrix-protocol'
 import { browserReloadEnvironment, reloadNow } from '../reload'
+import { formatTelemetry } from '../stores/telemetry'
 import { useServices } from '../services'
 import { currentPlatform, isApplePlatform } from '../shortcuts'
 import type {
@@ -327,6 +328,92 @@ function UpdateCheckControl() {
  * Settings stays a user-facing page; these three exist to diagnose a device,
  * not to configure day-to-day use.
  */
+/**
+ * Keeping the performance summaries, and getting them off the device.
+ *
+ * The overlay only helps when someone is watching: the slow load this
+ * instrumentation was built for has never happened while a screen recording
+ * was running. Persisting the summaries removes that requirement, and Copy is
+ * how they leave a phone that has no console and no usable file download in
+ * standalone mode.
+ */
+function TelemetrySettings() {
+  const { settings, telemetry } = useServices()
+  const [status, setStatus] = useState<string | null>(null)
+
+  async function withText(
+    hand: (text: string) => Promise<void>,
+    done: string,
+  ): Promise<void> {
+    try {
+      const text = formatTelemetry(await telemetry.read())
+      await hand(text)
+      setStatus(done)
+    } catch {
+      // Clipboard and share both reject when the gesture is not trusted or the
+      // user dismisses the sheet. Neither is an error worth a banner.
+      setStatus('Could not share the telemetry.')
+    }
+  }
+
+  return (
+    <>
+      <label class="setting-row">
+        <input
+          type="checkbox"
+          checked={settings.persistTelemetry.value}
+          onChange={(event) =>
+            (settings.persistTelemetry.value = event.currentTarget.checked)
+          }
+        />
+        Keep performance summaries on this device
+      </label>
+      <p class="muted">
+        Stores the summary lines — timings only, no room or account identifiers
+        — so a slow load can be read back afterwards instead of needing a screen
+        recording at the moment it happens. Requires performance
+        instrumentation. Cleared on sign-out.
+      </p>
+      <div class="setting-row">
+        <button
+          type="button"
+          onClick={() =>
+            void withText(
+              (text) => navigator.clipboard.writeText(text),
+              'Copied.',
+            )
+          }
+        >
+          Copy telemetry
+        </button>
+        {typeof navigator.share === 'function' && (
+          <button
+            type="button"
+            onClick={() =>
+              void withText((text) => navigator.share({ text }), 'Shared.')
+            }
+          >
+            Share
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => {
+            void telemetry.clear().then(() => setStatus('Cleared.'))
+          }}
+        >
+          Clear
+        </button>
+      </div>
+      {status !== null && (
+        <p class="muted" aria-live="polite">
+          {status}
+        </p>
+      )}
+    </>
+  )
+}
+
 function DebugSettings() {
   const { settings } = useServices()
   const [open, setOpen] = useState(false)
@@ -372,6 +459,22 @@ function DebugSettings() {
             the app — the numbers a screen recording needs on a phone, where
             there is no console to read marks from.
           </p>
+          <label class="setting-row">
+            <input
+              type="checkbox"
+              checked={settings.perfOverlay.value}
+              onChange={(event) =>
+                (settings.perfOverlay.value = event.currentTarget.checked)
+              }
+            />
+            Show the live readout on screen
+          </label>
+          <p class="muted">
+            Draws the numbers over the app. Turn this off to record during
+            ordinary use — the summaries are still collected, and still kept
+            below if that is enabled.
+          </p>
+          <TelemetrySettings />
           <label class="setting-row">
             <input
               type="checkbox"
