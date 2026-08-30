@@ -21,7 +21,6 @@ import {
 import { isTerminalMatrixOAuthQrFlow } from '../stores/matrix-oauth-qr'
 import { ServerStatus } from './ServerStatus'
 import { MatrixOAuthQrAcquisition } from './accounts/MatrixOAuthQrAcquisition'
-import { DevicePicker } from '../components/DevicePicker'
 import { flowKey } from '../stores/verification'
 
 /**
@@ -174,7 +173,6 @@ function AccountCard({
   onReactivate: (account: Account) => void
 }) {
   const { accounts, settings, api, verification } = useServices()
-  const [picking, setPicking] = useState(false)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [secretForm, setSecretForm] = useState<'recover' | 'enable' | null>(
     null,
@@ -359,7 +357,12 @@ function AccountCard({
               type="button"
               disabled={busy}
               title={VERIFY_DEVICE_HINT}
-              onClick={() => setPicking(true)}
+              onClick={() =>
+                verification.openPicker({
+                  accountId: id,
+                  ownDeviceId,
+                })
+              }
             >
               Verify this device
             </button>
@@ -442,17 +445,6 @@ function AccountCard({
           ))}
       </div>
 
-      {picking && account.state === 'active' && (
-        <DevicePicker
-          accountId={id}
-          ownDeviceId={account.device_id ?? null}
-          onClose={() => setPicking(false)}
-          onStarted={(key) => {
-            setPicking(false)
-            verification.open(key)
-          }}
-        />
-      )}
       {secretForm === 'recover' && account.state === 'active' && (
         <>
           <form

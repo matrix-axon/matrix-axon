@@ -397,6 +397,25 @@ describe('verification store', () => {
     expect(ids).toEqual(['$live', '$old'])
   })
 
+  it('openPicker and open() are exclusive', () => {
+    const verification = store()
+    verification.openPicker({ accountId: ACCOUNT, ownDeviceId: DEVICE })
+    expect(verification.picker.value).toEqual({
+      accountId: ACCOUNT,
+      ownDeviceId: DEVICE,
+    })
+    verification.noteFrame(ACCOUNT, 'requested', payload())
+    verification.open(`${ACCOUNT}\0$flow`)
+    expect(verification.openFlow.value?.flowId).toBe('$flow')
+    expect(verification.picker.value).toBeNull()
+    verification.closeModal()
+    verification.openPicker({ accountId: ACCOUNT, ownDeviceId: DEVICE })
+    expect(verification.openKey.value).toBeNull()
+    expect(verification.picker.value?.accountId).toBe(ACCOUNT)
+    verification.resetSession()
+    expect(verification.picker.value).toBeNull()
+  })
+
   it('resetSession drops flows and ignores a late GET', async () => {
     let release: (() => void) | undefined
     const held = new Promise<void>((resolve) => {

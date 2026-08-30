@@ -166,6 +166,18 @@ describe('AccountsPage', () => {
     ).toBeTruthy()
   })
 
+  it('Verify this device requests the shell picker instead of mounting one', async () => {
+    const { findByRole, queryByRole, services } = renderPage()
+    fireEvent.click(await findByRole('button', { name: 'Verify this device' }))
+    expect(
+      queryByRole('dialog', { name: 'Verify with another device' }),
+    ).toBeNull()
+    expect(services.verification.picker.value).toEqual({
+      accountId: ALICE.account_id,
+      ownDeviceId: ALICE.device_id,
+    })
+  })
+
   it('shows a fetched display name below the Matrix user ID', async () => {
     const { findByText, getByText } = renderPage()
 

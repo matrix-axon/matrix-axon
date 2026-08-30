@@ -125,12 +125,19 @@ export function inboxVisible(flow: VerificationFlow): boolean {
   )
 }
 
+export type DevicePickerTarget = {
+  accountId: string
+  ownDeviceId: string | null
+}
+
 export interface VerificationStore {
   flows: ReadonlySignal<VerificationFlow[]>
   inbox: ReadonlySignal<VerificationFlow[]>
   inboxCount: ReadonlySignal<number>
   openKey: ReadonlySignal<string | null>
   openFlow: ReadonlySignal<VerificationFlow | null>
+  /** Shell-owned device picker. Exclusive with `openFlow` (WCR-14). */
+  picker: ReadonlySignal<DevicePickerTarget | null>
   /** Keyed by accountId. Never a single global list. */
   devicesByAccount: ReadonlySignal<Readonly<Record<string, DeviceDto[]>>>
   devicesLoading: ReadonlySignal<Readonly<Record<string, boolean>>>
@@ -151,6 +158,8 @@ export interface VerificationStore {
   open(key: string): void
   openFlowRecord(flow: VerificationFlow): void
   closeModal(): void
+  openPicker(target: DevicePickerTarget): void
+  closePicker(): void
   dismissTerminal(key: string): void
   noteFrame(
     accountId: string,
@@ -324,6 +333,7 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
   const flowMap = new Map<string, VerificationFlow>()
   const flows = signal<VerificationFlow[]>([])
   const openKey = signal<string | null>(null)
+  const picker = signal<DevicePickerTarget | null>(null)
   const openFlow = computed((): VerificationFlow | null => {
     const key = openKey.value
     if (key === null) {
@@ -614,7 +624,12 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
       Object.keys(devicesByAccount.value).length === 0 &&
       Object.keys(devicesLoading.value).length === 0 &&
       Object.keys(devicesError.value).length === 0
-    if (flowMap.size === 0 && openKey.value === null && devicesEmpty) {
+    if (
+      flowMap.size === 0 &&
+      openKey.value === null &&
+      picker.value === null &&
+      devicesEmpty
+    ) {
       settledAccounts.clear()
       liveAdds.clear()
       tombstones.clear()
@@ -631,6 +646,7 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
     deviceGeneration.clear()
     ownUserMap.clear()
     openKey.value = null
+    picker.value = null
     devicesByAccount.value = {}
     devicesLoading.value = {}
     devicesError.value = {}
@@ -1090,6 +1106,7 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
     inboxCount,
     openKey,
     openFlow,
+    picker,
     devicesByAccount,
     devicesLoading,
     devicesError,
@@ -1104,14 +1121,26 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
     requestCancel,
     open: (key) => {
       if (flowMap.has(key)) {
+        picker.value = null
         openKey.value = key
       }
     },
     openFlowRecord: (flow) => {
+      picker.value = null
       openKey.value = put(flow)
     },
     closeModal: () => {
       openKey.value = null
+    },
+    openPicker: (target) => {
+      openKey.value = null
+      picker.value = {
+        accountId: target.accountId,
+        ownDeviceId: target.ownDeviceId,
+      }
+    },
+    closePicker: () => {
+      picker.value = null
     },
     dismissTerminal: (key) => {
       drop(key)
