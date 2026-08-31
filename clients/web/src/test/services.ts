@@ -1,3 +1,4 @@
+import { browserPlatform } from '../platform'
 import { signal } from '@preact/signals'
 import { createApiClient } from '../api/client'
 import { createCompositeAuthProvider } from '../auth/composite'
@@ -241,6 +242,7 @@ export function testServices(
     activeRoom,
     activeThread,
     composerFocus,
+    platform: browserPlatform(),
     sockets,
   }
 }
