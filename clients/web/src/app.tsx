@@ -145,6 +145,7 @@ interface PendingMatrixJoin {
 export function App({
   services,
   platform,
+  storage,
 }: {
   services?: AppServices
   /**
@@ -152,14 +153,17 @@ export function App({
    * rather than defaulted here: the shell selects its platform at boot, and a
    * default would silently rebuild the graph on the browser's `fetch` — the
    * server probe would succeed and every request after it would go through the
-   * webview, failing on CORS or as mixed content (ADR 0102 § 2).
+   * webview, failing on CORS or as mixed content (ADR 0102 § 2). The symptom
+   * is a "Load failed" banner and a socket stuck reconnecting, with nothing
+   * naming the cause.
    */
   platform?: Platform
+  storage?: Storage
 }) {
   const svc = useMemo(
-    // Third positional: (storage, sessionStorage, platform). Passing it second
-    // would land it in the sessionStorage slot.
-    () => services ?? createServices(undefined, undefined, platform),
+    // Positional: (storage, sessionStorage, platform). Passing the platform
+    // second would land it in the sessionStorage slot.
+    () => services ?? createServices(storage, undefined, platform),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- build the real graph exactly once
     [],
   )

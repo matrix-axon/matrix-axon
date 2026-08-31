@@ -112,3 +112,23 @@ export function browserPlatform(): Platform {
     defaultApiBaseUrl: '/',
   }
 }
+
+/**
+ * Whether this bundle is running inside the native shell.
+ *
+ * Feature-detected rather than compiled in, so one `dist` serves both targets —
+ * ADR 0046's stated exit criterion for the shell, and what keeps the browser
+ * build from needing a pipeline of its own.
+ *
+ * Kept synchronous, and kept separate from constructing the shell platform.
+ * `main.tsx` branches on this and only then imports `./tauri`, so the plugin
+ * code never enters the browser's boot path — which ADR 0085 and ADR 0087
+ * measure, and which should not grow an `await` to support a target the
+ * browser is not.
+ */
+export function isTauriRuntime(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    '__TAURI_INTERNALS__' in (window as unknown as Record<string, unknown>)
+  )
+}

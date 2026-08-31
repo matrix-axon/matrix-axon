@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the Axon window is allowed to ask this process to do.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "websocket:default",
+    {
+      "identifier": "http:default",
+      "comment": "Any host and any port, because the server is the user's own and is chosen at runtime (ADR 0102 § 3) — there is no build-time host to narrow this to. Note ':*' is load-bearing: 'http://*' alone means port 80, so a LAN axon on :8080 is denied.",
+      "allow": [{ "url": "http://*:*" }, { "url": "https://*:*" }]
+    }
+  ]
+}

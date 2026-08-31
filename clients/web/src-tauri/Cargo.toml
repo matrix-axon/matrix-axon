@@ -1,0 +1,49 @@
+# The Tauri desktop/mobile shell (ADR 0102, M-W12).
+#
+# Deliberately its OWN workspace, not a member of the repo root's.
+# `.github/workflows/cross-build.yml` runs `cargo build --workspace` on
+# ubuntu-latest, windows-latest and macos-latest (both arches), and the
+# pre-push gate runs `cargo clippy --all-features --all-targets -- -D warnings`
+# and `cargo test --all`. Making this a member would put webkit2gtk on the
+# critical path of every one of those lanes, and ask them to build a desktop
+# app they have no business building. A separate workspace also keeps this
+# crate's lockfile — and the cache key derived from it — away from the server's.
+[workspace]
+
+[package]
+name = "axon-shell"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+license = "Apache-2.0"
+description = "Native shell for the Axon web client"
+publish = false
+
+[lib]
+# Mobile targets link the app as a library; the binary below is desktop's entry.
+name = "axon_shell_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# Pinned to 2.5.x rather than "2". The Tauri CLI requires the Rust crate and
+# its npm counterpart to agree on major.minor, and @tauri-apps/plugin-http
+# 2.6.0 is too new for pnpm's minimumReleaseAge supply-chain guard to install
+# (published 2026-08-31). Taking 2.6.0 on the npm side means writing a
+# minimumReleaseAgeExclude entry, i.e. deliberately installing a hours-old
+# package to settle a version-alignment nit. Pinning down here keeps both sides
+# on the aged release; lift it once 2.6.0 ages past the threshold.
+tauri-plugin-http = "~2.5"
+tauri-plugin-websocket = "2"
+
+[dev-dependencies]
+# `test` gives a mock runtime, so the asset-resolution rules below can be
+# asserted headlessly — no webview, no display.
+tauri = { version = "2", features = ["test"] }
+
+[features]
+# Used by `tauri dev` to enable devtools in a release-profile build.
+custom-protocol = ["tauri/custom-protocol"]
