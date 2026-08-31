@@ -1,5 +1,6 @@
 import { computed, signal, type ReadonlySignal } from '@preact/signals'
 import { decodeFrame, type LiveFrame } from '../api/frames'
+import type { LiveSocket } from '../platform'
 
 /**
  * The live socket's state, surfaced for the connection indicator (M-W6, ADR
@@ -50,8 +51,13 @@ export interface LiveConnectionOptions {
    * production). Injected so tests supply a hand-driven fake — jsdom has no
    * `WebSocket`. A factory that throws (e.g. no token) is treated as a failed
    * attempt: it backs off and retries while the connection is wanted.
+   *
+   * `LiveSocket` rather than `WebSocket`: this module only ever attaches the
+   * four handlers and calls `close()`, and a packaged build's socket is opened
+   * in the shell rather than by the webview (ADR 0102 § 2). A real `WebSocket`
+   * satisfies it structurally.
    */
-  socketFactory: () => WebSocket
+  socketFactory: () => LiveSocket
 }
 
 /**
@@ -74,13 +80,19 @@ export function createLiveConnection(
   const reconnects = signal(0)
   const listeners = new Set<FrameListener>()
 
-  let socket: WebSocket | null = null
+  let socket: LiveSocket | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let backoffMs = INITIAL_BACKOFF_MS
   /** When the current socket opened, for the stable-uptime backoff reset. */
   let openedAtMs: number | null = null
   /** True once any socket has opened this session — distinguishes reconnect. */
   let everConnected = false
+  /**
+   * The last message `socketFactory` threw, so a permanent failure is reported
+   * once instead of on every retry. Cleared on a successful open, so a fault
+   * that recurs after a good connection is reported again.
+   */
+  let lastFactoryError: string | null = null
   /** True between `start()` and `stop()` — whether a connection is wanted. */
   let wanted = false
 
@@ -114,15 +126,33 @@ export function createLiveConnection(
   }
 
   function openSocket(): void {
-    let opened: WebSocket
+    let opened: LiveSocket
     try {
       opened = options.socketFactory()
-    } catch {
-      // No socket to attach to (e.g. no token yet): treat as a failed attempt.
+    } catch (error) {
+      // No socket to attach to: treat as a failed attempt and back off.
+      //
+      // But say so once. Two very different things arrive here — "no token
+      // yet", which is ordinary and resolves itself at sign-in, and "this base
+      // URL cannot produce a websocket URL", which is a configuration error
+      // that will never resolve. Both used to be swallowed, so the second
+      // presented as a permanent "reconnecting" with nothing anywhere to say
+      // why; `api/ws.ts` throws a description of exactly that case and had
+      // nowhere to put it.
+      //
+      // Logged once per distinct message rather than on every attempt,
+      // because the retry loop is unbounded and would otherwise turn a real
+      // diagnostic into scroll.
+      const message = error instanceof Error ? error.message : String(error)
+      if (message !== lastFactoryError) {
+        lastFactoryError = message
+        console.warn('live connection: could not open a socket —', message)
+      }
       socket = null
       scheduleReconnect()
       return
     }
+    lastFactoryError = null
     socket = opened
     opened.onopen = () => {
       openedAtMs = Date.now()

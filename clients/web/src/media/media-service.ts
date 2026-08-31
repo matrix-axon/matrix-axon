@@ -1,5 +1,6 @@
 import { apiErrorMessage } from '../api/client'
 import type { AuthProvider } from '../auth/provider'
+import { browserPlatform, type Platform } from '../platform'
 import { mxcToPath } from './parse-media'
 
 /**
@@ -194,8 +195,15 @@ function semaphore(max: number) {
 export function createMediaService(deps: {
   auth: AuthProvider
   baseUrl: string
+  /**
+   * Transport seam (ADR 0102 § 2). Media is the one path that does not go
+   * through `openapi-fetch` — it wants bytes, not JSON — so it takes the
+   * platform's `fetch` directly. Defaulted to the browser's.
+   */
+  platform?: Pick<Platform, 'fetch'>
 }): MediaService {
   const root = deps.baseUrl.replace(/\/$/, '')
+  const fetch = (deps.platform ?? browserPlatform()).fetch
   const gate = semaphore(MAX_CONCURRENT)
 
   // Refcounted object-URL cache. `refs > 0` entries are never revoked.
