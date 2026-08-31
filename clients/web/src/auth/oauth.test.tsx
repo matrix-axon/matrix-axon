@@ -514,55 +514,51 @@ describe('createOAuthAuthProvider', () => {
   })
 })
 
-describe('the transport seam (ADR 0102 § 2)', () => {
-  /**
-   * The token exchange defaults to `browserPlatform()`, so msw keeps every
-   * other test here green whether or not the injected platform is threaded
-   * through. This one registers no msw handler, and the server errors on any
-   * unhandled request — so a fall-back to the global `fetch` fails outright.
-   */
-  it('redeems the code through the injected fetch', async () => {
-    const storage = memoryStorage()
-    const pending = memoryStorage({
-      'axon.oauth.pending': JSON.stringify({
-        state: 'state-seam',
-        codeVerifier: 'verifier-seam',
-        provider: 'google',
-        redirectUri: 'http://localhost:3000/oauth/callback',
-        createdAt: Date.now(),
-      }),
-    })
-
-    const calls: string[] = []
-    const injected: typeof globalThis.fetch = async (input) => {
-      calls.push(String(input instanceof Request ? input.url : input))
-      return new Response(
-        JSON.stringify({
-          access_token: 'access-seam',
-          token_type: 'Bearer',
-          expires_in: 3600,
-          refresh_token: 'refresh-seam',
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    }
-
+describe('a shell callback URI', () => {
+  it('is used verbatim, not composed from a base', async () => {
+    // Composition mangles a custom scheme: resolving `/oauth/callback` against
+    // `axon://oauth` gives `axon://oauth/oauth/callback`. It is also the value
+    // the server allow-lists *exactly* (`OAuthClients::redirect_uri_allowed`),
+    // so a derived one would be rejected at `/v1/oauth/authorize`.
+    const pending = memoryStorage()
+    const navigated: string[] = []
     const auth = createOAuthAuthProvider({
       providers: [{ provider: 'google', label: 'Google' }],
       baseUrl: BASE_URL,
-      storage,
+      clientId: 'axon-desktop',
+      redirectUri: 'org.matrixaxon.axon:/oauth/callback',
+      storage: memoryStorage(),
       pendingStorage: pending,
-      platform: { fetch: injected },
+      navigate: (url) => navigated.push(url),
     })
-    const result = await auth.completeRedirect(
-      new URL(
-        'http://localhost:3000/oauth/callback?code=code-seam&state=state-seam',
-      ),
-    )
 
-    expect(result).toEqual({ ok: true })
-    expect(calls).toHaveLength(1)
-    expect(calls[0]).toBe(TOKEN_URL)
-    expect(auth.signedIn.value).toBe(true)
+    await auth.startSignIn('google')
+
+    const authorize = new URL(navigated[0])
+    expect(authorize.searchParams.get('redirect_uri')).toBe(
+      'org.matrixaxon.axon:/oauth/callback',
+    )
+    expect(authorize.searchParams.get('client_id')).toBe('axon-desktop')
+    // And it must be what the token exchange later presents back, since the
+    // server checks the two match.
+    const stored = JSON.parse(pending.getItem('axon.oauth.pending') ?? '{}')
+    expect(stored.redirectUri).toBe('org.matrixaxon.axon:/oauth/callback')
+  })
+
+  it('still composes from the origin when no URI is given', async () => {
+    const navigated: string[] = []
+    const auth = createOAuthAuthProvider({
+      providers: [{ provider: 'google', label: 'Google' }],
+      baseUrl: BASE_URL,
+      storage: memoryStorage(),
+      pendingStorage: memoryStorage(),
+      navigate: (url) => navigated.push(url),
+    })
+
+    await auth.startSignIn('google')
+
+    expect(new URL(navigated[0]).searchParams.get('redirect_uri')).toBe(
+      'http://localhost:3000/oauth/callback',
+    )
   })
 })

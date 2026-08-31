@@ -1,3 +1,4 @@
+import { onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
@@ -251,6 +252,30 @@ export function boundedSignal(
     : AbortSignal.any([caller, backstop])
 }
 
+/**
+ * The scheme this app registers with the OS, and the callback it expects.
+ *
+ * A reverse-domain scheme, per RFC 8252 § 7.1 and ADR 0102 § 4, not a short
+ * `axon:`. A private-use scheme is claimed first-come and unauthenticated on
+ * every desktop OS, so a generic one is both easy to collide with and easy to
+ * impersonate — any application registering `axon` could receive an
+ * authorization code meant for this one (§ 8.4, § 8.6).
+ *
+ * Single slash: there is no authority component, and `://` would make
+ * `oauth` look like a host.
+ *
+ * Note this is *not* the scheme the bundle is served from. `APP_SCHEME` in
+ * `src-tauri/src/lib.rs` stays `axon`, because that is an in-webview protocol
+ * handler which is never registered with the OS and takes no part in OAuth.
+ *
+ * Must stay in step with `plugins.deep-link.desktop.schemes` in
+ * `tauri.conf.json` and with the `redirect_uris` registered for this
+ * `client_id` on the server, which allow-lists them exactly
+ * (`OAuthClients::redirect_uri_allowed`). Three places, no shared source —
+ * changing one alone produces a sign-in that dead-ends at the browser.
+ */
+const OAUTH_REDIRECT_URI = 'org.matrixaxon.axon:/oauth/callback'
+
 export function tauriPlatform(): Platform {
   return {
     // The plugin's fetch is signature-compatible with the global, but has no
@@ -293,6 +318,25 @@ export function tauriPlatform(): Platform {
         // handler, which is all this line was ever for.
         console.error('could not open an external link', originOf(url))
       })
+    },
+    oauthRedirectUri: OAUTH_REDIRECT_URI,
+    onDeepLink: (handler) => {
+      // `onOpenUrl` resolves to its own unlisten function; the subscription is
+      // established asynchronously, so unsubscribing has to wait for it rather
+      // than race it.
+      const ready = onOpenUrl((urls) => {
+        for (const raw of urls) {
+          try {
+            handler(new URL(raw))
+          } catch {
+            // The OS can hand us anything registered to the scheme; a URL we
+            // cannot parse is not ours to act on.
+          }
+        }
+      })
+      return () => {
+        void ready.then((unlisten) => unlisten()).catch(() => {})
+      }
     },
     // A packaged build has no same-origin API to assume: it must be told.
     defaultApiBaseUrl: null,

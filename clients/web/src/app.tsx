@@ -160,6 +160,9 @@ export function App({
   platform?: Platform
   storage?: Storage
 }) {
+  const [oauthDeepLinkError, setOauthDeepLinkError] = useState<string | null>(
+    null,
+  )
   const svc = useMemo(
     // Positional: (storage, sessionStorage, platform). Passing the platform
     // second would land it in the sessionStorage slot.
@@ -208,6 +211,34 @@ export function App({
     })
   }, [svc])
 
+  // Take the OAuth authorization code back off the OS (ADR 0102 § 3).
+  //
+  // A browser gets it as a navigation to `/oauth/callback`, handled by the
+  // route branch below. A packaged build has no origin a browser can redirect
+  // to, so the sign-in happens in the user's real browser (RFC 8252) and the
+  // code arrives as a deep link on the app's registered scheme. `onDeepLink`
+  // is null wherever there is no such channel, which is what makes this inert
+  // in a browser rather than a second, competing callback path.
+  useEffect(() => {
+    const subscribe = svc.platform.onDeepLink
+    if (subscribe === undefined || subscribe === null) {
+      return
+    }
+    return subscribe((url) => {
+      // Only the callback. The same scheme carries anything else the OS routes
+      // to this app, and handing an unrelated URL to the token exchange would
+      // burn the pending PKCE verifier for no reason.
+      if (!url.pathname.endsWith('/callback')) {
+        return
+      }
+      void svc.auth.completeOAuthRedirect(url).then((result) => {
+        if (!result.ok) {
+          setOauthDeepLinkError(result.message)
+        }
+      })
+    })
+  }, [svc])
+
   // Hold the live socket open only while signed in; sign-out tears it down
   // (M-W6, ADR 0061). Reconnect/backoff on unexpected drops arrives in step 3.
   useEffect(() => {
@@ -225,7 +256,7 @@ export function App({
       ) : window.location.pathname === '/oauth/callback' ? (
         <OAuthCallback />
       ) : (
-        <SignedOut />
+        <SignedOut error={oauthDeepLinkError} />
       )}
       <PerfOverlay />
     </ServicesContext.Provider>
@@ -444,12 +475,17 @@ function isReloadOrRestoreNavigation(): boolean {
 }
 
 /** The signed-out state: the auth provider's bootstrap UI. */
-function SignedOut() {
+function SignedOut({ error }: { error?: string | null }) {
   const { auth } = useServices()
   return (
     <main class="signin">
       <h1>axon</h1>
       <p>Sign in with SSO or a server-issued access token.</p>
+      {error != null && (
+        <p class="server-setup-error" role="alert">
+          {error}
+        </p>
+      )}
       <auth.LoginBootstrap />
     </main>
   )

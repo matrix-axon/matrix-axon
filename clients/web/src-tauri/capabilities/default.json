@@ -40,6 +40,10 @@
           "url": "https://*"
         }
       ]
+    },
+    {
+      "identifier": "deep-link:default",
+      "comment": "Receive the OAuth authorization code. Sign-in happens in the user's real browser (RFC 8252), which redirects to this app's registered scheme; without this the code has nowhere to land and the flow dead-ends in the browser."
     }
   ]
 }

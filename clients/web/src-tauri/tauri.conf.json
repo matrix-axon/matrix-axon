@@ -27,5 +27,12 @@
     "category": "SocialNetworking",
     "shortDescription": "Axon Matrix client",
     "longDescription": "Native shell for the Axon web client: a Matrix client that talks to your own self-hosted Axon server."
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["org.matrixaxon.axon"]
+      }
+    }
   }
 }

@@ -141,6 +141,15 @@ export interface OAuthAuthOptions {
    * pass a deep-link scheme here instead of changing `startSignIn`.
    */
   redirectUriBase?: string
+  /**
+   * The complete callback URI, overriding `redirectUriBase`.
+   *
+   * A shell's callback cannot be composed from a base: resolving
+   * `/oauth/callback` against `axon://oauth` gives `axon://oauth/oauth/callback`.
+   * It is also the value the server allow-lists *exactly*, so it has to be
+   * stated rather than derived.
+   */
+  redirectUri?: string
   persistence?: AuthPersistence
   storage?: Storage
   sessionStorage?: Storage
@@ -177,6 +186,7 @@ export function createOAuthAuthProvider({
   baseUrl,
   clientId = DEFAULT_CLIENT_ID,
   redirectUriBase = window.location.origin,
+  redirectUri,
   persistence: providedPersistence,
   storage,
   sessionStorage,
@@ -321,7 +331,8 @@ export function createOAuthAuthProvider({
       const codeVerifier = randomBase64Url(32)
       const codeChallenge = await sha256Base64Url(codeVerifier)
       const state = randomBase64Url(32)
-      const redirectUri = new URL('/oauth/callback', redirectUriBase).toString()
+      const callbackUri =
+        redirectUri ?? new URL('/oauth/callback', redirectUriBase).toString()
       const storageMode = persistence.rememberMe.value
         ? 'persistent'
         : 'session'
@@ -329,7 +340,7 @@ export function createOAuthAuthProvider({
         state,
         codeVerifier,
         provider: providerName,
-        redirectUri,
+        redirectUri: callbackUri,
         createdAt: Date.now(),
         storageMode,
       }
@@ -338,7 +349,7 @@ export function createOAuthAuthProvider({
       const authorize = new URL(apiUrl('/v1/oauth/authorize', baseUrl))
       authorize.searchParams.set('response_type', 'code')
       authorize.searchParams.set('client_id', clientId)
-      authorize.searchParams.set('redirect_uri', redirectUri)
+      authorize.searchParams.set('redirect_uri', callbackUri)
       authorize.searchParams.set('code_challenge', codeChallenge)
       authorize.searchParams.set('code_challenge_method', 'S256')
       authorize.searchParams.set('provider', providerName)

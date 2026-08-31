@@ -238,6 +238,61 @@ describe('App', () => {
     anchor.remove()
   })
 
+  it('completes an OAuth callback delivered as a deep link', async () => {
+    // A shell has no origin a browser can redirect to, so the code comes back
+    // over the OS scheme rather than as a navigation to /oauth/callback.
+    let deliver: ((url: URL) => void) | null = null
+    const base = testServices()
+    const completeOAuthRedirect = vi.fn<(url: URL) => Promise<{ ok: true }>>()
+    completeOAuthRedirect.mockResolvedValue({ ok: true })
+    const services = {
+      ...base,
+      auth: { ...base.auth, completeOAuthRedirect },
+      platform: {
+        ...base.platform,
+        onDeepLink: (handler: (url: URL) => void) => {
+          deliver = handler
+          return () => {}
+        },
+      },
+    }
+    render(<App services={services} />)
+    await waitFor(() => expect(deliver).not.toBeNull())
+
+    deliver!(new URL('org.matrixaxon.axon:/oauth/callback?code=c1&state=s1'))
+
+    expect(completeOAuthRedirect).toHaveBeenCalledOnce()
+    expect(completeOAuthRedirect.mock.calls[0][0].toString()).toContain(
+      'code=c1',
+    )
+  })
+
+  it('ignores a deep link that is not the OAuth callback', async () => {
+    // The same scheme carries anything else the OS routes here; handing an
+    // unrelated URL to the exchange would burn the pending PKCE verifier.
+    let deliver: ((url: URL) => void) | null = null
+    const base = testServices()
+    const completeOAuthRedirect = vi.fn<(url: URL) => Promise<{ ok: true }>>()
+    completeOAuthRedirect.mockResolvedValue({ ok: true })
+    const services = {
+      ...base,
+      auth: { ...base.auth, completeOAuthRedirect },
+      platform: {
+        ...base.platform,
+        onDeepLink: (handler: (url: URL) => void) => {
+          deliver = handler
+          return () => {}
+        },
+      },
+    }
+    render(<App services={services} />)
+    await waitFor(() => expect(deliver).not.toBeNull())
+
+    deliver!(new URL('axon://room/!abc:example.org'))
+
+    expect(completeOAuthRedirect).not.toHaveBeenCalled()
+  })
+
   it('hands an external link to the platform when it has an opener', async () => {
     // In a packaged build an untouched external link navigates the *app
     // window* to that page, and the shell has no back button to return with —

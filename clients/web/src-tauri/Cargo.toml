@@ -28,6 +28,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# `generate_context!` expands to `serde_json` paths once tauri.conf.json
+# carries a `plugins` section, so it has to be nameable here.
+serde_json = "1"
 tauri = { version = "2", features = [] }
 # Pinned to 2.5.x rather than "2". The Tauri CLI requires the Rust crate and
 # its npm counterpart to agree on major.minor, and @tauri-apps/plugin-http
@@ -36,6 +39,7 @@ tauri = { version = "2", features = [] }
 # minimumReleaseAgeExclude entry, i.e. deliberately installing a hours-old
 # package to settle a version-alignment nit. Pinning down here keeps both sides
 # on the aged release; lift it once 2.6.0 ages past the threshold.
+tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-http = "~2.5"

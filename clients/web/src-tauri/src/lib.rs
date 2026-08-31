@@ -36,6 +36,9 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         // External links, opened in the user's browser rather than in place.
         .plugin(tauri_plugin_opener::init())
+        // The OAuth callback. Sign-in happens in the user's real browser
+        // (RFC 8252), which redirects to this app's registered scheme.
+        .plugin(tauri_plugin_deep_link::init())
         // Serve the bundle ourselves, so an unknown path can fall back to the
         // app instead of 404ing. See `route`.
         .register_uri_scheme_protocol(APP_SCHEME, |ctx, request| {

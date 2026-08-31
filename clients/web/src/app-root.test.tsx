@@ -115,6 +115,8 @@ describe('AppRoot wiring the transport into the app', () => {
       openSocket: vi.fn(socket),
       saveFile: vi.fn(() => Promise.resolve('saved' as const)),
       openExternal: vi.fn(),
+      oauthRedirectUri: null,
+      onDeepLink: null,
       defaultApiBaseUrl: null,
     }
 

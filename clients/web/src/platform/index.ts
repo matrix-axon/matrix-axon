@@ -102,6 +102,30 @@ export interface Platform {
   openExternal: ((url: string) => void) | null
 
   /**
+   * The complete OAuth callback URI this build receives its authorization code
+   * at, or `null` to compose one from the page origin.
+   *
+   * `null` in a browser, where the callback is a route on the origin serving
+   * the app. A shell has no origin a browser can redirect to, so it registers
+   * a private scheme with the OS and receives the redirect as a deep link
+   * (RFC 8252) — and that URI cannot be composed from a base: resolving
+   * `/oauth/callback` against `axon://oauth` yields `axon://oauth/oauth/callback`.
+   * So it is carried whole rather than assembled.
+   */
+  oauthRedirectUri: string | null
+
+  /**
+   * Subscribe to URLs the OS hands this app, or `null` where there is no such
+   * channel.
+   *
+   * This is how the authorization code comes back: the sign-in happens in the
+   * user's real browser (RFC 8252 — never in an embedded webview, which would
+   * hand the app the user's IdP credentials), and the browser redirects to the
+   * registered scheme, which the OS routes here. Returns an unsubscribe.
+   */
+  onDeepLink: ((handler: (url: URL) => void) => () => void) | null
+
+  /**
    * The API base to fall back on when the user has configured none and no
    * `VITE_AXON_SERVER_URL` was baked in (ADR 0102 § 3).
    *
@@ -149,6 +173,11 @@ export function browserPlatform(): Platform {
     saveFile: saveInBrowser,
     // The anchor already does the right thing here; see `openExternal`.
     openExternal: null,
+    // The callback is a route on this origin, composed from it.
+    oauthRedirectUri: null,
+    // A browser has no OS-level URL channel; the callback arrives as a
+    // navigation to `/oauth/callback` instead.
+    onDeepLink: null,
     // Same-origin: the deployment that serves this bundle also proxies /v1.
     defaultApiBaseUrl: '/',
   }

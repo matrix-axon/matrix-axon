@@ -974,6 +974,14 @@ export function createServices(
     baseUrl,
     clientId: oauthClientId(),
     redirectUriBase: oauthRedirectUriBase(),
+    // A shell states its callback whole; a browser composes one from its
+    // origin (ADR 0102 § 3, RFC 8252).
+    redirectUri: platform.oauthRedirectUri ?? undefined,
+    // Sign-in must happen in the user's real browser, never in the app's own
+    // webview: an embedded one would put the app between the user and their
+    // identity provider's password field. `openExternal` is exactly that
+    // hand-off, and is null in a browser where a plain navigation is right.
+    navigate: platform.openExternal ?? undefined,
     storage,
     sessionStorage,
     platform,
