@@ -12,12 +12,11 @@
 //! **Serving the bundle**, so an unknown path can fall back to the app instead
 //! of 404ing. See `route`.
 //!
-//! Two client-side affordances still need this shell and do not have it yet:
-//! saving an attachment (`<a download>` is inert from a custom scheme) and
-//! opening an external link (`target="_blank"` would navigate the app window
-//! away from itself). Both need a matching change in `clients/web/src`, so the
-//! plugins are added in the same commit that routes the client through them
-//! rather than sitting here as unused capability.
+//! **Two affordances the webview has no working default for.** Saving a file:
+//! `<a download>` is inert from a custom scheme, so the app asks the OS for a
+//! path and writes the bytes itself. Opening an external link: left alone it
+//! navigates the *app window* to that page, and there is no back button to
+//! return with, so links are handed to the user's real browser.
 
 /// Wire up and run the shell.
 ///
@@ -31,6 +30,12 @@ pub fn run() {
         // security-relevant and belongs somewhere reviewable.
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_websocket::init())
+        // Saving an attachment: a save dialog and a real write, because
+        // `<a download>` does nothing from a custom scheme.
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        // External links, opened in the user's browser rather than in place.
+        .plugin(tauri_plugin_opener::init())
         // Serve the bundle ourselves, so an unknown path can fall back to the
         // app instead of 404ing. See `route`.
         .register_uri_scheme_protocol(APP_SCHEME, |ctx, request| {

@@ -113,6 +113,8 @@ describe('AppRoot wiring the transport into the app', () => {
     const platform = {
       fetch,
       openSocket: vi.fn(socket),
+      saveFile: vi.fn(() => Promise.resolve('saved' as const)),
+      openExternal: vi.fn(),
       defaultApiBaseUrl: null,
     }
 

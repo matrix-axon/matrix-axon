@@ -36,7 +36,10 @@ tauri = { version = "2", features = [] }
 # minimumReleaseAgeExclude entry, i.e. deliberately installing a hours-old
 # package to settle a version-alignment nit. Pinning down here keeps both sides
 # on the aged release; lift it once 2.6.0 ages past the threshold.
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
 tauri-plugin-http = "~2.5"
+tauri-plugin-opener = "2"
 tauri-plugin-websocket = "2"
 
 [dev-dependencies]

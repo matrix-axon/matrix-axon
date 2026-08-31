@@ -10,6 +10,18 @@
       "identifier": "http:default",
       "comment": "Any host and any port, because the server is the user's own and is chosen at runtime (ADR 0102 § 3) — there is no build-time host to narrow this to. Note ':*' is load-bearing: 'http://*' alone means port 80, so a LAN axon on :8080 is denied.",
       "allow": [{ "url": "http://*:*" }, { "url": "https://*:*" }]
+    },
+    {
+      "identifier": "dialog:allow-save",
+      "comment": "Ask the user where to put a downloaded attachment. The dialog is the only thing that chooses a path; nothing here can pick one on the user's behalf."
+    },
+    {
+      "identifier": "fs:allow-write-file",
+      "comment": "Write the bytes to the path the save dialog returned. Unscoped by design: the user names the destination, and pre-declaring a directory would either forbid the one they pick or grant more than the dialog did."
+    },
+    {
+      "identifier": "opener:allow-open-url",
+      "comment": "Hand an http(s) link to the user's browser. `isExternalHref` in app.tsx admits only http and https, so this cannot be used to launch a local program."
     }
   ]
 }

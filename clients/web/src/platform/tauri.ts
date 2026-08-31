@@ -1,6 +1,9 @@
+import { save } from '@tauri-apps/plugin-dialog'
+import { writeFile } from '@tauri-apps/plugin-fs'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import WebSocketClient from '@tauri-apps/plugin-websocket'
-import type { LiveSocket, Platform } from './index'
+import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 
 /**
  * The packaged-build platform (ADR 0102 § 2).
@@ -69,6 +72,35 @@ function adapt(connect: Promise<WebSocketClient>): LiveSocket {
   return socket
 }
 
+/**
+ * Ask the OS where to put the file, then write it.
+ *
+ * `<a download>` cannot do this from a custom scheme — the shell has no
+ * download manager — so a packaged build that kept the browser path would show
+ * a Download button that silently did nothing.
+ *
+ * `save()` resolves to `null` when the dialog is dismissed, which is a cancel
+ * and not a failure: the caller shows an error for `'failed'`, and someone who
+ * changed their mind should not see one.
+ */
+async function saveViaDialog(file: SaveRequest): Promise<SaveOutcome> {
+  let path: string | null
+  try {
+    path = await save({ defaultPath: file.filename })
+  } catch {
+    return 'failed'
+  }
+  if (path === null) {
+    return 'cancelled'
+  }
+  try {
+    await writeFile(path, new Uint8Array(await file.blob.arrayBuffer()))
+    return 'saved'
+  } catch {
+    return 'failed'
+  }
+}
+
 export function tauriPlatform(): Platform {
   return {
     // The plugin's fetch is signature-compatible with the global.
@@ -85,6 +117,13 @@ export function tauriPlatform(): Platform {
           headers: { Authorization: `Bearer ${token}` },
         }),
       ),
+    saveFile: saveViaDialog,
+    // Hand the link to the user's real browser. Left to itself, an external
+    // anchor navigates the *app window* to that page, and the shell has no
+    // back button to return with — the app is simply gone until restarted.
+    openExternal: (url) => {
+      void openUrl(url).catch(() => {})
+    },
     // A packaged build has no same-origin API to assume: it must be told.
     defaultApiBaseUrl: null,
   }

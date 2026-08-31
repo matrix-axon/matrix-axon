@@ -39,6 +39,20 @@ export interface LiveSocket {
   close(): void
 }
 
+/** What `saveFile` is handed. */
+export interface SaveRequest {
+  blob: Blob
+  filename: string
+  /** Falls back to the blob's own type, then to a generic binary type. */
+  mimetype?: string | null
+}
+
+/**
+ * How a save ended. `shared` means a share sheet took the file rather than the
+ * filesystem; `cancelled` means the user dismissed the sheet or dialog.
+ */
+export type SaveOutcome = 'saved' | 'shared' | 'cancelled' | 'failed'
+
 export interface Platform {
   /**
    * The HTTP transport. Signature-compatible with the global, because
@@ -62,6 +76,30 @@ export interface Platform {
    * `bearer.<token>` back apart to do the right thing.
    */
   openSocket(url: string, token: string): LiveSocket
+
+  /**
+   * Write a file to wherever this platform puts files.
+   *
+   * `<a download>` is the browser's answer and is *inert* from a custom
+   * scheme — the shell has no download manager to honour it — so a packaged
+   * build has to ask the OS for a path and write the bytes itself. Returning
+   * the outcome rather than a boolean keeps "the user dismissed the save
+   * dialog" distinguishable from "the save failed"; showing an error for
+   * someone who simply changed their mind is worse than showing nothing.
+   */
+  saveFile(file: SaveRequest): Promise<SaveOutcome>
+
+  /**
+   * Open a link outside the app, or `null` when the anchor's own behaviour is
+   * already right.
+   *
+   * `null` in a browser: `target="_blank"` opens a tab, and `window.open` is
+   * banned repo-wide (`clients/web/AGENTS.md`), so there is nothing better to
+   * do and intercepting would only break middle-click and modifiers. A shell
+   * must supply one — an unhandled external link navigates the app window away
+   * from the app, with no back button to return.
+   */
+  openExternal: ((url: string) => void) | null
 
   /**
    * The API base to fall back on when the user has configured none and no
@@ -108,6 +146,9 @@ export function browserPlatform(): Platform {
   return {
     fetch: (...args) => globalThis.fetch(...args),
     openSocket: (url, token) => new WebSocket(url, bearerSubprotocols(token)),
+    saveFile: saveInBrowser,
+    // The anchor already does the right thing here; see `openExternal`.
+    openExternal: null,
     // Same-origin: the deployment that serves this bundle also proxies /v1.
     defaultApiBaseUrl: '/',
   }
@@ -131,4 +172,68 @@ export function isTauriRuntime(): boolean {
     typeof window !== 'undefined' &&
     '__TAURI_INTERNALS__' in (window as unknown as Record<string, unknown>)
   )
+}
+
+/**
+ * How long the object URL is held after the anchor is clicked. Revoking
+ * immediately races the browser's own read of the blob, and the download then
+ * silently produces an empty file.
+ */
+const REVOKE_DELAY_MS = 60_000
+
+/**
+ * Offer the file to the platform share sheet, or `null` when there is no sheet
+ * that takes files, so the caller falls back to the anchor.
+ *
+ * On a phone the anchor lands the file in Files rather than Photos, which reads
+ * as the save having failed — so where the platform can share files, the sheet
+ * is offered first and gives "Save Image" and AirDrop. Detected by capability,
+ * never by user agent, and the anchor stays the path that must keep working.
+ */
+async function shareInBrowser(file: SaveRequest): Promise<SaveOutcome | null> {
+  const share = navigator.share?.bind(navigator)
+  const canShare = navigator.canShare?.bind(navigator)
+  if (share === undefined || canShare === undefined) {
+    return null
+  }
+  const shareable = new File([file.blob], file.filename, {
+    type: file.mimetype ?? file.blob.type ?? 'application/octet-stream',
+  })
+  if (!canShare({ files: [shareable] })) {
+    return null
+  }
+  try {
+    await share({ files: [shareable] })
+    return 'shared'
+  } catch (error) {
+    // Dismissing the sheet throws `AbortError`. That is a deliberate cancel,
+    // not a failure — surfacing it as one would show an error for a user who
+    // simply changed their mind. Anything else means the sheet could not take
+    // the file, so fall back to the anchor rather than leave them with nothing.
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      return 'cancelled'
+    }
+    return null
+  }
+}
+
+/**
+ * The browser save: share sheet where one takes files, transient anchor
+ * otherwise. `window.open` is banned repo-wide, so there is no "open it in a
+ * tab and let them save from there" fallback to lean on.
+ */
+async function saveInBrowser(file: SaveRequest): Promise<SaveOutcome> {
+  const shared = await shareInBrowser(file)
+  if (shared !== null) {
+    return shared
+  }
+  const url = URL.createObjectURL(file.blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = file.filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS)
+  return 'saved'
 }

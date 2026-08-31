@@ -22,7 +22,10 @@
   "dependencies": {
     "@preact/signals": "^2.9.2",
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@tauri-apps/plugin-fs": "^2.5.1",
     "@tauri-apps/plugin-http": "^2.5.9",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "@tauri-apps/plugin-websocket": "^2.4.2",
     "brace-expansion": "2.1.4",
     "browserslist": "4.28.9",
