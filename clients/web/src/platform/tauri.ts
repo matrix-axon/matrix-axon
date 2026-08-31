@@ -122,7 +122,16 @@ export function tauriPlatform(): Platform {
     // anchor navigates the *app window* to that page, and the shell has no
     // back button to return with — the app is simply gone until restarted.
     openExternal: (url) => {
-      void openUrl(url).catch(() => {})
+      // Not swallowed. The click has already been `preventDefault`ed — letting
+      // the navigation through instead would take the app window to the page
+      // and there is no way back — so a rejection here means the user clicked
+      // a link and nothing happened, with the reason known only to us. It is
+      // also exactly how a mis-scoped capability presents: the opener denies
+      // every URL unless its scope says otherwise, and the first version of
+      // this granted the command without one.
+      void openUrl(url).catch((error: unknown) => {
+        console.error('could not open an external link', url, error)
+      })
     },
     // A packaged build has no same-origin API to assume: it must be told.
     defaultApiBaseUrl: null,

@@ -131,6 +131,53 @@ export function storeServerUrl(storage: Storage, raw: string): string | null {
 }
 
 /** Forget the configured server, sending the app back to the setup screen. */
+/**
+ * The `http://` form of a base the user typed without a scheme, or `null` when
+ * there is no sensible fallback.
+ *
+ * `normalizeServerUrl` assumes `https` for a bare host, which is right for
+ * anything on the internet and wrong for the LAN box `deploy/web/Caddyfile`
+ * explicitly supports on plain `:8080`. Rather than guess, the setup screen
+ * probes `https` first and then this — so a typed `axon.local:8080` reaches a
+ * server that has no certificate, without silently downgrading anyone who
+ * asked for `https` by name.
+ *
+ * Only for addresses that cannot have a public certificate anyway: a bare
+ * hostname with no dot, a `.local` name, or a literal address. A public host
+ * failing on https is a broken deployment and should be reported, not
+ * downgraded.
+ */
+export function httpFallbackFor(
+  raw: string,
+  normalized: string,
+): string | null {
+  // An explicit scheme is a decision; never second-guess it.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw.trim())) {
+    return null
+  }
+  let url: URL
+  try {
+    url = new URL(normalized)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'https:') {
+    return null
+  }
+  const host = url.hostname
+  const isLocal =
+    !host.includes('.') ||
+    host.endsWith('.local') ||
+    host === 'localhost' ||
+    /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ||
+    host.startsWith('[')
+  if (!isLocal) {
+    return null
+  }
+  url.protocol = 'http:'
+  return url.toString().replace(/\/+$/, '')
+}
+
 export function clearStoredServerUrl(storage: Storage): void {
   try {
     storage.removeItem(SERVER_URL_KEY)

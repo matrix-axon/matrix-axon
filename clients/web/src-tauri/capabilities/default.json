@@ -8,8 +8,15 @@
     "websocket:default",
     {
       "identifier": "http:default",
-      "comment": "Any host and any port, because the server is the user's own and is chosen at runtime (ADR 0102 § 3) — there is no build-time host to narrow this to. Note ':*' is load-bearing: 'http://*' alone means port 80, so a LAN axon on :8080 is denied.",
-      "allow": [{ "url": "http://*:*" }, { "url": "https://*:*" }]
+      "comment": "Any host and any port, because the server is the user's own and is chosen at runtime (ADR 0102 \u00a7 3) \u2014 there is no build-time host to narrow this to. Note ':*' is load-bearing: 'http://*' alone means port 80, so a LAN axon on :8080 is denied.",
+      "allow": [
+        {
+          "url": "http://*:*"
+        },
+        {
+          "url": "https://*:*"
+        }
+      ]
     },
     {
       "identifier": "dialog:allow-save",
@@ -21,7 +28,15 @@
     },
     {
       "identifier": "opener:allow-open-url",
-      "comment": "Hand an http(s) link to the user's browser. `isExternalHref` in app.tsx admits only http and https, so this cannot be used to launch a local program."
+      "comment": "The command grant alone is scopeless, and a scopeless opener denies every URL -- that is why links did nothing at first. NOTE the pattern syntax differs from `http:default` above: the opener matches with `glob::Pattern` (default MatchOptions, so `*` spans `/`), NOT the URL Pattern standard. So `https://*` already covers any port and path, and writing `https://*:*` by analogy with the http scope silently denies every ordinary URL -- there is no literal `:` after the host to match. http(s) only, deliberately narrower than the plugin's own `allow-default-urls`, which also admits `mailto:` and `tel:`: `isExternalHref` in app.tsx passes neither.",
+      "allow": [
+        {
+          "url": "http://*"
+        },
+        {
+          "url": "https://*"
+        }
+      ]
     }
   ]
 }
