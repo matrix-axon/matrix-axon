@@ -562,3 +562,115 @@ describe('a shell callback URI', () => {
     )
   })
 })
+
+describe('discovering providers from the server', () => {
+  const provider = (
+    options: Partial<Parameters<typeof createOAuthAuthProvider>[0]> = {},
+  ) =>
+    createOAuthAuthProvider({
+      providers: [],
+      baseUrl: BASE_URL,
+      storage: memoryStorage(),
+      pendingStorage: memoryStorage(),
+      ...options,
+    })
+
+  it('replaces the built-in list with what the server offers', async () => {
+    // The list is a property of the server. A binary pointed at someone else's
+    // axon cannot have been built knowing it.
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () =>
+        HttpResponse.json({ data: [{ provider: 'google' }] }),
+      ),
+    )
+    const auth = provider()
+    await auth.discoverProviders()
+
+    expect(auth.providers.value).toEqual([
+      { provider: 'google', label: 'Google' },
+    ])
+  })
+
+  it('keeps a configured label for a provider the server names', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () =>
+        HttpResponse.json({ data: [{ provider: 'google' }] }),
+      ),
+    )
+    const auth = provider({
+      providers: [{ provider: 'google', label: 'Work Google' }],
+    })
+    await auth.discoverProviders()
+
+    expect(auth.providers.value).toEqual([
+      { provider: 'google', label: 'Work Google' },
+    ])
+  })
+
+  it('keeps the configured list when the server has no such route', async () => {
+    // A server older than GET /v1/oauth/providers, or one with OAuth off,
+    // 404s. Treating that as "no providers" would delete working sign-in
+    // buttons from every existing browser deployment.
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () =>
+        HttpResponse.json(
+          { error: { code: 'not_found', message: 'nope' } },
+          { status: 404 },
+        ),
+      ),
+    )
+    const configured = [{ provider: 'google', label: 'Google' }]
+    const auth = provider({ providers: configured })
+    await auth.discoverProviders()
+
+    expect(auth.providers.value).toEqual(configured)
+  })
+
+  it('keeps the configured list when the server cannot be reached', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () => HttpResponse.error()),
+    )
+    const configured = [{ provider: 'google', label: 'Google' }]
+    const auth = provider({ providers: configured })
+    await auth.discoverProviders()
+
+    expect(auth.providers.value).toEqual(configured)
+  })
+
+  it('reports an empty server list as empty', async () => {
+    // Distinct from the failures above: OAuth is on and the server genuinely
+    // has nothing configured, so the buttons should go away.
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    )
+    const auth = provider({
+      providers: [{ provider: 'google', label: 'Google' }],
+    })
+    await auth.discoverProviders()
+
+    expect(auth.providers.value).toEqual([])
+  })
+
+  it('asks once however many times it is called', async () => {
+    let calls = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () => {
+        calls += 1
+        return HttpResponse.json({ data: [{ provider: 'apple' }] })
+      }),
+    )
+    const auth = provider()
+    await Promise.all([
+      auth.discoverProviders(),
+      auth.discoverProviders(),
+      auth.discoverProviders(),
+    ])
+
+    expect(calls).toBe(1)
+    expect(auth.providers.value).toEqual([
+      { provider: 'apple', label: 'Apple' },
+    ])
+  })
+})

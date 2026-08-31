@@ -57,7 +57,7 @@ export function createCompositeAuthProvider(
       <div class="signin-options">
         <RememberMe persistence={persistence} />
         <oauth.LoginBootstrap />
-        {oauth.providers.length > 0 && (
+        {oauth.providers.value.length > 0 && (
           <div class="signin-divider" aria-hidden="true">
             or
           </div>

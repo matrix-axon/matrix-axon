@@ -1,5 +1,5 @@
 import { computed, signal, type ReadonlySignal } from '@preact/signals'
-import { useState } from 'preact/hooks'
+import { useEffect, useState } from 'preact/hooks'
 import { browserPlatform, type Platform } from '../platform'
 import { apiUrl as buildApiUrl } from '../server-url'
 import {
@@ -125,7 +125,17 @@ interface TokenSuccessBody {
 
 export interface OAuthAuthProvider extends AuthProvider {
   signedIn: ReadonlySignal<boolean>
-  providers: readonly OAuthProviderConfig[]
+  /**
+   * The sign-in buttons to offer. Reactive because the authoritative list
+   * comes from the *server* and therefore arrives after construction — see
+   * `discoverProviders`.
+   */
+  providers: ReadonlySignal<readonly OAuthProviderConfig[]>
+  /**
+   * Ask the server which providers it has enabled, replacing the built-in
+   * list. Idempotent and safe to call repeatedly; the first call wins.
+   */
+  discoverProviders(): Promise<void>
   clearToken(): void
   startSignIn(provider: string): Promise<void>
   completeRedirect(url: URL): Promise<OAuthCallbackResult>
@@ -181,6 +191,65 @@ export function parseOAuthProviders(
     .filter(({ provider }) => /^[a-z][a-z0-9_-]*$/.test(provider))
 }
 
+/**
+ * Ask the server which providers it has enabled, or `null` when it cannot say.
+ *
+ * `null` covers every "we don't know" case alike — no such route on an older
+ * server, OAuth disabled (404 by design), unreachable, unparseable — because
+ * the caller's response to all of them is the same: keep what was configured.
+ * Distinguishing them would only invite treating one of them as "no providers".
+ */
+async function fetchProviderNames(
+  baseUrl: string,
+  fetchImpl: typeof globalThis.fetch,
+): Promise<string[] | null> {
+  let response: Response
+  try {
+    response = await fetchImpl(apiUrl('/v1/oauth/providers', baseUrl))
+  } catch {
+    return null
+  }
+  if (!response.ok) {
+    return null
+  }
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    return null
+  }
+  const data = (body as { data?: unknown } | null)?.data
+  if (!Array.isArray(data)) {
+    return null
+  }
+  return data
+    .map((entry) => (entry as { provider?: unknown })?.provider)
+    .filter((provider): provider is string => typeof provider === 'string')
+}
+
+/**
+ * Pair server-named providers with display labels.
+ *
+ * The server states which providers exist; it has no opinion on what to call
+ * them. A configured entry wins where there is one, so an operator who set
+ * `VITE_AXON_OAUTH_PROVIDERS=google:Work Google` keeps that wording. Otherwise
+ * the name is title-cased, which is right for every provider axon supports
+ * (`google`, `microsoft`, `apple`) and a reasonable guess for any later one.
+ */
+function withLabels(
+  names: readonly string[],
+  configured: readonly OAuthProviderConfig[],
+): OAuthProviderConfig[] {
+  return names.map((provider) => {
+    const match = configured.find((entry) => entry.provider === provider)
+    return {
+      provider,
+      label:
+        match?.label ?? provider.charAt(0).toUpperCase() + provider.slice(1),
+    }
+  })
+}
+
 export function createOAuthAuthProvider({
   providers,
   baseUrl,
@@ -203,6 +272,11 @@ export function createOAuthAuthProvider({
       sessionStorage,
       rememberMeDefault,
     })
+  // Starts as whatever was configured at build time and is replaced by the
+  // server's own answer once `discoverProviders` runs.
+  const providerList = signal<readonly OAuthProviderConfig[]>(providers)
+  let discovery: Promise<void> | null = null
+
   const storedSession = persistence.read(SESSION_KEY)
   const session = signal<OAuthSession | null>(
     parseSession(storedSession?.value ?? null),
@@ -288,7 +362,6 @@ export function createOAuthAuthProvider({
   }
 
   const provider: OAuthAuthProvider = {
-    providers,
     getToken() {
       const current = session.value
       if (current === null) {
@@ -324,8 +397,25 @@ export function createOAuthAuthProvider({
       pendingStorage.removeItem(PENDING_KEY)
     },
     signedIn: computed(() => session.value !== null),
+    providers: computed(() => providerList.value),
+    discoverProviders() {
+      discovery ??= (async () => {
+        const names = await fetchProviderNames(baseUrl, fetch)
+        if (names === null) {
+          // The server is older than `GET /v1/oauth/providers`, unreachable, or
+          // has OAuth off. Keep the configured list: for a browser deployment
+          // that is the correct answer and always was, and replacing it with an
+          // empty one would delete working sign-in buttons over a 404.
+          return
+        }
+        providerList.value = withLabels(names, providers)
+      })()
+      return discovery
+    },
     async startSignIn(providerName: string) {
-      if (!providers.some(({ provider }) => provider === providerName)) {
+      if (
+        !providerList.value.some(({ provider }) => provider === providerName)
+      ) {
         throw new Error('unknown OAuth provider')
       }
       const codeVerifier = randomBase64Url(32)
@@ -409,13 +499,21 @@ function OAuthButtons({ provider }: { provider: OAuthAuthProvider }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  if (provider.providers.length === 0) {
+  // Ask the server what it offers, here rather than at construction: this
+  // component renders exactly when the list is needed — the signed-out
+  // screen — so a signed-in session never makes the request at all. Before
+  // the early return below, since hook order cannot be conditional.
+  useEffect(() => {
+    void provider.discoverProviders()
+  }, [provider])
+
+  if (provider.providers.value.length === 0) {
     return null
   }
 
   return (
     <div class="sso-options">
-      {provider.providers.map(({ provider: id, label }) => {
+      {provider.providers.value.map(({ provider: id, label }) => {
         const brand = providerBrand(id, label)
         return (
           <button
