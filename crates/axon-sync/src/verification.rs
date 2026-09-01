@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use axon_core::{LiveFrame, VerificationFrame, VerificationFrameKind};
 use axon_store::{Account, AccountState, Store};
-use futures_util::{pin_mut, StreamExt};
+use futures_util::{pin_mut, Stream, StreamExt};
 use matrix_sdk::encryption::verification::{
     SasState, SasVerification, VerificationRequest, VerificationRequestState,
 };
@@ -722,6 +722,102 @@ fn sas_state_label(state: &SasState) -> &'static str {
     }
 }
 
+/// SAS-object stage for [`snapshot`]. `Done` here is the MAC verdict.
+fn flow_stage_from_sas(sas: &SasVerification) -> FlowStage {
+    match sas.state() {
+        SasState::Created { .. } | SasState::Started { .. } | SasState::Accepted { .. } => {
+            FlowStage::Ready
+        }
+        SasState::KeysExchanged { .. } => FlowStage::KeysExchanged,
+        SasState::Confirmed => FlowStage::Confirmed,
+        SasState::Done { .. } => FlowStage::Done,
+        SasState::Cancelled(_) => FlowStage::Cancelled,
+    }
+}
+
+/// Request-only stage when no SAS object is in hand.
+///
+/// A request-level [`VerificationRequestState::Done`] is the peer's
+/// `m.key.verification.done`, not a MAC. Reporting [`FlowStage::Done`] from it
+/// would let `GET /v1/verify/{flow}` say the device is verified with nothing
+/// verified. Treat it as cancelled instead; the SAS path is the only way to
+/// reach [`FlowStage::Done`] without a retained [`TerminalOutcome::Done`].
+fn flow_stage_from_request_without_sas(state: &VerificationRequestState) -> FlowStage {
+    match state {
+        VerificationRequestState::Created { .. } | VerificationRequestState::Requested { .. } => {
+            FlowStage::Requested
+        }
+        VerificationRequestState::Ready { .. } | VerificationRequestState::Transitioned { .. } => {
+            FlowStage::Ready
+        }
+        VerificationRequestState::Done | VerificationRequestState::Cancelled(_) => {
+            FlowStage::Cancelled
+        }
+    }
+}
+
+/// SAS currently attached to this request, if the request is still
+/// `Transitioned`. Once the request itself is `Done` the SDK drops that object
+/// from the request state; it then lives on [`FlowEntry::sas`] (if we already
+/// adopted it) or in the SDK verification cache. Do not call this after
+/// observing [`VerificationRequestState::Done`] — it cannot fire.
+fn sas_from_request(request: &VerificationRequest) -> Option<SasVerification> {
+    match request.state() {
+        VerificationRequestState::Transitioned { verification } => verification.sas(),
+        _ => None,
+    }
+}
+
+fn registry_sas(registry: &FlowRegistry, key: &(Uuid, String)) -> Option<SasVerification> {
+    registry
+        .lock()
+        .expect("flow registry poisoned")
+        .get(key)
+        .and_then(|entry| entry.sas.clone())
+}
+
+/// SAS to drive after the request reports `Done`.
+///
+/// `sas_from_request` is `None` here: the SDK has already dropped the object
+/// from `request.state()`. Prefer a SAS we already stashed on the registry;
+/// otherwise look in the SDK cache, which still holds the verification after
+/// the request itself is `Done` (a coalesced `changes()` burst can skip
+/// `Transitioned` and land on `Done`).
+async fn sas_after_request_done(
+    registry: &FlowRegistry,
+    key: &(Uuid, String),
+    client: &Client,
+    other_user_id: &str,
+    flow_id: &str,
+) -> Option<SasVerification> {
+    if let Some(sas) = registry_sas(registry, key) {
+        return Some(sas);
+    }
+    let user_id = other_user_id.parse::<OwnedUserId>().ok()?;
+    client
+        .encryption()
+        .get_verification(&user_id, flow_id)
+        .await
+        .and_then(|verification| verification.sas())
+}
+
+fn snapshot_from_sas(
+    flow_id: String,
+    target_user_id: String,
+    target_device_id: Option<String>,
+    sas: &SasVerification,
+) -> FlowState {
+    FlowState {
+        flow_id,
+        target_user_id,
+        target_device_id,
+        stage: flow_stage_from_sas(sas),
+        emoji: emoji_pairs(sas),
+        decimals: sas.decimals(),
+        cancel_reason: sas.cancel_info().map(|c| c.reason().to_owned()),
+    }
+}
+
 /// Re-derive a flow's replayable state from its live SDK object, or its retained
 /// terminal outcome.
 fn snapshot(entry: &FlowEntry) -> FlowState {
@@ -746,38 +842,15 @@ fn snapshot(entry: &FlowEntry) -> FlowState {
     }
 
     if let Some(sas) = &entry.sas {
-        let stage = match sas.state() {
-            SasState::Created { .. } | SasState::Started { .. } | SasState::Accepted { .. } => {
-                FlowStage::Ready
-            }
-            SasState::KeysExchanged { .. } => FlowStage::KeysExchanged,
-            SasState::Confirmed => FlowStage::Confirmed,
-            SasState::Done { .. } => FlowStage::Done,
-            SasState::Cancelled(_) => FlowStage::Cancelled,
-        };
-        FlowState {
-            flow_id,
-            target_user_id,
-            target_device_id,
-            stage,
-            emoji: emoji_pairs(sas),
-            decimals: sas.decimals(),
-            cancel_reason: sas.cancel_info().map(|c| c.reason().to_owned()),
-        }
+        snapshot_from_sas(flow_id, target_user_id, target_device_id, sas)
+    } else if let Some(sas) = sas_from_request(&entry.request) {
+        snapshot_from_sas(flow_id, target_user_id, target_device_id, &sas)
     } else {
-        let stage = match entry.request.state() {
-            VerificationRequestState::Created { .. }
-            | VerificationRequestState::Requested { .. } => FlowStage::Requested,
-            VerificationRequestState::Ready { .. }
-            | VerificationRequestState::Transitioned { .. } => FlowStage::Ready,
-            VerificationRequestState::Done => FlowStage::Done,
-            VerificationRequestState::Cancelled(_) => FlowStage::Cancelled,
-        };
         FlowState {
             flow_id,
             target_user_id,
             target_device_id,
-            stage,
+            stage: flow_stage_from_request_without_sas(&entry.request.state()),
             emoji: None,
             decimals: None,
             cancel_reason: entry.request.cancel_info().map(|c| c.reason().to_owned()),
@@ -936,6 +1009,7 @@ pub(crate) async fn on_incoming_request(
                 live_tx: ctx.live_tx.clone(),
                 rooms: ctx.rooms.clone(),
                 cancel: driver_cancel,
+                client: client.clone(),
             },
         ));
         reg.get_mut(&key)
@@ -1095,6 +1169,7 @@ pub(crate) async fn on_incoming_room_request(
                 live_tx: ctx.live_tx.clone(),
                 rooms: ctx.rooms.clone(),
                 cancel: driver_cancel,
+                client: client.clone(),
             },
         ));
         reg.get_mut(&registry_key)
@@ -1135,12 +1210,41 @@ struct FlowDriverCtx {
     live_tx: broadcast::Sender<LiveFrame>,
     rooms: VerificationRooms,
     cancel: CancellationToken,
+    /// Live SDK client for this account. Used to recover a SAS from the
+    /// verification cache after the request reports `Done` (the request object
+    /// no longer holds it).
+    client: Client,
+}
+
+/// Stamp the registry terminal marker and publish the matching frame. Shared by
+/// every Done/Cancelled exit so a request-level `Done` cannot be published as
+/// verified from one path while another path requires the SAS MAC.
+fn finish_flow(ctx: &FlowDriverCtx, key: &(Uuid, String), flow_id: &str, outcome: TerminalOutcome) {
+    let (kind, reason) = match &outcome {
+        TerminalOutcome::Done => (VerificationFrameKind::Done, None),
+        TerminalOutcome::Cancelled(reason) => (VerificationFrameKind::Cancelled, reason.clone()),
+    };
+    if mark_terminal(&ctx.registry, key, outcome) {
+        ctx.rooms.wake(ctx.account_id);
+    }
+    publish(
+        &ctx.live_tx,
+        ctx.account_id,
+        flow_id,
+        &ctx.target_user_id,
+        ctx.target_device_id.as_deref(),
+        kind,
+        None,
+        None,
+        reason,
+    );
 }
 
 /// Drive one verification request from its current state through to a
 /// `SasVerification`, then hand off to [`drive_sas`]. Publishes the
 /// `verification.requested` frame, accepts a peer-initiated request, and starts
-/// SAS once ready.
+/// SAS once ready. [`drive_sas`] keeps watching this request so a peer `start`
+/// that wins the spec tie-break replaces the SAS object we drive.
 async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
     let flow_id = request.flow_id().to_owned();
     let key = (ctx.account_id, flow_id.clone());
@@ -1170,8 +1274,10 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
     // quickly enough that creating the stream after the send can miss the
     // transition into ready/SAS and leave the driver waiting forever while the
     // snapshot endpoint reports the flow as ready.
-    let changes = request.changes();
-    pin_mut!(changes);
+    //
+    // Boxed rather than `pin_mut!`ed so the *same* subscription can be handed
+    // to `drive_sas` instead of it opening a second one — see the note there.
+    let mut changes = Box::pin(request.changes());
 
     // A peer-initiated request must be accepted to advance. Advertise SAS only —
     // never the SDK default set (which includes QR) — so the peer can't steer the
@@ -1339,24 +1445,42 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
                 }
             }
             VerificationRequestState::Done => {
+                // A coalesced `changes()` burst can skip `Transitioned` and
+                // land on request-level `Done`. `request.state()` is then
+                // `Done`, so `sas_from_request` cannot fire — recover from the
+                // registry (already adopted) or the SDK cache (still holds the
+                // SAS). Otherwise this is the peer's `m.key.verification.done`
+                // with no SAS object, and publishing `Done` would let clients
+                // render "device verified" with zero MAC exchange.
+                if let Some(sas) = sas_after_request_done(
+                    &ctx.registry,
+                    &key,
+                    &ctx.client,
+                    &ctx.target_user_id,
+                    &flow_id,
+                )
+                .await
+                {
+                    tracing::info!(
+                        account_id = %ctx.account_id,
+                        %flow_id,
+                        sas_state = sas_state_label(&sas.state()),
+                        "verification request reported done; recovering SAS"
+                    );
+                    break sas;
+                }
                 tracing::info!(
                     account_id = %ctx.account_id,
                     %flow_id,
-                    "verification request completed before SAS"
+                    "verification request completed before SAS; not treating as verified"
                 );
-                if mark_terminal(&ctx.registry, &key, TerminalOutcome::Done) {
-                    ctx.rooms.wake(ctx.account_id);
-                }
-                publish(
-                    &ctx.live_tx,
-                    ctx.account_id,
+                finish_flow(
+                    &ctx,
+                    &key,
                     &flow_id,
-                    &ctx.target_user_id,
-                    ctx.target_device_id.as_deref(),
-                    VerificationFrameKind::Done,
-                    None,
-                    None,
-                    None,
+                    TerminalOutcome::Cancelled(Some(
+                        "request completed before SAS verification".to_owned(),
+                    )),
                 );
                 return;
             }
@@ -1368,36 +1492,43 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
                     reason = %reason,
                     "verification request cancelled"
                 );
-                if mark_terminal(
-                    &ctx.registry,
+                finish_flow(
+                    &ctx,
                     &key,
-                    TerminalOutcome::Cancelled(Some(reason.clone())),
-                ) {
-                    ctx.rooms.wake(ctx.account_id);
-                }
-                publish(
-                    &ctx.live_tx,
-                    ctx.account_id,
                     &flow_id,
-                    &ctx.target_user_id,
-                    ctx.target_device_id.as_deref(),
-                    VerificationFrameKind::Cancelled,
-                    None,
-                    None,
-                    Some(reason),
+                    TerminalOutcome::Cancelled(Some(reason)),
                 );
                 return;
             }
         }
     };
 
-    // Stash the SAS object so the read verbs and `confirm`/`cancel` can reach it,
-    // then accept it (a no-op send for the side that started SAS).
+    // Stash + protocol-level accept, then drive. `drive_sas` keeps watching the
+    // request: both sides are allowed to send `m.key.verification.start`, and
+    // matrix-rust-sdk may replace the SAS object we just obtained with the
+    // lexicographic winner. Confirm/cancel read `entry.sas`, so the registry
+    // must follow that replacement too.
+    if !adopt_sas(&sas, &flow_id, &key, &ctx).await {
+        return;
+    }
+    drive_sas(request, sas, flow_id, ctx, changes).await;
+}
+
+/// Stash `sas` on the registry entry and send the protocol-level accept (a
+/// no-op for the side that sent `m.key.verification.start`).
+///
+/// Returns `false` if the accept timed out and this flow was torn down.
+async fn adopt_sas(
+    sas: &SasVerification,
+    flow_id: &str,
+    key: &(Uuid, String),
+    ctx: &FlowDriverCtx,
+) -> bool {
     if let Some(entry) = ctx
         .registry
         .lock()
         .expect("flow registry poisoned")
-        .get_mut(&key)
+        .get_mut(key)
     {
         entry.sas = Some(sas.clone());
     }
@@ -1409,9 +1540,16 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
                 state = sas_state_label(&sas.state()),
                 "accepted SAS verification"
             );
+            true
         }
         Ok(Err(err)) => {
-            tracing::warn!(account_id = %ctx.account_id, %flow_id, error = %err, "failed to accept SAS");
+            tracing::warn!(
+                account_id = %ctx.account_id,
+                %flow_id,
+                error = %err,
+                "failed to accept SAS"
+            );
+            true
         }
         Err(_) => {
             tracing::warn!(
@@ -1420,132 +1558,249 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
                 timeout_secs = DRIVER_SEND_TIMEOUT.as_secs(),
                 "timed out accepting SAS"
             );
-            cancel_verification_best_effort(ctx.account_id, &flow_id, "sas", sas.cancel()).await;
-            remove_flow(&ctx.registry, &key);
-            return;
+            cancel_verification_best_effort(ctx.account_id, flow_id, "sas", sas.cancel()).await;
+            remove_flow(&ctx.registry, key);
+            false
         }
     }
-
-    drive_sas(sas, flow_id, ctx).await;
 }
 
 /// Drive a SAS verification to a terminal state, publishing the `sas`, `done`,
 /// and `cancelled` frames and keeping the registry's terminal marker current.
-async fn drive_sas(sas: SasVerification, flow_id: String, ctx: FlowDriverCtx) {
+///
+/// Also watches the parent [`VerificationRequest`]: Matrix lets either side send
+/// `m.key.verification.start`, and two axons (or axon + Element X) both will.
+/// matrix-rust-sdk then keeps the lexicographically smaller device-id's SAS and
+/// replaces the other. If we kept driving the object `start_sas()` returned, we
+/// never `accept()` the winner, keys never exchange, and both UIs sit on
+/// "waiting". A `Transitioned` snapshot with a different [`SasState`] is that
+/// replacement — adopt it, accept it, drive it.
+///
+/// `request_changes` is the caller's subscription, handed over rather than
+/// re-opened here. `SharedObservable::subscribe` seeds at the current version
+/// and never replays, so a stream opened at this point would silently miss
+/// every transition published during `start_sas()` and the `accept()` send —
+/// which is exactly the window the dual-start replacement lands in, and the
+/// deadlock above would survive unfixed in its likeliest case.
+async fn drive_sas(
+    request: VerificationRequest,
+    mut sas: SasVerification,
+    flow_id: String,
+    ctx: FlowDriverCtx,
+    mut request_changes: impl Stream<Item = VerificationRequestState> + Unpin,
+) {
     let key = (ctx.account_id, flow_id.clone());
-    let changes = sas.changes();
-    pin_mut!(changes);
-    let mut pending_state = Some(sas.state());
 
     loop {
-        let state = if let Some(state) = pending_state.take() {
-            state
-        } else {
-            tokio::select! {
-                _ = ctx.cancel.cancelled() => {
-                    // See drive_request: drop the entry rather than leak a non-terminal
-                    // one the TTL sweep would never reclaim.
-                    cancel_verification_best_effort(ctx.account_id, &flow_id, "sas", sas.cancel())
+        let sas_changes = sas.changes();
+        pin_mut!(sas_changes);
+        let mut pending_state = Some(sas.state());
+
+        let new_sas = loop {
+            let state = if let Some(state) = pending_state.take() {
+                state
+            } else {
+                tokio::select! {
+                    _ = ctx.cancel.cancelled() => {
+                        // See drive_request: drop the entry rather than leak a
+                        // non-terminal one the TTL sweep would never reclaim.
+                        cancel_verification_best_effort(
+                            ctx.account_id,
+                            &flow_id,
+                            "sas",
+                            sas.cancel(),
+                        )
                         .await;
-                    remove_flow(&ctx.registry, &key);
-                    return;
-                }
-                next = changes.next() => match next {
-                    None => {
                         remove_flow(&ctx.registry, &key);
                         return;
                     }
-                    Some(state) => state,
-                },
+                    next = request_changes.next() => match next {
+                        None => {
+                            remove_flow(&ctx.registry, &key);
+                            return;
+                        }
+                        Some(VerificationRequestState::Transitioned { verification }) => {
+                            match verification.sas() {
+                                Some(new_sas)
+                                    if should_follow_sas_replacement(
+                                        &sas.state(),
+                                        &new_sas.state(),
+                                    ) =>
+                                {
+                                    break new_sas;
+                                }
+                                Some(_) => continue,
+                                // QR (or any non-SAS) isn't supported — cancel
+                                // and wait for the resulting Cancelled.
+                                None => {
+                                    cancel_verification_best_effort(
+                                        ctx.account_id,
+                                        &flow_id,
+                                        "request",
+                                        request.cancel(),
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            }
+                        }
+                        Some(VerificationRequestState::Cancelled(info)) => {
+                            let reason = info.reason().to_owned();
+                            tracing::info!(
+                                account_id = %ctx.account_id,
+                                %flow_id,
+                                reason = %reason,
+                                "verification request cancelled"
+                            );
+                            finish_flow(
+                                &ctx,
+                                &key,
+                                &flow_id,
+                                TerminalOutcome::Cancelled(Some(reason)),
+                            );
+                            return;
+                        }
+                        Some(VerificationRequestState::Done) => {
+                            if !request_done_is_verified(sas.is_done()) {
+                                tracing::info!(
+                                    account_id = %ctx.account_id,
+                                    %flow_id,
+                                    sas_state = sas_state_label(&sas.state()),
+                                    "verification request reported done before the SAS \
+                                     verified; waiting for the SAS verdict"
+                                );
+                                continue;
+                            }
+                            tracing::info!(
+                                account_id = %ctx.account_id,
+                                %flow_id,
+                                "verification request completed"
+                            );
+                            finish_flow(&ctx, &key, &flow_id, TerminalOutcome::Done);
+                            return;
+                        }
+                        Some(_) => continue,
+                    },
+                    next = sas_changes.next() => match next {
+                        None => {
+                            remove_flow(&ctx.registry, &key);
+                            return;
+                        }
+                        Some(state) => state,
+                    },
+                }
+            };
+
+            match state {
+                SasState::Created { .. }
+                | SasState::Started { .. }
+                | SasState::Accepted { .. }
+                | SasState::Confirmed => {
+                    tracing::debug!(
+                        account_id = %ctx.account_id,
+                        %flow_id,
+                        state = sas_state_label(&state),
+                        "SAS verification state changed"
+                    );
+                }
+                SasState::KeysExchanged { .. } => {
+                    let emoji = emoji_pairs(&sas);
+                    let decimals = sas.decimals();
+                    tracing::info!(
+                        account_id = %ctx.account_id,
+                        %flow_id,
+                        has_emoji = emoji.as_ref().is_some_and(|items| !items.is_empty()),
+                        has_decimals = decimals.is_some(),
+                        "SAS keys exchanged"
+                    );
+                    publish(
+                        &ctx.live_tx,
+                        ctx.account_id,
+                        &flow_id,
+                        &ctx.target_user_id,
+                        ctx.target_device_id.as_deref(),
+                        VerificationFrameKind::Sas,
+                        emoji,
+                        decimals,
+                        None,
+                    );
+                }
+                SasState::Done { .. } => {
+                    tracing::info!(
+                        account_id = %ctx.account_id,
+                        %flow_id,
+                        "SAS verification completed"
+                    );
+                    finish_flow(&ctx, &key, &flow_id, TerminalOutcome::Done);
+                    return;
+                }
+                SasState::Cancelled(info) => {
+                    let reason = info.reason().to_owned();
+                    tracing::info!(
+                        account_id = %ctx.account_id,
+                        %flow_id,
+                        reason = %reason,
+                        "SAS verification cancelled"
+                    );
+                    finish_flow(
+                        &ctx,
+                        &key,
+                        &flow_id,
+                        TerminalOutcome::Cancelled(Some(reason)),
+                    );
+                    return;
+                }
             }
         };
 
-        match state {
-            SasState::Created { .. }
-            | SasState::Started { .. }
-            | SasState::Accepted { .. }
-            | SasState::Confirmed => {
-                tracing::debug!(
-                    account_id = %ctx.account_id,
-                    %flow_id,
-                    state = sas_state_label(&state),
-                    "SAS verification state changed"
-                );
-            }
-            SasState::KeysExchanged { .. } => {
-                let emoji = emoji_pairs(&sas);
-                let decimals = sas.decimals();
-                tracing::info!(
-                    account_id = %ctx.account_id,
-                    %flow_id,
-                    has_emoji = emoji.as_ref().is_some_and(|items| !items.is_empty()),
-                    has_decimals = decimals.is_some(),
-                    "SAS keys exchanged"
-                );
-                publish(
-                    &ctx.live_tx,
-                    ctx.account_id,
-                    &flow_id,
-                    &ctx.target_user_id,
-                    ctx.target_device_id.as_deref(),
-                    VerificationFrameKind::Sas,
-                    emoji,
-                    decimals,
-                    None,
-                );
-            }
-            SasState::Done { .. } => {
-                tracing::info!(
-                    account_id = %ctx.account_id,
-                    %flow_id,
-                    "SAS verification completed"
-                );
-                if mark_terminal(&ctx.registry, &key, TerminalOutcome::Done) {
-                    ctx.rooms.wake(ctx.account_id);
-                }
-                publish(
-                    &ctx.live_tx,
-                    ctx.account_id,
-                    &flow_id,
-                    &ctx.target_user_id,
-                    ctx.target_device_id.as_deref(),
-                    VerificationFrameKind::Done,
-                    None,
-                    None,
-                    None,
-                );
-                return;
-            }
-            SasState::Cancelled(info) => {
-                let reason = info.reason().to_owned();
-                tracing::info!(
-                    account_id = %ctx.account_id,
-                    %flow_id,
-                    reason = %reason,
-                    "SAS verification cancelled"
-                );
-                if mark_terminal(
-                    &ctx.registry,
-                    &key,
-                    TerminalOutcome::Cancelled(Some(reason.clone())),
-                ) {
-                    ctx.rooms.wake(ctx.account_id);
-                }
-                publish(
-                    &ctx.live_tx,
-                    ctx.account_id,
-                    &flow_id,
-                    &ctx.target_user_id,
-                    ctx.target_device_id.as_deref(),
-                    VerificationFrameKind::Cancelled,
-                    None,
-                    None,
-                    Some(reason),
-                );
-                return;
-            }
+        tracing::info!(
+            account_id = %ctx.account_id,
+            %flow_id,
+            previous_state = sas_state_label(&sas.state()),
+            new_state = sas_state_label(&new_sas.state()),
+            "adopting replacement SAS after dual start"
+        );
+        if !adopt_sas(&new_sas, &flow_id, &key, &ctx).await {
+            return;
         }
+        sas = new_sas;
     }
+}
+
+/// Does a request-level `Done` prove the SAS verified?
+///
+/// Only if our own SAS says so. [`VerificationRequestState::Done`] is reached on
+/// the peer's `m.key.verification.done` and nothing else: `receive_done` checks
+/// only that the sender is the other user, and `into_done` throws the content
+/// away without ever consulting the SAS. `SasState::Done` is the authoritative
+/// state — it alone carries `verified_devices()` / `verified_identities()`, and
+/// it alone is reachable only after the MAC exchange.
+///
+/// Publishing a `done` frame on the request-level signal would let a buggy or
+/// hostile peer make clients render "device verified" with no MAC ever checked.
+/// Peers do legitimately send `m.key.verification.done` before our own MAC
+/// processing finishes, so the answer to a premature one is to keep driving the
+/// SAS, not to cancel — its own terminal follows a moment later.
+fn request_done_is_verified(sas_is_done: bool) -> bool {
+    sas_is_done
+}
+
+/// Dual-start: the SDK replaces our `start_sas()` object with the peer's when
+/// the peer's device id wins the spec tie-break. Those two objects do not share
+/// a state machine. A different [`SasState`] label is a replacement; so is the
+/// same pre-emoji label (`created` / `started`), because both SAS objects sit
+/// there until accept/key.
+fn should_follow_sas_replacement(current: &SasState, incoming: &SasState) -> bool {
+    should_follow_sas_replacement_labels(sas_state_label(current), sas_state_label(incoming))
+}
+
+fn should_follow_sas_replacement_labels(current: &str, incoming: &str) -> bool {
+    if current != incoming {
+        return true;
+    }
+    // Dual-start: the winner's SAS is a *new* object that can sit in the same
+    // pre-emoji label (`created` / `started`) as the loser we are driving.
+    matches!(current, "created" | "started")
 }
 
 /// The concrete device-verification backend. Cheap to clone (all handles); built
@@ -1787,6 +2042,7 @@ impl VerificationEngine {
                     live_tx: self.live_tx.clone(),
                     rooms: self.rooms.clone(),
                     cancel: driver_cancel,
+                    client,
                 },
             ));
             reg.get_mut(&key)
@@ -2013,6 +2269,70 @@ mod tests {
     use crate::manager::ClientManager;
     use axon_core::SyncConfig;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Dual-start: a peer `m.key.verification.start` that wins the tie-break
+    /// produces a *new* SAS object. It may already be `started` while we are
+    /// also `started` on the loser — same label, different object. After emoji
+    /// (`keys_exchanged` / `confirmed`) a matching label is the SAS we already
+    /// drive; do not tear down its `changes()` stream.
+    #[test]
+    fn follow_sas_replacement_when_state_labels_differ() {
+        assert!(should_follow_sas_replacement_labels("started", "created"));
+        assert!(should_follow_sas_replacement_labels("started", "accepted"));
+        assert!(should_follow_sas_replacement_labels("started", "started"));
+        assert!(should_follow_sas_replacement_labels("created", "created"));
+        assert!(!should_follow_sas_replacement_labels(
+            "keys_exchanged",
+            "keys_exchanged"
+        ));
+        assert!(!should_follow_sas_replacement_labels(
+            "confirmed",
+            "confirmed"
+        ));
+    }
+
+    /// A request-level `Done` is the peer's word, not proof. `receive_done`
+    /// authenticates nothing but the sender and `into_done` ignores the content,
+    /// so a peer that sends `m.key.verification.done` while our SAS is still at
+    /// `keys_exchanged` / `confirmed` must not be able to make us publish a
+    /// `done` frame — clients render that as "device verified" with no MAC ever
+    /// checked. Only `SasState::Done` carries the verified devices.
+    #[test]
+    fn request_done_is_proof_only_when_the_sas_agrees() {
+        assert!(request_done_is_verified(true));
+        assert!(
+            !request_done_is_verified(false),
+            "a peer's m.key.verification.done must not stand in for the SAS verdict"
+        );
+    }
+
+    /// Pre-SAS request-level `Done` (drive_request before any SAS object, and
+    /// snapshot's request-only fallback) is the same signal as above — not
+    /// verification. The poll path would otherwise report `FlowStage::Done` for
+    /// a flow that never exchanged MACs.
+    #[test]
+    fn request_done_without_sas_is_not_a_verified_snapshot() {
+        assert_eq!(
+            flow_stage_from_request_without_sas(&VerificationRequestState::Done),
+            FlowStage::Cancelled
+        );
+        assert!(
+            !request_done_is_verified(false),
+            "drive_request must not publish Done when no SAS exists to agree"
+        );
+    }
+
+    /// The request-`Done` recovery path looks in the registry before the SDK
+    /// cache. An unknown flow has no stashed SAS, so that first lookup is
+    /// `None` and the driver must not treat request-level `Done` as verified.
+    #[test]
+    fn registry_sas_is_none_when_the_flow_is_unknown() {
+        let registry = new_registry();
+        assert!(
+            registry_sas(&registry, &(Uuid::nil(), "flow".to_owned())).is_none(),
+            "drive_request's Done recovery must not invent a SAS"
+        );
+    }
 
     /// `cancelled_err` is a pure mapping — no DB needed. It must carry the reason
     /// when there is one and never read as a success.
