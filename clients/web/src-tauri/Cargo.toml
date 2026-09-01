@@ -51,6 +51,13 @@ tauri-plugin-websocket = "2"
 # asserted headlessly — no webview, no display.
 tauri = { version = "2", features = ["test"] }
 
+# Desktop only: the OS spawns a *new* process for a deep link on Windows and
+# Linux, so without this the OAuth callback would arrive in a second instance
+# while the PKCE verifier sits in the first one's sessionStorage. The
+# `deep-link` feature forwards the URL to the running instance instead.
+[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+
 [features]
 # Used by `tauri dev` to enable devtools in a release-profile build.
 custom-protocol = ["tauri/custom-protocol"]

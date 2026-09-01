@@ -24,7 +24,32 @@
 /// (M-W13) link this crate and call in through their own generated entry
 /// point; the desktop binary is a one-line caller of the same function.
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    // Must be the *first* plugin registered, per its own documentation: it
+    // decides whether this process lives at all, and anything set up before it
+    // would be initialised in a process about to exit.
+    //
+    // Windows and Linux answer a deep link by spawning a new process with the
+    // URL as a CLI argument, rather than signalling the running app. Left
+    // alone, the OAuth callback would arrive in a second instance — one whose
+    // webview has never seen the PKCE verifier, which lives in the *first*
+    // instance's sessionStorage — and the exchange would fail with the sign-in
+    // apparently having worked. Its `deep-link` feature hands the URL to the
+    // running instance instead, which is where the flow started.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        // The URL has already been dispatched to the deep-link plugin by
+        // the time this runs. All that is left is to raise the window the
+        // user was last looking at, since they are coming back from a
+        // browser and expect to land in the app.
+        use tauri::Manager as _;
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.set_focus();
+        }
+    }));
+
+    builder
         // Transport. Both are configured by capability files under
         // `capabilities/`, not here — the allow-list of reachable origins is
         // security-relevant and belongs somewhere reviewable.
@@ -46,10 +71,48 @@ pub fn run() {
         })
         .setup(|app| {
             main_window(app.handle())?;
+            claim_deep_link_schemes(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running the Axon shell");
+}
+
+/// Claim the `axon://` scheme with the OS, so the OAuth callback can come back.
+///
+/// The installers already register it — that is what the `deep-link` section of
+/// `tauri.conf.json` is compiled into — so on an installed copy this is a
+/// no-op overwrite. It is here for every copy that is *not* installed: a binary
+/// run straight out of `target/`, an AppImage launched by hand, a build under
+/// test. Without it the browser reaches the end of a working OAuth flow and
+/// reports "the scheme does not have a registered handler", which is a true
+/// statement about the machine and says nothing about the flow.
+///
+/// Failure is never fatal. On macOS registration is unsupported by design —
+/// the `.app` bundle declares `CFBundleURLTypes` and the OS reads it from
+/// there — so the error is expected and routine. On Linux it needs `xdg-mime`
+/// and `update-desktop-database`, which a minimal container may not have. In
+/// every case the app still runs; only the callback leg is affected, and only
+/// on a copy that was not installed.
+fn claim_deep_link_schemes<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri_plugin_deep_link::DeepLinkExt;
+
+    if let Err(error) = app.deep_link().register_all() {
+        log_scheme_registration(&error);
+    }
+}
+
+/// Split out so the message is written once and the reason is stated.
+fn log_scheme_registration(error: &tauri_plugin_deep_link::Error) {
+    if matches!(error, tauri_plugin_deep_link::Error::UnsupportedPlatform) {
+        // macOS: the bundle declares the scheme, so there is nothing to do and
+        // nothing has gone wrong.
+        return;
+    }
+    eprintln!(
+        "could not register the axon:// scheme ({error}); OAuth sign-in will \
+         fail at the callback unless this copy was installed"
+    );
 }
 
 /// Create the app window.
