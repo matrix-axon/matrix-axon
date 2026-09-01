@@ -1,4 +1,5 @@
-import { useCallback, useRef, useState } from 'preact/hooks'
+import { useCallback, useEffect, useId, useRef, useState } from 'preact/hooks'
+import type { Platform } from '../platform'
 
 /**
  * Drag-and-drop of a file onto a pane (ADR 0065). Scoped to the element it is
@@ -11,8 +12,41 @@ import { useCallback, useRef, useState } from 'preact/hooks'
  * `dragenter`/`dragleave` fire for every child element crossed, so a plain
  * boolean flickers off as the cursor moves over the timeline's rows. Counting
  * enters against leaves is the usual fix.
+ *
+ * `nativeDrops` is the second, mutually exclusive channel. Where a shell takes
+ * the drag at the *window* — which is what the Linux build must do, because
+ * WebKitGTK hands the page a URI and no bytes — none of the DOM handlers below
+ * ever fire, and the drag arrives as a position and a set of already-read
+ * files instead. Both channels drive the same `dragging`, `problem` and
+ * `onFiles`, so everything downstream is unaware of which one ran.
  */
-export function useFileDrop(onFiles: (files: FileList) => void): {
+/**
+ * Shown when a drop was accepted and yielded nothing to stage. Silence is
+ * indistinguishable from the app being broken, which is how it was first
+ * reported.
+ */
+const NOTHING_TO_STAGE =
+  'That drop carried no file this app can read. Use the paperclip to choose it instead.'
+
+/**
+ * Whether a viewport point lies within the pane tagged `id`.
+ *
+ * `elementFromPoint` rather than a bounding box, so an overlapping pane
+ * resolves the way the user sees it: the topmost element at the point wins,
+ * which is what a DOM drop event would have given for free. `id` comes from
+ * `useId` and contains nothing that needs escaping in a selector.
+ */
+function isOverTarget(id: string, x: number, y: number): boolean {
+  const element = document.elementFromPoint(x, y)
+  return (
+    element !== null && element.closest(`[data-drop-target="${id}"]`) !== null
+  )
+}
+
+export function useFileDrop(
+  onFiles: (files: FileList | readonly File[]) => void,
+  nativeDrops?: Platform['onNativeFileDrop'],
+): {
   dragging: boolean
   /**
    * Set when a drop was accepted but carried nothing that could be staged, and
@@ -22,7 +56,15 @@ export function useFileDrop(onFiles: (files: FileList) => void): {
    * app being broken, which is how it was reported.
    */
   problem: string | null
+  /**
+   * Spread onto the element this drop is scoped to. Carries a `data-drop-target`
+   * attribute as well as the DOM handlers: a native drag knows only *where* it
+   * landed, never on what, so the attribute is how the point is resolved back
+   * to a pane. Panes that spread nothing (an edit in progress, where media
+   * cannot be attached) are correctly invisible to both channels at once.
+   */
   handlers: {
+    'data-drop-target': string
     onDragEnter(event: DragEvent): void
     onDragOver(event: DragEvent): void
     onDragLeave(event: DragEvent): void
@@ -32,6 +74,13 @@ export function useFileDrop(onFiles: (files: FileList) => void): {
   const [dragging, setDragging] = useState(false)
   const [problem, setProblem] = useState<string | null>(null)
   const depth = useRef(0)
+  const targetId = useId()
+
+  // Held in a ref so the native subscription below does not tear down and
+  // rebuild on every render — `onFiles` is a fresh closure each time, and
+  // resubscribing mid-drag would lose the drag.
+  const latestOnFiles = useRef(onFiles)
+  latestOnFiles.current = onFiles
 
   /**
    * Whether this drag looks like it carries a file.
@@ -54,10 +103,44 @@ export function useFileDrop(onFiles: (files: FileList) => void): {
     setDragging(false)
   }, [])
 
+  useEffect(() => {
+    if (nativeDrops === undefined || nativeDrops === null) {
+      return
+    }
+    return nativeDrops((drag) => {
+      if (drag.kind === 'leave') {
+        reset()
+        return
+      }
+      // The event carries a point, not a target, because it never went through
+      // the DOM. Without this test every pane would light up at once and a
+      // file dropped on the thread panel would stage into the room's composer
+      // — the exact confusion ADR 0065 scoped this hook to a pane to avoid.
+      const over = isOverTarget(targetId, drag.x, drag.y)
+      if (drag.kind === 'over') {
+        setDragging(over)
+        if (over) {
+          setProblem(null)
+        }
+        return
+      }
+      reset()
+      if (!over) {
+        return
+      }
+      if (drag.files.length > 0) {
+        latestOnFiles.current(drag.files)
+        return
+      }
+      setProblem(NOTHING_TO_STAGE)
+    })
+  }, [nativeDrops, reset, targetId])
+
   return {
     dragging,
     problem,
     handlers: {
+      'data-drop-target': targetId,
       onDragEnter(event) {
         if (!looksLikeFile(event)) {
           return
@@ -99,9 +182,7 @@ export function useFileDrop(onFiles: (files: FileList) => void): {
           onFiles(files)
           return
         }
-        setProblem(
-          'That drop carried no file this app can read. Use the paperclip to choose it instead.',
-        )
+        setProblem(NOTHING_TO_STAGE)
       },
     },
   }

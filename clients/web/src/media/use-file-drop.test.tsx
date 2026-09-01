@@ -1,5 +1,6 @@
-import { cleanup, fireEvent, render } from '@testing-library/preact'
+import { act, cleanup, fireEvent, render } from '@testing-library/preact'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { NativeDrag } from '../platform'
 import { preventStrayFileDrops, useFileDrop } from './use-file-drop'
 
 afterEach(cleanup)
@@ -11,7 +12,11 @@ const withFiles = (files: File[] = []) => ({
 /** Dragging selected text, not a file — the hook must ignore it entirely. */
 const withText = { dataTransfer: { types: ['text/plain'], files: [] } }
 
-function Harness({ onFile }: { onFile?: (files: FileList) => void }) {
+function Harness({
+  onFile,
+}: {
+  onFile?: (files: FileList | readonly File[]) => void
+}) {
   const { dragging, problem, handlers } = useFileDrop(onFile ?? (() => {}))
   return (
     <div data-testid="pane" {...handlers}>
@@ -166,5 +171,172 @@ describe('a drop that carries nothing usable', () => {
     fireEvent.dragEnter(getByTestId('pane'), withFiles())
 
     expect(queryByRole('alert')).toBeNull()
+  })
+})
+
+describe('a drag the OS reports to the window (Linux)', () => {
+  /**
+   * The shell's channel, driven by hand. `subscribe` is what a pane is given
+   * as `nativeDrops`; `deliver` plays the shell's part.
+   */
+  function nativeChannel() {
+    const handlers = new Set<(drag: NativeDrag) => void>()
+    return {
+      subscribe: (handler: (drag: NativeDrag) => void) => {
+        handlers.add(handler)
+        return () => handlers.delete(handler)
+      },
+      // `act` because this is the shell calling in from outside Preact —
+      // nothing here is an event the test library already wraps.
+      deliver: (drag: NativeDrag) => {
+        act(() => {
+          for (const handler of [...handlers]) {
+            handler(drag)
+          }
+        })
+      },
+      get listeners() {
+        return handlers.size
+      },
+    }
+  }
+
+  /**
+   * jsdom has no `elementFromPoint` — it does no layout — so the point-to-pane
+   * mapping is stubbed. `closest` walking up to the tagged pane is real DOM,
+   * and that is the part the hook actually owns.
+   */
+  function elementsAt(byX: Record<number, () => Element | null>) {
+    // Assigned rather than spied: jsdom does not define the method at all, so
+    // there is nothing for `vi.spyOn` to replace.
+    const target = document as unknown as Record<string, unknown>
+    const original = target.elementFromPoint
+    target.elementFromPoint = (x: number) => byX[x]?.() ?? null
+    return () => {
+      target.elementFromPoint = original
+    }
+  }
+
+  function TwoPanes({
+    subscribe,
+    onFile,
+  }: {
+    subscribe: (handler: (drag: NativeDrag) => void) => () => void
+    onFile: (files: FileList | readonly File[]) => void
+  }) {
+    const room = useFileDrop(onFile, subscribe)
+    const thread = useFileDrop(onFile, subscribe)
+    return (
+      <>
+        <div data-testid="room" {...room.handlers}>
+          {room.dragging && <span data-testid="room-overlay">Drop</span>}
+          {room.problem !== null && <p role="alert">{room.problem}</p>}
+          <span data-testid="room-child">a timeline row</span>
+        </div>
+        <div data-testid="thread" {...thread.handlers}>
+          {thread.dragging && <span data-testid="thread-overlay">Drop</span>}
+        </div>
+      </>
+    )
+  }
+
+  const png = () => new File(['bytes'], 'cat.png', { type: 'image/png' })
+
+  it('arms only the pane the cursor is actually over', () => {
+    const channel = nativeChannel()
+    const { getByTestId, queryByTestId } = render(
+      <TwoPanes subscribe={channel.subscribe} onFile={() => {}} />,
+    )
+    const restore = elementsAt({
+      10: () => getByTestId('room-child'),
+      90: () => getByTestId('thread'),
+    })
+
+    // The event carries a point and no target — it never went through the
+    // DOM — so without the hit-test both panes would light up at once.
+    channel.deliver({ kind: 'over', x: 10, y: 5 })
+    expect(queryByTestId('room-overlay')).not.toBeNull()
+    expect(queryByTestId('thread-overlay')).toBeNull()
+
+    channel.deliver({ kind: 'over', x: 90, y: 5 })
+    expect(queryByTestId('room-overlay')).toBeNull()
+    expect(queryByTestId('thread-overlay')).not.toBeNull()
+
+    restore()
+  })
+
+  it('stages into the pane under the cursor and no other', () => {
+    const channel = nativeChannel()
+    const staged = vi.fn()
+    const { getByTestId } = render(
+      <TwoPanes subscribe={channel.subscribe} onFile={staged} />,
+    )
+    const restore = elementsAt({ 90: () => getByTestId('thread') })
+
+    channel.deliver({ kind: 'drop', x: 90, y: 5, files: [png()] })
+
+    // One call, not two: a file dropped on the thread panel must not also
+    // stage into the room's composer (ADR 0065).
+    expect(staged).toHaveBeenCalledTimes(1)
+    expect(staged.mock.calls[0]?.[0]).toHaveLength(1)
+
+    restore()
+  })
+
+  it('ignores a drop that landed on neither pane', () => {
+    const channel = nativeChannel()
+    const staged = vi.fn()
+    render(<TwoPanes subscribe={channel.subscribe} onFile={staged} />)
+    // The sidebar, the topbar, empty space: `elementFromPoint` finds nothing
+    // tagged as a drop target.
+    const restore = elementsAt({})
+
+    channel.deliver({ kind: 'drop', x: 5, y: 5, files: [png()] })
+
+    expect(staged).not.toHaveBeenCalled()
+    restore()
+  })
+
+  it('says so when every dropped path failed to read', () => {
+    const channel = nativeChannel()
+    const { getByTestId, queryByRole } = render(
+      <TwoPanes subscribe={channel.subscribe} onFile={() => {}} />,
+    )
+    const restore = elementsAt({ 10: () => getByTestId('room-child') })
+
+    channel.deliver({ kind: 'drop', x: 10, y: 5, files: [] })
+
+    expect(queryByRole('alert')?.textContent).toMatch(/carried no file/i)
+    restore()
+  })
+
+  it('disarms when the drag leaves the window', () => {
+    const channel = nativeChannel()
+    const { getByTestId, queryByTestId } = render(
+      <TwoPanes subscribe={channel.subscribe} onFile={() => {}} />,
+    )
+    const restore = elementsAt({ 10: () => getByTestId('room-child') })
+
+    channel.deliver({ kind: 'over', x: 10, y: 5 })
+    expect(queryByTestId('room-overlay')).not.toBeNull()
+
+    // A cancelled drag has no position at all, so there is nothing to test —
+    // every pane must disarm.
+    channel.deliver({ kind: 'leave' })
+    expect(queryByTestId('room-overlay')).toBeNull()
+
+    restore()
+  })
+
+  it('unsubscribes when the pane unmounts', () => {
+    const channel = nativeChannel()
+    const { unmount } = render(
+      <TwoPanes subscribe={channel.subscribe} onFile={() => {}} />,
+    )
+    expect(channel.listeners).toBe(2)
+
+    unmount()
+
+    expect(channel.listeners).toBe(0)
   })
 })

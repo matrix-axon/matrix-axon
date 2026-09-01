@@ -1,9 +1,12 @@
+import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import WebSocketClient from '@tauri-apps/plugin-websocket'
+import { fileFromPath } from '../media/dropped-file'
 import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 
 /**
@@ -288,6 +291,38 @@ const OAUTH_CLIENT = {
   redirectUri: 'org.matrixaxon.axon:/oauth/callback',
 }
 
+/**
+ * Read the files behind a set of dropped paths.
+ *
+ * `read_dropped_file` is this app's own command rather than the fs plugin's
+ * `readFile`, and that is a deliberate narrowing. A dropped file can be
+ * anywhere, so an fs-plugin route would need a scope wide enough to cover the
+ * whole filesystem — a standing grant to read any file, held by the webview,
+ * for the sake of a gesture. The command instead reads only paths the shell
+ * has just seen the user drop on this window, so the grant lasts exactly as
+ * long as the drag and covers exactly what was dragged.
+ *
+ * Sequential, not `Promise.all`: the batch is at most a handful of files
+ * (`MAX_BATCH_FILES`), and staging order is the order they are sent in
+ * (ADR 0081), so it should be the order the OS listed them.
+ *
+ * A path that cannot be read is skipped rather than failing the whole drop.
+ * Dropping five images should not be lost to one of them being a broken
+ * symlink, and the caller reports an empty result honestly.
+ */
+async function readDroppedFiles(paths: readonly string[]): Promise<File[]> {
+  const files: File[] = []
+  for (const path of paths) {
+    try {
+      const bytes = await invoke<ArrayBuffer>('read_dropped_file', { path })
+      files.push(fileFromPath(path, bytes))
+    } catch (error) {
+      console.error('could not read a dropped file', path, error)
+    }
+  }
+  return files
+}
+
 export function tauriPlatform(): Platform {
   return {
     // The plugin's fetch is signature-compatible with the global, but has no
@@ -387,6 +422,39 @@ export function tauriPlatform(): Platform {
           deliver(raw)
         }
       })
+      return () => {
+        void ready.then((unlisten) => unlisten()).catch(() => {})
+      }
+    },
+    onNativeFileDrop: (handler) => {
+      // Only ever fires where the shell left its drag-drop handler enabled,
+      // which is Linux alone (`src-tauri/src/lib.rs`). Windows and macOS keep
+      // the handler disabled so the page's own HTML5 events work — Tauri's own
+      // docs require that on Windows — and there this subscription is simply
+      // never called, which is why no platform check is needed here.
+      const ready = getCurrentWebview().onDragDropEvent((event) => {
+        const drag = event.payload
+        if (drag.type === 'leave') {
+          handler({ kind: 'leave' })
+          return
+        }
+        // The OS reports physical pixels. Everything on the page — layout,
+        // `elementFromPoint` — is in CSS pixels, so on any scaled display an
+        // unconverted point lands somewhere else entirely, and on a 2x screen
+        // it lands off the bottom-right of the window.
+        const { x, y } = drag.position.toLogical(window.devicePixelRatio || 1)
+        if (drag.type !== 'drop') {
+          // `enter` and `over` are the same thing to a drop target: the cursor
+          // is here, with a file.
+          handler({ kind: 'over', x, y })
+          return
+        }
+        void readDroppedFiles(drag.paths).then((files) => {
+          handler({ kind: 'drop', x, y, files })
+        })
+      })
+      // The subscription is established asynchronously, so unsubscribing has
+      // to wait for it rather than race it.
       return () => {
         void ready.then((unlisten) => unlisten()).catch(() => {})
       }

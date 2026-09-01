@@ -15,6 +15,7 @@ import {
   userMentionSuggestions,
   type FormattedMessageParts,
 } from '../mentions'
+import type { Platform } from '../platform'
 import type { MembersStore } from '../stores/members'
 import type { RoomDto } from '../stores/room-list'
 import type { EventDto, TimelineStore } from '../stores/timeline'
@@ -46,6 +47,12 @@ export interface MessageComposerOptions {
    * files have to outlive that.
    */
   staging: AttachmentStaging
+  /**
+   * The shell's window-level drag-drop channel, where there is one
+   * (`Platform.onNativeFileDrop`). Passed in rather than read from the service
+   * graph so this hook keeps taking everything it needs explicitly.
+   */
+  nativeDrops?: Platform['onNativeFileDrop']
 }
 
 /**
@@ -100,7 +107,7 @@ export function useMessageComposer(options: MessageComposerOptions): {
     dragging,
     problem: dropProblem,
     handlers: dropHandlers,
-  } = useFileDrop(stage)
+  } = useFileDrop(stage, options.nativeDrops)
 
   useEffect(() => {
     let cancelled = false
