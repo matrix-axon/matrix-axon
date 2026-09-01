@@ -499,7 +499,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> &str {
     }
 }
 
-fn html_escape(value: &str) -> String {
+pub(crate) fn html_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('"', "&quot;")
