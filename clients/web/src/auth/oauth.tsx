@@ -155,7 +155,8 @@ export interface OAuthAuthOptions {
    * The complete callback URI, overriding `redirectUriBase`.
    *
    * A shell's callback cannot be composed from a base: resolving
-   * `/oauth/callback` against `axon://oauth` gives `axon://oauth/oauth/callback`.
+   * `/oauth/callback` against `org.matrixaxon.axon:/oauth` gives
+   * `org.matrixaxon.axon:/oauth/oauth/callback`.
    * It is also the value the server allow-lists *exactly*, so it has to be
    * stated rather than derived.
    */

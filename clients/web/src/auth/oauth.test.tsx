@@ -517,7 +517,8 @@ describe('createOAuthAuthProvider', () => {
 describe('a shell callback URI', () => {
   it('is used verbatim, not composed from a base', async () => {
     // Composition mangles a custom scheme: resolving `/oauth/callback` against
-    // `axon://oauth` gives `axon://oauth/oauth/callback`. It is also the value
+    // `org.matrixaxon.axon:/oauth` gives
+    // `org.matrixaxon.axon:/oauth/oauth/callback`. It is also the value
     // the server allow-lists *exactly* (`OAuthClients::redirect_uri_allowed`),
     // so a derived one would be rejected at `/v1/oauth/authorize`.
     const pending = memoryStorage()

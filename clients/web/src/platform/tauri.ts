@@ -253,28 +253,39 @@ export function boundedSignal(
 }
 
 /**
- * The scheme this app registers with the OS, and the callback it expects.
+ * How this shell identifies itself to the Axon authorization server.
  *
- * A reverse-domain scheme, per RFC 8252 § 7.1 and ADR 0102 § 4, not a short
- * `axon:`. A private-use scheme is claimed first-come and unauthenticated on
- * every desktop OS, so a generic one is both easy to collide with and easy to
- * impersonate — any application registering `axon` could receive an
- * authorization code meant for this one (§ 8.4, § 8.6).
+ * `clientId` and `redirectUri` are one registration, not two settings: the
+ * server allow-lists URIs per client id, so `axon-desktop` with the browser's
+ * callback — or `axon-web` with this one — is an unregistered *pair* and is
+ * refused with "unknown client_id or redirect_uri". The shell previously set
+ * only the URI and kept the build-time `axon-web`, which is precisely that.
  *
- * Single slash: there is no authority component, and `://` would make
- * `oauth` look like a host.
+ * The redirect is a reverse-domain scheme per RFC 8252 § 7.1 and ADR 0102 § 4,
+ * not a short `axon:`. A private-use scheme is claimed first-come and
+ * unauthenticated on every desktop OS, so a generic one is both easy to collide
+ * with and easy to impersonate: any application registering `axon` could
+ * receive an authorization code meant for this one (§ 8.4, § 8.6). Single
+ * slash, because there is no authority component and `://` would make `oauth`
+ * look like a host.
  *
- * Note this is *not* the scheme the bundle is served from. `APP_SCHEME` in
- * `src-tauri/src/lib.rs` stays `axon`, because that is an in-webview protocol
- * handler which is never registered with the OS and takes no part in OAuth.
+ * It is *not* the scheme the bundle is served from. `APP_SCHEME` in
+ * `src-tauri/src/lib.rs` stays `axon`: that is an in-webview protocol handler,
+ * never registered with the OS, and takes no part in OAuth.
  *
- * Must stay in step with `plugins.deep-link.desktop.schemes` in
- * `tauri.conf.json` and with the `redirect_uris` registered for this
- * `client_id` on the server, which allow-lists them exactly
- * (`OAuthClients::redirect_uri_allowed`). Three places, no shared source —
- * changing one alone produces a sign-in that dead-ends at the browser.
+ * The scheme must also match `plugins.deep-link.desktop.schemes` in
+ * `tauri.conf.json`, and the operator's server needs the matching entry:
+ *
+ * ```toml
+ * [[oauth.clients]]
+ * client_id = "axon-desktop"
+ * redirect_uris = ["org.matrixaxon.axon:/oauth/callback"]
+ * ```
  */
-const OAUTH_REDIRECT_URI = 'org.matrixaxon.axon:/oauth/callback'
+const OAUTH_CLIENT = {
+  clientId: 'axon-desktop',
+  redirectUri: 'org.matrixaxon.axon:/oauth/callback',
+}
 
 export function tauriPlatform(): Platform {
   return {
@@ -319,7 +330,7 @@ export function tauriPlatform(): Platform {
         console.error('could not open an external link', originOf(url))
       })
     },
-    oauthRedirectUri: OAUTH_REDIRECT_URI,
+    oauthClient: OAUTH_CLIENT,
     onDeepLink: (handler) => {
       // `onOpenUrl` resolves to its own unlisten function; the subscription is
       // established asynchronously, so unsubscribing has to wait for it rather

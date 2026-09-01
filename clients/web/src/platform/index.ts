@@ -102,17 +102,23 @@ export interface Platform {
   openExternal: ((url: string) => void) | null
 
   /**
-   * The complete OAuth callback URI this build receives its authorization code
-   * at, or `null` to compose one from the page origin.
+   * How this build identifies itself to the Axon authorization server, or
+   * `null` to use the build-time client id and a callback composed from the
+   * page origin.
    *
-   * `null` in a browser, where the callback is a route on the origin serving
-   * the app. A shell has no origin a browser can redirect to, so it registers
-   * a private scheme with the OS and receives the redirect as a deep link
-   * (RFC 8252) — and that URI cannot be composed from a base: resolving
-   * `/oauth/callback` against `axon://oauth` yields `axon://oauth/oauth/callback`.
-   * So it is carried whole rather than assembled.
+   * One object because the two halves are one registration. The server
+   * allow-lists redirect URIs *per client id*
+   * (`OAuthClients::redirect_uri_allowed`), so a client id paired with the
+   * wrong URI is not a partial configuration — it is an unregistered pair, and
+   * `/v1/oauth/authorize` rejects it with "unknown client_id or redirect_uri".
+   * Setting one without the other is exactly the shape of that mistake, so
+   * they cannot be set separately.
+   *
+   * A shell's callback also cannot be composed from a base: resolving
+   * `/oauth/callback` against `org.matrixaxon.axon:/oauth` yields
+   * `org.matrixaxon.axon:/oauth/oauth/callback`. It is carried whole.
    */
-  oauthRedirectUri: string | null
+  oauthClient: { clientId: string; redirectUri: string } | null
 
   /**
    * Subscribe to URLs the OS hands this app, or `null` where there is no such
@@ -173,8 +179,8 @@ export function browserPlatform(): Platform {
     saveFile: saveInBrowser,
     // The anchor already does the right thing here; see `openExternal`.
     openExternal: null,
-    // The callback is a route on this origin, composed from it.
-    oauthRedirectUri: null,
+    // The build-time client id, and a callback composed from this origin.
+    oauthClient: null,
     // A browser has no OS-level URL channel; the callback arrives as a
     // navigation to `/oauth/callback` instead.
     onDeepLink: null,

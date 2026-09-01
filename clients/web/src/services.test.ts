@@ -29,6 +29,8 @@ import { createTimelineStoreCache } from './stores/timeline-cache'
 import { createUpdateChecker } from './stores/update-check'
 import { FakeWebSocket } from './test/fake-socket'
 import { memoryStorage } from './test/memory-storage'
+import { browserPlatform } from './platform'
+import { createServices } from './services'
 import { testServices } from './test/services'
 
 const ACCT = '11111111-1111-1111-1111-111111111111'
@@ -683,5 +685,46 @@ describe('connectAttachmentReset', () => {
     }).not.toThrow()
     expect(staging.batch('scope').items).toHaveLength(0)
     dispose()
+  })
+})
+
+describe('OAuth client identity from the platform', () => {
+  it('takes the client id and callback from the same place', async () => {
+    // The bug this exists for: the shell overrode the redirect URI but kept
+    // the build-time `axon-web` client id, and the server allow-lists URIs
+    // *per client id* — so the pair was unregistered and every sign-in died
+    // at `/v1/oauth/authorize` with "unknown client_id or redirect_uri".
+    // Half-configuring is the whole failure mode, so assert both together.
+    const navigated: string[] = []
+    const services = createServices(memoryStorage(), memoryStorage(), {
+      ...browserPlatform(),
+      defaultApiBaseUrl: 'https://axon.example.com',
+      oauthClient: {
+        clientId: 'axon-desktop',
+        redirectUri: 'org.matrixaxon.axon:/oauth/callback',
+      },
+      openExternal: (url) => navigated.push(url),
+      fetch: (() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ data: [{ provider: 'google' }] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )) as unknown as typeof globalThis.fetch,
+    })
+
+    // `startSignIn` refuses a provider the list does not name, so discovery
+    // has to have run — which is also how a packaged build learns it.
+    await services.auth.oauth.discoverProviders()
+    await services.auth.oauth.startSignIn('google')
+
+    // `startSignIn` rejects for an unknown provider before navigating, so an
+    // empty list here would make this vacuous.
+    expect(navigated).toHaveLength(1)
+    const authorize = new URL(navigated[0])
+    expect(authorize.searchParams.get('client_id')).toBe('axon-desktop')
+    expect(authorize.searchParams.get('redirect_uri')).toBe(
+      'org.matrixaxon.axon:/oauth/callback',
+    )
   })
 })

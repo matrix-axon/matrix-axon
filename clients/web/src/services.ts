@@ -972,11 +972,12 @@ export function createServices(
   const auth = createCompositeAuthProvider({
     providers: parseOAuthProviders(import.meta.env.VITE_AXON_OAUTH_PROVIDERS),
     baseUrl,
-    clientId: oauthClientId(),
+    // Both halves from the same source, or neither: see `Platform.oauthClient`.
+    clientId: platform.oauthClient?.clientId ?? oauthClientId(),
     redirectUriBase: oauthRedirectUriBase(),
     // A shell states its callback whole; a browser composes one from its
     // origin (ADR 0102 § 3, RFC 8252).
-    redirectUri: platform.oauthRedirectUri ?? undefined,
+    redirectUri: platform.oauthClient?.redirectUri,
     // Sign-in must happen in the user's real browser, never in the app's own
     // webview: an embedded one would put the app between the user and their
     // identity provider's password field. `openExternal` is exactly that
