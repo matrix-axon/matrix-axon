@@ -45,7 +45,18 @@ function isOverTarget(id: string, x: number, y: number): boolean {
 
 export function useFileDrop(
   onFiles: (files: FileList | readonly File[]) => void,
-  nativeDrops?: Platform['onNativeFileDrop'],
+  options: {
+    /** The shell's window-level channel, where the platform has one. */
+    nativeDrops?: Platform['onNativeFileDrop']
+    /**
+     * Identity of the surface this pane composes for
+     * (`useMessageComposer`'s `attachmentScope`). Only read to drop a stale
+     * `problem`: these panes are reused across a room change rather than
+     * remounted, so without it the message follows the user into a room they
+     * never dropped anything on.
+     */
+    scope?: string
+  } = {},
 ): {
   dragging: boolean
   /**
@@ -71,6 +82,7 @@ export function useFileDrop(
     onDrop(event: DragEvent): void
   }
 } {
+  const { nativeDrops, scope } = options
   const [dragging, setDragging] = useState(false)
   const [problem, setProblem] = useState<string | null>(null)
   const depth = useRef(0)
@@ -102,6 +114,11 @@ export function useFileDrop(
     depth.current = 0
     setDragging(false)
   }, [])
+
+  // A stale message must not outlive the surface it was about.
+  useEffect(() => {
+    setProblem(null)
+  }, [scope])
 
   useEffect(() => {
     if (nativeDrops === undefined || nativeDrops === null) {

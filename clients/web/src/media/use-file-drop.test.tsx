@@ -174,6 +174,43 @@ describe('a drop that carries nothing usable', () => {
   })
 })
 
+describe('a message about a drop that staged nothing', () => {
+  function Scoped({ scope }: { scope: string }) {
+    const { problem, handlers } = useFileDrop(() => {}, { scope })
+    return (
+      <div data-testid="pane" {...handlers}>
+        {problem !== null && <p role="alert">{problem}</p>}
+      </div>
+    )
+  }
+
+  it('does not follow the user into another room', () => {
+    // These panes are reused across a room change rather than remounted, so
+    // the message outlived the room it was about and appeared in one the user
+    // had never dropped anything on.
+    const { getByTestId, queryByRole, rerender } = render(
+      <Scoped scope="acct\0!room-a" />,
+    )
+    fireEvent.drop(getByTestId('pane'), withUriList)
+    expect(queryByRole('alert')).not.toBeNull()
+
+    rerender(<Scoped scope="acct\0!room-b" />)
+
+    expect(queryByRole('alert')).toBeNull()
+  })
+
+  it('survives a render that did not change the surface', () => {
+    const { getByTestId, queryByRole, rerender } = render(
+      <Scoped scope="acct\0!room-a" />,
+    )
+    fireEvent.drop(getByTestId('pane'), withUriList)
+
+    rerender(<Scoped scope="acct\0!room-a" />)
+
+    expect(queryByRole('alert')).not.toBeNull()
+  })
+})
+
 describe('a drag the OS reports to the window (Linux)', () => {
   /**
    * The shell's channel, driven by hand. `subscribe` is what a pane is given
@@ -224,8 +261,8 @@ describe('a drag the OS reports to the window (Linux)', () => {
     subscribe: (handler: (drag: NativeDrag) => void) => () => void
     onFile: (files: FileList | readonly File[]) => void
   }) {
-    const room = useFileDrop(onFile, subscribe)
-    const thread = useFileDrop(onFile, subscribe)
+    const room = useFileDrop(onFile, { nativeDrops: subscribe })
+    const thread = useFileDrop(onFile, { nativeDrops: subscribe })
     return (
       <>
         <div data-testid="room" {...room.handlers}>

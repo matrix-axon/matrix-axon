@@ -193,6 +193,11 @@ struct DroppedPaths(std::sync::Mutex<std::collections::HashSet<std::path::PathBu
 
 /// How many dropped paths stay readable. Comfortably above `MAX_BATCH_FILES`
 /// (10, in `media/attachment-staging.ts`), so a drag is never truncated.
+///
+/// Gated like the listener that is its only reader. Everywhere else the page
+/// handles the drag itself and nothing is ever recorded, so an ungated
+/// constant is dead code on Windows and macOS — which is how it was reported.
+#[cfg(target_os = "linux")]
 const DROPPED_PATHS_REMEMBERED: usize = 64;
 
 /// Record what the user drops, so the page can ask for its bytes.

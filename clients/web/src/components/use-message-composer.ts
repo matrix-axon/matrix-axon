@@ -107,7 +107,10 @@ export function useMessageComposer(options: MessageComposerOptions): {
     dragging,
     problem: dropProblem,
     handlers: dropHandlers,
-  } = useFileDrop(stage, options.nativeDrops)
+  } = useFileDrop(stage, {
+    nativeDrops: options.nativeDrops,
+    scope: options.attachmentScope,
+  })
 
   useEffect(() => {
     let cancelled = false
