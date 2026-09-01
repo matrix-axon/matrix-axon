@@ -749,6 +749,10 @@ fn expand_send_path_with_home(path: &str, home: Option<std::ffi::OsString>) -> P
     PathBuf::from(path)
 }
 
+fn whoami_line(user_id: &str, display_name: &str, device_label: &str) -> String {
+    format!("Matrix ID: {user_id}; Display Name: {display_name}; Device: {device_label}")
+}
+
 pub(crate) struct App {
     pub(crate) client: AxonClient,
     pub(crate) account_filter: Option<Uuid>,
@@ -2060,12 +2064,16 @@ impl App {
         self.open_popup(PopupKind::RoomInfo);
     }
 
+    /// `/whoami` is local except for the optional homeserver display name.
+    /// Paint the Matrix id / profile / device id immediately, then spawn the
+    /// devices GET so a slow or hung axon cannot freeze the event loop
+    /// (`clients/tui/AGENTS.md`: never `await` an API call from key handling).
     fn show_whoami(&mut self) {
         let Some(room) = self.selected_room() else {
             self.status = Status::Info("select a room before using /whoami".to_owned());
             return;
         };
-        let Some(user_id) = room.account_user_id.as_deref() else {
+        let Some(user_id) = room.account_user_id.clone() else {
             self.status = Status::Info("current user is unavailable for this room".to_owned());
             return;
         };
@@ -2075,13 +2083,58 @@ impl App {
             .rooms
             .display_names
             .get(&key)
-            .and_then(|names| names.get(user_id))
+            .and_then(|names| names.get(&user_id))
             .filter(|name| !name.trim().is_empty())
-            .map(String::as_str)
-            .unwrap_or("unknown");
-        self.status = Status::Info(format!(
-            "Matrix ID: {user_id}; Display Name: {display_name}"
-        ));
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_owned());
+        let account = self
+            .accounts
+            .client_visible
+            .iter()
+            .find(|account| account.account_id == room.account_id)
+            .cloned();
+        let device_id = account
+            .as_ref()
+            .and_then(|account| account.device_id.clone())
+            .filter(|id| !id.is_empty());
+        let device_label = device_id.as_deref().unwrap_or("unknown").to_owned();
+        let provisional = whoami_line(&user_id, &display_name, &device_label);
+        self.status = Status::Info(provisional.clone());
+
+        let Some(device_id) = device_id else {
+            return;
+        };
+        let Some(account) = account else {
+            return;
+        };
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        let client = self.client.clone();
+        let account_id = account.account_id;
+        tokio::spawn(async move {
+            let Ok(list) = client.list_devices(account_id).await else {
+                return;
+            };
+            let Some(name) = list
+                .devices
+                .iter()
+                .find(|device| device.device_id == device_id)
+                .and_then(|device| device.display_name.as_deref())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+            else {
+                return;
+            };
+            let enriched = whoami_line(&user_id, &display_name, &format!("{name} ({device_id})"));
+            if enriched != provisional {
+                let _ = tx.send(LifecycleOutcome::WhoamiDevice {
+                    provisional,
+                    enriched,
+                });
+            }
+        });
     }
 
     pub(crate) fn start_reply_to_selected_message(&mut self) {
