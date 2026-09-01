@@ -1214,13 +1214,19 @@ test('narrow: opening a thread from the unread drawer uncovers the thread pane',
 }) => {
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
+  // Real-ish timestamps: the reply is recent, sits just past the room read
+  // marker, and the drawer flags it. Fixed tiny values (100/200) predate the
+  // reconcile recency window (ADR 0096 addendum) and never reach the badge.
+  const rootTs = Date.now() - 20_000
+  const replyTs = Date.now() - 10_000
+  const markerTs = Date.now() - 15_000
   const root = {
     account_id: '11111111-1111-4111-8111-111111111111',
     event_id: '$seed-image:hs',
     room_id: ROOM_ID,
     sender: '@bob:hs',
     state_key: null,
-    origin_ts: 100,
+    origin_ts: rootTs,
     type: 'm.room.message',
     content: { msgtype: 'm.text', body: 'root body' },
     body: 'root body',
@@ -1236,7 +1242,7 @@ test('narrow: opening a thread from the unread drawer uncovers the thread pane',
   const reply = {
     ...root,
     event_id: '$thread-reply:hs',
-    origin_ts: 200,
+    origin_ts: replyTs,
     body: 'hidden reply',
     content: { msgtype: 'm.text', body: 'hidden reply' },
     relates_to: { rel_type: 'm.thread', event_id: '$seed-image:hs' },
@@ -1254,7 +1260,7 @@ test('narrow: opening a thread from the unread drawer uncovers the thread pane',
             root_event_id: '$seed-image:hs',
             reply_count: 1,
             latest_reply_event_id: '$thread-reply:hs',
-            latest_reply_ts: 200,
+            latest_reply_ts: replyTs,
           },
         ],
       },
@@ -1273,7 +1279,7 @@ test('narrow: opening a thread from the unread drawer uncovers the thread pane',
             namespace === 'read_markers'
               ? {
                   [ROOM_ID]: {
-                    value: { event_id: '$before:hs', origin_ts: 150 },
+                    value: { event_id: '$before:hs', origin_ts: markerTs },
                     device_id: 'e2e',
                     updated_at: '2026-01-01T00:00:00Z',
                   },

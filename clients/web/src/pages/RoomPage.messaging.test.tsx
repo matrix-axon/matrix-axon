@@ -174,7 +174,10 @@ function renderRoom(
     '',
     url ?? `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
   )
-  const services = testServices()
+  // Fixtures here stamp events a few hundred ms past the epoch; put "now" just
+  // after them so `reconcileSummary`'s recency window is not the thing under
+  // test (it is exercised directly in `stores/thread-unread.test.ts`).
+  const services = testServices({ now: () => 60_000 })
   const utils = render(
     <ServicesContext.Provider value={services}>
       <LocationProvider>
