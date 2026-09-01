@@ -13,7 +13,7 @@ That one persistent brain also covers multiple Matrix accounts (personal and wor
 Start composing a message on the mobile web app and continue that same draft instantly via the TUI on desktop.
 No saving required.
 
-Two reference clients consume that same open, versioned `/v1/` API today — [`axon-tui`](clients/tui/README.md), a keyboard-first terminal client, and [`axon-web`](clients/web/README.md), a desktop/mobile browser and (soon to be packaged) Tauri desktop client — proof that building a third is a client-only project, not a fork.
+Two reference clients consume that same open, versioned `/v1/` API today — [`axon-tui`](clients/tui/README.md), a keyboard-first terminal client, and [`axon-web`](clients/web/README.md), a desktop/mobile browser and [Tauri desktop client](clients/web/src-tauri/README.md) — proof that building a third is a client-only project, not a fork.
 Check out our [client parity](docs/client-parity.md) document for the current implementation status of these clients and future roadmap.
 And because Axon can be self-hosted on your own hardware or cloud instance rather than a SaaS holding your decrypted history, it's working toward a single-command setup that works painlessly on Linux, MacOS, or Windows: a Docker Compose stack that brings up Postgres, Axon, and the web client behind one front door, with Caddy handling TLS and a Tailscale profile for private remote access already built in.
 
