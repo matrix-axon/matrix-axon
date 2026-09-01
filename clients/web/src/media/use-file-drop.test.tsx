@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render } from '@testing-library/preact'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { useFileDrop } from './use-file-drop'
+import { preventStrayFileDrops, useFileDrop } from './use-file-drop'
 
 afterEach(cleanup)
 
@@ -88,5 +88,59 @@ describe('useFileDrop (ADR 0065)', () => {
 
     fireEvent.dragLeave(pane, withFiles())
     expect(queryByTestId('overlay')).toBeNull()
+  })
+})
+
+/** WebKitGTK advertises this for a file-manager drag; `Files` may be absent. */
+const withUriList = { dataTransfer: { types: ['text/uri-list'], files: [] } }
+
+describe('a drag WebKitGTK reports as text/uri-list', () => {
+  it('is intercepted, so the composer does not receive a pasted path', () => {
+    // The reported Linux symptom: dropping an image on the message box typed
+    // its path in. The guard required `Files` in `types`, so the handler bailed
+    // and the textarea's own default ran.
+    const onFile = vi.fn()
+    const { getByTestId } = render(<Harness onFile={onFile} />)
+
+    const prevented = !fireEvent.drop(getByTestId('pane'), withUriList)
+
+    expect(prevented).toBe(true)
+    // Nothing to stage from a bare URI, and that is fine — doing nothing beats
+    // pasting a path nobody typed.
+    expect(onFile).not.toHaveBeenCalled()
+  })
+
+  it('is also intercepted on dragover, or the drop never fires', () => {
+    const { getByTestId } = render(<Harness />)
+
+    expect(!fireEvent.dragOver(getByTestId('pane'), withUriList)).toBe(true)
+  })
+})
+
+describe('preventStrayFileDrops', () => {
+  it('refuses a file dropped outside any drop target', () => {
+    // Otherwise the browser navigates to the file and the app is replaced by
+    // the image, with no way back but a restart.
+    const stop = preventStrayFileDrops(document)
+
+    expect(!fireEvent.drop(document.body, withFiles())).toBe(true)
+
+    stop()
+  })
+
+  it('leaves a drag carrying no file alone', () => {
+    // Dragging selected text, or a link, is not ours to interfere with.
+    const stop = preventStrayFileDrops(document)
+
+    expect(!fireEvent.drop(document.body, withText)).toBe(false)
+
+    stop()
+  })
+
+  it('stops listening when disposed', () => {
+    const stop = preventStrayFileDrops(document)
+    stop()
+
+    expect(!fireEvent.drop(document.body, withFiles())).toBe(false)
   })
 })

@@ -51,6 +51,7 @@ import {
   setPerfOverlay,
 } from './perf'
 import { setupInstallPromptCapture } from './install-prompt'
+import { preventStrayFileDrops } from './media/use-file-drop'
 import { SLASH_COMMAND } from './slash-commands'
 import {
   createServices,
@@ -187,6 +188,9 @@ export function App({
   useEffect(() => {
     setPerfOverlay(svc.settings.perfOverlay.value)
   }, [svc, svc.settings.perfOverlay.value, svc.settings.perfMarks.value])
+  // A file dropped outside a drop target must not navigate the window away
+  // from the app (see `preventStrayFileDrops`).
+  useEffect(() => preventStrayFileDrops(), [])
   useVisualViewportShell(svc.settings)
   useStandaloneKeyboardAccessoryInset()
   useInstallPromptCapture()

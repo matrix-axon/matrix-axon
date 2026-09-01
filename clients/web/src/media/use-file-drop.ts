@@ -24,8 +24,21 @@ export function useFileDrop(onFiles: (files: FileList) => void): {
   const [dragging, setDragging] = useState(false)
   const depth = useRef(0)
 
-  const carriesFile = (event: DragEvent) =>
-    Array.from(event.dataTransfer?.types ?? []).includes('Files')
+  /**
+   * Whether this drag looks like it carries a file.
+   *
+   * `Files` is what a browser reports for a drag out of a file manager. But WebKitGTK also advertises `text/uri-list`
+   * for the same gesture and does not always include `Files` in `types` — and
+   * when this returned false, the handlers below bailed and the *browser's*
+   * default ran instead: a drop on the composer inserted the file's path as
+   * text, which is what a Linux user reported. Anything file-shaped is
+   * therefore intercepted, even if nothing can be staged from it; doing
+   * nothing is a much better outcome than pasting a path nobody typed.
+   */
+  const looksLikeFile = (event: DragEvent) => {
+    const types = Array.from(event.dataTransfer?.types ?? [])
+    return types.includes('Files') || types.includes('text/uri-list')
+  }
 
   const reset = useCallback(() => {
     depth.current = 0
@@ -36,21 +49,22 @@ export function useFileDrop(onFiles: (files: FileList) => void): {
     dragging,
     handlers: {
       onDragEnter(event) {
-        if (!carriesFile(event)) {
+        if (!looksLikeFile(event)) {
           return
         }
         depth.current += 1
         setDragging(true)
       },
       onDragOver(event) {
-        if (!carriesFile(event)) {
+        if (!looksLikeFile(event)) {
           return
         }
-        // Without this the browser navigates to the dropped file.
+        // Without this the browser navigates to the dropped file, and the drop
+        // event may never fire at all.
         event.preventDefault()
       },
       onDragLeave(event) {
-        if (!carriesFile(event)) {
+        if (!looksLikeFile(event)) {
           return
         }
         depth.current -= 1
@@ -59,9 +73,11 @@ export function useFileDrop(onFiles: (files: FileList) => void): {
         }
       },
       onDrop(event) {
-        if (!carriesFile(event)) {
+        if (!looksLikeFile(event)) {
           return
         }
+        // Prevented before the staging decision, not after: even a drag we
+        // cannot stage from must not reach the browser's default handling.
         event.preventDefault()
         reset()
         // The whole list goes through (ADR 0081). Only the staging hook knows
@@ -73,5 +89,37 @@ export function useFileDrop(onFiles: (files: FileList) => void): {
         }
       },
     },
+  }
+}
+
+/**
+ * Stop the browser acting on a file dropped anywhere the app does not handle.
+ *
+ * `useFileDrop` is scoped to a pane on purpose (see above), which leaves the
+ * rest of the window — sidebar, topbar, empty space — with no handler at all,
+ * and there the browser does what browsers do with a dropped file: it navigates
+ * to it. The app is simply *replaced* by the image, with no way back but a
+ * restart, which is what a Linux user hit.
+ *
+ * This is a guard, not a drop target: it never stages anything, it only refuses
+ * the default. A drop on a real target still stages, because the pane's own
+ * handler runs first — it is the event's target, and this listens at the
+ * document.
+ */
+export function preventStrayFileDrops(target: Document = document): () => void {
+  const looksLikeFile = (event: DragEvent) => {
+    const types = Array.from(event.dataTransfer?.types ?? [])
+    return types.includes('Files') || types.includes('text/uri-list')
+  }
+  const swallow = (event: DragEvent) => {
+    if (looksLikeFile(event)) {
+      event.preventDefault()
+    }
+  }
+  target.addEventListener('dragover', swallow)
+  target.addEventListener('drop', swallow)
+  return () => {
+    target.removeEventListener('dragover', swallow)
+    target.removeEventListener('drop', swallow)
   }
 }
