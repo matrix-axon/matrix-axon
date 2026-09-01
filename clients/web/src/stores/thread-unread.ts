@@ -102,7 +102,21 @@ function sameEntry(
   )
 }
 
-export function createThreadUnreadStore(): ThreadUnreadStore {
+/**
+ * How recent a thread's latest reply must be for `reconcileSummary` to raise it
+ * off the *room* marker alone. With only that marker the read position is the
+ * main-timeline one (ADR 0096 §1), so every thread that got a reply after the
+ * room's last main-timeline message clears the bar — years-old threads included.
+ * A per-thread marker is a precise position and carries no such window; this
+ * gate applies only to the roomMarker fallback, and only to promotion, never to
+ * clearing. A reply older than the window in a thread never opened here is left
+ * to the server-side per-thread unread signal (ADR 0096 §6).
+ */
+const RECONCILE_RECENCY_MS = 14 * 24 * 60 * 60_000
+
+export function createThreadUnreadStore(
+  now: () => number = () => Date.now(),
+): ThreadUnreadStore {
   const byKey = signal<ReadonlyMap<string, ThreadUnreadEntry>>(new Map())
 
   function remove(key: string): void {
@@ -145,6 +159,9 @@ export function createThreadUnreadStore(): ThreadUnreadStore {
       return byKey.value.has(threadUnreadKey(accountId, roomId, rootEventId))
     },
 
+    // Records the reply unconditionally once past the identity checks: it has no
+    // read position to weigh against, so freshness is the caller's to enforce.
+    // `connectLiveThreadUnread` gates stale replays before calling in.
     recordLiveEvent(event, context) {
       const rootEventId = threadRootId(event)
       if (
@@ -190,6 +207,17 @@ export function createThreadUnreadStore(): ThreadUnreadStore {
         if (markerTs !== null) {
           remove(key)
         }
+        return
+      }
+      // Unread against `markerTs` — but if that position came from the room
+      // marker (no per-thread marker), it is the main-timeline one, and a reply
+      // from long after the last main-timeline message yet still long ago is
+      // noise here, not news. Hold those for the server-side signal (ADR 0096
+      // §6); a per-thread marker is exact and keeps promoting whatever the age.
+      if (
+        context.threadMarker === null &&
+        now() - latestTs > RECONCILE_RECENCY_MS
+      ) {
         return
       }
       upsert({
