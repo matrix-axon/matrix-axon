@@ -10,11 +10,17 @@ import {
   connectRoomsSessionReset,
   connectAttachmentReset,
   connectLiveRooms,
+  connectLiveThreadUnread,
   connectReadMarkers,
   connectTimelineCacheReset,
   connectUnreadCounts,
   connectUpdateChecks,
 } from './services'
+import {
+  createThreadUnreadStore,
+  type ActiveThread,
+} from './stores/thread-unread'
+import type { AccountsStore } from './stores/accounts'
 import { setPerfEnabled } from './perf'
 import { createMemoryCacheStore } from './stores/cache-store'
 import { createDeviceStateStore } from './stores/device-state'
@@ -268,6 +274,65 @@ describe('connectLiveRooms', () => {
     sockets[1].emitOpen()
     expect(refreshCount()).toBe(1)
     vi.useRealTimers()
+  })
+})
+
+function threadUnreadHarness(now: () => number) {
+  let socket: FakeWebSocket | undefined
+  const live = createLiveConnection({
+    socketFactory: () => {
+      socket = new FakeWebSocket()
+      return socket.asWebSocket()
+    },
+  })
+  const threadUnread = createThreadUnreadStore()
+  const accounts = {
+    accounts: computed(() => [{ account_id: ACCT, user_id: '@me:server' }]),
+  } as unknown as AccountsStore
+  const { stub } = roomsStub()
+  const activeThread = signal<ActiveThread | null>(null)
+  connectLiveThreadUnread(live, stub, accounts, threadUnread, activeThread, now)
+  live.start()
+  socket!.emitOpen()
+  return { threadUnread, socket: () => socket! }
+}
+
+const threadReplyFrame = (originTs: number) =>
+  JSON.stringify({
+    type: TIMELINE_EVENT,
+    account_id: ACCT,
+    payload: {
+      event_id: `$reply-${originTs}`,
+      account_id: ACCT,
+      room_id: ROOM,
+      sender: '@alice:server',
+      origin_ts: originTs,
+      arrival_order: originTs,
+      relates_to: { rel_type: 'm.thread', event_id: '$root' },
+      body: 'a reply',
+    },
+  })
+
+describe('connectLiveThreadUnread', () => {
+  // A homeserver-stamped `origin_ts`, so the harness clock is fixed near it.
+  const T0 = 1_700_000_000_000
+
+  it('badges a thread for a reply stamped after the connection opened', () => {
+    const { threadUnread, socket } = threadUnreadHarness(() => T0)
+    socket().emitMessage(threadReplyFrame(T0 + 1000))
+    expect(threadUnread.count.value).toBe(1)
+  })
+
+  it('keeps a reply inside the clock-skew slack window', () => {
+    const { threadUnread, socket } = threadUnreadHarness(() => T0)
+    socket().emitMessage(threadReplyFrame(T0 - 60_000))
+    expect(threadUnread.count.value).toBe(1)
+  })
+
+  it('drops a dormant-room reply replayed on a gappy resync', () => {
+    const { threadUnread, socket } = threadUnreadHarness(() => T0)
+    socket().emitMessage(threadReplyFrame(T0 - 365 * 24 * 60 * 60_000))
+    expect(threadUnread.count.value).toBe(0)
   })
 })
 

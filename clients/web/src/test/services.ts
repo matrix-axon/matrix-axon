@@ -87,6 +87,12 @@ export function testServices(
     currentVersion?: string
     /** Injectable browser boundary for QR page interaction tests. */
     qr?: BrowserQrAdapter
+    /**
+     * Wall clock for the thread-unread store, so a test with fixed-date
+     * fixtures can anchor `reconcileSummary`'s recency window instead of racing
+     * the real calendar. Defaults to `Date.now`.
+     */
+    now?: () => number
   } = {},
 ): AppServices & { sockets: FakeWebSocket[] } {
   const storage =
@@ -139,7 +145,9 @@ export function testServices(
     }),
   )
   const search = createSearchStore(api)
-  const threadUnread = createThreadUnreadStore()
+  const threadUnread = createThreadUnreadStore(
+    options.now ?? (() => Date.now()),
+  )
   const ephemeral = createEphemeralStore()
   const ephemeralSender = createEphemeralSender(api)
   // An inert socket: `start()` builds one but nothing drives its handshake, so
@@ -169,7 +177,17 @@ export function testServices(
   connectLiveRooms(live, rooms)
   connectLiveInvites(live, invites)
   connectInvitesSessionReset(auth, invites)
-  connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
+  // `() => 0`: the replay gate is off in the shared harness so a test can emit a
+  // `timeline.event` frame with any `origin_ts` and see it badge. Tests that
+  // exercise the gate build their own graph (`services.test.ts`).
+  connectLiveThreadUnread(
+    live,
+    rooms,
+    accounts,
+    threadUnread,
+    activeThread,
+    () => 0,
+  )
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
   connectThreadReadMarkers(live, threadUnread, deviceState)

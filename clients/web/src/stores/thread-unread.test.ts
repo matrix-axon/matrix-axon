@@ -67,46 +67,98 @@ describe('createThreadUnreadStore', () => {
     })
   })
 
-  it('seeds from summaries only when newer than the room or thread marker', () => {
-    const store = createThreadUnreadStore()
-    const summary = {
+  it('seeds from summaries only when unread and, off the room marker, recent', () => {
+    const NOW = 1_700_000_000_000
+    const DAY = 24 * 60 * 60_000
+    const store = createThreadUnreadStore(() => NOW)
+    const base = {
+      accountId: ACCT,
+      roomId: ROOM,
+      roomTitle: 'Ops',
+      threadMarker: null,
+    }
+    const summaryAt = (ts: number) => ({
       root_event_id: ROOT,
       latest_reply_event_id: '$reply',
-      latest_reply_ts: 200,
+      latest_reply_ts: ts,
       reply_count: 3,
-    }
-
-    store.reconcileSummary(summary, {
-      accountId: ACCT,
-      roomId: ROOM,
-      roomTitle: 'Ops',
-      roomMarker: null,
-      threadMarker: null,
     })
+
+    // No read position at all: silent, not a guess.
+    store.reconcileSummary(summaryAt(NOW - DAY), { ...base, roomMarker: null })
     expect(store.count.value).toBe(0)
 
-    store.reconcileSummary(summary, {
-      accountId: ACCT,
-      roomId: ROOM,
-      roomTitle: 'Ops',
-      roomMarker: { eventId: '$before', originTs: 100 },
-      threadMarker: null,
+    // Room marker behind a recent reply: raised.
+    store.reconcileSummary(summaryAt(NOW - DAY), {
+      ...base,
+      roomMarker: { eventId: '$before', originTs: NOW - 2 * DAY },
     })
     expect(store.isUnread(ACCT, ROOM, ROOT)).toBe(true)
 
-    store.reconcileSummary(summary, {
-      accountId: ACCT,
-      roomId: ROOM,
-      roomTitle: 'Ops',
-      roomMarker: { eventId: '$before', originTs: 100 },
-      threadMarker: {
-        roomId: ROOM,
-        rootEventId: ROOT,
-        eventId: '$reply',
-        originTs: 200,
-        arrivalThrough: null,
-      },
+    // Room marker behind a reply older than the recency window: held back — the
+    // marker is a main-timeline position, and this is the years-old-thread noise.
+    store.markThreadRead(ACCT, ROOM, ROOT)
+    store.reconcileSummary(summaryAt(NOW - 30 * DAY), {
+      ...base,
+      roomMarker: { eventId: '$before', originTs: NOW - 31 * DAY },
     })
+    expect(store.isUnread(ACCT, ROOM, ROOT)).toBe(false)
+  })
+
+  it('raises a stale reply when a per-thread marker places it unread', () => {
+    const NOW = 1_700_000_000_000
+    const DAY = 24 * 60 * 60_000
+    const store = createThreadUnreadStore(() => NOW)
+    const staleTs = NOW - 90 * DAY
+
+    store.reconcileSummary(
+      {
+        root_event_id: ROOT,
+        latest_reply_event_id: '$reply',
+        latest_reply_ts: staleTs,
+        reply_count: 3,
+      },
+      {
+        accountId: ACCT,
+        roomId: ROOM,
+        roomTitle: 'Ops',
+        roomMarker: { eventId: '$before', originTs: staleTs - 10 * DAY },
+        threadMarker: {
+          roomId: ROOM,
+          rootEventId: ROOT,
+          eventId: '$read-through',
+          originTs: staleTs - DAY,
+          arrivalThrough: null,
+        },
+      },
+    )
+    // A precise read position: the age of the gap is irrelevant.
+    expect(store.isUnread(ACCT, ROOM, ROOT)).toBe(true)
+  })
+
+  it('clears an entry once a marker proves the latest reply read', () => {
+    const NOW = 1_700_000_000_000
+    const store = createThreadUnreadStore(() => NOW)
+    store.recordLiveEvent(event('$reply', NOW - 1000, { root: ROOT }), {
+      roomTitle: 'Ops',
+    })
+    expect(store.isUnread(ACCT, ROOM, ROOT)).toBe(true)
+
+    store.reconcileSummary(
+      {
+        root_event_id: ROOT,
+        latest_reply_event_id: '$reply',
+        latest_reply_ts: NOW - 1000,
+        reply_count: 1,
+      },
+      {
+        accountId: ACCT,
+        roomId: ROOM,
+        roomTitle: 'Ops',
+        roomMarker: { eventId: '$after', originTs: NOW },
+        threadMarker: null,
+      },
+    )
     expect(store.isUnread(ACCT, ROOM, ROOT)).toBe(false)
   })
 

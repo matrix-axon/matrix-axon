@@ -254,3 +254,65 @@ Condition 2 of the gate is a fact about client state — which threads the user 
   - **A suite of "must not send" tests will happily certify a gate that never opens.**
     The version this ADR rejected passed seven of them and reached a dev server that never cleared a badge.
     The must-send cases carry the weight, and they have to be built from a room shaped like a real one — several threads, most never opened — not from the minimal fixture that reproduces the bug.
+
+## Addendum (false-positive unread threads on stale accounts)
+
+Confirmed on the production instance: the Unread threads drawer fills with
+threads whose latest reply is months or years old and which contain nothing new.
+This ADR's Consequences section welcomed the drawer lighting up — "the root row's
+'New' chip and the Unread threads panel light up" — without bounding _which_
+threads it lights up for. On an account whose room marker is old (or has been
+withheld and replaced with the display-last main-timeline event, as this ADR
+itself does for a marker parked on a thread member), `reconcileSummary`'s
+room-marker fallback flags **every** thread that received a reply after the
+room's last main-timeline message, however long ago. In a room where the
+conversation moved into threads and the main channel went quiet — the #207 shape
+— that is most of the thread list.
+
+Two mechanisms feed it:
+
+- **The reconcile fallback.** With no per-thread marker, `reconcileSummary`
+  compares `latest_reply_ts` against the room marker, which is a main-timeline
+  position by construction (§1). Any post-main-timeline reply clears that bar
+  regardless of age. Run over up to 1000 summaries per `GET /threads` on every
+  room open, this accumulates the whole historical thread backlog into a global
+  drawer as the user browses.
+- **The live path.** `connectLiveThreadUnread` → `recordLiveEvent` had no
+  age gate. After an axon restart or a gappy sliding-sync resume, the initial
+  per-room sync window is replayed on the live bus (only back-pagination is
+  suppressed server-side, `axon-sync/src/engine.rs`), so a dormant room
+  re-delivers its last reply as "just arrived" and badges a years-old thread.
+
+### The stopgap
+
+- **Live gate.** `connectLiveThreadUnread` drops a `timeline.event` stamped
+  before the live connection was wired, minus a five-minute slack for homeserver
+  clock skew and the gap to the first frame. Real-time replies badge; dormant
+  replays do not. `recordLiveEvent` stays an unconditional primitive — it has no
+  read position to weigh against, so freshness is the connection layer's to
+  enforce.
+- **Recency window on the room-marker fallback (route a′).** When the read
+  position comes from the room marker (no per-thread marker), `reconcileSummary`
+  promotes only a reply within a 14-day window of now. A per-thread marker is an
+  exact position and is exempt — it keeps promoting whatever the gap's age,
+  which is the case this ADR added and which is correct. Clearing is unchanged.
+
+Both are strictly conservative in the same direction as this ADR's marker
+withholding: the drawer claims _less_, never more. The live gate and the recency
+window are injected clocks (`createThreadUnreadStore(now)`,
+`connectLiveThreadUnread(…, now)`) so fixed-date fixtures can anchor them; the
+`RoomPage` "must-send" tests here encoded the eager fallback as intended and were
+rewritten with an anchored clock — the same test caution this ADR already
+records, from the other side.
+
+### What the stopgap does not cover
+
+A thread the user has **never opened on this account**, whose only reply arrived
+while they were offline more than 14 days ago, will not surface: there is no
+per-thread marker, and the window has passed. The client has no per-room "caught
+up as of" wall-clock (the read marker stores an event `origin_ts`, not a visit
+time) and cannot get one without new per-device persisted state that is itself
+silent until a room's first post-fix visit. This is the case §6's server-side
+per-room thread-unread signal is for; it remains the real fix, and the recency
+window and live gate are removable (or demotable to a pure offline fallback)
+once it lands.
