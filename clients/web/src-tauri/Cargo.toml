@@ -55,6 +55,12 @@ tauri = { version = "2", features = ["test"] }
 # Linux, so without this the OAuth callback would arrive in a second instance
 # while the PKCE verifier sits in the first one's sessionStorage. The
 # `deep-link` feature forwards the URL to the running instance instead.
+# Reaching the underlying WebKitGTK view, to answer its permission requests.
+# Version and feature pinned to what tauri itself depends on, so the types are
+# the same ones `with_webview` hands back rather than a parallel copy.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2", features = ["v2_40"] }
+
 [target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 

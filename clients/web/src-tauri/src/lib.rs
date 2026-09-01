@@ -70,7 +70,8 @@ pub fn run() {
             serve(ctx.app_handle(), request.uri().path())
         })
         .setup(|app| {
-            main_window(app.handle())?;
+            let window = main_window(app.handle())?;
+            allow_camera_capture(&window);
             claim_deep_link_schemes(app.handle());
             Ok(())
         })
@@ -89,6 +90,59 @@ pub fn run() {
 /// Not to be confused with [`APP_SCHEME`], which is also spelled `axon` and is
 /// a different thing entirely: an in-webview protocol handler that serves the
 /// bundle, never registered with the OS, taking no part in OAuth.
+/// Answer WebKitGTK's camera permission request, on Linux only.
+///
+/// Every desktop webview gates `getUserMedia`, and they disagree on the
+/// default. WebView2 *prompts the user*, which is why Windows works with no
+/// code. WKWebView asks its UI delegate, and wry answers `Grant`, so macOS
+/// needs nothing here either. WebKitGTK emits `permission-request` and
+/// **denies** when nothing handles the signal — and wry's GTK backend handles
+/// no permissions at all, so the request was refused before any prompt could
+/// exist. What the user saw was the browser's own wording for a denial they
+/// were never asked about, after granting camera access at the OS level and
+/// even adding themselves to the `video` group, neither of which WebKit
+/// consults.
+///
+/// Granting without prompting is the right answer *here* specifically. The
+/// webview loads one thing — this app's own bundle, from its own scheme, under
+/// a CSP that admits no other origin — so there is no third-party page to
+/// protect the camera from. And the request only ever follows the user
+/// pressing "Start camera", which is the consent; a second dialog asking
+/// whether they meant it would be noise. Deliberately narrow all the same:
+/// only user-media requests are answered, so geolocation, notifications and
+/// the rest keep WebKit's deny-by-default.
+#[cfg(target_os = "linux")]
+fn allow_camera_capture<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    use webkit2gtk::glib::ObjectExt as _;
+    use webkit2gtk::{PermissionRequestExt, UserMediaPermissionRequest, WebViewExt};
+
+    let result = window.with_webview(|webview| {
+        webview.inner().connect_permission_request(|_, request| {
+            if request.is::<UserMediaPermissionRequest>() {
+                request.allow();
+                return true;
+            }
+            // Not ours to answer; WebKit's default (deny) stands.
+            false
+        });
+    });
+    if let Err(error) = result {
+        eprintln!(
+            "could not install the camera permission handler ({error}); QR scanning will not work"
+        );
+    }
+}
+
+/// Everywhere else the webview already resolves this for itself: WebView2
+/// prompts, and WKWebView asks a delegate wry answers.
+#[cfg(not(target_os = "linux"))]
+fn allow_camera_capture<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
+
+/// Claim the OAuth callback scheme with the OS — in development builds only.
+///
+/// `org.matrixaxon.axon`, per RFC 8252 § 7.1 and ADR 0102 § 4. Note this is
+/// *not* `APP_SCHEME`: that one stays `axon`, is served in-webview, and is
+/// never registered with the OS.
 ///
 /// A release build must not do this. The installers already register the
 /// scheme (`plugins.deep-link.desktop.schemes` is compiled into them, and the

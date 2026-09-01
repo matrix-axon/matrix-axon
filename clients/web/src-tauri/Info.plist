@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Merged into the generated Info.plist by Tauri, which picks up any
+    Info.plist sitting beside tauri.conf.json.
+
+    Without NSCameraUsageDescription macOS does not merely refuse the camera —
+    it does not expose the API at all, so `navigator.mediaDevices` is undefined
+    and the client reports "Camera access is unavailable in this browser"
+    rather than a denial. The string is shown to the user in the system prompt,
+    so it has to say what the camera is for.
+
+    wry's WKUIDelegate already answers the webview-level permission with
+    `Grant`, so this key is the only thing missing on macOS. Under hardened
+    runtime — which notarization requires — the signed app will additionally
+    need the `com.apple.security.device.camera` entitlement; see README.
+  -->
+  <key>NSCameraUsageDescription</key>
+  <string>Axon uses the camera to scan a Matrix sign-in QR code.</string>
+</dict>
+</plist>
