@@ -457,6 +457,7 @@ pub fn router(state: AppState) -> Router {
     // layer's rate limiter) are the boundary instead — see `routes::oauth`.
     let oauth_state = state.oauth.clone();
     let oauth_router = Router::new()
+        .route("/v1/oauth/providers", get(routes::oauth::providers))
         .route("/v1/oauth/authorize", get(routes::oauth::authorize))
         .route(
             "/v1/oauth/{provider}/callback",

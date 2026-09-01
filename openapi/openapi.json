@@ -7372,6 +7372,39 @@
         }
       }
     },
+    "/v1/oauth/providers": {
+      "get": {
+        "tags": [
+          "oauth"
+        ],
+        "summary": "`GET /v1/oauth/providers`: which sign-in providers this instance offers.",
+        "description": "A client cannot know this by configuration. Which providers exist is a\nproperty of the *server*, and a client that is distributed as a binary —\nthe desktop and mobile shells of ADR 0102 — is pointed at a server it has\nnever seen and cannot have been built against. Baking the list in at build\ntime, as the web client's `VITE_AXON_OAUTH_PROVIDERS` does, works only when\nwhoever builds the bundle also runs the server.\n\nDeliberately un-gated, like the rest of this module: it is read *before*\nthere is a token, to decide which buttons the sign-in screen has. It\ntherefore reveals which IdPs an instance trusts to anyone who can reach it,\nwhich is the same thing its sign-in page would show them, and no more than\n`/v1/oauth/authorize` already tells them by accepting or rejecting a\n`provider`.\n\n`404` when OAuth is off, matching this module's stated policy: an\nunauthenticated caller of a disabled surface sees \"no such route\", not\n\"come back later\".",
+        "operationId": "providers",
+        "responses": {
+          "200": {
+            "description": "The enabled sign-in providers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_OAuthProviderDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "OAuth is disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/v1/rooms": {
       "get": {
         "tags": [
@@ -9262,6 +9295,31 @@
           }
         }
       },
+      "ApiResponse_Vec_OAuthProviderDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One sign-in provider this instance has enabled.\n\nAn object rather than a bare string so a later addition — a display label,\nan icon, whether the provider supports Path B — is an additive field rather\nthan a reshaped array, which ADR 0099's additive-first policy would\notherwise make a breaking change.",
+              "required": [
+                "provider"
+              ],
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "description": "The value to pass as `provider` to `GET /v1/oauth/authorize`, e.g.\n`\"google\"`."
+                }
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_Vec_RoomDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -10670,6 +10728,19 @@
           "user_id": {
             "type": "string",
             "description": "Matrix user ID (the `m.room.member` state key)."
+          }
+        }
+      },
+      "OAuthProviderDto": {
+        "type": "object",
+        "description": "One sign-in provider this instance has enabled.\n\nAn object rather than a bare string so a later addition — a display label,\nan icon, whether the provider supports Path B — is an additive field rather\nthan a reshaped array, which ADR 0099's additive-first policy would\notherwise make a breaking change.",
+        "required": [
+          "provider"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "The value to pass as `provider` to `GET /v1/oauth/authorize`, e.g.\n`\"google\"`."
           }
         }
       },
