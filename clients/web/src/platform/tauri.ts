@@ -1,4 +1,4 @@
-import { onOpenUrl } from '@tauri-apps/plugin-deep-link'
+import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
@@ -334,17 +334,36 @@ export function tauriPlatform(): Platform {
       }),
     oauthClient: OAUTH_CLIENT,
     onDeepLink: (handler) => {
+      const deliver = (raw: string) => {
+        try {
+          handler(new URL(raw))
+        } catch {
+          // The OS can hand us anything registered to the scheme; a URL we
+          // cannot parse is not ours to act on.
+        }
+      }
+
+      // The URL that *launched* this process, if any. `onOpenUrl` below only
+      // reports links that arrive while the app is already up — on Windows and
+      // Linux a cold launch carries the URL in argv instead, and the plugin
+      // exposes it here rather than replaying it as an event. Without this, a
+      // callback that starts the app (rather than returning to a running one)
+      // is silently dropped: the app opens on the sign-in screen as if nothing
+      // had happened.
+      void getCurrent()
+        .then((urls) => {
+          for (const raw of urls ?? []) {
+            deliver(raw)
+          }
+        })
+        .catch(() => {})
+
       // `onOpenUrl` resolves to its own unlisten function; the subscription is
       // established asynchronously, so unsubscribing has to wait for it rather
       // than race it.
       const ready = onOpenUrl((urls) => {
         for (const raw of urls) {
-          try {
-            handler(new URL(raw))
-          } catch {
-            // The OS can hand us anything registered to the scheme; a URL we
-            // cannot parse is not ours to act on.
-          }
+          deliver(raw)
         }
       })
       return () => {

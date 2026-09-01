@@ -11,17 +11,17 @@
 [workspace]
 
 [package]
-name = "axon-shell"
+name = "axon"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.86"
 license = "Apache-2.0"
-description = "Native shell for the Axon web client"
+description = "Axon desktop client"
 publish = false
 
 [lib]
 # Mobile targets link the app as a library; the binary below is desktop's entry.
-name = "axon_shell_lib"
+name = "axon_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

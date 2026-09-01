@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Axon",
+  "productName": "axon-desktop",
   "version": "0.1.0",
   "identifier": "org.matrixaxon.axon",
   "build": {
@@ -26,7 +26,17 @@
     ],
     "category": "SocialNetworking",
     "shortDescription": "Axon Matrix client",
-    "longDescription": "Native shell for the Axon web client: a Matrix client that talks to your own self-hosted Axon server."
+    "longDescription": "Native shell for the Axon web client: a Matrix client that talks to your own self-hosted Axon server.",
+    "linux": {
+      "deb": {
+        "desktopTemplate": "bundle/axon.desktop",
+        "conflicts": ["axon"],
+        "replaces": ["axon"]
+      },
+      "rpm": {
+        "desktopTemplate": "bundle/axon.desktop"
+      }
+    }
   },
   "plugins": {
     "deep-link": {

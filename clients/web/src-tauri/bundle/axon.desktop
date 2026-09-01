@@ -1,0 +1,11 @@
+# Rationale in ../README.md § Linux desktop entry. The `%u` is load-bearing.
+[Desktop Entry]
+Type=Application
+Name=Axon
+Comment={{comment}}
+Exec={{exec}} %u
+Icon={{icon}}
+Terminal=false
+Categories={{categories}}
+StartupWMClass={{exec}}
+MimeType=x-scheme-handler/org.matrixaxon.axon

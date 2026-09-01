@@ -1,4 +1,4 @@
-# axon-shell
+# axon-desktop
 
 The native shell around the `clients/web` bundle (ADR 0102, M-W12). Desktop
 today; iOS and Android are M-W13.
@@ -47,14 +47,43 @@ rather than drifting to 5174. `devUrl` in `tauri.conf.json` names 5173, and
 Vite's default of quietly picking another port means the shell would otherwise
 load whatever _else_ is on 5173 — a different app, with no error anywhere.
 
+## Linux desktop entry
+
+`bundle/axon.desktop` overrides Tauri's built-in template, and exists for one
+character: the `%u` on `Exec`.
+
+`%u` is the freedesktop field code that passes a URL to the program. Without
+it the launcher starts the app with _no argument_, so an
+`org.matrixaxon.axon:/oauth/callback?...` link resolves to this entry,
+launches the app, and
+the URL is silently dropped — the sign-in completes in the browser and the app
+never hears about it. Tauri's default template has no field code, because
+nothing tells it this app handles a URL scheme; the `deep-link` plugin
+contributes the `MimeType` line but not the argument. The two halves have to
+agree or the association is decoration.
+
+`Name` is fixed rather than `{{name}}`. That variable is `productName`, which
+also names the package (`axon-desktop`), and a launcher should show the app's
+name rather than the package's.
+
 ## Icons
 
-`icons/` is generated from `icon-source.png` (rasterised from
-`../public/favicon.svg` at 1024×1024):
+`icons/` is generated from `icon-source.png`, which is the artwork as
+supplied. It is currently **60×60**, and `tauri icon` wants 1024×1024, so it is
+upscaled on the way in:
 
 ```sh
-pnpm exec tauri icon src-tauri/icon-source.png -o src-tauri/icons
+python3 -c "from PIL import Image; \
+  Image.open('src-tauri/icon-source.png').convert('RGBA') \
+    .resize((1024,1024), Image.LANCZOS).save('/tmp/axon-1024.png')"
+pnpm exec tauri icon /tmp/axon-1024.png -o src-tauri/icons
 ```
+
+A 17× upscale cannot add detail. It is fine at the sizes a window and a
+launcher actually use, and soft at 1024 — which is the size the App Store
+requires and inspects. **Replace `icon-source.png` with artwork at 1024×1024
+(or the original vector) before any store submission**, and regenerate; nothing
+else has to change.
 
 ## The bundle identifier is settled
 
