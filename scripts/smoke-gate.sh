@@ -43,7 +43,7 @@ run_tui_stub() {
 run_tui_true_local() {
   ./scripts/check-smoke-isolation.sh axon-smoke-local-stack axon-smoke-tui
   cargo build -p axon-server -p axon-tui -p axon-smoke-local-stack -p axon-smoke-tui
-  AXON_SERVER_BIN="$target_bin/axon" \
+  AXON_SERVER_BIN="$target_bin/axon-server" \
     AXON_TUI_BIN="$target_bin/axon-tui" \
     AXON_SMOKE_LOCAL_STACK_BIN="$target_bin/axon-smoke-local-stack" \
     cargo run -p axon-smoke-tui -- --profile true-local
@@ -52,7 +52,7 @@ run_tui_true_local() {
 run_server() {
   ./scripts/check-smoke-isolation.sh axon-smoke-local-stack axon-smoke-server
   cargo build -p axon-server -p axon-smoke-local-stack -p axon-smoke-server
-  AXON_SERVER_BIN="$target_bin/axon" \
+  AXON_SERVER_BIN="$target_bin/axon-server" \
     AXON_SMOKE_LOCAL_STACK_BIN="$target_bin/axon-smoke-local-stack" \
     cargo run -p axon-smoke-server -- --profile true-local
 }

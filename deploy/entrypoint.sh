@@ -27,12 +27,12 @@ if [ ! -f "$AXON_CONFIG" ]; then
     #   for this stack): DON'T mint here. The one-time first-credential web
     #   bootstrap must itself be the first credential; it mints one for the web
     #   client when the operator opens the bootstrap URL (ADR 0052). Minting here
-    #   — or running `axon token issue` — before that would consume the bootstrap.
+    #   — or running `axon-server token issue` — before that would consume the bootstrap.
     # * Otherwise: mint + print the first bearer token to the logs by default so
     #   the operator has a credential immediately (it prints only on this first
     #   boot). It then persists in `docker compose logs` — set
     #   AXON_INIT_PRINT_TOKEN=false to suppress it and mint out-of-band instead.
-    #   Rotate any exposed token with `axon token revoke`.
+    #   Rotate any exposed token with `axon-server token revoke`.
     if [ "${AXON_SERVER__BOOTSTRAP_WEB_AUTO:-false}" = "true" ]; then
         echo "axon: web bootstrap armed — leaving the first credential to the web setup page (init --no-token)"
         axon-server init --non-interactive --config "$AXON_CONFIG" \
