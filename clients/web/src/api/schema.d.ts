@@ -1455,6 +1455,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/oauth/providers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /v1/oauth/providers`: which sign-in providers this instance offers.
+         * @description A client cannot know this by configuration. Which providers exist is a
+         *     property of the *server*, and a client that is distributed as a binary —
+         *     the desktop and mobile shells of ADR 0102 — is pointed at a server it has
+         *     never seen and cannot have been built against. Baking the list in at build
+         *     time, as the web client's `VITE_AXON_OAUTH_PROVIDERS` does, works only when
+         *     whoever builds the bundle also runs the server.
+         *
+         *     Deliberately un-gated, like the rest of this module: it is read *before*
+         *     there is a token, to decide which buttons the sign-in screen has. It
+         *     therefore reveals which IdPs an instance trusts to anyone who can reach it,
+         *     which is the same thing its sign-in page would show them, and no more than
+         *     `/v1/oauth/authorize` already tells them by accepting or rejecting a
+         *     `provider`.
+         *
+         *     `404` when OAuth is off, matching this module's stated policy: an
+         *     unauthenticated caller of a disabled surface sees "no such route", not
+         *     "come back later".
+         */
+        get: operations["providers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/rooms": {
         parameters: {
             query?: never;
@@ -2413,6 +2449,16 @@ export interface components {
             }[];
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_Vec_OAuthProviderDto: {
+            data: {
+                /**
+                 * @description The value to pass as `provider` to `GET /v1/oauth/authorize`, e.g.
+                 *     `"google"`.
+                 */
+                provider: string;
+            }[];
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_Vec_RoomDto: {
             data: {
                 /**
@@ -3153,6 +3199,21 @@ export interface components {
             membership: string;
             /** @description Matrix user ID (the `m.room.member` state key). */
             user_id: string;
+        };
+        /**
+         * @description One sign-in provider this instance has enabled.
+         *
+         *     An object rather than a bare string so a later addition — a display label,
+         *     an icon, whether the provider supports Path B — is an additive field rather
+         *     than a reshaped array, which ADR 0099's additive-first policy would
+         *     otherwise make a breaking change.
+         */
+        OAuthProviderDto: {
+            /**
+             * @description The value to pass as `provider` to `GET /v1/oauth/authorize`, e.g.
+             *     `"google"`.
+             */
+            provider: string;
         };
         /**
          * @description Request body for setting a room's power levels (`PUT
@@ -9013,6 +9074,35 @@ export interface operations {
             };
             /** @description The account's homeserver connection is not currently established */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    providers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The enabled sign-in providers */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Vec_OAuthProviderDto"];
+                };
+            };
+            /** @description OAuth is disabled */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
