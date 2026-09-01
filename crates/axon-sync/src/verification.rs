@@ -758,12 +758,47 @@ fn flow_stage_from_request_without_sas(state: &VerificationRequestState) -> Flow
 
 /// SAS currently attached to this request, if the request is still
 /// `Transitioned`. Once the request itself is `Done` the SDK drops that object
-/// from the request state; it then lives only on [`FlowEntry::sas`].
+/// from the request state; it then lives on [`FlowEntry::sas`] (if we already
+/// adopted it) or in the SDK verification cache. Do not call this after
+/// observing [`VerificationRequestState::Done`] — it cannot fire.
 fn sas_from_request(request: &VerificationRequest) -> Option<SasVerification> {
     match request.state() {
         VerificationRequestState::Transitioned { verification } => verification.sas(),
         _ => None,
     }
+}
+
+fn registry_sas(registry: &FlowRegistry, key: &(Uuid, String)) -> Option<SasVerification> {
+    registry
+        .lock()
+        .expect("flow registry poisoned")
+        .get(key)
+        .and_then(|entry| entry.sas.clone())
+}
+
+/// SAS to drive after the request reports `Done`.
+///
+/// `sas_from_request` is `None` here: the SDK has already dropped the object
+/// from `request.state()`. Prefer a SAS we already stashed on the registry;
+/// otherwise look in the SDK cache, which still holds the verification after
+/// the request itself is `Done` (a coalesced `changes()` burst can skip
+/// `Transitioned` and land on `Done`).
+async fn sas_after_request_done(
+    registry: &FlowRegistry,
+    key: &(Uuid, String),
+    client: &Client,
+    other_user_id: &str,
+    flow_id: &str,
+) -> Option<SasVerification> {
+    if let Some(sas) = registry_sas(registry, key) {
+        return Some(sas);
+    }
+    let user_id = other_user_id.parse::<OwnedUserId>().ok()?;
+    client
+        .encryption()
+        .get_verification(&user_id, flow_id)
+        .await
+        .and_then(|verification| verification.sas())
 }
 
 fn snapshot_from_sas(
@@ -974,6 +1009,7 @@ pub(crate) async fn on_incoming_request(
                 live_tx: ctx.live_tx.clone(),
                 rooms: ctx.rooms.clone(),
                 cancel: driver_cancel,
+                client: client.clone(),
             },
         ));
         reg.get_mut(&key)
@@ -1133,6 +1169,7 @@ pub(crate) async fn on_incoming_room_request(
                 live_tx: ctx.live_tx.clone(),
                 rooms: ctx.rooms.clone(),
                 cancel: driver_cancel,
+                client: client.clone(),
             },
         ));
         reg.get_mut(&registry_key)
@@ -1173,6 +1210,10 @@ struct FlowDriverCtx {
     live_tx: broadcast::Sender<LiveFrame>,
     rooms: VerificationRooms,
     cancel: CancellationToken,
+    /// Live SDK client for this account. Used to recover a SAS from the
+    /// verification cache after the request reports `Done` (the request object
+    /// no longer holds it).
+    client: Client,
 }
 
 /// Stamp the registry terminal marker and publish the matching frame. Shared by
@@ -1405,16 +1446,26 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
             }
             VerificationRequestState::Done => {
                 // A coalesced `changes()` burst can skip `Transitioned` and
-                // land on request-level `Done`. If a SAS is still on the
-                // request, drive it — that is the MAC path. Otherwise this is
-                // the peer's `m.key.verification.done` with no SAS object, and
-                // publishing `Done` would let clients render "device verified"
-                // with zero MAC exchange.
-                if let Some(sas) = sas_from_request(&request) {
+                // land on request-level `Done`. `request.state()` is then
+                // `Done`, so `sas_from_request` cannot fire — recover from the
+                // registry (already adopted) or the SDK cache (still holds the
+                // SAS). Otherwise this is the peer's `m.key.verification.done`
+                // with no SAS object, and publishing `Done` would let clients
+                // render "device verified" with zero MAC exchange.
+                if let Some(sas) = sas_after_request_done(
+                    &ctx.registry,
+                    &key,
+                    &ctx.client,
+                    &ctx.target_user_id,
+                    &flow_id,
+                )
+                .await
+                {
                     tracing::info!(
                         account_id = %ctx.account_id,
                         %flow_id,
-                        "verification request reported done with a SAS already present"
+                        sas_state = sas_state_label(&sas.state()),
+                        "verification request reported done; recovering SAS"
                     );
                     break sas;
                 }
@@ -1991,6 +2042,7 @@ impl VerificationEngine {
                     live_tx: self.live_tx.clone(),
                     rooms: self.rooms.clone(),
                     cancel: driver_cancel,
+                    client,
                 },
             ));
             reg.get_mut(&key)
@@ -2267,6 +2319,18 @@ mod tests {
         assert!(
             !request_done_is_verified(false),
             "drive_request must not publish Done when no SAS exists to agree"
+        );
+    }
+
+    /// The request-`Done` recovery path looks in the registry before the SDK
+    /// cache. An unknown flow has no stashed SAS, so that first lookup is
+    /// `None` and the driver must not treat request-level `Done` as verified.
+    #[test]
+    fn registry_sas_is_none_when_the_flow_is_unknown() {
+        let registry = new_registry();
+        assert!(
+            registry_sas(&registry, &(Uuid::nil(), "flow".to_owned())).is_none(),
+            "drive_request's Done recovery must not invent a SAS"
         );
     }
 
