@@ -8,7 +8,7 @@ license.workspace = true
 publish = false
 
 [[bin]]
-name = "axon"
+name = "axon-server"
 path = "src/main.rs"
 
 [build-dependencies]

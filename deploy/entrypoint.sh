@@ -2,7 +2,7 @@
 # Idempotent first-run wrapper for the axon server container (ADR 0052, Decision 3).
 #
 # On first boot only, generate the config (a CSPRNG store_key + the Postgres URL)
-# by reusing `axon init` — no bespoke key-generation shell. $AXON_CONFIG points at
+# by reusing `axon-server init` — no bespoke key-generation shell. $AXON_CONFIG points at
 # the mounted data volume, so the store_key persists; later boots find the file,
 # skip init, and keep the key stable. We NEVER pass --force (it would regenerate
 # store_key and orphan every account's encrypted data).
@@ -15,7 +15,7 @@ set -eu
 : "${AXON_CONFIG:=/var/lib/axon/axon.toml}"
 
 if [ ! -f "$AXON_CONFIG" ]; then
-    echo "axon: no config at $AXON_CONFIG — running first-run 'axon init'"
+    echo "axon: no config at $AXON_CONFIG — running first-run 'axon-server init'"
     if [ -z "${DATABASE_URL:-}" ]; then
         echo "axon: DATABASE_URL is unset; cannot generate a config" >&2
         exit 1
@@ -35,13 +35,13 @@ if [ ! -f "$AXON_CONFIG" ]; then
     #   Rotate any exposed token with `axon token revoke`.
     if [ "${AXON_SERVER__BOOTSTRAP_WEB_AUTO:-false}" = "true" ]; then
         echo "axon: web bootstrap armed — leaving the first credential to the web setup page (init --no-token)"
-        axon init --non-interactive --config "$AXON_CONFIG" \
+        axon-server init --non-interactive --config "$AXON_CONFIG" \
             --database-url "$DATABASE_URL" --no-token
     elif [ "${AXON_INIT_PRINT_TOKEN:-true}" = "false" ]; then
-        axon init --non-interactive --config "$AXON_CONFIG" \
+        axon-server init --non-interactive --config "$AXON_CONFIG" \
             --database-url "$DATABASE_URL" --no-token
     else
-        axon init --non-interactive --config "$AXON_CONFIG" \
+        axon-server init --non-interactive --config "$AXON_CONFIG" \
             --database-url "$DATABASE_URL" --print-token
     fi
 else
@@ -49,4 +49,4 @@ else
 fi
 
 # init ran migrations via its DB probe; the server re-runs them idempotently.
-exec axon --config "$AXON_CONFIG"
+exec axon-server --config "$AXON_CONFIG"

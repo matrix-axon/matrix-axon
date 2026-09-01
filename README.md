@@ -156,10 +156,10 @@ All `/v1/` API endpoints require a bearer token.
 Mint one after startup:
 
 ```bash
-axon token issue --label my-client   # prints the raw token once
-axon token list                       # list tokens (never shows secrets)
-axon token revoke <id>                # revoke a token by id
-axon token revoke --label my-client   # or by label, if it uniquely identifies one active token
+axon-server token issue --label my-client   # prints the raw token once
+axon-server token list                       # list tokens (never shows secrets)
+axon-server token revoke <id>                # revoke a token by id
+axon-server token revoke --label my-client   # or by label, if it uniquely identifies one active token
 ```
 
 Tokens are instance-scoped — one token grants access to all accounts on that Axon instance.
@@ -173,9 +173,9 @@ both mint the same kind of bearer token underneath.
 Configure a provider (`oauth.providers.google` / `.microsoft` in `axon.toml`), then bind the owner's identity once from the command line:
 
 ```bash
-axon oauth bind --provider google      # or --provider microsoft
-axon oauth identities list
-axon oauth identities unbind <id>       # revokes every token/refresh token that identity minted
+axon-server oauth bind --provider google      # or --provider microsoft
+axon-server oauth identities list
+axon-server oauth identities unbind <id>       # revokes every token/refresh token that identity minted
 ```
 
 `bind` prints a URL — open it in any browser, on this machine or elsewhere, since it only needs to reach Axon's already-running `/v1/` surface — and polls until that browser leg completes or the 10-minute handshake expires.
