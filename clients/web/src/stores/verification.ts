@@ -235,30 +235,35 @@ function parseStage(value: string | null | undefined): FlowStage | null {
   return FLOW_STAGES.has(value) ? (value as FlowStage) : null
 }
 
-function stageFrom(
+/**
+ * Live UI progress. A stale GET or replayed frame may only move this number
+ * forward. `done` and `ended` are absorbing: they do not convert into each
+ * other either (a late `cancelled` snapshot must not un-verify).
+ */
+function uiRank(stage: VerificationUiStage): number {
+  switch (stage) {
+    case 'starting':
+    case 'waiting':
+      return 0
+    case 'compare':
+      return 1
+    case 'confirming':
+      return 2
+    case 'done':
+    case 'ended':
+      return 3
+  }
+}
+
+function mapServerStage(
   serverStage: FlowStage | null,
   emoji: EmojiDto[] | null,
   cancelReason: string | null,
-  previous: VerificationUiStage,
 ): {
   stage: VerificationUiStage
   error: string | null
   cancelReason: string | null
 } {
-  if (previous === 'confirming') {
-    if (serverStage === 'keys_exchanged' || serverStage === null) {
-      return { stage: 'confirming', error: null, cancelReason }
-    }
-  }
-  if (previous === 'compare') {
-    if (
-      serverStage === 'requested' ||
-      serverStage === 'ready' ||
-      serverStage === null
-    ) {
-      return { stage: 'compare', error: null, cancelReason }
-    }
-  }
   if (serverStage === 'requested' || serverStage === 'ready') {
     return { stage: 'waiting', error: null, cancelReason }
   }
@@ -293,6 +298,34 @@ function stageFrom(
     return { stage: 'compare', error: null, cancelReason }
   }
   return { stage: 'waiting', error: null, cancelReason }
+}
+
+function stageFrom(
+  serverStage: FlowStage | null,
+  emoji: EmojiDto[] | null,
+  cancelReason: string | null,
+  previous: VerificationUiStage,
+): {
+  stage: VerificationUiStage
+  error: string | null
+  cancelReason: string | null
+} {
+  const mapped = mapServerStage(serverStage, emoji, cancelReason)
+  // Completing (or cancelling) is terminal for this flow id. A GET that was
+  // in flight before the write committed still carries the pre-terminal
+  // snapshot; holding here closes that race for every remaining previous
+  // stage, not only compare / confirming.
+  if (previous === 'done' || previous === 'ended') {
+    return {
+      stage: previous,
+      error: null,
+      cancelReason: previous === 'ended' ? mapped.cancelReason : cancelReason,
+    }
+  }
+  if (uiRank(mapped.stage) < uiRank(previous)) {
+    return { stage: previous, error: null, cancelReason }
+  }
+  return mapped
 }
 
 function isPendingOutgoingDevice(

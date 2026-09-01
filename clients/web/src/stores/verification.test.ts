@@ -704,6 +704,78 @@ describe('verification store', () => {
     expect(verification.flows.value[0].error).toBeNull()
   })
 
+  it('a stale GET at ready does not rewind a flow already confirming', async () => {
+    server.use(
+      http.post(
+        `${BASE}/v1/accounts/${ACCOUNT}/verify/:flowId/confirm`,
+        () => new HttpResponse(null, { status: 204 }),
+      ),
+      http.get(`${BASE}/v1/accounts/${ACCOUNT}/verify`, () =>
+        HttpResponse.json({ data: [flowDto({ stage: 'ready' })] }),
+      ),
+    )
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    expect(await verification.confirm(ACCOUNT, '$flow')).toEqual({ ok: true })
+    expect(verification.flows.value[0].stage).toBe('confirming')
+    await verification.refresh(ACCOUNT)
+    expect(verification.flows.value[0].stage).toBe('confirming')
+    expect(verification.flows.value[0].error).toBeNull()
+  })
+
+  it('a stale GET at keys_exchanged does not rewind a completed flow', async () => {
+    server.use(
+      http.get(`${BASE}/v1/accounts/${ACCOUNT}/verify`, () =>
+        HttpResponse.json({
+          data: [
+            flowDto({
+              stage: 'keys_exchanged',
+              emoji: sevenEmoji(),
+            }),
+          ],
+        }),
+      ),
+    )
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    verification.noteFrame(ACCOUNT, 'done', payload())
+    expect(verification.flows.value[0].stage).toBe('done')
+    await verification.refresh(ACCOUNT)
+    expect(verification.flows.value[0].stage).toBe('done')
+    expect(verification.flows.value[0].error).toBeNull()
+  })
+
+  it('a stale GET at cancelled does not un-verify a completed flow', async () => {
+    server.use(
+      http.get(`${BASE}/v1/accounts/${ACCOUNT}/verify`, () =>
+        HttpResponse.json({
+          data: [flowDto({ stage: 'cancelled', cancel_reason: 'timeout' })],
+        }),
+      ),
+    )
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    verification.noteFrame(ACCOUNT, 'done', payload())
+    expect(verification.flows.value[0].stage).toBe('done')
+    await verification.refresh(ACCOUNT)
+    expect(verification.flows.value[0].stage).toBe('done')
+  })
+
+  it('a stale GET at ready does not rewind a flow already ended', async () => {
+    server.use(
+      http.get(`${BASE}/v1/accounts/${ACCOUNT}/verify`, () =>
+        HttpResponse.json({ data: [flowDto({ stage: 'ready' })] }),
+      ),
+    )
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    verification.open(flowKey(verification.flows.value[0]))
+    verification.noteFrame(ACCOUNT, 'cancelled', payload({ reason: 'timeout' }))
+    expect(verification.flows.value[0].stage).toBe('ended')
+    await verification.refresh(ACCOUNT)
+    expect(verification.flows.value[0].stage).toBe('ended')
+  })
+
   it('a second confirm after success does not revert to compare', async () => {
     let confirms = 0
     server.use(
