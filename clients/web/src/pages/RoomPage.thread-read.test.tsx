@@ -353,7 +353,10 @@ function renderRoom(
     '',
     `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}${options.query ?? ''}`,
   )
-  const services = testServices()
+  // Anchor the thread-unread recency window to the fixtures (all stamped within
+  // minutes of `T0`), so `reconcileSummary` promotion here does not depend on
+  // how far the real calendar has drifted past that date.
+  const services = testServices({ now: () => T0 + 5 * MINUTE })
   if (options.hideRedacted === true) {
     services.settings.hideRedactedEvents.value = true
   }
