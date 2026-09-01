@@ -447,6 +447,55 @@ describe('MatrixOAuthQrGrantStore', () => {
     )
   })
 
+  it('retries the outstanding account scopes after an inconclusive probe', async () => {
+    vi.useFakeTimers()
+    const storage = memoryStorage({
+      'axon.matrix-oauth-qr-grant.flow-id': FLOW_ID,
+    })
+    const api = apiMock()
+    api.GET.mockResolvedValueOnce({
+      error: { error: { code: 'not_found', message: 'unknown flow' } },
+      response: response(404),
+    })
+      .mockResolvedValueOnce({
+        error: { error: { code: 'upstream', message: 'try again' } },
+        response: response(503),
+      })
+      .mockResolvedValueOnce({
+        data: {
+          data: grantFlow('waiting_for_authorization', {
+            account_id: '40000000-0000-4000-8000-000000000004',
+            verification_uri: 'https://auth.example.org/device',
+          }),
+        },
+        response: response(),
+      })
+    const store = createMatrixOAuthQrGrantStore(api as unknown as ApiClient, {
+      storage,
+      transportBackoffMs: 1,
+    })
+    stores.push(store)
+
+    await expect(
+      store.resume([
+        '30000000-0000-4000-8000-000000000003',
+        '40000000-0000-4000-8000-000000000004',
+      ]),
+    ).resolves.toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(
+      api.GET.mock.calls.map((call) => call[1].params.path.account_id),
+    ).toEqual([
+      '30000000-0000-4000-8000-000000000003',
+      '40000000-0000-4000-8000-000000000004',
+      '40000000-0000-4000-8000-000000000004',
+    ])
+    expect(store.flow.value?.account_id).toBe(
+      '40000000-0000-4000-8000-000000000004',
+    )
+  })
+
   it('polls the owning account serially and stops after completion', async () => {
     vi.useFakeTimers()
     const storage = memoryStorage()

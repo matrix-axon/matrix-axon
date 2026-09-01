@@ -267,7 +267,11 @@ function createMatrixOAuthQrFlowCore<T extends MatrixOAuthQrFlowState>(
     }
   }
 
-  function schedulePoll(owner: number, delay = pollDelayMs): void {
+  function schedulePoll(
+    owner: number,
+    delay = pollDelayMs,
+    scopes: readonly (string | null)[] = [routeScope],
+  ): void {
     clearPoll()
     if (
       owner !== generation ||
@@ -276,9 +280,10 @@ function createMatrixOAuthQrFlowCore<T extends MatrixOAuthQrFlowState>(
     ) {
       return
     }
+    const retryScopes = [...scopes]
     pollTimer = setTimeout(() => {
       pollTimer = null
-      void fetchCurrent(owner, 'polling', [routeScope])
+      void fetchCurrent(owner, 'polling', retryScopes)
     }, delay)
   }
 
@@ -339,8 +344,11 @@ function createMatrixOAuthQrFlowCore<T extends MatrixOAuthQrFlowState>(
     }
     operation.value = kind
     const active = beginRequest()
+    let retryScopes = scopes
     try {
-      for (const scope of scopes) {
+      for (let index = 0; index < scopes.length; index += 1) {
+        const scope = scopes[index]
+        retryScopes = scopes.slice(index)
         const result = await routes.get(scope, flowId, active.controller.signal)
         if (owner !== generation || active.controller.signal.aborted) {
           return false
@@ -356,7 +364,7 @@ function createMatrixOAuthQrFlowCore<T extends MatrixOAuthQrFlowState>(
         clearRetainedError()
         error.value = apiErrorMessage(result.error)
         operation.value = 'idle'
-        schedulePoll(owner, transportBackoffMs)
+        schedulePoll(owner, transportBackoffMs, retryScopes)
         return false
       }
       storage.removeItem(routes.storageKey)
@@ -374,7 +382,7 @@ function createMatrixOAuthQrFlowCore<T extends MatrixOAuthQrFlowState>(
       clearRetainedError()
       error.value = transportMessage(cause, routes.noun)
       operation.value = 'idle'
-      schedulePoll(owner, transportBackoffMs)
+      schedulePoll(owner, transportBackoffMs, retryScopes)
       return false
     } finally {
       active.finish()

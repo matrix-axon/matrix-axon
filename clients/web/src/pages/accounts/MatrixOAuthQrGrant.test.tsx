@@ -325,6 +325,53 @@ describe('MatrixOAuthQrGrant', () => {
       pendingStorage.getItem('axon.matrix-oauth-qr-grant.flow-id'),
     ).toBeNull()
   })
+
+  it('cancels an active grant before the last account disappears', async () => {
+    let cancelled = false
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ALICE.account_id}/login-grants/qr`,
+        () =>
+          HttpResponse.json(
+            {
+              data: {
+                flow_id: FLOW_ID,
+                account_id: ALICE.account_id,
+                presentation: 'scan',
+                stage: 'starting',
+              },
+            },
+            { status: 201 },
+          ),
+      ),
+      http.delete(
+        `${TEST_BASE_URL}/v1/accounts/${ALICE.account_id}/login-grants/qr/${FLOW_ID}`,
+        () => {
+          cancelled = true
+          return new HttpResponse(null, { status: 204 })
+        },
+      ),
+    )
+    const { services, findByRole, getByRole } = renderPage()
+
+    fireEvent.click(
+      await findByRole('button', { name: 'Set up device authorization' }),
+    )
+    fireEvent.click(getByRole('button', { name: 'Start device authorization' }))
+    await waitFor(() =>
+      expect(services.matrixOAuthQrGrant.flow.value).not.toBeNull(),
+    )
+
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    )
+    await services.accounts.refresh()
+
+    await waitFor(() => expect(cancelled).toBe(true))
+    expect(services.matrixOAuthQrGrant.flow.value?.stage).toBe('cancelled')
+  })
 })
 
 function getByTextContent(pattern: RegExp): HTMLElement {

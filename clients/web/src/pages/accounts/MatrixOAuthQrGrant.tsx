@@ -2,7 +2,10 @@ import { useEffect, useMemo, useState } from 'preact/hooks'
 import { ErrorBanner } from '../../components/ErrorBanner'
 import { useServices } from '../../services'
 import type { Account } from '../../stores/accounts'
-import type { MatrixOAuthQrGrantFlow } from '../../stores/matrix-oauth-qr'
+import {
+  isTerminalMatrixOAuthQrFlow,
+  type MatrixOAuthQrGrantFlow,
+} from '../../stores/matrix-oauth-qr'
 import {
   MatrixOAuthQrFlowPanel,
   type MatrixOAuthQrFlowCopy,
@@ -74,7 +77,12 @@ export function MatrixOAuthQrGrant() {
         (account) => account.account_id,
       )
       if (accountIds.length === 0) {
-        matrixOAuthQrGrant.reset()
+        const current = matrixOAuthQrGrant.flow.value
+        if (current !== null && !isTerminalMatrixOAuthQrFlow(current)) {
+          void matrixOAuthQrGrant.cancel()
+        } else {
+          matrixOAuthQrGrant.reset()
+        }
       } else {
         void matrixOAuthQrGrant.resume(accountIds)
       }
