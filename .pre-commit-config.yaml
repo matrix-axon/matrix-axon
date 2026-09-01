@@ -252,6 +252,16 @@ repos:
       # `cargo build --workspace` never has to find webkit2gtk. It therefore
       # needs its own gate, filtered so that a contributor who never touches
       # src-tauri never needs the system libraries it links against.
+      # Cheap, and first of the src-tauri group so it fails before anything
+      # compiles. Not a content check -- `tauri icon` is not reproducible, and
+      # the script says why at length.
+      - id: icons-regenerated
+        name: app icons match their source
+        language: system
+        entry: scripts/check-icons-regenerated.py
+        files: '^clients/web/src-tauri/(icon-source\.svg|icons/)'
+        pass_filenames: true
+        stages: [pre-push]
       - id: shell-fmt
         name: rustfmt (tauri shell)
         language: system

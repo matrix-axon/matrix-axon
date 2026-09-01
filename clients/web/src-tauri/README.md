@@ -68,22 +68,71 @@ name rather than the package's.
 
 ## Icons
 
-`icons/` is generated from `icon-source.png`, which is the artwork as
-supplied. It is currently **60×60**, and `tauri icon` wants 1024×1024, so it is
-upscaled on the way in:
+`icons/` is 52 files generated from `icon-source.svg`:
 
 ```sh
-python3 -c "from PIL import Image; \
-  Image.open('src-tauri/icon-source.png').convert('RGBA') \
-    .resize((1024,1024), Image.LANCZOS).save('/tmp/axon-1024.png')"
-pnpm exec tauri icon /tmp/axon-1024.png -o src-tauri/icons
+cd clients/web && pnpm exec tauri icon src-tauri/icon-source.svg -o src-tauri/icons
 ```
 
-A 17× upscale cannot add detail. It is fine at the sizes a window and a
-launcher actually use, and soft at 1024 — which is the size the App Store
-requires and inspects. **Replace `icon-source.png` with artwork at 1024×1024
-(or the original vector) before any store submission**, and regenerate; nothing
-else has to change.
+**The source is an SVG on purpose.** `tauri icon` takes one directly, and a
+vector master costs nothing and settles two things a raster one cannot: it
+rasterises crisply at every size from 16px to the 1024px the App Store
+inspects, and it is a text file, so a change to it is legible in review
+instead of an opaque binary blob.
+
+Keep it to plain geometry — strokes and paths, one colour, no text, no filters,
+no external references. `tauri icon` rasterises with resvg rather than a
+browser engine, and anything beyond flat geometry is where renderers start to
+disagree. Text in particular depends on fonts the rasteriser may not have.
+
+The artwork is a neuron composed on the square's diagonal: dendrites at lower
+left, the soma, then an axon running up and right and arborising into three
+terminals, the upper of which branches again. Diagonal because an app icon is a
+square and a horizontally-composed mark wastes most of it — the mark this
+replaced spanned 93% of the width and 56% of the height, which at 32px left a
+thin strip floating in empty space.
+
+Two stroke weights keep it from reading as a diagram: the soma and axon carry
+the mass at 104, the dendrites and terminals taper to 80. Branch points are
+staggered and the angles uneven on purpose — evenly spaced branches of equal
+length read as a snowflake rather than a cell.
+
+**32px is the ceiling on detail**, not 1024. A Linux launcher and a Windows
+taskbar draw it at 32, and every further branch costs separation there first.
+Look at `icons/32x32.png` before adding one.
+
+It is transparent, which is what Linux, Windows and macOS all want: those show
+a _shaped_ icon, and `icon.icns` and `icon.ico` both carry real transparency.
+iOS is the exception — it wants a full-bleed square and masks its own corners —
+and `tauri icon` composites an opaque background for that set alone. The
+default is white, which is deliberate here: the obvious-looking
+`--ios-color '#5142E6'` paints the background in the same colour as the glyph
+and yields a plain blue square.
+
+Note the iOS files still carry an _alpha channel_ even though nothing in them
+is transparent. App Store Connect rejects an app icon with one at all
+(`ITMS-90717`), so they need flattening to RGB before submission. No
+`tauri icon` flag does it — `--ios-color` changes the colour and still writes
+RGBA — so it needs a post-processing step. Tracked as #410 for M-W13 rather
+than built here, where nothing consumes `icons/ios/` yet.
+
+Both sides are committed, and the `icons-regenerated` pre-push hook refuses a
+change to `icon-source.svg` that does not regenerate them — the five files
+`tauri.conf.json` bundles all live under `icons/`, nothing in the build reads
+the source, so a forgotten regeneration silently ships the old artwork. That
+had already happened once: the source was replaced and the icons were not.
+
+The hook checks only that the two changed together, not that the output
+matches. `tauri icon` is not reproducible: two runs over one source give 51
+byte-identical files and an `icon.icns` whose members come out in a different
+order each time. That is also why generation is not part of the build — every
+release would otherwise carry a different `.icns` than the last, for no reason,
+and macOS notarization eventually signs over those bytes.
+
+Note `icons/icon.png` and `icons/64x64.png` are emitted by the generator but
+referenced by nothing here; `icons/android/` and `icons/ios/` are for M-W13.
+Editing any of them has no effect on a desktop build, and the next regeneration
+overwrites them.
 
 ## The bundle identifier is settled
 

@@ -125,6 +125,11 @@ CASES: list[tuple[str, set[str]]] = [
         "clients/web/src-tauri/tauri.conf.json",
         {"prettier", "shell-fmt", "shell-clippy", "shell-test"},
     ),
+    # The icon source and its generated set both reach the coupling check, and
+    # neither reaches a compiler: they are artwork, not code. `icons/` is
+    # prettier-excluded along with the rest of src-tauri.
+    ("clients/web/src-tauri/icon-source.svg", {"icons-regenerated"}),
+    ("clients/web/src-tauri/icons/128x128.png", {"icons-regenerated"}),
     # Cargo build output is not ours -- not linted, not formatted, not a gate.
     ("clients/web/src-tauri/target/debug/build/x/out/__global-api-script.js", set()),
     # ...but the root workspace's own manifest still gates the workspace hooks
