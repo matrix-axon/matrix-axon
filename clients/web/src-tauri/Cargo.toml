@@ -12,6 +12,11 @@
 
 [package]
 name = "axon"
+# Not the product version, and not what any bundle carries: `tauri.conf.json`
+# reads that from `../package.json`, which is the one place the web client's
+# release number lives. Cargo requires a version here and this crate is
+# `publish = false`, so this string appears nowhere but its own Cargo.lock.
+# Leave it be when cutting a release; bump `clients/web/package.json`.
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.86"
