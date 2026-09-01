@@ -48,7 +48,7 @@ async fn whoami_shows_current_user_id_and_display_name() {
 
     assert_eq!(
         app.status.text(false),
-        "Matrix ID: @me:example.com; Display Name: Me Myself"
+        "Matrix ID: @me:example.com; Display Name: Me Myself; Device: unknown"
     );
 }
 
@@ -63,8 +63,76 @@ async fn whoami_reports_unknown_display_name() {
 
     assert_eq!(
         app.status.text(false),
-        "Matrix ID: @me:example.com; Display Name: unknown"
+        "Matrix ID: @me:example.com; Display Name: unknown; Device: unknown"
     );
+}
+
+#[tokio::test]
+async fn whoami_includes_account_matrix_device_id() {
+    let mut room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    room.account_user_id = Some("@me:example.com".to_owned());
+    let account_id = room.account_id;
+    let mut app = app_with_rooms(vec![room]);
+    app.rooms.selected = Some(0);
+    let mut acc = account("@me:example.com", AccountState::Active);
+    acc.account_id = account_id;
+    acc.device_id = Some("AXONDEV".to_owned());
+    app.set_accounts(vec![acc]);
+
+    app.handle_command(Command::Whoami).await;
+
+    assert_eq!(
+        app.status.text(false),
+        "Matrix ID: @me:example.com; Display Name: unknown; Device: AXONDEV"
+    );
+}
+
+#[tokio::test]
+async fn whoami_device_name_enriches_status_via_lifecycle_outcome() {
+    let mut room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    room.account_user_id = Some("@me:example.com".to_owned());
+    let account_id = room.account_id;
+    let mut app = app_with_rooms(vec![room]);
+    app.rooms.selected = Some(0);
+    let mut acc = account("@me:example.com", AccountState::Active);
+    acc.account_id = account_id;
+    acc.device_id = Some("AXONDEV".to_owned());
+    app.set_accounts(vec![acc]);
+
+    app.handle_command(Command::Whoami).await;
+    let provisional = app.status.text(false).to_owned();
+    assert_eq!(
+        provisional,
+        "Matrix ID: @me:example.com; Display Name: unknown; Device: AXONDEV"
+    );
+
+    app.handle_lifecycle_outcome(LifecycleOutcome::WhoamiDevice {
+        provisional: provisional.clone(),
+        enriched: "Matrix ID: @me:example.com; Display Name: unknown; Device: axon (AXONDEV)"
+            .to_owned(),
+    })
+    .await;
+
+    assert_eq!(
+        app.status.text(false),
+        "Matrix ID: @me:example.com; Display Name: unknown; Device: axon (AXONDEV)"
+    );
+}
+
+#[tokio::test]
+async fn whoami_device_name_does_not_clobber_a_later_status() {
+    let mut app = app_with_rooms(Vec::new());
+    app.status = Status::Info("select a room before using /whoami".to_owned());
+
+    app.handle_lifecycle_outcome(LifecycleOutcome::WhoamiDevice {
+        provisional: "Matrix ID: @me:example.com; Display Name: unknown; Device: AXONDEV"
+            .to_owned(),
+        enriched: "Matrix ID: @me:example.com; Display Name: unknown; Device: axon (AXONDEV)"
+            .to_owned(),
+    })
+    .await;
+
+    assert_eq!(app.status.text(false), "select a room before using /whoami");
 }
 
 #[tokio::test]
