@@ -695,6 +695,15 @@ impl AxonClient {
         self.send(lifecycle(request)).await
     }
 
+    /// List a user's Matrix devices (`GET …/accounts/{id}/devices`, M16).
+    pub async fn list_devices(&self, account_id: Uuid) -> Result<DeviceListDto, ApiError> {
+        let request = self.http.get(format!(
+            "{}/v1/accounts/{account_id}/devices",
+            self.base_url
+        ));
+        self.send(read_request(request)).await
+    }
+
     /// List the account's active/recent verification flows. Used on reconnect to
     /// discover a request that arrived while disconnected (ADR 0028 §3).
     pub async fn list_flows(&self, account_id: Uuid) -> Result<Vec<FlowDto>, ApiError> {
@@ -1198,6 +1207,21 @@ pub enum FlowStage {
 pub struct EmojiDto {
     pub symbol: String,
     pub description: String,
+}
+
+/// `GET /v1/accounts/{id}/devices` (M16): the resolved user plus their devices.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DeviceListDto {
+    pub user_id: String,
+    pub devices: Vec<DeviceListEntryDto>,
+}
+
+/// One Matrix device in [`DeviceListDto`]. Extra wire fields are ignored.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DeviceListEntryDto {
+    pub device_id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -2282,6 +2306,32 @@ mod tests {
         assert_eq!(response.data.state, AccountState::Active);
         assert_eq!(response.data.device_id.as_deref(), Some("DEVICE"));
         assert_eq!(response.data.backup, BackupSnapshot::default());
+    }
+
+    #[test]
+    fn deserializes_device_list_response() {
+        let body = r#"{
+            "data": {
+                "user_id": "@alice:example.com",
+                "devices": [
+                    {
+                        "device_id": "AXONDEV",
+                        "display_name": "axon",
+                        "is_verified": true,
+                        "is_cross_signed_by_owner": true,
+                        "local_trust_state": "verified",
+                        "algorithms": []
+                    }
+                ]
+            }
+        }"#;
+        let response: ApiResponse<DeviceListDto> = serde_json::from_str(body).unwrap();
+        assert_eq!(response.data.user_id, "@alice:example.com");
+        assert_eq!(response.data.devices[0].device_id, "AXONDEV");
+        assert_eq!(
+            response.data.devices[0].display_name.as_deref(),
+            Some("axon")
+        );
     }
 
     #[test]

@@ -300,7 +300,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/whoami",
         insert_text: "/whoami",
-        description: "show your Matrix ID and display name",
+        description: "show your Matrix ID, profile name, and this session's device",
     },
     HelpCommand {
         label: "/whereami",

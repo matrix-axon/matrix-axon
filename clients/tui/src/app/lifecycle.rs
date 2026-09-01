@@ -122,6 +122,13 @@ pub(crate) enum LifecycleOutcome {
         account_id: Uuid,
         result: Result<Vec<FlowDto>, String>,
     },
+    /// Optional homeserver display name for `/whoami`, fetched off the event
+    /// loop. Applied only while the status line still matches `provisional`, so
+    /// a later command is not overwritten by a slow devices GET.
+    WhoamiDevice {
+        provisional: String,
+        enriched: String,
+    },
 }
 
 /// Failure modes of a verification resync. A 404 is treated as an implicit
@@ -806,6 +813,19 @@ impl App {
             }
             return;
         }
+        if let LifecycleOutcome::WhoamiDevice {
+            provisional,
+            enriched,
+        } = outcome
+        {
+            if self.status.text(false) == provisional {
+                self.status = Status::Info(enriched.clone());
+                if self.pending_command_response.as_deref() == Some(provisional.as_str()) {
+                    self.pending_command_response = Some(enriched);
+                }
+            }
+            return;
+        }
         if let LifecycleOutcome::MediaSent { key, result } = outcome {
             self.media_send_busy = false;
             // The user may have switched rooms while the upload was in
@@ -1167,6 +1187,7 @@ impl App {
             }
             LifecycleOutcome::MessageSent { .. } => unreachable!(),
             LifecycleOutcome::MediaSent { .. } => unreachable!(),
+            LifecycleOutcome::WhoamiDevice { .. } => unreachable!(),
         }
         self.queue_completed_command_response();
     }
