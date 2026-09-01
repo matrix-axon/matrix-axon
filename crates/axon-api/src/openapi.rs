@@ -25,8 +25,15 @@ impl Modify for SecurityAddon {
             );
         }
 
-        // Add a shared 401 (the enveloped ErrorResponse) to every operation that
-        // doesn't already declare one — every `/v1/` route is behind the gate.
+        // Add a shared 401 (the enveloped ErrorResponse) to every *gated*
+        // operation that doesn't already declare one.
+        //
+        // Not every `/v1/` route is behind the gate. `/v1/oauth/*` cannot be —
+        // it is how a client obtains a bearer token in the first place — and an
+        // operation that opts out with an empty `security()` can never answer
+        // 401, so claiming it would describe a failure the route has no way to
+        // produce. An empty security requirement is the opt-out; absent means
+        // the global requirement applies.
         for path_item in openapi.paths.paths.values_mut() {
             let operations = [
                 path_item.get.as_mut(),
@@ -39,6 +46,17 @@ impl Modify for SecurityAddon {
                 path_item.trace.as_mut(),
             ];
             for operation in operations.into_iter().flatten() {
+                // `security()` with no arguments emits an empty list, which
+                // OpenAPI defines as "this operation needs no authentication"
+                // — distinct from the field being absent, which inherits the
+                // document-level requirement.
+                if operation
+                    .security
+                    .as_ref()
+                    .is_some_and(|requirements| requirements.is_empty())
+                {
+                    continue;
+                }
                 operation
                     .responses
                     .responses
@@ -111,6 +129,7 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::routes::matrix_oauth_grant::submit_scan,
         crate::routes::matrix_oauth_grant::submit_check_code,
         crate::routes::matrix_oauth_grant::cancel,
+        crate::routes::oauth::providers,
         crate::routes::search::search,
         crate::routes::status::get_status,
         crate::routes::rooms::list_rooms,

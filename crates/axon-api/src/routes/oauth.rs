@@ -33,7 +33,7 @@ use crate::extract::{Path, Query};
 use crate::oauth::provider::OidcError;
 use crate::oauth::tokens::{self, TokenError, TokenPair};
 use crate::oauth::{OAuthRuntime, OidcProvider};
-use crate::response::ApiError;
+use crate::response::{ApiError, ApiResponse};
 use crate::routes::bootstrap::{self, BOOTSTRAP_STATE_PREFIX};
 use crate::state::BootstrapConfig;
 
@@ -67,6 +67,68 @@ pub struct AuthorizeQuery {
 pub struct CallbackQuery {
     pub code: String,
     pub state: String,
+}
+
+/// One sign-in provider this instance has enabled.
+///
+/// An object rather than a bare string so a later addition — a display label,
+/// an icon, whether the provider supports Path B — is an additive field rather
+/// than a reshaped array, which ADR 0099's additive-first policy would
+/// otherwise make a breaking change.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct OAuthProviderDto {
+    /// The value to pass as `provider` to `GET /v1/oauth/authorize`, e.g.
+    /// `"google"`.
+    pub provider: String,
+}
+
+/// `GET /v1/oauth/providers`: which sign-in providers this instance offers.
+///
+/// A client cannot know this by configuration. Which providers exist is a
+/// property of the *server*, and a client that is distributed as a binary —
+/// the desktop and mobile shells of ADR 0102 — is pointed at a server it has
+/// never seen and cannot have been built against. Baking the list in at build
+/// time, as the web client's `VITE_AXON_OAUTH_PROVIDERS` does, works only when
+/// whoever builds the bundle also runs the server.
+///
+/// Deliberately un-gated, like the rest of this module: it is read *before*
+/// there is a token, to decide which buttons the sign-in screen has. It
+/// therefore reveals which IdPs an instance trusts to anyone who can reach it,
+/// which is the same thing its sign-in page would show them, and no more than
+/// `/v1/oauth/authorize` already tells them by accepting or rejecting a
+/// `provider`.
+///
+/// `404` when OAuth is off, matching this module's stated policy: an
+/// unauthenticated caller of a disabled surface sees "no such route", not
+/// "come back later".
+#[utoipa::path(
+    get,
+    path = "/v1/oauth/providers",
+    responses(
+        (status = 200, description = "The enabled sign-in providers", body = ApiResponse<Vec<OAuthProviderDto>>),
+        (status = 404, description = "OAuth is disabled", body = crate::response::ErrorResponse),
+    ),
+    tag = "oauth",
+    security(),
+)]
+pub async fn providers(
+    State(runtime): State<Option<Arc<OAuthRuntime>>>,
+) -> Result<ApiResponse<Vec<OAuthProviderDto>>, ApiError> {
+    let Some(runtime) = runtime else {
+        return Err(ApiError::not_found("oauth is disabled"));
+    };
+    // Sorted so the sign-in screen's button order is stable across restarts;
+    // `providers` is a HashMap, whose iteration order is not.
+    let mut names = runtime.providers.keys().copied().collect::<Vec<_>>();
+    names.sort_unstable();
+    Ok(ApiResponse::new(
+        names
+            .into_iter()
+            .map(|provider| OAuthProviderDto {
+                provider: provider.to_owned(),
+            })
+            .collect(),
+    ))
 }
 
 /// Start Path A: validate the request, record it, and redirect the browser
@@ -533,5 +595,97 @@ fn token_error_into_response(err: TokenError) -> Response {
                 "internal server error",
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod providers_tests {
+    use super::*;
+    use crate::oauth::provider::{OidcError, UpstreamTokens, VerifiedIdentity};
+    use axon_core::OauthConfig;
+    use std::collections::HashMap;
+
+    /// The trait's shape is irrelevant here — `providers` only ever reads the
+    /// map's keys — so this exists purely to occupy a slot in it.
+    struct StubProvider(&'static str);
+
+    #[async_trait::async_trait]
+    impl OidcProvider for StubProvider {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn authorize_url(&self, _state: &str, _nonce: &str, _redirect_uri: &str) -> String {
+            unreachable!("providers() never starts a flow")
+        }
+        async fn exchange_code(
+            &self,
+            _code: &str,
+            _redirect_uri: &str,
+        ) -> Result<UpstreamTokens, OidcError> {
+            unreachable!("providers() never exchanges a code")
+        }
+        async fn verify_identity_token(
+            &self,
+            _token: &str,
+            _nonce: Option<&str>,
+        ) -> Result<VerifiedIdentity, OidcError> {
+            unreachable!("providers() never verifies a token")
+        }
+    }
+
+    fn runtime(names: &[&'static str]) -> Arc<OAuthRuntime> {
+        let providers = names
+            .iter()
+            .map(|name| {
+                let provider: Arc<dyn OidcProvider> = Arc::new(StubProvider(name));
+                (*name, provider)
+            })
+            .collect::<HashMap<_, _>>();
+        Arc::new(OAuthRuntime::new(&OauthConfig::default(), providers))
+    }
+
+    #[tokio::test]
+    async fn lists_only_the_enabled_providers() {
+        let response = providers(State(Some(runtime(&["google"]))))
+            .await
+            .expect("enabled");
+        let names = response
+            .data
+            .iter()
+            .map(|p| p.provider.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["google"]);
+    }
+
+    #[tokio::test]
+    async fn sorts_them_so_the_sign_in_screen_is_stable() {
+        // `OAuthRuntime::providers` is a HashMap; unsorted, the buttons would
+        // reorder between restarts for no reason the user can see.
+        let response = providers(State(Some(runtime(&["microsoft", "apple", "google"]))))
+            .await
+            .expect("enabled");
+        let names = response
+            .data
+            .iter()
+            .map(|p| p.provider.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["apple", "google", "microsoft"]);
+    }
+
+    #[tokio::test]
+    async fn is_404_when_oauth_is_disabled() {
+        // Not 503: an unauthenticated caller of a disabled surface should see
+        // "no such route", the same as a genuinely unregistered path.
+        let error = providers(State(None)).await.expect_err("disabled");
+        assert_eq!(error.into_response().status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn is_empty_rather_than_absent_when_none_are_configured() {
+        // OAuth on with no provider wired up is a real configuration; the
+        // client needs "none available", not a 404 it would read as "no such
+        // server".
+        let response = providers(State(Some(runtime(&[])))).await.expect("enabled");
+        assert!(response.data.is_empty());
     }
 }
