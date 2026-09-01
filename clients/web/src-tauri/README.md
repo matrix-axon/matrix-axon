@@ -1,4 +1,4 @@
-# axon-desktop
+# Axon desktop shell
 
 The native shell around the `clients/web` bundle (ADR 0102, M-W12). Desktop
 today; iOS and Android are M-W13.
@@ -84,8 +84,9 @@ contributes the `MimeType` line but not the argument. The two halves have to
 agree or the association is decoration.
 
 `Name` is fixed rather than `{{name}}`. That variable is `productName`, which
-also names the package (`axon-desktop`), and a launcher should show the app's
-name rather than the package's.
+is now `Axon` and would give the same answer — but it also names the deb
+package and the macOS bundle, so pinning the launcher's `Name` keeps a future
+packaging rename out of what the user reads in their menu.
 
 ## Icons
 
