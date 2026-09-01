@@ -863,6 +863,21 @@ body {
   margin: 0;
 }
 
+.signin-server {
+  font-size: 0.9rem;
+  margin-top: 1.25rem;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .server-setup-error {
   color: var(--danger);
   font-size: 0.9rem;

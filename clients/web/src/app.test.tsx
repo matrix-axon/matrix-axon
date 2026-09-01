@@ -2,6 +2,7 @@ import {
   cleanup,
   fireEvent,
   render,
+  screen,
   waitFor,
   within,
 } from '@testing-library/preact'
@@ -1604,5 +1605,41 @@ describe('shell keyboard shortcuts (ADR 0078)', () => {
       'Hide rooms (Ctrl-B); drag or use arrow keys to resize',
     )
     expect(toggle.getAttribute('aria-keyshortcuts')).toBe('Control+B')
+  })
+})
+
+describe('changing the server', () => {
+  /** A packaged build: no same-origin API to fall back on. */
+  const shellServices = () => {
+    const base = testServices()
+    return {
+      ...base,
+      platform: { ...base.platform, defaultApiBaseUrl: null },
+    }
+  }
+
+  it('offers a way off the current server from the sign-in screen', async () => {
+    // Signing out clears the credential but keeps the server, and Settings is
+    // behind the signed-in shell — so without this a packaged build pointed at
+    // a wrong or dead address has no route back to the setup screen at all,
+    // short of deleting its data directory by hand.
+    const services = shellServices()
+    services.auth.clearToken()
+    render(<App services={services} />)
+
+    expect(
+      await screen.findByRole('button', { name: /use a different server/i }),
+    ).toBeTruthy()
+  })
+
+  it('does not offer it in a browser, where the server is the origin', async () => {
+    const services = testServices()
+    services.auth.clearToken()
+    render(<App services={services} />)
+
+    await screen.findByText(/sign in with sso/i)
+    expect(
+      screen.queryByRole('button', { name: /use a different server/i }),
+    ).toBeNull()
   })
 })

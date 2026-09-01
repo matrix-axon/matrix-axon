@@ -54,10 +54,12 @@ import { setupInstallPromptCapture } from './install-prompt'
 import { SLASH_COMMAND } from './slash-commands'
 import {
   createServices,
+  resolveApiBaseUrl,
   ServicesContext,
   useServices,
   type AppServices,
 } from './services'
+import { disconnectFromServer } from './server-url'
 import {
   hint,
   isApplePlatform,
@@ -487,7 +489,44 @@ function SignedOut({ error }: { error?: string | null }) {
         </p>
       )}
       <auth.LoginBootstrap />
+      <ServerFooter />
     </main>
+  )
+}
+
+/**
+ * Which server this is, and a way off it.
+ *
+ * Signing out clears the credential but keeps the server, so without this a
+ * packaged build has no route back to the setup screen: Settings is behind the
+ * signed-in shell, and the sign-in form itself cannot help. Pointing the app at
+ * the wrong address — or at one that has stopped answering — left the only
+ * remedy as deleting the app's data directory by hand.
+ *
+ * Absent in a browser, where the server is the origin and not a choice.
+ */
+function ServerFooter() {
+  const { auth, platform } = useServices()
+  if (platform.defaultApiBaseUrl !== null) {
+    return null
+  }
+  // The graph's platform, not a fresh `browserPlatform()` — that one answers
+  // `'/'` for its default, so with nothing stored this would read "Connected
+  // to /." in the one build that has no same-origin server to be connected to.
+  const current = resolveApiBaseUrl(undefined, platform)
+  return (
+    <p class="signin-server muted">
+      {current === null ? 'No server configured.' : `Connected to ${current}.`}{' '}
+      <button
+        type="button"
+        class="link-button"
+        onClick={() =>
+          disconnectFromServer(window.localStorage, () => auth.clearToken())
+        }
+      >
+        Use a different server
+      </button>
+    </p>
   )
 }
 
