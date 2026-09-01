@@ -259,13 +259,29 @@ describe('MediaImage', () => {
 
   it('shows the ciphertext-fallback placeholder when the image fails to decode', async () => {
     serveBytes()
-    const { findByRole, findByText } = renderImage(image({ encrypted: true }))
+    const { findByRole, findByText, queryByRole } = renderImage(
+      image({ encrypted: true }),
+    )
     const img = await findByRole('img')
     // The proxy returned a 200 of raw ciphertext; decode fails at the <img>.
     fireEvent.error(img)
     expect(
       await findByText('Encrypted media — server could not decrypt'),
     ).toBeTruthy()
+    // No Download: these bytes are not a file. Saving them under the event's
+    // own `.png` name hands over something no tool can open, with nothing to
+    // say why. Mirrors the pageable viewer's `saveable` gate (#328 review).
+    expect(queryByRole('button', { name: 'Download' })).toBeNull()
+  })
+
+  it('offers no download for undecodable plaintext bytes either', async () => {
+    // The gate is "could we name the format", not "is it encrypted" — an
+    // unidentifiable plaintext object is just as unopenable.
+    serveBytes()
+    const { findByRole, findByText, queryByRole } = renderImage(image())
+    fireEvent.error(await findByRole('img'))
+    expect(await findByText('Could not display this image')).toBeTruthy()
+    expect(queryByRole('button', { name: 'Download' })).toBeNull()
   })
 
   it('names the format instead of blaming decryption for a HEIC', async () => {
@@ -297,15 +313,6 @@ describe('MediaImage', () => {
     expect(
       await findByText("HEIC image — this browser can't display it"),
     ).toBeTruthy()
-  })
-
-  it('does not blame decryption for undecodable plaintext media', async () => {
-    // Unidentifiable bytes on a plaintext event: we do not know why, and
-    // saying "encrypted" is the one answer that is certainly wrong.
-    serveBytes()
-    const { findByRole, findByText } = renderImage(image())
-    fireEvent.error(await findByRole('img'))
-    expect(await findByText('Could not display this image')).toBeTruthy()
   })
 
   it('offers a download from the failure placeholder so the bytes are reachable', async () => {

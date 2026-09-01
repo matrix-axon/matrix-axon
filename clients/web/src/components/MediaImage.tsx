@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'preact/hooks'
 import type { ParsedMedia } from '../media/parse-media'
 import { useMediaBlob } from '../media/use-media-blob'
-import { imageDecodeFailureMessage } from '../media/image-format'
+import {
+  imageDecodeFailureMessage,
+  unrenderableImageFormat,
+} from '../media/image-format'
 import { downloadMedia, isDownloadable } from '../media/download-media'
 import { useServices } from '../services'
 import {
@@ -121,6 +124,14 @@ export function MediaImage({
       }
 
   const alt = media.caption ?? media.filename
+  /**
+   * Whether offering to save the undisplayable bytes helps. Identical to the
+   * pageable viewer's `saveable` gate, and identical for the same reason: a
+   * named format is a real file another application will open, whereas bytes
+   * we cannot identify are most likely the ciphertext-fallback 200, and
+   * writing those to `photo.jpg` is worse than offering nothing (ADR 0101).
+   */
+  const saveable = unrenderableImageFormat(media) !== null
   const canOpen =
     state.status === 'ready' && !decodeFailed && media.url !== null
 
@@ -140,14 +151,15 @@ export function MediaImage({
               decoding="async"
             />
           ) : decodeFailed ? (
-            // Not a dead end: whatever the cause, the bytes are on the server
-            // and a local tool may well open them, so the placeholder carries
-            // the same Download the attachment card would have offered.
+            // Not a dead end when we can name the format: those bytes are a
+            // real file a local tool will open, so the placeholder carries the
+            // same Download the attachment card would have offered. Withheld
+            // for unidentifiable bytes — see `saveable`.
             <div class="media-undisplayable">
               <p class="muted placeholder">
                 {imageDecodeFailureMessage(media)}
               </p>
-              {isDownloadable(media) && (
+              {saveable && isDownloadable(media) && (
                 <button
                   type="button"
                   class="ghost"

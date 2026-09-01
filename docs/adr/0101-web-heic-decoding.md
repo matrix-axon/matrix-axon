@@ -91,21 +91,32 @@ Third place is not a cop-out. Unidentifiable bytes on a plaintext event are a
 case we genuinely have no explanation for, and the previous message was the one
 answer that was certainly wrong.
 
-### 2. A file we cannot draw is still a file
+### 2. A file we cannot draw is still a file — but only if it is a file
 
-The inline placeholder carries a **Download** button, reusing `downloadMedia`
-and its share-sheet-then-anchor path. A HEIC is a real file that Preview,
-Photos, or any image tool will open; the failure is ours, not the file's, so the
-bytes must not become a dead end.
+A named format is a real file that Preview, Photos, or any image tool will
+open: the failure is ours, not the file's, so those bytes must not become a
+dead end. Bytes we cannot identify are most likely the ciphertext-fallback
+200, and writing those to `photo.jpg` is worse than offering nothing — the
+reader gets a file that no tool can open and no indication why.
 
-In the shared pageable viewer the same reasoning applies to the Save control
-that was already there, which was gated on `decoded` and therefore *withdrew
-itself* exactly when it became the only useful action on screen. `LightboxImage`
-now reports a typed outcome rather than a boolean, so the viewer can keep Save
-for `unsupported-format` while still withholding it for `undecodable` — saving
-raw ciphertext under a plausible `.jpg` name remains worse than offering
-nothing, which is the distinction ADR 0064 was reaching for with a signal too
-coarse to express it.
+So **saving is offered exactly when §1 could name the format**, and that one
+rule governs both surfaces:
+
+- The inline placeholder gains a **Download** button, reusing `downloadMedia`
+  and its share-sheet-then-anchor path, shown when
+  `unrenderableImageFormat(media) !== null`.
+- The pageable viewer's existing Save control was gated on `decoded` and
+  therefore *withdrew itself* exactly when it became the only useful action on
+  screen. `LightboxImage` now reports a typed outcome rather than a boolean, so
+  the viewer keeps Save for `unsupported-format` and withholds it for
+  `undecodable`.
+
+The distinction is the one ADR 0064 was reaching for with a signal too coarse
+to express it. Stating it as a single rule over both surfaces is deliberate:
+the first draft of this change applied it only in the viewer and left the
+inline placeholder offering Download for anything with an `mxc://` URI, which
+put the ciphertext hazard on the *more* commonly hit surface — the one that
+needs no extra click. Caught in review of the implementing PR (#328).
 
 ### 3. Two tiers of identification, and explicitly not byte-sniffing
 
