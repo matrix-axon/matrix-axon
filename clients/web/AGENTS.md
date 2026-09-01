@@ -575,8 +575,6 @@ SPDisplaysDataType` before debugging the simulator itself.
 
 - jsdom under Node 25 exposes `window.localStorage` as a bare object —
   inject `memoryStorage()` from `src/test/memory-storage.ts` instead.
-- testing-library auto-cleanup needs vitest globals (not enabled): add
-  `afterEach(cleanup)` in every component test file.
 - msw handler paths: use `:param` segments for ids containing `$`/`:`
   (Matrix event/room ids) — literal or percent-encoded paths don't match.
 - Generated free-form objects (`content`, `relates_to`) type as
