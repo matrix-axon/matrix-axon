@@ -78,23 +78,31 @@ pub fn run() {
         .expect("error while running the Axon shell");
 }
 
-/// Claim the `axon://` scheme with the OS, so the OAuth callback can come back.
+/// Claim the `axon://` scheme with the OS — in development builds only.
 ///
-/// The installers already register it — that is what the `deep-link` section of
-/// `tauri.conf.json` is compiled into — so on an installed copy this is a
-/// no-op overwrite. It is here for every copy that is *not* installed: a binary
-/// run straight out of `target/`, an AppImage launched by hand, a build under
-/// test. Without it the browser reaches the end of a working OAuth flow and
-/// reports "the scheme does not have a registered handler", which is a true
-/// statement about the machine and says nothing about the flow.
+/// A release build must not do this. The installers already register the
+/// scheme (`plugins.deep-link.desktop.schemes` is compiled into them, and the
+/// generated `.deb` carries `MimeType=x-scheme-handler/axon`), and registering
+/// again at runtime writes a *second*, user-level `.desktop` file alongside the
+/// installed one. The user is then asked which of two identical-looking
+/// handlers should open the link, and the answer decides which binary runs —
+/// reported on Linux after installing the `.deb`.
 ///
-/// Failure is never fatal. On macOS registration is unsupported by design —
-/// the `.app` bundle declares `CFBundleURLTypes` and the OS reads it from
-/// there — so the error is expected and routine. On Linux it needs `xdg-mime`
-/// and `update-desktop-database`, which a minimal container may not have. In
-/// every case the app still runs; only the callback leg is affected, and only
-/// on a copy that was not installed.
+/// `is_registered` cannot be used to avoid that: on Linux it only reports
+/// whether *this* runtime-written file is the default, so on an installed
+/// system it says "no" and the duplicate gets written anyway.
+///
+/// So development registers itself, because there is no installer in that
+/// loop, and release leaves it to the package. This matches the plugin's own
+/// model, where desktop deep links belong to installed applications.
+///
+/// Failure is never fatal. macOS returns `UnsupportedPlatform` by design — the
+/// `.app` declares `CFBundleURLTypes` and the OS reads it there — and Linux
+/// needs `xdg-mime`, which a minimal container may lack.
 fn claim_deep_link_schemes<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if !cfg!(dev) {
+        return;
+    }
     use tauri_plugin_deep_link::DeepLinkExt;
 
     if let Err(error) = app.deep_link().register_all() {
@@ -109,10 +117,7 @@ fn log_scheme_registration(error: &tauri_plugin_deep_link::Error) {
         // nothing has gone wrong.
         return;
     }
-    eprintln!(
-        "could not register the axon:// scheme ({error}); OAuth sign-in will \
-         fail at the callback unless this copy was installed"
-    );
+    eprintln!("could not register the axon:// scheme for development ({error})");
 }
 
 /// Create the app window.
