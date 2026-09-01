@@ -27,6 +27,33 @@ export const FLUSH_TIMEOUT_MS = 2000
 /** Re-check at most this often on visibility changes, to bound rapid switching. */
 const VISIBILITY_THROTTLE_MS = 30_000
 
+/**
+ * Whether the automatic update path applies to this build at all.
+ *
+ * Both answers are "no" for the same underlying reason — the origin's build id
+ * is not a deployment identity this bundle can be compared against — but they
+ * arrive from opposite directions, so they are stated together rather than
+ * discovered one at a time at the call site.
+ *
+ * **Not under `vite dev`.** HMR already owns reloading there, and the dev stamp
+ * is a git hash plus a `-dirty` flag read once at server start, so it moves
+ * whenever the working tree does. Restart the dev server after a commit and
+ * every open tab sees a "new build" and reloads itself — indistinguishable
+ * from a bug, and fighting the HMR update arriving at the same moment.
+ *
+ * **Not in a packaged build.** `dist` is compiled into the binary, so the
+ * manifest fetched is the one that shipped: the comparison is an identity
+ * check that can only answer "current", and the reload it would trigger brings
+ * back what is already running. Skipping the installer skips the timer, the
+ * visibility and online checks, *and* the hidden-tab auto-reload.
+ */
+export function autoRefreshApplies(build: {
+  isDev: boolean
+  updatesFromOrigin: boolean
+}): boolean {
+  return !build.isDev && build.updatesFromOrigin
+}
+
 export interface AutoRefreshOptions {
   updates: UpdateChecker
   /** This bundle's build id, for the reload loop guard. */

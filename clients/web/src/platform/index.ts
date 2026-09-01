@@ -186,6 +186,28 @@ export interface Platform {
   onNativeFileDrop: ((handler: (drag: NativeDrag) => void) => () => void) | null
 
   /**
+   * Whether reloading could produce a different build.
+   *
+   * `true` in a browser, which is the premise the whole update path rests on
+   * (ADR 0087): the origin serves the bundle, a deploy replaces it, so
+   * `version.json` can disagree with `BUILD_INFO` and a reload picks the new
+   * one up.
+   *
+   * `false` in a packaged build, where `dist` is compiled into the binary. The
+   * manifest it would fetch is the one it shipped with — served by the shell's
+   * own scheme handler out of the same bundle — so the comparison is an
+   * identity check that can only ever answer "current", and a reload brings
+   * back exactly what was already running. Polling it costs a timer and a
+   * request to say nothing, "Check for updates" asserts a currency the build
+   * cannot know, and the banner would offer a Reload that cannot deliver.
+   *
+   * The desktop updater (ADR 0102 § 8) replaces this with a real check when
+   * there are desktop artifacts to update *to*; until then the honest answer
+   * is to say nothing rather than something false.
+   */
+  updatesFromOrigin: boolean
+
+  /**
    * The API base to fall back on when the user has configured none and no
    * `VITE_AXON_SERVER_URL` was baked in (ADR 0102 § 3).
    *
@@ -243,6 +265,9 @@ export function browserPlatform(): Platform {
     onNativeFileDrop: null,
     // Same-origin: the deployment that serves this bundle also proxies /v1.
     defaultApiBaseUrl: '/',
+    // A deploy replaces what this origin serves, which is what makes the
+    // version manifest, the banner and the auto-reload meaningful.
+    updatesFromOrigin: true,
   }
 }
 

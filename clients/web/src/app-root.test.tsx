@@ -119,6 +119,8 @@ describe('AppRoot wiring the transport into the app', () => {
       onDeepLink: null,
       onNativeFileDrop: null,
       defaultApiBaseUrl: null,
+      // A packaged build, like the one this simulates.
+      updatesFromOrigin: false,
     }
 
     // A token, so the shell mounts signed-in and actually issues requests.

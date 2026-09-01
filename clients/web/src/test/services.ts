@@ -3,7 +3,7 @@ import { createApiClient } from '../api/client'
 import { createCompositeAuthProvider } from '../auth/composite'
 import type { OAuthProviderConfig } from '../auth/oauth'
 import type { CacheStore } from '../stores/cache-store'
-import { browserPlatform } from '../platform'
+import { browserPlatform, type Platform } from '../platform'
 import {
   connectCacheReset,
   connectCacheSetting,
@@ -101,6 +101,12 @@ export function testServices(
      * the real calendar. Defaults to `Date.now`.
      */
     now?: () => number
+    /**
+     * Overrides on the platform seam, for the surfaces that behave differently
+     * in the packaged shell. Defaults to the browser platform, so every
+     * existing test keeps the behaviour it was written against.
+     */
+    platform?: Partial<Platform>
   } = {},
 ): AppServices & { sockets: FakeWebSocket[] } {
   const storage =
@@ -252,7 +258,7 @@ export function testServices(
     activeRoom,
     activeThread,
     composerFocus,
-    platform: browserPlatform(),
+    platform: { ...browserPlatform(), ...options.platform },
     sockets,
   }
 }

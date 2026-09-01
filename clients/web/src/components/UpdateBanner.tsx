@@ -15,9 +15,15 @@ import { useServices } from '../services'
  * dismissal that outlived the session would turn "not now" into "never".
  */
 export function UpdateBanner() {
-  const { updates } = useServices()
+  const { updates, platform } = useServices()
   const [dismissed, setDismissed] = useState(false)
 
+  // Stated here as well as at the poller, rather than relying on `available`
+  // never latching because nothing starts the checker. That is true today and
+  // is an accident of wiring; this is the reason.
+  if (!platform.updatesFromOrigin) {
+    return null
+  }
   if (!updates.available.value || dismissed) {
     return null
   }

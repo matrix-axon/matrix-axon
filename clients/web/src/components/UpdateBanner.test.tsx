@@ -60,3 +60,27 @@ describe('UpdateBanner', () => {
     expect(queryByRole('status')).toBeNull()
   })
 })
+
+describe('UpdateBanner in a packaged build', () => {
+  it('never offers a reload that cannot bring a new version', async () => {
+    // The shell's bundle is its binary, so a reload returns exactly what is
+    // already running. Asserted independently of the poller not starting —
+    // that is true today and is an accident of wiring, not the reason.
+    const services = testServices({
+      currentVersion: 'build-a',
+      versionManifest: () => Promise.resolve(NEWER),
+      platform: { updatesFromOrigin: false },
+    })
+    const { queryByRole, queryByText } = render(
+      <ServicesContext.Provider value={services}>
+        <UpdateBanner />
+      </ServicesContext.Provider>,
+    )
+    await services.updates.check()
+
+    // The checker did see a newer build; the banner still must not appear.
+    expect(services.updates.available.value).toBe(true)
+    expect(queryByText(/A new version of Axon is available/)).toBeNull()
+    expect(queryByRole('button', { name: 'Reload' })).toBeNull()
+  })
+})

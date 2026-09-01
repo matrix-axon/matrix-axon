@@ -615,7 +615,15 @@ function MessageGestureSettings() {
  * escape hatch when the user wants the update now rather than on next idle.
  */
 function UpdateCheckControl() {
-  const { updates } = useServices()
+  const { updates, platform } = useServices()
+  // A packaged build's bundle is its binary, so there is nothing to check
+  // against: this control could only ever answer "This is the latest version",
+  // which is a currency claim it has no way to establish. The footer above
+  // already prints the build id, which is what a bug report actually needs.
+  // Say how updates arrive instead, and say nothing that is not true.
+  if (!platform.updatesFromOrigin) {
+    return <span>Updates arrive by installing a new build.</span>
+  }
   const status = updates.status.value
   const message =
     status === 'checking'
