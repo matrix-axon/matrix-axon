@@ -240,6 +240,7 @@ export function ThreadPanel({
     removeAttachment,
     dragging,
     dropHandlers,
+    dropProblem,
     formatComposerBody,
     mentionCompletions,
     roomReferenceCompletions,
@@ -554,6 +555,11 @@ export function ThreadPanel({
       aria-label="Thread"
       {...(attachable ? dropHandlers : {})}
     >
+      {dropProblem !== null && !dragging && (
+        <p class="drop-problem" role="alert">
+          {dropProblem}
+        </p>
+      )}
       {dragging && (
         <div class="drop-overlay" aria-hidden="true">
           <p>Drop to attach</p>

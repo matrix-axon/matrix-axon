@@ -12,9 +12,10 @@ const withFiles = (files: File[] = []) => ({
 const withText = { dataTransfer: { types: ['text/plain'], files: [] } }
 
 function Harness({ onFile }: { onFile?: (files: FileList) => void }) {
-  const { dragging, handlers } = useFileDrop(onFile ?? (() => {}))
+  const { dragging, problem, handlers } = useFileDrop(onFile ?? (() => {}))
   return (
     <div data-testid="pane" {...handlers}>
+      {problem !== null && !dragging && <p role="alert">{problem}</p>}
       {dragging && <span data-testid="overlay">Drop to attach</span>}
       <span data-testid="child">a timeline row</span>
     </div>
@@ -142,5 +143,28 @@ describe('preventStrayFileDrops', () => {
     stop()
 
     expect(!fireEvent.drop(document.body, withFiles())).toBe(false)
+  })
+})
+
+describe('a drop that carries nothing usable', () => {
+  it('says so instead of doing nothing', () => {
+    // WebKitGTK advertises `text/uri-list` for a file-manager drag and can
+    // hand over no `File` at all. Silence reads as the app being broken —
+    // which is exactly how it was reported.
+    const { getByTestId, queryByRole } = render(<Harness />)
+
+    fireEvent.drop(getByTestId('pane'), withUriList)
+
+    expect(queryByRole('alert')?.textContent).toMatch(/carried no file/i)
+  })
+
+  it('clears the message when a new drag starts', () => {
+    const { getByTestId, queryByRole } = render(<Harness />)
+    fireEvent.drop(getByTestId('pane'), withUriList)
+    expect(queryByRole('alert')).not.toBeNull()
+
+    fireEvent.dragEnter(getByTestId('pane'), withFiles())
+
+    expect(queryByRole('alert')).toBeNull()
   })
 })

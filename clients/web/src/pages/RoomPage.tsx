@@ -1171,6 +1171,7 @@ export function RoomPage() {
     removeAttachment,
     dragging,
     dropHandlers,
+    dropProblem,
     emojiEntries,
     formatComposerBody,
     mentionCompletions,
@@ -1927,6 +1928,11 @@ export function RoomPage() {
           class="room-stream"
           {...(attachable ? dropHandlers : {})}
         >
+          {dropProblem !== null && !dragging && (
+            <p class="drop-problem" role="alert">
+              {dropProblem}
+            </p>
+          )}
           {dragging && (
             <div class="drop-overlay" aria-hidden="true">
               <p>Drop to attach</p>

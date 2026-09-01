@@ -14,6 +14,14 @@ import { useCallback, useRef, useState } from 'preact/hooks'
  */
 export function useFileDrop(onFiles: (files: FileList) => void): {
   dragging: boolean
+  /**
+   * Set when a drop was accepted but carried nothing that could be staged, and
+   * cleared by the next drag. A drag can advertise `text/uri-list` and then
+   * hand over no `File` at all — WebKitGTK does this for a file-manager drag —
+   * and the honest outcome is to say so. Silently doing nothing reads as the
+   * app being broken, which is how it was reported.
+   */
+  problem: string | null
   handlers: {
     onDragEnter(event: DragEvent): void
     onDragOver(event: DragEvent): void
@@ -22,6 +30,7 @@ export function useFileDrop(onFiles: (files: FileList) => void): {
   }
 } {
   const [dragging, setDragging] = useState(false)
+  const [problem, setProblem] = useState<string | null>(null)
   const depth = useRef(0)
 
   /**
@@ -47,6 +56,7 @@ export function useFileDrop(onFiles: (files: FileList) => void): {
 
   return {
     dragging,
+    problem,
     handlers: {
       onDragEnter(event) {
         if (!looksLikeFile(event)) {
@@ -54,6 +64,7 @@ export function useFileDrop(onFiles: (files: FileList) => void): {
         }
         depth.current += 1
         setDragging(true)
+        setProblem(null)
       },
       onDragOver(event) {
         if (!looksLikeFile(event)) {
@@ -86,7 +97,11 @@ export function useFileDrop(onFiles: (files: FileList) => void): {
         const files = event.dataTransfer?.files
         if (files !== undefined && files.length > 0) {
           onFiles(files)
+          return
         }
+        setProblem(
+          'That drop carried no file this app can read. Use the paperclip to choose it instead.',
+        )
       },
     },
   }

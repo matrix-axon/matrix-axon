@@ -903,6 +903,12 @@ body {
   cursor: pointer;
 }
 
+.drop-problem {
+  color: var(--danger);
+  font-size: 0.9rem;
+  margin: 0 0 0.5rem;
+}
+
 .server-setup-error {
   color: var(--danger);
   font-size: 0.9rem;

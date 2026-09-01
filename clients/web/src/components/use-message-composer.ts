@@ -68,6 +68,8 @@ export function useMessageComposer(options: MessageComposerOptions): {
   clearAttachment: () => void
   dragging: boolean
   dropHandlers: ReturnType<typeof useFileDrop>['handlers']
+  /** Why a drop staged nothing, if it did not. */
+  dropProblem: string | null
   emojiEntries: readonly EmojiEntry[]
   formatComposerBody: (body: string) => Promise<FormattedMessageParts>
   mentionCompletions: (query: string) => ComposerAutocompleteOption[]
@@ -94,7 +96,11 @@ export function useMessageComposer(options: MessageComposerOptions): {
     remove: removeAttachment,
     clear: clearAttachment,
   } = useAttachments(options.attachmentScope, options.staging)
-  const { dragging, handlers: dropHandlers } = useFileDrop(stage)
+  const {
+    dragging,
+    problem: dropProblem,
+    handlers: dropHandlers,
+  } = useFileDrop(stage)
 
   useEffect(() => {
     let cancelled = false
@@ -197,6 +203,7 @@ export function useMessageComposer(options: MessageComposerOptions): {
     removeAttachment,
     clearAttachment,
     dragging,
+    dropProblem,
     dropHandlers,
     emojiEntries,
     formatComposerBody,
