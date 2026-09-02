@@ -1,0 +1,65 @@
+# cargo-about configuration for the Tauri desktop shell.
+#
+# Separate from `about.toml` because the shell is a separate cargo workspace
+# (`clients/web/src-tauri`, see ADR 0102 § "Its own cargo workspace"). The root
+# run cannot see it, which is why 486 crates shipped in the desktop binary
+# appeared in no disclosure at all until this existed.
+#
+# `accepted` is deliberately identical to the root's rather than a superset. The
+# shell's whole graph was checked against that list before this file was
+# written: zero crates whose licence no accepted term satisfies, and zero with
+# no licence field. Folding the shell in therefore needed no policy change, and
+# if that ever stops being true the generation should fail rather than quietly
+# widen the list here.
+#
+# One string will catch a careful reader's eye and is not a problem: `r-efi`
+# declares `MIT OR Apache-2.0 OR LGPL-2.1-or-later`. That is a disjunction — we
+# take MIT or Apache-2.0 — and it does not make the LGPL question ADR 0101
+# reasoned about apply here.
+#
+# The list does differ from the root's by exactly one entry, and it is a real
+# addition rather than an oversight, so it is called out here. Six crates in
+# this graph carry an LLVM exception; five of them (`rustix`, `linux-raw-sys`,
+# `wasi`, `wasip2`, `wit-bindgen`) also offer plain `Apache-2.0 OR MIT` and
+# resolve without it. `target-lexicon` offers nothing else, so without
+# `Apache-2.0 WITH LLVM-exception` the whole disclosure fails to generate.
+#
+# Accepting it is a smaller step than it looks: the LLVM exception only *grants*
+# permission on top of Apache-2.0, which is already accepted — it waives the
+# requirement to reproduce the licence when redistributing binaries and settles
+# GPLv2 compatibility. There is no additional obligation to comply with. The
+# root workspace has no crate carrying it, which is why the root list does not.
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",
+    "LicenseRef-axon",
+    "CDLA-Permissive-2.0",
+    "BSL-1.0",
+    # See the note above: required by `target-lexicon`, and strictly more
+    # permissive than the `Apache-2.0` already on this list.
+    "Apache-2.0 WITH LLVM-exception"
+]
+
+private = { ignore = true }
+
+# Named explicitly rather than left to the host, so the notice covers every
+# platform the shell ships to and is the same document whichever machine
+# generates it. Without this the disclosure would silently describe whichever
+# runner happened to build it — a Linux runner would omit every Windows and
+# macOS crate.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]

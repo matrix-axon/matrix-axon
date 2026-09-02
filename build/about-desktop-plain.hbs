@@ -1,0 +1,45 @@
+Open Source License Attributions - Axon desktop
+
+The following open-source components are used in the Axon desktop application.
+
+This notice covers the native shell's Rust dependencies. The web bundle the
+shell displays has its own notice, generated from the npm dependency tree and
+readable inside the app under Settings -> Open-source licenses.
+
+SYSTEM COMPONENTS
+
+The application renders through the operating system's own web engine. These
+are shared libraries provided by the platform rather than dependencies compiled
+into this binary, so they do not appear in the crate list below and no tool
+generates their attribution for us. They are recorded here deliberately.
+
+  - WebKitGTK (Linux) - LGPL-2.1-or-later and BSD-style licences. Dynamically
+    linked against the copy the distribution provides; the application neither
+    bundles nor modifies it. Source: https://webkitgtk.org/
+  - Microsoft Edge WebView2 Runtime (Windows) - proprietary, redistributable
+    under the Microsoft Software License Terms for the WebView2 Runtime. Not
+    bundled; the installer relies on the runtime present on the system.
+  - WKWebView / WebKit (macOS) - supplied by the operating system as part of
+    macOS. Apple's WebKit is available under LGPL-2.1 and BSD-style licences.
+    Details: https://webkit.org/licensing-webkit/
+
+OVERVIEW
+{{#each overview}}
+- {{name}} (used by {{count}} crate{{#if (gt count 1)}}s{{/if}})
+{{/each}}
+
+
+LICENSE DETAILS
+{{#each licenses}}
+
+================================================================================
+LICENSE: {{name}} (SPDX ID: {{id}})
+USED BY:
+{{#each used_by}}
+  - {{crate.name}} {{crate.version}}
+{{/each}}
+================================================================================
+{{text}}
+
+--------------------------------------------------------------------------------
+{{/each}}

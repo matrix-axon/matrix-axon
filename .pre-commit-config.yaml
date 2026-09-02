@@ -113,14 +113,17 @@ repos:
         # length is a convention, not a check (AGENTS.md § Docs and prose).
         files: '^(\.pre-commit-config\.yaml|[^/]+\.md|docs/.*\.md|(clients|crates|smoke|deploy)/.*\.md|clients/web/.*\.(ts|tsx|mjs|cjs|js|css|json|html|yml|yaml))$'
         # Generated or not-ours, in both trees:
-        #   THIRDPARTY.md   scripts/generate-thirdparty.sh rewrites it wholesale
+        #   THIRDPARTY.md   scripts/generate-thirdparty.sh rewrites it wholesale,
+        #                   at the root and under clients/web/src-tauri (the
+        #                   desktop shell is a separate cargo workspace, so it
+        #                   gets its own cargo-about run and its own notice)
         #   LICENSE.md      license text is not ours to reflow
         #   docs/adr/       historical records; reformatting costs blame and
         #                   buys consistency in files nobody edits after merge
         #   clients/web/*   mirror of clients/web/.prettierignore, including
         #                   src-tauri/{target,gen}: cargo build output, which
         #                   contains JavaScript tauri-build generates and embeds
-        exclude: '^(THIRDPARTY\.md|LICENSE\.md|docs/adr/|clients/web/(dist/|pnpm-lock\.yaml|src/api/schema\.d\.ts|public/emoji-picker-data-en\.json|src-tauri/(target|gen)/))'
+        exclude: '^(THIRDPARTY\.md|clients/web/src-tauri/THIRDPARTY\.md|LICENSE\.md|docs/adr/|clients/web/(dist/|pnpm-lock\.yaml|src/api/schema\.d\.ts|public/emoji-picker-data-en\.json|src-tauri/(target|gen)/))'
         pass_filenames: true
         stages: [pre-push]
       # Before any pnpm-backed hook: the web hooks use the repo's real
