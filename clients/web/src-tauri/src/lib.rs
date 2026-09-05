@@ -92,6 +92,32 @@ fn main_window<R: tauri::Runtime>(
 /// On Windows and Android this surfaces as `http://axon.localhost`.
 const APP_SCHEME: &str = "axon";
 
+/// Build the response for one resolved asset.
+///
+/// Split out from `serve` so the headers can be asserted directly. The CSP is
+/// configured in `tauri.conf.json`, and Tauri applies it by *serving* it: the
+/// asset resolver computes the header — including the per-load nonces the
+/// policy refers to — and expects whoever answers the request to send it.
+/// Answering with only the bytes, which this did, meant the production build
+/// enforced no policy at all, and every reason the policy exists (one origin,
+/// no third-party script, no remote frames) held only in the config file.
+///
+/// The tests below covered `route`, a pure function over paths, which is why
+/// nothing caught a missing header.
+fn asset_response(
+    mime_type: &str,
+    csp: Option<&str>,
+    bytes: Vec<u8>,
+) -> tauri::http::Response<Vec<u8>> {
+    let mut builder = tauri::http::Response::builder()
+        .status(tauri::http::StatusCode::OK)
+        .header(tauri::http::header::CONTENT_TYPE, mime_type);
+    if let Some(csp) = csp {
+        builder = builder.header(tauri::http::header::CONTENT_SECURITY_POLICY, csp);
+    }
+    builder.body(bytes).expect("asset response")
+}
+
 /// What to answer for one request path.
 ///
 /// Deliberately a pure function over `(does this asset exist?, path)` so the
@@ -131,11 +157,7 @@ fn serve<R: tauri::Runtime>(
     };
 
     match resolver.get(target.clone()) {
-        Some(asset) => builder
-            .status(tauri::http::StatusCode::OK)
-            .header("Content-Type", asset.mime_type)
-            .body(asset.bytes)
-            .expect("asset response"),
+        Some(asset) => asset_response(&asset.mime_type, asset.csp_header.as_deref(), asset.bytes),
         // The bundle is empty. `generate_context!` embeds `../dist` at compile
         // time and says nothing when it is not there -- and `dist/` is
         // gitignored, so a fresh checkout has none. Building the Rust crate
@@ -195,7 +217,47 @@ fn route(path: &str, exists: impl Fn(&str) -> bool) -> Route {
 
 #[cfg(test)]
 mod tests {
-    use super::{route, Route};
+    use super::{asset_response, route, Route};
+
+    /// The bug this covers shipped: `serve` answered with the bytes and the
+    /// content type and dropped the policy, so the release build enforced no
+    /// CSP at all while `tauri.conf.json` said it did.
+    #[test]
+    fn an_asset_response_carries_the_configured_csp() {
+        let response = asset_response(
+            "text/html",
+            Some("default-src 'self'"),
+            b"<!doctype html>".to_vec(),
+        );
+
+        assert_eq!(
+            response
+                .headers()
+                .get(tauri::http::header::CONTENT_SECURITY_POLICY)
+                .map(|v| v.to_str().expect("ascii header")),
+            Some("default-src 'self'"),
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(tauri::http::header::CONTENT_TYPE)
+                .map(|v| v.to_str().expect("ascii header")),
+            Some("text/html"),
+        );
+    }
+
+    /// Not every asset has one — the resolver returns `None` for anything that
+    /// is not the document — and a literal "None" header would be worse than
+    /// no header.
+    #[test]
+    fn an_asset_without_a_policy_gets_no_header() {
+        let response = asset_response("image/png", None, b"\x89PNG".to_vec());
+
+        assert!(response
+            .headers()
+            .get(tauri::http::header::CONTENT_SECURITY_POLICY)
+            .is_none());
+    }
 
     /// Stands in for the embedded bundle.
     fn bundle(path: &str) -> bool {
