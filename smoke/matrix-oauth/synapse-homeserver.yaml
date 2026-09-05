@@ -1,0 +1,50 @@
+# Dedicated Synapse configuration for the ADR 0097 interoperability lanes.
+# It is localhost-only and uses a throwaway SQLite database under the run dir.
+server_name: "localhost"
+public_baseurl: "@SYNAPSE_PUBLIC_BASE@"
+pid_file: /data/homeserver.pid
+signing_key_path: /data/localhost.signing.key
+log_config: /etc/synapse/log.config
+media_store_path: /data/media_store
+report_stats: false
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    resources:
+      - names: [client]
+        compress: false
+
+database:
+  name: sqlite3
+  args:
+    database: /data/homeserver.db
+
+matrix_authentication_service:
+  enabled: true
+  endpoint: http://mas:8080/
+  secret: axon-matrix-oauth-smoke-shared-secret
+
+trusted_key_servers: []
+suppress_key_server_warning: true
+
+experimental_features:
+  msc4108_enabled: true
+  msc4186_enabled: true
+
+rc_message:
+  per_second: 1000
+  burst_count: 1000
+
+rc_login:
+  address:
+    per_second: 1000
+    burst_count: 1000
+  account:
+    per_second: 1000
+    burst_count: 1000
+  failed_attempts:
+    per_second: 1000
+    burst_count: 1000

@@ -70,11 +70,31 @@ Knobs (all optional, via env):
 
 ### In CI
 
-`.github/workflows/integration.yml` runs this same script on pull requests and
-pushes to `main`. The GitHub runner already has docker, docker compose, python3,
-and curl, and the default ports are free there, so the job is just "checkout →
-install Rust → run the script". It's slower than the lint/test lane (it pulls the
-Synapse + Postgres images), which is why it's a separate workflow.
+`.github/workflows/integration.yml` runs this same script on manual dispatch.
+The GitHub runner already has docker, docker compose, python3, and curl, and the default ports are free there, so the job is just "checkout → install Rust → run the script".
+It's slower than the lint/test lane because it pulls the Synapse and Postgres images, which is why it's a separate workflow.
+
+## Matrix OAuth QR interoperability (ADR 0097)
+
+The same manual integration workflow exposes four pinned Synapse + MAS lanes: `matrix-oauth-api`, `matrix-oauth-acquire`, `matrix-oauth-grant`, and `matrix-oauth-unsupported`.
+Choose `matrix-oauth-all` to run the complete set, or `all` to run both the re-decryption suite above and every Matrix OAuth lane.
+
+Locally, run a single lane with:
+
+```sh
+scripts/matrix-oauth-test.sh api
+scripts/matrix-oauth-test.sh acquire
+scripts/matrix-oauth-test.sh grant
+scripts/matrix-oauth-test.sh unsupported
+```
+
+The acquisition lane proves Axon becomes cross-signed, receives encryption secrets, decrypts pre-login history, and restores and refreshes its OAuth session after a restart beyond the test token lifetime.
+The separate grant lane proves a trusted Axon account can authorize a fresh SDK device only after explicit authorization-server approval, after which that device is cross-signed and decrypts history using the transferred backup secret.
+The API and unsupported lanes cover failure, rejection, cancellation, timeout, account scoping, capability gating, and secret-safe diagnostics.
+
+The fixture writes runtime protocol material only to memory or a throwaway run directory that is removed by its cleanup trap.
+The workflow uploads no Matrix OAuth failure artifacts.
+See [`smoke/matrix-oauth/README.md`](../smoke/matrix-oauth/README.md) for pinned versions, prerequisites, and the complete secret-handling contract.
 
 ## Prerequisites (manual walkthrough)
 

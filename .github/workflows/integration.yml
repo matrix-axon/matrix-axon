@@ -1,12 +1,26 @@
 name: Integration test
 
-# End-to-end test of the M3c re-decryption queue and encrypted media proxy
-# against a real Synapse. It's slower than the unit/lint lane (it pulls Synapse
-# + Postgres images and runs a full seed → sync → recover → media-fetch flow),
-# so it lives in its own workflow rather than gating every push.
+# Real-service integration suites that are too expensive for the unit/lint lane.
+# The original lane covers the M3c re-decryption queue and encrypted media proxy.
+# ADR 0097 adds pinned Synapse + MAS API, acquisition, grant, and unsupported
+# Matrix OAuth QR lanes. They stay manually dispatched rather than gating every
+# push, and the secret-bearing OAuth lanes deliberately upload no artifacts.
 
 on:
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Which real-service integration suite to run
+        type: choice
+        default: redecryption
+        options:
+          - redecryption
+          - matrix-oauth-api
+          - matrix-oauth-acquire
+          - matrix-oauth-grant
+          - matrix-oauth-unsupported
+          - matrix-oauth-all
+          - all
 
 permissions:
   contents: read
@@ -16,6 +30,7 @@ env:
 
 jobs:
   integration:
+    if: inputs.suite == 'redecryption' || inputs.suite == 'all'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -41,3 +56,45 @@ jobs:
         run: scripts/integration-test.sh
         env:
           TIMEOUT: 180
+
+  matrix-oauth:
+    if: inputs.suite != 'redecryption'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-matrix-oauth-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-matrix-oauth-
+
+      - name: Run Matrix OAuth QR interoperability
+        env:
+          MATRIX_OAUTH_SUITE: ${{ inputs.suite }}
+        run: |
+          case "$MATRIX_OAUTH_SUITE" in
+            matrix-oauth-api) lanes=(api) ;;
+            matrix-oauth-acquire) lanes=(acquire) ;;
+            matrix-oauth-grant) lanes=(grant) ;;
+            matrix-oauth-unsupported) lanes=(unsupported) ;;
+            matrix-oauth-all|all) lanes=(api acquire grant unsupported) ;;
+            *) echo "unknown Matrix OAuth suite" >&2; exit 2 ;;
+          esac
+          for lane in "${lanes[@]}"; do
+            scripts/matrix-oauth-test.sh "$lane"
+          done
+
+      # These lanes handle OAuth and Matrix secrets in a throwaway directory.
+      # The harness scans Axon's log, deletes the directory, and deliberately
+      # uploads no failure artifact that could persist protocol material.
