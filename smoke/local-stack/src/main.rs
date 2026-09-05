@@ -1630,9 +1630,11 @@ fn resolve_axon_bin() -> anyhow::Result<PathBuf> {
         Command::new(env_cargo()).args(["build", "-p", "axon-server"]),
         "cargo build -p axon-server",
     )?;
-    let bin = target_dir()?
-        .join("debug")
-        .join(if cfg!(windows) { "axon.exe" } else { "axon" });
+    let bin = target_dir()?.join("debug").join(if cfg!(windows) {
+        "axon-server.exe"
+    } else {
+        "axon-server"
+    });
     if !bin.exists() {
         bail!("axon binary not found at {}", bin.display());
     }

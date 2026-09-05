@@ -137,7 +137,8 @@ open question in ADR 0031. Rationale, against the alternatives tabled there:
 
 Each milestone is one silo — one PR or a small stack — per the project's
 one-silo-per-PR rule. M-W1 through M-W6 produce the basic browser client; M-W7
-through M-W12 complete parity, hardening, and the desktop shell.
+through M-W12 complete parity, hardening, and the desktop shell; ADR 0102
+adds M-W13 for the mobile targets.
 
 | Milestone  | Scope                                                                                                                                                                                                                                                                                                                                                                  | Exit criterion                                                                                                      |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
@@ -155,7 +156,8 @@ through M-W12 complete parity, hardening, and the desktop shell.
 | **M-W9**   | Verification & sender trust (PR #162 scope): verification frame handling, SAS modal (emoji + decimal, confirm/cancel), self- and cross-user (`@user`) initiation, incoming-request gating setting, reconnect flow re-discovery, per-event verification-bundle view (ADR 0045), trust glyphs + violation alerts. May be a 2-PR stack (flows, then trust display).       | Web ↔ TUI SAS ceremony completes against the integration Synapse.                                                   |
 | **M-W10**  | Search (PR #183 scope, ADR 0039): UI over `GET /v1/search`, results with room/account context, deep-link into the room at the hit via `?event=`.                                                                                                                                                                                                                       | Search-to-message navigation works.                                                                                 |
 | **M-W11**  | Hardening & parity audit: core keyboard shortcuts, a11y pass (modal focus, spoilers, SAS dialog), error/empty/loading states, bundle-size budget, parity checklist signed off against the target above.                                                                                                                                                                | full feature parity with TUI; "SPA stable" trigger for Tauri per ADR 0031.                                          |
-| **M-W12**  | Tauri desktop shell: `clients/web/src-tauri/`, Windows + Linux builds, Tauri `AuthProvider` (OS keychain — first payoff of the M-W2 seam), CI build lane.                                                                                                                                                                                                              | Desktop builds ship from the same dist.                                                                             |
+| **M-W12**  | Tauri desktop shell: `clients/web/src-tauri/`, macOS + Windows + Linux builds (macOS added by ADR 0102), Tauri `AuthProvider` (OS keychain — first payoff of the M-W2 seam), CI build lane.                                                                                                                                                                                                              | Desktop builds ship from the same dist.                                                                             |
+| **M-W13**  | Mobile targets and store distribution (added by ADR 0102): iOS and Android builds from the same shell, camera/safe-area/icon/local-network platform work, App Store and Play submission. Push notifications are explicitly not in scope.                                                                                                            | Builds installed from TestFlight and the Play internal track.                                                       |
 
 **Addendum (Tauri prep, pre-M-W12):** `services.ts`/`ws.ts`/`oauth.tsx` were
 decoupled from hardcoded same-origin assumptions (`apiBaseUrl()` as the single
@@ -170,9 +172,16 @@ items remain open and are *not* resolved by that prep:
   used there. No `CorsLayer` exists yet anywhere in `crates/axon-api` — this
   is the recommended shape, not a restructuring. Adding the Tauri origin
   later is then a one-line addition to that list.
+  *(ADR 0102 § 2 removes this from the shell's critical path: the packaged app
+  goes through Tauri's Rust-side HTTP and WebSocket plugins, so it is never a
+  CORS client. M-W1.5 stays unbuilt and stays owed to separately-hosted browser
+  deployments.)*
 - **`file://` routing hash-fallback under Tauri** (open question 5 below)
-  remains unresolved and unimplemented — see `clients/web/src/app.tsx:46`,
+  remains unresolved and unimplemented — see `clients/web/src/app.tsx:134`,
   which flags it explicitly as "M-W12's problem."
+  *(Resolved by ADR 0102 § 5: history routing is kept on every target, with a
+  Rust URI-scheme handler in the shell serving `index.html` for any non-asset
+  path — the same rule `deploy/web/Caddyfile` already implements.)*
 
 ### Out of scope for this roadmap
 
@@ -180,7 +189,8 @@ OAuth 2.0 + PKCE (seam only; revisit after this lands in the server),
 web push, typing indicators, read receipts, presence (no server support), room
 join/leave/create (no API), server-side
 thumbnailing, an i18n framework, a rich-text editor, and macOS/mobile Tauri
-targets.
+targets. *(ADR 0102 brings macOS into M-W12 and the mobile targets into the new
+M-W13; the rest of this list stands.)*
 
 Media upload was on this list when the roadmap was written ("no API"). M15
 (ADR 0059) built that API, so it moved _into_ scope as M-W8.5 above.
@@ -212,9 +222,16 @@ not after dependent UI ships.
    answer under Tauri `file://`. Recommend history in the browser with a
    Tauri-conditional fallback. Resolve this before M-W3, because the
    deep-link shape becomes a search/navigation contract.
+   *(Closed by ADR 0102 § 5: history everywhere, no hash fallback. Tauri v2
+   serves from a custom scheme rather than `file://`, so the shell can answer
+   the fallback itself and the deep-link contract stays one shape.)*
 6. **Responsive posture.** Recommend desktop-first, non-broken at narrow
    widths; native mobile clients follow per ADR 0031, so mobile-web is a
    stopgap, not a target.
+   *(Overtaken by events, then by ADR 0102: ADR 0031's native mobile clients
+   are withdrawn, so the responsive layout is the mobile client. This ADR's own
+   ADR 0062 two-pane work, ADR 0075 swipe-back, and ADR 0077 on-device perf
+   readout had already stopped treating it as a stopgap.)*
 7. **Keyboard-shortcut parity.** The TUI is keyboard-everything with a
    fully rebindable keymap. Recommend a fixed core set for MVP (room nav,
    compose focus, search, reply/edit on selection); rebindability later.
@@ -242,4 +259,6 @@ not after dependent UI ships.
   standing architecture rules for `clients/web/` from the first commit.
 - The web client becomes the design reference for the mobile clients
   (ADR 0031): its screen flows and URL structure inform the SwiftUI and
-  Compose implementations.
+  Compose implementations. **Superseded by ADR 0102**, which withdraws the
+  SwiftUI and Compose clients: the web bundle is no longer a reference the
+  mobile clients imitate, it is the mobile client, wrapped in a Tauri shell.
