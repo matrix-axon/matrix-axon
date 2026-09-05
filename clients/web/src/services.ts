@@ -13,6 +13,7 @@ import {
 } from './api/frames'
 import { openLiveSocket } from './api/ws'
 import { setPerfEnabled, setTelemetrySink } from './perf'
+import { browserPlatform, type Platform } from './platform'
 import {
   createCompositeAuthProvider,
   type CompositeAuthProvider,
@@ -879,6 +880,10 @@ export function connectEphemeralPassthrough(
 export function createServices(
   storage: Storage = window.localStorage,
   sessionStorage: Storage = window.sessionStorage,
+  // Transport seam (ADR 0102 § 2). Every call that leaves the page goes
+  // through this one object, so a packaged build swaps it for the shell's
+  // Rust-side transport and no call site below changes.
+  platform: Platform = browserPlatform(),
 ): AppServices {
   const auth = createCompositeAuthProvider({
     providers: parseOAuthProviders(import.meta.env.VITE_AXON_OAUTH_PROVIDERS),
@@ -887,9 +892,10 @@ export function createServices(
     redirectUriBase: oauthRedirectUriBase(),
     storage,
     sessionStorage,
+    platform,
   })
-  const api = createApiClient(auth, apiBaseUrl())
-  const media = createMediaService({ auth, baseUrl: apiBaseUrl() })
+  const api = createApiClient(auth, apiBaseUrl(), platform)
+  const media = createMediaService({ auth, baseUrl: apiBaseUrl(), platform })
   // Deliberately *not* `apiBaseUrl()`: the manifest describes the web bundle,
   // which is served by the document's own origin even in a cross-origin
   // deployment where the API lives elsewhere (`VITE_AXON_SERVER_URL`).
@@ -966,7 +972,7 @@ export function createServices(
       if (typeof token !== 'string') {
         throw new Error('live socket requires a synchronously available token')
       }
-      return openLiveSocket(token, apiBaseUrl())
+      return openLiveSocket(token, apiBaseUrl(), platform)
     },
   })
   const activeRoom = signal<string | null>(null)

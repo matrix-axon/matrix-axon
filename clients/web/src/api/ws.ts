@@ -16,6 +16,24 @@
  * Kubernetes API server's fix for the same problem.
  */
 
+import {
+  bearerSubprotocols,
+  browserPlatform,
+  type LiveSocket,
+  type Platform,
+} from '../platform'
+
+/**
+ * The only page protocols a live socket can be derived from. Anything else is
+ * a caller error rather than a value to coerce — see `wsUrl`.
+ */
+const SOCKET_PROTOCOL: Readonly<Record<string, string>> = {
+  'http:': 'ws:',
+  'ws:': 'ws:',
+  'https:': 'wss:',
+  'wss:': 'wss:',
+}
+
 /**
  * The WebSocket URL for the API at `baseUrl` — same-origin by default (the
  * dev-proxy setup), or a cross-origin server root. `http(s)` maps to
@@ -28,32 +46,59 @@
  * an explicit `'/'` slipped past it and threw before any socket was
  * constructed, leaving the client permanently "reconnecting" (regression from
  * the `apiBaseUrl()` extraction in #349).
+ *
+ * **Anything that is not http(s)/ws(s) throws.** This used to fall through to
+ * `ws:`, which was harmless while the page was always served over http(s) and
+ * silently wrong the moment it was not. Under a packaged build the page origin
+ * is the shell's own scheme, and a relative base resolved against it failed
+ * two different ways, neither of them visibly:
+ *
+ * - `tauri://localhost` (macOS, iOS, Linux) → `tauri://localhost/v1/ws`. The
+ *   coercion is a *no-op*, because setting `.protocol` on a non-special scheme
+ *   is ignored per the URL spec. `new WebSocket()` then throws on the scheme.
+ * - `http://tauri.localhost` (Windows, Android) → `ws://tauri.localhost/v1/ws`.
+ *   A perfectly valid socket URL, pointing at the app's own origin instead of
+ *   the server.
+ *
+ * Both land in `socketFactory`'s catch, which treats a throw as a failed
+ * attempt and backs off — so the client reconnects forever with nothing in the
+ * UI or the log to say why. The shell must pass an absolute server base;
+ * failing loudly here is how it finds out it did not.
  */
 export function wsUrl(baseUrl: string | URL = window.location.origin): string {
   const url = new URL('/v1/ws', new URL(baseUrl, window.location.origin))
-  if (url.protocol === 'https:' || url.protocol === 'wss:') {
-    url.protocol = 'wss:'
-  } else {
-    url.protocol = 'ws:'
+  const protocol = SOCKET_PROTOCOL[url.protocol]
+  if (protocol === undefined) {
+    throw new Error(
+      `cannot derive a websocket URL from ${url.protocol} — ` +
+        'the API base must be an absolute http(s) or ws(s) URL',
+    )
   }
+  url.protocol = protocol
   return url.toString()
 }
 
 /**
- * The `Sec-WebSocket-Protocol` entries the browser offers: the benign `axon`
- * subprotocol the server echoes to keep the 101 RFC 6455-compliant (#238),
- * followed by the `bearer.<token>` entry carrying the credential (ADR 0029).
- * `axon` is listed first so the server has a non-secret protocol to negotiate;
- * the token-bearing entry is accepted but never echoed back.
+ * Re-exported for the tests and call sites that already name it. The list
+ * itself now lives with the browser platform (`platform/index.ts`), because
+ * carrying a credential in `Sec-WebSocket-Protocol` is that platform's
+ * workaround rather than a property of `/v1/ws` (#238, ADR 0029).
  */
-export function wsAuthProtocols(token: string): string[] {
-  return ['axon', `bearer.${token}`]
-}
+export { bearerSubprotocols as wsAuthProtocols }
 
-/** Open the live-event socket, authenticated via subprotocol. */
+/**
+ * Open the live-event socket, authenticated with the caller's token.
+ *
+ * `platform` is the transport seam (ADR 0102 § 2): the browser opens a real
+ * `WebSocket` and encodes the token as a subprotocol, while a packaged build
+ * opens the socket in the shell process and can send a real `Authorization`
+ * header. The token crosses this boundary as a token for exactly that reason.
+ * Defaulted so every existing call site is unchanged.
+ */
 export function openLiveSocket(
   token: string,
   baseUrl?: string | URL,
-): WebSocket {
-  return new WebSocket(wsUrl(baseUrl), wsAuthProtocols(token))
+  platform: Pick<Platform, 'openSocket'> = browserPlatform(),
+): LiveSocket {
+  return platform.openSocket(wsUrl(baseUrl), token)
 }

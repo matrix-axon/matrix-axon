@@ -1,5 +1,6 @@
 import createClient, { type Client, type Middleware } from 'openapi-fetch'
 import type { AuthProvider } from '../auth/provider'
+import { browserPlatform, type Platform } from '../platform'
 import type { paths } from './schema'
 
 /**
@@ -25,11 +26,19 @@ export interface ErrorEnvelope {
  * session consequence (e.g. dropping a revoked token).
  *
  * `baseUrl` defaults to same-origin (`/`), which is the Vite dev-proxy setup;
- * a separately-hosted deployment passes the server origin and relies on the
- * server's CORS allow-list (M-W1.5).
+ * a separately-hosted browser deployment passes the server origin and relies
+ * on the server's CORS allow-list (M-W1.5, still unbuilt).
+ *
+ * `platform` is the transport seam (ADR 0102 § 2). A packaged build passes one
+ * whose `fetch` runs in the shell process, which is why it is never a CORS
+ * client; the browser gets its own `fetch` and behaves exactly as before.
  */
-export function createApiClient(auth: AuthProvider, baseUrl = '/'): ApiClient {
-  const client = createClient<paths>({ baseUrl })
+export function createApiClient(
+  auth: AuthProvider,
+  baseUrl = '/',
+  platform: Pick<Platform, 'fetch'> = browserPlatform(),
+): ApiClient {
+  const client = createClient<paths>({ baseUrl, fetch: platform.fetch })
 
   const bearer: Middleware = {
     async onRequest({ request }) {

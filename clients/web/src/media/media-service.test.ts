@@ -451,3 +451,52 @@ describe('createMediaService.upload', () => {
     expect(auth.failures).toBe(1)
   })
 })
+
+describe('the transport seam (ADR 0102 § 2)', () => {
+  /**
+   * Both media paths default to `browserPlatform()`, so msw would keep every
+   * other test in this file green even if the injected platform stopped being
+   * threaded through. These pin download and upload separately, because they
+   * are two distinct `fetch` call sites.
+   */
+  it('downloads through the injected fetch', async () => {
+    const calls: string[] = []
+    const injected: typeof globalThis.fetch = async (input) => {
+      calls.push(String(input instanceof Request ? input.url : input))
+      return new Response(new Blob(['bytes']), { status: 200 })
+    }
+
+    const media = createMediaService({
+      auth: stubAuth('tok-dl'),
+      baseUrl: BASE_URL,
+      platform: { fetch: injected },
+    })
+    const handle = await media.acquire(ACCOUNT, 'mxc://hs/abc')
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toContain('/v1/media/')
+    expect(handle.result.ok).toBe(true)
+  })
+
+  it('uploads through the injected fetch', async () => {
+    const methods: (string | undefined)[] = []
+    const injected: typeof globalThis.fetch = async (input, init) => {
+      methods.push(
+        input instanceof Request ? input.method : (init?.method ?? 'GET'),
+      )
+      return new Response(JSON.stringify({ data: { upload_id: 'u1' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+
+    const media = createMediaService({
+      auth: stubAuth('tok-up'),
+      baseUrl: BASE_URL,
+      platform: { fetch: injected },
+    })
+    await media.upload(ACCOUNT, new File(['x'], 'x.png', { type: 'image/png' }))
+
+    expect(methods).toEqual(['POST'])
+  })
+})
