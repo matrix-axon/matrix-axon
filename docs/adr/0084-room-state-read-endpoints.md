@@ -47,8 +47,8 @@ Supersede ADR 0055's Tier-2 plan for these four state clusters. Extend the
 existing typed-read pattern instead: `room_state`/`room_state_of_type` → a
 purpose-built DTO → enrichment where needed, one dedicated (small) query per
 cluster rather than a generic pass-through. (ADR 0055's Tier-1 fields —
-`room_type`/`is_direct`/`tags` on `RoomDto` — are a separate, still-open gap
-and out of scope here.)
+`room_type` shipped; `is_direct` / `tags` are ADR 0103 / issue #365 and
+out of scope here.)
 
 Four read surfaces, all under `/v1/accounts/{account_id}/rooms/{room_id}/`:
 
