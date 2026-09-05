@@ -47,7 +47,7 @@ cargo run -p axon-smoke-server -- --profile true-local --manifest smoke-artifact
   the local-stack helper.
 - `SMOKE_TIMEOUT=30`: per-operation timeout in seconds. The default is 20.
 - `KEEP_UP=1`: keep an owned local stack and failure artifacts after the run.
-- `AXON_SERVER_BIN=/path/to/axon`: used by local-stack when it builds/runs Axon.
+- `AXON_SERVER_BIN=/path/to/axon-server`: used by local-stack when it builds/runs Axon.
 
 ## Tested Scenarios
 

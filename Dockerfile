@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Multi-stage build for the `axon` server binary (crate axon-server, [[bin]] axon).
+# Multi-stage build for the `axon-server` binary (crate axon-server, [[bin]] axon-server).
 #
 # The whole workspace builds one self-contained binary: rustls + aws-lc-rs, sqlx's
 # Postgres driver compiled in (no libpq), no OpenSSL / libsqlite3. So the runtime
@@ -32,8 +32,8 @@ ENV GIT_HASH=${GIT_HASH}
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --release -p axon-server --bin axon \
-    && cp /build/target/release/axon /usr/local/bin/axon
+    cargo build --release -p axon-server --bin axon-server \
+    && cp /build/target/release/axon-server /usr/local/bin/axon-server
 
 # ---- runtime ---------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
@@ -63,7 +63,7 @@ ENV AXON_CONFIG=/var/lib/axon/axon.toml \
     AXON_SERVER__HOST=0.0.0.0 \
     AXON_SERVER__ALLOW_INSECURE_BIND=true
 
-COPY --from=builder /usr/local/bin/axon /usr/local/bin/axon
+COPY --from=builder /usr/local/bin/axon-server /usr/local/bin/axon-server
 # --chmod=0755 so the non-root `axon` user can read+execute it regardless of the
 # source file's mode (a plain `chmod +x` on a 0640 source yields 0750, root-owned
 # and unreadable by `axon`, breaking the entrypoint).

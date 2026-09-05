@@ -141,7 +141,7 @@ throwaway dir avoids that:
 
 ```sh
 cargo build -p axon-server
-BIN=$PWD/target/debug/axon
+BIN=$PWD/target/debug/axon-server
 mkdir -p /tmp/axon-smoke && cd /tmp/axon-smoke
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5433/axon \
 AXON_SERVER__PORT=18080 \

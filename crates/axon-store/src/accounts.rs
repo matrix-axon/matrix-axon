@@ -183,7 +183,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for Account {
 }
 
 /// Columns selected for an [`Account`] (no encrypted token).
-const ACCOUNT_COLUMNS: &str = "account_id, user_id, homeserver_url, device_id, \
+pub(crate) const ACCOUNT_COLUMNS: &str = "account_id, user_id, homeserver_url, device_id, \
     auth_kind, state, verified, backup_enable_intent, sync_token, created_at, updated_at";
 
 impl Store {

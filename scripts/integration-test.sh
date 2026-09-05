@@ -117,7 +117,7 @@ info "Synapse healthy and advertising MSC4186"
 log "Building axon-server + seeder"
 cargo build -p axon-server -p axon-itest
 
-AXON_BIN="${REPO_ROOT}/target/debug/axon"
+AXON_BIN="${REPO_ROOT}/target/debug/axon-server"
 SEED_BIN="${REPO_ROOT}/target/debug/seed"
 [ -x "$AXON_BIN" ] || die "axon binary not found at $AXON_BIN"
 [ -x "$SEED_BIN" ] || die "seed binary not found at $SEED_BIN"

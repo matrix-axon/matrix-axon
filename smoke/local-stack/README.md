@@ -16,7 +16,7 @@ do not reuse its credentials.
   - `SMOKE_POSTGRES_PORT`
   - `SMOKE_SYNAPSE_PORT`
   - `SMOKE_AXON_PORT`
-- A buildable `axon` binary. Set `AXON_SERVER_BIN=/path/to/axon` to skip the
+- A buildable `axon-server` binary. Set `AXON_SERVER_BIN=/path/to/axon-server` to skip the
   helper's `cargo build -p axon-server` step.
 
 When ports are not explicitly overridden, the helper retries a small number of

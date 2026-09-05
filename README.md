@@ -65,7 +65,7 @@ Download the latest [axon-tui](https://github.com/matrix-axon/matrix-axon/releas
 
 ```sh
 # 1. Mint a token from the running stack:
-docker compose exec axon-server axon token issue --label tui
+docker compose exec axon-server axon-server token issue --label tui
 
 # 2. Run the TUI against the front door, pasting that token:
 axon-tui --base-url http://127.0.0.1:8080 --token <token>
@@ -89,12 +89,12 @@ See the [architecture diagram](docs/mvp/tech-spec.md#architecture-overview) for 
 
 ## Clients
 
-| Client                              | Platform                                        | Status                        |
-| ----------------------------------- | ----------------------------------------------- | ----------------------------- |
-| [`axon-tui`](clients/tui/README.md) | Terminal                                        | Active (MVP reference client) |
-| [`axon-web`](clients/web/README.md) | Web browser + Windows/Linux/Mac desktop (Tauri) | Active (nearing MVP)          |
-| `axon-apple`                        | iOS + macOS (shared Swift Package)              | Planned                       |
-| `axon-android`                      | Android                                         | Planned                       |
+| Client                              | Platform                                              | Status                        |
+| ----------------------------------- | ----------------------------------------------------- | ----------------------------- |
+| [`axon-tui`](clients/tui/README.md) | Terminal                                              | Active (MVP reference client) |
+| [`axon-web`](clients/web/README.md) | Web browser + Windows/Linux/Mac desktop (Tauri)       | Active (nearing MVP)          |
+| `axon-desktop`                      | Linux, macOS, Windows (Tauri shell around `axon-web`) | In progress (ADR 0102)        |
+| `axon-mobile`                       | iOS + Android (the same shell)                        | Planned (ADR 0102)            |
 
 See [ADR 0031](docs/adr/0031-client-strategy.md) for the client strategy and sequencing.
 
@@ -156,10 +156,10 @@ All `/v1/` API endpoints require a bearer token.
 Mint one after startup:
 
 ```bash
-axon token issue --label my-client   # prints the raw token once
-axon token list                       # list tokens (never shows secrets)
-axon token revoke <id>                # revoke a token by id
-axon token revoke --label my-client   # or by label, if it uniquely identifies one active token
+axon-server token issue --label my-client   # prints the raw token once
+axon-server token list                       # list tokens (never shows secrets)
+axon-server token revoke <id>                # revoke a token by id
+axon-server token revoke --label my-client   # or by label, if it uniquely identifies one active token
 ```
 
 Tokens are instance-scoped — one token grants access to all accounts on that Axon instance.
@@ -173,9 +173,9 @@ both mint the same kind of bearer token underneath.
 Configure a provider (`oauth.providers.google` / `.microsoft` in `axon.toml`), then bind the owner's identity once from the command line:
 
 ```bash
-axon oauth bind --provider google      # or --provider microsoft
-axon oauth identities list
-axon oauth identities unbind <id>       # revokes every token/refresh token that identity minted
+axon-server oauth bind --provider google      # or --provider microsoft
+axon-server oauth identities list
+axon-server oauth identities unbind <id>       # revokes every token/refresh token that identity minted
 ```
 
 `bind` prints a URL — open it in any browser, on this machine or elsewhere, since it only needs to reach Axon's already-running `/v1/` surface — and polls until that browser leg completes or the 10-minute handshake expires.
