@@ -717,4 +717,108 @@ describe('createDeviceStateStore', () => {
     })
     vi.useRealTimers()
   })
+
+  it('chunks a batched write to the server cap rather than over-running it (#338)', async () => {
+    const sizes: number[] = []
+    server.use(
+      http.put(STATE_PATH, async ({ request }) => {
+        const body = (await request.json()) as {
+          entries: Record<string, unknown>
+        }
+        sizes.push(Object.keys(body.entries).length)
+        return HttpResponse.json({
+          data: { updated_at: '2026-01-01T00:00:00Z' },
+        })
+      }),
+    )
+    const { store } = setup()
+
+    // 65 rooms: one past the server's cap, which is all it takes. A bridged
+    // account has hundreds, and the whole batch used to come back a 400.
+    await store.markRoomSummariesRead(
+      ACCT,
+      Array.from({ length: 65 }, (_, i) => ({
+        account_id: ACCT,
+        room_id: `!room${i}:hs`,
+        last_event_id: `$e${i}`,
+        last_activity_ts: 100 + i,
+      })) as never,
+    )
+
+    expect(sizes).toEqual([64, 1])
+  })
+
+  it('does not ack a write the server rejected (#338)', async () => {
+    vi.useFakeTimers()
+    // The server keeps what it acked; the PUT is refused outright. openapi-fetch
+    // resolves on that, so the old code called it a success — and a later
+    // re-read then rolled the local value back to the server's.
+    server.use(
+      http.get(STATE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            namespace: 'drafts',
+            entries: {
+              [ROOM]: {
+                value: { text: 'hello' },
+                device_id: 'self',
+                updated_at: '2026-01-01T00:00:00Z',
+              },
+            },
+          },
+        }),
+      ),
+      http.put(STATE_PATH, () => new HttpResponse(null, { status: 400 })),
+    )
+    const { store, live, socket } = setup()
+    store.hydrateDrafts(ACCT)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.draft(ACCT, ROOM)).toBe('hello')
+
+    store.setDraft(ACCT, ROOM, 'never landed')
+    await vi.advanceTimersByTimeAsync(800)
+
+    live.start()
+    socket().emitOpen()
+    socket().emitClose()
+    await vi.advanceTimersByTimeAsync(1000)
+    socket().emitOpen() // reconnect → re-read of the drafts scope
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Unacked, so the re-read may not overwrite it. Losing the text would be
+    // the visible half of the bug; the invisible half is that nothing ever told
+    // the user the write did not land.
+    expect(store.draft(ACCT, ROOM)).toBe('never landed')
+    vi.useRealTimers()
+  })
+
+  it('retries a 5xx write but drops a 4xx (#338)', async () => {
+    vi.useFakeTimers()
+    let status = 500
+    const attempts: unknown[] = []
+    server.use(
+      http.put(STATE_PATH, async ({ request }) => {
+        attempts.push(await request.json())
+        return new HttpResponse(null, { status })
+      }),
+    )
+    const { store } = setup()
+
+    store.setDraft(ACCT, ROOM, 'text')
+    await vi.advanceTimersByTimeAsync(800)
+    expect(attempts).toHaveLength(1)
+
+    // A 5xx says nothing about the batch, so it goes back on the queue.
+    await vi.advanceTimersByTimeAsync(800)
+    expect(attempts).toHaveLength(2)
+
+    // A 4xx is the server's verdict. Retrying it would loop every debounce
+    // period — the failure mode the rejection path was always wary of.
+    status = 400
+    await vi.advanceTimersByTimeAsync(800)
+    expect(attempts).toHaveLength(3)
+    await vi.advanceTimersByTimeAsync(2400)
+    expect(attempts).toHaveLength(3)
+    vi.useRealTimers()
+  })
 })

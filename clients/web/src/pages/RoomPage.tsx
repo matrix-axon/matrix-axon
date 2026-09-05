@@ -734,33 +734,49 @@ export function RoomPage() {
   // state events are tiered behind the visibility setting, and bodyless
   // unsupported events are developer diagnostics rather than ordinary timeline
   // content.
-  const isVisibleTimelineEvent = useCallback(
-    (event: TimelineEvent): boolean => {
+  //
+  // Redaction is the one exclusion a *read position* does not have to honour,
+  // so it gets its own verdict instead of being folded in with the rest.
+  // `'redacted'` means "not rendered, but still nameable": the content is gone,
+  // so acknowledging the event withholds nothing the user has not seen. Without
+  // that distinction a message redacted moments after it arrives is unreachable
+  // — it leaves the timeline, the bodyless `m.room.redaction` behind it is
+  // dropped too, and the receipt has nothing above it to name, so the
+  // homeserver's notification count for the room can never be cleared (#337).
+  //
+  // The redaction test moved below the state-event tiers to report its verdict
+  // apart from theirs. That is not a behaviour change for rendering — both
+  // answers still hide the row — and `isUnsupportedBodylessEvent` excludes
+  // redacted events itself, so nothing above reorders around it.
+  const timelineEventVisibility = useCallback(
+    (event: TimelineEvent): 'shown' | 'redacted' | 'hidden' => {
       if (threadRootId(event) !== null) {
-        return false
+        return 'hidden'
       }
       if (!settings.developerMode.value && isUnsupportedBodylessEvent(event)) {
-        return false
+        return 'hidden'
       }
-      if (hideRedacted && event.redacted) {
-        return false
+      const renderable =
+        !isStateEvent(event) ||
+        stateEvents === 'all' ||
+        // The `important` tier is membership only, and only when there is
+        // something to say: a member event whose profile fields are unchanged
+        // is routine re-sync traffic with no notice to render (ADR 0083).
+        (stateEvents === 'important' &&
+          stateEventTier(event) === 'important' &&
+          stateEventNotice(event) !== null)
+      if (!renderable) {
+        return 'hidden'
       }
-      if (!isStateEvent(event)) {
-        return true
-      }
-      if (stateEvents === 'all') {
-        return true
-      }
-      // The `important` tier is membership only, and only when there is
-      // something to say: a member event whose profile fields are unchanged is
-      // routine re-sync traffic with no notice to render (ADR 0083).
-      return (
-        stateEvents === 'important' &&
-        stateEventTier(event) === 'important' &&
-        stateEventNotice(event) !== null
-      )
+      return hiddenByRedaction(event, hideRedacted) ? 'redacted' : 'shown'
     },
     [hideRedacted, settings.developerMode.value, stateEvents],
+  )
+  /** The rendering question, for the callers that only ask that one. */
+  const isVisibleTimelineEvent = useCallback(
+    (event: TimelineEvent): boolean =>
+      timelineEventVisibility(event) === 'shown',
+    [timelineEventVisibility],
   )
 
   /**
@@ -773,25 +789,38 @@ export function RoomPage() {
    * up to `RETAINED_EVENT_LIMIT` events, including renders caused by things
    * with no bearing on the timeline's contents at all: opening the reaction
    * picker, the jump dialog, the room-info panel.
+   *
+   * One walk produces both sets, rather than `visible` and the read-position
+   * candidates filtering the slice independently — that duplicated pass is
+   * what this memo exists to avoid (review), and it is the reason the two
+   * cannot simply be separate filters now that they disagree about redaction.
    */
-  const visible = useMemo(
-    () => timeline.events.value.filter(isVisibleTimelineEvent),
-    [timeline.events.value, isVisibleTimelineEvent],
-  )
+  const { visible, acknowledgeable } = useMemo(() => {
+    const visible: TimelineEvent[] = []
+    const acknowledgeable: TimelineEvent[] = []
+    for (const event of timeline.events.value) {
+      const visibility = timelineEventVisibility(event)
+      if (visibility === 'hidden') {
+        continue
+      }
+      if (visibility === 'shown') {
+        visible.push(event)
+      }
+      acknowledgeable.push(event)
+    }
+    return { visible, acknowledgeable }
+  }, [timeline.events.value, timelineEventVisibility])
 
   /**
-   * The events this view has put on screen, in display order — the candidate
-   * set both read positions are picked from (ADR 0089). Memoised on what the
-   * filter actually reads: the effect below runs on it, and so does the thread
-   * receipt ceiling, and a fresh array per render would re-run both on renders
-   * that cannot change either answer.
+   * The events this view may claim a read position through, in display order
+   * (ADR 0089) — everything it rendered, plus the events hidden from it only by
+   * redaction (#337). Memoised on what the filter actually reads: the effect
+   * below runs on it, and so does the thread receipt ceiling, and a fresh array
+   * per render would re-run both on renders that cannot change either answer.
    */
   const displayed = useMemo(
     () =>
-      // Derived from `visible` rather than re-filtering the slice: the two ran
-      // `isVisibleTimelineEvent` over every loaded event independently, which is
-      // the pass this memo exists to avoid doing twice (review).
-      visible.filter(
+      acknowledgeable.filter(
         (event) =>
           // A local echo has not been ingested, so it has no arrival position
           // and is not a receipt candidate; it is not the room's read position
@@ -799,7 +828,7 @@ export function RoomPage() {
           !event.event_id.startsWith('local:') &&
           (unreadThreadCutoff === null || event.origin_ts < unreadThreadCutoff),
       ),
-    [visible, unreadThreadCutoff],
+    [acknowledgeable, unreadThreadCutoff],
   )
 
   /**
@@ -871,9 +900,11 @@ export function RoomPage() {
    * `reconcileSummary` deliberately records nothing when it has nothing to
    * compare against, so a withheld marker leaves the thread unflagged — silent
    * in a different way. What replaces it is the position the marker should have
-   * held: the display-last event the main timeline actually rendered. That reads
-   * as "you are caught up on the room stream to here", which is true, and makes
-   * a reply newer than it unread, which is also true.
+   * held: the last event of the room stream this view is caught up through —
+   * everything it rendered, and anything past that hidden only by redaction
+   * (#337), which the user has equally nothing left to read. That reads as "you
+   * are caught up on the room stream to here", which is true, and makes a reply
+   * newer than it unread, which is also true.
    */
   const mainTimelineRead = displayed.at(-1)
   // Memoised on the marker's id rather than left in the render body: it is a

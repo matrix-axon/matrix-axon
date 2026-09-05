@@ -14,6 +14,12 @@ export const READ_MARKERS_NAMESPACE = 'read_markers'
 export const THREAD_READ_MARKERS_NAMESPACE = 'thread_read_markers'
 /** How long a settled edit waits before its `PUT` (one write per pause). */
 const PUT_DEBOUNCE_MS = 800
+/**
+ * Entries per `PUT`, mirroring the server's `MAX_PUT_ENTRIES` cap in
+ * `routes/device_state.rs`. Exceeding it is a `400` for the whole batch, so
+ * batched writers are chunked to it rather than left to find out (#338).
+ */
+const MAX_PUT_ENTRIES = 64
 /** Separator for composite cache keys — NUL, which never appears in ids
  *  or namespaces (same convention as `media-service.ts`). Written as the
  *  escape sequence: a raw NUL byte sat here before and rendered invisibly,
@@ -456,6 +462,14 @@ export function createDeviceStateStore(
    * return a promise for *this* write. The single entry point for writing a
    * batch — nothing calls `putBatch` directly, or the ordering guarantee has a
    * hole in it.
+   *
+   * An over-cap batch is split here rather than rejected by the server: the
+   * batch writers (`baselineReadMarkers`, `markRoomSummariesRead`) size their
+   * work by the account's room count, so on a bridged account they sail past
+   * the cap, and the 400 that came back used to be recorded as an ack (#338).
+   * Chunks go out in sequence on the scope's existing chain, so a partial
+   * failure still leaves the chunks that landed acked and re-queues only the
+   * rest.
    */
   function enqueuePut(
     accountId: string,
@@ -463,11 +477,24 @@ export function createDeviceStateStore(
     batch: Map<string, unknown>,
   ): Promise<void> {
     const sk = scopeKey(accountId, namespace)
+    const chunks: Map<string, unknown>[] = []
+    for (const entry of batch) {
+      const last = chunks.at(-1)
+      if (last === undefined || last.size >= MAX_PUT_ENTRIES) {
+        chunks.push(new Map([entry]))
+      } else {
+        last.set(entry[0], entry[1])
+      }
+    }
     const next = (writes.get(sk) ?? Promise.resolve())
       // A predecessor that failed must not cancel this write: `putBatch` has
       // already re-queued its batch, and this one is the newer text.
       .catch(() => {})
-      .then(() => putBatch(accountId, namespace, batch))
+      .then(async () => {
+        for (const chunk of chunks) {
+          await putBatch(accountId, namespace, chunk)
+        }
+      })
     writes.set(sk, next)
     void next
       .catch(() => {})
@@ -498,12 +525,10 @@ export function createDeviceStateStore(
   ): Promise<void> {
     const sk = scopeKey(accountId, namespace)
     const requeue = () => {
-      // The PUT never reached the server (network-level rejection): put the
-      // batch back so the write isn't silently lost — the local cache already
-      // shows it, so losing it would surface only on the next device (WCR-12).
-      // Keys written again while the PUT was in flight are newer; keep them.
-      // An HTTP *response* is not re-queued: the server answered, and blind
-      // retry on e.g. a 401 after sign-out would loop every debounce period.
+      // The PUT did not land: put the batch back so the write isn't silently
+      // lost — the local cache already shows it, so losing it would surface
+      // only on the next device (WCR-12). Keys written again while the PUT was
+      // in flight are newer; keep them.
       const current = pending.get(sk) ?? new Map<string, unknown>()
       for (const [key, value] of batch) {
         if (!current.has(key)) {
@@ -528,15 +553,39 @@ export function createDeviceStateStore(
       }
     }
     // `null` entries are sent verbatim as tombstones (ADR 0048).
-    await api
-      .PUT('/v1/devices/{device_id}/state/{namespace}', {
-        params: {
-          path: { device_id: deviceId, namespace },
-          query: { account_id: accountId },
-        },
-        body: { entries: Object.fromEntries(batch) },
-      })
-      .then(() => noteAck(sent), requeue)
+    let response: Response
+    try {
+      response = (
+        await api.PUT('/v1/devices/{device_id}/state/{namespace}', {
+          params: {
+            path: { device_id: deviceId, namespace },
+            query: { account_id: accountId },
+          },
+          body: { entries: Object.fromEntries(batch) },
+        })
+      ).response
+    } catch {
+      // Never got an answer (offline, a dropped connection). Always worth
+      // retrying.
+      requeue()
+      return
+    }
+    // openapi-fetch *resolves* on an HTTP error, so the status has to be read
+    // rather than inferred from the promise settling. Acking here regardless
+    // was the bug: the server had rejected the write, and the local cache went
+    // on presenting it as saved until something read the namespace back (#338).
+    if (!response.ok) {
+      // A 5xx or a 429 says nothing about the batch, so retry it. A 4xx is a
+      // verdict — the same reasoning that has always kept this path from
+      // looping on a 401 after sign-out — so the write is dropped. It stays
+      // unacked either way, which keeps `settled` from letting the server's
+      // older value overwrite the local one.
+      if (response.status >= 500 || response.status === 429) {
+        requeue()
+      }
+      return
+    }
+    noteAck(sent)
   }
 
   function schedulePut(
