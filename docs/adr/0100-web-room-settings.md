@@ -37,7 +37,12 @@ partial ("Saved name. Could not save topic: …") rather than as success.
 
 Clicking the identity avatar opens it full size in the existing `Lightbox`
 (ADR 0064/0072) via `LightboxImage`, which already fetches the full object
-rather than a thumbnail and reports whether the bytes decoded. Only a real
+rather than a thumbnail and reports whether the bytes decoded. ADR 0101 later
+widened that component from an `mxc` URL to a full `ParsedMedia` descriptor;
+an avatar has no event behind it, so this call site synthesises one — the
+mimetype is genuinely unknown, since `m.room.avatar` carries `info.mimetype`
+only when whoever set it included one, and this panel reads the room summary
+rather than the state event. Only a real
 image is a control: with no `m.room.avatar` the fallback is a coloured
 letter, and a viewer over that shows nothing. The room-list avatars are
 deliberately left alone — a click there opens the room, and hijacking it
