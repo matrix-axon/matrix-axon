@@ -48,6 +48,9 @@ const server = setupServer(
   http.get(`${TEST_BASE_URL}/v1/invites`, () =>
     HttpResponse.json({ data: [] }),
   ),
+  http.get(`${TEST_BASE_URL}/v1/accounts/:accountId/verify`, () =>
+    HttpResponse.json({ data: [] }),
+  ),
   http.get(`${TEST_BASE_URL}/v1/status`, () =>
     HttpResponse.json({
       data: { backfill: { paused: false, free_bytes: 0, accounts: [] } },
@@ -1298,6 +1301,96 @@ describe('shell keyboard shortcuts (ADR 0078)', () => {
 
     fireEvent.click(button)
     expect(await findByRole('dialog', { name: 'Help' })).toBeTruthy()
+  })
+
+  it('SAS displaces the device picker so only one modal is mounted', async () => {
+    history.replaceState(null, '', '/accounts')
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/:accountId/users/:userId/profile`,
+        () =>
+          HttpResponse.json({
+            data: {
+              user_id: ACCOUNT_DTO.user_id,
+              display_name: null,
+              avatar_url: null,
+            },
+          }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/:accountId/devices`, () =>
+        HttpResponse.json({
+          data: {
+            user_id: ACCOUNT_DTO.user_id,
+            devices: [
+              {
+                device_id: 'AXONDEV',
+                display_name: 'axon',
+                is_verified: true,
+                is_cross_signed_by_owner: true,
+                local_trust_state: 'verified',
+                algorithms: [],
+              },
+              {
+                device_id: 'ELEMENT',
+                display_name: 'Element',
+                is_verified: true,
+                is_cross_signed_by_owner: true,
+                local_trust_state: 'verified',
+                algorithms: [],
+              },
+            ],
+          },
+        }),
+      ),
+    )
+    const services = testServices()
+    const { findByRole, queryByRole } = render(<App services={services} />)
+    fireEvent.click(await findByRole('button', { name: 'Verify this device' }))
+    expect(
+      await findByRole('dialog', { name: 'Verify with another device' }),
+    ).toBeTruthy()
+
+    services.verification.noteFrame(ACCOUNT, 'requested', {
+      flowId: '$flow',
+      userId: '@alice:example.org',
+      deviceId: 'ELEMENT',
+      emoji: null,
+      decimals: null,
+      reason: null,
+    })
+    services.verification.open(`${ACCOUNT}\0$flow`)
+
+    await waitFor(() => {
+      expect(
+        queryByRole('dialog', { name: 'Verify with another device' }),
+      ).toBeNull()
+    })
+    expect(await findByRole('dialog', { name: 'Verify ELEMENT' })).toBeTruthy()
+    expect(services.verification.picker.value).toBeNull()
+  })
+
+  it('a verification request closes search by replacing, not pushing', async () => {
+    history.replaceState(null, '', '/?search=')
+    const services = testServices()
+    const { findByRole } = render(<App services={services} />)
+    await findByRole('dialog', { name: 'Search messages' })
+
+    const pushState = vi.spyOn(history, 'pushState')
+    services.verification.noteFrame(ACCOUNT, 'requested', {
+      flowId: '$flow',
+      userId: '@alice:example.org',
+      deviceId: 'ELEMENT',
+      emoji: null,
+      decimals: null,
+      reason: null,
+    })
+    services.verification.open(`${ACCOUNT}\0$flow`)
+
+    await waitFor(() => expect(window.location.search).toBe(''))
+    // Back belongs to whatever the user was doing before search, not to the
+    // overlay a verification request took away from them.
+    expect(pushState).not.toHaveBeenCalled()
+    pushState.mockRestore()
   })
 
   it('the sidebar toggle advertises its chord', () => {

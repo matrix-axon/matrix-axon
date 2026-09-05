@@ -33,7 +33,7 @@ const VERSION: &str = concat!(
 
 /// Top-level CLI: an optional subcommand, defaulting to "run the server".
 #[derive(Debug, Parser)]
-#[command(name = "axon", version = VERSION, about = "A personal Matrix state layer")]
+#[command(name = "axon-server", version = VERSION, about = "A personal Matrix state layer")]
 pub struct Cli {
     /// Path to the TOML config file. Overrides the `AXON_CONFIG` env var and the
     /// `./axon.toml` / platform-config-dir discovery. Applies to the server and

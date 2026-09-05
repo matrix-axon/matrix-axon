@@ -19,6 +19,7 @@ import {
   type SyncState,
 } from '../stores/accounts'
 import { isTerminalMatrixOAuthQrFlow } from '../stores/matrix-oauth-qr'
+import { flowKey } from '../stores/verification'
 import { ServerStatus } from './ServerStatus'
 import { MatrixOAuthQrAcquisition } from './accounts/MatrixOAuthQrAcquisition'
 import { MatrixOAuthQrGrant } from './accounts/MatrixOAuthQrGrant'
@@ -119,6 +120,9 @@ function Badge({
   )
 }
 
+const VERIFY_DEVICE_HINT =
+  'Start emoji verification (Short Authentication String or SAS) with one of your other Matrix sessions. Pick a device you can confirm on (Element, Element X, another Axon). Matching emoji cross-signs this Axon device so encrypted rooms can decrypt, without entering a recovery key.'
+
 const RECOVER_KEYS_HINT =
   'Import Matrix Server-Side Secret Storage (4S) with a recovery key. That unlocks megolm backup so stored encrypted messages can decrypt, and verifies this Axon device when cross-signing keys are present. Messages stay undecryptable if those session keys were never uploaded to backup.'
 
@@ -170,7 +174,7 @@ function AccountCard({
   account: Account
   onReactivate: (account: Account) => void
 }) {
-  const { accounts, settings, api } = useServices()
+  const { accounts, settings, api, verification } = useServices()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [secretForm, setSecretForm] = useState<'recover' | 'enable' | null>(
     null,
@@ -183,6 +187,9 @@ function AccountCard({
   const notice = useMemo(() => signal<Notice | null>(null), [])
 
   const id = account.account_id
+  const accountFlows = verification.inbox.value.filter(
+    (flow) => flow.accountId === id,
+  )
   const pending = accounts.pending.value
   const busy = pending !== null
   const recovering = pending?.kind === 'recover' && pending.accountId === id
@@ -249,6 +256,24 @@ function AccountCard({
     }
   }, [api, account.account_id, account.user_id, account.state])
 
+  useEffect(() => {
+    if (account.state !== 'active') {
+      return
+    }
+    void verification.loadDevices(account.account_id)
+  }, [account.state, account.account_id, verification])
+
+  const ownDeviceId =
+    account.device_id !== undefined &&
+    account.device_id !== null &&
+    account.device_id !== ''
+      ? account.device_id
+      : null
+  const ownDevice = (verification.devicesByAccount.value[id] ?? []).find(
+    (device) => ownDeviceId !== null && device.device_id === ownDeviceId,
+  )
+  const deviceName = ownDevice?.display_name?.trim() ?? ''
+
   return (
     <li
       class={`card account-${account.state}`}
@@ -294,6 +319,14 @@ function AccountCard({
           </CopyableText>
         </div>
       )}
+      {account.state === 'active' && ownDeviceId !== null && (
+        <div class="card-meta account-device">
+          {deviceName !== '' ? `${deviceName} · ` : null}
+          <CopyableText text={ownDeviceId} label="device ID">
+            <code>{ownDeviceId}</code>
+          </CopyableText>
+        </div>
+      )}
       {snapshotLines !== null && (
         <div class="card-meta backup-snapshot">
           <div>{snapshotLines.megolm}</div>
@@ -322,6 +355,34 @@ function AccountCard({
               />
               use this account
             </label>
+            <button
+              type="button"
+              disabled={busy}
+              title={VERIFY_DEVICE_HINT}
+              onClick={() =>
+                verification.openPicker({
+                  accountId: id,
+                  ownDeviceId,
+                })
+              }
+            >
+              Verify this device
+            </button>
+            {accountFlows.length > 0 && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  const live = accountFlows.filter(
+                    (flow) => flow.stage !== 'done',
+                  )
+                  const target = live[0] ?? accountFlows[0]
+                  verification.open(flowKey(target))
+                }}
+              >
+                Resume verification
+              </button>
+            )}
             <button
               type="button"
               disabled={busy}
@@ -672,8 +733,8 @@ function PasswordAccountAcquisition({
           />
         </label>
         <label>
-          Matrix Recovery Key (optional; add later, or skip with SAS or QR code
-          verification)
+          Matrix Recovery Key (optional; you can also verify this device with
+          SAS after login)
           <input
             type="password"
             value={recoveryKey}

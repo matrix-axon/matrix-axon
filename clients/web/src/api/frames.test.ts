@@ -12,6 +12,11 @@ import {
   TIMELINE_EVENT,
   unreadCountsChange,
   UNREAD_COUNTS_CHANGED,
+  verificationFrame,
+  VERIFICATION_CANCELLED,
+  VERIFICATION_DONE,
+  VERIFICATION_REQUESTED,
+  VERIFICATION_SAS,
 } from './frames'
 
 const envelope = (type: string, accountId: string, payload: unknown) =>
@@ -243,6 +248,122 @@ describe('invite frames', () => {
     ).toBeNull()
     expect(
       inviteRemoved(decodeFrame(envelope(INVITE_ADDED, 'a', {}))!),
+    ).toBeNull()
+  })
+})
+
+describe('verificationFrame', () => {
+  const requested = (payload: unknown) =>
+    decodeFrame(envelope(VERIFICATION_REQUESTED, 'acct-1', payload))!
+
+  it('extracts a requested frame, including a null device_id', () => {
+    expect(
+      verificationFrame(
+        requested({
+          flow_id: '$flow',
+          user_id: '@me:hs',
+          device_id: 'DEV',
+        }),
+      ),
+    ).toEqual({
+      kind: 'requested',
+      payload: {
+        flowId: '$flow',
+        userId: '@me:hs',
+        deviceId: 'DEV',
+        emoji: null,
+        decimals: null,
+        reason: null,
+      },
+    })
+    expect(
+      verificationFrame(requested({ flow_id: '$flow', user_id: '@other:hs' }))
+        ?.payload.deviceId,
+    ).toBeNull()
+  })
+
+  it('extracts sas emoji and the decimal triple', () => {
+    const frame = decodeFrame(
+      envelope(VERIFICATION_SAS, 'acct-1', {
+        flow_id: '$flow',
+        user_id: '@me:hs',
+        device_id: 'DEV',
+        emoji: [{ symbol: '🐶', description: 'Dog' }],
+        decimals: [1, 2, 3],
+      }),
+    )!
+    expect(verificationFrame(frame)).toEqual({
+      kind: 'sas',
+      payload: {
+        flowId: '$flow',
+        userId: '@me:hs',
+        deviceId: 'DEV',
+        emoji: [{ symbol: '🐶', description: 'Dog' }],
+        decimals: [1, 2, 3],
+        reason: null,
+      },
+    })
+  })
+
+  it('extracts cancelled reason and done', () => {
+    expect(
+      verificationFrame(
+        decodeFrame(
+          envelope(VERIFICATION_CANCELLED, 'acct-1', {
+            flow_id: '$flow',
+            user_id: '@me:hs',
+            reason: 'user cancelled',
+          }),
+        )!,
+      ),
+    ).toEqual({
+      kind: 'cancelled',
+      payload: {
+        flowId: '$flow',
+        userId: '@me:hs',
+        deviceId: null,
+        emoji: null,
+        decimals: null,
+        reason: 'user cancelled',
+      },
+    })
+    expect(
+      verificationFrame(
+        decodeFrame(
+          envelope(VERIFICATION_DONE, 'acct-1', {
+            flow_id: '$flow',
+            user_id: '@me:hs',
+            device_id: 'DEV',
+          }),
+        )!,
+      )?.kind,
+    ).toBe('done')
+  })
+
+  it('returns null for other tags and malformed payloads', () => {
+    expect(
+      verificationFrame(decodeFrame(envelope(TIMELINE_EVENT, 'a', {}))!),
+    ).toBeNull()
+    expect(verificationFrame(requested(null))).toBeNull()
+    expect(verificationFrame(requested({ user_id: '@me:hs' }))).toBeNull()
+    expect(
+      verificationFrame(
+        requested({ flow_id: '$f', user_id: '@me:hs', device_id: 1 }),
+      ),
+    ).toBeNull()
+    expect(
+      verificationFrame(
+        requested({
+          flow_id: '$f',
+          user_id: '@me:hs',
+          emoji: [{ symbol: '🐶' }],
+        }),
+      ),
+    ).toBeNull()
+    expect(
+      verificationFrame(
+        requested({ flow_id: '$f', user_id: '@me:hs', decimals: [1, 2] }),
+      ),
     ).toBeNull()
   })
 })

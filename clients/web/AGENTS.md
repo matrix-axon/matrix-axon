@@ -338,6 +338,11 @@ api.GET(...)`, a background `.then`) must attach a rejection handler: wrap
   `useModalFocus()` (`src/components/use-modal-focus.ts`) for the focus
   half and a capture-phase `useShortcuts` Escape binding for the other;
   `Lightbox.tsx` shows both together. (WCR-14.)
+  `SasModal` and `DevicePicker` are ShellChrome overlays, not page-local.
+  Accounts only requests the picker (`verification.openPicker`).
+  The shell mounts at most one of picker, SAS, search, help, or inbox.
+  SAS outranks the picker.
+  Do not remount `DevicePicker` from `AccountsPage`.
 - **Mobile overlay exits need a real-browser hit-test.** When a mobile flow
   opens content from an overlay or drawer — for example Settings back to a
   room, search result to a timeline, or Room Information member actions to a
@@ -600,7 +605,8 @@ SPDisplaysDataType` before debugging the simulator itself.
 M-W1–M-W8.5 are done (M-W7 was built before M-W6
 deliberately — messaging is pure HTTP; M-W8.5, media send, was unblocked late
 by M15's upload API and so sits between M-W8 and M-W9). Remaining: **M-W9**
-(verification/SAS + trust glyphs), **M-W10** (search UI over `GET /v1/search`, deep-linking via
+(sender-trust glyphs / bundle inspector, plus optional cross-user outbound SAS;
+self-verification SAS has landed), **M-W10** (search UI over `GET /v1/search`, deep-linking via
 `?event=`), **M-W11** (hardening/a11y/parity audit), **M-W12** (Tauri —
 no service workers, `document.cookie`, or `window.open` anywhere, ever).
 

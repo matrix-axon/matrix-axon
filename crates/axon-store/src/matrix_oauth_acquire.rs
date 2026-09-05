@@ -9,10 +9,7 @@ use sqlx_core::row::Row;
 use sqlx_postgres::{PgRow, Postgres};
 use uuid::Uuid;
 
-use crate::{Account, AccountState, Store, StoreError};
-
-const ACCOUNT_COLUMNS: &str = "account_id, user_id, homeserver_url, device_id, \
-    auth_kind, state, verified, sync_token, created_at, updated_at";
+use crate::{accounts::ACCOUNT_COLUMNS, Account, AccountState, Store, StoreError};
 
 /// Filesystem finalization state persisted for crash reconciliation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +350,10 @@ mod tests {
         };
         assert_eq!(account.state, AccountState::Deactivated);
         assert!(!account.verified, "verification is hidden until adoption");
+        assert!(
+            !account.backup_enable_intent,
+            "a new OAuth account has no pending backup enable intent"
+        );
         let breadcrumbs = store.list_matrix_oauth_acquire_breadcrumbs().await.unwrap();
         let breadcrumb = breadcrumbs
             .iter()

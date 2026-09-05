@@ -126,7 +126,7 @@ SQL
 cargo run -p axon-server -- init
 ```
 
-`axon init` writes a minimal config — with a generated `sync.store_key` and a Postgres URL — to the platform config directory, or to `--config <PATH>` if you pass one.
+`axon-server init` writes a minimal config — with a generated `sync.store_key` and a Postgres URL — to the platform config directory, or to `--config <PATH>` if you pass one.
 Do not use the `change-me` placeholder from the example file for anything real.
 
 The server also loads `.env` automatically on startup.
@@ -154,7 +154,7 @@ if you copy it, replace `AXON_SYNC__STORE_KEY=change-me` with a real secret and 
 ```
 
 The run scripts are source-checkout scaffolding: they load `.env` if present and run the chosen target.
-First-run config and secret generation live in `axon init`, not in the shell scripts.
+First-run config and secret generation live in `axon-server init`, not in the shell scripts.
 To skip them once Postgres is up:
 
 ```bash

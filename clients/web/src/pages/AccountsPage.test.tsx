@@ -28,6 +28,7 @@ const ALICE = {
   account_id: '6b53f7f0-0000-4000-8000-000000000001',
   user_id: '@alice:example.org',
   homeserver_url: 'https://matrix.example.org',
+  device_id: 'AXONDEV',
   state: 'active',
   verified: true,
   backup: ENABLED_BACKUP,
@@ -38,6 +39,7 @@ const BOB = {
   ...ALICE,
   account_id: '6b53f7f0-0000-4000-8000-000000000002',
   user_id: '@bob:example.org',
+  device_id: null,
   state: 'deactivated',
   verified: null,
   backup: UNKNOWN_BACKUP,
@@ -109,6 +111,32 @@ function renderPage(
         })
       },
     ),
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/:accountId/devices`,
+      ({ params }) => {
+        const accountId = String(params.accountId)
+        if (accountId !== ALICE.account_id) {
+          return HttpResponse.json({
+            data: { user_id: BOB.user_id, devices: [] },
+          })
+        }
+        return HttpResponse.json({
+          data: {
+            user_id: ALICE.user_id,
+            devices: [
+              {
+                device_id: 'AXONDEV',
+                display_name: 'axon',
+                is_verified: true,
+                is_cross_signed_by_owner: true,
+                local_trust_state: 'verified',
+                algorithms: [],
+              },
+            ],
+          },
+        })
+      },
+    ),
   )
   const services: AppServices = testServices({ qr })
   const utils = render(
@@ -131,12 +159,39 @@ describe('AccountsPage', () => {
     expect(getByText('deactivated')).toBeTruthy()
   })
 
+  it('offers Verify this device on an active account', async () => {
+    const { findByRole } = renderPage([{ ...ALICE, device_id: 'AXON' }])
+    expect(
+      await findByRole('button', { name: 'Verify this device' }),
+    ).toBeTruthy()
+  })
+
+  it('Verify this device requests the shell picker instead of mounting one', async () => {
+    const { findByRole, queryByRole, services } = renderPage()
+    fireEvent.click(await findByRole('button', { name: 'Verify this device' }))
+    expect(
+      queryByRole('dialog', { name: 'Verify with another device' }),
+    ).toBeNull()
+    expect(services.verification.picker.value).toEqual({
+      accountId: ALICE.account_id,
+      ownDeviceId: ALICE.device_id,
+    })
+  })
+
   it('shows a fetched display name below the Matrix user ID', async () => {
     const { findByText, getByText } = renderPage()
 
     expect(await findByText('Alice Example')).toBeTruthy()
     expect(getByText('@alice:example.org')).toBeTruthy()
     expect(getByText(ALICE.account_id)).toBeTruthy()
+  })
+
+  it("shows this session's Matrix device id and display name", async () => {
+    const { findByLabelText, findByText } = renderPage()
+
+    expect(await findByLabelText('Copy device ID')).toBeTruthy()
+    expect(await findByText('AXONDEV')).toBeTruthy()
+    expect(await findByText(/axon ·/)).toBeTruthy()
   })
 
   it('does not fetch a display name for a deactivated account', async () => {
@@ -160,9 +215,16 @@ describe('AccountsPage', () => {
     expect(getByLabelText(/first sync has not finished/i)).toBeTruthy()
   })
 
-  it('gives recover, log out, and delete explanatory tooltips', async () => {
+  it('gives verify, recover, log out, and delete explanatory tooltips', async () => {
     const { findByRole, getByRole } = renderPage([ALICE])
 
+    expect(
+      (
+        (await findByRole('button', {
+          name: 'Verify this device',
+        })) as HTMLButtonElement
+      ).title,
+    ).toMatch(/emoji verification .*with one of your other Matrix sessions/i)
     expect(
       (
         (await findByRole('button', {
@@ -466,6 +528,9 @@ describe('AccountsPage', () => {
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith('https://matrix.example.org'),
     )
+
+    fireEvent.click(getAllByRole('button', { name: 'Copy device ID' })[0])
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('AXONDEV'))
   })
 
   it('shows the backfill status including the paused warning', async () => {
@@ -800,6 +865,7 @@ describe('AccountsPage', () => {
       qr,
     )
 
+    await findByText('No accounts yet — add one below.')
     fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
     fireEvent.input(getByLabelText('Expected Matrix user ID'), {
       target: { value: '@alice:example.org' },
@@ -810,12 +876,18 @@ describe('AccountsPage', () => {
     expect(
       await findByText(/camera denied.*Choose an image instead/i),
     ).toBeTruthy()
+    await waitFor(() =>
+      expect(services.matrixOAuthQr.operation.value).toBe('idle'),
+    )
 
-    fireEvent.change(getByLabelText('Choose QR image'), {
-      target: {
-        files: [new File(['qr'], 'qr.png', { type: 'image/png' })],
-      },
+    const imageInput = getByLabelText('Choose QR image') as HTMLInputElement
+    const qrFile = new File(['qr'], 'qr.png', { type: 'image/png' })
+    Object.defineProperty(imageInput, 'files', {
+      configurable: true,
+      value: [qrFile],
     })
+    imageInput.dispatchEvent(new Event('input', { bubbles: true }))
+    imageInput.dispatchEvent(new Event('change', { bubbles: true }))
     await waitFor(() => expect(scanBody).toEqual({ qr_code_data: 'AAH-_w' }))
     expect(await findByText('42')).toBeTruthy()
     services.matrixOAuthQr.reset()
@@ -855,9 +927,16 @@ describe('AccountsPage', () => {
         ),
       ),
     )
-    const { findByLabelText, findByText, getByLabelText, getByRole, unmount } =
-      renderPage([], qr)
+    const {
+      services,
+      findByLabelText,
+      findByText,
+      getByLabelText,
+      getByRole,
+      unmount,
+    } = renderPage([], qr)
 
+    await findByText('No accounts yet — add one below.')
     fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
     fireEvent.input(getByLabelText('Expected Matrix user ID'), {
       target: { value: '@alice:example.org' },
@@ -877,8 +956,15 @@ describe('AccountsPage', () => {
       expect.any(Function),
       undefined,
     )
+    await waitFor(() =>
+      expect(services.matrixOAuthQr.operation.value).toBe('idle'),
+    )
 
-    fireEvent.change(picker, { target: { value: 'usb' } })
+    const livePicker = getByLabelText('Camera') as HTMLSelectElement
+    expect(livePicker.isConnected).toBe(true)
+    livePicker.value = 'usb'
+    livePicker.dispatchEvent(new Event('input', { bubbles: true }))
+    livePicker.dispatchEvent(new Event('change', { bubbles: true }))
     await waitFor(() =>
       expect(startCamera).toHaveBeenNthCalledWith(
         2,

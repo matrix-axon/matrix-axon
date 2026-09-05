@@ -14,6 +14,9 @@ import { SpaceList } from './components/SpaceList'
 import { SearchOverlay } from './components/SearchOverlay'
 import { ShortcutsHelp } from './components/ShortcutsHelp'
 import { UnreadThreadsPanel } from './components/UnreadThreadsPanel'
+import { SasModal } from './components/SasModal'
+import { DevicePicker } from './components/DevicePicker'
+import { VerificationInboxPanel } from './components/VerificationInboxPanel'
 import { UpdateBanner } from './components/UpdateBanner'
 import { useModalFocus } from './components/use-modal-focus'
 import { layoutMode, SINGLE_PANE_QUERY, useMediaQuery } from './layout'
@@ -26,6 +29,7 @@ import {
 import {
   currentRoomFromPath,
   serializeSearchTokens,
+  withoutSearchParam,
   withSearchParam,
 } from './search-tokens'
 import { ShellActionsContext } from './shell-actions'
@@ -70,6 +74,7 @@ import {
 import { roomKey } from './stores/room-list'
 import { orderedSpaces } from './stores/spaces'
 import { hasActiveAccount, type Account } from './stores/accounts'
+import { flowKey } from './stores/verification'
 import type { RoomEntryResult, RoomsStore } from './stores/rooms'
 
 /**
@@ -584,14 +589,22 @@ function SidebarPaneHandle({
 function ShellChrome() {
   const location = useLocation()
   const { path, query } = location
-  const { accounts, rooms, search, settings, spaces, threadUnread } =
-    useServices()
+  const {
+    accounts,
+    rooms,
+    search,
+    settings,
+    spaces,
+    threadUnread,
+    verification,
+  } = useServices()
   const mode = layoutMode(path)
   perfMark('shell:render', { path, mode })
   const collapsed = settings.sidebarCollapsed.value
   const sidebarWidth = settings.sidebarWidth.value
   const [helpOpen, setHelpOpen] = useState(false)
   const [unreadThreadsOpen, setUnreadThreadsOpen] = useState(false)
+  const [verificationInboxOpen, setVerificationInboxOpen] = useState(false)
   const [jumpAction, setJumpActionState] = useState<(() => void) | null>(null)
   const [roomLinkJoinError, setRoomLinkJoinError] = useState<string | null>(
     null,
@@ -606,6 +619,26 @@ function ShellChrome() {
   // The search overlay is URL-addressed (ADR 0066): mounted while `?search=`
   // is present (even empty), so a shared link restores it and Back closes it.
   const searchOpen = typeof query.search === 'string'
+  const sasOpen = verification.openFlow.value !== null
+  const pickerTarget = verification.picker.value
+  const pickerOpen = pickerTarget !== null
+  const exclusiveModal = sasOpen || pickerOpen
+  const verificationInboxCount = verification.inboxCount.value
+
+  useEffect(() => {
+    if (!exclusiveModal) {
+      return
+    }
+    setHelpOpen(false)
+    setUnreadThreadsOpen(false)
+    setVerificationInboxOpen(false)
+    if (searchOpen) {
+      // Replace, not push: the user did not close search, an exclusive modal
+      // (SAS or the device picker) did. A pushed entry would make Back re-open
+      // the overlay.
+      location.route(withoutSearchParam(location.url), true)
+    }
+  }, [exclusiveModal, searchOpen, location])
   const activeAccountExists = hasActiveAccount(accounts.accounts.value)
   const accountsLoading = accounts.loading.value
   const accountsError = accounts.error.value
@@ -655,12 +688,22 @@ function ShellChrome() {
   }, [path, search])
 
   const openHelp = (event: KeyboardEvent) => {
+    if (sasOpen) {
+      event.preventDefault()
+      return
+    }
     event.preventDefault()
+    verification.closePicker()
     setHelpOpen(true)
   }
 
   const openSearch = (event?: KeyboardEvent) => {
+    if (sasOpen) {
+      event?.preventDefault()
+      return
+    }
     event?.preventDefault()
+    verification.closePicker()
     if (!searchOpen) {
       const lastQuery = search.lastQuery.value
       location.route(
@@ -710,12 +753,25 @@ function ShellChrome() {
     () => ({
       jumpAction,
       setJumpAction,
-      openUnreadThreads: () => setUnreadThreadsOpen(true),
+      openUnreadThreads: () => {
+        if (sasOpen) {
+          return
+        }
+        verification.closePicker()
+        setUnreadThreadsOpen(true)
+      },
       roomTitle: roomChrome.title,
       roomInfoAction: roomChrome.action,
       setRoomChrome,
     }),
-    [jumpAction, roomChrome, setJumpAction, setRoomChrome],
+    [
+      jumpAction,
+      roomChrome,
+      sasOpen,
+      setJumpAction,
+      setRoomChrome,
+      verification,
+    ],
   )
   const mobileRoomChrome = mode === 'room' && singlePane
 
@@ -742,10 +798,16 @@ function ShellChrome() {
   }, [mobileRoomChrome, path])
 
   useEffect(() => {
-    const onShowHelp = () => setHelpOpen(true)
+    const onShowHelp = () => {
+      if (verification.openFlow.value !== null) {
+        return
+      }
+      verification.closePicker()
+      setHelpOpen(true)
+    }
     window.addEventListener(SHOW_HELP_EVENT, onShowHelp)
     return () => window.removeEventListener(SHOW_HELP_EVENT, onShowHelp)
-  }, [])
+  }, [verification])
   useEffect(() => {
     if (accountsLoading) {
       void accounts.refresh()
@@ -1038,6 +1100,32 @@ function ShellChrome() {
             </button>
           )}
           <div class="topbar-actions">
+            {verificationInboxCount > 0 && (
+              <button
+                type="button"
+                class="ghost topbar-icon-button verification-chip"
+                title="Device verification"
+                aria-label={`Device verification, ${verificationInboxCount} pending`}
+                aria-haspopup="dialog"
+                onClick={() => {
+                  const live = verification.inbox.value.filter(
+                    (flow) => flow.stage !== 'done',
+                  )
+                  if (live.length === 1) {
+                    verification.open(flowKey(live[0]))
+                    return
+                  }
+                  if (sasOpen) {
+                    return
+                  }
+                  verification.closePicker()
+                  setVerificationInboxOpen(true)
+                }}
+              >
+                <span class="topbar-count-badge">{verificationInboxCount}</span>
+                <span class="topbar-label">Verification</span>
+              </button>
+            )}
             <button
               type="button"
               class="ghost topbar-icon-button unread-threads-button"
@@ -1048,7 +1136,13 @@ function ShellChrome() {
                   : `Unread threads, ${unreadThreadCount}`
               }
               aria-haspopup="dialog"
-              onClick={() => setUnreadThreadsOpen(true)}
+              onClick={() => {
+                if (sasOpen) {
+                  return
+                }
+                verification.closePicker()
+                setUnreadThreadsOpen(true)
+              }}
             >
               <ThreadIcon />
               {unreadThreadCount > 0 && (
@@ -1085,7 +1179,13 @@ function ShellChrome() {
               aria-label="Keyboard shortcuts"
               aria-keyshortcuts={keyAria(KEYS.showHelp)}
               aria-haspopup="dialog"
-              onClick={() => setHelpOpen(true)}
+              onClick={() => {
+                if (sasOpen) {
+                  return
+                }
+                verification.closePicker()
+                setHelpOpen(true)
+              }}
             >
               ?
             </button>
@@ -1168,18 +1268,32 @@ function ShellChrome() {
           </main>
         </div>
 
-        {searchOpen && <SearchOverlay />}
-        {unreadThreadsOpen && (
+        {sasOpen && <SasModal />}
+        {pickerOpen && !sasOpen && pickerTarget !== null && (
+          <DevicePicker
+            accountId={pickerTarget.accountId}
+            ownDeviceId={pickerTarget.ownDeviceId}
+            onClose={() => verification.closePicker()}
+            onStarted={(key) => verification.open(key)}
+          />
+        )}
+        {searchOpen && !exclusiveModal && <SearchOverlay />}
+        {unreadThreadsOpen && !exclusiveModal && (
           <UnreadThreadsPanel onClose={() => setUnreadThreadsOpen(false)} />
         )}
-        {pendingMatrixJoin !== null && (
+        {verificationInboxOpen && !exclusiveModal && (
+          <VerificationInboxPanel
+            onClose={() => setVerificationInboxOpen(false)}
+          />
+        )}
+        {pendingMatrixJoin !== null && !exclusiveModal && (
           <MatrixJoinPrompt
             pending={pendingMatrixJoin}
             onCancel={cancelPendingMatrixJoin}
             onJoin={confirmPendingMatrixJoin}
           />
         )}
-        {helpOpen && (
+        {helpOpen && !exclusiveModal && (
           <ShortcutsHelp
             mobile={singlePane}
             onClose={() => setHelpOpen(false)}

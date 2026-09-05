@@ -100,6 +100,9 @@ const server = setupServer(
   http.get(`${TEST_BASE_URL}/v1/invites`, () =>
     HttpResponse.json({ data: [] }),
   ),
+  http.get(`${TEST_BASE_URL}/v1/accounts/:accountId/verify`, () =>
+    HttpResponse.json({ data: [] }),
+  ),
   http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
     HttpResponse.json({
       data: [
@@ -423,12 +426,12 @@ describe('sending', () => {
   })
 
   it('escape cancels reply mode', async () => {
-    const { findAllByRole, findByText, getByLabelText, queryByText } =
+    const { findAllByRole, findByText, findByLabelText, queryByText } =
       renderRoom([event('$target', 100)])
 
     fireEvent.click((await findAllByRole('button', { name: 'Reply' }))[0])
     await findByText('Replying to')
-    fireEvent.keyDown(getByLabelText('Message Ops'), { key: 'Escape' })
+    fireEvent.keyDown(await findByLabelText('Message Ops'), { key: 'Escape' })
     expect(queryByText('Replying to')).toBeNull()
   })
 
