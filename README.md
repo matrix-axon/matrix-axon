@@ -65,7 +65,7 @@ Download the latest [axon-tui](https://github.com/matrix-axon/matrix-axon/releas
 
 ```sh
 # 1. Mint a token from the running stack:
-docker compose exec axon-server axon token issue --label tui
+docker compose exec axon-server axon-server token issue --label tui
 
 # 2. Run the TUI against the front door, pasting that token:
 axon-tui --base-url http://127.0.0.1:8080 --token <token>
