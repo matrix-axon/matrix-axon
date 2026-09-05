@@ -37,9 +37,12 @@ use crate::error::{sdk_err, SyncError};
 /// Apply the [`ClientBuilder`] settings shared by every production client.
 ///
 /// Axon retains and searches encrypted history, so receiving the recovery
-/// secret must also restore the backed-up Megolm keys. matrix-rust-sdk defaults
-/// to `Manual`, which leaves pre-login history as UTD after QR secret transfer;
-/// `OneShot` downloads the complete backup once when that secret arrives.
+/// secret must also restore missing backed-up Megolm keys. matrix-rust-sdk
+/// defaults to `Manual`, which leaves pre-login history as UTD after QR secret
+/// transfer. `AfterDecryptionFailure` fetches the missing key when that history
+/// arrives; unlike `OneShot`, it also covers MSC4108's direct secrets-bundle
+/// import path, which resumes the stored backup key without running the SDK's
+/// one-shot download branch.
 ///
 /// The OAuth acquisition client starts in a staging store and cannot use
 /// [`client_builder`] because it discovers its homeserver from QR data. Keeping
@@ -47,7 +50,7 @@ use crate::error::{sdk_err, SyncError};
 /// paths identical.
 fn production_encryption_settings() -> EncryptionSettings {
     EncryptionSettings {
-        backup_download_strategy: BackupDownloadStrategy::OneShot,
+        backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,
         ..EncryptionSettings::default()
     }
 }
@@ -762,11 +765,11 @@ mod tests {
     }
 
     #[test]
-    fn production_encryption_settings_download_backup_after_recovery() {
+    fn production_encryption_settings_download_missing_backup_keys() {
         let settings = production_encryption_settings();
         assert_eq!(
             settings.backup_download_strategy,
-            BackupDownloadStrategy::OneShot
+            BackupDownloadStrategy::AfterDecryptionFailure
         );
     }
 
