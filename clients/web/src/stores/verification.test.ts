@@ -688,6 +688,19 @@ describe('verification store', () => {
     expect(verification.flows.value[0].stage).toBe('done')
   })
 
+  it('a late done frame does not un-cancel an ended flow', () => {
+    const verification = store()
+    verification.noteFrame(ACCOUNT, 'requested', payload())
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    verification.open(flowKey(verification.flows.value[0]))
+    verification.noteFrame(ACCOUNT, 'cancelled', payload({ reason: 'timeout' }))
+    expect(verification.flows.value[0].stage).toBe('ended')
+    verification.noteFrame(ACCOUNT, 'done', payload())
+    expect(verification.flows.value[0].stage).toBe('ended')
+    verification.noteFrame(ACCOUNT, 'sas', payload({ emoji: sevenEmoji() }))
+    expect(verification.flows.value[0].stage).toBe('ended')
+  })
+
   it('a stale GET at ready does not rewind a flow already at compare', async () => {
     server.use(
       http.get(`${BASE}/v1/accounts/${ACCOUNT}/verify`, () =>

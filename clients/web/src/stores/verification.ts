@@ -1075,9 +1075,11 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
     const previousKey = flowKey(flow)
     flow = withIdentity(bindFlowId(flow, flowId), userId, deviceId)
 
-    // A completed verification is terminal: a redelivered `sas` or a late
-    // `cancelled` must not flip the UI back to compare / ended.
-    if (flow.stage === 'done' && (kind === 'sas' || kind === 'cancelled')) {
+    // Completing and cancelling are absorbing. A redelivered `sas`/`requested`
+    // or a late `done`/`cancelled` in the other direction must not rewrite a
+    // terminal flow — the same no-rewind rule `stageFrom`/`uiRank` enforces on
+    // GET. Skip the write entirely so `serverStage` cannot regress either.
+    if (flow.stage === 'done' || flow.stage === 'ended') {
       return
     }
 
@@ -1085,20 +1087,21 @@ export function createVerificationStore(api: ApiClient): VerificationStore {
       // `compare` belongs here too: a replayed request frame must not rewind a
       // flow whose emoji are already on screen, or `confirm()` rejects the
       // user's "They match" as an incomplete emoji set.
-      if (!['done', 'ended', 'confirming', 'compare'].includes(flow.stage)) {
+      if (!['confirming', 'compare'].includes(flow.stage)) {
         flow = { ...flow, stage: 'waiting', serverStage: 'requested' }
       }
     } else if (kind === 'sas') {
       flow = applyServerStage(flow, 'keys_exchanged', emoji, decimals, null)
     } else if (kind === 'done') {
-      flow = { ...flow, stage: 'done', serverStage: 'done', error: null }
+      flow = applyServerStage(flow, 'done', emoji, decimals, null)
     } else {
-      flow = {
-        ...flow,
-        stage: 'ended',
-        serverStage: 'cancelled',
-        cancelReason: payload.reason ?? 'Verification cancelled',
-      }
+      flow = applyServerStage(
+        flow,
+        'cancelled',
+        null,
+        null,
+        payload.reason ?? 'Verification cancelled',
+      )
     }
 
     if (flow.cancelRequested && kind !== 'done') {
