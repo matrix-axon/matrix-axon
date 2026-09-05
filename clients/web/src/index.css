@@ -1099,6 +1099,16 @@ h2 {
   margin-top: 1rem;
 }
 
+.account-grant {
+  margin-top: 1rem;
+}
+
+.expected-account-guidance {
+  padding: 0.75rem 1rem;
+  border-left: 3px solid var(--accent);
+  background: var(--bg-raised);
+}
+
 .accounts-page {
   max-width: 56rem;
 }
@@ -4234,6 +4244,30 @@ input[type='checkbox'] {
   height: 100%;
   border-radius: 8px;
   object-fit: contain;
+}
+
+/*
+ * The placeholder for media that arrived but would not decode (ADR 0101). It
+ * sits inside the reserved aspect-ratio box, which for a phone photo can be
+ * tall and narrow, so it centres rather than pinning the text to the top and
+ * leaving the Download button somewhere off in the middle of empty space.
+ */
+.media-undisplayable {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-align: center;
+}
+
+.media-undisplayable > p {
+  margin: 0;
 }
 
 .media-thumbnail-unsized > .media-open > img,

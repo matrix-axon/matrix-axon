@@ -1,6 +1,11 @@
 import type { ComponentChildren } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { useMediaBlob } from '../media/use-media-blob'
+import type { ParsedMedia } from '../media/parse-media'
+import {
+  imageDecodeFailureMessage,
+  unrenderableImageFormat,
+} from '../media/image-format'
 import { useShortcuts } from '../shortcuts'
 import { BodyPortal } from './BodyPortal'
 import { useSwipePaging } from '../media/use-swipe-paging'
@@ -78,10 +83,13 @@ export function Lightbox({
   onClose: () => void
   paging?: LightboxPaging
   /**
-   * Save the displayed object to the device. Offered only once the caller has
-   * confirmed the bytes decoded — the proxy serves undecryptable ciphertext
-   * with a 200, and saving that under a plausible `.jpg` name is worse than
-   * offering nothing.
+   * Save the displayed object to the device. Withheld while the bytes are
+   * still in flight, and withheld for bytes that would not decode *and* match
+   * no format we can name — the proxy serves undecryptable ciphertext with a
+   * 200, and saving that under a plausible `.jpg` name is worse than offering
+   * nothing. An image that failed to decode but is identifiably HEIC is the
+   * opposite case: saving it is the only thing left that helps, so the caller
+   * should offer it (ADR 0101).
    */
   onSave?: () => void
   saving?: boolean
@@ -337,52 +345,72 @@ export function Lightbox({
  * The lightbox's image body: the full-size object URL, loaded eagerly and never
  * a thumbnail.
  */
+/**
+ * How the open image ended up, for a caller deciding what controls to offer.
+ *
+ * `unsupported-format` and `undecodable` are both decode failures; they are
+ * distinct because only the first tells the reader anything actionable. A HEIC
+ * is a real file that another application will open, so Save must stay
+ * available; bytes matching no known format are most likely ciphertext, where
+ * Save would hand over a broken file (ADR 0101).
+ */
+export type LightboxImageOutcome =
+  'pending' | 'displayed' | 'unsupported-format' | 'undecodable'
+
 export function LightboxImage({
   accountId,
-  mxcUrl,
-  alt,
-  onDecoded,
+  media,
+  onOutcome,
 }: {
   accountId: string
-  mxcUrl: string
-  alt: string
   /**
-   * Whether the bytes actually decoded as an image. The media proxy returns
-   * **200 with raw ciphertext** when it lacks the decryption key, so a ready
-   * blob is not necessarily a picture — it surfaces only here, at decode.
-   * `MediaImage` has always caught this; this one did not, and rendered a
-   * broken-image icon with no explanation.
+   * The full descriptor, not just the url: naming *why* an image would not
+   * decode needs the declared mimetype and the filename, and the alt text is
+   * derived from the same fields both call sites were already deriving it from.
    */
-  onDecoded?: (decoded: boolean) => void
+  media: ParsedMedia
+  /**
+   * How the display attempt ended. A ready blob is not necessarily a picture —
+   * the media proxy returns **200 with raw ciphertext** when it lacks the
+   * decryption key, and a HEIC arrives intact and still will not paint — so
+   * this is the only place either failure can be observed.
+   */
+  onOutcome?: (outcome: LightboxImageOutcome) => void
 }) {
-  const { state } = useMediaBlob(accountId, mxcUrl, { eager: true })
-  const [decodeFailed, setDecodeFailed] = useState(false)
-  const onDecodedRef = useRef(onDecoded)
+  const { state } = useMediaBlob(accountId, media.url, { eager: true })
+  const [failure, setFailure] = useState<
+    'unsupported-format' | 'undecodable' | null
+  >(null)
+  const onOutcomeRef = useRef(onOutcome)
   useEffect(() => {
-    onDecodedRef.current = onDecoded
+    onOutcomeRef.current = onOutcome
   })
+
+  const alt = media.caption ?? media.filename
 
   // A new object means a fresh verdict — paging must not carry the previous
   // image's failure, or its success, onto the next one.
   useEffect(() => {
-    setDecodeFailed(false)
-    onDecodedRef.current?.(false)
-  }, [mxcUrl])
+    setFailure(null)
+    onOutcomeRef.current?.('pending')
+  }, [media.url])
 
   return (
     <div tabindex={0} class="lightbox-image">
-      {decodeFailed ? (
-        <p class="muted placeholder">
-          Encrypted media — server could not decrypt
-        </p>
+      {failure !== null ? (
+        <p class="muted placeholder">{imageDecodeFailureMessage(media)}</p>
       ) : state.status === 'ready' && state.url !== undefined ? (
         <img
           src={state.url}
           alt={alt}
-          onLoad={() => onDecodedRef.current?.(true)}
+          onLoad={() => onOutcomeRef.current?.('displayed')}
           onError={() => {
-            setDecodeFailed(true)
-            onDecodedRef.current?.(false)
+            const outcome =
+              unrenderableImageFormat(media) !== null
+                ? 'unsupported-format'
+                : 'undecodable'
+            setFailure(outcome)
+            onOutcomeRef.current?.(outcome)
           }}
         />
       ) : state.status === 'error' ? (

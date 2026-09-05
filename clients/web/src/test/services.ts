@@ -25,7 +25,10 @@ import {
 } from '../services'
 import { setPerfEnabled } from '../perf'
 import { createAccountsStore } from '../stores/accounts'
-import { createMatrixOAuthQrStore } from '../stores/matrix-oauth-qr'
+import {
+  createMatrixOAuthQrGrantStore,
+  createMatrixOAuthQrStore,
+} from '../stores/matrix-oauth-qr'
 import { createDeviceStateStore } from '../stores/device-state'
 import { createEphemeralStore } from '../stores/ephemeral'
 import { createEphemeralSender } from '../stores/ephemeral-sender'
@@ -132,6 +135,9 @@ export function testServices(
     // extra mount work (verification store). e2e covers live polling.
     pollDelayMs: 30_000,
   })
+  const matrixOAuthQrGrant = createMatrixOAuthQrGrantStore(api, {
+    storage: options.pendingStorage ?? memoryStorage(),
+  })
   const qr = options.qr ?? createBrowserQrAdapter()
   const cache = options.cache ?? createMemoryCacheStore()
   const telemetry = createTelemetryStore({
@@ -204,7 +210,7 @@ export function testServices(
   connectTimelineCacheReset(auth, timelines)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
-  connectMatrixOAuthQrSessionReset(auth, matrixOAuthQr)
+  connectMatrixOAuthQrSessionReset(auth, matrixOAuthQr, matrixOAuthQrGrant)
   connectCacheSetting(settings, cache)
   connectUpdateChecks(live, updates)
   connectAttachmentReset(auth, attachments)
@@ -220,6 +226,7 @@ export function testServices(
     settings,
     accounts,
     matrixOAuthQr,
+    matrixOAuthQrGrant,
     qr,
     rooms,
     invites,

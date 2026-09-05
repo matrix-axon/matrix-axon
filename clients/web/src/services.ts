@@ -20,7 +20,9 @@ import {
 import { parseOAuthProviders } from './auth/oauth'
 import { createAccountsStore, type AccountsStore } from './stores/accounts'
 import {
+  createMatrixOAuthQrGrantStore,
   createMatrixOAuthQrStore,
+  type MatrixOAuthQrGrantStore,
   type MatrixOAuthQrStore,
 } from './stores/matrix-oauth-qr'
 import {
@@ -95,6 +97,7 @@ export interface AppServices {
   settings: SettingsStore
   accounts: AccountsStore
   matrixOAuthQr: MatrixOAuthQrStore
+  matrixOAuthQrGrant: MatrixOAuthQrGrantStore
   qr: BrowserQrAdapter
   rooms: RoomsStore
   invites: InvitesStore
@@ -666,11 +669,13 @@ export function connectRoomsSessionReset(
 /** Drop every QR flow and presentation byte when the Axon session ends. */
 export function connectMatrixOAuthQrSessionReset(
   auth: CompositeAuthProvider,
-  matrixOAuthQr: MatrixOAuthQrStore,
+  ...stores: Array<MatrixOAuthQrStore | MatrixOAuthQrGrantStore>
 ): () => void {
   return effect(() => {
     if (!auth.signedIn.value) {
-      matrixOAuthQr.reset()
+      for (const store of stores) {
+        store.reset()
+      }
     }
   })
 }
@@ -912,6 +917,9 @@ export function createServices(
   const matrixOAuthQr = createMatrixOAuthQrStore(api, accounts, {
     storage: sessionStorage,
   })
+  const matrixOAuthQrGrant = createMatrixOAuthQrGrantStore(api, {
+    storage: sessionStorage,
+  })
   const qr = createBrowserQrAdapter()
   const cache = createIndexedDbCacheStore()
   requestPersistentStorage()
@@ -983,7 +991,7 @@ export function createServices(
   connectTimelineCacheReset(auth, timelines)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
-  connectMatrixOAuthQrSessionReset(auth, matrixOAuthQr)
+  connectMatrixOAuthQrSessionReset(auth, matrixOAuthQr, matrixOAuthQrGrant)
   connectCacheSetting(settings, cache)
   connectUpdateChecks(live, updates)
   connectAttachmentReset(auth, attachments)
@@ -999,6 +1007,7 @@ export function createServices(
     settings,
     accounts,
     matrixOAuthQr,
+    matrixOAuthQrGrant,
     qr,
     rooms,
     invites,
