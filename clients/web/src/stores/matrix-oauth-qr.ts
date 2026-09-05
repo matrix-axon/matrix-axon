@@ -9,8 +9,21 @@ import type { components } from '../api/schema'
 import type { AccountsStore } from './accounts'
 
 export type MatrixOAuthQrFlow = components['schemas']['MatrixOAuthQrFlowDto']
+export type MatrixOAuthQrGrantFlow =
+  components['schemas']['MatrixOAuthQrGrantFlowDto']
 export type MatrixOAuthQrPresentation =
   components['schemas']['MatrixOAuthQrPresentation']
+
+type MatrixOAuthQrFlowState = Pick<
+  MatrixOAuthQrFlow,
+  | 'flow_id'
+  | 'presentation'
+  | 'stage'
+  | 'qr_code_data'
+  | 'check_code'
+  | 'verification_uri'
+  | 'error_code'
+>
 
 export type MatrixOAuthQrOperation =
   | 'idle'
@@ -22,19 +35,31 @@ export type MatrixOAuthQrOperation =
   | 'refreshing_accounts'
   | 'cancelling'
 
-export interface MatrixOAuthQrStore {
-  flow: ReadonlySignal<MatrixOAuthQrFlow | null>
+interface MatrixOAuthQrFlowControls<T extends MatrixOAuthQrFlowState> {
+  flow: ReadonlySignal<T | null>
   operation: ReadonlySignal<MatrixOAuthQrOperation>
   error: Signal<string | null>
+  submitScan(qrCodeData: string): Promise<boolean>
+  submitCheckCode(checkCode: string): Promise<boolean>
+  cancel(): Promise<boolean>
+  reset(): void
+}
+
+export interface MatrixOAuthQrStore extends MatrixOAuthQrFlowControls<MatrixOAuthQrFlow> {
   start(
     userId: string,
     presentation: MatrixOAuthQrPresentation,
   ): Promise<boolean>
-  submitScan(qrCodeData: string): Promise<boolean>
-  submitCheckCode(checkCode: string): Promise<boolean>
-  cancel(): Promise<boolean>
   resume(): Promise<boolean>
-  reset(): void
+}
+
+export interface MatrixOAuthQrGrantStore extends MatrixOAuthQrFlowControls<MatrixOAuthQrGrantFlow> {
+  start(
+    accountId: string,
+    presentation: MatrixOAuthQrPresentation,
+  ): Promise<boolean>
+  /** Probe account scopes serially because only the opaque flow id is stored. */
+  resume(accountIds: readonly string[]): Promise<boolean>
 }
 
 interface MatrixOAuthQrStoreOptions {
@@ -44,18 +69,66 @@ interface MatrixOAuthQrStoreOptions {
   transportBackoffMs?: number
 }
 
-const ACTIVE_FLOW_KEY = 'axon.matrix-oauth-qr.flow-id'
+interface ApiResult<T> {
+  data?: { data: T }
+  error?: unknown
+  response: Response
+}
+
+interface FlowRoutes<T extends MatrixOAuthQrFlowState> {
+  storageKey: string
+  noun: string
+  scopeOf(flow: T): string | null
+  get(
+    scope: string | null,
+    flowId: string,
+    signal: AbortSignal,
+  ): Promise<ApiResult<T>>
+  scan(
+    scope: string | null,
+    flowId: string,
+    qrCodeData: string,
+    signal: AbortSignal,
+  ): Promise<ApiResult<T>>
+  checkCode(
+    scope: string | null,
+    flowId: string,
+    checkCode: string,
+    signal: AbortSignal,
+  ): Promise<ApiResult<T>>
+  cancel(
+    scope: string | null,
+    flowId: string,
+    signal: AbortSignal,
+  ): Promise<ApiResult<never>>
+  failureFallback: string
+  knownFailureMessage(code: string | null | undefined): string | undefined
+  onDone?(flow: T): Promise<void>
+}
+
+interface MatrixOAuthQrFlowCore<
+  T extends MatrixOAuthQrFlowState,
+> extends MatrixOAuthQrFlowControls<T> {
+  start(
+    scope: string | null,
+    create: (signal: AbortSignal) => Promise<ApiResult<T>>,
+  ): Promise<boolean>
+  resume(scopes: readonly (string | null)[]): Promise<boolean>
+}
+
+const ACQUIRE_ACTIVE_FLOW_KEY = 'axon.matrix-oauth-qr.flow-id'
+const GRANT_ACTIVE_FLOW_KEY = 'axon.matrix-oauth-qr-grant.flow-id'
 const REQUEST_TIMEOUT_MS = 15_000
 const POLL_DELAY_MS = 1_000
 const TRANSPORT_BACKOFF_MS = 5_000
 
-const TERMINAL_STAGES = new Set<MatrixOAuthQrFlow['stage']>([
+const TERMINAL_STAGES = new Set<MatrixOAuthQrFlowState['stage']>([
   'done',
   'failed',
   'cancelled',
 ])
 
-const FAILURE_MESSAGES: Record<string, string> = {
+const ACQUIRE_FAILURE_MESSAGES: Record<string, string> = {
   cancelled: 'The QR sign-in was cancelled.',
   timeout: 'The QR sign-in timed out. Start a new flow and try again.',
   unsupported:
@@ -78,20 +151,47 @@ const FAILURE_MESSAGES: Record<string, string> = {
     'Axon could not complete QR sign-in. Try again or check the server logs.',
 }
 
-export function isTerminalMatrixOAuthQrFlow(flow: MatrixOAuthQrFlow): boolean {
+const GRANT_FAILURE_MESSAGES: Record<string, string> = {
+  cancelled: 'Device authorization was cancelled.',
+  timeout: 'Device authorization timed out. Start again on both devices.',
+  unsupported:
+    'This homeserver does not support authorizing another device with QR.',
+  invalid_qr:
+    'That QR code cannot be used to authorize this device. Scan a fresh code from the new device.',
+  invalid_check_code:
+    'The check code was rejected. Start again and compare the new code carefully.',
+  rendezvous_expired:
+    'The QR rendezvous expired. Start a new authorization on both devices.',
+  device_conflict:
+    'The new Matrix device conflicts with an existing device. Start again from a fresh sign-in on the new client.',
+  device_not_found:
+    'The new device was not found for this Matrix account. Confirm that the new client is signing in to the expected account and that its device was provisioned, then start again.',
+  trust_lost:
+    'Axon can no longer prove that this account is trusted. Restore verification before authorizing another device.',
+  secrets_unavailable:
+    'Axon cannot export the encryption secrets required to provision the new device.',
+  upstream:
+    'The homeserver or authorization service could not complete device authorization. Try again.',
+  internal:
+    'Axon could not authorize the new device. Try again or check the server logs.',
+}
+
+export function isTerminalMatrixOAuthQrFlow(
+  flow: MatrixOAuthQrFlowState,
+): boolean {
   return TERMINAL_STAGES.has(flow.stage)
 }
 
-function failureMessage(code: string | null | undefined): string {
-  return code === null || code === undefined
-    ? 'QR sign-in failed. Start a new flow and try again.'
-    : (FAILURE_MESSAGES[code] ??
-        'QR sign-in failed. Start a new flow and try again.')
+function knownFailureMessage(
+  messages: Record<string, string>,
+  code: string | null | undefined,
+): string | undefined {
+  return code === null || code === undefined ? undefined : messages[code]
 }
 
-function transportMessage(cause: unknown): string {
+function transportMessage(cause: unknown, noun: string): string {
   if (cause instanceof DOMException && cause.name === 'AbortError') {
-    return 'The QR request timed out. Axon will check the flow before allowing a retry.'
+    return `The ${noun} request timed out. Axon will check the flow before allowing a retry.`
   }
   return cause instanceof Error
     ? `Could not reach Axon: ${cause.message}`
@@ -99,39 +199,35 @@ function transportMessage(cause: unknown): string {
 }
 
 /**
- * Replayable Matrix OAuth QR acquisition state (ADR 0097 PR 4).
+ * Shared replayable QR-flow lifecycle for both directions of ADR 0097.
  *
  * Only the opaque flow id reaches session storage. Presentation data is held in
  * memory, every network call is bounded, and generation checks prevent a late
  * response from reviving a cancelled or replaced flow.
  */
-export function createMatrixOAuthQrStore(
-  api: ApiClient,
-  accounts: AccountsStore,
-  options: MatrixOAuthQrStoreOptions = {},
-): MatrixOAuthQrStore {
+function createMatrixOAuthQrFlowCore<T extends MatrixOAuthQrFlowState>(
+  routes: FlowRoutes<T>,
+  options: MatrixOAuthQrStoreOptions,
+): MatrixOAuthQrFlowCore<T> {
   const storage = options.storage ?? window.sessionStorage
   const requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS
   const pollDelayMs = options.pollDelayMs ?? POLL_DELAY_MS
   const transportBackoffMs = options.transportBackoffMs ?? TRANSPORT_BACKOFF_MS
-  const flow = signal<MatrixOAuthQrFlow | null>(null)
+  const flow = signal<T | null>(null)
   const operation = signal<MatrixOAuthQrOperation>('idle')
   const error = signal<string | null>(null)
   let generation = 0
   let request: AbortController | null = null
   let pollTimer: ReturnType<typeof setTimeout> | null = null
-  const refreshed = new Set<string>()
-  let retainedErrorAt: Pick<MatrixOAuthQrFlow, 'flow_id' | 'stage'> | null =
-    null
+  let routeScope: string | null = null
+  const completed = new Set<string>()
+  let retainedErrorAt: Pick<T, 'flow_id' | 'stage'> | null = null
 
   function clearRetainedError(): void {
     retainedErrorAt = null
   }
 
-  function retainError(
-    message: string,
-    current: MatrixOAuthQrFlow | null = flow.value,
-  ): void {
+  function retainError(message: string, current: T | null = flow.value): void {
     error.value = message
     retainedErrorAt =
       current === null
@@ -171,32 +267,37 @@ export function createMatrixOAuthQrStore(
     }
   }
 
-  function schedulePoll(owner: number, delay = pollDelayMs): void {
+  function schedulePoll(
+    owner: number,
+    delay = pollDelayMs,
+    scopes: readonly (string | null)[] = [routeScope],
+  ): void {
     clearPoll()
     if (
       owner !== generation ||
-      (flow.value === null && storage.getItem(ACTIVE_FLOW_KEY) === null) ||
+      (flow.value === null && storage.getItem(routes.storageKey) === null) ||
       (flow.value !== null && isTerminalMatrixOAuthQrFlow(flow.value))
     ) {
       return
     }
+    const retryScopes = [...scopes]
     pollTimer = setTimeout(() => {
       pollTimer = null
-      void fetchCurrent(owner, 'polling')
+      void fetchCurrent(owner, 'polling', retryScopes)
     }, delay)
   }
 
-  async function applyFlow(
-    next: MatrixOAuthQrFlow,
-    owner: number,
-  ): Promise<void> {
+  async function applyFlow(next: T, owner: number): Promise<void> {
     if (owner !== generation) {
       return
     }
-    const refreshCompletedAccount =
-      next.stage === 'done' && !refreshed.has(next.flow_id)
-    if (refreshCompletedAccount) {
-      refreshed.add(next.flow_id)
+    routeScope = routes.scopeOf(next)
+    const runCompletion =
+      next.stage === 'done' &&
+      routes.onDone !== undefined &&
+      !completed.has(next.flow_id)
+    if (runCompletion) {
+      completed.add(next.flow_id)
       operation.value = 'refreshing_accounts'
     }
     const retainCurrentError =
@@ -205,16 +306,17 @@ export function createMatrixOAuthQrStore(
     flow.value = next
     if (next.stage === 'failed') {
       clearRetainedError()
-      error.value = failureMessage(next.error_code)
+      error.value =
+        routes.knownFailureMessage(next.error_code) ?? routes.failureFallback
     } else if (!retainCurrentError) {
       clearRetainedError()
       error.value = null
     }
     if (isTerminalMatrixOAuthQrFlow(next)) {
       clearPoll()
-      storage.removeItem(ACTIVE_FLOW_KEY)
-      if (refreshCompletedAccount) {
-        await accounts.refresh()
+      storage.removeItem(routes.storageKey)
+      if (runCompletion) {
+        await routes.onDone?.(next)
         if (owner !== generation) {
           return
         }
@@ -222,7 +324,7 @@ export function createMatrixOAuthQrStore(
       operation.value = 'idle'
       return
     }
-    storage.setItem(ACTIVE_FLOW_KEY, next.flow_id)
+    storage.setItem(routes.storageKey, next.flow_id)
     operation.value = 'idle'
     schedulePoll(owner)
   }
@@ -230,40 +332,46 @@ export function createMatrixOAuthQrStore(
   async function fetchCurrent(
     owner: number,
     kind: 'polling' | 'resuming',
+    scopes: readonly (string | null)[],
   ): Promise<boolean> {
     if (owner !== generation) {
       return false
     }
-    const flowId = flow.value?.flow_id ?? storage.getItem(ACTIVE_FLOW_KEY)
-    if (flowId === null || flowId === '') {
+    const flowId = flow.value?.flow_id ?? storage.getItem(routes.storageKey)
+    if (flowId === null || flowId === '' || scopes.length === 0) {
       operation.value = 'idle'
       return false
     }
     operation.value = kind
     const active = beginRequest()
+    let retryScopes = scopes
     try {
-      const result = await api.GET('/v1/accounts/login/qr/{flow_id}', {
-        params: { path: { flow_id: flowId } },
-        signal: active.controller.signal,
-      })
-      if (owner !== generation || active.controller.signal.aborted) {
-        return false
-      }
-      if (result.error !== undefined) {
-        clearRetainedError()
-        if (result.response.status === 404) {
-          storage.removeItem(ACTIVE_FLOW_KEY)
-          flow.value = null
-          error.value = 'This QR sign-in expired. Start a new flow to continue.'
-        } else {
-          error.value = apiErrorMessage(result.error)
-          schedulePoll(owner, transportBackoffMs)
+      for (let index = 0; index < scopes.length; index += 1) {
+        const scope = scopes[index]
+        retryScopes = scopes.slice(index)
+        const result = await routes.get(scope, flowId, active.controller.signal)
+        if (owner !== generation || active.controller.signal.aborted) {
+          return false
         }
+        if (result.error === undefined && result.data !== undefined) {
+          routeScope = scope
+          await applyFlow(result.data.data, owner)
+          return true
+        }
+        if (result.response.status === 404) {
+          continue
+        }
+        clearRetainedError()
+        error.value = apiErrorMessage(result.error)
         operation.value = 'idle'
+        schedulePoll(owner, transportBackoffMs, retryScopes)
         return false
       }
-      await applyFlow(result.data.data, owner)
-      return true
+      storage.removeItem(routes.storageKey)
+      flow.value = null
+      error.value = `This ${routes.noun} flow expired. Start a new flow to continue.`
+      operation.value = 'idle'
+      return false
     } catch (cause) {
       if (
         owner !== generation ||
@@ -272,9 +380,9 @@ export function createMatrixOAuthQrStore(
         return false
       }
       clearRetainedError()
-      error.value = transportMessage(cause)
+      error.value = transportMessage(cause, routes.noun)
       operation.value = 'idle'
-      schedulePoll(owner, transportBackoffMs)
+      schedulePoll(owner, transportBackoffMs, retryScopes)
       return false
     } finally {
       active.finish()
@@ -282,7 +390,7 @@ export function createMatrixOAuthQrStore(
   }
 
   async function reconcileAmbiguous(owner: number): Promise<boolean> {
-    const reconciled = await fetchCurrent(owner, 'polling')
+    const reconciled = await fetchCurrent(owner, 'polling', [routeScope])
     if (!reconciled && owner === generation) {
       retainError(
         'The request outcome is unknown. Axon is checking the flow before you retry.',
@@ -293,10 +401,7 @@ export function createMatrixOAuthQrStore(
 
   async function submitInput(
     kind: 'submitting_scan' | 'submitting_check_code',
-    call: (
-      flowId: string,
-      signal: AbortSignal,
-    ) => ReturnType<ApiClient['POST']>,
+    call: (flowId: string, signal: AbortSignal) => Promise<ApiResult<T>>,
   ): Promise<boolean> {
     const current = flow.value
     if (current === null || isTerminalMatrixOAuthQrFlow(current)) {
@@ -313,13 +418,13 @@ export function createMatrixOAuthQrStore(
       if (owner !== generation || active.controller.signal.aborted) {
         return false
       }
-      if (result.error !== undefined) {
+      if (result.error !== undefined || result.data === undefined) {
         retainError(apiErrorMessage(result.error), current)
         operation.value = 'idle'
         schedulePoll(owner)
         return false
       }
-      await applyFlow(result.data.data as MatrixOAuthQrFlow, owner)
+      await applyFlow(result.data.data, owner)
       return true
     } catch {
       if (
@@ -340,46 +445,41 @@ export function createMatrixOAuthQrStore(
     operation: computed(() => operation.value),
     error,
 
-    start: async (userId, presentation) => {
+    start: async (scope, create) => {
       const previous = flow.value
+      const previousScope =
+        previous === null ? routeScope : routes.scopeOf(previous)
       generation += 1
       const owner = generation
       clearPoll()
       request?.abort()
       flow.value = null
+      routeScope = scope
       clearRetainedError()
       error.value = null
       operation.value = 'starting'
-      storage.removeItem(ACTIVE_FLOW_KEY)
+      storage.removeItem(routes.storageKey)
       if (previous !== null && !isTerminalMatrixOAuthQrFlow(previous)) {
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), requestTimeoutMs)
-        void api
-          .DELETE('/v1/accounts/login/qr/{flow_id}', {
-            params: { path: { flow_id: previous.flow_id } },
-            signal: controller.signal,
-          })
+        void routes
+          .cancel(previousScope, previous.flow_id, controller.signal)
           .catch(() => {})
           .finally(() => clearTimeout(timer))
       }
       const active = beginRequest()
       try {
-        const result = await api.POST('/v1/accounts/login/qr', {
-          body: {
-            expected_user_id: userId,
-            presentation,
-          },
-          signal: active.controller.signal,
-        })
+        const result = await create(active.controller.signal)
         if (owner !== generation || active.controller.signal.aborted) {
           return false
         }
-        if (result.error !== undefined) {
+        if (result.error !== undefined || result.data === undefined) {
           const code = apiErrorCode(result.error)
           error.value =
-            code !== null && code in FAILURE_MESSAGES
-              ? failureMessage(code)
-              : apiErrorMessage(result.error)
+            code === null
+              ? apiErrorMessage(result.error)
+              : (routes.knownFailureMessage(code) ??
+                apiErrorMessage(result.error))
           operation.value = 'idle'
           return false
         }
@@ -392,7 +492,7 @@ export function createMatrixOAuthQrStore(
         ) {
           return false
         }
-        error.value = transportMessage(cause)
+        error.value = transportMessage(cause, routes.noun)
         operation.value = 'idle'
         return false
       } finally {
@@ -402,20 +502,12 @@ export function createMatrixOAuthQrStore(
 
     submitScan: (qrCodeData) =>
       submitInput('submitting_scan', (flowId, requestSignal) =>
-        api.POST('/v1/accounts/login/qr/{flow_id}/scan', {
-          params: { path: { flow_id: flowId } },
-          body: { qr_code_data: qrCodeData },
-          signal: requestSignal,
-        }),
+        routes.scan(routeScope, flowId, qrCodeData, requestSignal),
       ),
 
     submitCheckCode: (checkCode) =>
       submitInput('submitting_check_code', (flowId, requestSignal) =>
-        api.POST('/v1/accounts/login/qr/{flow_id}/check-code', {
-          params: { path: { flow_id: flowId } },
-          body: { check_code: checkCode },
-          signal: requestSignal,
-        }),
+        routes.checkCode(routeScope, flowId, checkCode, requestSignal),
       ),
 
     cancel: async () => {
@@ -430,10 +522,11 @@ export function createMatrixOAuthQrStore(
       error.value = null
       const active = beginRequest()
       try {
-        const result = await api.DELETE('/v1/accounts/login/qr/{flow_id}', {
-          params: { path: { flow_id: current.flow_id } },
-          signal: active.controller.signal,
-        })
+        const result = await routes.cancel(
+          routeScope,
+          current.flow_id,
+          active.controller.signal,
+        )
         if (owner !== generation || active.controller.signal.aborted) {
           return false
         }
@@ -445,7 +538,7 @@ export function createMatrixOAuthQrStore(
         }
         generation += 1
         flow.value = { ...current, stage: 'cancelled' }
-        storage.removeItem(ACTIVE_FLOW_KEY)
+        storage.removeItem(routes.storageKey)
         operation.value = 'idle'
         return true
       } catch (cause) {
@@ -456,7 +549,7 @@ export function createMatrixOAuthQrStore(
           return false
         }
         retainError(
-          `${transportMessage(cause)} Cancellation was not confirmed; you can retry it.`,
+          `${transportMessage(cause, routes.noun)} Cancellation was not confirmed; you can retry it.`,
           current,
         )
         operation.value = 'idle'
@@ -467,12 +560,12 @@ export function createMatrixOAuthQrStore(
       }
     },
 
-    resume: () => {
-      if (flow.value !== null || storage.getItem(ACTIVE_FLOW_KEY) === null) {
+    resume: (scopes) => {
+      if (flow.value !== null || storage.getItem(routes.storageKey) === null) {
         return Promise.resolve(false)
       }
       generation += 1
-      return fetchCurrent(generation, 'resuming')
+      return fetchCurrent(generation, 'resuming', scopes)
     },
 
     reset: () => {
@@ -481,10 +574,133 @@ export function createMatrixOAuthQrStore(
       request?.abort()
       request = null
       flow.value = null
+      routeScope = null
       operation.value = 'idle'
       clearRetainedError()
       error.value = null
-      storage.removeItem(ACTIVE_FLOW_KEY)
+      storage.removeItem(routes.storageKey)
     },
+  }
+}
+
+function requireScope(scope: string | null): string {
+  if (scope === null) {
+    throw new Error('account-scoped QR flow has no account')
+  }
+  return scope
+}
+
+export function createMatrixOAuthQrStore(
+  api: ApiClient,
+  accounts: AccountsStore,
+  options: MatrixOAuthQrStoreOptions = {},
+): MatrixOAuthQrStore {
+  const core = createMatrixOAuthQrFlowCore<MatrixOAuthQrFlow>(
+    {
+      storageKey: ACQUIRE_ACTIVE_FLOW_KEY,
+      noun: 'QR sign-in',
+      scopeOf: () => null,
+      get: (_scope, flowId, requestSignal) =>
+        api.GET('/v1/accounts/login/qr/{flow_id}', {
+          params: { path: { flow_id: flowId } },
+          signal: requestSignal,
+        }),
+      scan: (_scope, flowId, qrCodeData, requestSignal) =>
+        api.POST('/v1/accounts/login/qr/{flow_id}/scan', {
+          params: { path: { flow_id: flowId } },
+          body: { qr_code_data: qrCodeData },
+          signal: requestSignal,
+        }),
+      checkCode: (_scope, flowId, checkCode, requestSignal) =>
+        api.POST('/v1/accounts/login/qr/{flow_id}/check-code', {
+          params: { path: { flow_id: flowId } },
+          body: { check_code: checkCode },
+          signal: requestSignal,
+        }),
+      cancel: (_scope, flowId, requestSignal) =>
+        api.DELETE('/v1/accounts/login/qr/{flow_id}', {
+          params: { path: { flow_id: flowId } },
+          signal: requestSignal,
+        }),
+      failureFallback: 'QR sign-in failed. Start a new flow and try again.',
+      knownFailureMessage: (code) =>
+        knownFailureMessage(ACQUIRE_FAILURE_MESSAGES, code),
+      onDone: async () => accounts.refresh(),
+    },
+    options,
+  )
+  return {
+    ...core,
+    start: (userId, presentation) =>
+      core.start(null, (requestSignal) =>
+        api.POST('/v1/accounts/login/qr', {
+          body: { expected_user_id: userId, presentation },
+          signal: requestSignal,
+        }),
+      ),
+    resume: () => core.resume([null]),
+  }
+}
+
+export function createMatrixOAuthQrGrantStore(
+  api: ApiClient,
+  options: MatrixOAuthQrStoreOptions = {},
+): MatrixOAuthQrGrantStore {
+  const core = createMatrixOAuthQrFlowCore<MatrixOAuthQrGrantFlow>(
+    {
+      storageKey: GRANT_ACTIVE_FLOW_KEY,
+      noun: 'device authorization',
+      scopeOf: (flow) => flow.account_id,
+      get: (scope, flowId, requestSignal) =>
+        api.GET('/v1/accounts/{account_id}/login-grants/qr/{flow_id}', {
+          params: {
+            path: { account_id: requireScope(scope), flow_id: flowId },
+          },
+          signal: requestSignal,
+        }),
+      scan: (scope, flowId, qrCodeData, requestSignal) =>
+        api.POST('/v1/accounts/{account_id}/login-grants/qr/{flow_id}/scan', {
+          params: {
+            path: { account_id: requireScope(scope), flow_id: flowId },
+          },
+          body: { qr_code_data: qrCodeData },
+          signal: requestSignal,
+        }),
+      checkCode: (scope, flowId, checkCode, requestSignal) =>
+        api.POST(
+          '/v1/accounts/{account_id}/login-grants/qr/{flow_id}/check-code',
+          {
+            params: {
+              path: { account_id: requireScope(scope), flow_id: flowId },
+            },
+            body: { check_code: checkCode },
+            signal: requestSignal,
+          },
+        ),
+      cancel: (scope, flowId, requestSignal) =>
+        api.DELETE('/v1/accounts/{account_id}/login-grants/qr/{flow_id}', {
+          params: {
+            path: { account_id: requireScope(scope), flow_id: flowId },
+          },
+          signal: requestSignal,
+        }),
+      failureFallback:
+        'Device authorization failed. Start a new flow and try again.',
+      knownFailureMessage: (code) =>
+        knownFailureMessage(GRANT_FAILURE_MESSAGES, code),
+    },
+    options,
+  )
+  return {
+    ...core,
+    start: (accountId, presentation) =>
+      core.start(accountId, (requestSignal) =>
+        api.POST('/v1/accounts/{account_id}/login-grants/qr', {
+          params: { path: { account_id: accountId } },
+          body: { presentation },
+          signal: requestSignal,
+        }),
+      ),
+    resume: (accountIds) => core.resume(accountIds),
   }
 }

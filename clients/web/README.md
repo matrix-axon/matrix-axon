@@ -13,7 +13,8 @@ lifecycle on the unified `/accounts` page (account list, active-account choice,
 status, recovery, megolm backup snapshot and enable, logout, reactivation,
 deletion, and password acquisition),
 Matrix OAuth QR account acquisition (display or selectable-camera/image scan,
-check codes, authorization, reload resume, and cancellation), theme +
+check codes, authorization, reload resume, and cancellation) plus trusted-account
+QR authorization of new clients such as Element X, theme +
 schema-versioned settings, history routing with the permanent deep-link
 shape `/:accountId/rooms/:roomId?thread=&event=` (signed off), the
 cross-account room list with TUI semantics (pinning ADR 0038, sort/filters
