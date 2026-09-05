@@ -14,6 +14,7 @@ import {
 import { openLiveSocket } from './api/ws'
 import { setPerfEnabled, setTelemetrySink } from './perf'
 import { browserPlatform, type Platform } from './platform'
+import { readStoredServerUrl } from './server-url'
 import {
   createCompositeAuthProvider,
   type CompositeAuthProvider,
@@ -93,6 +94,14 @@ import { createBrowserQrAdapter, type BrowserQrAdapter } from './qr/browser-qr'
  * an in-memory storage; components never construct services themselves.
  */
 export interface AppServices {
+  /**
+   * The transport this graph was built on (ADR 0102 § 2).
+   *
+   * Exposed because constructing one at a call site gives the *browser's*
+   * answer regardless of what the app is running inside — which silently hid
+   * the "Change server" panel in the only build that can use it.
+   */
+  platform: Platform
   auth: CompositeAuthProvider
   api: ApiClient
   settings: SettingsStore
@@ -156,18 +165,43 @@ export interface AppServices {
 }
 
 /**
- * `VITE_AXON_SERVER_URL` bakes a cross-origin server base into the bundle for
- * separately-hosted deployments (which rely on the server's CORS allow-list,
- * M-W1.5). Unset, the client is same-origin: the Vite dev proxy in
- * development, or a reverse proxy serving app and API together.
+ * Which server this client talks to, or `null` if that is not yet known
+ * (ADR 0102 § 3). Resolution order: what the user configured, then
+ * `VITE_AXON_SERVER_URL` baked in at build time, then the platform's own
+ * default — `'/'` in a browser, nothing in a packaged shell.
  *
- * This is the one accessor every server-base-URL consumer (HTTP client,
- * media, OAuth's `baseUrl`, WebSocket) should go through, so a future build
- * target with a non-origin base (e.g. Tauri, M-W12) only ever needs to set
- * this env var — no call site changes.
+ * `null` is only reachable on a platform with no same-origin API to fall back
+ * on, and it means "ask": `AppRoot` renders the setup screen instead of the
+ * app. A browser build can never see it, which is why nobody is ever asked
+ * for a URL in a deployment that serves the SPA and the API together.
  */
-export function apiBaseUrl(): string {
-  return import.meta.env.VITE_AXON_SERVER_URL ?? '/'
+export function resolveApiBaseUrl(
+  storage: Storage = window.localStorage,
+  platform: Pick<Platform, 'defaultApiBaseUrl'> = browserPlatform(),
+): string | null {
+  return (
+    readStoredServerUrl(storage) ??
+    import.meta.env.VITE_AXON_SERVER_URL ??
+    platform.defaultApiBaseUrl
+  )
+}
+
+/**
+ * The base the service graph is built on. This is the one accessor every
+ * server-base-URL consumer (HTTP client, media, OAuth's `baseUrl`, WebSocket)
+ * goes through.
+ *
+ * Falls back to `'/'` rather than propagating `null`, because by the time this
+ * runs the setup gate has already established that a base exists — everything
+ * downstream wants a `string`, and threading an unreachable `null` through all
+ * of it would buy nothing. `resolveApiBaseUrl` is the honest answer; this is
+ * the value.
+ */
+export function apiBaseUrl(
+  storage: Storage = window.localStorage,
+  platform: Pick<Platform, 'defaultApiBaseUrl'> = browserPlatform(),
+): string {
+  return resolveApiBaseUrl(storage, platform) ?? '/'
 }
 
 function oauthClientId(): string {
@@ -885,17 +919,23 @@ export function createServices(
   // Rust-side transport and no call site below changes.
   platform: Platform = browserPlatform(),
 ): AppServices {
+  // Resolved once, against this graph's own storage and platform rather than
+  // the window's. The base cannot change under a running graph — changing the
+  // server reloads the document (ADR 0102 § 3) — so a single value is both
+  // cheaper and safer than re-reading storage per consumer, which could
+  // otherwise hand two consumers two different servers mid-session.
+  const baseUrl = apiBaseUrl(storage, platform)
   const auth = createCompositeAuthProvider({
     providers: parseOAuthProviders(import.meta.env.VITE_AXON_OAUTH_PROVIDERS),
-    baseUrl: apiBaseUrl(),
+    baseUrl,
     clientId: oauthClientId(),
     redirectUriBase: oauthRedirectUriBase(),
     storage,
     sessionStorage,
     platform,
   })
-  const api = createApiClient(auth, apiBaseUrl(), platform)
-  const media = createMediaService({ auth, baseUrl: apiBaseUrl(), platform })
+  const api = createApiClient(auth, baseUrl, platform)
+  const media = createMediaService({ auth, baseUrl, platform })
   // Deliberately *not* `apiBaseUrl()`: the manifest describes the web bundle,
   // which is served by the document's own origin even in a cross-origin
   // deployment where the API lives elsewhere (`VITE_AXON_SERVER_URL`).
@@ -944,7 +984,7 @@ export function createServices(
   // cold too, which on a phone is a launch the user sees.
   const namespace = () =>
     Promise.resolve(auth.getToken()).then(
-      (token) => cacheNamespace(apiBaseUrl(), token),
+      (token) => cacheNamespace(baseUrl, token),
       () => null,
     )
   const rooms = createRoomsStore(
@@ -972,7 +1012,7 @@ export function createServices(
       if (typeof token !== 'string') {
         throw new Error('live socket requires a synchronously available token')
       }
-      return openLiveSocket(token, apiBaseUrl(), platform)
+      return openLiveSocket(token, baseUrl, platform)
     },
   })
   const activeRoom = signal<string | null>(null)
@@ -1002,6 +1042,7 @@ export function createServices(
   connectUpdateChecks(live, updates)
   connectAttachmentReset(auth, attachments)
   return {
+    platform,
     auth,
     api,
     media,

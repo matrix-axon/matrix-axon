@@ -852,6 +852,23 @@ body {
   gap: 0.75rem;
 }
 
+.server-setup {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.server-setup-hint {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.server-setup-error {
+  color: var(--danger);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
 .signin-divider {
   color: var(--muted);
   font-size: 0.9rem;

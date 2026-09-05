@@ -20,6 +20,7 @@ import { VerificationInboxPanel } from './components/VerificationInboxPanel'
 import { UpdateBanner } from './components/UpdateBanner'
 import { useModalFocus } from './components/use-modal-focus'
 import { layoutMode, SINGLE_PANE_QUERY, useMediaQuery } from './layout'
+import type { Platform } from './platform'
 import {
   localRoomHref,
   parseMatrixRoomReference,
@@ -141,9 +142,27 @@ interface PendingMatrixJoin {
  *
  * `services` is injectable for tests; the app builds the real graph once.
  */
-export function App({ services }: { services?: AppServices }) {
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- build the real graph exactly once
-  const svc = useMemo(() => services ?? createServices(), [])
+export function App({
+  services,
+  platform,
+}: {
+  services?: AppServices
+  /**
+   * The transport `createServices` should build on. Threaded from `AppRoot`
+   * rather than defaulted here: the shell selects its platform at boot, and a
+   * default would silently rebuild the graph on the browser's `fetch` — the
+   * server probe would succeed and every request after it would go through the
+   * webview, failing on CORS or as mixed content (ADR 0102 § 2).
+   */
+  platform?: Platform
+}) {
+  const svc = useMemo(
+    // Third positional: (storage, sessionStorage, platform). Passing it second
+    // would land it in the sessionStorage slot.
+    () => services ?? createServices(undefined, undefined, platform),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- build the real graph exactly once
+    [],
+  )
 
   useEffect(() => applyTheme(svc.settings, document.documentElement), [svc])
   useEffect(() => applyAppBadge(svc.settings, svc.rooms), [svc])

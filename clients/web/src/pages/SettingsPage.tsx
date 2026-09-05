@@ -17,8 +17,9 @@ import {
   registerMatrixProtocolHandler,
 } from '../matrix-protocol'
 import { browserReloadEnvironment, reloadNow } from '../reload'
+import { disconnectFromServer } from '../server-url'
 import { formatTelemetry } from '../stores/telemetry'
-import { useServices } from '../services'
+import { resolveApiBaseUrl, useServices } from '../services'
 import { currentPlatform, isApplePlatform } from '../shortcuts'
 import type {
   StateEventVisibility,
@@ -244,6 +245,7 @@ export function SettingsPage() {
           Manage accounts
         </a>
       </section>
+      <ServerSettings />
       <DebugSettings />
       <section class="panel">
         <h2>Session</h2>
@@ -703,5 +705,54 @@ function isInstalledDisplay(): boolean {
   return (
     navigatorStandalone === true ||
     window.matchMedia?.('(display-mode: standalone)').matches === true
+  )
+}
+
+/**
+ * Which server this client is pointed at, and how to change it (ADR 0102 § 3).
+ *
+ * Hidden wherever the platform has a same-origin default — i.e. every browser
+ * deployment, where the server is not a choice the user made and offering to
+ * "change" it would be offering to break the app. Only a packaged build, which
+ * asked for the address on first run, can act on this.
+ *
+ * Changing it reloads rather than rebuilding in place: the base URL is baked
+ * into the service graph at construction (`createServices`), and there is no
+ * mechanism — nor any reason to build one — for swapping it under a live
+ * socket, an open timeline and a warm cache. Navigating to `/` first is
+ * deliberate: a reload at a deep room path would be a route belonging to the
+ * *old* server.
+ */
+function ServerSettings() {
+  // From the graph, not `browserPlatform()`. Constructing one here always sees
+  // the browser's `'/'` default and hides this panel — including in the shell,
+  // which is the only build that can reach it.
+  const { auth, platform } = useServices()
+  if (platform.defaultApiBaseUrl !== null) {
+    return null
+  }
+  const current = resolveApiBaseUrl()
+  return (
+    <section class="panel">
+      <h2>Server</h2>
+      <p class="muted">{current ?? 'No server configured.'}</p>
+      <button
+        type="button"
+        class="danger"
+        onClick={() => {
+          // Credentials go with the server that issued them; see
+          // `disconnectFromServer`.
+          disconnectFromServer(window.localStorage, () => auth.clearToken())
+          window.location.assign('/')
+        }}
+      >
+        Change server
+      </button>
+      <p class="muted">
+        Disconnect from this server and choose another. This signs you out:
+        credentials belong to the server that issued them, so you will sign in
+        again even if you switch back.
+      </p>
+    </section>
   )
 }

@@ -16,6 +16,7 @@
  * Kubernetes API server's fix for the same problem.
  */
 
+import { apiUrl } from '../server-url'
 import {
   bearerSubprotocols,
   browserPlatform,
@@ -66,7 +67,7 @@ const SOCKET_PROTOCOL: Readonly<Record<string, string>> = {
  * failing loudly here is how it finds out it did not.
  */
 export function wsUrl(baseUrl: string | URL = window.location.origin): string {
-  const url = new URL('/v1/ws', new URL(baseUrl, window.location.origin))
+  const url = apiUrl('/v1/ws', baseUrl)
   const protocol = SOCKET_PROTOCOL[url.protocol]
   if (protocol === undefined) {
     throw new Error(

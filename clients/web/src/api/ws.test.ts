@@ -16,9 +16,13 @@ describe('wsUrl', () => {
     expect(wsUrl('wss://axon.example.com')).toBe('wss://axon.example.com/v1/ws')
   })
 
-  it('replaces any base path with /v1/ws', () => {
-    expect(wsUrl('https://axon.example.com/some/page')).toBe(
-      'wss://axon.example.com/v1/ws',
+  it('keeps a path prefix, because the base may live under one', () => {
+    // This asserted the opposite until review pointed out the contradiction:
+    // `normalizeServerUrl` promises `/axon` is preserved and the API client
+    // and media service honour that, so discarding it here made one setting
+    // mean two things. `server-url.ts`'s `apiUrl` is now the single join.
+    expect(wsUrl('https://axon.example.com/axon')).toBe(
+      'wss://axon.example.com/axon/v1/ws',
     )
   })
 
