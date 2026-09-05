@@ -259,13 +259,103 @@ describe('MediaImage', () => {
 
   it('shows the ciphertext-fallback placeholder when the image fails to decode', async () => {
     serveBytes()
-    const { findByRole, findByText } = renderImage(image({ encrypted: true }))
+    const { findByRole, findByText, queryByRole } = renderImage(
+      image({ encrypted: true }),
+    )
     const img = await findByRole('img')
     // The proxy returned a 200 of raw ciphertext; decode fails at the <img>.
     fireEvent.error(img)
     expect(
       await findByText('Encrypted media — server could not decrypt'),
     ).toBeTruthy()
+    // No Download: these bytes are not a file. Saving them under the event's
+    // own `.png` name hands over something no tool can open, with nothing to
+    // say why. Mirrors the pageable viewer's `saveable` gate (#328 review).
+    expect(queryByRole('button', { name: 'Download' })).toBeNull()
+  })
+
+  it('offers no download for undecodable plaintext bytes either', async () => {
+    // The gate is "could we name the format", not "is it encrypted" — an
+    // unidentifiable plaintext object is just as unopenable.
+    serveBytes()
+    const { findByRole, findByText, queryByRole } = renderImage(image())
+    fireEvent.error(await findByRole('img'))
+    expect(await findByText('Could not display this image')).toBeTruthy()
+    expect(queryByRole('button', { name: 'Download' })).toBeNull()
+  })
+
+  it('names the format instead of blaming decryption for a HEIC', async () => {
+    // The whole point of ADR 0101: an iPhone photo arrives intact and simply
+    // will not decode outside WebKit. Reporting that as a decryption failure
+    // sent a real investigation after the wrong thing.
+    serveBytes()
+    const { findByRole, findByText, queryByText } = renderImage(
+      image({ mimetype: 'image/heic', filename: 'IMG_4021.HEIC' }),
+    )
+    fireEvent.error(await findByRole('img'))
+    expect(
+      await findByText("HEIC image — this browser can't display it"),
+    ).toBeTruthy()
+    expect(queryByText('Encrypted media — server could not decrypt')).toBeNull()
+  })
+
+  it('names the format from the extension when the sender declared none', async () => {
+    // ADR 0072 found real events carrying `application/octet-stream`; the
+    // filename is then the only signal there is.
+    serveBytes()
+    const { findByRole, findByText } = renderImage(
+      image({
+        mimetype: 'application/octet-stream',
+        filename: 'IMG_4021.heic',
+      }),
+    )
+    fireEvent.error(await findByRole('img'))
+    expect(
+      await findByText("HEIC image — this browser can't display it"),
+    ).toBeTruthy()
+  })
+
+  it('offers a download from the failure placeholder so the bytes are reachable', async () => {
+    serveBytes()
+    const { findByRole, findByText } = renderImage(
+      image({ mimetype: 'image/heic', filename: 'IMG_4021.HEIC' }),
+    )
+    fireEvent.error(await findByRole('img'))
+    await findByText("HEIC image — this browser can't display it")
+
+    // Count the fetch rather than assert on the button settling: the button is
+    // enabled both before the click and after it finishes, so a state check
+    // would pass even if the handler never ran.
+    let fetched = 0
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/media/:account/:server/:media`, () => {
+        fetched += 1
+        return new HttpResponse(PNG, {
+          headers: { 'content-type': 'image/heic' },
+        })
+      }),
+    )
+    fireEvent.click(await findByRole('button', { name: 'Download' }))
+    // `downloadMedia` deliberately re-fetches rather than reuse the displayed
+    // object URL, so a successful save is exactly one more request.
+    await waitFor(() => expect(fetched).toBe(1))
+  })
+
+  it('reports a failed download rather than looking like it worked', async () => {
+    serveBytes()
+    const { findByRole, findByText } = renderImage(
+      image({ mimetype: 'image/heic', filename: 'IMG_4021.HEIC' }),
+    )
+    fireEvent.error(await findByRole('img'))
+    // The download re-fetches, so it is this request that fails — not the one
+    // that delivered the bytes we could not decode.
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/media/:account/:server/:media`, () =>
+        HttpResponse.json({ error: {} }, { status: 500 }),
+      ),
+    )
+    fireEvent.click(await findByRole('button', { name: 'Download' }))
+    expect(await findByText('Download failed')).toBeTruthy()
   })
 
   it('falls back to the full-size image when the thumbnail fails (WCR-18)', async () => {

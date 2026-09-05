@@ -288,7 +288,72 @@ pub async fn callback(
             .query_pairs_mut()
             .append_pair("state", client_state);
     }
-    Ok(Redirect::to(redirect_url.as_str()).into_response())
+    Ok(deliver_authorization_code(&redirect_url))
+}
+
+/// Hand the authorization code back to the client that asked for it.
+///
+/// A browser-hosted client gets the redirect it always got. A client whose
+/// `redirect_uri` is a private scheme — a desktop or mobile app, RFC 8252 § 7.1
+/// — gets a page instead, for a reason that only shows up on a real desktop:
+/// a bare `302` to `myapp://…` hands the URL to the OS and leaves the tab with
+/// no document to render, so it spins forever on a sign-in that has in fact
+/// already succeeded. Reported on Windows against Edge; the tab had to be
+/// closed by hand every time.
+///
+/// The page performs the same hand-off from script, and says the tab can be
+/// closed. It also degrades: if the scheme has no handler, or script is off,
+/// the link is still there to click, where the redirect would simply have
+/// failed with a console message the user never sees.
+fn deliver_authorization_code(redirect_url: &url::Url) -> Response {
+    if matches!(redirect_url.scheme(), "http" | "https") {
+        return Redirect::to(redirect_url.as_str()).into_response();
+    }
+    Html(handoff_page(redirect_url.as_str())).into_response()
+}
+
+/// The interstitial for a private-scheme client.
+///
+/// The script reads the target back out of the DOM rather than having it
+/// interpolated into it. `client_state` is opaque data this server echoes on
+/// behalf of the client, so it is attacker-influenceable in principle: it
+/// arrives here percent-encoded by `query_pairs_mut`, is escaped again for the
+/// attribute, and never enters a script context at all. `getAttribute` rather
+/// than `.href` so the browser's URL normalisation cannot alter a non-special
+/// scheme on the way through.
+fn handoff_page(target: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Signed in</title>
+    <style>
+      body {{
+        font-family: system-ui, sans-serif;
+        margin: 4rem auto;
+        max-width: 28rem;
+        padding: 0 1rem;
+        line-height: 1.5;
+      }}
+    </style>
+  </head>
+  <body>
+    <h1>Signed in</h1>
+    <p>Returning you to Axon. You can close this tab.</p>
+    <p><a id="handoff" href="{target}">Open Axon</a></p>
+    <script>
+      var link = document.getElementById('handoff')
+      if (link) {{
+        window.location.replace(link.getAttribute('href'))
+      }}
+    </script>
+  </body>
+</html>
+"#,
+        target = bootstrap::html_escape(target)
+    )
 }
 
 /// `POST /v1/oauth/token` (RFC 6749 §4.1.3, §6, and Path B's custom
@@ -687,5 +752,92 @@ mod providers_tests {
         // server".
         let response = providers(State(Some(runtime(&[])))).await.expect("enabled");
         assert!(response.data.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::{deliver_authorization_code, handoff_page};
+    use axum::http::{header::LOCATION, StatusCode};
+    use axum::response::IntoResponse;
+
+    /// Build the delivery URL the same way `callback` does, so the encoding
+    /// under test is the encoding that actually ships.
+    fn delivery(redirect_uri: &str, state: &str) -> url::Url {
+        let mut url = url::Url::parse(redirect_uri).expect("redirect uri");
+        url.query_pairs_mut().append_pair("code", "abc123");
+        url.query_pairs_mut().append_pair("state", state);
+        url
+    }
+
+    #[test]
+    fn a_browser_client_still_gets_a_redirect() {
+        // The web client's flow is unchanged; adding an interstitial to a
+        // working browser sign-in would be a regression for every deployment.
+        let response =
+            deliver_authorization_code(&delivery("https://axon.example.com/oauth/callback", "s1"))
+                .into_response();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .expect("Location")
+            .to_str()
+            .expect("ascii");
+        assert!(location.starts_with("https://axon.example.com/oauth/callback?"));
+        assert!(location.contains("code=abc123"));
+    }
+
+    #[test]
+    fn a_private_scheme_client_gets_a_page_instead() {
+        // A bare 302 to a private scheme hands the URL to the OS and leaves
+        // the tab with nothing to render, so it spins on a sign-in that has
+        // already succeeded.
+        let response =
+            deliver_authorization_code(&delivery("axon://oauth/callback", "s1")).into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(LOCATION).is_none());
+    }
+
+    #[test]
+    fn the_page_carries_the_target_for_script_and_for_a_click() {
+        // Both paths matter: script performs the hand-off, and the link is
+        // what is left when the scheme has no handler or script is off.
+        let page = handoff_page(delivery("axon://oauth/callback", "s1").as_str());
+
+        assert!(page.contains(r#"id="handoff""#));
+        assert!(page.contains("axon://oauth/callback?code=abc123&amp;state=s1"));
+        assert!(page.contains("getAttribute('href')"));
+    }
+
+    #[test]
+    fn percent_encoding_is_the_first_line_of_defence() {
+        // `state` is opaque data echoed on the client's behalf, so it is
+        // attacker-influenceable in principle. Going through the URL is what
+        // neutralises it: `query_pairs_mut` percent-encodes, so the dangerous
+        // characters never reach the markup as themselves.
+        let page = handoff_page(
+            delivery("axon://oauth/callback", "\"><script>alert(1)</script>").as_str(),
+        );
+
+        assert!(!page.contains("alert(1)"));
+        // The one <script> element is ours.
+        assert_eq!(page.matches("<script>").count(), 1);
+    }
+
+    #[test]
+    fn the_attribute_is_escaped_independently_of_that() {
+        // And the escaping is a real second layer, not decoration — asserted
+        // by handing `handoff_page` a raw string rather than a URL-built one.
+        // Composing through `delivery` cannot test this: percent-encoding
+        // removes the characters first, so the assertion passes with the
+        // escaping deleted, which is exactly what it did before this split.
+        let page = handoff_page("axon://oauth/callback?state=\"><script>alert(1)</script>");
+
+        assert!(!page.contains("\"><script>"));
+        assert!(page.contains("&quot;&gt;&lt;script&gt;"));
+        assert_eq!(page.matches("<script>").count(), 1);
     }
 }

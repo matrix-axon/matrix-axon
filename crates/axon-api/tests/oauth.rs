@@ -38,7 +38,13 @@ async fn store() -> Store {
 }
 
 const CLIENT_ID: &str = "test-client";
-const REDIRECT_URI: &str = "axon://oauth/callback";
+/// The browser-hosted client's callback. `https`, so the callback keeps
+/// answering `303` with a `Location` — the contract most tests here exercise.
+const REDIRECT_URI: &str = "https://client.test/oauth/callback";
+/// A native client's callback (RFC 8252 § 7.1). A private scheme gets the HTML
+/// hand-off page instead of a redirect, which is a different assertion and so
+/// gets its own constant rather than being switched under the other tests.
+const NATIVE_REDIRECT_URI: &str = "axon://oauth/callback";
 const TEST_PROVIDER: &str = "test";
 const TEST_ISSUER: &str = "https://fake-idp.test/";
 const TEST_AUDIENCE: &str = "test-upstream-client-id";
@@ -80,7 +86,7 @@ fn app_with_oauth_bootstrap(
         refresh_token_ttl_secs: 2_592_000,
         clients: vec![OauthClientConfig {
             client_id: CLIENT_ID.to_owned(),
-            redirect_uris: vec![REDIRECT_URI.to_owned()],
+            redirect_uris: vec![REDIRECT_URI.to_owned(), NATIVE_REDIRECT_URI.to_owned()],
         }],
         providers: axon_core::OauthProvidersConfig::default(),
     };
@@ -535,7 +541,7 @@ async fn path_a_authorize_callback_token_refresh_chain() {
         .unwrap()
         .to_owned();
     let client_redirect = url::Url::parse(&location).expect("client redirect is a URL");
-    assert_eq!(client_redirect.scheme(), "axon");
+    assert_eq!(client_redirect.scheme(), "https");
     assert_eq!(query_param(&client_redirect, "state"), "client-state-abc");
     let axon_code = query_param(&client_redirect, "code");
 
@@ -842,6 +848,100 @@ async fn bind_flow_creates_identity_then_path_a_succeeds() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "token exchange failed: {body}");
+}
+
+/// A private-scheme client completes the whole Path A flow through the HTML
+/// hand-off page rather than a redirect.
+///
+/// The unit tests beside `deliver_authorization_code` already assert the split
+/// on a synthesized URL. They did not catch this route regressing, because
+/// nothing drove the real callback with a private-scheme `redirect_uri` — which
+/// is exactly the gap that let two tests here go from passing to failing
+/// unnoticed. This closes it end to end.
+///
+/// The last step is the point: the code carried in the page's `href` is
+/// redeemed for a real token. A page that renders correctly and carries a code
+/// nobody can spend would satisfy a status assertion and still be broken.
+#[tokio::test]
+#[ignore]
+async fn path_a_hands_a_private_scheme_client_a_page_it_can_use() {
+    let store = store().await;
+    let (app, provider) = app_with_oauth(store.clone());
+
+    let subject = format!("native-subject-{}", Uuid::new_v4());
+    store
+        .bind_identity(TEST_PROVIDER, &subject, Some("owner@example.com"))
+        .await
+        .expect("bind identity");
+
+    let (verifier, challenge) = pkce_pair();
+    let authorize_uri = format!(
+        "/v1/oauth/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&provider={TEST_PROVIDER}&state=native-state-xyz",
+        urlencoding_encode(NATIVE_REDIRECT_URI),
+    );
+    let resp = get_no_body(&app, &authorize_uri).await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let upstream_url = url::Url::parse(
+        resp.headers()
+            .get("location")
+            .expect("Location header")
+            .to_str()
+            .unwrap(),
+    )
+    .expect("upstream redirect is a URL");
+    let upstream_state = query_param(&upstream_url, "state");
+    let upstream_nonce = query_param(&upstream_url, "nonce");
+    let code = provider.issue_code(&subject, Some("owner@example.com"), &upstream_nonce);
+
+    let (status, body) = get_text(
+        &app,
+        &format!("/v1/oauth/{TEST_PROVIDER}/callback?code={code}&state={upstream_state}"),
+    )
+    .await;
+    // Not a redirect: a 302 to a private scheme leaves the browser tab with no
+    // document and it spins forever on a sign-in that already succeeded.
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a private-scheme client must get a page, not a redirect: {body}"
+    );
+    assert!(
+        body.contains("You can close this tab"),
+        "the page must tell the user the tab is finished with: {body}"
+    );
+
+    let target = handoff_target(&body);
+    assert_eq!(target.scheme(), "axon");
+    assert_eq!(query_param(&target, "state"), "native-state-xyz");
+
+    let (status, body) = post_form(
+        &app,
+        "/v1/oauth/token",
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", &query_param(&target, "code")),
+            ("code_verifier", &verifier),
+            ("client_id", CLIENT_ID),
+            ("redirect_uri", NATIVE_REDIRECT_URI),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "token exchange failed: {body}");
+    assert_eq!(body["token_type"], "Bearer");
+}
+
+/// Pull the hand-off URL out of the page the way a browser would: the `href`
+/// attribute, with its HTML entities decoded. Only `&amp;` appears in practice
+/// — the target is already percent-encoded by the time it is escaped — but
+/// decoding it is what makes the query string parse at all.
+fn handoff_target(page: &str) -> url::Url {
+    let start = page
+        .find("id=\"handoff\" href=\"")
+        .map(|i| i + "id=\"handoff\" href=\"".len())
+        .unwrap_or_else(|| panic!("no hand-off link in the page: {page}"));
+    let rest = &page[start..];
+    let end = rest.find('"').expect("unterminated href");
+    url::Url::parse(&rest[..end].replace("&amp;", "&")).expect("hand-off href is a URL")
 }
 
 /// A bind request's `device_code`/`state` can't be completed twice — the
