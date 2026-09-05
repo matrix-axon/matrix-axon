@@ -4,8 +4,10 @@ import type { ApiClient } from '../api/client'
 import { memoryStorage } from '../test/memory-storage'
 import type { AccountsStore } from './accounts'
 import {
+  createMatrixOAuthQrGrantStore,
   createMatrixOAuthQrStore,
   type MatrixOAuthQrFlow,
+  type MatrixOAuthQrGrantFlow,
   type MatrixOAuthQrStore,
 } from './matrix-oauth-qr'
 
@@ -56,7 +58,7 @@ function accountsMock(): AccountsStore {
   }
 }
 
-const stores: MatrixOAuthQrStore[] = []
+const stores: Array<Pick<MatrixOAuthQrStore, 'reset'>> = []
 afterEach(() => {
   for (const store of stores) {
     store.reset()
@@ -334,5 +336,218 @@ describe('MatrixOAuthQrStore', () => {
 
     await store.start('@alice:example.org', 'display')
     expect(store.error.value).toMatch(/homeserver does not support/i)
+  })
+})
+
+function grantFlow(
+  stage: MatrixOAuthQrGrantFlow['stage'] = 'starting',
+  overrides: Partial<MatrixOAuthQrGrantFlow> = {},
+): MatrixOAuthQrGrantFlow {
+  return {
+    flow_id: FLOW_ID,
+    account_id: '30000000-0000-4000-8000-000000000003',
+    presentation: 'scan',
+    stage,
+    ...overrides,
+  }
+}
+
+describe('MatrixOAuthQrGrantStore', () => {
+  it('uses account-scoped routes and persists only the opaque flow id', async () => {
+    const storage = memoryStorage()
+    const api = apiMock()
+    api.POST.mockReturnValueOnce(
+      Promise.resolve({
+        data: { data: grantFlow() },
+        response: response(201),
+      }),
+    ).mockReturnValueOnce(
+      Promise.resolve({
+        data: {
+          data: grantFlow('check_code_to_display', { check_code: '42' }),
+        },
+        response: response(),
+      }),
+    )
+    const store = createMatrixOAuthQrGrantStore(api as unknown as ApiClient, {
+      storage,
+    })
+    stores.push(store)
+
+    await expect(store.start(grantFlow().account_id, 'scan')).resolves.toBe(
+      true,
+    )
+    expect(api.POST).toHaveBeenNthCalledWith(
+      1,
+      '/v1/accounts/{account_id}/login-grants/qr',
+      expect.objectContaining({
+        params: { path: { account_id: grantFlow().account_id } },
+        body: { presentation: 'scan' },
+      }),
+    )
+    expect(storage.length).toBe(1)
+    expect(storage.getItem('axon.matrix-oauth-qr-grant.flow-id')).toBe(FLOW_ID)
+    expect(
+      Array.from({ length: storage.length }, (_, index) => storage.key(index)),
+    ).toEqual(['axon.matrix-oauth-qr-grant.flow-id'])
+
+    await expect(store.submitScan('AAH-_w')).resolves.toBe(true)
+    expect(api.POST).toHaveBeenNthCalledWith(
+      2,
+      '/v1/accounts/{account_id}/login-grants/qr/{flow_id}/scan',
+      expect.objectContaining({
+        params: {
+          path: {
+            account_id: grantFlow().account_id,
+            flow_id: FLOW_ID,
+          },
+        },
+        body: { qr_code_data: 'AAH-_w' },
+      }),
+    )
+  })
+
+  it('recovers by probing known account scopes serially', async () => {
+    const storage = memoryStorage({
+      'axon.matrix-oauth-qr-grant.flow-id': FLOW_ID,
+    })
+    const api = apiMock()
+    api.GET.mockResolvedValueOnce({
+      error: { error: { code: 'not_found', message: 'unknown flow' } },
+      response: response(404),
+    }).mockResolvedValueOnce({
+      data: {
+        data: grantFlow('waiting_for_authorization', {
+          account_id: '40000000-0000-4000-8000-000000000004',
+          verification_uri: 'https://auth.example.org/device',
+        }),
+      },
+      response: response(),
+    })
+    const store = createMatrixOAuthQrGrantStore(api as unknown as ApiClient, {
+      storage,
+    })
+    stores.push(store)
+
+    await expect(
+      store.resume([
+        '30000000-0000-4000-8000-000000000003',
+        '40000000-0000-4000-8000-000000000004',
+      ]),
+    ).resolves.toBe(true)
+    expect(api.GET).toHaveBeenCalledTimes(2)
+    expect(
+      api.GET.mock.calls.map((call) => call[1].params.path.account_id),
+    ).toEqual([
+      '30000000-0000-4000-8000-000000000003',
+      '40000000-0000-4000-8000-000000000004',
+    ])
+    expect(store.flow.value?.account_id).toBe(
+      '40000000-0000-4000-8000-000000000004',
+    )
+  })
+
+  it('retries the outstanding account scopes after an inconclusive probe', async () => {
+    vi.useFakeTimers()
+    const storage = memoryStorage({
+      'axon.matrix-oauth-qr-grant.flow-id': FLOW_ID,
+    })
+    const api = apiMock()
+    api.GET.mockResolvedValueOnce({
+      error: { error: { code: 'not_found', message: 'unknown flow' } },
+      response: response(404),
+    })
+      .mockResolvedValueOnce({
+        error: { error: { code: 'upstream', message: 'try again' } },
+        response: response(503),
+      })
+      .mockResolvedValueOnce({
+        data: {
+          data: grantFlow('waiting_for_authorization', {
+            account_id: '40000000-0000-4000-8000-000000000004',
+            verification_uri: 'https://auth.example.org/device',
+          }),
+        },
+        response: response(),
+      })
+    const store = createMatrixOAuthQrGrantStore(api as unknown as ApiClient, {
+      storage,
+      transportBackoffMs: 1,
+    })
+    stores.push(store)
+
+    await expect(
+      store.resume([
+        '30000000-0000-4000-8000-000000000003',
+        '40000000-0000-4000-8000-000000000004',
+      ]),
+    ).resolves.toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(
+      api.GET.mock.calls.map((call) => call[1].params.path.account_id),
+    ).toEqual([
+      '30000000-0000-4000-8000-000000000003',
+      '40000000-0000-4000-8000-000000000004',
+      '40000000-0000-4000-8000-000000000004',
+    ])
+    expect(store.flow.value?.account_id).toBe(
+      '40000000-0000-4000-8000-000000000004',
+    )
+  })
+
+  it('polls the owning account serially and stops after completion', async () => {
+    vi.useFakeTimers()
+    const storage = memoryStorage()
+    const api = apiMock()
+    api.POST.mockResolvedValue({
+      data: { data: grantFlow('starting') },
+      response: response(201),
+    })
+    api.GET.mockResolvedValue({
+      data: { data: grantFlow('done') },
+      response: response(),
+    })
+    const store = createMatrixOAuthQrGrantStore(api as unknown as ApiClient, {
+      storage,
+      pollDelayMs: 1,
+    })
+    stores.push(store)
+
+    await store.start(grantFlow().account_id, 'scan')
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(api.GET).toHaveBeenCalledTimes(1)
+    expect(api.GET).toHaveBeenCalledWith(
+      '/v1/accounts/{account_id}/login-grants/qr/{flow_id}',
+      expect.objectContaining({
+        params: {
+          path: {
+            account_id: grantFlow().account_id,
+            flow_id: FLOW_ID,
+          },
+        },
+      }),
+    )
+    expect(store.flow.value?.stage).toBe('done')
+    expect(storage.length).toBe(0)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(api.GET).toHaveBeenCalledTimes(1)
+  })
+
+  it('turns a missing-device terminal state into expected-account guidance', async () => {
+    const api = apiMock()
+    api.POST.mockResolvedValue({
+      data: {
+        data: grantFlow('failed', { error_code: 'device_not_found' }),
+      },
+      response: response(201),
+    })
+    const store = createMatrixOAuthQrGrantStore(api as unknown as ApiClient)
+    stores.push(store)
+
+    await store.start(grantFlow().account_id, 'display')
+    expect(store.error.value).toMatch(/expected account/i)
+    expect(store.error.value).toMatch(/device was provisioned/i)
   })
 })

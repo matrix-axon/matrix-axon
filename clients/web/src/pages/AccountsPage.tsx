@@ -21,6 +21,7 @@ import {
 import { isTerminalMatrixOAuthQrFlow } from '../stores/matrix-oauth-qr'
 import { ServerStatus } from './ServerStatus'
 import { MatrixOAuthQrAcquisition } from './accounts/MatrixOAuthQrAcquisition'
+import { MatrixOAuthQrGrant } from './accounts/MatrixOAuthQrGrant'
 
 /**
  * The account lifecycle page (ADR 0046, M-W3): list with state and
@@ -87,6 +88,7 @@ export function AccountsPage() {
           ))}
         </ul>
       )}
+      <MatrixOAuthQrGrant />
       <AccountAcquisition
         reactivation={acquisition.reactivation}
         method={acquisition.method}

@@ -8,7 +8,11 @@ import {
   useRef,
   useState,
 } from 'preact/hooks'
-import { Lightbox, LightboxImage } from '../components/Lightbox'
+import {
+  Lightbox,
+  LightboxImage,
+  type LightboxImageOutcome,
+} from '../components/Lightbox'
 import { MediaCaption } from '../components/MediaCaption'
 import { imageSequence, type LightboxItem } from './image-sequence'
 import { useMediaBlob } from './use-media-blob'
@@ -169,10 +173,19 @@ export function MediaViewerProvider({
     message: string
   } | null>(null)
   /**
-   * Whether the open image's bytes decoded. Reset by `LightboxImage` on every
-   * new object, so paging never carries one image's verdict onto the next.
+   * How the open image's display attempt ended. Reset by `LightboxImage` on
+   * every new object, so paging never carries one image's verdict onto the
+   * next.
    */
-  const [decoded, setDecoded] = useState(false)
+  const [outcome, setOutcome] = useState<LightboxImageOutcome>('pending')
+  /**
+   * Whether saving the open object is worth offering. A displayed image
+   * obviously is; so is one that would not decode but is identifiably HEIC or
+   * similar, where downloading it to open elsewhere is the only remedy left.
+   * Bytes that decoded as nothing recognisable are most likely ciphertext, and
+   * saving those is worse than offering nothing (ADR 0101).
+   */
+  const saveable = outcome === 'displayed' || outcome === 'unsupported-format'
   const [pendingOlder, setPendingOlder] = useState(false)
   const [autoPages, setAutoPages] = useState(0)
   const [loadingOlder, setLoadingOlder] = useState(false)
@@ -583,7 +596,7 @@ export function MediaViewerProvider({
           saveError={shownSaveError}
           actionError={deleteError}
           onSave={
-            decoded && isDownloadable(item.media)
+            saveable && isDownloadable(item.media)
               ? () => void save(item)
               : undefined
           }
@@ -594,9 +607,8 @@ export function MediaViewerProvider({
           <LightboxImage
             key={item.media.url}
             accountId={item.accountId ?? accountId}
-            mxcUrl={item.media.url}
-            alt={item.media.caption ?? item.media.filename}
-            onDecoded={setDecoded}
+            media={item.media}
+            onOutcome={setOutcome}
           />
           {preloadable.map((neighbour) => (
             <LightboxPreload
