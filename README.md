@@ -89,12 +89,12 @@ See the [architecture diagram](docs/mvp/tech-spec.md#architecture-overview) for 
 
 ## Clients
 
-| Client                              | Platform                                        | Status                        |
-| ----------------------------------- | ----------------------------------------------- | ----------------------------- |
-| [`axon-tui`](clients/tui/README.md) | Terminal                                        | Active (MVP reference client) |
-| [`axon-web`](clients/web/README.md) | Web browser + Windows/Linux/Mac desktop (Tauri) | Active (nearing MVP)          |
-| `axon-apple`                        | iOS + macOS (shared Swift Package)              | Planned                       |
-| `axon-android`                      | Android                                         | Planned                       |
+| Client                              | Platform                                              | Status                        |
+| ----------------------------------- | ----------------------------------------------------- | ----------------------------- |
+| [`axon-tui`](clients/tui/README.md) | Terminal                                              | Active (MVP reference client) |
+| [`axon-web`](clients/web/README.md) | Web browser + Windows/Linux/Mac desktop (Tauri)       | Active (nearing MVP)          |
+| `axon-desktop`                      | Linux, macOS, Windows (Tauri shell around `axon-web`) | In progress (ADR 0102)        |
+| `axon-mobile`                       | iOS + Android (the same shell)                        | Planned (ADR 0102)            |
 
 See [ADR 0031](docs/adr/0031-client-strategy.md) for the client strategy and sequencing.
 

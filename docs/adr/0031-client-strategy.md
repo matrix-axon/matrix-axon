@@ -1,5 +1,17 @@
 # ADR 0031 — Multi-platform client strategy
 
+## Status
+
+**Superseded in part by ADR 0102.** The "native per platform" decision
+below no longer holds: a single Tauri shell around the `clients/web` dist
+targets macOS, Windows, Linux, iOS and Android, and `clients/apple/` and
+`clients/android/` are withdrawn. The framing that remains current is the
+single `/v1/` contract, the bearer/OAuth auth stance, and the media-proxy
+rule. Individual paragraphs are annotated inline below.
+
+(See also ADR 0053, which corrects this ADR's push-notification and
+Swift-stub claims, and ADR 0046, which resolved its web-framework question.)
+
 ## Context
 
 `axon-tui` proved the `/v1/` API surface during the MVP. The post-MVP roadmap
@@ -54,6 +66,8 @@ form the networking layer (codegen tooling does not exist yet; standing it
 up is part of the iOS roadmap, not something already shipped). Push-token
 registration is deferred, not a day-one concern — see ADR 0053. Directory:
 `clients/apple/` (see macOS entry below).
+*(Superseded by ADR 0102: no Swift client is planned; iOS ships as a Tauri
+target in M-W13.)*
 
 **macOS (desktop): SwiftUI multiplatform, sharing the iOS Swift Package.** The
 iOS project is structured as a Swift Package with a shared `axon-core` library
@@ -61,10 +75,13 @@ iOS project is structured as a Swift Package with a shared `axon-core` library
 macOS target reuses `axon-core` with a native macOS SwiftUI UI — not
 Mac Catalyst. Both live under `clients/apple/` as targets within the same
 package.
+*(Superseded by ADR 0102: macOS ships as a Tauri target in M-W12.)*
 
 **Android client: Kotlin + Jetpack Compose, targeting Android 10 (API 29)+.**
 FCM push-token registration is a day-one concern in the client architecture,
 mirroring the iOS stance above. Directory: `clients/android/`.
+*(Superseded by ADR 0102: no Kotlin client is planned; Android ships as a
+Tauri target in M-W13.)*
 
 **Windows / Linux desktop: Tauri, delivered alongside the web client.** A
 Tauri shell (`src-tauri/` config directory) wraps the web SPA in a native
@@ -74,6 +91,9 @@ Chromium. The server is already Rust, so Tauri uses the same toolchain
 (`cargo tauri build`). Tauri support lives inside `clients/web/` alongside the
 SPA; no separate directory is needed. Target: ship Windows and Linux desktop
 builds as soon as the web SPA stabilizes, at near-zero marginal cost.
+*(Widened by ADR 0102 to all five targets. The webview inventory here is
+incomplete as a result — add WKWebView for macOS/iOS and Android's System
+WebView — and none of the four has been verified against a real build.)*
 
 **Web client: TypeScript SPA with Vite — framework to be decided.** The SPA
 consumes `/v1/` over `fetch` and the native `WebSocket` API (using the
@@ -81,6 +101,12 @@ consumes `/v1/` over `fetch` and the native `WebSocket` API (using the
 the server; no SSR is required. The web client is the design reference: its
 component library and screen flows inform the mobile clients. Directory:
 `clients/web/`.
+
+> **Amended by ADR 0102 § 2.** That transport is still exactly right for a
+> browser. The packaged shell does not use it: it routes `/v1` through Rust,
+> where an `Authorization` header is available and the subprotocol workaround
+> is unnecessary. And per ADR 0102 the web client is not a reference the mobile
+> clients imitate — it *is* them.
 
 The JavaScript framework is an open question that must be resolved before the
 web client milestone begins:
@@ -108,11 +134,16 @@ the other clients follow. Tauri Windows/Linux desktop ships alongside it at
 near-zero marginal cost. iOS ships second, because APNs is the P0 push target
 and the Swift stubs already exist. Android third, because FCM follows APNs.
 macOS last, because it depends on the iOS Swift Package being stable.
+*(Superseded by ADR 0102 § 7: desktop (M-W12) then mobile (M-W13). The
+rationale given here for iOS-before-Android — that APNs is the P0 push target
+and Swift stubs exist — was already wrong on both counts per ADR 0053.)*
 
 ## Consequences
 
 - Three client codebases: `clients/web/` (SPA + Tauri shell), `clients/apple/`
   (shared Swift Package with iOS and macOS targets), `clients/android/`.
+  *(Superseded by ADR 0102: one codebase, `clients/web/`, with the shell in
+  `clients/web/src-tauri/`.)*
 - ADR 0046 keeps `clients/web/` in this monorepo through the basic browser
   client and parity audit; revisit a separate repo after the SPA is stable.
 - The OpenAPI spec becomes a first-class contract artifact. Breaking changes to
