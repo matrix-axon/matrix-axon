@@ -1,6 +1,10 @@
 import { useState } from 'preact/hooks'
 import { browserPlatform, type Platform } from './platform'
-import { normalizeServerUrl, storeServerUrl } from './server-url'
+import {
+  httpFallbackFor,
+  normalizeServerUrl,
+  storeServerUrl,
+} from './server-url'
 
 /**
  * How long to wait for `/healthz` before giving up. Every outbound call gets a
@@ -53,18 +57,38 @@ export function ServerSetup({
     const abort = new AbortController()
     const timer = setTimeout(() => abort.abort(), PROBE_TIMEOUT_MS)
     try {
-      const res = await platform.fetch(`${normalized}/healthz`, {
-        signal: abort.signal,
-      })
-      if (!res.ok) {
+      // https first, then plain http for a local address the user typed
+      // without a scheme — see `httpFallbackFor`. An explicit scheme is never
+      // second-guessed.
+      const candidates = [normalized, httpFallbackFor(draft, normalized)]
+      let lastStatus: number | null = null
+      for (const candidate of candidates) {
+        if (candidate === null) {
+          continue
+        }
+        let res: Response
+        try {
+          res = await platform.fetch(`${candidate}/healthz`, {
+            signal: abort.signal,
+          })
+        } catch {
+          continue
+        }
+        if (res.ok) {
+          storeServerUrl(storage, candidate)
+          onConnected(candidate)
+          return
+        }
+        lastStatus = res.status
+      }
+      if (lastStatus !== null) {
         setStatus({
           state: 'failed',
-          message: `That address answered with ${res.status}. Is it an Axon server?`,
+          message: `That address answered with ${lastStatus}. Is it an Axon server?`,
         })
         return
       }
-      storeServerUrl(storage, normalized)
-      onConnected(normalized)
+      throw new Error('unreachable')
     } catch {
       // One message for abort, DNS failure, refused connection and TLS error
       // alike: the browser does not tell us which, and the user's next move is

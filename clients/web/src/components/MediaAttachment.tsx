@@ -47,7 +47,7 @@ export function MediaAttachment({
   /** Event `content`, so a caption with `formatted_body` can use it. */
   content?: unknown
 }) {
-  const { media: service } = useServices()
+  const { media: service, platform } = useServices()
   const [downloading, setDownloading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
@@ -62,7 +62,7 @@ export function MediaAttachment({
   const download = async () => {
     setDownloading(true)
     setError(null)
-    const outcome = await downloadMedia(service, accountId, media)
+    const outcome = await downloadMedia(service, accountId, media, platform)
     setDownloading(false)
     if (outcome === 'failed') {
       setError('Download failed')

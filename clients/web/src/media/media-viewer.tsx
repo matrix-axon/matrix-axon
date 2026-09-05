@@ -146,7 +146,7 @@ export function MediaViewerProvider({
   actions?: MediaViewerActions
   children: ComponentChildren
 }) {
-  const { media: mediaService } = useServices()
+  const { media: mediaService, platform } = useServices()
   const [cursor, setCursor] = useState<Cursor | null>(null)
   /** Which way the reader last moved, for aiming the preloads. 0 until a step. */
   const [direction, setDirection] = useState<-1 | 0 | 1>(0)
@@ -275,6 +275,7 @@ export function MediaViewerProvider({
         mediaService,
         target.accountId ?? accountId,
         target.media,
+        platform,
       )
       if (!mounted.current) {
         return
@@ -284,7 +285,7 @@ export function MediaViewerProvider({
         setSaveError({ eventId: target.eventId, message: 'Save failed' })
       }
     },
-    [mediaService, accountId],
+    [mediaService, accountId, platform],
   )
 
   const closeThen = useCallback(

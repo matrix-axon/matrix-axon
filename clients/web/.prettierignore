@@ -6,3 +6,7 @@ src/api/schema.d.ts
 public/emoji-picker-data-en.json
 # Demo recording output (ADR 0086); Playwright writes it, nobody reads the JSON.
 demo-artifacts/
+# Rust crate for the native shell (ADR 0102, M-W12): cargo build output and
+# generated schemas, neither of which is ours to format.
+src-tauri/target/
+src-tauri/gen/

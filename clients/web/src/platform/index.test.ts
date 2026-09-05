@@ -54,3 +54,72 @@ describe('browserPlatform', () => {
     ;(globalThis as { WebSocket?: unknown }).WebSocket = original
   })
 })
+
+describe('browserPlatform saving a file', () => {
+  const blob = () => new Blob(['bytes'], { type: 'image/png' })
+
+  it('uses a transient anchor when no share sheet takes files', async () => {
+    // The sanctioned path: `window.open` is banned repo-wide, so there is no
+    // "open it in a tab and save from there" fallback behind this.
+    const clicks: HTMLAnchorElement[] = []
+    const original = HTMLAnchorElement.prototype.click
+    HTMLAnchorElement.prototype.click = function () {
+      clicks.push(this as HTMLAnchorElement)
+    }
+    try {
+      const outcome = await browserPlatform().saveFile({
+        blob: blob(),
+        filename: 'cat.png',
+        mimetype: 'image/png',
+      })
+      expect(outcome).toBe('saved')
+      expect(clicks).toHaveLength(1)
+      expect(clicks[0].download).toBe('cat.png')
+    } finally {
+      HTMLAnchorElement.prototype.click = original
+    }
+  })
+
+  it('offers the share sheet first where one takes files', async () => {
+    const share = vi.fn(() => Promise.resolve())
+    const nav = navigator as unknown as Record<string, unknown>
+    nav.share = share
+    nav.canShare = () => true
+    try {
+      const outcome = await browserPlatform().saveFile({
+        blob: blob(),
+        filename: 'cat.png',
+        mimetype: 'image/png',
+      })
+      // On a phone the anchor lands the file in Files rather than Photos,
+      // which reads as the save having failed.
+      expect(outcome).toBe('shared')
+      expect(share).toHaveBeenCalled()
+    } finally {
+      delete nav.share
+      delete nav.canShare
+    }
+  })
+
+  it('reports a dismissed share sheet as cancelled, not failed', async () => {
+    const nav = navigator as unknown as Record<string, unknown>
+    nav.share = () =>
+      Promise.reject(new DOMException('dismissed', 'AbortError'))
+    nav.canShare = () => true
+    try {
+      // Someone who changed their mind must not be shown an error.
+      await expect(
+        browserPlatform().saveFile({ blob: blob(), filename: 'cat.png' }),
+      ).resolves.toBe('cancelled')
+    } finally {
+      delete nav.share
+      delete nav.canShare
+    }
+  })
+
+  it('leaves external links to the anchor', () => {
+    // `null` is the statement that the browser default is already correct.
+    // Anything else would break middle-click and modifier-click.
+    expect(browserPlatform().openExternal).toBeNull()
+  })
+})

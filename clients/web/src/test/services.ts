@@ -1,9 +1,9 @@
-import { browserPlatform } from '../platform'
 import { signal } from '@preact/signals'
 import { createApiClient } from '../api/client'
 import { createCompositeAuthProvider } from '../auth/composite'
 import type { OAuthProviderConfig } from '../auth/oauth'
 import type { CacheStore } from '../stores/cache-store'
+import { browserPlatform } from '../platform'
 import {
   connectCacheReset,
   connectCacheSetting,

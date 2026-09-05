@@ -267,6 +267,21 @@ Cache headers follow from the same distinction: `/assets/*` is content-hashed
 and can be `immutable`, while `index.html`, `version.json`, and the manifest
 change under a fixed name and must be revalidated.
 
+## Desktop shell (Tauri)
+
+The same `dist` is packaged as a native desktop app by the Tauri shell in
+`src-tauri/` (ADR 0102, M-W12). Build it from this directory through the Tauri
+CLI, never bare `cargo`:
+
+```sh
+pnpm tauri dev     # dev loop, hot reload
+pnpm tauri build   # release binary + installers
+```
+
+[`src-tauri/README.md`](src-tauri/README.md) has the rest: why `cargo` on its
+own produces a binary with no frontend in it, the Linux build dependencies, and
+why the shell is its own cargo workspace rather than a member of the root one.
+
 ## SSO sign-in
 
 The web client consumes Axon's OAuth authorization-code + PKCE flow

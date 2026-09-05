@@ -106,6 +106,30 @@ CASES: list[tuple[str, set[str]]] = [
         "crates/axon-store/migrations/20260101000000_init.sql",
         {"rustfmt", "rust-clippy", "cargo-test"},
     ),
+    # The Tauri shell (ADR 0102, M-W12) is its own cargo workspace, excluded
+    # from the root one, so it reaches the *shell* rust hooks and neither the
+    # workspace rust hooks nor the pnpm hooks. Getting either half wrong is
+    # silent: a src-tauri edit would either escape every gate, or drag a full
+    # `pnpm build` behind a change to a Rust file it does not affect.
+    (
+        "clients/web/src-tauri/src/lib.rs",
+        {"shell-fmt", "shell-clippy", "shell-test"},
+    ),
+    (
+        "clients/web/src-tauri/Cargo.toml",
+        {"shell-fmt", "shell-clippy", "shell-test"},
+    ),
+    # tauri.conf.json is a compile-time input: `tauri::generate_context!()`
+    # embeds it, so changing it changes the binary. It is also prettier's.
+    (
+        "clients/web/src-tauri/tauri.conf.json",
+        {"prettier", "shell-fmt", "shell-clippy", "shell-test"},
+    ),
+    # Cargo build output is not ours -- not linted, not formatted, not a gate.
+    ("clients/web/src-tauri/target/debug/build/x/out/__global-api-script.js", set()),
+    # ...but the root workspace's own manifest still gates the workspace hooks
+    # even though it now names src-tauri in `exclude`.
+    ("Cargo.toml", {"rustfmt", "rust-clippy", "cargo-test"}),
     # .cargo/config.toml can carry rustflags and target overrides, so it is a
     # rust build input even though it holds only aliases today.
     (".cargo/config.toml", {"rustfmt", "rust-clippy", "cargo-test"}),
@@ -182,6 +206,7 @@ SKIP_EXAMPLE = re.compile(r"SKIP=([a-z][a-z0-9-]*)")
 FAIL_FAST_GATES = {
     "rustfmt": ("rust-clippy", "cargo-test"),
     "web-lint": ("web-test", "web-build"),
+    "shell-fmt": ("shell-clippy", "shell-test"),
 }
 
 

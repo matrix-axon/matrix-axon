@@ -243,6 +243,22 @@ export default defineConfig({
   server: {
     allowedHosts,
     proxy: axonProxy,
+    watch: {
+      // `src-tauri/` is a Rust crate (ADR 0102, M-W12) that lives inside this
+      // package, so Vite's watcher walks into it by default — including
+      // `target/`, which is tens of thousands of build artifacts and gigabytes
+      // of them. Nothing under here is a frontend source, and the Tauri CLI
+      // watches the Rust side itself.
+      //
+      // On Linux that is merely wasteful. On Windows a running executable is
+      // locked, so `fs.watch` on `target/debug/deps/axon_shell.exe` throws
+      // EBUSY and takes the whole dev server down — intermittently, because it
+      // depends on whether a previous build's binary is still running when the
+      // watcher reaches that file. `pnpm tauri dev` then dies with
+      // "beforeDevCommand terminated with a non-zero status code", pointing at
+      // nothing that looks like a cause.
+      ignored: ['**/src-tauri/**'],
+    },
   },
   // Besides the demo lane the proxy above was written for, `preview` is how
   // startup is *measured*: `pnpm dev` serves hundreds of unbundled ES modules,

@@ -94,14 +94,6 @@ import { createBrowserQrAdapter, type BrowserQrAdapter } from './qr/browser-qr'
  * an in-memory storage; components never construct services themselves.
  */
 export interface AppServices {
-  /**
-   * The transport this graph was built on (ADR 0102 § 2).
-   *
-   * Exposed because constructing one at a call site gives the *browser's*
-   * answer regardless of what the app is running inside — which silently hid
-   * the "Change server" panel in the only build that can use it.
-   */
-  platform: Platform
   auth: CompositeAuthProvider
   api: ApiClient
   settings: SettingsStore
@@ -162,6 +154,13 @@ export interface AppServices {
    * the thread panel's composer deliberately ignores it.
    */
   composerFocus: Signal<number>
+  /**
+   * How this build leaves the page (ADR 0102 § 2). Exposed on the graph so
+   * components can reach it — saving an attachment and opening an external
+   * link both need the shell's help in a packaged build and neither has a
+   * working browser default there.
+   */
+  platform: Platform
 }
 
 /**
@@ -1042,7 +1041,6 @@ export function createServices(
   connectUpdateChecks(live, updates)
   connectAttachmentReset(auth, attachments)
   return {
-    platform,
     auth,
     api,
     media,
@@ -1069,6 +1067,7 @@ export function createServices(
     activeRoom,
     activeThread,
     composerFocus,
+    platform,
   }
 }
 

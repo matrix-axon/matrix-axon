@@ -5,7 +5,17 @@ import prettier from 'eslint-config-prettier'
 import globals from 'globals'
 
 export default tseslint.config(
-  { ignores: ['dist/', 'src/api/schema.d.ts'] },
+  {
+    // `src-tauri` is a Rust crate (ADR 0102, M-W12). Its `target/` holds
+    // cargo build output, including JavaScript that tauri-build generates and
+    // embeds — not ours to lint, and `gen/` is generated schemas.
+    ignores: [
+      'dist/',
+      'src/api/schema.d.ts',
+      'src-tauri/target/',
+      'src-tauri/gen/',
+    ],
+  },
   js.configs.recommended,
   tseslint.configs.recommended,
   {
