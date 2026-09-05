@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
+import {
+  cleanup,
+  fireEvent,
+  render,
+  waitFor,
+  type RenderResult,
+} from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import { LocationProvider } from 'preact-iso'
@@ -340,7 +346,10 @@ function pickFile(input: HTMLInputElement): void {
  * a click on a disabled button is silently a no-op — so wait for the gate to
  * actually open rather than clicking into the void.
  */
-async function openEditor(view: ReturnType<typeof renderPanel>) {
+async function openEditor(view: {
+  findByRole: RenderResult['findByRole']
+  findByLabelText: RenderResult['findByLabelText']
+}) {
   const button = await view.findByRole('button', { name: 'Edit' })
   await waitFor(() => expect(button.hasAttribute('disabled')).toBe(false))
   fireEvent.click(button)
@@ -924,4 +933,185 @@ it('does not treat a DM peer picture as the room avatar', async () => {
   ).toBe(true)
   // And the editor says why the picture it was showing is not in the form.
   expect(view.container.textContent).toContain('other member')
+})
+
+/** Render the panel with a controllable room, for navigation-style rerenders. */
+function renderSwitchable(onClose = () => {}) {
+  const services = testServices()
+  const members = createMembersStore(services.api, ACCOUNT, FIRST)
+  const tree = (roomId: string, name: string) => (
+    <ServicesContext.Provider value={services}>
+      <LocationProvider>
+        <RoomInfoPanel
+          accountId={ACCOUNT}
+          roomId={roomId}
+          room={room(roomId, name)}
+          roomTitles={new Map()}
+          members={members}
+          onClose={onClose}
+        />
+      </LocationProvider>
+    </ServicesContext.Provider>
+  )
+  const view = render(tree(FIRST, 'First'))
+  return {
+    ...view,
+    show: (id: string, n: string) => view.rerender(tree(id, n)),
+  }
+}
+
+it('confirms before a member DM discards an unsaved edit', async () => {
+  server.use(
+    // Overrides go before the factory: msw takes the first match, and
+    // `handlers()` answers `/members` with an empty list.
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
+      () =>
+        HttpResponse.json({
+          data: [
+            {
+              user_id: '@bob:example.org',
+              membership: 'join',
+              display_name: 'Bob',
+            },
+          ],
+        }),
+    ),
+    ...handlers(),
+  )
+  // The panel does not fetch members itself — `RoomPage` owns that store and
+  // populates it — so seed one here rather than rendering an empty roster.
+  const services = testServices()
+  const members = createMembersStore(services.api, ACCOUNT, FIRST)
+  await members.refresh()
+  const view = render(
+    <ServicesContext.Provider value={services}>
+      <LocationProvider>
+        <RoomInfoPanel
+          accountId={ACCOUNT}
+          roomId={FIRST}
+          room={room(FIRST, 'First')}
+          roomTitles={new Map()}
+          members={members}
+          onClose={() => {}}
+        />
+      </LocationProvider>
+    </ServicesContext.Provider>,
+  )
+  const dm = await view.findByRole('button', { name: /Open DM with Bob/ })
+
+  await openEditor(view)
+  fireEvent.input(view.getByLabelText('Name'), { target: { value: 'Renamed' } })
+  fireEvent.click(dm)
+
+  // Starting a DM navigates away and then closes the panel, so the guard has
+  // to run before the action, not at the onClose it ends with.
+  await view.findByRole('dialog', { name: 'Discard unsaved room settings' })
+})
+
+it('confirms before opening a related room discards an unsaved edit', async () => {
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/space/parents`,
+      () =>
+        HttpResponse.json({
+          data: [
+            {
+              room_id: '!parent:hs',
+              room_type: 'm.space',
+              name: 'Parent Space',
+              canonical: false,
+              via: [],
+            },
+          ],
+        }),
+    ),
+    ...handlers(),
+  )
+  const view = renderPanel(FIRST)
+  await openEditor(view)
+  fireEvent.input(view.getByLabelText('Name'), { target: { value: 'Renamed' } })
+
+  fireEvent.click(
+    await view.findByRole('button', { name: /Parent: Parent Space/ }),
+  )
+  await view.findByRole('dialog', { name: 'Discard unsaved room settings' })
+
+  // Confirming resumes what it interrupted rather than merely closing.
+  fireEvent.click(view.getByRole('button', { name: 'Discard changes' }))
+  await waitFor(() => expect(view.queryByLabelText('Name')).toBeNull())
+})
+
+it('finishes a save cleanly even when its form is gone', async () => {
+  let release: (() => void) | undefined
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let refreshes = 0
+  const onClose = vi.fn()
+  server.use(
+    http.put(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/name`,
+      async () => {
+        await held
+        return HttpResponse.json({ data: {} })
+      },
+    ),
+    http.get(`${TEST_BASE_URL}/v1/rooms`, () => {
+      refreshes += 1
+      return HttpResponse.json({ data: [] })
+    }),
+    ...handlers(),
+  )
+  const view = renderSwitchable(onClose)
+  fireEvent.click(await view.findByRole('button', { name: 'Edit' }))
+  fireEvent.input(await view.findByLabelText('Name'), {
+    target: { value: 'Renamed' },
+  })
+  fireEvent.click(view.getByRole('button', { name: 'Save' }))
+
+  // Switch rooms while the PUT is still in flight, then let it land.
+  view.show(SECOND, 'Second')
+  await waitFor(() => expect(view.queryByLabelText('Name')).toBeNull())
+  release?.()
+
+  // The socket-down fallback refresh must still run: the write succeeded, so
+  // the room list should reflect it whoever is on screen by now. It is also
+  // the signal that the save has finished unwinding.
+  await waitFor(() => expect(refreshes).toBeGreaterThan(0))
+
+  // Now edit the *new* room and close. If the finished save left the
+  // parent's `settingsSaving` stuck true, the discard guard is skipped and
+  // this second edit vanishes with no confirmation.
+  fireEvent.click(view.getByRole('button', { name: 'Edit' }))
+  fireEvent.input(await view.findByLabelText('Name'), {
+    target: { value: 'Second Rename' },
+  })
+  fireEvent.click(view.getByRole('button', { name: 'Close' }))
+
+  await view.findByRole('dialog', { name: 'Discard unsaved room settings' })
+  expect(onClose).not.toHaveBeenCalled()
+})
+
+it('does not carry a saved-status banner into another room', async () => {
+  server.use(
+    ...handlers(),
+    http.put(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/name`, () =>
+      HttpResponse.json({ data: {} }),
+    ),
+    http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+      HttpResponse.json({ data: [] }),
+    ),
+  )
+  const view = renderSwitchable()
+  fireEvent.click(await view.findByRole('button', { name: 'Edit' }))
+  fireEvent.input(await view.findByLabelText('Name'), {
+    target: { value: 'Renamed' },
+  })
+  fireEvent.click(view.getByRole('button', { name: 'Save' }))
+  await view.findByText(/Saved name\./)
+
+  view.show(SECOND, 'Second')
+  // Nothing was saved in this room; claiming otherwise misattributes it.
+  await waitFor(() => expect(view.queryByText(/Saved name\./)).toBeNull())
 })

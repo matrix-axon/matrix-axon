@@ -360,23 +360,32 @@ export function RoomSettingsForm({
         failed.push('avatar (the image could not be uploaded)')
       }
     }
+    // Both of these run whether or not this form still exists.
+    //
+    // The saving flag is the parent's, and the parent outlives the form: left
+    // stuck `true` by an unmount it would disable the discard confirmation
+    // for whatever room the user moved on to, silently dropping *that* room's
+    // edit.
+    //
+    // The refresh is the socket-down fallback — without it a save that landed
+    // while the socket was down shows nothing until an unrelated refresh
+    // happens by. The writes succeeded regardless of who is still on screen,
+    // so the room list should reflect them either way.
+    onSavingChange?.(false)
+    if (saved.length > 0) {
+      // The authoritative update normally arrives as an `m.room.*` live frame
+      // that `rooms.noteTimelineEvent` patches in; this only covers its
+      // absence. Fire-and-forget: the form's own result does not depend on it.
+      inBackground(rooms.refresh())
+    }
+
     if (!alive.current) {
       // This form is gone — the user switched rooms, or closed the panel.
-      // The writes above were for the room this form was opened on and have
-      // already been issued; only the UI update is dropped.
+      // Only the *local* UI update is dropped: reporting an outcome into a
+      // form that no longer exists, or onto whatever replaced it.
       return
     }
     setBusy(false)
-    onSavingChange?.(false)
-
-    // The authoritative update normally arrives as an `m.room.*` live frame,
-    // which `rooms.noteTimelineEvent` patches into the list. This refresh is
-    // the fallback for when the socket is down — without it a save would
-    // appear to do nothing until the next reconnect. Fire-and-forget: the
-    // form's own result does not depend on it.
-    if (saved.length > 0) {
-      inBackground(rooms.refresh())
-    }
 
     if (failed.length > 0) {
       // Partial success is reported as partial, never as success: some of

@@ -143,11 +143,26 @@ export function RoomInfoPanel({
   const [editingKey, setEditingKey] = useState<string | null>(null)
   const [settingsDirty, setSettingsDirty] = useState(false)
   const [settingsSaving, setSettingsSaving] = useState(false)
-  const [settingsStatus, setSettingsStatus] = useState<string | null>(null)
-  // 'close' also dismisses the panel; 'edit' just leaves edit mode.
-  const [discardIntent, setDiscardIntent] = useState<'close' | 'edit' | null>(
-    null,
-  )
+  // Keyed by room like the rest of this panel's state: `RoomPage` keeps one
+  // instance across navigation, so an unkeyed banner would still read
+  // "Saved name." in the next room the user opened, attributing a change to
+  // a room where nothing happened.
+  const [settingsStatus, setSettingsStatus] = useState<{
+    key: string
+    text: string
+  } | null>(null)
+  /**
+   * A pending exit awaiting "Discard changes?".
+   *
+   * `edit` just leaves edit mode; `proceed` carries the action the user was
+   * trying to take, so confirming resumes it rather than merely closing.
+   * Several exits navigate *and then* close (start a DM with a member, open a
+   * related room), so the check has to happen before the action runs — by the
+   * time `onClose` is reached the navigation has already happened.
+   */
+  const [discardIntent, setDiscardIntent] = useState<
+    { kind: 'edit' } | { kind: 'proceed'; run: () => void } | null
+  >(null)
   const editing = editingKey === roomStateKey
   const [avatarViewerOpen, setAvatarViewerOpen] = useState(false)
   /**
@@ -244,7 +259,7 @@ export function RoomInfoPanel({
           return
         }
         if (settingsDirty) {
-          setDiscardIntent('edit')
+          setDiscardIntent({ kind: 'edit' })
           return
         }
         leaveEditMode(null)
@@ -458,23 +473,32 @@ export function RoomInfoPanel({
     location.route('/', true)
   }
 
-  /** Close, but never silently drop a half-typed rename. */
-  const requestClose = () => {
-    // Not while saving: the requests are already out, so the changes are not
-    // unsaved and "Discard changes?" would be describing something that has
-    // already happened. Closing does not cancel them.
+  /**
+   * Run `action`, confirming first if it would silently drop a half-typed
+   * rename. Every exit from this panel goes through here — closing, starting
+   * a DM with a member, opening a related room — because the guarantee is
+   * only worth anything if it covers all of them.
+   *
+   * Not while saving: the requests are already out, so the changes are not
+   * unsaved and "Discard changes?" would be describing something that has
+   * already happened. Neither closing nor navigating cancels them.
+   */
+  const guardingEdit = (action: () => void) => {
     if (editing && settingsDirty && !settingsSaving) {
-      setDiscardIntent('close')
+      setDiscardIntent({ kind: 'proceed', run: action })
       return
     }
-    onClose()
+    action()
   }
+  const requestClose = () => guardingEdit(onClose)
   const leaveEditMode = (status: string | null) => {
     setEditingKey(null)
     setSettingsDirty(false)
     setSettingsSaving(false)
     setDiscardIntent(null)
-    setSettingsStatus(status)
+    setSettingsStatus(
+      status === null ? null : { key: roomStateKey, text: status },
+    )
   }
 
   const joinLinkedRoom = async (target: {
@@ -537,7 +561,7 @@ export function RoomInfoPanel({
           onDone={leaveEditMode}
           onDirtyChange={setSettingsDirty}
           onSavingChange={setSettingsSaving}
-          onRequestCancel={() => setDiscardIntent('edit')}
+          onRequestCancel={() => setDiscardIntent({ kind: 'edit' })}
         />
       ) : (
         <div class="room-info-identity">
@@ -575,9 +599,9 @@ export function RoomInfoPanel({
           </div>
         </div>
       )}
-      {settingsStatus !== null && (
+      {settingsStatus !== null && settingsStatus.key === roomStateKey && (
         <p class="room-info-status" role="status">
-          {settingsStatus}
+          {settingsStatus.text}
         </p>
       )}
       {!editing && editCaution !== null && (
@@ -673,22 +697,28 @@ export function RoomInfoPanel({
         upgrade={roomState.upgrade}
         errors={roomState.errors}
         status={joinLinkStatus}
-        onOpen={(target, via, label) => {
-          const known = rooms.rooms.value.find(
-            (candidate) =>
-              candidate.account_id === accountId &&
-              candidate.room_id === target,
-          )
-          if (known !== undefined) {
-            location.route(localRoomHref(accountId, target, null))
-            onClose()
-            return
-          }
-          // Opening an unjoined relation means joining it — a membership
-          // change the button label does not imply, so it is confirmed first.
-          setJoinLinkStatus(null)
-          setJoinLink({ roomId: target, via, label })
-        }}
+        onOpen={(target, via, label) =>
+          // Both branches leave this room behind — one by navigating, one by
+          // opening the join dialog that ends in navigation — so the guard
+          // wraps the whole handler rather than each exit inside it.
+          guardingEdit(() => {
+            const known = rooms.rooms.value.find(
+              (candidate) =>
+                candidate.account_id === accountId &&
+                candidate.room_id === target,
+            )
+            if (known !== undefined) {
+              location.route(localRoomHref(accountId, target, null))
+              onClose()
+              return
+            }
+            // Opening an unjoined relation means joining it — a membership
+            // change the button label does not imply, so it is confirmed
+            // first.
+            setJoinLinkStatus(null)
+            setJoinLink({ roomId: target, via, label })
+          })
+        }
       />
 
       <section class="room-info-section" aria-labelledby="room-info-pinned">
@@ -867,7 +897,9 @@ export function RoomInfoPanel({
                       disabled={dmUserId !== null}
                       aria-label={dmLabel}
                       title={dmLabel}
-                      onClick={() => void startDm(member.user_id)}
+                      onClick={() =>
+                        guardingEdit(() => void startDm(member.user_id))
+                      }
                     >
                       <UserAvatar
                         accountId={accountId}
@@ -970,8 +1002,21 @@ export function RoomInfoPanel({
         >
           <LightboxImage
             accountId={accountId}
-            mxcUrl={displayAvatarMxc}
-            alt={`${displayTitle} avatar`}
+            // ADR 0101 widened this to the full descriptor so an undecodable
+            // image can be named precisely. An avatar has no event behind it,
+            // so the fields are synthesised: `filename` is what becomes the
+            // alt text, and the mimetype is genuinely unknown here — `m.room.
+            // avatar` carries `info.mimetype` only when whoever set it
+            // included one, and this panel reads the room summary, not the
+            // state event.
+            media={{
+              kind: 'image',
+              url: displayAvatarMxc,
+              thumbnailUrl: null,
+              filename: `${displayTitle} avatar`,
+              caption: null,
+              encrypted: false,
+            }}
           />
         </Lightbox>
       )}
@@ -979,10 +1024,11 @@ export function RoomInfoPanel({
         <DiscardSettingsDialog
           onCancel={() => setDiscardIntent(null)}
           onConfirm={() => {
-            const alsoClose = discardIntent === 'close'
+            // Captured first: `leaveEditMode` clears the intent.
+            const intent = discardIntent
             leaveEditMode(null)
-            if (alsoClose) {
-              onClose()
+            if (intent !== null && intent.kind === 'proceed') {
+              intent.run()
             }
           }}
         />

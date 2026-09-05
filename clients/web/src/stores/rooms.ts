@@ -236,7 +236,11 @@ export function createRoomsStore(
    * silently do nothing.
    */
   let metadataPatchSeq = 0
-  const metadataPatchedAt = new Map<string, number>()
+  /** `roomKey` -> per-field sequence number of the last live patch. */
+  const metadataPatchedAt = new Map<
+    string,
+    Partial<Record<RoomMetadataPatch['field'], number>>
+  >()
   /**
    * Room creation can return before sync has reflected the m.room.name/topic
    * events into `/v1/rooms`. Keep the user's explicit create-room metadata as
@@ -371,19 +375,25 @@ export function createRoomsStore(
     const live = new Map(rooms.value.map((room) => [roomKey(room), room]))
     return incoming.map((room) => {
       const key = roomKey(room)
-      if ((metadataPatchedAt.get(key) ?? 0) <= seqAtStart) {
+      const patchedAt = metadataPatchedAt.get(key)
+      if (patchedAt === undefined) {
         return room
       }
       const patched = live.get(key)
       if (patched === undefined) {
         return room
       }
-      return {
-        ...room,
-        name: patched.name,
-        topic: patched.topic,
-        avatar_url: patched.avatar_url,
+      // Per field, not per room: a live `m.room.name` frame says nothing
+      // about the topic, and this response may legitimately carry a newer
+      // topic set by another client that has not reached this socket yet.
+      // Reverting all three would silently undo it.
+      let kept = room
+      for (const field of ROOM_METADATA_FIELDS) {
+        if ((patchedAt[field] ?? 0) > seqAtStart) {
+          kept = { ...kept, [field]: patched[field] }
+        }
       }
+      return kept
     })
   }
 
@@ -889,18 +899,26 @@ export function createRoomsStore(
   async function settingsMutation(
     call: () => Promise<{ error?: unknown }>,
   ): Promise<RoomSettingsResult> {
+    // Deliberately does not touch the shared `error` signal, unlike the
+    // membership and room-entry mutations beside it. That signal drives the
+    // app-wide banner in `RoomList`, and a room-settings save is reported
+    // inline by the form that issued it — so writing there would duplicate
+    // the message, and *clearing* there would erase somebody else's: a topic
+    // PUT succeeding would wipe the banner for the name PUT that just failed
+    // in the same save, or for an unrelated failure like a broken
+    // `/v1/rooms` fetch. The result is returned instead; the caller owns it.
     try {
       const { error: apiError } = await call()
       if (apiError !== undefined) {
-        const message = apiErrorMessage(apiError)
-        error.value = message
-        return { ok: false, message, code: apiErrorCode(apiError) }
+        return {
+          ok: false,
+          message: apiErrorMessage(apiError),
+          code: apiErrorCode(apiError),
+        }
       }
-      error.value = null
       return { ok: true }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)
-      error.value = message
       return { ok: false, message, code: null }
     }
   }
@@ -1177,7 +1195,11 @@ export function createRoomsStore(
       return
     }
     metadataPatchSeq += 1
-    metadataPatchedAt.set(roomKey(room), metadataPatchSeq)
+    const key = roomKey(room)
+    metadataPatchedAt.set(key, {
+      ...metadataPatchedAt.get(key),
+      [patch.field]: metadataPatchSeq,
+    })
     rooms.value = current.map((entry, i) =>
       i === index ? { ...entry, [patch.field]: patch.value } : entry,
     )
@@ -1352,6 +1374,9 @@ function clearTitleCache(storage: Storage): void {
     // storage can leave the record behind.
   }
 }
+
+/** The `RoomDto` fields a live `m.room.*` state event can set. */
+const ROOM_METADATA_FIELDS = ['name', 'topic', 'avatar_url'] as const
 
 /** One room-metadata field a live `m.room.*` state event sets. */
 export type RoomMetadataPatch =

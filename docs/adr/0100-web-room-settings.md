@@ -202,6 +202,26 @@ out, so the changes are not unsaved; a "Discard changes?" prompt would be
 describing something that has already happened, and closing does not cancel
 them.
 
+**Every exit from the panel goes through the same guard**, not just Close.
+Starting a DM with a member and opening a related room both navigate away and
+_then_ close, so the check has to run before the action rather than at the
+`onClose` it ends with — and confirming resumes the interrupted action rather
+than merely closing. A guarantee that covers only one of three exits is not a
+guarantee.
+
+**Finishing a save is not conditional on the form still existing.** Clearing
+the parent's saving flag and firing the socket-down fallback refresh both run
+even after an unmount: the flag left stuck would disarm the discard guard for
+whatever room the user moved on to, and the refresh exists precisely for the
+case where nothing else will reflect the write. Only the local UI update is
+dropped.
+
+**Save errors stay out of the shared `error` signal.** That signal drives the
+app-wide banner; a settings failure is reported inline by the form that issued
+it. Writing there would duplicate the message and — worse — _clearing_ there
+would erase somebody else's: a topic PUT succeeding would wipe the banner for
+the name PUT that failed in the same save.
+
 ### A refresh must not undo a newer live frame
 
 `setRoomAvatar` returns before the homeserver has told Axon about the new
@@ -212,7 +232,10 @@ response arrives and, replacing the list wholesale, erases it. The upload
 appears to have done nothing.
 
 `doRefresh` therefore records the live-patch counter when it starts and keeps
-name/topic/avatar from any room patched after that point. Only those three
+any _field_ patched after that point — per field, not per room. A live
+`m.room.name` frame says nothing about the topic, and the same response may
+legitimately carry a newer topic set by another client that has not reached
+this socket yet; reverting all three together would silently undo it. Only those three
 fields: everything else on the row is the server's to state, and a stale value
 there self-corrects on the next refresh rather than looking like a write that
 did not happen.
@@ -234,6 +257,17 @@ did not happen.
   cold start can show a stale cached name until the first refresh lands. This
   matches how live previews and unread counts already behave; changing the
   cache-write cadence for one field is not worth it.
+
+## Known follow-ups
+
+- **#343** — `roomMetadataPatch` reimplements the server's own
+  event-to-display-field projection, a third copy that can drift. The
+  suggested direction is a server-pushed resolved metadata frame so clients
+  apply values instead of re-deriving them.
+- **#344** — the three field writes are issued sequentially rather than
+  concurrently, costing ~3x round-trip latency on a full edit. Sequential
+  ordering is what makes the partial-failure report deterministic, so the
+  change needs `Promise.allSettled` plus a fixed reporting order.
 
 ## Out of scope
 

@@ -1272,3 +1272,74 @@ it('ignores a same-type state event under another state key', () => {
   }
   expect(roomMetadataPatch(member)).toBeNull()
 })
+
+it('leaves the app-wide error banner alone on a settings save', async () => {
+  useTitleHandlers()
+  const store = makeStore()
+  await store.refresh()
+  const room = `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(NAMED.room_id)}`
+  server.use(
+    http.put(`${room}/name`, () =>
+      HttpResponse.json(
+        { error: { code: 'forbidden', message: 'nope' } },
+        { status: 403 },
+      ),
+    ),
+    http.put(`${room}/topic`, () => HttpResponse.json({ data: {} })),
+  )
+
+  // A pre-existing banner from something else entirely.
+  store.error.value = 'The room list could not be loaded.'
+
+  const failed = await store.setRoomName(ACCOUNT, NAMED.room_id, 'Nope')
+  expect(failed.ok).toBe(false)
+  // The failure is returned to the caller, which renders it inline; it must
+  // not also seize the app-wide banner.
+  expect(store.error.value).toBe('The room list could not be loaded.')
+
+  const ok = await store.setRoomTopic(ACCOUNT, NAMED.room_id, 'fine')
+  expect(ok.ok).toBe(true)
+  // And a success must not clear somebody else's banner — the exact way a
+  // two-field save used to erase its own first failure.
+  expect(store.error.value).toBe('The room list could not be loaded.')
+})
+
+it('keeps only the live-patched field when a stale refresh lands', async () => {
+  let release: (() => void) | undefined
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let call = 0
+  server.use(
+    http.get(`${BASE_URL}/v1/rooms`, async () => {
+      call += 1
+      if (call === 2) {
+        await held
+        // This response is stale for the name, but carries a topic another
+        // client set that has not reached this socket yet.
+        return HttpResponse.json({
+          data: [{ ...NAMED, topic: 'set elsewhere' }, UNNAMED],
+        })
+      }
+      return HttpResponse.json({ data: [NAMED, UNNAMED] })
+    }),
+    http.get(
+      `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
+      () => HttpResponse.json({ data: [] }),
+    ),
+  )
+  const store = makeStore()
+  await store.refresh()
+
+  const slow = store.refresh()
+  store.noteTimelineEvent(stateEvent('m.room.name', { name: 'Live Name' }))
+  release?.()
+  await slow
+
+  const named = store.rooms.value.find((r) => r.room_id === NAMED.room_id)
+  // The name was patched live and must survive the older response …
+  expect(named?.name).toBe('Live Name')
+  // … but the topic was not, so the response's newer value must stand rather
+  // than being reverted along with it.
+  expect(named?.topic).toBe('set elsewhere')
+})
