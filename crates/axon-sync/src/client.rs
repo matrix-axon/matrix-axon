@@ -26,6 +26,7 @@ use matrix_sdk::{
     },
     config::RequestConfig,
     cross_process_lock::CrossProcessLockConfig,
+    encryption::{BackupDownloadStrategy, EncryptionSettings},
     ruma::OwnedUserId,
     store::RoomLoadSettings,
     Client, ClientBuildError, ClientBuilder, SessionMeta, SessionTokens, SqliteStoreConfig,
@@ -33,8 +34,38 @@ use matrix_sdk::{
 
 use crate::error::{sdk_err, SyncError};
 
-/// The [`ClientBuilder`] every production client is built from, carrying the
-/// settings that must not differ between the first-boot and restore paths.
+/// Apply the [`ClientBuilder`] settings shared by every production client.
+///
+/// Axon retains and searches encrypted history, so receiving the recovery
+/// secret must also restore the backed-up Megolm keys. matrix-rust-sdk defaults
+/// to `Manual`, which leaves pre-login history as UTD after QR secret transfer;
+/// `OneShot` downloads the complete backup once when that secret arrives.
+///
+/// The OAuth acquisition client starts in a staging store and cannot use
+/// [`client_builder`] because it discovers its homeserver from QR data. Keeping
+/// these settings in this lower helper makes the staging and permanent-store
+/// paths identical.
+fn production_encryption_settings() -> EncryptionSettings {
+    EncryptionSettings {
+        backup_download_strategy: BackupDownloadStrategy::OneShot,
+        ..EncryptionSettings::default()
+    }
+}
+
+fn configure_client_builder(builder: ClientBuilder, handle_refresh_tokens: bool) -> ClientBuilder {
+    let builder = builder
+        .with_encryption_settings(production_encryption_settings())
+        .cross_process_store_config(CrossProcessLockConfig::SingleProcess);
+    if handle_refresh_tokens {
+        builder.handle_refresh_tokens()
+    } else {
+        builder
+    }
+}
+
+/// The [`ClientBuilder`] used for production clients whose homeserver URL is
+/// already known, carrying the settings that must not differ between the
+/// first-boot and restore paths.
 /// Automatic refresh is enabled only for OAuth restores: legacy Matrix rows
 /// retain their pre-ADR 0097 unknown-token behavior exactly, while OAuth access
 /// tokens are expected to expire and rotate through their refresh token.
@@ -50,14 +81,10 @@ use crate::error::{sdk_err, SyncError};
 /// disk that lease renewal is a continuous stream of tiny fsync'd writes (~43
 /// KB/s, ~3.7 GB/day) with the server completely idle.
 fn client_builder(homeserver_url: &str, handle_refresh_tokens: bool) -> ClientBuilder {
-    let builder = Client::builder()
-        .homeserver_url(homeserver_url)
-        .cross_process_store_config(CrossProcessLockConfig::SingleProcess);
-    if handle_refresh_tokens {
-        builder.handle_refresh_tokens()
-    } else {
-        builder
-    }
+    configure_client_builder(
+        Client::builder().homeserver_url(homeserver_url),
+        handle_refresh_tokens,
+    )
 }
 
 /// Connections each SDK SQLite store keeps in its pool.
@@ -446,23 +473,23 @@ pub(crate) async fn build_matrix_oauth_acquire_client(
         .await
         .map_err(|_| MatrixOAuthAcquireClientError::LocalStorage)?;
     let timeout = Duration::from_secs(config.matrix_oauth.request_timeout_secs);
-    Client::builder()
-        .server_name_or_homeserver_url(server_name_or_url)
-        .handle_refresh_tokens()
-        .cross_process_store_config(CrossProcessLockConfig::SingleProcess)
-        .request_config(RequestConfig::new().timeout(timeout))
-        .sqlite_store_with_config_and_cache_path(sqlite_config(&staging, store_key), None::<&Path>)
-        .build()
-        .await
-        .map_err(|error| match error {
-            ClientBuildError::AutoDiscovery(_)
-            | ClientBuildError::SlidingSyncVersion(_)
-            | ClientBuildError::Http(_) => MatrixOAuthAcquireClientError::Upstream,
-            ClientBuildError::MissingHomeserver
-            | ClientBuildError::InvalidServerName
-            | ClientBuildError::Url(_) => MatrixOAuthAcquireClientError::Configuration,
-            ClientBuildError::SqliteStore(_) => MatrixOAuthAcquireClientError::LocalStorage,
-        })
+    configure_client_builder(
+        Client::builder().server_name_or_homeserver_url(server_name_or_url),
+        true,
+    )
+    .request_config(RequestConfig::new().timeout(timeout))
+    .sqlite_store_with_config_and_cache_path(sqlite_config(&staging, store_key), None::<&Path>)
+    .build()
+    .await
+    .map_err(|error| match error {
+        ClientBuildError::AutoDiscovery(_)
+        | ClientBuildError::SlidingSyncVersion(_)
+        | ClientBuildError::Http(_) => MatrixOAuthAcquireClientError::Upstream,
+        ClientBuildError::MissingHomeserver
+        | ClientBuildError::InvalidServerName
+        | ClientBuildError::Url(_) => MatrixOAuthAcquireClientError::Configuration,
+        ClientBuildError::SqliteStore(_) => MatrixOAuthAcquireClientError::LocalStorage,
+    })
 }
 
 /// Remove an abandoned pre-account SDK store. Idempotent for cancellation,
@@ -682,13 +709,15 @@ where
 mod tests {
     use super::{
         adopt_matrix_oauth_acquire_staging, client_builder, finish_matrix_oauth_acquire_adoption,
-        matrix_oauth_acquire_previous_dir, matrix_oauth_acquire_root, restore,
-        restore_account_client, sqlite_config, with_staged_store_dir,
+        matrix_oauth_acquire_previous_dir, matrix_oauth_acquire_root,
+        production_encryption_settings, restore, restore_account_client, sqlite_config,
+        with_staged_store_dir,
     };
     use crate::error::SyncError;
     use axon_core::SyncConfig;
     use axon_store::{Account, AccountAuthKind, AccountState, StoredAccountSession};
     use chrono::Utc;
+    use matrix_sdk::encryption::BackupDownloadStrategy;
     use std::path::PathBuf;
     use uuid::Uuid;
 
@@ -730,6 +759,15 @@ mod tests {
             store_key: Some("test-store-key".to_owned()),
             ..SyncConfig::default()
         }
+    }
+
+    #[test]
+    fn production_encryption_settings_download_backup_after_recovery() {
+        let settings = production_encryption_settings();
+        assert_eq!(
+            settings.backup_download_strategy,
+            BackupDownloadStrategy::OneShot
+        );
     }
 
     #[tokio::test]
