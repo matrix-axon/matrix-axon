@@ -6,12 +6,15 @@ import { observeVisible } from './intersection'
 import type {
   MediaFailure,
   MediaHandle,
+  SniffedFormat,
   ThumbnailRequest,
 } from './media-service'
 
 export interface MediaBlobState {
   status: 'idle' | 'loading' | 'ready' | 'error'
   url?: string
+  /** What the bytes actually are, once they have arrived (`sniff.ts`). */
+  format?: SniffedFormat
   error?: MediaFailure
 }
 
@@ -32,12 +35,18 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
     thumbnail?: ThumbnailRequest
     /** See `MediaRequestOptions.contentType` — allowlisted types only. */
     contentType?: string
+    /**
+     * Bump to re-fetch. See `MediaRequestOptions.attempt`: the new value is
+     * part of the cache key, so the effect re-runs, releases the handle it
+     * held, and acquires a freshly minted object URL.
+     */
+    attempt?: number
   } = {},
 ): { ref: RefObject<T>; state: MediaBlobState } {
   const { media } = useServices()
   const ref = useRef<T>(null)
   const [state, setState] = useState<MediaBlobState>({ status: 'idle' })
-  const { eager = false, thumbnail, contentType } = options
+  const { eager = false, thumbnail, contentType, attempt } = options
   const thumbnailWidth = thumbnail?.width
   const thumbnailHeight = thumbnail?.height
   const thumbnailMethod = thumbnail?.method
@@ -77,9 +86,10 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
                   method: thumbnailMethod,
                 },
                 contentType,
+                attempt,
               }
-            : contentType !== undefined
-              ? { contentType }
+            : contentType !== undefined || attempt !== undefined
+              ? { contentType, attempt }
               : undefined,
         )
         .then((acquired) => {
@@ -103,7 +113,11 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
           )
           setState(
             acquired.result.ok
-              ? { status: 'ready', url: acquired.result.url }
+              ? {
+                  status: 'ready',
+                  url: acquired.result.url,
+                  format: acquired.result.format,
+                }
               : { status: 'error', error: acquired.result.error },
           )
         })
@@ -134,6 +148,7 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
     thumbnailHeight,
     thumbnailMethod,
     contentType,
+    attempt,
   ])
 
   return { ref, state }

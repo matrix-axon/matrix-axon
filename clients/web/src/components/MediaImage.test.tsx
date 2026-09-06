@@ -8,7 +8,17 @@ import { TEST_BASE_URL, testServices } from '../test/services'
 import { MediaImage } from './MediaImage'
 
 const ACCOUNT = '11111111-1111-4111-8111-111111111111'
-const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+// Real magic bytes, not a prefix: the media service sniffs the head of every
+// object it fetches, and a truncated signature would sniff as "no known
+// format" — the one verdict these fixtures must not accidentally produce.
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const HEIC = new Uint8Array([
+  0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63,
+])
+/** Bytes matching no image container — the shape ciphertext arrives in. */
+const CIPHERTEXT = new Uint8Array([
+  0x3f, 0x91, 0xd2, 0x0a, 0x7c, 0x44, 0xe8, 0x16, 0x5b, 0x9a, 0x02, 0xff,
+])
 
 function image(overrides: Partial<ParsedMedia> = {}): ParsedMedia {
   return {
@@ -33,17 +43,40 @@ afterEach(() => {
 })
 afterAll(() => server.close())
 
-function serveBytes() {
+function serveBytes(bytes: Uint8Array = PNG) {
   server.use(
     http.get(
       `${TEST_BASE_URL}/v1/media/:account/:server/:media`,
-      () => new HttpResponse(PNG, { headers: { 'content-type': 'image/png' } }),
+      () =>
+        new HttpResponse(bytes, { headers: { 'content-type': 'image/png' } }),
     ),
     http.get(
       `${TEST_BASE_URL}/v1/media/:account/:server/:media/thumbnail`,
-      () => new HttpResponse(PNG, { headers: { 'content-type': 'image/png' } }),
+      () =>
+        new HttpResponse(bytes, { headers: { 'content-type': 'image/png' } }),
     ),
   )
+}
+
+/**
+ * Fail the `<img>` decode for real: the first error only buys a re-fetch, so a
+ * test that wants the failure placeholder has to exhaust the automatic retry.
+ * Re-queries between the two, because the retry mints a new object URL and the
+ * element rendered against the old one is gone.
+ */
+async function failDecodeTwice(
+  findByRole: (role: string) => Promise<HTMLElement>,
+): Promise<string> {
+  const first = await findByRole('img')
+  const firstSrc = first.getAttribute('src')
+  fireEvent.error(first)
+  const second = await waitFor(async () => {
+    const img = await findByRole('img')
+    expect(img.getAttribute('src')).not.toBe(firstSrc)
+    return img
+  })
+  fireEvent.error(second)
+  return second.getAttribute('src') ?? ''
 }
 
 function renderImage(media: ParsedMedia, previewUrl?: string | null) {
@@ -257,70 +290,90 @@ describe('MediaImage', () => {
     expect(await findByText('Could not load image')).toBeTruthy()
   })
 
-  it('shows the ciphertext-fallback placeholder when the image fails to decode', async () => {
-    serveBytes()
-    const { findByRole, findByText, queryByRole } = renderImage(
-      image({ encrypted: true }),
+  it('stays generic for unidentifiable bytes instead of accusing the server', async () => {
+    // These could be the ciphertext-fallback 200, or a format the sniffer does
+    // not carry, or a JSON error body. The client cannot tell, so it does not
+    // say (#359) — it just withholds Download.
+    serveBytes(CIPHERTEXT)
+    const { findByRole, findByText, queryByText } = renderImage(
+      image({ encrypted: true, mimetype: undefined, filename: 'blob' }),
     )
-    const img = await findByRole('img')
-    // The proxy returned a 200 of raw ciphertext; decode fails at the <img>.
-    fireEvent.error(img)
-    expect(
-      await findByText('Encrypted media — server could not decrypt'),
-    ).toBeTruthy()
-    // No Download: these bytes are not a file. Saving them under the event's
-    // own `.png` name hands over something no tool can open, with nothing to
-    // say why. Mirrors the pageable viewer's `saveable` gate (#328 review).
-    expect(queryByRole('button', { name: 'Download' })).toBeNull()
+    await failDecodeTwice(findByRole)
+    expect(await findByText('Could not display this image')).toBeTruthy()
+    expect(queryByText(/decrypt/)).toBeNull()
+    // Download stays available. #328's review withheld it here on the grounds
+    // that unidentifiable bytes are probably ciphertext; that path is
+    // near-unreachable (the proxy 404s or 502s instead), so these are much more
+    // likely a format no table carries — where opening them elsewhere is the
+    // whole remedy.
+    expect(await findByRole('button', { name: 'Download' })).toBeTruthy()
   })
 
-  it('offers no download for undecodable plaintext bytes either', async () => {
-    // The gate is "could we name the format", not "is it encrypted" — an
-    // unidentifiable plaintext object is just as unopenable.
-    serveBytes()
-    const { findByRole, findByText, queryByRole } = renderImage(image())
-    fireEvent.error(await findByRole('img'))
+  it('offers download for unidentifiable plaintext bytes too', async () => {
+    // Encryption never enters into it: bytes arrived either way, and another
+    // application is the only thing left that might open them.
+    serveBytes(CIPHERTEXT)
+    const { findByRole, findByText } = renderImage(
+      image({ mimetype: undefined, filename: 'blob' }),
+    )
+    await failDecodeTwice(findByRole)
     expect(await findByText('Could not display this image')).toBeTruthy()
-    expect(queryByRole('button', { name: 'Download' })).toBeNull()
+    expect(await findByRole('button', { name: 'Download' })).toBeTruthy()
+  })
+
+  it('keeps the sender-declared name when the sniffer does not carry it', async () => {
+    // The regression #360's first round introduced: `sniff.ts` has no DNG, so
+    // these bytes sniff as `null`. Reading that as ciphertext lost both the
+    // format name and the Download that ADR 0101 had put there.
+    serveBytes(CIPHERTEXT)
+    const { findByRole, findByText } = renderImage(
+      image({ mimetype: 'image/x-adobe-dng', filename: 'IMG_0007.dng' }),
+    )
+    await failDecodeTwice(findByRole)
+    expect(
+      await findByText("DNG image — this browser can't display it"),
+    ).toBeTruthy()
+    expect(await findByRole('button', { name: 'Download' })).toBeTruthy()
   })
 
   it('names the format instead of blaming decryption for a HEIC', async () => {
     // The whole point of ADR 0101: an iPhone photo arrives intact and simply
     // will not decode outside WebKit. Reporting that as a decryption failure
     // sent a real investigation after the wrong thing.
-    serveBytes()
+    serveBytes(HEIC)
     const { findByRole, findByText, queryByText } = renderImage(
       image({ mimetype: 'image/heic', filename: 'IMG_4021.HEIC' }),
     )
-    fireEvent.error(await findByRole('img'))
+    await failDecodeTwice(findByRole)
     expect(
       await findByText("HEIC image — this browser can't display it"),
     ).toBeTruthy()
     expect(queryByText('Encrypted media — server could not decrypt')).toBeNull()
   })
 
-  it('names the format from the extension when the sender declared none', async () => {
-    // ADR 0072 found real events carrying `application/octet-stream`; the
-    // filename is then the only signal there is.
-    serveBytes()
+  it('names the format from the bytes when the sender declared none', async () => {
+    // ADR 0072 found real events carrying `application/octet-stream`. The
+    // filename used to be the only signal; the bytes are a better one, and
+    // they are right even when the extension lies.
+    serveBytes(HEIC)
     const { findByRole, findByText } = renderImage(
       image({
         mimetype: 'application/octet-stream',
-        filename: 'IMG_4021.heic',
+        filename: 'holiday-snap.jpg',
       }),
     )
-    fireEvent.error(await findByRole('img'))
+    await failDecodeTwice(findByRole)
     expect(
       await findByText("HEIC image — this browser can't display it"),
     ).toBeTruthy()
   })
 
   it('offers a download from the failure placeholder so the bytes are reachable', async () => {
-    serveBytes()
+    serveBytes(HEIC)
     const { findByRole, findByText } = renderImage(
       image({ mimetype: 'image/heic', filename: 'IMG_4021.HEIC' }),
     )
-    fireEvent.error(await findByRole('img'))
+    await failDecodeTwice(findByRole)
     await findByText("HEIC image — this browser can't display it")
 
     // Count the fetch rather than assert on the button settling: the button is
@@ -342,11 +395,12 @@ describe('MediaImage', () => {
   })
 
   it('reports a failed download rather than looking like it worked', async () => {
-    serveBytes()
+    serveBytes(HEIC)
     const { findByRole, findByText } = renderImage(
       image({ mimetype: 'image/heic', filename: 'IMG_4021.HEIC' }),
     )
-    fireEvent.error(await findByRole('img'))
+    await failDecodeTwice(findByRole)
+    await findByText("HEIC image — this browser can't display it")
     // The download re-fetches, so it is this request that fails — not the one
     // that delivered the bytes we could not decode.
     server.use(
@@ -356,6 +410,116 @@ describe('MediaImage', () => {
     )
     fireEvent.click(await findByRole('button', { name: 'Download' }))
     expect(await findByText('Download failed')).toBeTruthy()
+  })
+
+  it('recovers a transient decode failure on the automatic retry', async () => {
+    // The iPhone case behind issue #359: perfectly good bytes, an <img> that
+    // fell over once. One re-fetch and the picture is back — the reader never
+    // learns anything went wrong.
+    serveBytes()
+    const { findByRole, queryByText } = renderImage(image())
+    const first = await findByRole('img')
+    const firstSrc = first.getAttribute('src')
+    fireEvent.error(first)
+    await waitFor(async () =>
+      expect((await findByRole('img')).getAttribute('src')).not.toBe(firstSrc),
+    )
+    expect(queryByText("Image didn't load")).toBeNull()
+    expect(queryByText('Encrypted media — server could not decrypt')).toBeNull()
+  })
+
+  it('blames the moment, not encryption, when good bytes fail twice', async () => {
+    // A PNG that will not paint is not a decryption failure and not a format
+    // problem — asserting either is what cost a whole investigation.
+    serveBytes()
+    const { findByRole, findByText, queryByText } = renderImage(
+      image({ encrypted: true }),
+    )
+    await failDecodeTwice(findByRole)
+    expect(await findByText("Image didn't load")).toBeTruthy()
+    expect(queryByText(/decrypt/)).toBeNull()
+  })
+
+  it('always offers retry, the only remedy a PWA user has', async () => {
+    // No reload in a standalone PWA: without this button the reader's next
+    // move is force-quitting the app, which is how this was found.
+    serveBytes(CIPHERTEXT)
+    const { findByRole, findByText, queryByText } = renderImage(
+      image({ encrypted: true, mimetype: undefined, filename: 'blob' }),
+    )
+    const failedSrc = await failDecodeTwice(findByRole)
+    await findByText('Could not display this image')
+
+    // Retry re-fetches; serve a real image this time so the recovery is
+    // visible rather than merely attempted.
+    serveBytes()
+    fireEvent.click(await findByRole('button', { name: 'Retry' }))
+
+    // The url that just failed must never be re-mounted. `useMediaBlob` keeps
+    // its previous `ready` state until its effect runs after paint, so
+    // clearing the failure on the click would render the failed blob again —
+    // and a browser re-fires `error` for it before the fresh bytes arrive,
+    // relatching the placeholder over the image the retry fetched.
+    expect(document.querySelector(`img[src="${failedSrc}"]`)).toBeNull()
+    expect(queryByText('Could not display this image')).not.toBeNull()
+
+    const recovered = await findByRole('img')
+    expect(recovered.getAttribute('src')).not.toBe(failedSrc)
+    expect(queryByText('Could not display this image')).toBeNull()
+  })
+
+  it("re-latches on the retry's own url, not the one before it", async () => {
+    // The verdict is keyed to the bytes it was reached on, so a retry that
+    // fails again is reported against *its* url — and Retry keeps working.
+    serveBytes(CIPHERTEXT)
+    const { findByRole, findByText } = renderImage(
+      image({ mimetype: undefined, filename: 'blob' }),
+    )
+    const failedSrc = await failDecodeTwice(findByRole)
+    fireEvent.click(await findByRole('button', { name: 'Retry' }))
+
+    const second = await findByRole('img')
+    expect(second.getAttribute('src')).not.toBe(failedSrc)
+    fireEvent.error(second)
+    expect(await findByText('Could not display this image')).toBeTruthy()
+    expect(await findByRole('button', { name: 'Retry' })).toBeTruthy()
+  })
+
+  it('offers retry when the fetch itself fails, not just the decode', async () => {
+    // One decode glitch plus one network glitch must not rebuild the dead end
+    // this change exists to remove.
+    serveBytes()
+    const { findByRole, findByText } = renderImage(image())
+    // Let the first load land before breaking the route, so it is the
+    // *automatic retry's* fetch that fails and not the original.
+    const img = await findByRole('img')
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/media/:account/:server/:media`, () =>
+        HttpResponse.json({ error: {} }, { status: 503 }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/media/:account/:server/:media/thumbnail`,
+        () => HttpResponse.json({ error: {} }, { status: 503 }),
+      ),
+    )
+    fireEvent.error(img)
+    expect(await findByText('Could not load image')).toBeTruthy()
+    expect(await findByRole('button', { name: 'Retry' })).toBeTruthy()
+
+    serveBytes()
+    fireEvent.click(await findByRole('button', { name: 'Retry' }))
+    expect(await findByRole('img')).toBeTruthy()
+  })
+
+  it('keeps download available for renderable bytes the browser fumbled', async () => {
+    // The dead end in issue #359: a PNG's failure withheld Download, because
+    // the old gate asked whether we could *name* an unrenderable format. These
+    // bytes are a real file, so saving them works.
+    serveBytes()
+    const { findByRole, findByText } = renderImage(image())
+    await failDecodeTwice(findByRole)
+    await findByText("Image didn't load")
+    expect(await findByRole('button', { name: 'Download' })).toBeTruthy()
   })
 
   it('falls back to the full-size image when the thumbnail fails (WCR-18)', async () => {

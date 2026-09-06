@@ -1,11 +1,9 @@
 import type { ComponentChildren } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { useMediaBlob } from '../media/use-media-blob'
+import type { SniffedFormat } from '../media/media-service'
 import type { ParsedMedia } from '../media/parse-media'
-import {
-  imageDecodeFailureMessage,
-  unrenderableImageFormat,
-} from '../media/image-format'
+import { imageDecodeFailureMessage } from '../media/image-format'
 import { useShortcuts } from '../shortcuts'
 import { BodyPortal } from './BodyPortal'
 import { useSwipePaging } from '../media/use-swipe-paging'
@@ -354,14 +352,17 @@ export function Lightbox({
 /**
  * How the open image ended up, for a caller deciding what controls to offer.
  *
- * `unsupported-format` and `undecodable` are both decode failures; they are
- * distinct because only the first tells the reader anything actionable. A HEIC
- * is a real file that another application will open, so Save must stay
- * available; bytes matching no known format are most likely ciphertext, where
- * Save would hand over a broken file (ADR 0101).
+ * ADR 0101 split the failure in two — `unsupported-format` kept Save,
+ * `undecodable` withheld it — on the reasoning that unidentifiable bytes are
+ * most likely the proxy's ciphertext-fallback 200. Tracing that path found it
+ * near-unreachable (see `sniff.ts`): the proxy fails closed with a 404 while an
+ * event is undecrypted, and once decrypted the key is *in* the event, so a
+ * decrypt failure is a 502 and never bytes. Unidentifiable bytes are therefore
+ * far more likely a format no table here carries — exactly the case where
+ * downloading to open elsewhere is the remedy — so the split had no cases left
+ * to separate and both now report as `failed` (#359).
  */
-export type LightboxImageOutcome =
-  'pending' | 'displayed' | 'unsupported-format' | 'undecodable'
+export type LightboxImageOutcome = 'pending' | 'displayed' | 'failed'
 
 export function LightboxImage({
   accountId,
@@ -383,10 +384,21 @@ export function LightboxImage({
    */
   onOutcome?: (outcome: LightboxImageOutcome) => void
 }) {
-  const { state } = useMediaBlob(accountId, media.url, { eager: true })
-  const [failure, setFailure] = useState<
-    'unsupported-format' | 'undecodable' | null
-  >(null)
+  // Retry generation — see `MediaRequestOptions.attempt`. Bumping it re-fetches
+  // under a fresh object URL, which is what recovers the transient WebKit
+  // decode failures that dominate on iOS (issue #359).
+  const [attempt, setAttempt] = useState(0)
+  const autoRetried = useRef(false)
+  const { state } = useMediaBlob(accountId, media.url, {
+    eager: true,
+    attempt,
+  })
+  // Bound to the object url the verdict was reached on — see `MediaImage`,
+  // where the same shape stops a retry re-mounting the url that just failed.
+  const [failure, setFailure] = useState<{
+    url: string
+    format?: SniffedFormat
+  } | null>(null)
   const onOutcomeRef = useRef(onOutcome)
   useEffect(() => {
     onOutcomeRef.current = onOutcome
@@ -394,33 +406,63 @@ export function LightboxImage({
 
   const alt = media.caption ?? media.filename
 
+  const decodeFailed =
+    failure !== null && (state.status !== 'ready' || state.url === failure.url)
+
+  const retry = () => {
+    autoRetried.current = true
+    setAttempt((previous) => previous + 1)
+    onOutcomeRef.current?.('pending')
+  }
+
   // A new object means a fresh verdict — paging must not carry the previous
   // image's failure, or its success, onto the next one.
   useEffect(() => {
+    autoRetried.current = false
     setFailure(null)
+    setAttempt(0)
     onOutcomeRef.current?.('pending')
   }, [media.url])
 
   return (
     <div tabindex={0} class="lightbox-image">
-      {failure !== null ? (
-        <p class="muted placeholder">{imageDecodeFailureMessage(media)}</p>
+      {state.status === 'error' ? (
+        // A failed fetch is its own outcome, and it carries Retry too — one
+        // decode glitch plus one network glitch must not rebuild a dead end.
+        <div class="lightbox-failure">
+          <p class="muted placeholder">Could not load image</p>
+          <button type="button" class="ghost" onClick={retry}>
+            Retry
+          </button>
+        </div>
+      ) : decodeFailed ? (
+        <div class="lightbox-failure">
+          <p class="muted placeholder">
+            {imageDecodeFailureMessage(media, failure?.format)}
+          </p>
+          <button type="button" class="ghost" onClick={retry}>
+            Retry
+          </button>
+        </div>
       ) : state.status === 'ready' && state.url !== undefined ? (
         <img
           src={state.url}
           alt={alt}
           onLoad={() => onOutcomeRef.current?.('displayed')}
           onError={() => {
-            const outcome =
-              unrenderableImageFormat(media) !== null
-                ? 'unsupported-format'
-                : 'undecodable'
-            setFailure(outcome)
-            onOutcomeRef.current?.(outcome)
+            // The first failure buys a re-fetch, not a verdict — see
+            // `MediaImage`, which does the same for the inline thumbnail.
+            if (!autoRetried.current) {
+              retry()
+              return
+            }
+            if (state.url === undefined) {
+              return
+            }
+            setFailure({ url: state.url, format: state.format })
+            onOutcomeRef.current?.('failed')
           }}
         />
-      ) : state.status === 'error' ? (
-        <p class="muted placeholder">Could not load image</p>
       ) : (
         <div class="media-skeleton" aria-hidden="true" />
       )}

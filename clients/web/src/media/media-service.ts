@@ -2,6 +2,7 @@ import { apiErrorMessage } from '../api/client'
 import type { AuthProvider } from '../auth/provider'
 import { browserPlatform, type Platform } from '../platform'
 import { mxcToPath } from './parse-media'
+import { SNIFF_HEAD_BYTES, sniffImageFormat } from './sniff'
 
 /**
  * The media layer (ADR 0064, M-W8).
@@ -22,11 +23,25 @@ import { mxcToPath } from './parse-media'
  */
 
 export type MediaResult =
-  { ok: true; url: string } | { ok: false; error: MediaFailure }
+  | { ok: true; url: string; format?: SniffedFormat }
+  | { ok: false; error: MediaFailure }
 
 /** The outcome of fetching an object's raw bytes (ADR 0072). */
 export type BlobResult =
-  { ok: true; blob: Blob } | { ok: false; error: MediaFailure }
+  | { ok: true; blob: Blob; format?: SniffedFormat }
+  | { ok: false; error: MediaFailure }
+
+/**
+ * What the bytes turned out to be, per [`sniffImageFormat`]: a format name,
+ * `null` for bytes matching no image container we know, or absent when the
+ * sniff could not run at all (a `Blob` without `arrayBuffer`, as some test
+ * doubles are).
+ *
+ * The three states are deliberately distinct — `null` is evidence, `undefined`
+ * is the absence of evidence — and `imageDecodeFailureMessage` says something
+ * different for each.
+ */
+export type SniffedFormat = string | null
 
 /** The outcome of decoding an object as text (ADR 0072). */
 export type TextResult =
@@ -74,6 +89,18 @@ export interface MediaRequestOptions {
    * (`text/html`, `image/svg+xml`) must never reach here.
    */
   contentType?: string
+  /**
+   * Retry generation. Bumping it yields a *different* cache key, so the caller
+   * gets a fresh fetch and a freshly minted object URL rather than the one it
+   * just failed to decode.
+   *
+   * Deliberately a key component rather than a "bypass the cache" flag:
+   * dropping the existing entry would strand the refcount that other holders
+   * of the same object are counting on (`releaseKey` resolves the key back to
+   * an entry, and would decrement the replacement). A new key leaves the old
+   * entry to be released and evicted on its own schedule.
+   */
+  attempt?: number
 }
 
 export interface MediaService {
@@ -170,6 +197,8 @@ export function uploadFailureMessage(failure: MediaFailure): string {
 interface CacheEntry {
   url: string
   refs: number
+  /** Sniffed once, at fetch; every later acquire of this url reuses it. */
+  format?: SniffedFormat
 }
 
 /** A FIFO semaphore: at most `max` holders run, the rest wait in order. */
@@ -221,14 +250,17 @@ export function createMediaService(deps: {
   ) => {
     const thumbnail = options?.thumbnail
     // A re-typed fetch yields a different blob than the raw one, so it needs
-    // its own cache slot even though it hits the same proxy URL.
+    // its own cache slot even though it hits the same proxy URL. A retry needs
+    // one for the opposite reason: the whole point is *not* to be handed back
+    // the object URL that just failed.
     const type = options?.contentType ?? ''
+    const attempt = options?.attempt ?? 0
     if (thumbnail === undefined) {
-      return `${accountId}\0full\0${type}\0${mxc}`
+      return `${accountId}\0full\0${type}\0${attempt}\0${mxc}`
     }
     return `${accountId}\0thumb\0${thumbnail.width}x${thumbnail.height}\0${
       thumbnail.method ?? 'scale'
-    }\0${type}\0${mxc}`
+    }\0${type}\0${attempt}\0${mxc}`
   }
 
   const mediaUrl = (
@@ -257,6 +289,28 @@ export function createMediaService(deps: {
     return `${base}/thumbnail?${params.toString()}`
   }
 
+  /**
+   * Identify a fetched object from its leading bytes, or `undefined` when the
+   * `Blob` cannot produce them.
+   *
+   * Reading the head is the only chance to do this: once the bytes become an
+   * object URL, the caller holds a string, and reading it back through
+   * `fetch()` is neither free nor available under jsdom (the same constraint
+   * that gives `fetchText` its reason to exist). Slices 16 bytes, not the
+   * object, so it costs nothing on a large photo.
+   */
+  async function sniffBlob(blob: Blob): Promise<SniffedFormat | undefined> {
+    try {
+      const head = await blob.slice(0, SNIFF_HEAD_BYTES).arrayBuffer()
+      return sniffImageFormat(new Uint8Array(head))
+    } catch {
+      // A `Blob` without a working `arrayBuffer` — some test doubles, and
+      // older engines. Absent evidence, not evidence of absence: the caller
+      // falls back to the declared mimetype exactly as it did before.
+      return undefined
+    }
+  }
+
   /** Fetch → Blob, without touching the cache. The shared core of every
    *  download: object URL, one-shot download, and text decode. */
   async function fetchBlob(
@@ -283,7 +337,7 @@ export function createMediaService(deps: {
             options?.contentType === undefined
               ? raw
               : new Blob([raw], { type: options.contentType })
-          return { ok: true, blob }
+          return { ok: true, blob, format: await sniffBlob(blob) }
         }
         if (res.status === 401) {
           // Let the provider drop the revoked token, exactly as the API client
@@ -312,7 +366,11 @@ export function createMediaService(deps: {
   ): Promise<MediaResult> {
     const result = await fetchBlob(accountId, mxcUrl, options)
     return result.ok
-      ? { ok: true, url: URL.createObjectURL(result.blob) }
+      ? {
+          ok: true,
+          url: URL.createObjectURL(result.blob),
+          format: result.format,
+        }
       : result
   }
 
@@ -387,7 +445,11 @@ export function createMediaService(deps: {
     if (cached !== undefined) {
       cached.refs += 1
       zeroRef.delete(key)
-      return handleFor(key, { ok: true, url: cached.url })
+      return handleFor(key, {
+        ok: true,
+        url: cached.url,
+        format: cached.format,
+      })
     }
 
     let pending = inflight.get(key)
@@ -396,7 +458,7 @@ export function createMediaService(deps: {
         const result = await download(accountId, mxcUrl, options)
         if (result.ok) {
           // Seed a zero-ref entry; each awaiter registers its own ref below.
-          cache.set(key, { url: result.url, refs: 0 })
+          cache.set(key, { url: result.url, refs: 0, format: result.format })
         }
         return result
       })()
@@ -417,7 +479,7 @@ export function createMediaService(deps: {
     }
     entry.refs += 1
     zeroRef.delete(key)
-    return handleFor(key, { ok: true, url: entry.url })
+    return handleFor(key, { ok: true, url: entry.url, format: entry.format })
   }
 
   function fetchBlobUrl(
