@@ -8918,6 +8918,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The encrypted attachment arrived intact but could not be decrypted (`media_undecryptable`). Terminal — retrying will not help. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Internal media-metadata lookup failure */
             500: {
                 headers: {

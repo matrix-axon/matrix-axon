@@ -764,6 +764,19 @@ async fn assert_media_route_preserves_error_statuses(name_prefix: &str, path_suf
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"]["code"], "service_unavailable");
 
+    // An attachment that arrived intact and would not decrypt is neither a
+    // homeserver failure nor a transient one. It used to be folded into the
+    // `502`, which told a client to retry something that can only ever fail
+    // the same way, and left "the bytes will not decrypt" indistinguishable
+    // from "the homeserver is down" (issue #359).
+    let undecryptable = Arc::new(ConfiguredMediaProxy::failing(MediaOutcome::Undecryptable(
+        "Hash mismatch while decrypting".to_owned(),
+    )));
+    let (status, body) = get(&media_app(store.clone(), undecryptable), &uri).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "media_undecryptable");
+    assert_ne!(status, StatusCode::BAD_GATEWAY);
+
     sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
         .bind(account_id)
         .execute(&pool)

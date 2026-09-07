@@ -47,6 +47,20 @@ pub enum GatewayError {
     /// The homeserver rejected or failed the operation.
     #[error("upstream homeserver error: {0}")]
     Upstream(String),
+
+    /// An encrypted attachment was downloaded intact but could not be
+    /// decrypted: the ciphertext failed its `hashes.sha256` check, or the
+    /// `content.file` descriptor was malformed (bad base64, missing hash,
+    /// unknown `v`).
+    ///
+    /// Deliberately *not* [`Upstream`](Self::Upstream). The homeserver did its
+    /// job and returned the bytes; the failure is local and terminal, so a
+    /// caller that retries an `Upstream` error should not retry this one. It
+    /// used to be folded in, which made a genuine decryption failure
+    /// indistinguishable from a homeserver outage at the API boundary
+    /// (issue #359).
+    #[error("media could not be decrypted: {0}")]
+    Undecryptable(String),
 }
 
 impl From<SyncError> for GatewayError {

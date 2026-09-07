@@ -34,6 +34,15 @@ pub enum MediaError {
     /// The caller is expected to log the detail (with `account_id`) before
     /// converting, since the `500` body is generic.
     Internal(String),
+    /// The object was downloaded intact but could not be decrypted — a failed
+    /// `hashes.sha256` check, or a malformed `content.file` descriptor. → `422`.
+    ///
+    /// Separate from [`Upstream`](Self::Upstream), which it used to be folded
+    /// into, for two reasons: the homeserver did nothing wrong, and this is
+    /// *terminal* — a retry re-fetches the same ciphertext and fails
+    /// identically — so a client that retries a `502` must not retry this
+    /// (issue #359).
+    Undecryptable(String),
 }
 
 impl From<MediaError> for crate::response::ApiError {
@@ -46,6 +55,7 @@ impl From<MediaError> for crate::response::ApiError {
             MediaError::Upstream(msg) => Self::bad_gateway(msg),
             MediaError::TooLarge(msg) => Self::payload_too_large(msg),
             MediaError::Internal(_) => Self::internal(),
+            MediaError::Undecryptable(msg) => Self::media_undecryptable(msg),
         }
     }
 }

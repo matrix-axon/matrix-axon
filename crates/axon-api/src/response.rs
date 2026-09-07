@@ -107,6 +107,24 @@ impl ApiError {
         Self::new(StatusCode::BAD_GATEWAY, "bad_gateway", message)
     }
 
+    /// `422 Unprocessable Entity` — an encrypted attachment arrived intact but
+    /// would not decrypt (issue #359).
+    ///
+    /// Not a `502`: the homeserver served exactly what was asked of it, and the
+    /// failure is ours to report, not its fault. Not a `500` either — nothing
+    /// is broken, the ciphertext simply does not match its `hashes.sha256` or
+    /// its descriptor is malformed. `422` says the request was well-formed and
+    /// the referenced entity could not be processed, which is precisely the
+    /// case, and the distinct `media_undecryptable` code lets a client say so
+    /// as fact and suppress a retry that can never succeed.
+    pub fn media_undecryptable(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "media_undecryptable",
+            message,
+        )
+    }
+
     /// `504 Gateway Timeout` — a send mutation didn't complete within its
     /// configured timeout (ADR 0030 decision #4, issue #241): the SDK gateway
     /// call is still outstanding, not rejected. Distinct from `bad_gateway`

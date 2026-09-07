@@ -22,6 +22,7 @@ use matrix_sdk::ruma::{
     api::error::ErrorKind,
     events::room::{EncryptedFile, MediaSource},
 };
+use matrix_sdk::Error as SdkError;
 use uuid::Uuid;
 
 use crate::error::GatewayError;
@@ -62,12 +63,12 @@ impl SdkMediaProxy {
         // When the event carries a `content.file` object the media is encrypted;
         // deserialize it into ruma's `EncryptedFile` so the SDK can download and
         // decrypt in one step. Fall back to plain download otherwise.
-        let source = if let Some(file_json) = encrypted_file {
+        let (source, encrypted) = if let Some(file_json) = encrypted_file {
             let enc: EncryptedFile = serde_json::from_value(file_json)
                 .map_err(|e| GatewayError::Invalid(format!("invalid encrypted file: {e}")))?;
-            MediaSource::Encrypted(Box::new(enc))
+            (MediaSource::Encrypted(Box::new(enc)), true)
         } else {
-            MediaSource::Plain(mxc_url.into())
+            (MediaSource::Plain(mxc_url.into()), false)
         };
 
         let request = MediaRequestParameters {
@@ -88,13 +89,7 @@ impl SdkMediaProxy {
                     self.fetch_timeout.as_secs()
                 ))
             })?
-            .map_err(|error| {
-                if error.client_api_error_kind() == Some(&ErrorKind::NotFound) {
-                    GatewayError::MediaNotFound(mxc_url.to_owned())
-                } else {
-                    GatewayError::Upstream(error.to_string())
-                }
-            })?;
+            .map_err(|error| classify_download_error(mxc_url, encrypted, error))?;
 
         Ok(data)
     }
@@ -139,13 +134,7 @@ impl SdkMediaProxy {
                     self.fetch_timeout.as_secs()
                 ))
             })?
-            .map_err(|error| {
-                if error.client_api_error_kind() == Some(&ErrorKind::NotFound) {
-                    GatewayError::MediaNotFound(mxc_url.to_owned())
-                } else {
-                    GatewayError::Upstream(error.to_string())
-                }
-            })?;
+            .map_err(|error| classify_download_error(mxc_url, false, error))?;
 
         Ok(data)
     }
@@ -185,6 +174,29 @@ impl MediaFetcher for SdkMediaProxy {
     }
 }
 
+/// Sort a failed download into "the homeserver let us down" and "the bytes are
+/// there but will not decrypt" — a distinction the API boundary needs, because
+/// only the first is worth retrying (issue #359).
+///
+/// `encrypted` is what makes this reliable without matching on error strings.
+/// On the encrypted path `get_media_content` (matrix-sdk 0.18) does exactly two
+/// fallible things after the HTTP fetch: it builds an `AttachmentDecryptor`,
+/// whose failures are `DecryptorError` (bad base64, missing hash, unknown `v`),
+/// and it `read_to_end`s through it, whose failures are the decryptor's own
+/// `io::Error` — the `"Hash mismatch while decrypting"` that a wrong key or
+/// corrupted ciphertext produces. Transport failures surface as HTTP variants,
+/// not `Io`. On the plain path there is no decryptor at all, so neither variant
+/// can mean decryption and both stay `Upstream`.
+fn classify_download_error(mxc_url: &str, encrypted: bool, error: SdkError) -> GatewayError {
+    if error.client_api_error_kind() == Some(&ErrorKind::NotFound) {
+        return GatewayError::MediaNotFound(mxc_url.to_owned());
+    }
+    if encrypted && matches!(error, SdkError::DecryptorError(_) | SdkError::Io(_)) {
+        return GatewayError::Undecryptable(error.to_string());
+    }
+    GatewayError::Upstream(error.to_string())
+}
+
 /// Collapse the sync-layer [`GatewayError`] onto the cache-neutral
 /// [`FetchError`] the `axon-media` cache passes back to the API adapter.
 fn gateway_to_fetch(err: GatewayError) -> FetchError {
@@ -201,5 +213,57 @@ fn gateway_to_fetch(err: GatewayError) -> FetchError {
         GatewayError::Forbidden(msg) => FetchError::Forbidden(msg),
         GatewayError::NotConnected(msg) => FetchError::NotConnected(msg),
         GatewayError::Upstream(msg) => FetchError::Upstream(msg),
+        GatewayError::Undecryptable(msg) => FetchError::Undecryptable(msg),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use matrix_sdk::encryption::DecryptorError;
+
+    const MXC: &str = "mxc://example.org/abc";
+
+    #[test]
+    fn hash_mismatch_on_the_encrypted_path_is_undecryptable() {
+        // What a wrong key or corrupted ciphertext actually produces: the
+        // `AttachmentDecryptor`'s `Read` impl returns this from `read_to_end`,
+        // and matrix-sdk wraps it as `Error::Io` — not as a `DecryptorError`,
+        // which is the subtlety this classification turns on.
+        let err = SdkError::Io(std::io::Error::other("Hash mismatch while decrypting"));
+        assert!(matches!(
+            classify_download_error(MXC, true, err),
+            GatewayError::Undecryptable(_)
+        ));
+    }
+
+    #[test]
+    fn malformed_descriptor_is_undecryptable() {
+        let err = SdkError::DecryptorError(DecryptorError::MissingHash);
+        assert!(matches!(
+            classify_download_error(MXC, true, err),
+            GatewayError::Undecryptable(_)
+        ));
+    }
+
+    #[test]
+    fn the_same_io_error_on_the_plain_path_stays_upstream() {
+        // No decryptor runs for plaintext media, so an `Io` error there cannot
+        // mean decryption — reporting it as `422 media_undecryptable` would
+        // tell a client the failure is terminal when it may well be transient.
+        let err = SdkError::Io(std::io::Error::other("connection reset"));
+        assert!(matches!(
+            classify_download_error(MXC, false, err),
+            GatewayError::Upstream(_)
+        ));
+    }
+
+    #[test]
+    fn a_decryptor_error_on_the_plain_path_stays_upstream() {
+        let err = SdkError::DecryptorError(DecryptorError::UnknownVersion);
+        assert!(matches!(
+            classify_download_error(MXC, false, err),
+            GatewayError::Upstream(_)
+        ));
     }
 }
