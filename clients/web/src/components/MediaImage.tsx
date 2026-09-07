@@ -34,11 +34,9 @@ function thumbnailWidth(w: number, h: number): number {
  * timeline is not re-anchored after mount, so an image that grew on load would
  * shove scrolled-back content around.
  *
- * A ready blob is not necessarily a picture. The media proxy returns raw
- * ciphertext with a 200 when it lacks the decryption key, and a format this
- * browser cannot decode (HEIC, most often) arrives perfectly intact and still
- * will not paint. Both surface only at `<img>` decode, caught by `onError`
- * (ADR 0101).
+ * A ready blob is not necessarily a picture: a format this browser cannot
+ * decode (HEIC, most often) arrives perfectly intact and still will not paint,
+ * surfacing only at `<img>` decode, caught by `onError` (ADR 0101).
  *
  * But a third cause outnumbers them on iOS, and it is not about the bytes at
  * all: the same `onError` fires when WebKit fumbles a perfectly good image —
@@ -86,7 +84,7 @@ export function MediaImage({
   const autoRetried = useRef(false)
   // A null url makes the hook a no-op, so a local preview skips the proxy fetch
   // entirely while keeping the hook call unconditional.
-  const { ref, state } = useMediaBlob<HTMLDivElement>(
+  const { ref, state, invalidate } = useMediaBlob<HTMLDivElement>(
     accountId,
     previewUrl === undefined || previewUrl === null ? displayUrl : null,
     { thumbnail, attempt },
@@ -202,10 +200,11 @@ export function MediaImage({
             // Never a dead end: Retry, because on iOS the most likely cause is
             // transient and a PWA has no reload, and Download, because bytes
             // that arrived are worth opening elsewhere whatever they turned out
-            // to be. ADR 0101 withheld Download for bytes it could not name, on
-            // the grounds they were probably ciphertext — a path that turned out
-            // to be near-unreachable (see `image-format.ts`), so that gate was
-            // costing readers the one action that helps.
+            // to be. ADR 0101 withheld Download for bytes it could not name,
+            // on the grounds they were probably the proxy's ciphertext-fallback
+            // 200 — a path that turned out to be near-unreachable (see
+            // `image-format.ts`), so that gate only cost readers the one action
+            // that helps.
             <div class="media-undisplayable">
               <p class="muted placeholder">
                 {imageDecodeFailureMessage(media, failedFormat)}
@@ -252,10 +251,16 @@ export function MediaImage({
                 // a stutter in the middle of a scroll gesture on a phone.
                 decoding="async"
                 onError={() => {
-                  // First failure is not a verdict: re-fetch under a fresh
-                  // object URL before believing the bytes are at fault. No
-                  // `failure` is recorded on that path, so the reader never
-                  // sees a placeholder flash for a glitch that recovered.
+                  // These bytes did not decode, so drop them from the cache
+                  // before anything else: entries outlive their holders, and a
+                  // retry — or simply leaving the room and coming back — would
+                  // otherwise be handed the very object that just failed,
+                  // without a request leaving the browser.
+                  invalidate()
+                  // The first failure is not a verdict: re-fetch before
+                  // believing the bytes are at fault. No `failure` is recorded
+                  // on that path, so the reader never sees a placeholder flash
+                  // for a glitch that recovered.
                   if (!autoRetried.current) {
                     retry()
                     return

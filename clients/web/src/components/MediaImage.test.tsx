@@ -15,7 +15,7 @@ const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const HEIC = new Uint8Array([
   0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63,
 ])
-/** Bytes matching no image container — the shape ciphertext arrives in. */
+/** Bytes matching no image container the sniffer knows. */
 const CIPHERTEXT = new Uint8Array([
   0x3f, 0x91, 0xd2, 0x0a, 0x7c, 0x44, 0xe8, 0x16, 0x5b, 0x9a, 0x02, 0xff,
 ])
@@ -291,9 +291,9 @@ describe('MediaImage', () => {
   })
 
   it('stays generic for unidentifiable bytes instead of accusing the server', async () => {
-    // These could be the ciphertext-fallback 200, or a format the sniffer does
-    // not carry, or a JSON error body. The client cannot tell, so it does not
-    // say (#359) — it just withholds Download.
+    // These could be a format the sniffer does not carry, a JSON error body,
+    // or ciphertext. The client cannot tell which, so it says none of them and
+    // reports only that the image would not display (#359).
     serveBytes(CIPHERTEXT)
     const { findByRole, findByText, queryByText } = renderImage(
       image({ encrypted: true, mimetype: undefined, filename: 'blob' }),
@@ -302,10 +302,10 @@ describe('MediaImage', () => {
     expect(await findByText('Could not display this image')).toBeTruthy()
     expect(queryByText(/decrypt/)).toBeNull()
     // Download stays available. #328's review withheld it here on the grounds
-    // that unidentifiable bytes are probably ciphertext; that path is
-    // near-unreachable (the proxy 404s or 502s instead), so these are much more
-    // likely a format no table carries — where opening them elsewhere is the
-    // whole remedy.
+    // that unidentifiable bytes are probably the proxy's ciphertext-fallback
+    // 200; that path is near-unreachable (the proxy 404s or 502s instead), so
+    // these are far more likely a format no table carries — where opening them
+    // elsewhere is the whole remedy.
     expect(await findByRole('button', { name: 'Download' })).toBeTruthy()
   })
 
@@ -323,8 +323,8 @@ describe('MediaImage', () => {
 
   it('keeps the sender-declared name when the sniffer does not carry it', async () => {
     // The regression #360's first round introduced: `sniff.ts` has no DNG, so
-    // these bytes sniff as `null`. Reading that as ciphertext lost both the
-    // format name and the Download that ADR 0101 had put there.
+    // these bytes sniff as `null`. Treating that as a decryption failure lost
+    // both the format name and the Download that ADR 0101 had put there.
     serveBytes(CIPHERTEXT)
     const { findByRole, findByText } = renderImage(
       image({ mimetype: 'image/x-adobe-dng', filename: 'IMG_0007.dng' }),
@@ -410,6 +410,52 @@ describe('MediaImage', () => {
     )
     fireEvent.click(await findByRole('button', { name: 'Download' }))
     expect(await findByText('Download failed')).toBeTruthy()
+  })
+
+  it('does not re-serve a failed object after the row remounts', async () => {
+    // The reader leaves the room and comes back. `attempt` is component-local
+    // and restarts at 0, while the service keeps released entries in its LRU —
+    // so without invalidating on failure, both the fresh load and its automatic
+    // retry are answered from cache with the two objects already known to be
+    // broken, and no request leaves the browser.
+    //
+    // One `testServices()` for both mounts on purpose: a second `renderImage`
+    // would build a new service with an empty cache and prove nothing.
+    let fetched = 0
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/media/:account/:server/:media`, () => {
+        fetched += 1
+        return new HttpResponse(PNG, {
+          headers: { 'content-type': 'image/png' },
+        })
+      }),
+      http.get(
+        `${TEST_BASE_URL}/v1/media/:account/:server/:media/thumbnail`,
+        () => {
+          fetched += 1
+          return new HttpResponse(PNG, {
+            headers: { 'content-type': 'image/png' },
+          })
+        },
+      ),
+    )
+    const services = testServices()
+    const mount = () =>
+      render(
+        <ServicesContext.Provider value={services}>
+          <MediaImage accountId={ACCOUNT} media={image()} />
+        </ServicesContext.Provider>,
+      )
+
+    const first = mount()
+    await failDecodeTwice(first.findByRole)
+    const afterFailures = fetched
+    expect(afterFailures).toBeGreaterThanOrEqual(2)
+    first.unmount()
+
+    const second = mount()
+    expect(await second.findByRole('img')).toBeTruthy()
+    expect(fetched).toBeGreaterThan(afterFailures)
   })
 
   it('recovers a transient decode failure on the automatic retry', async () => {

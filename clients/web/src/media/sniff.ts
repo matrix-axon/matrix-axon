@@ -6,10 +6,8 @@
  * `parse-media.ts` says so: cross-client divergence in media handling is a
  * recurring bug source.
  *
- * The point is to replace a *guess* with a *fact*. ADR 0101 had to decide,
- * after an `<img>` failed, whether the bytes were an undecodable format or the
- * proxy's ciphertext-fallback 200, and it could only weigh the sender's
- * declared `info.mimetype` against the filename extension — both
+ * The point is to replace a *guess* with a *fact*. ADR 0101 could only weigh a
+ * sender-declared `info.mimetype` against the filename extension — both
  * sender-controlled, neither describing the bytes that actually arrived. That
  * reasoning was ruled out of scope there because "the caller holds an object
  * URL, not the buffer", which is true of `MediaImage` but not of
@@ -45,14 +43,12 @@ function at(head: Uint8Array, start: number, text: string): boolean {
  * The format these bytes actually are, or `null` when they match no image
  * container we know.
  *
- * `null` means only that: unidentified. Ciphertext takes this shape, since
- * AES-CTR "succeeds" on the wrong key and yields uniform noise — but so does a
- * JSON error body served with a 200, and so does any format this table does
- * not carry. So `null` is never reported to the reader as a decryption
- * failure; callers fall back to the sender's declared type
- * (`imageDecodeFailureMessage`) and withhold Download
- * (`isSaveableAfterDecodeFailure`), which protects them without asserting
- * anything the client cannot know.
+ * `null` means only that: unidentified, with no implication about *why*. A
+ * format this table does not carry looks exactly like a JSON error body served
+ * with a 200, and exactly like ciphertext would. So callers read it as "no
+ * verdict from the bytes" and fall back to the sender's declared type
+ * (`imageDecodeFailureMessage`); nothing is inferred from it, and in
+ * particular it is never reported as a decryption failure.
  */
 export function sniffImageFormat(head: Uint8Array): string | null {
   if (starts(head, [0xff, 0xd8, 0xff])) {

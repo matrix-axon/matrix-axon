@@ -277,9 +277,12 @@ describe('createMediaService.acquire', () => {
     expect(handle.result).toEqual({ ok: false, error: { kind: 'network' } })
   })
 
-  it('re-fetches under a new attempt instead of returning the cached url', async () => {
-    // The retry behind issue #359 exists to hand the <img> a url it has not
-    // already failed on, so serving the cached one would defeat it entirely.
+  it('refetches after invalidate instead of returning the cached url', async () => {
+    // The retry behind issue #359 exists to hand the `<img>` bytes it has not
+    // already failed on. A component-local generation cannot do that: it
+    // restarts at 0 on remount and collides with its own earlier values, so a
+    // reader who leaves the room and comes back is served the failed object
+    // with no request made at all.
     let fetched = 0
     server.use(
       http.get(`${BASE_URL}/v1/media/:account/:server/:media`, () => {
@@ -296,18 +299,51 @@ describe('createMediaService.acquire', () => {
     expect(fetched).toBe(1)
     expect(cached.result).toEqual(first.result)
 
-    const retried = await media.acquire(ACCOUNT, 'mxc://hs/abc', { attempt: 1 })
+    media.invalidate(ACCOUNT, 'mxc://hs/abc')
+    const refetched = await media.acquire(ACCOUNT, 'mxc://hs/abc')
     expect(fetched).toBe(2)
-    expect(retried.result).toEqual({
+    expect(refetched.result).toEqual({
       ok: true,
       url: 'blob:1',
       format: null,
     })
 
-    // The original entry is untouched: releasing the retry must not revoke a
-    // url the first two holders are still displaying.
-    retried.release()
+    // Two holders still paint the invalidated url, so it must survive until
+    // both let go — and then be revoked, since the LRU no longer tracks it.
     expect(revoked).not.toContain('blob:0')
+    first.release()
+    expect(revoked).not.toContain('blob:0')
+    cached.release()
+    expect(revoked).toContain('blob:0')
+  })
+
+  it('revokes an invalidated entry immediately when nobody holds it', async () => {
+    serveBytes()
+    const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })
+    const handle = await media.acquire(ACCOUNT, 'mxc://hs/abc')
+    handle.release()
+    expect(revoked).not.toContain('blob:0')
+
+    media.invalidate(ACCOUNT, 'mxc://hs/abc')
+    expect(revoked).toContain('blob:0')
+  })
+
+  it('leaves an unrelated thumbnail variant alone when invalidating', async () => {
+    // `invalidate` takes the same options as `acquire`, so it addresses one
+    // cache slot — dropping the full object must not throw away a thumbnail
+    // that is still perfectly good.
+    serveBytes()
+    const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })
+    const full = await media.acquire(ACCOUNT, 'mxc://hs/abc')
+    const thumb = await media.acquire(ACCOUNT, 'mxc://hs/abc', {
+      thumbnail: { width: 320, height: 320 },
+    })
+    full.release()
+    thumb.release()
+
+    media.invalidate(ACCOUNT, 'mxc://hs/abc')
+    expect(revoked).toContain(String((full.result as { url: string }).url))
+    expect(revoked).not.toContain(String((thumb.result as { url: string }).url))
   })
 
   it('sniffs the fetched bytes so a caller need not trust the declared type', async () => {

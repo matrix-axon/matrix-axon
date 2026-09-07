@@ -87,13 +87,11 @@ export function Lightbox({
   onClose: () => void
   paging?: LightboxPaging
   /**
-   * Save the displayed object to the device. Withheld while the bytes are
-   * still in flight, and withheld for bytes that would not decode *and* match
-   * no format we can name — the proxy serves undecryptable ciphertext with a
-   * 200, and saving that under a plausible `.jpg` name is worse than offering
-   * nothing. An image that failed to decode but is identifiably HEIC is the
-   * opposite case: saving it is the only thing left that helps, so the caller
-   * should offer it (ADR 0101).
+   * Save the displayed object to the device. Withheld only while the bytes are
+   * still in flight. Once they have arrived it is offered whatever they turned
+   * out to be — an image that would not decode is exactly the case where
+   * opening it in another application is the one thing left that helps, and
+   * ADR 0101's narrower gate (identifiable formats only) is withdrawn (#359).
    */
   onSave?: () => void
   saving?: boolean
@@ -378,9 +376,8 @@ export function LightboxImage({
   media: ParsedMedia
   /**
    * How the display attempt ended. A ready blob is not necessarily a picture —
-   * the media proxy returns **200 with raw ciphertext** when it lacks the
-   * decryption key, and a HEIC arrives intact and still will not paint — so
-   * this is the only place either failure can be observed.
+   * a HEIC arrives intact and still will not paint — and `<img>` decode is the
+   * only place that can be observed.
    */
   onOutcome?: (outcome: LightboxImageOutcome) => void
 }) {
@@ -389,7 +386,7 @@ export function LightboxImage({
   // decode failures that dominate on iOS (issue #359).
   const [attempt, setAttempt] = useState(0)
   const autoRetried = useRef(false)
-  const { state } = useMediaBlob(accountId, media.url, {
+  const { state, invalidate } = useMediaBlob(accountId, media.url, {
     eager: true,
     attempt,
   })
@@ -450,8 +447,11 @@ export function LightboxImage({
           alt={alt}
           onLoad={() => onOutcomeRef.current?.('displayed')}
           onError={() => {
-            // The first failure buys a re-fetch, not a verdict — see
-            // `MediaImage`, which does the same for the inline thumbnail.
+            // Drop the failed bytes from the cache first — see `MediaImage`,
+            // which explains why an entry outliving its holder would otherwise
+            // serve the same broken object to the retry and to the next mount.
+            invalidate()
+            // The first failure buys a re-fetch, not a verdict.
             if (!autoRetried.current) {
               retry()
               return

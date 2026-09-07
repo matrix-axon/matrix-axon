@@ -52,9 +52,10 @@ changed, and they narrow this ADR rather than reverse it:
   are — but from the client that is indistinguishable from a format no table
   carries and from a JSON error body served with a 200, so it was a guess
   stated as a fact about the server, and it cost an investigation of a healthy
-  instance. Unidentifiable bytes now read "Could not display this image" and
-  still withhold Download, which is the protection §3 actually wanted; nothing
-  asserts a server failure the client cannot observe.
+  instance. Unidentifiable bytes now read "Could not display this image", and
+  Download is offered for them as for any other bytes that arrived — see the
+  previous point, which withdraws that gate. Nothing here asserts a server
+  failure the client cannot observe.
 - A decode failure is no longer final on the first `onError`: it re-fetches
   once under a fresh blob URL, and the placeholder always offers Retry. §3's
   "offer Download either way" gate is widened to match — bytes sniffed as a

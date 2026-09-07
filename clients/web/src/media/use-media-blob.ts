@@ -36,13 +36,25 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
     /** See `MediaRequestOptions.contentType` — allowlisted types only. */
     contentType?: string
     /**
-     * Bump to re-fetch. See `MediaRequestOptions.attempt`: the new value is
-     * part of the cache key, so the effect re-runs, releases the handle it
-     * held, and acquires a freshly minted object URL.
+     * Bump to re-acquire. Purely an effect trigger — it is deliberately *not*
+     * part of the media cache key, since a component-local counter restarts at
+     * 0 on remount and would collide with its own earlier generations. Pair it
+     * with `invalidate()`, which is what actually guarantees fresh bytes.
      */
     attempt?: number
   } = {},
-): { ref: RefObject<T>; state: MediaBlobState } {
+): {
+  ref: RefObject<T>
+  state: MediaBlobState
+  /**
+   * Forget the cached object for this url, so the next acquire refetches.
+   *
+   * Call it when the bytes themselves proved bad — a decode failure — before
+   * bumping `attempt`. Without it the retry is served the same object URL
+   * straight from the cache and no request is made at all.
+   */
+  invalidate: () => void
+} {
   const { media } = useServices()
   const ref = useRef<T>(null)
   const [state, setState] = useState<MediaBlobState>({ status: 'idle' })
@@ -86,10 +98,9 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
                   method: thumbnailMethod,
                 },
                 contentType,
-                attempt,
               }
-            : contentType !== undefined || attempt !== undefined
-              ? { contentType, attempt }
+            : contentType !== undefined
+              ? { contentType }
               : undefined,
         )
         .then((acquired) => {
@@ -151,5 +162,27 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
     attempt,
   ])
 
-  return { ref, state }
+  const invalidate = () => {
+    if (mxcUrl === null) {
+      return
+    }
+    media.invalidate(
+      accountId,
+      mxcUrl,
+      thumbnailWidth !== undefined && thumbnailHeight !== undefined
+        ? {
+            thumbnail: {
+              width: thumbnailWidth,
+              height: thumbnailHeight,
+              method: thumbnailMethod,
+            },
+            contentType,
+          }
+        : contentType !== undefined
+          ? { contentType }
+          : undefined,
+    )
+  }
+
+  return { ref, state, invalidate }
 }

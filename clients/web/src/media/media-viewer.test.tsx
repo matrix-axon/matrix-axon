@@ -27,7 +27,7 @@ const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const HEIC = new Uint8Array([
   0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63,
 ])
-/** Bytes matching no image container — the shape ciphertext arrives in. */
+/** Bytes matching no image container the sniffer knows. */
 const CIPHERTEXT = new Uint8Array([
   0x3f, 0x91, 0xd2, 0x0a, 0x7c, 0x44, 0xe8, 0x16, 0x5b, 0x9a, 0x02, 0xff,
 ])
@@ -878,9 +878,8 @@ describe('MediaViewerProvider', () => {
       document.querySelector<HTMLButtonElement>('.lightbox-save')
 
     it('offers no save button until the bytes decode', async () => {
-      // The proxy answers 200 with raw ciphertext when it lacks the key, so a
-      // ready blob is not necessarily an image. Offering to save it would
-      // write undecryptable bytes under a plausible `.png` name.
+      // A ready blob is not necessarily a picture, so Save waits for the
+      // decode rather than for the fetch.
       serveBytes()
       const { container } = render(
         <Surface events={[image('$1', 10), image('$2', 20)]} atStart />,

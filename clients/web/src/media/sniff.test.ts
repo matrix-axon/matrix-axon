@@ -35,19 +35,19 @@ describe('sniffImageFormat', () => {
   })
 
   it('falls back to the container for an unfamiliar ISO-BMFF brand', () => {
-    // A video, or a brand postdating this table. Naming the container beats
-    // claiming the bytes are unrecognizable, which would imply ciphertext.
+    // A video, or a brand postdating this table. Naming the container is more
+    // use to a reader than reporting the bytes as unidentified.
     expect(sniffImageFormat(ascii('????ftypmp42'))).toBe('ISO BMFF')
   })
 
   it('returns null for bytes matching no image container', () => {
-    // AES-CTR against the wrong key "succeeds" and yields uniform noise. This
-    // null is the only honest evidence that the proxy served ciphertext.
+    // Unidentified, and nothing more is claimed: noise from a wrong AES-CTR
+    // key, a format this table lacks, and a JSON error body all land here.
     expect(
       sniffImageFormat(head(0x3f, 0x91, 0xd2, 0x0a, 0x7c, 0x44)),
     ).toBeNull()
-    // A JSON error body served with a 200 looks the same from here, which is
-    // why the caller still qualifies the claim with `media.encrypted`.
+    // A JSON error body served with a 200 is indistinguishable from here,
+    // which is why the caller draws no conclusion from `null` at all.
     expect(sniffImageFormat(ascii('{"error":'))).toBeNull()
   })
 

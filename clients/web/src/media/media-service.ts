@@ -89,18 +89,6 @@ export interface MediaRequestOptions {
    * (`text/html`, `image/svg+xml`) must never reach here.
    */
   contentType?: string
-  /**
-   * Retry generation. Bumping it yields a *different* cache key, so the caller
-   * gets a fresh fetch and a freshly minted object URL rather than the one it
-   * just failed to decode.
-   *
-   * Deliberately a key component rather than a "bypass the cache" flag:
-   * dropping the existing entry would strand the refcount that other holders
-   * of the same object are counting on (`releaseKey` resolves the key back to
-   * an entry, and would decrement the replacement). A new key leaves the old
-   * entry to be released and evicted on its own schedule.
-   */
-  attempt?: number
 }
 
 export interface MediaService {
@@ -143,6 +131,26 @@ export interface MediaService {
    * ADR 0059's two-step upload). Returns the `upload_id` the send claims.
    */
   upload(accountId: string, file: File): Promise<UploadResult>
+  /**
+   * Forget the cached object URL for `mxcUrl`, so the next `acquire()` refetches.
+   *
+   * The retry path's foundation (#359). A decode failure is a fact about *those
+   * bytes*, and the cache would otherwise keep handing them out: entries live
+   * on at `refs === 0` until the LRU evicts them, so unmounting the row and
+   * coming back would re-serve the object that just failed without a request
+   * leaving the browser. Keying the retry by a component-local counter did not
+   * fix that — the counter restarts at 0 on remount and collides with its own
+   * earlier generations.
+   *
+   * Safe against live holders: the entry is dropped from the map immediately so
+   * nothing new can find it, but its url is revoked only once the last handle
+   * is released, since a mounted `<img>` may still be pointing at it.
+   */
+  invalidate(
+    accountId: string,
+    mxcUrl: string,
+    options?: MediaRequestOptions,
+  ): void
 }
 
 /** Zero-ref object URLs kept for instant re-display before revocation. */
@@ -250,17 +258,14 @@ export function createMediaService(deps: {
   ) => {
     const thumbnail = options?.thumbnail
     // A re-typed fetch yields a different blob than the raw one, so it needs
-    // its own cache slot even though it hits the same proxy URL. A retry needs
-    // one for the opposite reason: the whole point is *not* to be handed back
-    // the object URL that just failed.
+    // its own cache slot even though it hits the same proxy URL.
     const type = options?.contentType ?? ''
-    const attempt = options?.attempt ?? 0
     if (thumbnail === undefined) {
-      return `${accountId}\0full\0${type}\0${attempt}\0${mxc}`
+      return `${accountId}\0full\0${type}\0${mxc}`
     }
     return `${accountId}\0thumb\0${thumbnail.width}x${thumbnail.height}\0${
       thumbnail.method ?? 'scale'
-    }\0${type}\0${attempt}\0${mxc}`
+    }\0${type}\0${mxc}`
   }
 
   const mediaUrl = (
@@ -405,22 +410,55 @@ export function createMediaService(deps: {
     }
   }
 
-  function releaseKey(key: string): void {
-    const entry = cache.get(key)
-    if (entry === undefined || entry.refs === 0) {
+  /**
+   * Drop one holder's reference to `entry`.
+   *
+   * Takes the entry rather than looking it up by key, because `invalidate` can
+   * remove or replace the map's entry for that key while handles to the old one
+   * are still outstanding — resolving by key would then decrement (or fail to
+   * find) the wrong object.
+   */
+  function releaseEntry(key: string, entry: CacheEntry): void {
+    if (entry.refs === 0) {
       return
     }
     entry.refs -= 1
-    if (entry.refs === 0) {
+    if (entry.refs > 0) {
+      return
+    }
+    if (cache.get(key) === entry) {
       zeroRef.set(key, true)
       evict()
+      return
+    }
+    // Invalidated while this holder had it. Nothing can hand the url out
+    // again, and the LRU no longer tracks it, so revoke here or it leaks.
+    URL.revokeObjectURL(entry.url)
+  }
+
+  function invalidate(
+    accountId: string,
+    mxcUrl: string,
+    options?: MediaRequestOptions,
+  ): void {
+    const key = keyOf(accountId, mxcUrl, options)
+    const entry = cache.get(key)
+    if (entry === undefined) {
+      return
+    }
+    cache.delete(key)
+    zeroRef.delete(key)
+    // A live holder still paints this url; the last `releaseEntry` revokes it.
+    if (entry.refs === 0) {
+      URL.revokeObjectURL(entry.url)
     }
   }
 
-  function handleFor(key: string, result: MediaResult): MediaHandle {
-    if (!result.ok) {
-      return { result, release() {} }
-    }
+  function handleFor(
+    key: string,
+    entry: CacheEntry,
+    result: MediaResult,
+  ): MediaHandle {
     let released = false
     return {
       result,
@@ -429,9 +467,14 @@ export function createMediaService(deps: {
           return
         }
         released = true
-        releaseKey(key)
+        releaseEntry(key, entry)
       },
     }
+  }
+
+  /** A handle over a failed result: nothing to reference, nothing to release. */
+  function failedHandle(result: MediaResult): MediaHandle {
+    return { result, release() {} }
   }
 
   async function acquire(
@@ -445,7 +488,7 @@ export function createMediaService(deps: {
     if (cached !== undefined) {
       cached.refs += 1
       zeroRef.delete(key)
-      return handleFor(key, {
+      return handleFor(key, cached, {
         ok: true,
         url: cached.url,
         format: cached.format,
@@ -468,7 +511,7 @@ export function createMediaService(deps: {
 
     const result = await pending
     if (!result.ok) {
-      return handleFor(key, result)
+      return failedHandle(result)
     }
     // The shared entry exists (seeded above); take a ref against the live url.
     const entry = cache.get(key)
@@ -479,7 +522,11 @@ export function createMediaService(deps: {
     }
     entry.refs += 1
     zeroRef.delete(key)
-    return handleFor(key, { ok: true, url: entry.url, format: entry.format })
+    return handleFor(key, entry, {
+      ok: true,
+      url: entry.url,
+      format: entry.format,
+    })
   }
 
   function fetchBlobUrl(
@@ -550,5 +597,5 @@ export function createMediaService(deps: {
     }
   }
 
-  return { acquire, fetchBlob, fetchBlobUrl, fetchText, upload }
+  return { acquire, fetchBlob, fetchBlobUrl, fetchText, upload, invalidate }
 }
