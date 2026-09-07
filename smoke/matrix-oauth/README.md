@@ -39,6 +39,7 @@ Axon's stdout and stderr are captured inside a randomly named throwaway run dire
 Every successful lane rejects secret-bearing field names or known runtime values in that log.
 SQL statement text is excluded from the captured log so a column name cannot masquerade as a disclosure; a failing field-name check identifies the safe field name that matched.
 The harness handles SIGINT and SIGTERM so its Axon child is killed and reaped before the launcher's cleanup trap removes the directory, SDK stores, containers, databases, and MAS configuration volume.
+An intentional restart first gives Axon 45 seconds to complete its graceful shutdown, covering the server's 30-second sync-engine drain budget plus surrounding teardown, before the harness forcibly kills and reaps it.
 This cleanup applies on success, failure, cancellation, and cooperative interruption; SIGKILL cannot run process cleanup.
 The workflow deliberately uploads no failure artifacts for these lanes.
 

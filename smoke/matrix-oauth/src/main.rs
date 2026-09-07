@@ -44,6 +44,9 @@ use uuid::Uuid;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const FLOW_TIMEOUT: Duration = Duration::from_secs(120);
 const START_TIMEOUT: Duration = Duration::from_secs(120);
+// Axon's sync-engine tracker has its own 30-second graceful drain budget.
+// Leave room for the surrounding HTTP and process teardown before escalating.
+const AXON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 const BODY_LIMIT: usize = 1024 * 1024;
 
 #[derive(Clone)]
@@ -200,7 +203,7 @@ impl AxonProcess {
                 return Err(std::io::Error::last_os_error()).context("signal axon-server");
             }
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let deadline = tokio::time::Instant::now() + AXON_SHUTDOWN_TIMEOUT;
         loop {
             if child.try_wait().context("wait for axon-server")?.is_some() {
                 return Ok(());
