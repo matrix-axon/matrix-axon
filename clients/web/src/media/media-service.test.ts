@@ -361,6 +361,76 @@ describe('createMediaService.acquire', () => {
     const handle = await media.acquire(ACCOUNT, 'mxc://hs/abc')
     expect(handle.result).toEqual({ ok: true, url: 'blob:0', format: 'PNG' })
   })
+
+  it('reads the 422 envelope code without cloning or unbounded buffering', async () => {
+    // The read runs while this request still holds one of six media permits,
+    // so it is bounded in bytes and time; a body past the cap is treated as
+    // "no code" rather than pinning the permit (#363 review).
+    const huge = 'x'.repeat(64 * 1024)
+    server.use(
+      http.get(`${BASE_URL}/v1/media/:account/:server/:media`, () =>
+        HttpResponse.json(
+          { error: { code: 'media_undecryptable', message: huge } },
+          { status: 422 },
+        ),
+      ),
+    )
+    const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })
+    const handle = await media.acquire(ACCOUNT, 'mxc://hs/abc')
+    expect(handle.result).toEqual({
+      ok: false,
+      error: { kind: 'network', status: 422 },
+    })
+  })
+
+  it('classifies a small 422 envelope as undecryptable', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/media/:account/:server/:media`, () =>
+        HttpResponse.json(
+          { error: { code: 'media_undecryptable', message: 'hash mismatch' } },
+          { status: 422 },
+        ),
+      ),
+    )
+    const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })
+    const handle = await media.acquire(ACCOUNT, 'mxc://hs/abc')
+    expect(handle.result).toEqual({
+      ok: false,
+      error: { kind: 'undecryptable', status: 422 },
+    })
+  })
+
+  it('leaves a 422 with a different code as a generic failure', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/media/:account/:server/:media`, () =>
+        HttpResponse.json(
+          { error: { code: 'unprocessable', message: 'something else' } },
+          { status: 422 },
+        ),
+      ),
+    )
+    const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })
+    const handle = await media.acquire(ACCOUNT, 'mxc://hs/abc')
+    expect(handle.result).toEqual({
+      ok: false,
+      error: { kind: 'network', status: 422 },
+    })
+  })
+
+  it('survives a 422 whose body is not an envelope at all', async () => {
+    server.use(
+      http.get(
+        `${BASE_URL}/v1/media/:account/:server/:media`,
+        () => new HttpResponse('<html>gateway</html>', { status: 422 }),
+      ),
+    )
+    const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })
+    const handle = await media.acquire(ACCOUNT, 'mxc://hs/abc')
+    expect(handle.result).toEqual({
+      ok: false,
+      error: { kind: 'network', status: 422 },
+    })
+  })
 })
 
 describe('createMediaService.fetchBlobUrl', () => {

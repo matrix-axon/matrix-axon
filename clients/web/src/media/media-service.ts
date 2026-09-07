@@ -1,4 +1,4 @@
-import { apiErrorMessage } from '../api/client'
+import { apiErrorCode, apiErrorMessage } from '../api/client'
 import type { AuthProvider } from '../auth/provider'
 import { browserPlatform, type Platform } from '../platform'
 import { mxcToPath } from './parse-media'
@@ -168,28 +168,84 @@ export interface MediaService {
 }
 
 /**
- * Whether a `422` is specifically the media proxy saying the bytes would not
- * decrypt, rather than some other unprocessable-entity the route might grow.
+ * How much of an error body is worth reading to find a `code`, and how long to
+ * wait for it.
  *
- * Reads the envelope's `code` rather than trusting the status alone: `422` is a
- * general class, and mistaking another one for a decryption failure would put
- * the single most consequential wording in this client — the one that sends
- * people to look at their server — in front of a reader for the wrong reason
- * (#359). A body that will not parse is not a decryption failure.
+ * This read happens while the request still holds one of `MAX_CONCURRENT`
+ * media permits, so it cannot be open-ended: six responses that are enormous or
+ * that simply never finish would otherwise pin every permit and stop media
+ * loading across the app. An axon error envelope is a few dozen bytes; anything
+ * beyond this is not one, and is not worth a permit.
  */
-async function isUndecryptable(res: Response): Promise<boolean> {
+const ERROR_ENVELOPE_MAX_BYTES = 8 * 1024
+const ERROR_ENVELOPE_TIMEOUT_MS = 2_000
+
+/**
+ * The body of `res` as text, giving up past a byte or time bound.
+ *
+ * Reads `res.body` directly rather than `res.clone().json()`: cloning tees the
+ * stream and pins *both* branches in memory until each is consumed, and nothing
+ * else on this path ever reads the other one. Cancelling the reader resolves
+ * the pending `read()`, so the timeout needs no race.
+ */
+async function readBoundedText(res: Response): Promise<string | null> {
+  const body = res.body
+  if (body === null) {
+    // No stream to bound — the body is already buffered (jsdom and some test
+    // doubles), so there is nothing to read incrementally and nothing to pin.
+    return res.text()
+  }
+  const reader = body.getReader()
+  const timer = setTimeout(() => {
+    void reader.cancel().catch(() => {})
+  }, ERROR_ENVELOPE_TIMEOUT_MS)
+  const chunks: Uint8Array[] = []
+  let total = 0
   try {
-    const body: unknown = await res.clone().json()
-    return (
-      typeof body === 'object' &&
-      body !== null &&
-      'error' in body &&
-      typeof (body as { error: unknown }).error === 'object' &&
-      (body as { error: { code?: unknown } }).error?.code ===
-        'media_undecryptable'
-    )
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) {
+        break
+      }
+      if (value === undefined) {
+        continue
+      }
+      total += value.byteLength
+      if (total > ERROR_ENVELOPE_MAX_BYTES) {
+        return null
+      }
+      chunks.push(value)
+    }
   } catch {
-    return false
+    return null
+  } finally {
+    clearTimeout(timer)
+    void reader.cancel().catch(() => {})
+  }
+  const joined = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    joined.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(joined)
+}
+
+/**
+ * The envelope `code` on an error response, or `null` when there isn't one.
+ *
+ * Reuses `apiErrorCode`/`isErrorEnvelope` rather than re-deriving the shape, so
+ * this agrees with every other consumer of an axon error body by construction.
+ */
+async function errorEnvelopeCode(res: Response): Promise<string | null> {
+  const text = await readBoundedText(res)
+  if (text === null) {
+    return null
+  }
+  try {
+    return apiErrorCode(JSON.parse(text))
+  } catch {
+    return null
   }
 }
 
@@ -396,7 +452,10 @@ export function createMediaService(deps: {
         if (res.status === 413) {
           return { ok: false, error: { kind: 'too_large', status: 413 } }
         }
-        if (res.status === 422 && (await isUndecryptable(res))) {
+        if (
+          res.status === 422 &&
+          (await errorEnvelopeCode(res)) === 'media_undecryptable'
+        ) {
           return { ok: false, error: { kind: 'undecryptable', status: 422 } }
         }
         return { ok: false, error: { kind: 'network', status: res.status } }
