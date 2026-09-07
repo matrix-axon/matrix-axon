@@ -62,7 +62,7 @@ matrix-axon/
     api-docs.yml             # build the Pages site: homepage + API reference at https://matrix-axon.github.io/matrix-axon/api.html
     check-environment.yml    # local-runner environment check
     cross-build.yml          # fmt, clippy, test, and build for MacOS, Linux, and Windows (can manually select subset if desired)
-    lint-and-clippy.yml      # cargo fmt + clippy (faster than lint-and-test)
+    lint-and-clippy.yml      # required PR/main Rust gate: cargo fmt + clippy + test
     lint-and-test.yml        # cargo fmt + clippy + test
     integration.yml          # E2EE re-decryption test (Synapse + Postgres)
     smoke.yml                # S1 black-box smoke (PR 1: TUI PTY suite; PR 2 added the server gate)
@@ -244,7 +244,8 @@ this table is the orientation copy.
     `gh`'s "uncommitted changes" warning in colocated mode can be ignored as long as the bookmark was pushed correctly.
 - **Pre-push hook (strongly recommended).**
   `.pre-commit-config.yaml` is the **only** list of checks the repo runs before a push, for both front-ends (ADR 0092).
-  It mirrors CI's web job (`web-lint-and-test.yml`) and rust fmt/clippy jobs (`lint-and-test.yml` / `lint-and-clippy.yml`), path-filtered so a web-only push does not run clippy and a rust-only push does not run `pnpm`, and it adds `cargo test --all` — which runs in **no** automatic CI job (`lint-and-test.yml` is `workflow_dispatch`-only, `lint-and-clippy.yml` has no test step), so skipping the hook means the suite has not run at all.
+  It mirrors CI's web job (`web-lint-and-test.yml`) and Rust fmt/clippy/test jobs (`lint-and-test.yml` / `lint-and-clippy.yml`), path-filtered so a web-only push does not run clippy and a rust-only push does not run `pnpm`.
+  The automatic required `lint-and-test` PR job also runs `cargo test --all`; keeping it in the hook catches failures before review begins.
   The hook requires the [`pre-commit`](https://pre-commit.com) runner (`pipx install pre-commit`, `uv tool install pre-commit`, `pip install --user pre-commit`, or `sudo apt install pre-commit`);
   everything else it needs it installs itself.
   Enable it once per clone:
@@ -265,11 +266,11 @@ this table is the orientation copy.
   only the driver differs.
   On a failure, run the command printed by the hook (for example `pnpm --dir clients/web format` for formatting, `cargo fmt --all` for rustfmt, or `pnpm --dir clients/web gen:api` for schema drift) and push again.
   To skip deliberately: `SKIP=<hook-id> jj push` for one hook, `git push --no-verify` for all of them.
-  CI is the backstop for fmt, clippy and the web job, but _not_ for `cargo test --all` — see above.
+  CI is the backstop for fmt, clippy, `cargo test --all`, and the web job.
 
   **For what is in the gate, read `.pre-commit-config.yaml` itself** — it is the list, top to bottom in the order it runs, with each hook's command, path filter, and a comment on why it is there.
   Do not restate it here: a prose copy is a second list to keep in sync, which is the exact failure ADR 0092 exists to end.
-  What belongs here is only what that file cannot say about itself: **`cargo test --all` is in it and in no automatic CI job**, and two things are deliberately _absent_ from it — Playwright (browsers and minutes; `web-e2e.yml` gates PRs, and `clients/web/AGENTS.md` says when to run it locally) and the Docker smoke lanes (opt in per push with `RUN_SMOKE=<lane>`).
+  What belongs here is only what that file cannot say about itself: `cargo test --all` runs both locally and in the required PR Rust job, and two things are deliberately _absent_ from the hook — Playwright (browsers and minutes; `web-e2e.yml` gates PRs, and `clients/web/AGENTS.md` says when to run it locally) and the Docker smoke lanes (opt in per push with `RUN_SMOKE=<lane>`).
 
 - **Web verification uses the package scripts.**
   For `clients/web` code changes, the local gate is `pnpm --dir clients/web lint`, `pnpm --dir clients/web test`, and `pnpm --dir clients/web build`.
@@ -366,9 +367,9 @@ They apply across crates and clients.
   Any commit that touches code stays subject to the full gate below.
 - More complete formatting and clippy checks can run before committing/pushing
   **The repo is public, so GitHub-hosted runners (`ubuntu-latest`, `windows-latest`, `macos-latest`) get free, unlimited standard-runner minutes.**
-  `lint-and-clippy.yml`, `cross-build.yml`, and `publish-images.yml` trigger automatically on push/tag;
+  `lint-and-clippy.yml` triggers automatically on pull requests and pushes to `main`, while `cross-build.yml` and `publish-images.yml` trigger on release tags;
   workflows stay `workflow_dispatch`-only only where that's the right call for other reasons (e.g. expensive/manual smoke or integration runs), not because of a minutes budget.
-  The pre-push hook is still the safety net for anything that isn't covered by an automatic run — and `cargo test --all` is covered by none of them, since `lint-and-test.yml` is `workflow_dispatch`-only and `lint-and-clippy.yml` has no test step.
+  The pre-push hook remains the earliest safety net, while the required `lint-and-test` job repeats the full Rust suite on the pull-request commit.
   Before pushing, either install the hook once per clone with `./scripts/setup-hooks.sh` (git) or the `jj-hooks` alias above (jj), or, if you haven't, run it by hand:
 
 ```bash

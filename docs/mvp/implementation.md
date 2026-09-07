@@ -98,7 +98,7 @@ Non-obvious choices made in Milestone 2 (see ADRs 0002–0003):
 - **`/healthz`:** liveness-only, always 200, no DB ping.
 - **Errors:** top-level `axon_core::Error` is acyclic — its `Store(String)` variant carries a message so `axon-core` need not depend on `axon-store`; leaf crates impl `From<LeafError> for axon_core::Error`.
 - **CI:** unchanged. No `query!` macros yet, so sqlx compile-time checks aren't triggered and tests need no DB. When checked queries land in M3, add a Postgres service or a `.sqlx` offline cache.
-- **Pre-push hook:** `.pre-commit-config.yaml` is the whole gate — fmt, clippy, `cargo test --all`, the web job, and the cheap repo checks — enabled per clone with `./scripts/setup-hooks.sh` (git) or the `jj-hooks` alias (jj). See the pre-push hook bullet above and ADR 0092. (Historical note: this used to describe `.githooks/pre-commit` as a fmt + clippy subset with "full `cargo test` stays in CI". Both halves were wrong — `.githooks/pre-push` had been running `cargo test --all`, and CI never did on a pull request.)
+- **Pre-push hook:** `.pre-commit-config.yaml` is the whole local gate — fmt, clippy, `cargo test --all`, the web job, and the cheap repo checks — enabled per clone with `./scripts/setup-hooks.sh` (git) or the `jj-hooks` alias (jj). See the pre-push hook bullet above and ADR 0092. (Historical note: this used to describe `.githooks/pre-commit` as a fmt + clippy subset with "full `cargo test` stays in CI". Both halves were wrong at that time — `.githooks/pre-push` had been running `cargo test --all`, while CI gained its required pull-request copy later.)
 
 **Milestone 2 complete** — the binary boots: typed config, Postgres pool + migrations, and an axum server with `/healthz`.
 
