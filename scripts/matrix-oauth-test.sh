@@ -22,13 +22,20 @@ tmp_root="${TMPDIR:-/tmp}"
 run_dir=$(mktemp -d "$tmp_root/axon-matrix-oauth.XXXXXX")
 project=$(basename "$run_dir" | tr '[:upper:].' '[:lower:]-')
 mas_config_volume="$project-mas-config"
+harness_pid=
 
 cleanup() {
+  if [ -n "$harness_pid" ]; then
+    kill -TERM "$harness_pid" >/dev/null 2>&1 || true
+    wait "$harness_pid" >/dev/null 2>&1 || true
+  fi
   docker compose -f "$compose_file" -p "$project" down -v --remove-orphans >/dev/null 2>&1 || true
   docker volume rm "$mas_config_volume" >/dev/null 2>&1 || true
   rm -rf -- "$run_dir"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 free_port() {
   python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
@@ -129,4 +136,7 @@ export MATRIX_OAUTH_TRUSTED_DEVICE_ID="$trusted_device_id"
 export MATRIX_OAUTH_HARNESS_RUN_DIR="$run_dir/harness"
 
 echo "matrix-oauth: running $mode lane against Synapse ${synapse_image##*:}, MAS ${mas_image##*:}, and matrix-sdk 0.18"
-"$target_bin/axon-smoke-matrix-oauth" "$mode"
+"$target_bin/axon-smoke-matrix-oauth" "$mode" &
+harness_pid=$!
+wait "$harness_pid"
+harness_pid=

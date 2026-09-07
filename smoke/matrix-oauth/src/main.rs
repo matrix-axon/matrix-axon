@@ -119,7 +119,7 @@ impl SecretTracker {
             "recovery_key",
         ] {
             if lower.contains(forbidden) {
-                bail!("Axon log contains a secret-bearing field name");
+                bail!("Axon log contains secret-bearing field name {forbidden}");
             }
         }
         for secret in self.0.lock().expect("secret tracker lock").iter() {
@@ -188,7 +188,7 @@ impl AxonProcess {
     }
 
     async fn stop(&mut self) -> Result<()> {
-        let Some(mut child) = self.child.take() else {
+        let Some(child) = self.child.as_mut() else {
             return Ok(());
         };
         if child.try_wait().context("inspect axon-server")?.is_some() {
@@ -260,7 +260,7 @@ fn apply_axon_env(command: &mut Command, config: &Config, store_key: &str) {
         .env("AXON_SYNC__MATRIX_OAUTH__REQUEST_TIMEOUT_SECS", "15")
         .env(
             "RUST_LOG",
-            "info,matrix_sdk_crypto=error,matrix_sdk::encryption::backups=error,axon_sync=debug",
+            "info,sqlx::query=error,matrix_sdk_crypto=error,matrix_sdk::encryption::backups=error,axon_sync=debug",
         );
 }
 
@@ -685,16 +685,20 @@ impl MasApprover {
             .await
             .map_err(|_| anyhow!("submit MAS approval failed"))?;
         let (_, page) = bounded_html(response).await?;
-        let expected = if action == Approval::Consent {
-            "success"
-        } else {
-            "denied"
-        };
-        if !page.to_ascii_lowercase().contains(expected) {
-            bail!("MAS did not confirm the requested approval decision");
-        }
+        assert_mas_decision(&page, action)?;
         Ok(())
     }
+}
+
+fn assert_mas_decision(page: &str, action: Approval) -> Result<()> {
+    let outcome_element = match action {
+        Approval::Consent => "<div class=\"icon success\">",
+        Approval::Reject => "<div class=\"icon invalid\">",
+    };
+    if !page.contains(outcome_element) || page.contains("name=\"action\"") {
+        bail!("MAS did not confirm the requested approval decision");
+    }
+    Ok(())
 }
 
 async fn bounded_html(response: reqwest::Response) -> Result<(Url, String)> {
@@ -757,6 +761,7 @@ async fn drive_peer_grant(
     let grant = oauth.grant_login_with_qr_code().generate();
     let mut progress = Box::pin(grant.subscribe_to_progress());
     let mut future = grant.into_future();
+    let mut progress_ended = false;
     let deadline = tokio::time::Instant::now() + FLOW_TIMEOUT;
     loop {
         tokio::select! {
@@ -767,7 +772,7 @@ async fn drive_peer_grant(
                     (Approval::Reject, true) => Err(anyhow!("rejected authorization unexpectedly completed")),
                 };
             }
-            update = progress.next() => match update {
+            update = progress.next(), if !progress_ended => match update {
                 Some(GrantLoginProgress::Starting | GrantLoginProgress::SyncingSecrets) => {}
                 Some(GrantLoginProgress::EstablishingSecureChannel(GeneratedQrProgress::QrReady(qr))) => {
                     let encoded = qr.to_base64();
@@ -791,7 +796,7 @@ async fn drive_peer_grant(
                     assert_acquire_waits_for_approval(api, flow_id).await?;
                     approver.act(&uri, approval).await?;
                 }
-                Some(GrantLoginProgress::Done) | None => {}
+                Some(GrantLoginProgress::Done) | None => progress_ended = true,
             },
             _ = tokio::time::sleep_until(deadline) => bail!("trusted SDK grant timed out"),
         }
@@ -811,13 +816,14 @@ async fn drive_fresh_login(
     let login = oauth.login_with_qr_code(Some(&registration)).generate();
     let mut progress = Box::pin(login.subscribe_to_progress());
     let mut future = login.into_future();
+    let mut progress_ended = false;
     let deadline = tokio::time::Instant::now() + FLOW_TIMEOUT;
     loop {
         tokio::select! {
             result = &mut future => {
                 return result.map_err(|_| anyhow!("fresh SDK QR login failed"));
             }
-            update = progress.next() => match update {
+            update = progress.next(), if !progress_ended => match update {
                 Some(LoginProgress::Starting | LoginProgress::SyncingSecrets) => {}
                 Some(LoginProgress::EstablishingSecureChannel(GeneratedQrProgress::QrReady(qr))) => {
                     let encoded = qr.to_base64();
@@ -840,7 +846,7 @@ async fn drive_fresh_login(
                     assert_grant_waits_for_approval(api, account_id, flow_id).await?;
                     approver.act(&uri, Approval::Consent).await?;
                 }
-                Some(LoginProgress::Done) | None => {}
+                Some(LoginProgress::Done) | None => progress_ended = true,
             },
             _ = tokio::time::sleep_until(deadline) => bail!("fresh SDK QR login timed out"),
         }
@@ -1040,7 +1046,7 @@ async fn fresh_client(config: &Config) -> Result<Client> {
 }
 
 async fn assert_sdk_decrypts_history(client: &Client, peer: &SeededPeer) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+    let room_deadline = tokio::time::Instant::now() + START_TIMEOUT;
     let room = loop {
         if let Some(room) = client.get_room(&peer.room_id) {
             break room;
@@ -1049,12 +1055,24 @@ async fn assert_sdk_decrypts_history(client: &Client, peer: &SeededPeer) -> Resu
             .sync_once(SyncSettings::default())
             .await
             .map_err(|_| anyhow!("fresh-device history sync failed"))?;
-        if tokio::time::Instant::now() >= deadline {
+        if tokio::time::Instant::now() >= room_deadline {
             bail!("fresh SDK device did not receive the encrypted room");
         }
     };
-    if !client.encryption().backups().are_enabled().await {
-        bail!("fresh SDK device did not receive the backup secret");
+
+    let backup_deadline = tokio::time::Instant::now() + START_TIMEOUT;
+    loop {
+        if client.encryption().backups().are_enabled().await {
+            break;
+        }
+        if tokio::time::Instant::now() >= backup_deadline {
+            bail!("fresh SDK device did not receive the backup secret");
+        }
+        client
+            .sync_once(SyncSettings::default())
+            .await
+            .map_err(|_| anyhow!("fresh-device backup-state sync failed"))?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
     client
         .encryption()
@@ -1062,6 +1080,7 @@ async fn assert_sdk_decrypts_history(client: &Client, peer: &SeededPeer) -> Resu
         .download_room_keys_for_room(&peer.room_id)
         .await
         .map_err(|_| anyhow!("fresh-device backup download failed"))?;
+    let decryption_deadline = tokio::time::Instant::now() + START_TIMEOUT;
     loop {
         let event = room
             .event(&peer.history_event_id, None)
@@ -1083,7 +1102,7 @@ async fn assert_sdk_decrypts_history(client: &Client, peer: &SeededPeer) -> Resu
         {
             return Ok(());
         }
-        if tokio::time::Instant::now() >= deadline {
+        if tokio::time::Instant::now() >= decryption_deadline {
             bail!("fresh SDK device did not decrypt transferred history");
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1302,7 +1321,7 @@ async fn run_unsupported_lane(
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    match run().await {
+    match run_until_shutdown().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             // Every lower boundary maps its source to a stable harness error;
@@ -1310,6 +1329,38 @@ async fn main() -> std::process::ExitCode {
             eprintln!("matrix-oauth: failed: {error}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+async fn run_until_shutdown() -> Result<()> {
+    tokio::select! {
+        result = run() => result,
+        _ = shutdown_signal() => bail!("harness interrupted"),
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            signal.recv().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
     }
 }
 
@@ -1336,4 +1387,33 @@ async fn run() -> Result<()> {
     secrets.assert_absent_from(&process.log_path)?;
     eprintln!("matrix-oauth({}): passed", config.mode);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{assert_mas_decision, Approval};
+
+    #[test]
+    fn mas_decision_requires_the_action_specific_result_element() {
+        let consent = r#"<div class="icon success"><svg></svg></div>"#;
+        let rejected = r#"<div class="icon invalid"><svg></svg></div>"#;
+
+        assert!(assert_mas_decision(consent, Approval::Consent).is_ok());
+        assert!(assert_mas_decision(rejected, Approval::Reject).is_ok());
+        assert!(assert_mas_decision(consent, Approval::Reject).is_err());
+        assert!(assert_mas_decision(rejected, Approval::Consent).is_err());
+    }
+
+    #[test]
+    fn mas_decision_rejects_generic_success_text_and_pending_forms() {
+        assert!(
+            assert_mas_decision(r#"<p class="text-success">success</p>"#, Approval::Consent)
+                .is_err()
+        );
+        assert!(assert_mas_decision(
+            r#"<div class="icon success"></div><button name="action">approve</button>"#,
+            Approval::Consent
+        )
+        .is_err());
+    }
 }

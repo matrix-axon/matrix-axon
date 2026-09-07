@@ -27,6 +27,7 @@ The lanes cover:
 
 The integration workflow exposes each lane separately and provides `matrix-oauth-all` to run all four manually.
 The smoke workflow runs all four in a separate job after every push to `main` and on its nightly schedule.
+The scheduled job attempts every lane after a failure and reports the aggregate result, so one run exposes all broken scenarios it reaches within the job budget.
 These expensive, unstable-protocol lanes remain outside the pull-request path.
 
 ## Secret handling
@@ -36,7 +37,9 @@ The launcher passes its known compatibility and Axon bearer tokens without comma
 
 Axon's stdout and stderr are captured inside a randomly named throwaway run directory.
 Every successful lane rejects secret-bearing field names or known runtime values in that log.
-The cleanup trap removes the directory, SDK stores, containers, databases, and MAS configuration volume on success, failure, cancellation, or interruption.
+SQL statement text is excluded from the captured log so a column name cannot masquerade as a disclosure; a failing field-name check identifies the safe field name that matched.
+The harness handles SIGINT and SIGTERM so its Axon child is killed and reaped before the launcher's cleanup trap removes the directory, SDK stores, containers, databases, and MAS configuration volume.
+This cleanup applies on success, failure, cancellation, and cooperative interruption; SIGKILL cannot run process cleanup.
 The workflow deliberately uploads no failure artifacts for these lanes.
 
 Harness errors name only a stable phase or classification.

@@ -177,9 +177,14 @@ jobs:
 
       - name: Run Matrix OAuth QR interoperability
         run: |
+          failed=0
           for lane in api acquire grant unsupported; do
-            scripts/matrix-oauth-test.sh "$lane"
+            if ! scripts/matrix-oauth-test.sh "$lane"; then
+              echo "::error title=Matrix OAuth QR smoke::$lane lane failed"
+              failed=1
+            fi
           done
+          exit "$failed"
 
       # OAuth and encryption secrets exist only in the harness's throwaway
       # directory. Never upload failure artifacts from this job.
