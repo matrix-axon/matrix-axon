@@ -113,11 +113,22 @@ if [ -z "$compatibility_token" ]; then
   echo "matrix-oauth: MAS compatibility-session output had no token" >&2
   exit 1
 fi
-whoami_status=$(printf 'header = "Authorization: Bearer %s"\n' "$compatibility_token" | \
-  curl --config - --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
-    "http://127.0.0.1:$MATRIX_OAUTH_SYNAPSE_PORT/_matrix/client/v3/account/whoami")
+whoami_deadline=$((SECONDS + 30))
+whoami_status=unavailable
+while [ "$SECONDS" -lt "$whoami_deadline" ]; do
+  if whoami_status=$(printf 'header = "Authorization: Bearer %s"\n' "$compatibility_token" | \
+    curl --config - --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
+      "http://127.0.0.1:$MATRIX_OAUTH_SYNAPSE_PORT/_matrix/client/v3/account/whoami"); then
+    if [ "$whoami_status" = 200 ]; then
+      break
+    fi
+  else
+    whoami_status=unavailable
+  fi
+  sleep 1
+done
 if [ "$whoami_status" != 200 ]; then
-  echo "matrix-oauth: compatibility session was rejected by Synapse (HTTP $whoami_status)" >&2
+  echo "matrix-oauth: compatibility session did not become usable (last result $whoami_status)" >&2
   exit 1
 fi
 

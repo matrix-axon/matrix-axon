@@ -27,7 +27,7 @@ The lanes cover:
 
 The integration workflow exposes each lane separately and provides `matrix-oauth-all` to run all four manually.
 The smoke workflow runs all four in a separate job after every push to `main` and on its nightly schedule.
-The scheduled job attempts every lane after a failure and reports the aggregate result, so one run exposes all broken scenarios it reaches within the job budget.
+Both multi-lane jobs attempt every lane after a failure and report the aggregate result, so one run exposes all broken scenarios it reaches within the job budget.
 These expensive, unstable-protocol lanes remain outside the pull-request path.
 
 ## Secret handling

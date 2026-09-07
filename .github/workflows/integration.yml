@@ -92,9 +92,14 @@ jobs:
             matrix-oauth-all|all) lanes=(api acquire grant unsupported) ;;
             *) echo "unknown Matrix OAuth suite" >&2; exit 2 ;;
           esac
+          failed=0
           for lane in "${lanes[@]}"; do
-            scripts/matrix-oauth-test.sh "$lane"
+            if ! scripts/matrix-oauth-test.sh "$lane"; then
+              echo "::error title=Matrix OAuth QR integration::$lane lane failed"
+              failed=1
+            fi
           done
+          exit "$failed"
 
       # These lanes handle OAuth and Matrix secrets in a throwaway directory.
       # The harness scans Axon's log, deletes the directory, and deliberately
