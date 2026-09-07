@@ -338,6 +338,7 @@ impl Api {
 
     async fn envelope<T: DeserializeOwned>(
         &self,
+        operation: &'static str,
         method: Method,
         path: &str,
         body: Option<Value>,
@@ -345,15 +346,16 @@ impl Api {
     ) -> Result<T> {
         let (status, text) = self.raw(method, path, body, true).await?;
         if status != expected {
-            bail!("Axon API returned an unexpected status");
+            bail!("Axon API {operation} returned HTTP {status}; expected {expected}");
         }
         let envelope: Envelope<T> = serde_json::from_str(&text)
-            .map_err(|_| anyhow!("Axon API returned an invalid success envelope"))?;
+            .map_err(|_| anyhow!("Axon API {operation} returned an invalid success envelope"))?;
         Ok(envelope.data)
     }
 
     async fn create_acquire(&self) -> Result<AcquireFlow> {
         self.envelope(
+            "acquisition creation",
             Method::POST,
             "/v1/accounts/login/qr",
             Some(json!({ "expected_user_id": "@alice:localhost", "presentation": "scan" })),
@@ -362,8 +364,40 @@ impl Api {
         .await
     }
 
+    async fn create_acquire_after_cancellation(&self) -> Result<AcquireFlow> {
+        let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+        loop {
+            let (status, text) = self
+                .raw(
+                    Method::POST,
+                    "/v1/accounts/login/qr",
+                    Some(json!({ "expected_user_id": "@alice:localhost", "presentation": "scan" })),
+                    true,
+                )
+                .await?;
+            if status == StatusCode::CREATED {
+                let envelope: Envelope<AcquireFlow> = serde_json::from_str(&text).map_err(|_| {
+                    anyhow!(
+                        "Axon API acquisition creation after cancellation returned an invalid success envelope"
+                    )
+                })?;
+                return Ok(envelope.data);
+            }
+            if status != StatusCode::CONFLICT {
+                bail!(
+                    "Axon API acquisition creation after cancellation returned HTTP {status}; expected 201 Created or transient 409 Conflict"
+                );
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("cancelled acquisition did not release its identity reservation in time");
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
     async fn acquire(&self, flow_id: Uuid) -> Result<AcquireFlow> {
         self.envelope(
+            "acquisition lookup",
             Method::GET,
             &format!("/v1/accounts/login/qr/{flow_id}"),
             None,
@@ -375,6 +409,7 @@ impl Api {
     async fn acquire_scan(&self, flow_id: Uuid, qr_code_data: &str) -> Result<()> {
         let _: AcquireFlow = self
             .envelope(
+                "acquisition scan submission",
                 Method::POST,
                 &format!("/v1/accounts/login/qr/{flow_id}/scan"),
                 Some(json!({ "qr_code_data": qr_code_data })),
@@ -394,13 +429,16 @@ impl Api {
             )
             .await?;
         if status != StatusCode::NO_CONTENT {
-            bail!("acquire cancellation returned an unexpected status");
+            bail!(
+                "Axon API acquisition cancellation returned HTTP {status}; expected 204 No Content"
+            );
         }
         Ok(())
     }
 
     async fn create_grant(&self, account_id: Uuid, presentation: &str) -> Result<GrantFlow> {
         self.envelope(
+            "grant creation",
             Method::POST,
             &format!("/v1/accounts/{account_id}/login-grants/qr"),
             Some(json!({ "presentation": presentation })),
@@ -411,6 +449,7 @@ impl Api {
 
     async fn grant(&self, account_id: Uuid, flow_id: Uuid) -> Result<GrantFlow> {
         self.envelope(
+            "grant lookup",
             Method::GET,
             &format!("/v1/accounts/{account_id}/login-grants/qr/{flow_id}"),
             None,
@@ -422,6 +461,7 @@ impl Api {
     async fn grant_scan(&self, account_id: Uuid, flow_id: Uuid, qr_code_data: &str) -> Result<()> {
         let _: GrantFlow = self
             .envelope(
+                "grant scan submission",
                 Method::POST,
                 &format!("/v1/accounts/{account_id}/login-grants/qr/{flow_id}/scan"),
                 Some(json!({ "qr_code_data": qr_code_data })),
@@ -441,19 +481,26 @@ impl Api {
             )
             .await?;
         if status != StatusCode::NO_CONTENT {
-            bail!("grant cancellation returned an unexpected status");
+            bail!("Axon API grant cancellation returned HTTP {status}; expected 204 No Content");
         }
         Ok(())
     }
 
     async fn accounts(&self) -> Result<Vec<Account>> {
-        self.envelope(Method::GET, "/v1/accounts", None, StatusCode::OK)
-            .await
+        self.envelope(
+            "account listing",
+            Method::GET,
+            "/v1/accounts",
+            None,
+            StatusCode::OK,
+        )
+        .await
     }
 
     async fn timeline(&self, account_id: Uuid, room_id: &str) -> Result<Timeline> {
         let encoded: String = url::form_urlencoded::byte_serialize(room_id.as_bytes()).collect();
         self.envelope(
+            "timeline lookup",
             Method::GET,
             &format!("/v1/accounts/{account_id}/rooms/{encoded}/timeline?limit=20"),
             None,
@@ -1212,7 +1259,7 @@ async fn run_api_lane(
     }
 
     eprintln!("matrix-oauth(api): checking authorization rejection");
-    let rejected = api.create_acquire().await?;
+    let rejected = api.create_acquire_after_cancellation().await?;
     drive_peer_grant(
         &peer.client,
         &api,

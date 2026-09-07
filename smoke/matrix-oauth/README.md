@@ -20,7 +20,7 @@ Set `TMPDIR` to a filesystem with enough room for the throwaway configuration an
 
 The lanes cover:
 
-- `api`: authenticated acquisition boundaries, invalid identity, idempotent cancellation, explicit authorization rejection, account-scoped grant isolation, malformed QR redaction, grant cancellation, and real rendezvous expiry;
+- `api`: authenticated acquisition boundaries, invalid identity, idempotent cancellation and bounded identity-release recovery, explicit authorization rejection, account-scoped grant isolation, malformed QR redaction, grant cancellation, and real rendezvous expiry;
 - `acquire`: a trusted SDK device authorizes Axon, Axon becomes cross-signed, receives backup material, decrypts history created before login, then restores and refreshes its OAuth session after restart beyond the 60-second test access-token lifetime;
 - `grant`: a trusted Axon account authorizes a fresh SDK device only after explicit MAS approval, and the new device becomes cross-signed, activates the transferred backup secret, and decrypts the seeded history; and
 - `unsupported`: MAS omits the device-authorization capability and acquisition terminates with the stable `unsupported` classification.
