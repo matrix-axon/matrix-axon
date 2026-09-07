@@ -25,8 +25,9 @@ The lanes cover:
 - `grant`: a trusted Axon account authorizes a fresh SDK device only after explicit MAS approval, and the new device becomes cross-signed, activates the transferred backup secret, and decrypts the seeded history; and
 - `unsupported`: MAS omits the device-authorization capability and acquisition terminates with the stable `unsupported` classification.
 
-The integration workflow exposes each lane separately and provides `matrix-oauth-all` to run all four.
-These expensive, unstable-protocol lanes are manual rather than pull-request gates.
+The integration workflow exposes each lane separately and provides `matrix-oauth-all` to run all four manually.
+The smoke workflow runs all four in a separate job after every push to `main` and on its nightly schedule.
+These expensive, unstable-protocol lanes remain outside the pull-request path.
 
 ## Secret handling
 

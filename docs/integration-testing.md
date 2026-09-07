@@ -78,6 +78,7 @@ It's slower than the lint/test lane because it pulls the Synapse and Postgres im
 
 The same manual integration workflow exposes four pinned Synapse + MAS lanes: `matrix-oauth-api`, `matrix-oauth-acquire`, `matrix-oauth-grant`, and `matrix-oauth-unsupported`.
 Choose `matrix-oauth-all` to run the complete set, or `all` to run both the re-decryption suite above and every Matrix OAuth lane.
+The smoke workflow also runs all four Matrix OAuth lanes in a separate job after every push to `main` and on its nightly schedule.
 
 Locally, run a single lane with:
 
@@ -93,7 +94,7 @@ The separate grant lane proves a trusted Axon account can authorize a fresh SDK 
 The API and unsupported lanes cover failure, rejection, cancellation, timeout, account scoping, capability gating, and secret-safe diagnostics.
 
 The fixture writes runtime protocol material only to memory or a throwaway run directory that is removed by its cleanup trap.
-The workflow uploads no Matrix OAuth failure artifacts.
+Neither workflow uploads Matrix OAuth failure artifacts.
 See [`smoke/matrix-oauth/README.md`](../smoke/matrix-oauth/README.md) for pinned versions, prerequisites, and the complete secret-handling contract.
 
 ## Prerequisites (manual walkthrough)

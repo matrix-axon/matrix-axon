@@ -12,6 +12,11 @@ name: smoke
 # regression through; the honest alternative — blocking every PR on a Docker
 # stack — costs more than it saves at this size.
 #
+# `matrix-oauth` independently runs the four ADR 0097 API and interoperability
+# lanes on the same post-merge and nightly events. It stays in its own job so
+# its secret-safe no-artifact policy and failure signal cannot be confused with
+# the ordinary smoke harness.
+#
 # Before this split the whole gate was workflow_dispatch-only, so nothing ran
 # it automatically and `scroll_pin_on_relation_refresh` sat broken on main long
 # enough that its start could not be dated (#190).
@@ -143,6 +148,49 @@ jobs:
           NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
           SMOKE_LANE: ${{ steps.lane.outputs.lane }}
           JOB_LABEL: true-local
+          STATUS: ${{ job.status }}
+        run: ./scripts/notify-smoke-result.sh
+
+  # Does not gate pull requests: this pulls pinned Synapse and MAS images and
+  # exercises an unstable Matrix protocol with real OAuth and E2EE secrets.
+  matrix-oauth:
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-matrix-oauth-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-matrix-oauth-
+
+      - name: Run Matrix OAuth QR interoperability
+        run: |
+          for lane in api acquire grant unsupported; do
+            scripts/matrix-oauth-test.sh "$lane"
+          done
+
+      # OAuth and encryption secrets exist only in the harness's throwaway
+      # directory. Never upload failure artifacts from this job.
+      - name: Notify axon-developer room of result
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
+          NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
+          SMOKE_LANE: matrix-oauth-all
+          JOB_LABEL: matrix-oauth
           STATUS: ${{ job.status }}
         run: ./scripts/notify-smoke-result.sh
 

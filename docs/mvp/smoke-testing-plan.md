@@ -2,6 +2,9 @@
 
 > **Status:** S1 has shipped, and the stub lane is now the required PR job this plan originally called for — `smoke.yml` runs `scripts/smoke-gate.sh tui` on every pull request (no Docker, ~90s). The Docker-backed lanes remain off the PR path and run on push to `main` and nightly; `scripts/smoke-gate.sh all` also runs locally via the pre-push hook's `RUN_SMOKE=` opt-in (the `smoke-gate` hook in `.pre-commit-config.yaml`, which fires for git and jj alike — ADR 0092). The lanes were split once measured: keeping all of them manual meant nothing ran automatically, and `scroll_pin_on_relation_refresh` sat broken on `main` undetected (#190). Most of S2's journey coverage (login, the full mutation set, live updates/resilience, the live-stack journey) is also built out under the same harness. S3 (dedicated Windows/macOS PTY runners) and S4 (external-homeserver profile) have not started. This plan predates 7b bearer-token auth landing — see the note under "Assumptions" below, which is now stale in one respect.
 
+The nightly and post-merge smoke workflow also runs ADR 0097's four Matrix OAuth QR API and interoperability lanes in a separate job.
+That job uploads no failure artifacts because its throwaway state handles OAuth and encryption secrets.
+
 ## Summary
 
 Stand up black-box smoke coverage for the two shipped binaries:
