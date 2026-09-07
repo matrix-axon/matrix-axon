@@ -531,6 +531,79 @@ describe('MediaImage', () => {
     expect(await findByRole('button', { name: 'Retry' })).toBeTruthy()
   })
 
+  it('reports the server-confirmed decryption failure as fact', async () => {
+    // The one time this client may say the words. It is not inferring it from
+    // an `onError` — the server observed the failure and said so with
+    // `422 media_undecryptable` (#361), which is the evidence #359 found the
+    // client never had.
+    serveBytes()
+    const { findByRole, findByText, queryByRole } = renderImage(
+      image({ encrypted: true }),
+    )
+    const img = await findByRole('img')
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/media/:account/:server/:media`, () =>
+        HttpResponse.json(
+          { error: { code: 'media_undecryptable', message: 'hash mismatch' } },
+          { status: 422 },
+        ),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/media/:account/:server/:media/thumbnail`,
+        () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: 'media_undecryptable',
+                message: 'hash mismatch',
+              },
+            },
+            { status: 422 },
+          ),
+      ),
+    )
+    fireEvent.error(img)
+
+    expect(
+      await findByText('Encrypted media — the server could not decrypt it'),
+    ).toBeTruthy()
+    // No Retry: the same ciphertext would come back and fail identically, so
+    // the button would promise something pressing it cannot deliver.
+    expect(queryByRole('button', { name: 'Retry' })).toBeNull()
+  })
+
+  it('keeps retry for a 422 that is not a decryption failure', async () => {
+    // The status is a general class. Reading the envelope `code` is what stops
+    // some future unprocessable-entity from wearing the one message in this
+    // client that sends people to go and look at their server.
+    serveBytes()
+    const { findByRole, findByText, queryByText } = renderImage(
+      image({ encrypted: true }),
+    )
+    const img = await findByRole('img')
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/media/:account/:server/:media`, () =>
+        HttpResponse.json(
+          { error: { code: 'unprocessable', message: 'something else' } },
+          { status: 422 },
+        ),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/media/:account/:server/:media/thumbnail`,
+        () =>
+          HttpResponse.json(
+            { error: { code: 'unprocessable', message: 'something else' } },
+            { status: 422 },
+          ),
+      ),
+    )
+    fireEvent.error(img)
+
+    expect(await findByText('Could not load image')).toBeTruthy()
+    expect(await findByRole('button', { name: 'Retry' })).toBeTruthy()
+    expect(queryByText(/could not decrypt it/)).toBeNull()
+  })
+
   it('offers retry when the fetch itself fails, not just the decode', async () => {
     // One decode glitch plus one network glitch must not rebuild the dead end
     // this change exists to remove.

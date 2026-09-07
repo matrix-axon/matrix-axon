@@ -184,17 +184,26 @@ export function MediaImage({
               decoding="async"
             />
           ) : state.status === 'error' ? (
-            // The retry's own fetch failed. Reported as itself rather than as
-            // a decode verdict — and it carries Retry, or one decode glitch
-            // followed by one network glitch would rebuild the dead end this
-            // whole change exists to remove.
+            // A failed fetch, reported as itself rather than as a decode
+            // verdict. Retry comes with it — one decode glitch followed by one
+            // network glitch would otherwise rebuild the dead end this whole
+            // change exists to remove — *unless* the server told us the bytes
+            // will not decrypt, which is terminal: the same ciphertext would
+            // come back and fail the same way, so a Retry button there would
+            // be a lie about what pressing it can achieve (#361).
             <div class="media-undisplayable">
-              <p class="muted placeholder">Could not load image</p>
-              <div class="media-undisplayable-actions">
-                <button type="button" class="ghost" onClick={retry}>
-                  Retry
-                </button>
-              </div>
+              <p class="muted placeholder">
+                {state.error?.kind === 'undecryptable'
+                  ? 'Encrypted media — the server could not decrypt it'
+                  : 'Could not load image'}
+              </p>
+              {state.error?.kind !== 'undecryptable' && (
+                <div class="media-undisplayable-actions">
+                  <button type="button" class="ghost" onClick={retry}>
+                    Retry
+                  </button>
+                </div>
+              )}
             </div>
           ) : decodeFailed ? (
             // Never a dead end: Retry, because on iOS the most likely cause is

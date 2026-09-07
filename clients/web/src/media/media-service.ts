@@ -48,7 +48,21 @@ export type TextResult =
   { ok: true; text: string } | { ok: false; error: MediaFailure }
 
 export interface MediaFailure {
-  kind: 'auth' | 'not_found' | 'too_large' | 'network' | 'rejected'
+  kind:
+    | 'auth'
+    | 'not_found'
+    | 'too_large'
+    | 'network'
+    | 'rejected'
+    /**
+     * The object was downloaded intact and would not decrypt — the server's
+     * `422 media_undecryptable` (#361).
+     *
+     * The one failure the *client* can report as a fact about decryption, and
+     * only because the server said so. It is also terminal: a retry re-fetches
+     * the same ciphertext and fails identically, so callers must not offer one.
+     */
+    | 'undecryptable'
   status?: number
   /** The server's envelope message, when it sent one (`rejected` carries it). */
   message?: string
@@ -151,6 +165,32 @@ export interface MediaService {
     mxcUrl: string,
     options?: MediaRequestOptions,
   ): void
+}
+
+/**
+ * Whether a `422` is specifically the media proxy saying the bytes would not
+ * decrypt, rather than some other unprocessable-entity the route might grow.
+ *
+ * Reads the envelope's `code` rather than trusting the status alone: `422` is a
+ * general class, and mistaking another one for a decryption failure would put
+ * the single most consequential wording in this client — the one that sends
+ * people to look at their server — in front of a reader for the wrong reason
+ * (#359). A body that will not parse is not a decryption failure.
+ */
+async function isUndecryptable(res: Response): Promise<boolean> {
+  try {
+    const body: unknown = await res.clone().json()
+    return (
+      typeof body === 'object' &&
+      body !== null &&
+      'error' in body &&
+      typeof (body as { error: unknown }).error === 'object' &&
+      (body as { error: { code?: unknown } }).error?.code ===
+        'media_undecryptable'
+    )
+  } catch {
+    return false
+  }
 }
 
 /** Zero-ref object URLs kept for instant re-display before revocation. */
@@ -355,6 +395,9 @@ export function createMediaService(deps: {
         }
         if (res.status === 413) {
           return { ok: false, error: { kind: 'too_large', status: 413 } }
+        }
+        if (res.status === 422 && (await isUndecryptable(res))) {
+          return { ok: false, error: { kind: 'undecryptable', status: 422 } }
         }
         return { ok: false, error: { kind: 'network', status: res.status } }
       } catch {
