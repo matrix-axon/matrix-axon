@@ -426,11 +426,19 @@ export function LightboxImage({
       {state.status === 'error' ? (
         // A failed fetch is its own outcome, and it carries Retry too — one
         // decode glitch plus one network glitch must not rebuild a dead end.
+        // Except when the server reports the bytes as undecryptable, which is
+        // terminal and gets no Retry (see `MediaImage`, and #361).
         <div class="lightbox-failure">
-          <p class="muted placeholder">Could not load image</p>
-          <button type="button" class="ghost" onClick={retry}>
-            Retry
-          </button>
+          <p class="muted placeholder">
+            {state.error?.kind === 'undecryptable'
+              ? 'Encrypted media — the server could not decrypt it'
+              : 'Could not load image'}
+          </p>
+          {state.error?.kind !== 'undecryptable' && (
+            <button type="button" class="ghost" onClick={retry}>
+              Retry
+            </button>
+          )}
         </div>
       ) : decodeFailed ? (
         <div class="lightbox-failure">

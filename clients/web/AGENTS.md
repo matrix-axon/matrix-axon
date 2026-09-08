@@ -178,7 +178,10 @@ before starting a milestone.
   cleared the failure on the click would re-mount the failed url and relatch.
   **The proxy does not hand back ciphertext.** It answers 404 while an event is
   undecrypted, and once decrypted the AES key is inside `content.file.key`, so
-  a decryption failure is a 502 — not a 200 of noise. ADR 0064/0101 assumed
+  a decryption failure is a `422 media_undecryptable` — not a 200 of noise.
+  That code is the _only_ basis on which this client says the words "could not
+  decrypt", and it suppresses Retry, because the same ciphertext would come
+  back and fail identically (#361). ADR 0064/0101 assumed
   otherwise; the gates built on that assumption (withholding Download for
   unidentifiable bytes) have been removed, so any bytes that arrive are
   offered for Download.
