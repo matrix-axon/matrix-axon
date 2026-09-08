@@ -52,6 +52,20 @@ async function openReactionFixture(page: Page) {
   await expect(page.getByText('newest message')).toBeVisible()
 }
 
+async function pickerAnchorOffset(
+  page: Page,
+  anchor: { top: number; right: number },
+) {
+  return page.evaluate(({ top, right }) => {
+    const dialog = document.querySelector<HTMLElement>('.reaction-full-picker')!
+    const box = dialog.getBoundingClientRect()
+    return {
+      horizontal: Math.abs(box.left - right),
+      vertical: Math.abs(box.bottom - top),
+    }
+  }, anchor)
+}
+
 test('reacting to the newest message keeps the reaction chip inside the timeline viewport', async ({
   page,
 }) => {
@@ -113,6 +127,16 @@ test('the full reaction emoji picker anchors to the more button when space allow
   const dialog = page.getByRole('dialog', { name: 'Emoji picker' })
   await expect(dialog).toBeVisible()
   await expect(dialog.locator('emoji-picker')).toBeVisible()
+
+  // The dialog first renders at its CSS fallback, then the layout effect moves
+  // it to its anchor. The picker element being visible does not prove that
+  // positioning state has committed yet.
+  await expect
+    .poll(async () => (await pickerAnchorOffset(page, anchorBox)).horizontal)
+    .toBeLessThanOrEqual(1)
+  await expect
+    .poll(async () => (await pickerAnchorOffset(page, anchorBox)).vertical)
+    .toBeLessThanOrEqual(1)
 
   const geometry = await page.evaluate(() => {
     const dialog = document.querySelector<HTMLElement>('.reaction-full-picker')!
