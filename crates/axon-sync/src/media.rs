@@ -187,6 +187,25 @@ impl MediaFetcher for SdkMediaProxy {
 /// corrupted ciphertext produces. Transport failures surface as HTTP variants,
 /// not `Io`. On the plain path there is no decryptor at all, so neither variant
 /// can mean decryption and both stay `Upstream`.
+///
+/// **This reads two undocumented upstream details, so name them precisely.**
+/// The workspace takes `matrix-sdk = "0.18"` (caret), meaning a patch release
+/// can change either without a compile error here — and a misclassification is
+/// silent in both directions: a network blip reported as a permanent `422`, or
+/// a real decryption failure reported as retryable. The two lines to re-read on
+/// any bump, verified against 0.18.0:
+///
+/// - `matrix-sdk-0.18.0/src/media.rs`, `Media::get_media_content` — the
+///   `#[cfg(feature = "e2e-encryption")]` block that wraps the fetched bytes in
+///   `AttachmentDecryptor::new(...)?` and then `reader.read_to_end(&mut …)?`.
+///   Those two `?`s are the entire fallible surface this function reasons about.
+/// - `matrix-sdk-crypto-0.18.0/src/file_encryption/attachments.rs`, the
+///   `impl Read for AttachmentDecryptor` — `IoError::other("Hash mismatch while
+///   decrypting")` on the final zero-length read. This is why the *common* case
+///   is `Io` and not `DecryptorError`, which is the counter-intuitive half.
+///
+/// Tracked in issue #376, which also weighs an integration test through the
+/// real decryptor — the only check that would actually fail if this changed.
 fn classify_download_error(mxc_url: &str, encrypted: bool, error: SdkError) -> GatewayError {
     if error.client_api_error_kind() == Some(&ErrorKind::NotFound) {
         return GatewayError::MediaNotFound(mxc_url.to_owned());
