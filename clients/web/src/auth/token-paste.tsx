@@ -12,7 +12,7 @@ import type { AuthProvider } from './provider'
  * GitHub-PAT one (ADR 0046): the token is self-minted (`axon token issue`)
  * and revocable (`axon token revoke`), and OAuth replaces this flow post-MVP.
  */
-const STORAGE_KEY = 'axon.token'
+export const STORAGE_KEY = 'axon.token'
 
 /** The token-paste [`AuthProvider`], with the mutations the paste UI needs. */
 export interface TokenPasteProvider extends AuthProvider {

@@ -1,6 +1,6 @@
 import { render } from 'preact'
 import './index.css'
-import { App } from './app.tsx'
+import { AppRoot } from './app-root.tsx'
 import { BUILD_INFO } from './build-info.ts'
 import {
   browserReloadEnvironment,
@@ -35,4 +35,4 @@ window.addEventListener('vite:preloadError', (event) => {
   reloadOnce(BUILD_INFO.version, CHUNK_TARGET, reloadEnv)
 })
 
-render(<App />, document.getElementById('app')!)
+render(<AppRoot />, document.getElementById('app')!)

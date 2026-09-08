@@ -62,6 +62,17 @@ export interface Platform {
    * `bearer.<token>` back apart to do the right thing.
    */
   openSocket(url: string, token: string): LiveSocket
+
+  /**
+   * The API base to fall back on when the user has configured none and no
+   * `VITE_AXON_SERVER_URL` was baked in (ADR 0102 § 3).
+   *
+   * `'/'` in a browser, where the SPA and the API are served from one origin
+   * by construction (`deploy/web/Caddyfile`) and so the question never needs
+   * asking. `null` in a shell, which is distributed to people whose servers we
+   * have never heard of and must therefore ask before it can do anything.
+   */
+  defaultApiBaseUrl: string | null
 }
 
 /**
@@ -97,5 +108,7 @@ export function browserPlatform(): Platform {
   return {
     fetch: (...args) => globalThis.fetch(...args),
     openSocket: (url, token) => new WebSocket(url, bearerSubprotocols(token)),
+    // Same-origin: the deployment that serves this bundle also proxies /v1.
+    defaultApiBaseUrl: '/',
   }
 }

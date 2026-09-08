@@ -469,6 +469,39 @@ describe('SettingsPage', () => {
     )
     expect((await findByRole('status')).textContent).toBe('Copied')
   })
+
+  it('hides the server panel in a browser, where the server is not a choice', () => {
+    // `browserPlatform().defaultApiBaseUrl` is `'/'`, so offering to "change"
+    // the server would be offering to break a same-origin deployment.
+    const { queryByRole } = render(
+      <ServicesContext.Provider value={testServices()}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+
+    expect(queryByRole('button', { name: 'Change server' })).toBe(null)
+  })
+
+  it('says no server is configured rather than naming the browser default', () => {
+    // The panel reads the base URL through the graph's platform, not a fresh
+    // `browserPlatform()`. With nothing stored and nothing baked in, the shell
+    // has no default at all — asking the browser instead answers `'/'`, and
+    // the one build that can reach this panel would show "Server: /", which
+    // is not an address and not where it is pointed.
+    const services = testServices()
+    const shell = {
+      ...services,
+      platform: { ...services.platform, defaultApiBaseUrl: null },
+    }
+    const { getByText, getByRole } = render(
+      <ServicesContext.Provider value={shell}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+
+    expect(getByRole('button', { name: 'Change server' })).toBeTruthy()
+    expect(getByText('No server configured.')).toBeTruthy()
+  })
 })
 
 function mockNavigatorProperty(

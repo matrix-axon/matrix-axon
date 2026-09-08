@@ -1,6 +1,7 @@
 import { computed, signal, type ReadonlySignal } from '@preact/signals'
 import { useState } from 'preact/hooks'
 import { browserPlatform, type Platform } from '../platform'
+import { apiUrl as buildApiUrl } from '../server-url'
 import {
   createAuthPersistence,
   type AuthPersistence,
@@ -8,8 +9,8 @@ import {
 } from './persistence'
 import type { AuthProvider, OAuthCallbackResult } from './provider'
 
-const SESSION_KEY = 'axon.oauth.session'
-const PENDING_KEY = 'axon.oauth.pending'
+export const SESSION_KEY = 'axon.oauth.session'
+export const PENDING_KEY = 'axon.oauth.pending'
 const REFRESH_SKEW_MS = 60_000
 const DEFAULT_CLIENT_ID = 'axon-web'
 
@@ -589,8 +590,12 @@ function sessionFromTokenBody(body: unknown, provider: string): OAuthSession {
   }
 }
 
+/**
+ * `server-url.ts` owns the join, so a base with a path prefix survives it —
+ * `new URL(path, base)` on a leading-slash path silently drops one.
+ */
 function apiUrl(path: string, baseUrl: string): string {
-  return new URL(path, new URL(baseUrl, window.location.origin)).toString()
+  return buildApiUrl(path, baseUrl).toString()
 }
 
 function randomBase64Url(bytes: number): string {
