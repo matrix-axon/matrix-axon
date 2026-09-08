@@ -180,3 +180,54 @@ describe('error envelope helpers', () => {
     )
   })
 })
+
+describe('the transport seam (ADR 0102 § 2)', () => {
+  /**
+   * `createApiClient` defaults to `browserPlatform()`, so a change that stopped
+   * threading the injected platform through would leave every other test in
+   * this file green — msw intercepts the global `fetch` either way. These
+   * assert the injected function is the one that runs.
+   */
+  it('issues requests through the injected fetch, not the global', async () => {
+    const calls: string[] = []
+    const injected: typeof globalThis.fetch = async (input) => {
+      calls.push(String(input instanceof Request ? input.url : input))
+      return new Response(JSON.stringify({ data: [ACCOUNT] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+
+    const api = createApiClient(stubAuth('tok-1'), BASE_URL, {
+      fetch: injected,
+    })
+    const { data } = await api.GET('/v1/accounts')
+
+    // No msw handler is registered, and the server is set to error on any
+    // unhandled request — so a global-fetch fallback would fail this outright.
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toContain('/v1/accounts')
+    expect(data?.data?.[0]?.account_id).toBe(ACCOUNT.account_id)
+  })
+
+  it('still carries the bearer token when the platform is injected', async () => {
+    let seen: string | null = null
+    const injected: typeof globalThis.fetch = async (input, init) => {
+      const headers = new Headers(
+        input instanceof Request ? input.headers : init?.headers,
+      )
+      seen = headers.get('authorization')
+      return new Response(JSON.stringify({ data: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+
+    const api = createApiClient(stubAuth('tok-2'), BASE_URL, {
+      fetch: injected,
+    })
+    await api.GET('/v1/accounts')
+
+    expect(seen).toBe('Bearer tok-2')
+  })
+})

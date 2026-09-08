@@ -258,3 +258,52 @@ describe('createLiveConnection', () => {
     expect(live.connection.value).toBe('live')
   })
 })
+
+describe('a socket factory that throws', () => {
+  it('reports the reason once, not on every retry', () => {
+    // The case this exists for: `api/ws.ts` throws a description of a base URL
+    // that cannot produce a websocket URL. Before, every such throw was
+    // swallowed and the client reconnected forever with nothing anywhere
+    // saying why — the exact state the diagnostic was written to end.
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const live = createLiveConnection({
+      socketFactory: () => {
+        throw new Error('cannot derive a websocket URL from tauri:')
+      },
+    })
+    live.start()
+    vi.advanceTimersByTime(60_000)
+
+    const ours = warn.mock.calls.filter((c) =>
+      String(c[1]).includes('cannot derive a websocket URL'),
+    )
+    expect(ours).toHaveLength(1)
+    expect(live.connection.value).toBe('reconnecting')
+
+    live.stop()
+    warn.mockRestore()
+  })
+
+  it('reports again when the reason changes', () => {
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let reason = 'no token yet'
+    const live = createLiveConnection({
+      socketFactory: () => {
+        throw new Error(reason)
+      },
+    })
+    live.start()
+    vi.advanceTimersByTime(5_000)
+    reason = 'cannot derive a websocket URL from tauri:'
+    vi.advanceTimersByTime(60_000)
+
+    const messages = warn.mock.calls.map((c) => String(c[1]))
+    expect(messages).toContain('no token yet')
+    expect(messages).toContain('cannot derive a websocket URL from tauri:')
+
+    live.stop()
+    warn.mockRestore()
+  })
+})

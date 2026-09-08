@@ -1,7 +1,11 @@
 # ADR 0069 — Client rollout: M19 room and account actions
 
 **Status:** Proposed — client-side companion to ADR 0068 (M19). Tracked in
-issue #304.
+issue #355.
+
+> Earlier revisions of this line cited issue #304. That number came from the
+> private repo; in the public one it belongs to an unrelated SAS issue — one
+> of the pre-2026-07-28 renumbering collisions. #355 is the real umbrella.
 
 ## Context
 
