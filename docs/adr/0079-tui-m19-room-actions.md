@@ -58,9 +58,10 @@ Shared TUI rules:
 3. **TUI-M19-3 — Room settings and tags.** Implement `/roomname`,
    `/topic`, `/roomavatar`, `/tag`, `/untag`, `/favorite`, and `/unfavorite`.
    Clears use explicit `--clear`, not blank input. Avatar writes reuse staged
-   image upload and require an image content type. Because `GET /v1/rooms` does
-   not expose room tags today, tag-backed room-list display/filtering waits for
-   an authoritative read surface.
+   image upload and require an image content type. Tag-backed room-list
+   display/filtering waits on ADR 0103's read surface (issue #365 / #369);
+   `/pin` becomes that consumer rather than a parallel `/favorite` in the
+   first landing.
 4. **TUI-M19-4 — Power levels.** Implement a read-only `/powerlevels` popup and
    conservative `/powerlevel set ...` edits. Always fetch current resolved
    levels first, write one merged request, and require explicit confirmation
