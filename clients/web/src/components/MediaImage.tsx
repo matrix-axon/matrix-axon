@@ -1,10 +1,8 @@
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
+import type { SniffedFormat } from '../media/media-service'
 import type { ParsedMedia } from '../media/parse-media'
 import { useMediaBlob } from '../media/use-media-blob'
-import {
-  imageDecodeFailureMessage,
-  unrenderableImageFormat,
-} from '../media/image-format'
+import { imageDecodeFailureMessage } from '../media/image-format'
 import { downloadMedia, isDownloadable } from '../media/download-media'
 import { useServices } from '../services'
 import {
@@ -36,13 +34,17 @@ function thumbnailWidth(w: number, h: number): number {
  * timeline is not re-anchored after mount, so an image that grew on load would
  * shove scrolled-back content around.
  *
- * A ready blob is not necessarily a picture. The media proxy returns raw
- * ciphertext with a 200 when it lacks the decryption key, and a format this
- * browser cannot decode (HEIC, most often) arrives perfectly intact and still
- * will not paint. Both surface only at `<img>` decode, caught by `onError`;
- * `imageDecodeFailureMessage` decides which of them to report, and the
- * placeholder offers Download either way so the bytes are never a dead end
- * (ADR 0101).
+ * A ready blob is not necessarily a picture: a format this browser cannot
+ * decode (HEIC, most often) arrives perfectly intact and still will not paint,
+ * surfacing only at `<img>` decode, caught by `onError` (ADR 0101).
+ *
+ * But a third cause outnumbers them on iOS, and it is not about the bytes at
+ * all: the same `onError` fires when WebKit fumbles a perfectly good image —
+ * an object URL revoked out from under it, memory pressure, a decoder that
+ * gave up. So the first failure is *not* a verdict. It re-fetches under a new
+ * `attempt`, which mints a fresh object URL, and only a second failure paints
+ * the placeholder — which then always offers Retry, because in a PWA there is
+ * no reload and the alternative is force-quitting the app (issue #359).
  */
 export function MediaImage({
   accountId,
@@ -73,21 +75,57 @@ export function MediaImage({
   const { media: service } = useServices()
   const [status, setStatus] = useState<'idle' | 'error'>('idle')
   const { displayUrl, thumbnail } = useThumbnailFallback(media, status)
+  // Retry generation. Part of the media cache key, so bumping it re-fetches
+  // and mints an object URL that is not the one that just failed to decode.
+  const [attempt, setAttempt] = useState(0)
+  // One automatic retry per object, then the reader decides. A ref, not state:
+  // it must not itself cause a render, and it is read inside `onError` where a
+  // stale closure over a state value would grant a second free retry.
+  const autoRetried = useRef(false)
   // A null url makes the hook a no-op, so a local preview skips the proxy fetch
   // entirely while keeping the hook call unconditional.
-  const { ref, state } = useMediaBlob<HTMLDivElement>(
+  const { ref, state, invalidate } = useMediaBlob<HTMLDivElement>(
     accountId,
     previewUrl === undefined || previewUrl === null ? displayUrl : null,
-    { thumbnail },
+    { thumbnail, attempt },
   )
   // Feed the load outcome back so the hook can fall back off a bad thumbnail.
   useEffect(() => {
     setStatus(state.status === 'error' ? 'error' : 'idle')
   }, [state.status])
   const [lightboxOpen, setLightboxOpen] = useState(false)
-  const [decodeFailed, setDecodeFailed] = useState(false)
+  // The decode verdict, bound to the object url it was reached on and to what
+  // those bytes sniffed as.
+  const [failure, setFailure] = useState<{
+    url: string
+    format?: SniffedFormat
+  } | null>(null)
   const [downloading, setDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState<string | null>(null)
+
+  // Hold the verdict until a *different* url arrives. Clearing it on the retry
+  // click instead would re-mount the url that just failed: `useMediaBlob` keeps
+  // its previous `ready` state until its effect runs after paint, so the render
+  // in between points the `<img>` at the failed blob again — and a browser
+  // fires `error` for it before that effect lands, relatching the placeholder
+  // and hiding the bytes the retry went and fetched.
+  const decodeFailed =
+    failure !== null && (state.status !== 'ready' || state.url === failure.url)
+
+  // A different object means a fresh verdict — the same reset `LightboxImage`
+  // does when the viewer pages. Without it a row recycled onto another event
+  // (or falling back off a bad thumbnail) inherits the previous object's
+  // failure and never tries.
+  useEffect(() => {
+    autoRetried.current = false
+    setFailure(null)
+    setAttempt(0)
+  }, [displayUrl])
+
+  const retry = () => {
+    autoRetried.current = true
+    setAttempt((previous) => previous + 1)
+  }
 
   const saveUndisplayable = async () => {
     setDownloading(true)
@@ -124,14 +162,9 @@ export function MediaImage({
       }
 
   const alt = media.caption ?? media.filename
-  /**
-   * Whether offering to save the undisplayable bytes helps. Identical to the
-   * pageable viewer's `saveable` gate, and identical for the same reason: a
-   * named format is a real file another application will open, whereas bytes
-   * we cannot identify are most likely the ciphertext-fallback 200, and
-   * writing those to `photo.jpg` is worse than offering nothing (ADR 0101).
-   */
-  const saveable = unrenderableImageFormat(media) !== null
+  // Read the verdict off the *failed* fetch, so the message does not wobble to
+  // the metadata fallback while a retry is in flight.
+  const failedFormat = failure?.format
   const canOpen =
     state.status === 'ready' && !decodeFailed && media.url !== null
 
@@ -150,33 +183,53 @@ export function MediaImage({
               alt={alt}
               decoding="async"
             />
+          ) : state.status === 'error' ? (
+            // The retry's own fetch failed. Reported as itself rather than as
+            // a decode verdict — and it carries Retry, or one decode glitch
+            // followed by one network glitch would rebuild the dead end this
+            // whole change exists to remove.
+            <div class="media-undisplayable">
+              <p class="muted placeholder">Could not load image</p>
+              <div class="media-undisplayable-actions">
+                <button type="button" class="ghost" onClick={retry}>
+                  Retry
+                </button>
+              </div>
+            </div>
           ) : decodeFailed ? (
-            // Not a dead end when we can name the format: those bytes are a
-            // real file a local tool will open, so the placeholder carries the
-            // same Download the attachment card would have offered. Withheld
-            // for unidentifiable bytes — see `saveable`.
+            // Never a dead end: Retry, because on iOS the most likely cause is
+            // transient and a PWA has no reload, and Download, because bytes
+            // that arrived are worth opening elsewhere whatever they turned out
+            // to be. ADR 0101 withheld Download for bytes it could not name,
+            // on the grounds they were probably the proxy's ciphertext-fallback
+            // 200 — a path that turned out to be near-unreachable (see
+            // `image-format.ts`), so that gate only cost readers the one action
+            // that helps.
             <div class="media-undisplayable">
               <p class="muted placeholder">
-                {imageDecodeFailureMessage(media)}
+                {imageDecodeFailureMessage(media, failedFormat)}
               </p>
-              {saveable && isDownloadable(media) && (
-                <button
-                  type="button"
-                  class="ghost"
-                  disabled={downloading}
-                  onClick={() => void saveUndisplayable()}
-                >
-                  {downloading ? 'Downloading…' : 'Download'}
+              <div class="media-undisplayable-actions">
+                <button type="button" class="ghost" onClick={retry}>
+                  Retry
                 </button>
-              )}
+                {isDownloadable(media) && (
+                  <button
+                    type="button"
+                    class="ghost"
+                    disabled={downloading}
+                    onClick={() => void saveUndisplayable()}
+                  >
+                    {downloading ? 'Downloading…' : 'Download'}
+                  </button>
+                )}
+              </div>
               {downloadError !== null && (
                 <p class="muted placeholder" role="alert">
                   {downloadError}
                 </p>
               )}
             </div>
-          ) : state.status === 'error' ? (
-            <p class="muted placeholder">Could not load image</p>
           ) : state.status === 'ready' && state.url !== undefined ? (
             <button
               type="button"
@@ -197,7 +250,25 @@ export function MediaImage({
                 // Keep decode off the main thread: a photo decoding inline is
                 // a stutter in the middle of a scroll gesture on a phone.
                 decoding="async"
-                onError={() => setDecodeFailed(true)}
+                onError={() => {
+                  // These bytes did not decode, so drop them from the cache
+                  // before anything else: entries outlive their holders, and a
+                  // retry — or simply leaving the room and coming back — would
+                  // otherwise be handed the very object that just failed,
+                  // without a request leaving the browser.
+                  invalidate()
+                  // The first failure is not a verdict: re-fetch before
+                  // believing the bytes are at fault. No `failure` is recorded
+                  // on that path, so the reader never sees a placeholder flash
+                  // for a glitch that recovered.
+                  if (!autoRetried.current) {
+                    retry()
+                    return
+                  }
+                  if (state.url !== undefined) {
+                    setFailure({ url: state.url, format: state.format })
+                  }
+                }}
               />
             </button>
           ) : (

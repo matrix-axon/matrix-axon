@@ -21,7 +21,16 @@ import {
 } from './media-viewer'
 
 const ACCOUNT = '11111111-1111-4111-8111-111111111111'
-const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+// Real magic bytes: the media service sniffs every object's head, and a
+// truncated signature would sniff as "no known format".
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const HEIC = new Uint8Array([
+  0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63,
+])
+/** Bytes matching no image container the sniffer knows. */
+const CIPHERTEXT = new Uint8Array([
+  0x3f, 0x91, 0xd2, 0x0a, 0x7c, 0x44, 0xe8, 0x16, 0x5b, 0x9a, 0x02, 0xff,
+])
 
 const server = setupServer()
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
@@ -32,14 +41,14 @@ afterEach(() => {
 afterAll(() => server.close())
 
 /** Records every media path fetched, for the preload assertions. */
-function serveBytes(): string[] {
+function serveBytes(bytes: Uint8Array = PNG): string[] {
   const requested: string[] = []
   server.use(
     http.get(
       `${TEST_BASE_URL}/v1/media/:account/:server/:media`,
       ({ params }) => {
         requested.push(String(params.media))
-        return new HttpResponse(PNG, {
+        return new HttpResponse(bytes, {
           headers: { 'content-type': 'image/png' },
         })
       },
@@ -48,13 +57,32 @@ function serveBytes(): string[] {
       `${TEST_BASE_URL}/v1/media/:account/:server/:media/thumbnail`,
       ({ params }) => {
         requested.push(`${String(params.media)}:thumb`)
-        return new HttpResponse(PNG, {
+        return new HttpResponse(bytes, {
           headers: { 'content-type': 'image/png' },
         })
       },
     ),
   )
   return requested
+}
+
+/**
+ * Exhaust the viewer's automatic retry. The first decode failure only buys a
+ * re-fetch (issue #359), and that mints a new object URL — so the element the
+ * caller is holding is replaced, and the second failure has to be fired at
+ * whatever is mounted afterwards.
+ */
+async function failDecodeTwice(img: Element): Promise<string | null> {
+  const firstSrc = img.getAttribute('src')
+  fireEvent.error(img)
+  const retried = await waitFor(() => {
+    const found = document.querySelector('.lightbox-image img')
+    expect(found).not.toBeNull()
+    expect(found!.getAttribute('src')).not.toBe(firstSrc)
+    return found!
+  })
+  fireEvent.error(retried)
+  return retried.getAttribute('src')
 }
 
 function image(id: string, ts: number): TimelineEvent {
@@ -850,9 +878,8 @@ describe('MediaViewerProvider', () => {
       document.querySelector<HTMLButtonElement>('.lightbox-save')
 
     it('offers no save button until the bytes decode', async () => {
-      // The proxy answers 200 with raw ciphertext when it lacks the key, so a
-      // ready blob is not necessarily an image. Offering to save it would
-      // write undecryptable bytes under a plausible `.png` name.
+      // A ready blob is not necessarily a picture, so Save waits for the
+      // decode rather than for the fetch.
       serveBytes()
       const { container } = render(
         <Surface events={[image('$1', 10), image('$2', 20)]} atStart />,
@@ -870,11 +897,13 @@ describe('MediaViewerProvider', () => {
       await waitFor(() => expect(saveButton()).not.toBeNull())
     })
 
-    it('withdraws the save button for bytes that match no known format', async () => {
-      // Nothing identifies these bytes, so they are most likely the
-      // ciphertext-fallback 200 and saving them helps nobody. The event is
-      // plaintext, so the placeholder must NOT blame decryption either.
-      serveBytes()
+    it('keeps the save button for bytes that match no known format', async () => {
+      // ADR 0101 withheld Save here, reading unidentifiable bytes as the
+      // ciphertext-fallback 200. That path is near-unreachable — the proxy
+      // 404s while an event is undecrypted and 502s if decryption fails — so
+      // these are far more likely a format no table carries, and Save is the
+      // remedy. The placeholder must not blame decryption either.
+      serveBytes(CIPHERTEXT)
       const { container } = render(
         <Surface events={[image('$1', 10), image('$2', 20)]} atStart />,
       )
@@ -887,18 +916,63 @@ describe('MediaViewerProvider', () => {
       fireEvent.load(img)
       await waitFor(() => expect(saveButton()).not.toBeNull())
 
-      fireEvent.error(img)
-      await waitFor(() => expect(saveButton()).toBeNull())
+      await failDecodeTwice(img)
+      await waitFor(() => expect(saveButton()).not.toBeNull())
       const shown = document.querySelector('.lightbox-image')?.textContent
       expect(shown).toContain('Could not display this image')
       expect(shown).not.toContain('decrypt')
+      // And never a dead end — the viewer offers Retry the same way the
+      // inline placeholder does (#359).
+      expect(shown).toContain('Retry')
+    })
+
+    it('holds the viewer placeholder until different bytes arrive', async () => {
+      // Clearing it on the click would re-mount the url that just failed:
+      // `useMediaBlob` keeps its previous `ready` state until its effect runs
+      // after paint, and a browser re-fires `error` for that url before the
+      // fresh bytes land, relatching over the image the retry fetched.
+      serveBytes(CIPHERTEXT)
+      const { container } = render(
+        <Surface events={[image('$1', 10), image('$2', 20)]} atStart />,
+      )
+      await openAt(container, '$1')
+      const img = await waitFor(() => {
+        const found = document.querySelector('.lightbox-image img')
+        expect(found).not.toBeNull()
+        return found!
+      })
+      const failedSrc = (await failDecodeTwice(img)) ?? ''
+
+      const retryButton = await waitFor(() => {
+        const found = [
+          ...document.querySelectorAll('.lightbox-failure button'),
+        ].find((b) => b.textContent?.includes('Retry'))
+        expect(found).not.toBeUndefined()
+        return found!
+      })
+      serveBytes()
+      fireEvent.click(retryButton)
+
+      expect(
+        document.querySelector(`.lightbox-image img[src="${failedSrc}"]`),
+      ).toBeNull()
+      expect(document.querySelector('.lightbox-image')?.textContent).toContain(
+        'Could not display this image',
+      )
+
+      const recovered = await waitFor(() => {
+        const found = document.querySelector('.lightbox-image img')
+        expect(found).not.toBeNull()
+        return found!
+      })
+      expect(recovered.getAttribute('src')).not.toBe(failedSrc)
     })
 
     it('keeps the save button for a HEIC, which is the only remedy left', async () => {
       // A HEIC is a real file another application will open, so withdrawing
       // Save — the old behaviour for any decode failure — removed the one
       // action that helps (ADR 0101).
-      serveBytes()
+      serveBytes(HEIC)
       const { container } = render(
         <Surface events={[heicImage('$1', 10), image('$2', 20)]} atStart />,
       )
@@ -908,7 +982,7 @@ describe('MediaViewerProvider', () => {
         expect(found).not.toBeNull()
         return found!
       })
-      fireEvent.error(img)
+      await failDecodeTwice(img)
 
       await waitFor(() =>
         expect(

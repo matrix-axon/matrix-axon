@@ -20,7 +20,12 @@ import {
 
 const BASE_URL = 'http://axon.test'
 const ACCOUNT = '11111111-1111-4111-8111-111111111111'
+// A truncated signature is deliberate in most of these fixtures — they only
+// care about urls and refcounts — but `attempt` and the sniff need real ones.
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+const REAL_PNG = new Uint8Array([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+])
 
 const server = setupServer()
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
@@ -95,7 +100,7 @@ describe('createMediaService.acquire', () => {
     const handle = await media.acquire(ACCOUNT, 'mxc://hs/abc')
 
     expect(seenAuth).toBe('Bearer tok-x')
-    expect(handle.result).toEqual({ ok: true, url: 'blob:0' })
+    expect(handle.result).toEqual({ ok: true, url: 'blob:0', format: null })
   })
 
   it('shares one fetch and one object url across concurrent acquires', async () => {
@@ -109,8 +114,8 @@ describe('createMediaService.acquire', () => {
 
     expect(state.fetches).toBe(1)
     expect(created).toHaveLength(1)
-    expect(a.result).toEqual({ ok: true, url: 'blob:0' })
-    expect(b.result).toEqual({ ok: true, url: 'blob:0' })
+    expect(a.result).toEqual({ ok: true, url: 'blob:0', format: null })
+    expect(b.result).toEqual({ ok: true, url: 'blob:0', format: null })
   })
 
   it('resolves a generated thumbnail through the thumbnail route', async () => {
@@ -137,7 +142,7 @@ describe('createMediaService.acquire', () => {
       thumbnail: { width: 320, height: 320, method: 'scale' },
     })
 
-    expect(handle.result).toEqual({ ok: true, url: 'blob:0' })
+    expect(handle.result).toEqual({ ok: true, url: 'blob:0', format: null })
     expect(seenAuth).toBe('Bearer tok-thumb')
     expect(seenUrl).toBe(
       `${BASE_URL}/v1/media/${ACCOUNT}/hs/full/thumbnail?width=320&height=320&method=scale`,
@@ -176,7 +181,7 @@ describe('createMediaService.acquire', () => {
     expect(fullFetches).toBe(1)
     expect(thumbnailFetches).toBe(1)
     expect(created).toEqual(['blob:0', 'blob:1'])
-    expect(thumbAgain.result).toEqual({ ok: true, url: 'blob:1' })
+    expect(thumbAgain.result).toEqual({ ok: true, url: 'blob:1', format: null })
   })
 
   it('keeps a released blob available below the cap', async () => {
@@ -189,7 +194,7 @@ describe('createMediaService.acquire', () => {
 
     // Re-acquiring hits the cache: no second fetch, no new object url.
     const again = await media.acquire(ACCOUNT, 'mxc://hs/keep')
-    expect(again.result).toEqual({ ok: true, url: 'blob:0' })
+    expect(again.result).toEqual({ ok: true, url: 'blob:0', format: null })
     expect(created).toHaveLength(1)
   })
 
@@ -214,7 +219,7 @@ describe('createMediaService.acquire', () => {
     // Hold one entry (refs stays 1, never zero-ref), then churn far past the
     // cap. The held blob must never be revoked — the core hazard.
     const held = await media.acquire(ACCOUNT, 'mxc://hs/held')
-    expect(held.result).toEqual({ ok: true, url: 'blob:0' })
+    expect(held.result).toEqual({ ok: true, url: 'blob:0', format: null })
 
     for (let i = 0; i < 40; i++) {
       const handle = await media.acquire(ACCOUNT, `mxc://hs/n${i}`)
@@ -271,6 +276,91 @@ describe('createMediaService.acquire', () => {
     const handle = await media.acquire(ACCOUNT, 'not-an-mxc')
     expect(handle.result).toEqual({ ok: false, error: { kind: 'network' } })
   })
+
+  it('refetches after invalidate instead of returning the cached url', async () => {
+    // The retry behind issue #359 exists to hand the `<img>` bytes it has not
+    // already failed on. A component-local generation cannot do that: it
+    // restarts at 0 on remount and collides with its own earlier values, so a
+    // reader who leaves the room and comes back is served the failed object
+    // with no request made at all.
+    let fetched = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/media/:account/:server/:media`, () => {
+        fetched += 1
+        return new HttpResponse(PNG, {
+          headers: { 'content-type': 'image/png' },
+        })
+      }),
+    )
+    const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })
+
+    const first = await media.acquire(ACCOUNT, 'mxc://hs/abc')
+    const cached = await media.acquire(ACCOUNT, 'mxc://hs/abc')
+    expect(fetched).toBe(1)
+    expect(cached.result).toEqual(first.result)
+
+    media.invalidate(ACCOUNT, 'mxc://hs/abc')
+    const refetched = await media.acquire(ACCOUNT, 'mxc://hs/abc')
+    expect(fetched).toBe(2)
+    expect(refetched.result).toEqual({
+      ok: true,
+      url: 'blob:1',
+      format: null,
+    })
+
+    // Two holders still paint the invalidated url, so it must survive until
+    // both let go — and then be revoked, since the LRU no longer tracks it.
+    expect(revoked).not.toContain('blob:0')
+    first.release()
+    expect(revoked).not.toContain('blob:0')
+    cached.release()
+    expect(revoked).toContain('blob:0')
+  })
+
+  it('revokes an invalidated entry immediately when nobody holds it', async () => {
+    serveBytes()
+    const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })
+    const handle = await media.acquire(ACCOUNT, 'mxc://hs/abc')
+    handle.release()
+    expect(revoked).not.toContain('blob:0')
+
+    media.invalidate(ACCOUNT, 'mxc://hs/abc')
+    expect(revoked).toContain('blob:0')
+  })
+
+  it('leaves an unrelated thumbnail variant alone when invalidating', async () => {
+    // `invalidate` takes the same options as `acquire`, so it addresses one
+    // cache slot — dropping the full object must not throw away a thumbnail
+    // that is still perfectly good.
+    serveBytes()
+    const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })
+    const full = await media.acquire(ACCOUNT, 'mxc://hs/abc')
+    const thumb = await media.acquire(ACCOUNT, 'mxc://hs/abc', {
+      thumbnail: { width: 320, height: 320 },
+    })
+    full.release()
+    thumb.release()
+
+    media.invalidate(ACCOUNT, 'mxc://hs/abc')
+    expect(revoked).toContain(String((full.result as { url: string }).url))
+    expect(revoked).not.toContain(String((thumb.result as { url: string }).url))
+  })
+
+  it('sniffs the fetched bytes so a caller need not trust the declared type', async () => {
+    server.use(
+      http.get(
+        `${BASE_URL}/v1/media/:account/:server/:media`,
+        () =>
+          // Declared JPEG, actually PNG. The bytes are the ones that matter.
+          new HttpResponse(REAL_PNG, {
+            headers: { 'content-type': 'image/jpeg' },
+          }),
+      ),
+    )
+    const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })
+    const handle = await media.acquire(ACCOUNT, 'mxc://hs/abc')
+    expect(handle.result).toEqual({ ok: true, url: 'blob:0', format: 'PNG' })
+  })
 })
 
 describe('createMediaService.fetchBlobUrl', () => {
@@ -282,8 +372,8 @@ describe('createMediaService.fetchBlobUrl', () => {
     const second = await media.fetchBlobUrl(ACCOUNT, 'mxc://hs/dl')
 
     // Not cached: each call downloads and mints its own url.
-    expect(first).toEqual({ ok: true, url: 'blob:0' })
-    expect(second).toEqual({ ok: true, url: 'blob:1' })
+    expect(first).toEqual({ ok: true, url: 'blob:0', format: null })
+    expect(second).toEqual({ ok: true, url: 'blob:1', format: null })
   })
 })
 

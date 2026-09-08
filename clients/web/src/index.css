@@ -4372,6 +4372,15 @@ input[type='checkbox'] {
   margin: 0;
 }
 
+/* Retry is always offered and Download sometimes joins it, so the actions sit
+   on one row rather than stacking two buttons into a thumbnail-sized box. */
+.media-undisplayable-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: center;
+}
+
 .media-thumbnail-unsized > .media-open > img,
 .media-thumbnail-unsized > .media-preview {
   height: auto;
@@ -4867,6 +4876,22 @@ audio.media-player {
   max-width: 90vw;
   max-height: 80vh;
   object-fit: contain;
+}
+
+/* The viewer's own decode-failure placeholder. Not `.media-undisplayable`:
+   that one is shaped for the timeline's reserved aspect-ratio box, and its
+   border reads as a stray rectangle against the lightbox backdrop. */
+.lightbox-failure {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1rem;
+  text-align: center;
+}
+
+.lightbox-failure > p {
+  margin: 0;
 }
 
 .lightbox-caption {

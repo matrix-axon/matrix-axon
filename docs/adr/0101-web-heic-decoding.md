@@ -16,6 +16,53 @@ license and packaging decision rather than a rendering one, and it is recorded
 here for discussion rather than resolved. Nothing in this ADR authorises adding
 a dependency.
 
+**Amended 2026-09-06 by issue #359 / PR #360.** §3's ordering — name the
+format, else blame encryption, else admit ignorance — kept encryption as the
+fallback for anything it could not name, and that branch went on to mis-report
+transient iOS decode failures of _valid_ images as server-side decryption
+failures. It cost a full investigation of a healthy instance. Two things
+changed, and they narrow this ADR rather than reverse it:
+
+- The verdict now comes from the bytes. `MediaService` sniffs each object's
+  head (`clients/web/src/media/sniff.ts`, a port of the TUI's `sniff_format`),
+  so a format is named even when the sender declared otherwise. §3's
+  declared-mimetype-then-extension tiers survive underneath, for bytes the
+  sniffer does not carry and for when no sniff can run. This ADR's reason for
+  ruling sniffing out — "the caller holds an object URL, not the buffer" — was
+  true of `MediaImage` and never of the service that fetched the bytes.
+- **The premise itself does not hold.** §3 rests on ADR 0064's "the proxy
+  returns raw ciphertext with a 200 when it lacks the key". Tracing the route
+  found that near-unreachable: `resolve_media_content` answers 404 while an
+  event is undecrypted, and once decrypted the AES key is _inside_
+  `content.file.key`, so the server cannot lack it — a decryption failure
+  becomes a 502, never bytes. Ciphertext with a 200 needs an event pointing at
+  an encrypted object through a _plaintext_ descriptor, which is a malformed
+  event rather than a keyless server. Corroborating: a production instance's
+  entire 616-object media cache held valid images, with no ciphertext at all.
+- **So the Download gate is withdrawn too.** §3 withheld Save for bytes it
+  could not name, to avoid handing over ciphertext under a `.png`. With that
+  case near-impossible, unidentifiable bytes are overwhelmingly a format no
+  table here carries — precisely where opening them in another application is
+  the remedy — so the gate was costing readers the one action that helps.
+  `LightboxImageOutcome`'s `unsupported-format`/`undecodable` split existed
+  only to drive that gate and collapses to `failed`.
+- **The "server could not decrypt" wording is withdrawn entirely.** §3 kept it
+  for encrypted media whose format could not be named, on the reasoning that
+  unidentifiable bytes are probably the ciphertext-fallback 200. They probably
+  are — but from the client that is indistinguishable from a format no table
+  carries and from a JSON error body served with a 200, so it was a guess
+  stated as a fact about the server, and it cost an investigation of a healthy
+  instance. Unidentifiable bytes now read "Could not display this image", and
+  Download is offered for them as for any other bytes that arrived — see the
+  previous point, which withdraws that gate. Nothing here asserts a server
+  failure the client cannot observe.
+- A decode failure is no longer final on the first `onError`: it re-fetches
+  once under a fresh blob URL, and the placeholder always offers Retry. §3's
+  "offer Download either way" gate is widened to match — bytes sniffed as a
+  renderable format are a real file, so Save helps there too.
+
+The open question below is untouched: nothing here decodes a HEIC.
+
 ## Context
 
 A photo sent from an iPhone rendered in the web client as the placeholder
@@ -27,7 +74,7 @@ one investigation in the wrong direction:
 
 1. `MediaImage.tsx` and `Lightbox.tsx` rendered that text for **any** `<img>`
    `onError`. Neither branch consulted `media.encrypted`, the declared
-   mimetype, or the bytes. Decode failure was simply *assumed* to mean
+   mimetype, or the bytes. Decode failure was simply _assumed_ to mean
    ciphertext — so the message also appeared for plaintext media, where
    decryption cannot be the cause and no key is even involved.
 2. That assumption is ADR 0064's, stated outright in
@@ -58,7 +105,7 @@ The TUI already gets this right and is the model for §1. `decode_image`
 sniffing comes back unknown, and `sniff_format` in the same file has an
 explicit `HEIC` arm alongside `AVIF` and `HEIF`. The web client never received
 that logic; `parse-media.ts` is a documented port of the TUI's media parsing,
-but the *failure* path was never ported with it.
+but the _failure_ path was never ported with it.
 
 HEIC has been the iPhone camera default since iOS 11, and Matrix clients upload
 camera originals untouched. For anyone with iOS correspondents this is not an
@@ -106,7 +153,7 @@ rule governs both surfaces:
   and its share-sheet-then-anchor path, shown when
   `unrenderableImageFormat(media) !== null`.
 - The pageable viewer's existing Save control was gated on `decoded` and
-  therefore *withdrew itself* exactly when it became the only useful action on
+  therefore _withdrew itself_ exactly when it became the only useful action on
   screen. `LightboxImage` now reports a typed outcome rather than a boolean, so
   the viewer keeps Save for `unsupported-format` and withholds it for
   `undecodable`.
@@ -115,7 +162,7 @@ The distinction is the one ADR 0064 was reaching for with a signal too coarse
 to express it. Stating it as a single rule over both surfaces is deliberate:
 the first draft of this change applied it only in the viewer and left the
 inline placeholder offering Download for anything with an `mxc://` URI, which
-put the ciphertext hazard on the *more* commonly hit surface — the one that
+put the ciphertext hazard on the _more_ commonly hit surface — the one that
 needs no extra click. Caught in review of the implementing PR (#328).
 
 ### 3. Two tiers of identification, and explicitly not byte-sniffing
@@ -123,7 +170,7 @@ needs no extra click. Caught in review of the implementing PR (#328).
 Declared `info.mimetype` first, then the filename extension, against closed
 tables. This follows ADR 0072 § "`info.mimetype` cannot be relied on", which
 found real phone media arriving as `application/octet-stream` with the filename
-as the only signal. A *specific* image declaration we do not list returns no
+as the only signal. A _specific_ image declaration we do not list returns no
 name rather than falling through to the extension, so `photo.heic.jpg` — a
 transcoded file whose old extension survived mid-name — is not mislabelled.
 
@@ -145,7 +192,7 @@ the blocking considerations are legal and packaging ones rather than technical.
 
 ### The technical shape is the easy part
 
-Roughly: keep native decode first, so `onError` *is* the capability probe and no
+Roughly: keep native decode first, so `onError` _is_ the capability probe and no
 WebKit user ever fetches a decoder; on failure, lazily import a wasm decoder,
 decode in a worker (`OffscreenCanvas` → `convertToBlob`, following the
 `pdfjs-dist` worker precedent in `PdfViewer.tsx`) under a pixel ceiling
@@ -173,7 +220,7 @@ which a bundler defeats by construction — satisfying it means shipping the
 decoder's JS and wasm as standalone, unmodified, replaceable assets rather than
 minified into an application chunk.
 
-And there is a trap in that mitigation: vendoring the wasm *outside* the pnpm
+And there is a trap in that mitigation: vendoring the wasm _outside_ the pnpm
 production tree to keep it replaceable would silently drop its disclosure entry,
 satisfying the relinking obligation by breaking the attribution one, with no
 build failure to notice. Any implementation would need the disclosure asserted

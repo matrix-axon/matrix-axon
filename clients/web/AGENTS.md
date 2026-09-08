@@ -162,8 +162,26 @@ before starting a milestone.
   points at; `acquire()` returns a handle whose `release()` the caller must
   call, and only zero-ref entries are eligible for the 32-entry LRU. Lazy-load
   via one shared `IntersectionObserver` (`useMediaBlob`), which falls back to
-  eager acquire under jsdom. A 200 of raw ciphertext (server lacks the key)
-  fails only at `<img>` decode, caught by `onError`.
+  eager acquire under jsdom. A decode failure surfaces only at `<img>`, via
+  `onError` — but so does a perfectly
+  good image WebKit fumbled, which on iOS is the commoner cause, so the first
+  `onError` re-fetches under a bumped `attempt` (a cache-key component, giving
+  a fresh blob URL) and only the second paints a placeholder, which always
+  offers Retry — as does a failed _fetch_, or one decode glitch plus one
+  network glitch rebuilds the dead end. **Never report a decode failure as a
+  decryption failure** (#359): the client cannot tell ciphertext from a format
+  its sniffer lacks, so no message claims one. `MediaService` sniffs each
+  object's head (`sniff.ts`) and `imageDecodeFailureMessage` prefers that over
+  the sender's declared type, falling back to it for bytes nothing identifies.
+  A decode verdict is keyed to the object url it was reached on: `useMediaBlob`
+  holds its previous `ready` state until an after-paint effect, so a retry that
+  cleared the failure on the click would re-mount the failed url and relatch.
+  **The proxy does not hand back ciphertext.** It answers 404 while an event is
+  undecrypted, and once decrypted the AES key is inside `content.file.key`, so
+  a decryption failure is a 502 — not a 200 of noise. ADR 0064/0101 assumed
+  otherwise; the gates built on that assumption (withholding Download for
+  unidentifiable bytes) have been removed, so any bytes that arrive are
+  offered for Download.
 - **Markdown-on-send** (`src/markdown/markdown.ts`): plain prose sends a
   bare body; detected formatting sends `org.matrix.custom.html`. The server
   never interprets Markdown. Raw inline HTML in composer input is escaped.

@@ -6,12 +6,17 @@ import { observeVisible } from './intersection'
 import type {
   MediaFailure,
   MediaHandle,
+  MediaRequestOptions,
+  SniffedFormat,
+  ThumbnailMethod,
   ThumbnailRequest,
 } from './media-service'
 
 export interface MediaBlobState {
   status: 'idle' | 'loading' | 'ready' | 'error'
   url?: string
+  /** What the bytes actually are, once they have arrived (`sniff.ts`). */
+  format?: SniffedFormat
   error?: MediaFailure
 }
 
@@ -24,6 +29,30 @@ export interface MediaBlobState {
  * jsdom has no `IntersectionObserver`, so there the fetch starts eagerly on
  * mount — component tests exercise the real load path without a stub.
  */
+/**
+ * The `MediaRequestOptions` for one acquire, from the hook's flattened inputs.
+ *
+ * Shared by `acquire()` and `invalidate()` rather than written out at each,
+ * because these options *are* the media cache key: two copies that drifted
+ * would leave `invalidate()` addressing a different slot than the one that
+ * failed, and the retry would be handed the broken object right back — with
+ * nothing to show that anything had gone wrong.
+ *
+ * Flattened arguments, not a `ThumbnailRequest`, because the hook destructures
+ * the request into primitives so its effect dependencies compare by value.
+ */
+function requestOptions(
+  width: number | undefined,
+  height: number | undefined,
+  method: ThumbnailMethod | undefined,
+  contentType: string | undefined,
+): MediaRequestOptions | undefined {
+  if (width !== undefined && height !== undefined) {
+    return { thumbnail: { width, height, method }, contentType }
+  }
+  return contentType !== undefined ? { contentType } : undefined
+}
+
 export function useMediaBlob<T extends HTMLElement = HTMLElement>(
   accountId: string,
   mxcUrl: string | null,
@@ -32,12 +61,30 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
     thumbnail?: ThumbnailRequest
     /** See `MediaRequestOptions.contentType` — allowlisted types only. */
     contentType?: string
+    /**
+     * Bump to re-acquire. Purely an effect trigger — it is deliberately *not*
+     * part of the media cache key, since a component-local counter restarts at
+     * 0 on remount and would collide with its own earlier generations. Pair it
+     * with `invalidate()`, which is what actually guarantees fresh bytes.
+     */
+    attempt?: number
   } = {},
-): { ref: RefObject<T>; state: MediaBlobState } {
+): {
+  ref: RefObject<T>
+  state: MediaBlobState
+  /**
+   * Forget the cached object for this url, so the next acquire refetches.
+   *
+   * Call it when the bytes themselves proved bad — a decode failure — before
+   * bumping `attempt`. Without it the retry is served the same object URL
+   * straight from the cache and no request is made at all.
+   */
+  invalidate: () => void
+} {
   const { media } = useServices()
   const ref = useRef<T>(null)
   const [state, setState] = useState<MediaBlobState>({ status: 'idle' })
-  const { eager = false, thumbnail, contentType } = options
+  const { eager = false, thumbnail, contentType, attempt } = options
   const thumbnailWidth = thumbnail?.width
   const thumbnailHeight = thumbnail?.height
   const thumbnailMethod = thumbnail?.method
@@ -69,18 +116,12 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
         .acquire(
           accountId,
           mxcUrl,
-          thumbnailWidth !== undefined && thumbnailHeight !== undefined
-            ? {
-                thumbnail: {
-                  width: thumbnailWidth,
-                  height: thumbnailHeight,
-                  method: thumbnailMethod,
-                },
-                contentType,
-              }
-            : contentType !== undefined
-              ? { contentType }
-              : undefined,
+          requestOptions(
+            thumbnailWidth,
+            thumbnailHeight,
+            thumbnailMethod,
+            contentType,
+          ),
         )
         .then((acquired) => {
           if (cancelled) {
@@ -103,7 +144,11 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
           )
           setState(
             acquired.result.ok
-              ? { status: 'ready', url: acquired.result.url }
+              ? {
+                  status: 'ready',
+                  url: acquired.result.url,
+                  format: acquired.result.format,
+                }
               : { status: 'error', error: acquired.result.error },
           )
         })
@@ -134,7 +179,24 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
     thumbnailHeight,
     thumbnailMethod,
     contentType,
+    attempt,
   ])
 
-  return { ref, state }
+  const invalidate = () => {
+    if (mxcUrl === null) {
+      return
+    }
+    media.invalidate(
+      accountId,
+      mxcUrl,
+      requestOptions(
+        thumbnailWidth,
+        thumbnailHeight,
+        thumbnailMethod,
+        contentType,
+      ),
+    )
+  }
+
+  return { ref, state, invalidate }
 }

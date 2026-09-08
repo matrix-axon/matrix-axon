@@ -179,13 +179,15 @@ export function MediaViewerProvider({
    */
   const [outcome, setOutcome] = useState<LightboxImageOutcome>('pending')
   /**
-   * Whether saving the open object is worth offering. A displayed image
-   * obviously is; so is one that would not decode but is identifiably HEIC or
-   * similar, where downloading it to open elsewhere is the only remedy left.
-   * Bytes that decoded as nothing recognisable are most likely ciphertext, and
-   * saving those is worse than offering nothing (ADR 0101).
+   * Whether saving the open object is worth offering: any time bytes have
+   * actually arrived. A displayed image obviously qualifies, and so does one
+   * that would not decode — opening it elsewhere is then the only remedy left,
+   * and withholding Save is what left a reader with a placeholder and no
+   * action at all (#359). ADR 0101 withheld it for unidentifiable bytes on the
+   * grounds that they were probably ciphertext; that path turned out to be
+   * near-unreachable, so the gate now costs more than it protects.
    */
-  const saveable = outcome === 'displayed' || outcome === 'unsupported-format'
+  const saveable = outcome !== 'pending'
   const [pendingOlder, setPendingOlder] = useState(false)
   const [autoPages, setAutoPages] = useState(0)
   const [loadingOlder, setLoadingOlder] = useState(false)
