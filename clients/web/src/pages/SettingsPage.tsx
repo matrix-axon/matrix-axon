@@ -731,7 +731,12 @@ function ServerSettings() {
   if (platform.defaultApiBaseUrl !== null) {
     return null
   }
-  const current = resolveApiBaseUrl()
+  // Through the graph's platform, not a fresh `browserPlatform()`: with nothing
+  // stored and nothing baked in, the browser answers `'/'` and this would read
+  // "Server: /" — the browser's same-origin default, in the one build that has
+  // no same-origin server. Storage stays the window's because the graph does
+  // not expose its own, and `createServices` is constructed with that same one.
+  const current = resolveApiBaseUrl(undefined, platform)
   return (
     <section class="panel">
       <h2>Server</h2>
