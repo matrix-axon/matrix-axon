@@ -49,6 +49,7 @@ fn map_err(err: MediaCacheError) -> MediaError {
             FetchError::Forbidden(msg) => MediaError::Forbidden(msg),
             FetchError::NotConnected(msg) => MediaError::NotConnected(msg),
             FetchError::Upstream(msg) => MediaError::Upstream(msg),
+            FetchError::Undecryptable(msg) => MediaError::Undecryptable(msg),
         },
         MediaCacheError::TooLarge { len, cap } => MediaError::TooLarge(format!(
             "media object too large to proxy ({len} bytes; per-object limit is {cap} bytes)"
