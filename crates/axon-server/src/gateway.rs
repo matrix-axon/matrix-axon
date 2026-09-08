@@ -130,6 +130,12 @@ fn map_err(err: GatewayError) -> SendError {
         GatewayError::NotConnected(msg) => SendError::Unavailable(msg),
         GatewayError::Invalid(msg) => SendError::Invalid(msg),
         GatewayError::Upstream(msg) => SendError::Upstream(msg),
+        // Unreachable on this path: mutations upload attachments, they never
+        // download and decrypt one, so only the media proxy can produce this.
+        // Folded onto `Upstream` rather than asserted away, so a future caller
+        // that does reach it degrades to the previous behaviour instead of
+        // panicking in production.
+        GatewayError::Undecryptable(msg) => SendError::Upstream(msg),
     }
 }
 

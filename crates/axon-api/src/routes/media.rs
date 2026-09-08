@@ -260,6 +260,7 @@ fn if_none_match_matches(header: Option<&str>, etag_quoted: &str) -> bool {
         (status = 404, description = "Account not found, or media not found on the homeserver", body = crate::response::ErrorResponse),
         (status = 413, description = "The media object exceeds the configured per-object cache limit", body = crate::response::ErrorResponse),
         (status = 416, description = "The requested `Range` is not satisfiable (with `Content-Range: bytes */len`).", body = crate::response::ErrorResponse),
+        (status = 422, description = "The encrypted attachment arrived intact but could not be decrypted (`media_undecryptable`). Terminal — retrying will not help.", body = crate::response::ErrorResponse),
         (status = 500, description = "Internal media-metadata lookup failure", body = crate::response::ErrorResponse),
         (status = 502, description = "The homeserver was unreachable or returned an error", body = crate::response::ErrorResponse),
         (status = 503, description = "The account's homeserver connection is not currently established", body = crate::response::ErrorResponse),
@@ -405,8 +406,18 @@ fn log_and_convert_media_error(
     route: &'static str,
     err: MediaError,
 ) -> ApiError {
-    if let MediaError::Internal(detail) = &err {
-        tracing::error!(%account_id, mxc = %mxc_url, route, error = %detail, "media proxy internal error");
+    match &err {
+        MediaError::Internal(detail) => {
+            tracing::error!(%account_id, mxc = %mxc_url, route, error = %detail, "media proxy internal error");
+        }
+        // The operator's only signal that an attachment is genuinely
+        // undecryptable. Before issue #359 this detail went to the client and
+        // nowhere else, so a report of "it won't decrypt" left nothing in the
+        // log but a bare `502` indistinguishable from a homeserver blip.
+        MediaError::Undecryptable(detail) => {
+            tracing::warn!(%account_id, mxc = %mxc_url, route, error = %detail, "media could not be decrypted");
+        }
+        _ => {}
     }
     err.into()
 }

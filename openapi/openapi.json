@@ -7159,6 +7159,16 @@
               }
             }
           },
+          "422": {
+            "description": "The encrypted attachment arrived intact but could not be decrypted (`media_undecryptable`). Terminal — retrying will not help.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal media-metadata lookup failure",
             "content": {

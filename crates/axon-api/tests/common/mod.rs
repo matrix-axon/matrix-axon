@@ -1857,6 +1857,7 @@ pub enum MediaOutcome {
     Ok(Vec<u8>),
     Forbidden(String),
     NotConnected(String),
+    Undecryptable(String),
 }
 
 /// A configurable media proxy for route-level status and call-path tests.
@@ -1899,6 +1900,7 @@ impl ConfiguredMediaProxy {
             MediaOutcome::Ok(data) => Ok(media_resource_from(data).await),
             MediaOutcome::Forbidden(message) => Err(MediaError::Forbidden(message.clone())),
             MediaOutcome::NotConnected(message) => Err(MediaError::NotConnected(message.clone())),
+            MediaOutcome::Undecryptable(message) => Err(MediaError::Undecryptable(message.clone())),
         }
     }
 }

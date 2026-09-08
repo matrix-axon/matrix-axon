@@ -58,6 +58,10 @@ pub enum FetchError {
     /// The homeserver was unreachable or failed the request. → `502`.
     #[error("upstream error: {0}")]
     Upstream(String),
+    /// The object arrived but could not be decrypted. Terminal — retrying
+    /// fetches the same ciphertext and fails the same way. → `422`.
+    #[error("media could not be decrypted: {0}")]
+    Undecryptable(String),
 }
 
 /// Downloads (and decrypts) MXC media on behalf of an account. Implemented in
