@@ -1,5 +1,6 @@
 import { computed, signal, type ReadonlySignal } from '@preact/signals'
 import { useState } from 'preact/hooks'
+import { browserPlatform, type Platform } from '../platform'
 import {
   createAuthPersistence,
   type AuthPersistence,
@@ -145,6 +146,12 @@ export interface OAuthAuthOptions {
   rememberMeDefault?: boolean
   pendingStorage?: Storage
   navigate?: (url: string) => void
+  /**
+   * Transport seam (ADR 0102 § 2) for the token exchange. This one call is not
+   * an `openapi-fetch` operation — the token endpoint is form-encoded per
+   * RFC 6749, not the `/v1` JSON envelope — so it takes the platform directly.
+   */
+  platform?: Pick<Platform, 'fetch'>
 }
 
 export function parseOAuthProviders(
@@ -175,7 +182,9 @@ export function createOAuthAuthProvider({
   rememberMeDefault,
   pendingStorage = window.sessionStorage,
   navigate = (url) => window.location.assign(url),
+  platform = browserPlatform(),
 }: OAuthAuthOptions): OAuthAuthProvider {
+  const fetch = platform.fetch
   const persistence =
     providedPersistence ??
     createAuthPersistence({
