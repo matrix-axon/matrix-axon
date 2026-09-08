@@ -216,7 +216,7 @@ guarantee.
 
 **Leaving the room is the deliberate exception.** `leaveRoom` routes straight
 to `location.route('/')` and discards an open edit without asking, and is left
-that way: it is reached only through `confirmLeave`'s own "Leave room?"
+that way: it is reached only through `confirmLeave`'s own confirmation
 dialog, and a second modal stacked on the first would be asking
 twice about one decision — while the thing being discarded is a rename for a
 room the user is in the act of leaving. Recorded here because it looks like a
