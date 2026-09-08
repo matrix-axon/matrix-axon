@@ -140,7 +140,7 @@ this table is the orientation copy.
   Behavioral changes — anything that changes logic, functionality, or intent — must stay within a single silo per commit/PR.
   Typically, changes to the `web` and `tui` clients should be separate PRs except where a global change impacts both clients.
   If a behavioral server change breaks client compatibility, ship the server change on its own; don't bundle a client-side fix into the same PR even to keep `main` working, even temporarily — open a separate, immediate follow-up PR for the client side.
-  Exception for generated sync artifacts: a PR may cross the `crates/` ↔ `clients/web` boundary only to keep a generated file in sync with its source of truth (e.g. regenerating `schema.ts` from `openapi/openapi.json` via `pnpm check:api`) — this is mechanical, not behavioral, and does not violate this rule.
+  Exception for generated sync artifacts: a PR may cross the `crates/` ↔ `clients/web` boundary only to keep a generated file in sync with its source of truth (e.g. regenerating `clients/web/src/api/schema.d.ts` from `openapi/openapi.json` via `pnpm check:api`) — this is mechanical, not behavioral, and does not violate this rule.
   Server-first sequencing: for a large feature spanning server and client (e.g. QR sign-in, encryption key backup), do not touch client code until the server-side implementation is settled; land and stabilize the server piece first.
   If a bug in another silo is discovered mid-task, do not fix it inline — stop, return to the appropriate silo, and address it as its own separate change.
   Files can be added to `docs/` combined with other silos where they are directly related to the change in that silo.
