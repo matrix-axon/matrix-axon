@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "packageManager": "pnpm@11.25.0",
+  "packageManager": "pnpm@11.25.0+sha256.33dd0748f27e7916c4f1c8b6943461983e3453b06bbda6312a6280130b4881e5",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -33,7 +33,6 @@
     "nanoid": "3.3.18",
     "openapi-fetch": "^0.17.0",
     "pdfjs-dist": "^6.2.108",
-    "pnpm": "11.20.0",
     "postcss": "8.5.25",
     "preact": "^10.29.3",
     "preact-iso": "^2.12.0",
