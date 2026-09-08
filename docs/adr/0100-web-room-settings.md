@@ -214,6 +214,15 @@ _then_ close, so the check has to run before the action rather than at the
 than merely closing. A guarantee that covers only one of three exits is not a
 guarantee.
 
+**Leaving the room is the deliberate exception.** `leaveRoom` routes straight
+to `location.route('/')` and discards an open edit without asking, and is left
+that way: it is reached only through `confirmLeave`'s own confirmation
+dialog, and a second modal stacked on the first would be asking
+twice about one decision — while the thing being discarded is a rename for a
+room the user is in the act of leaving. Recorded here because it looks like a
+missed case rather than a choice; if it ever stops feeling right, the fix is
+one `guardingEdit` call, the same as the other three exits.
+
 **Finishing a save is not conditional on the form still existing.** Clearing
 the parent's saving flag and firing the socket-down fallback refresh both run
 even after an unmount: the flag left stuck would disarm the discard guard for
@@ -304,6 +313,13 @@ composer owns its own drop target on `.room-stream`, and the panel is a
 sibling of that pane rather than a child, so ADR 0065's per-pane scoping is
 what keeps an avatar drop from also becoming a message attachment. That is
 worth pinning, since a later layout change could nest the two.
+
+One caveat on that lane: the e2e mock serves no `/info`, `/pinned` or
+`/upgrade`, so Room Information runs permanently in its degraded state and
+carries three "Could not load this section" alerts. Nothing fails — the panel
+handles it — but it is why the corrupt-avatar test scopes its alert locator to
+`.room-settings-form` rather than the panel, and why the Details section has
+no browser-level coverage at all. Tracked as #354.
 
 Each of these tests restores the mock's room settings before finishing. The
 e2e mock server is one process shared by all three browser projects, which run
