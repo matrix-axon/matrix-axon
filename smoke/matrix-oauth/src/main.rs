@@ -167,6 +167,7 @@ impl AxonProcess {
         Api::new(
             format!("http://127.0.0.1:{}", self.config.axon_port),
             self.bearer_token.clone(),
+            self.config.user_id.to_string(),
         )
     }
 
@@ -200,7 +201,15 @@ impl AxonProcess {
         #[cfg(unix)]
         unsafe {
             if libc::kill(child.id() as i32, libc::SIGTERM) != 0 {
-                return Err(std::io::Error::last_os_error()).context("signal axon-server");
+                let signal_error = std::io::Error::last_os_error();
+                if child
+                    .try_wait()
+                    .context("reinspect axon-server after signal failure")?
+                    .is_some()
+                {
+                    return Ok(());
+                }
+                return Err(signal_error).context("signal axon-server");
             }
         }
         let deadline = tokio::time::Instant::now() + AXON_SHUTDOWN_TIMEOUT;
@@ -295,10 +304,11 @@ struct Api {
     http: reqwest::Client,
     base: String,
     token: String,
+    expected_user_id: String,
 }
 
 impl Api {
-    fn new(base: String, token: String) -> Result<Self> {
+    fn new(base: String, token: String, expected_user_id: String) -> Result<Self> {
         Ok(Self {
             http: reqwest::Client::builder()
                 .timeout(HTTP_TIMEOUT)
@@ -306,6 +316,7 @@ impl Api {
                 .context("build Axon API client")?,
             base,
             token,
+            expected_user_id,
         })
     }
 
@@ -361,7 +372,7 @@ impl Api {
             "acquisition creation",
             Method::POST,
             "/v1/accounts/login/qr",
-            Some(json!({ "expected_user_id": "@alice:localhost", "presentation": "scan" })),
+            Some(json!({ "expected_user_id": self.expected_user_id.as_str(), "presentation": "scan" })),
             StatusCode::CREATED,
         )
         .await
@@ -374,7 +385,7 @@ impl Api {
                 .raw(
                     Method::POST,
                     "/v1/accounts/login/qr",
-                    Some(json!({ "expected_user_id": "@alice:localhost", "presentation": "scan" })),
+                    Some(json!({ "expected_user_id": self.expected_user_id.as_str(), "presentation": "scan" })),
                     true,
                 )
                 .await?;
@@ -1045,7 +1056,7 @@ async fn wait_account_ready(api: &Api, account_id: Uuid) -> Result<()> {
     loop {
         if api.accounts().await?.iter().any(|account| {
             account.account_id == account_id
-                && account.user_id == "@alice:localhost"
+                && account.user_id == api.expected_user_id.as_str()
                 && account.state == "active"
                 && account.verified
         }) {
@@ -1235,7 +1246,7 @@ async fn run_api_lane(
         .raw(
             Method::POST,
             "/v1/accounts/login/qr",
-            Some(json!({ "expected_user_id": "@alice:localhost", "presentation": "scan" })),
+            Some(json!({ "expected_user_id": api.expected_user_id.as_str(), "presentation": "scan" })),
             false,
         )
         .await?;
@@ -1383,10 +1394,25 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run_until_shutdown() -> Result<()> {
-    tokio::select! {
-        result = run() => result,
-        _ = shutdown_signal() => bail!("harness interrupted"),
-    }
+    let config = Config::load()?;
+    let mode = config.mode.clone();
+    let secrets = SecretTracker::default();
+    let mut process = AxonProcess::start(config.clone(), &secrets).await?;
+
+    let lane_result = tokio::select! {
+        result = run_lane(&mut process, &config, &secrets) => result,
+        _ = shutdown_signal() => Err(anyhow!("harness interrupted")),
+    };
+    let stop_result = process.stop().await;
+    let log_path = process.log_path.clone();
+    // `stop` retains ownership on every failure. Drop is the final kill/reap
+    // fallback, and the disclosure scan runs only after the log is quiescent.
+    drop(process);
+    let scan_result = secrets.assert_absent_from(&log_path);
+    combine_run_outcomes(lane_result, stop_result, scan_result)?;
+
+    eprintln!("matrix-oauth({mode}): passed");
+    Ok(())
 }
 
 async fn shutdown_signal() {
@@ -1414,11 +1440,12 @@ async fn shutdown_signal() {
     }
 }
 
-async fn run() -> Result<()> {
-    let config = Config::load()?;
-    let secrets = SecretTracker::default();
-    let mut process = AxonProcess::start(config.clone(), &secrets).await?;
-    let peer = seed_trusted_peer(&config, &secrets).await?;
+async fn run_lane(
+    process: &mut AxonProcess,
+    config: &Config,
+    secrets: &SecretTracker,
+) -> Result<()> {
+    let peer = seed_trusted_peer(config, secrets).await?;
     let approver = MasApprover {
         base: config.mas_base.clone(),
         username: "alice".to_owned(),
@@ -1426,22 +1453,56 @@ async fn run() -> Result<()> {
     };
 
     match config.mode.as_str() {
-        "api" => run_api_lane(&process, &peer, &approver, &secrets).await?,
-        "acquire" => run_acquire_lane(&mut process, &peer, &approver, &secrets).await?,
-        "grant" => run_grant_lane(&process, &peer, &approver, &secrets).await?,
-        "unsupported" => run_unsupported_lane(&process, &peer, &approver, &secrets).await?,
+        "api" => run_api_lane(process, &peer, &approver, secrets).await?,
+        "acquire" => run_acquire_lane(process, &peer, &approver, secrets).await?,
+        "grant" => run_grant_lane(process, &peer, &approver, secrets).await?,
+        "unsupported" => run_unsupported_lane(process, &peer, &approver, secrets).await?,
         _ => unreachable!(),
     }
-
-    process.stop().await?;
-    secrets.assert_absent_from(&process.log_path)?;
-    eprintln!("matrix-oauth({}): passed", config.mode);
     Ok(())
+}
+
+fn combine_run_outcomes(
+    lane_result: Result<()>,
+    stop_result: Result<()>,
+    scan_result: Result<()>,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    if let Err(error) = lane_result {
+        failures.push(format!("lane failed: {error}"));
+    }
+    if let Err(error) = stop_result {
+        failures.push(format!("Axon shutdown failed: {error}"));
+    }
+    if let Err(error) = scan_result {
+        failures.push(format!("Axon log disclosure check failed: {error}"));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(failures.join("; "))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{assert_mas_decision, Approval};
+    use anyhow::anyhow;
+
+    use super::{assert_mas_decision, combine_run_outcomes, Approval};
+
+    #[test]
+    fn run_outcomes_retain_lane_and_disclosure_failures() {
+        let error = combine_run_outcomes(
+            Err(anyhow!("stable lane failure")),
+            Ok(()),
+            Err(anyhow!("stable disclosure failure")),
+        )
+        .expect_err("combined failures must fail the lane")
+        .to_string();
+
+        assert!(error.contains("lane failed: stable lane failure"));
+        assert!(error.contains("Axon log disclosure check failed: stable disclosure failure"));
+    }
 
     #[test]
     fn mas_decision_requires_the_action_specific_result_element() {

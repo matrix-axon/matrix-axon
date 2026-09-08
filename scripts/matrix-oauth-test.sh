@@ -107,12 +107,14 @@ if ! compatibility_output=$(mas manage issue-compatibility-token alice "$trusted
   echo "matrix-oauth: MAS compatibility-session issuance failed" >&2
   exit 1
 fi
-compatibility_token=$(printf '%s\n' "$compatibility_output" | grep -Eo '(mct|syt)_[A-Za-z0-9_-]+' | tail -n 1 || true)
+mapfile -t compatibility_tokens < <(printf '%s\n' "$compatibility_output" | grep -Eo '(mct|syt)_[A-Za-z0-9_-]+' || true)
 unset compatibility_output
-if [ -z "$compatibility_token" ]; then
-  echo "matrix-oauth: MAS compatibility-session output had no token" >&2
+if [ "${#compatibility_tokens[@]}" -ne 1 ]; then
+  echo "matrix-oauth: MAS compatibility-session output contained ${#compatibility_tokens[@]} token-shaped values; expected exactly one" >&2
   exit 1
 fi
+compatibility_token=${compatibility_tokens[0]}
+unset compatibility_tokens
 whoami_deadline=$((SECONDS + 30))
 whoami_status=unavailable
 while [ "$SECONDS" -lt "$whoami_deadline" ]; do

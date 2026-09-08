@@ -36,7 +36,8 @@ Runtime access tokens, refresh tokens, QR payloads, check codes, authorization u
 The launcher passes its known compatibility and Axon bearer tokens without command-line arguments, and the harness retains known runtime protocol values only in memory for disclosure checks.
 
 Axon's stdout and stderr are captured inside a randomly named throwaway run directory.
-Every successful lane rejects secret-bearing field names or known runtime values in that log.
+Every lane outcome is followed by a check that rejects secret-bearing field names or known runtime values in that log.
+If both the lane and disclosure check fail, the harness reports both stable errors without printing the matched runtime value.
 SQL statement text is excluded from the captured log so a column name cannot masquerade as a disclosure; a failing field-name check identifies the safe field name that matched.
 The harness handles SIGINT and SIGTERM so its Axon child is killed and reaped before the launcher's cleanup trap removes the directory, SDK stores, containers, databases, and MAS configuration volume.
 An intentional restart first gives Axon 45 seconds to complete its graceful shutdown, covering the server's 30-second sync-engine drain budget plus surrounding teardown, before the harness forcibly kills and reaps it.
