@@ -5,7 +5,10 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "websocket:default",
+    {
+      "identifier": "websocket:default",
+      "comment": "Unscoped because the plugin has no scope to give: its `connect` command takes the URL and dials it, with no allow-list consulted anywhere in `tauri-plugin-websocket`. The bare grant is therefore the only form available, not a laxer one chosen over `http:default`-style narrowing. The URL is the client's own construction (`wsUrl` over the configured server), so nothing a room can carry reaches it."
+    },
     {
       "identifier": "http:default",
       "comment": "Any host and any port, because the server is the user's own and is chosen at runtime (ADR 0102 \u00a7 3) \u2014 there is no build-time host to narrow this to. Note ':*' is load-bearing: 'http://*' alone means port 80, so a LAN axon on :8080 is denied.",

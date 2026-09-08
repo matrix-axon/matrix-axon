@@ -200,23 +200,43 @@ function originOf(url: string): string {
   }
 }
 
+/**
+ * The caller's own deadline, if it has one, plus the backstop.
+ *
+ * Composed rather than chosen. The obvious shape — leave a request alone if it
+ * already carries a signal — cannot be written, because there is no way to ask
+ * whether a `Request` carries one: `new Request(url)` with no `signal` option
+ * still exposes a live `AbortSignal` that simply never fires, so "has a signal"
+ * is true of every `Request` ever made. Reading it as consent to skip the
+ * backstop exempted the whole openapi-fetch path, which is most of `/v1`, since
+ * `openapi-fetch` calls its injected fetch with a `Request` it built itself.
+ *
+ * Composing needs no such question: whichever bound is shorter aborts first, so
+ * the first-run health probe keeps its own few seconds and everything else
+ * inherits the backstop.
+ */
+export function boundedSignal(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): AbortSignal {
+  const caller =
+    init?.signal ?? (input instanceof Request ? input.signal : null)
+  const backstop = AbortSignal.timeout(timeoutMs)
+  return caller === null || caller === undefined
+    ? backstop
+    : AbortSignal.any([caller, backstop])
+}
+
 export function tauriPlatform(): Platform {
   return {
     // The plugin's fetch is signature-compatible with the global, but has no
-    // timeout of its own; see `REQUEST_TIMEOUT_MS`. A caller that supplies its
-    // own signal keeps it — the first-run health probe wants a much shorter
-    // bound than this, and overriding it would make the setup screen hang.
-    fetch: (input, init) => {
-      const caller =
-        init?.signal ?? (input instanceof Request ? input.signal : null)
-      if (caller !== null && caller !== undefined) {
-        return tauriFetch(input, init)
-      }
-      return tauriFetch(input, {
-        ...init,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      })
-    },
+    // timeout of its own; see `REQUEST_TIMEOUT_MS`. The signal has to go in
+    // `init` and not on the `Request`: the plugin reads `init?.signal` alone
+    // and never consults `input.signal`, so a bound left on the request object
+    // is a bound it will never honour.
+    fetch: (input, init) =>
+      tauriFetch(input, { ...init, signal: boundedSignal(input, init) }),
     openSocket: (url, token) =>
       adapt(
         // A real `Authorization` header, not the `Sec-WebSocket-Protocol`

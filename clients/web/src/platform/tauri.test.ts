@@ -13,7 +13,7 @@ vi.mock('@tauri-apps/plugin-websocket', () => ({
   default: { connect: vi.fn() },
 }))
 
-import { adapt, tauriPlatform } from './tauri'
+import { adapt, boundedSignal, tauriPlatform } from './tauri'
 
 /**
  * A stand-in for the websocket plugin's client. Only `addListener` and
@@ -165,16 +165,57 @@ describe('the shell request bound', () => {
     expect(init?.signal).toBeInstanceOf(AbortSignal)
   })
 
-  it("keeps the caller's own signal", async () => {
-    // The first-run health probe wants a far shorter bound than the backstop;
-    // overriding it would make the setup screen sit there.
+  it('bounds a request that arrives as a Request object', async () => {
+    // The regression this whole helper exists for. `openapi-fetch` builds a
+    // `Request` and hands it to the injected fetch, and a `Request` always
+    // exposes a signal even when nobody asked for one -- so treating a
+    // non-null `input.signal` as the caller's own bound silently exempted
+    // every /v1 call the API client makes.
     tauriFetch.mockClear()
-    const controller = new AbortController()
-    await tauriPlatform().fetch('https://axon.example/healthz', {
-      signal: controller.signal,
-    })
+    await tauriPlatform().fetch(new Request('https://axon.example/v1/rooms'))
 
     const init = tauriFetch.mock.calls[0]?.[1]
-    expect(init?.signal).toBe(controller.signal)
+    expect(init?.signal).toBeInstanceOf(AbortSignal)
+    // In `init`, because the plugin reads `init?.signal` and never looks at
+    // the request's own -- a bound left on the `Request` would not be honoured.
+    expect(init?.signal).not.toBe(
+      (tauriFetch.mock.calls[0]?.[0] as Request).signal,
+    )
+  })
+
+  it('abandons a Request the plugin never answers', async () => {
+    const signal = boundedSignal(
+      new Request('https://axon.example/v1/rooms'),
+      undefined,
+      1,
+    )
+    await expect(aborted(signal)).resolves.toBe('TimeoutError')
+  })
+
+  it("keeps the caller's own, shorter bound", async () => {
+    // The first-run health probe wants a far shorter bound than the backstop;
+    // composing rather than replacing means whichever fires first wins, so the
+    // probe still gives up in seconds and the setup screen does not sit there.
+    const controller = new AbortController()
+    const signal = boundedSignal(
+      'https://axon.example/healthz',
+      { signal: controller.signal },
+      60_000,
+    )
+    controller.abort(new DOMException('probe gave up', 'AbortError'))
+    await expect(aborted(signal)).resolves.toBe('AbortError')
   })
 })
+
+/** The name of the reason a signal aborts with, once it does. */
+function aborted(signal: AbortSignal): Promise<string> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve((signal.reason as DOMException).name)
+      return
+    }
+    signal.addEventListener('abort', () => {
+      resolve((signal.reason as DOMException).name)
+    })
+  })
+}
