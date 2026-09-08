@@ -6,7 +6,9 @@ import { observeVisible } from './intersection'
 import type {
   MediaFailure,
   MediaHandle,
+  MediaRequestOptions,
   SniffedFormat,
+  ThumbnailMethod,
   ThumbnailRequest,
 } from './media-service'
 
@@ -27,6 +29,30 @@ export interface MediaBlobState {
  * jsdom has no `IntersectionObserver`, so there the fetch starts eagerly on
  * mount — component tests exercise the real load path without a stub.
  */
+/**
+ * The `MediaRequestOptions` for one acquire, from the hook's flattened inputs.
+ *
+ * Shared by `acquire()` and `invalidate()` rather than written out at each,
+ * because these options *are* the media cache key: two copies that drifted
+ * would leave `invalidate()` addressing a different slot than the one that
+ * failed, and the retry would be handed the broken object right back — with
+ * nothing to show that anything had gone wrong.
+ *
+ * Flattened arguments, not a `ThumbnailRequest`, because the hook destructures
+ * the request into primitives so its effect dependencies compare by value.
+ */
+function requestOptions(
+  width: number | undefined,
+  height: number | undefined,
+  method: ThumbnailMethod | undefined,
+  contentType: string | undefined,
+): MediaRequestOptions | undefined {
+  if (width !== undefined && height !== undefined) {
+    return { thumbnail: { width, height, method }, contentType }
+  }
+  return contentType !== undefined ? { contentType } : undefined
+}
+
 export function useMediaBlob<T extends HTMLElement = HTMLElement>(
   accountId: string,
   mxcUrl: string | null,
@@ -90,18 +116,12 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
         .acquire(
           accountId,
           mxcUrl,
-          thumbnailWidth !== undefined && thumbnailHeight !== undefined
-            ? {
-                thumbnail: {
-                  width: thumbnailWidth,
-                  height: thumbnailHeight,
-                  method: thumbnailMethod,
-                },
-                contentType,
-              }
-            : contentType !== undefined
-              ? { contentType }
-              : undefined,
+          requestOptions(
+            thumbnailWidth,
+            thumbnailHeight,
+            thumbnailMethod,
+            contentType,
+          ),
         )
         .then((acquired) => {
           if (cancelled) {
@@ -169,18 +189,12 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
     media.invalidate(
       accountId,
       mxcUrl,
-      thumbnailWidth !== undefined && thumbnailHeight !== undefined
-        ? {
-            thumbnail: {
-              width: thumbnailWidth,
-              height: thumbnailHeight,
-              method: thumbnailMethod,
-            },
-            contentType,
-          }
-        : contentType !== undefined
-          ? { contentType }
-          : undefined,
+      requestOptions(
+        thumbnailWidth,
+        thumbnailHeight,
+        thumbnailMethod,
+        contentType,
+      ),
     )
   }
 
