@@ -76,16 +76,12 @@ Two new configurable bindings, active only when room-list focus is held:
 `popup_shortcuts_lines` in `ui.rs` is updated to list both bindings in the room-list
 section, following the existing convention.
 
-### Phase 2 — migrate to `m.tag` / `m.favourite` (future ADR)
+### Phase 2 — migrate to `m.tag` / `m.favourite`
 
-A follow-up ADR should cover:
-- Backend: expose `GET /v1/rooms/:id/tags` and `PUT /v1/rooms/:id/tags/:tag`
-  (proxying Matrix `/_matrix/client/v3/user/{userId}/rooms/{roomId}/tags`)
-- Gateway: write account-data mutations back to the homeserver
-- TUI: on startup, merge `m.favourite` state from the server with local config
-  (server wins); on pin/unpin, write both locally and to the server
-
-Until Phase 2 ships, pinned rooms do not sync across Matrix clients.
+**Done as design in ADR 0103** (issue #365 / #366). Tag **writes** already
+shipped with ADR 0068 M19d; the missing read surface, live fan-out, and
+client migration of local `pinned_rooms` / `pinnedRooms` are #367–#369.
+Until those land, pinned rooms still do not sync across Matrix clients.
 
 ### Not option: server-only `m.tag` from the start
 
@@ -99,9 +95,9 @@ sync, and the merge strategy in Phase 2 is straightforward.
 - Pinned rooms appear at the top of the TUI room list, separated from unpinned rooms
   by a thin horizontal line.
 - Pinned state persists across TUI restarts; it does not sync to other Matrix clients
-  until Phase 2.
+  until ADR 0103's client PRs land (issues #368 / #369).
 - Users with existing `m.favourite` tags set from other clients do not automatically
-  see those rooms pinned in the TUI until Phase 2 is implemented.
+  see those rooms pinned in the TUI until those PRs land.
 - The `[display]` section of `config.toml` gains a `pinned_rooms` array; older TUI
   versions that do not know this key will ignore it gracefully via serde's
   `deny_unknown_fields = false` default.

@@ -146,15 +146,23 @@ follow-on, not required for `is_direct`.
   (`account_data(account_id, room_id, type)`) is safe to use for isolation.
 - Writes (e.g. setting `m.tag` from the TUI) remain unaddressed here; they need
   the mutations gateway / homeserver round-trip and belong to ADR 0038 Phase 2.
+  Tag **writes** later landed as ADR 0068 M19d; the read surface, live fan-out,
+  and client migration are ADR 0103 (issue #365).
 - This ADR supersedes the "future ADR" placeholder in ADR 0038 Phase 2 for the
-  **read** side of `m.tag` exposure.
+  **read** side of `m.tag` exposure. Implementation of that read (`tags` and
+  `is_direct` on `RoomDto`) is ADR 0103; `room_type` shipped with the room
+  list independently.
 
 ### Suggested implementation sequence
 
 1. **Store/API (Tier 1):** add `is_direct` (and `room_type`, `tags`) to
    `RoomSummary` → `RoomDto`, computing `is_direct` from `m.direct`.
+   `room_type` has shipped; `is_direct` and `tags` are ADR 0103 / issue #367.
 2. **API (Tier 2):** the generic account-data / state read endpoints.
+   ADR 0084 superseded this for four state clusters; remaining global
+   account-data GET/PUT is not part of ADR 0103.
 3. **TUI:** consume `is_direct` for a room-list DM indicator; later, migrate
-   pinning to `m.tag` via the new reads.
+   pinning to `m.tag` via the new reads. Both are ADR 0103 / issues #369 and
+   #370.
 
 Each is its own PR/silo; Tier 1 unblocks the TUI DM indicator on its own.
