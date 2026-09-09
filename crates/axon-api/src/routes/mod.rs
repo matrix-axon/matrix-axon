@@ -15,6 +15,7 @@ pub mod membership;
 pub mod messages;
 pub mod oauth;
 pub mod power_levels;
+pub mod preferences;
 pub mod room_entry;
 pub mod room_settings;
 pub mod rooms;

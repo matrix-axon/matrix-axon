@@ -23,8 +23,9 @@ pub use config::{
 };
 pub use error::{ConfigError, Error, Result};
 pub use live::{
-    DeviceStateFrame, EphemeralFrame, InviteAddedFrame, InviteRemovedFrame, LiveEvent, LiveFrame,
-    SenderTrustFrame, SyncStateFrame, UnreadCountsFrame, VerificationFrame, VerificationFrameKind,
+    AccountDataFrame, DeviceStateFrame, EphemeralFrame, InviteAddedFrame, InviteRemovedFrame,
+    LiveEvent, LiveFrame, PreferencesFrame, SenderTrustFrame, SyncStateFrame, UnreadCountsFrame,
+    VerificationFrame, VerificationFrameKind,
 };
 pub use media::{ThumbnailMethod, ThumbnailSpec};
 pub use message::{Formatted, MediaAttachment, MediaSendKind, Relation};

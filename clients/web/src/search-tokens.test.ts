@@ -29,6 +29,7 @@ function room(
     last_activity_ts: 0,
     highlight_count: 0,
     notification_count: 0,
+    is_direct: false,
     ...overrides,
   }
 }

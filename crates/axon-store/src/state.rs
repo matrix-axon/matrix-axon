@@ -16,7 +16,7 @@ use crate::{Store, StoreError};
 /// The `room_id` sentinel for global (account-wide) account data. A real Matrix
 /// room id always starts with `!`, so the empty string is unambiguous. See the
 /// `account_data` migration.
-const GLOBAL_SCOPE: &str = "";
+pub(crate) const GLOBAL_SCOPE: &str = "";
 
 /// Singleton state types whose current value is cached on `room_summaries`
 /// (ADR 0095). `state_key` must be `""`.
@@ -266,5 +266,88 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row)
+    }
+
+    /// Atomically add or update `tag` on this room's `m.tag` row (ADR 0103
+    /// write-path upsert). Creates the row when missing. Returns the content
+    /// that is now stored, so the caller can fan out `account_data.changed`
+    /// without a second read. Concurrent writes to different tags on the same
+    /// row serialize on the `ON CONFLICT DO UPDATE` row lock; `jsonb_set`
+    /// then merges into whichever writer ran second.
+    pub async fn apply_room_tag(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        tag: &str,
+        order: Option<f64>,
+    ) -> Result<Value, StoreError> {
+        let info = match order {
+            Some(order) => serde_json::json!({ "order": order }),
+            None => serde_json::json!({}),
+        };
+        let row = sqlx_core::query::query(
+            "INSERT INTO account_data (account_id, room_id, event_type, content) \
+             VALUES ($1, $2, 'm.tag', jsonb_build_object('tags', jsonb_build_object($3::text, $4::jsonb))) \
+             ON CONFLICT (account_id, room_id, event_type) DO UPDATE SET \
+               content = jsonb_set( \
+                 jsonb_set( \
+                   COALESCE(account_data.content, '{}'::jsonb), \
+                   '{tags}', \
+                   CASE \
+                     WHEN jsonb_typeof(account_data.content->'tags') = 'object' \
+                       THEN account_data.content->'tags' \
+                     ELSE '{}'::jsonb \
+                   END, \
+                   true \
+                 ), \
+                 ARRAY['tags', $3::text], \
+                 $4::jsonb, \
+                 true \
+               ) \
+             RETURNING content",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .bind(tag)
+        .bind(&info)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.try_get("content")?)
+    }
+
+    /// Atomically remove `tag` from this room's `m.tag` row (ADR 0103
+    /// write-path upsert). A room with no `m.tag` row is a no-op (`None`):
+    /// unpinning something that was never pinned must not manufacture a row
+    /// or a live frame. Returns the content now stored when a row existed.
+    pub async fn remove_room_tag(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        tag: &str,
+    ) -> Result<Option<Value>, StoreError> {
+        let row = sqlx_core::query::query(
+            "UPDATE account_data SET \
+               content = jsonb_set( \
+                 CASE \
+                   WHEN jsonb_typeof(content) = 'object' THEN content \
+                   ELSE '{}'::jsonb \
+                 END, \
+                 '{tags}', \
+                 CASE \
+                   WHEN jsonb_typeof(content->'tags') = 'object' \
+                     THEN (content->'tags') - $3::text \
+                   ELSE '{}'::jsonb \
+                 END, \
+                 true \
+               ) \
+             WHERE account_id = $1 AND room_id = $2 AND event_type = 'm.tag' \
+             RETURNING content",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .bind(tag)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| row.try_get("content")).transpose()?)
     }
 }

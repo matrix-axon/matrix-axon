@@ -21,8 +21,8 @@ use axon_api::AppState;
 use axon_core::{EphemeralFrame, LiveEvent, LiveFrame, VerificationFrame, VerificationFrameKind};
 use axon_store::Store;
 use common::{
-    StubDeviceList, StubLifecycle, StubMediaProxy, StubSender, StubTokenVerifier, StubTrust,
-    StubVerification, TEST_TOKEN,
+    with_isolated_space_order, StubDeviceList, StubLifecycle, StubMediaProxy, StubSender,
+    StubTokenVerifier, StubTrust, StubVerification, TEST_TOKEN,
 };
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -568,4 +568,76 @@ async fn ws_streams_device_state_changes() {
         .execute(&pool)
         .await
         .expect("cleanup");
+}
+
+/// ADR 0103: a `PUT /v1/preferences/{key}` fans out one `preferences.changed`
+/// frame carrying the originator device (echo suppression) and the new value.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn ws_streams_preferences_changes() {
+    let store = store().await;
+    with_isolated_space_order(&store, || async {
+        let (live, _) = broadcast::channel::<LiveFrame>(16);
+        let app = axon_api::router(AppState::new(
+            store.clone(),
+            live.clone(),
+            Arc::new(StubSender::ok("$unused:localhost")),
+            Arc::new(StubLifecycle::ok(Uuid::nil())),
+            Arc::new(StubVerification::ok("$unused-flow")),
+            Arc::new(StubTrust::ok()),
+            Arc::new(StubDeviceList::ok()),
+            Arc::new(StubTokenVerifier::ok()),
+            Arc::new(StubMediaProxy),
+            None,
+        ));
+        let http_app = app.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let url = format!("ws://{addr}/v1/ws");
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(authed_request(&url))
+            .await
+            .expect("ws connect");
+
+        let device_id = Uuid::new_v4();
+        let account = Uuid::new_v4();
+        let space = format!("{account}/!space:localhost");
+        let body = json!({ "device_id": device_id, "value": { "spaces": [space] } });
+        let req = axum::http::Request::builder()
+            .method("PUT")
+            .uri("/v1/preferences/space_order")
+            .header("authorization", format!("Bearer {TEST_TOKEN}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        use tower::ServiceExt;
+        let resp = http_app.oneshot(req).await.expect("PUT");
+        assert_eq!(resp.status(), 200);
+
+        let frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("a frame within the timeout")
+            .expect("stream still open")
+            .expect("a websocket message");
+        let text = match frame {
+            Message::Text(text) => text,
+            other => panic!("expected a text frame, got {other:?}"),
+        };
+        let envelope: Value = serde_json::from_str(text.as_str()).expect("json frame");
+        assert_eq!(envelope["type"], "preferences.changed");
+        assert_eq!(envelope["account_id"], Uuid::nil().to_string());
+        assert_eq!(envelope["payload"]["key"], "space_order");
+        assert_eq!(envelope["payload"]["device_id"], device_id.to_string());
+        assert_eq!(envelope["payload"]["value"]["spaces"][0], space);
+
+        ws.close(None).await.ok();
+        server.abort();
+    })
+    .await;
 }

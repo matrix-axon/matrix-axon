@@ -7,12 +7,24 @@
 //! projection. A room joined by two accounts yields two summaries, one per
 //! `account_id` — the natural identity here is `(account_id, room_id)`.
 
+use std::collections::{HashMap, HashSet};
+
+use serde_json::Value;
 use sqlx_core::row::Row;
 use sqlx_core::transaction::Transaction;
 use sqlx_postgres::{PgRow, Postgres};
 use uuid::Uuid;
 
 use crate::{Store, StoreError};
+
+/// One `m.tag` entry on a room (`name` is the wire form, e.g. `m.favourite`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoomTag {
+    /// Matrix tag name (`m.favourite`, `m.lowpriority`, `u.work`, …).
+    pub name: String,
+    /// Optional sort order in `[0, 1]`.
+    pub order: Option<f64>,
+}
 
 /// Incremental `room_summaries` write (ADR 0095). Prepended with a
 /// `WITH ins AS ( <event write> RETURNING account_id, room_id, event_id,
@@ -95,6 +107,12 @@ pub struct RoomSummary {
     /// SDK-derived highlight count (issue #313, ADR 0070), from matrix-sdk's
     /// `Room::num_unread_mentions()` counter.
     pub highlight_count: i64,
+    /// This account's `m.tag` entries on the room (ADR 0103). Empty when the
+    /// account has no `m.tag` row for the room.
+    pub tags: Vec<RoomTag>,
+    /// Whether this room appears in the account's global `m.direct` map
+    /// (ADR 0103 / ADR 0055 Tier 1).
+    pub is_direct: bool,
 }
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomSummary {
@@ -112,8 +130,41 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomSummary {
             last_event_id: row.try_get("last_event_id")?,
             notification_count: row.try_get("notification_count")?,
             highlight_count: row.try_get("highlight_count")?,
+            tags: parse_room_tags(row.try_get("tag_content")?),
+            // Filled in after the query from global `m.direct` (ADR 0103).
+            is_direct: false,
         })
     }
+}
+
+/// Parse `m.tag` account-data `content` into a stable `Vec<RoomTag>`.
+/// Malformed or missing content is treated as untagged — a bad row must not
+/// drop the room from the list.
+fn parse_room_tags(content: Option<Value>) -> Vec<RoomTag> {
+    let Some(tags) = content
+        .as_ref()
+        .and_then(|content| content.get("tags"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+    tags.iter()
+        .map(|(name, info)| RoomTag {
+            name: name.clone(),
+            order: info.get("order").and_then(Value::as_f64),
+        })
+        .collect()
+}
+
+/// Room ids listed in any array of an `m.direct` content object.
+fn room_ids_in_direct_map(content: &Value) -> impl Iterator<Item = &str> {
+    content
+        .as_object()
+        .into_iter()
+        .flat_map(|map| map.values())
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(Value::as_str)
 }
 
 impl Store {
@@ -131,7 +182,11 @@ impl Store {
     /// `room_unread_counts` (issue #313, ADR 0070) supplies the unread
     /// counts. `COALESCE(..., 0)` covers a room with no unread-counts row yet
     /// (between account creation and the sync engine's first sweep), so the
-    /// fields read as `0` rather than `NULL`.
+    /// fields read as `0` rather than `NULL`. A `LEFT JOIN` to `account_data`
+    /// on `(account_id, room_id, 'm.tag')` supplies tags (ADR 0103); `is_direct`
+    /// is applied in Rust from each account's global `m.direct` row after the
+    /// SQL, so a large `m.direct` blob is not repeated on every room of that
+    /// account.
     ///
     /// The activity timestamp and latest event id each prefer content-bearing
     /// events — `decrypted_body_text IS NOT NULL`, the same "does this event
@@ -161,16 +216,21 @@ impl Store {
         &self,
         account_id: Option<Uuid>,
     ) -> Result<Vec<RoomSummary>, StoreError> {
-        let rows = sqlx_core::query_as::query_as::<Postgres, RoomSummary>(
+        let mut rows = sqlx_core::query_as::query_as::<Postgres, RoomSummary>(
             "SELECT a.account_id, ac.user_id AS account_user_id, a.room_id, \
                     a.last_activity_ts, a.last_event_id, \
                     a.name, a.topic, a.avatar_url, a.canonical_alias, a.room_type, \
                     COALESCE(ruc.notification_count, 0) AS notification_count, \
-                    COALESCE(ruc.highlight_count, 0) AS highlight_count \
+                    COALESCE(ruc.highlight_count, 0) AS highlight_count, \
+                    ad_tag.content AS tag_content \
              FROM room_summaries a \
              JOIN accounts ac ON ac.account_id = a.account_id AND ac.state = 'active' \
              LEFT JOIN room_unread_counts ruc \
                ON ruc.account_id = a.account_id AND ruc.room_id = a.room_id \
+             LEFT JOIN account_data ad_tag \
+               ON ad_tag.account_id = a.account_id \
+              AND ad_tag.room_id = a.room_id \
+              AND ad_tag.event_type = 'm.tag' \
              WHERE ($1::uuid IS NULL OR a.account_id = $1) \
                AND NOT a.hidden_left \
                AND NOT a.hidden_tombstoned \
@@ -179,7 +239,55 @@ impl Store {
         .bind(account_id)
         .fetch_all(&self.pool)
         .await?;
+        self.apply_is_direct(&mut rows).await?;
         Ok(rows)
+    }
+
+    /// Mark rooms whose id appears in any array of the account's global
+    /// `m.direct` map (ADR 0103). One extra query for the distinct accounts in
+    /// `rooms`, not a join, so a large `m.direct` value is not copied onto
+    /// every room row.
+    async fn apply_is_direct(&self, rooms: &mut [RoomSummary]) -> Result<(), StoreError> {
+        if rooms.is_empty() {
+            return Ok(());
+        }
+        let mut account_ids: Vec<Uuid> = rooms.iter().map(|room| room.account_id).collect();
+        account_ids.sort_unstable();
+        account_ids.dedup();
+        let directs = self.direct_rooms_for_accounts(&account_ids).await?;
+        for room in rooms {
+            room.is_direct = directs
+                .get(&room.account_id)
+                .is_some_and(|ids| ids.contains(&room.room_id));
+        }
+        Ok(())
+    }
+
+    /// Load global `m.direct` for `account_ids` and return the room ids listed
+    /// in any of that map's arrays, keyed by account.
+    async fn direct_rooms_for_accounts(
+        &self,
+        account_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, HashSet<String>>, StoreError> {
+        let rows = sqlx_core::query::query(
+            "SELECT account_id, content FROM account_data \
+             WHERE event_type = 'm.direct' AND room_id = $2 \
+               AND account_id = ANY($1)",
+        )
+        .bind(account_ids)
+        .bind(crate::state::GLOBAL_SCOPE)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out: HashMap<Uuid, HashSet<String>> = HashMap::new();
+        for row in rows {
+            let account_id: Uuid = row.try_get("account_id")?;
+            let content: Value = row.try_get("content")?;
+            let ids = out.entry(account_id).or_default();
+            for room_id in room_ids_in_direct_map(&content) {
+                ids.insert(room_id.to_owned());
+            }
+        }
+        Ok(out)
     }
 
     /// Rebuild `room_summaries` for one account from `events`.
@@ -260,5 +368,56 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use serde_json::json;
+
+    use super::{parse_room_tags, room_ids_in_direct_map, RoomTag};
+
+    #[test]
+    fn parse_room_tags_reads_name_and_optional_order() {
+        let content = json!({
+            "tags": {
+                "m.favourite": { "order": 0.25 },
+                "u.work": {}
+            }
+        });
+        assert_eq!(
+            parse_room_tags(Some(content)),
+            vec![
+                RoomTag {
+                    name: "m.favourite".to_owned(),
+                    order: Some(0.25),
+                },
+                RoomTag {
+                    name: "u.work".to_owned(),
+                    order: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_room_tags_treats_missing_or_malformed_as_untagged() {
+        assert!(parse_room_tags(None).is_empty());
+        assert!(parse_room_tags(Some(json!({}))).is_empty());
+        assert!(parse_room_tags(Some(json!({ "tags": null }))).is_empty());
+        assert!(parse_room_tags(Some(json!({ "tags": "nope" }))).is_empty());
+    }
+
+    #[test]
+    fn direct_map_collects_room_ids_from_every_array() {
+        let content = json!({
+            "@alice:localhost": ["!dm:localhost", "!group:localhost"],
+            "@bob:localhost": ["!dm:localhost"],
+            "@carol:localhost": "not-an-array"
+        });
+        let mut ids: Vec<_> = room_ids_in_direct_map(&content).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids, vec!["!dm:localhost", "!group:localhost"]);
     }
 }

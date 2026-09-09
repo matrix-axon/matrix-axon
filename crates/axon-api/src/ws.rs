@@ -15,6 +15,9 @@
 //! (issue #313, ADR 0070) — *not* built on the ADR 0056 ephemeral path, since
 //! notification counts are per-room counters, not an ephemeral event.
 //! `invite.added` / `invite.removed` carry the pending-invite inbox (ADR 0091).
+//! `account_data.changed` carries persisted Matrix account data (`m.tag`,
+//! `m.direct`, …; ADR 0103). `preferences.changed` carries instance-wide
+//! preference writes (`space_order`).
 //!
 //! Delivery is **best-effort live tail**, not a replay: a client sees events
 //! that arrive after it connects, and uses the HTTP read API for history. The
@@ -44,8 +47,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axon_core::{
-    DeviceStateFrame, EphemeralFrame, InviteAddedFrame, InviteRemovedFrame, LiveFrame,
-    SenderTrustFrame, SyncStateFrame, UnreadCountsFrame, VerificationFrame, VerificationFrameKind,
+    AccountDataFrame, DeviceStateFrame, EphemeralFrame, InviteAddedFrame, InviteRemovedFrame,
+    LiveFrame, PreferencesFrame, SenderTrustFrame, SyncStateFrame, UnreadCountsFrame,
+    VerificationFrame, VerificationFrameKind,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -294,6 +298,51 @@ impl From<InviteRemovedFrame> for InviteRemovedFramePayload {
     }
 }
 
+/// The `type` tag for a persisted Matrix account-data frame (ADR 0103).
+const ACCOUNT_DATA_CHANGED: &str = "account_data.changed";
+
+/// Wire payload for `account_data.changed`. `room_id` is omitted for global
+/// account data (`m.direct`).
+#[derive(Debug, Serialize)]
+struct AccountDataFramePayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    room_id: Option<String>,
+    event_type: String,
+    content: serde_json::Value,
+}
+
+impl From<AccountDataFrame> for AccountDataFramePayload {
+    fn from(frame: AccountDataFrame) -> Self {
+        Self {
+            room_id: frame.room_id,
+            event_type: frame.event_type,
+            content: frame.content,
+        }
+    }
+}
+
+/// The `type` tag for an instance-preference write (ADR 0103).
+const PREFERENCES_CHANGED: &str = "preferences.changed";
+
+/// Wire payload for `preferences.changed`. Receivers drop frames whose
+/// `device_id` is their own.
+#[derive(Debug, Serialize)]
+struct PreferencesFramePayload {
+    key: String,
+    value: serde_json::Value,
+    device_id: Uuid,
+}
+
+impl From<PreferencesFrame> for PreferencesFramePayload {
+    fn from(frame: PreferencesFrame) -> Self {
+        Self {
+            key: frame.key,
+            value: frame.value,
+            device_id: frame.device_id,
+        }
+    }
+}
+
 /// The `type` tag for a verification frame of the given kind.
 fn verification_type(kind: VerificationFrameKind) -> &'static str {
     match kind {
@@ -424,6 +473,22 @@ fn encode_frame(frame: LiveFrame) -> Result<String, serde_json::Error> {
             account_id: frame.account_id,
             payload: InviteRemovedFramePayload::from(frame),
         }),
+        LiveFrame::AccountDataChanged(frame) => serde_json::to_string(&WsEnvelope {
+            kind: ACCOUNT_DATA_CHANGED,
+            account_id: frame.account_id,
+            payload: AccountDataFramePayload::from(frame),
+        }),
+        LiveFrame::PreferencesChanged(frame) => serde_json::to_string(&WsEnvelope {
+            kind: PREFERENCES_CHANGED,
+            // Instance-scoped. The envelope still carries `account_id` so
+            // existing clients that require the field on every frame can
+            // ignore an unknown `type` instead of treating the frame as a
+            // protocol error. The nil UUID is the sentinel that this frame
+            // is not account-scoped — a consumer that self-filters by known
+            // accounts must special-case this type rather than drop it.
+            account_id: Uuid::nil(),
+            payload: PreferencesFramePayload::from(frame),
+        }),
     }
 }
 
@@ -541,8 +606,8 @@ async fn pump(
 mod tests {
     use super::*;
     use axon_core::{
-        EphemeralFrame, LiveEvent, SenderTrustFrame, SyncStateFrame, UnreadCountsFrame,
-        VerificationFrame, VerificationFrameKind,
+        AccountDataFrame, EphemeralFrame, LiveEvent, PreferencesFrame, SenderTrustFrame,
+        SyncStateFrame, UnreadCountsFrame, VerificationFrame, VerificationFrameKind,
     };
     use serde_json::Value;
 
@@ -783,5 +848,56 @@ mod tests {
         assert_eq!(v["type"], "invite.removed");
         assert_eq!(v["account_id"], account_id.to_string());
         assert_eq!(v["payload"]["room_id"], "!r:localhost");
+    }
+
+    #[test]
+    fn account_data_changed_frame_omits_room_id_when_global() {
+        let account_id = Uuid::new_v4();
+        let v = decode(LiveFrame::AccountDataChanged(AccountDataFrame {
+            account_id,
+            room_id: None,
+            event_type: "m.direct".to_owned(),
+            content: serde_json::json!({ "@bob:localhost": ["!dm:localhost"] }),
+        }));
+        assert_eq!(v["type"], "account_data.changed");
+        assert_eq!(v["account_id"], account_id.to_string());
+        assert!(v["payload"].get("room_id").is_none());
+        assert_eq!(v["payload"]["event_type"], "m.direct");
+        assert_eq!(
+            v["payload"]["content"]["@bob:localhost"][0],
+            "!dm:localhost"
+        );
+    }
+
+    #[test]
+    fn account_data_changed_frame_includes_room_id_for_m_tag() {
+        let account_id = Uuid::new_v4();
+        let v = decode(LiveFrame::AccountDataChanged(AccountDataFrame {
+            account_id,
+            room_id: Some("!r:localhost".to_owned()),
+            event_type: "m.tag".to_owned(),
+            content: serde_json::json!({ "tags": { "m.favourite": { "order": 0.25 } } }),
+        }));
+        assert_eq!(v["payload"]["room_id"], "!r:localhost");
+        assert_eq!(v["payload"]["event_type"], "m.tag");
+        assert_eq!(
+            v["payload"]["content"]["tags"]["m.favourite"]["order"],
+            0.25
+        );
+    }
+
+    #[test]
+    fn preferences_changed_frame_uses_nil_account_id() {
+        let device_id = Uuid::new_v4();
+        let v = decode(LiveFrame::PreferencesChanged(PreferencesFrame {
+            key: "space_order".to_owned(),
+            value: serde_json::json!({ "spaces": [] }),
+            device_id,
+        }));
+        assert_eq!(v["type"], "preferences.changed");
+        assert_eq!(v["account_id"], Uuid::nil().to_string());
+        assert_eq!(v["payload"]["key"], "space_order");
+        assert_eq!(v["payload"]["value"]["spaces"], serde_json::json!([]));
+        assert_eq!(v["payload"]["device_id"], device_id.to_string());
     }
 }
