@@ -52,6 +52,20 @@ async function openReactionFixture(page: Page) {
   await expect(page.getByText('newest message')).toBeVisible()
 }
 
+async function pickerAnchorOffset(
+  page: Page,
+  anchor: { top: number; right: number },
+) {
+  return page.evaluate(({ top, right }) => {
+    const dialog = document.querySelector<HTMLElement>('.reaction-full-picker')!
+    const box = dialog.getBoundingClientRect()
+    return {
+      horizontal: Math.abs(box.left - right),
+      vertical: Math.abs(box.bottom - top),
+    }
+  }, anchor)
+}
+
 test('reacting to the newest message keeps the reaction chip inside the timeline viewport', async ({
   page,
 }) => {
@@ -114,6 +128,16 @@ test('the full reaction emoji picker anchors to the more button when space allow
   await expect(dialog).toBeVisible()
   await expect(dialog.locator('emoji-picker')).toBeVisible()
 
+  // The dialog first renders at its CSS fallback, then the layout effect moves
+  // it to its anchor. The picker element being visible does not prove that
+  // positioning state has committed yet.
+  await expect
+    .poll(async () => {
+      const offset = await pickerAnchorOffset(page, anchorBox)
+      return Math.max(offset.horizontal, offset.vertical)
+    })
+    .toBeLessThanOrEqual(1)
+
   const geometry = await page.evaluate(() => {
     const dialog = document.querySelector<HTMLElement>('.reaction-full-picker')!
     const host = document.querySelector<HTMLElement>(
@@ -129,7 +153,6 @@ test('the full reaction emoji picker anchors to the more button when space allow
     return {
       dialogHeight: dialogBox.height,
       dialogWidth: dialogBox.width,
-      dialogLeft: dialogBox.left,
       dialogTop: dialogBox.top,
       dialogBottom: dialogBox.bottom,
       hostHeight: hostBox.height,
@@ -155,8 +178,6 @@ test('the full reaction emoji picker anchors to the more button when space allow
   expect(geometry.dialogZIndex).toBeGreaterThan(geometry.composerZIndex)
   expect(geometry.parentTag).toBe('BODY')
   expect(geometry.rowContainsDialog).toBe(false)
-  expect(Math.abs(geometry.dialogLeft - anchorBox.right)).toBeLessThanOrEqual(1)
-  expect(Math.abs(geometry.dialogBottom - anchorBox.top)).toBeLessThanOrEqual(1)
   expect(geometry.dialogTop).toBeGreaterThanOrEqual(0)
   expect(geometry.dialogBottom).toBeLessThanOrEqual(geometry.viewportHeight)
   expect(geometry.dialogHeight).toBeLessThanOrEqual(geometry.viewportHeight)
