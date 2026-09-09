@@ -143,7 +143,7 @@ struct AxonProcess {
 }
 
 impl AxonProcess {
-    async fn start(config: Config, secrets: &SecretTracker) -> Result<Self> {
+    fn prepare(config: Config, secrets: &SecretTracker) -> Result<Self> {
         std::fs::create_dir_all(&config.run_dir).context("create harness run directory")?;
         let log_path = config.run_dir.join("axon.log");
         let store_key = format!("matrix-oauth-smoke-{}", Uuid::new_v4());
@@ -152,15 +152,13 @@ impl AxonProcess {
         secrets.remember(store_key.clone());
         secrets.remember(bearer_token.clone());
 
-        let mut process = Self {
+        Ok(Self {
             config,
             child: None,
             log_path,
             store_key,
             bearer_token,
-        };
-        process.spawn().await?;
-        Ok(process)
+        })
     }
 
     fn api(&self) -> Result<Api> {
@@ -1397,10 +1395,15 @@ async fn run_until_shutdown() -> Result<()> {
     let config = Config::load()?;
     let mode = config.mode.clone();
     let secrets = SecretTracker::default();
-    let mut process = AxonProcess::start(config.clone(), &secrets).await?;
+    let mut process = AxonProcess::prepare(config.clone(), &secrets)?;
 
     let lane_result = tokio::select! {
-        result = run_lane(&mut process, &config, &secrets) => result,
+        // Keep startup cancellable while retaining the process outside this
+        // future so the common stop, reap, and disclosure scan always run.
+        result = async {
+            process.spawn().await?;
+            run_lane(&mut process, &config, &secrets).await
+        } => result,
         _ = shutdown_signal() => Err(anyhow!("harness interrupted")),
     };
     let stop_result = process.stop().await;
