@@ -120,12 +120,15 @@ fn asset_response(
 
 /// What to answer for one request path.
 ///
-/// Deliberately a pure function over `(does this asset exist?, path)` so the
-/// rules can be asserted without a webview — see the tests below.
+/// Deliberately a pure function over `(how do I resolve an asset?, path)` so
+/// the rules can be asserted without a webview — see the tests below. Generic
+/// in what resolution produces so that `serve` can hand it the real asset and
+/// the tests a name; either way the lookup happens once, and the asset the
+/// route decided on is the asset that gets served.
 #[derive(Debug, PartialEq, Eq)]
-enum Route {
+enum Route<A> {
     /// Serve this asset.
-    Asset(String),
+    Asset(A),
     /// Serve the app; the client router reads the path.
     App,
     /// A content-hashed asset that is genuinely gone.
@@ -140,9 +143,13 @@ fn serve<R: tauri::Runtime>(
     let resolver = app.asset_resolver();
     let builder = tauri::http::Response::builder();
 
-    let target = match route(path, |candidate| resolver.get(candidate.into()).is_some()) {
-        Route::Asset(asset) => asset,
-        Route::App => "index.html".to_string(),
+    // Resolved once. The resolver decodes the asset and mints a fresh CSP nonce
+    // on every call (see `asset_response`), so asking whether an asset exists
+    // and then asking for it again paid that twice for every script, style,
+    // font and image the app loads.
+    let asset = match route(path, |candidate| resolver.get(candidate.into())) {
+        Route::Asset(asset) => Some(asset),
+        Route::App => resolver.get("index.html".into()),
         Route::NotFound => {
             return builder
                 .status(tauri::http::StatusCode::NOT_FOUND)
@@ -156,7 +163,7 @@ fn serve<R: tauri::Runtime>(
         }
     };
 
-    match resolver.get(target.clone()) {
+    match asset {
         Some(asset) => asset_response(&asset.mime_type, asset.csp_header.as_deref(), asset.bytes),
         // The bundle is empty. `generate_context!` embeds `../dist` at compile
         // time and says nothing when it is not there -- and `dist/` is
@@ -198,7 +205,7 @@ fn serve<R: tauri::Runtime>(
 ///   HTML as a module, and a client still running the previous build hangs with
 ///   no useful error. That is the exact failure ADR 0087 exists to fix, and the
 ///   Caddyfile carries the same carve-out for the same reason.
-fn route(path: &str, exists: impl Fn(&str) -> bool) -> Route {
+fn route<A>(path: &str, resolve: impl Fn(&str) -> Option<A>) -> Route<A> {
     let trimmed = path.trim_start_matches('/');
     let candidate = if trimmed.is_empty() {
         "index.html"
@@ -206,8 +213,8 @@ fn route(path: &str, exists: impl Fn(&str) -> bool) -> Route {
         trimmed
     };
 
-    if exists(candidate) {
-        return Route::Asset(candidate.to_string());
+    if let Some(asset) = resolve(candidate) {
+        return Route::Asset(asset);
     }
     if candidate.starts_with("assets/") {
         return Route::NotFound;
@@ -259,12 +266,13 @@ mod tests {
             .is_none());
     }
 
-    /// Stands in for the embedded bundle.
-    fn bundle(path: &str) -> bool {
+    /// Stands in for the embedded bundle, resolving a name to itself.
+    fn bundle(path: &str) -> Option<String> {
         matches!(
             path,
             "index.html" | "assets/index-abc123.js" | "favicon.png" | "version.json"
         )
+        .then(|| path.to_string())
     }
 
     #[test]

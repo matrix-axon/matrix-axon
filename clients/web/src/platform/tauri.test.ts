@@ -13,6 +13,7 @@ vi.mock('@tauri-apps/plugin-websocket', () => ({
   default: { connect: vi.fn() },
 }))
 
+import { save } from '@tauri-apps/plugin-dialog'
 import { adapt, boundedSignal, tauriPlatform } from './tauri'
 
 /**
@@ -150,6 +151,41 @@ describe('the shell socket connect bound', () => {
     expect(disconnect).toHaveBeenCalled()
     expect(events).toEqual(['close'])
     warn.mockRestore()
+  })
+})
+
+describe('the shell save dialog', () => {
+  it('offers a basename, never a path the sender chose', async () => {
+    // `filename` is `content.filename`/`content.body` off the event, so a room
+    // can put anything in it. `<a download>` dropped the directory; this must
+    // not lose that in the port to a native dialog.
+    const saved = vi.mocked(save)
+    saved.mockClear()
+    saved.mockResolvedValue(null)
+
+    await tauriPlatform().saveFile({
+      blob: new Blob(['x']),
+      filename: '../../.config/autostart/evil.desktop',
+      mimetype: 'text/plain',
+    })
+    expect(saved.mock.calls[0]?.[0]).toEqual({
+      defaultPath: 'evil.desktop',
+    })
+
+    await tauriPlatform().saveFile({
+      blob: new Blob(['x']),
+      filename: 'C:\\Windows\\System32\\drivers\\etc\\hosts',
+      mimetype: 'text/plain',
+    })
+    expect(saved.mock.calls[1]?.[0]).toEqual({ defaultPath: 'hosts' })
+
+    // A name that is only a path leaves the dialog something to show.
+    await tauriPlatform().saveFile({
+      blob: new Blob(['x']),
+      filename: '../',
+      mimetype: 'text/plain',
+    })
+    expect(saved.mock.calls[2]?.[0]).toEqual({ defaultPath: 'download' })
   })
 })
 

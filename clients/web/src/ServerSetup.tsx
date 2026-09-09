@@ -54,8 +54,6 @@ export function ServerSetup({
     }
     setStatus({ state: 'probing' })
 
-    const abort = new AbortController()
-    const timer = setTimeout(() => abort.abort(), PROBE_TIMEOUT_MS)
     try {
       // https first, then plain http for a local address the user typed
       // without a scheme — see `httpFallbackFor`. An explicit scheme is never
@@ -66,6 +64,15 @@ export function ServerSetup({
         if (candidate === null) {
           continue
         }
+        // A bound per candidate, not per attempt at connecting. Shared, the
+        // first probe's timeout fires and the second is handed a signal that
+        // has already aborted, so it rejects without reaching the network —
+        // which silently removed the http fallback in precisely the case it
+        // exists for, a LAN box that stalls the TLS handshake because it only
+        // speaks plain http. The cost is that two dead candidates take two
+        // timeouts to give up on, which is the honest price of probing two.
+        const abort = new AbortController()
+        const timer = setTimeout(() => abort.abort(), PROBE_TIMEOUT_MS)
         let res: Response
         try {
           res = await platform.fetch(`${candidate}/healthz`, {
@@ -73,6 +80,8 @@ export function ServerSetup({
           })
         } catch {
           continue
+        } finally {
+          clearTimeout(timer)
         }
         if (res.ok) {
           storeServerUrl(storage, candidate)
@@ -97,8 +106,6 @@ export function ServerSetup({
         state: 'failed',
         message: `Could not reach ${normalized}. Check the address and that the server is running.`,
       })
-    } finally {
-      clearTimeout(timer)
     }
   }
 

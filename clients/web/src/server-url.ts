@@ -130,7 +130,6 @@ export function storeServerUrl(storage: Storage, raw: string): string | null {
   return normalized
 }
 
-/** Forget the configured server, sending the app back to the setup screen. */
 /**
  * The `http://` form of a base the user typed without a scheme, or `null` when
  * there is no sensible fallback.
@@ -164,20 +163,85 @@ export function httpFallbackFor(
   if (url.protocol !== 'https:') {
     return null
   }
-  const host = url.hostname
-  const isLocal =
-    !host.includes('.') ||
-    host.endsWith('.local') ||
-    host === 'localhost' ||
-    /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ||
-    host.startsWith('[')
-  if (!isLocal) {
+  if (!cannotHoldAPublicCertificate(url.hostname)) {
     return null
   }
   url.protocol = 'http:'
   return url.toString().replace(/\/+$/, '')
 }
 
+/**
+ * Whether a host is one no public CA would ever certify, and so one the setup
+ * screen may retry over plain http.
+ *
+ * A literal address is checked by *range*, not by shape. `203.0.113.5` is a
+ * dotted quad exactly like `192.168.1.5`, and downgrading it puts the bearer
+ * token used by every later request on the open internet in cleartext — on no
+ * better evidence than an https probe that failed, which a self-signed
+ * certificate, a closed port or a firewall will each produce against a server
+ * that speaks https perfectly well. `ServerSetup` takes the fallback silently,
+ * so there is no moment at which the user is told the difference.
+ *
+ * Ranges: RFC 1918 (`10/8`, `172.16/12`, `192.168/16`), loopback (`127/8`,
+ * `::1`), link-local (`169.254/16`, `fe80::/10`), IPv6 unique-local
+ * (`fc00::/7`), and the shared CGNAT block `100.64/10` that Tailscale draws
+ * from — a Tailnet address is exactly the case this fallback is for.
+ */
+function cannotHoldAPublicCertificate(host: string): boolean {
+  if (host.startsWith('[')) {
+    return isPrivateIpv6(host.slice(1, -1))
+  }
+  const octets = ipv4Octets(host)
+  if (octets !== null) {
+    return isPrivateIpv4(octets)
+  }
+  // A name rather than an address. No dot at all is a LAN name, and `.local`
+  // is mDNS; neither can be validated by a CA.
+  return !host.includes('.') || host.endsWith('.local')
+}
+
+/** The four octets of a dotted-quad literal, or `null` if it is not one. */
+function ipv4Octets(host: string): [number, number, number, number] | null {
+  const parts = host.split('.')
+  if (parts.length !== 4 || !parts.every((part) => /^\d{1,3}$/.test(part))) {
+    return null
+  }
+  const octets = parts.map(Number)
+  if (octets.some((octet) => octet > 255)) {
+    return null
+  }
+  return octets as [number, number, number, number]
+}
+
+function isPrivateIpv4([a, b]: [number, number, number, number]): boolean {
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254) ||
+    (a === 100 && b >= 64 && b <= 127)
+  )
+}
+
+function isPrivateIpv6(address: string): boolean {
+  const lowered = address.toLowerCase()
+  if (lowered === '::1') {
+    return true
+  }
+  // Only the first group decides: `fc00::/7` is fc00-fdff and `fe80::/10` is
+  // fe80-febf. An address that starts with `::` has no first group and is not
+  // one of those, so `parseInt('')` giving NaN is the right answer.
+  const group = Number.parseInt(lowered.split(':')[0] ?? '', 16)
+  if (Number.isNaN(group)) {
+    return false
+  }
+  return (
+    (group >= 0xfc00 && group <= 0xfdff) || (group >= 0xfe80 && group <= 0xfebf)
+  )
+}
+
+/** Forget the configured server, sending the app back to the setup screen. */
 export function clearStoredServerUrl(storage: Storage): void {
   try {
     storage.removeItem(SERVER_URL_KEY)

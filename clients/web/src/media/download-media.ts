@@ -1,4 +1,4 @@
-import { browserPlatform, type Platform, type SaveOutcome } from '../platform'
+import { type Platform, type SaveOutcome } from '../platform'
 import type { MediaService } from './media-service'
 import type { ParsedMedia } from './parse-media'
 
@@ -33,7 +33,12 @@ export async function downloadMedia(
   service: MediaService,
   accountId: string,
   media: ParsedMedia,
-  platform: Pick<Platform, 'saveFile'> = browserPlatform(),
+  // Required, not defaulted. A default of `browserPlatform()` reads as a
+  // convenience and behaves as a trap: the browser's `saveFile` is the
+  // `<a download>` anchor, which is inert under the shell's custom scheme, so
+  // a call site that simply forgot the argument compiled, ran, and saved
+  // nothing at all with no error anywhere. `MediaImage` was that call site.
+  platform: Pick<Platform, 'saveFile'>,
 ): Promise<DownloadOutcome> {
   if (media.url === null) {
     return 'failed'

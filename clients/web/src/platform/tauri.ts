@@ -176,7 +176,7 @@ export function adapt(
 async function saveViaDialog(file: SaveRequest): Promise<SaveOutcome> {
   let path: string | null
   try {
-    path = await save({ defaultPath: file.filename })
+    path = await save({ defaultPath: basename(file.filename) })
   } catch {
     return 'failed'
   }
@@ -189,6 +189,29 @@ async function saveViaDialog(file: SaveRequest): Promise<SaveOutcome> {
   } catch {
     return 'failed'
   }
+}
+
+/**
+ * A filename with any path in it removed.
+ *
+ * The name comes from `content.filename` or `content.body` on the event, which
+ * is to say from whoever sent the media — `../../.config/autostart/evil.desktop`
+ * is a filename as far as the room is concerned. It reaches an OS save dialog
+ * here, and while that dialog still requires the user to confirm a destination,
+ * what a traversal-shaped `defaultPath` does to it before then is a per-backend
+ * question (GTK, Cocoa and Win32 each answer differently) and not one worth
+ * depending on. `<a download>`, which this replaced, dropped the directory
+ * itself; do the same rather than lose that property in the port.
+ *
+ * Separators for both worlds, since a Windows name can reach a Linux client and
+ * the reverse. An empty result falls back rather than handing the dialog `''`.
+ */
+function basename(filename: string): string {
+  const last = filename.split(/[/\\]/).pop() ?? ''
+  const trimmed = last.trim()
+  return trimmed === '' || trimmed === '.' || trimmed === '..'
+    ? 'download'
+    : trimmed
 }
 
 /** `https://host:port` for logging, or a placeholder if it will not parse. */

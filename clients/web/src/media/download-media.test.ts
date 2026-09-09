@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { browserPlatform } from '../platform'
 import { downloadMedia, isDownloadable } from './download-media'
 import type { MediaService } from './media-service'
 import type { ParsedMedia } from './parse-media'
@@ -59,7 +60,9 @@ describe('isDownloadable', () => {
 
 describe('downloadMedia', () => {
   it('reports failure when the object cannot be fetched', async () => {
-    expect(await downloadMedia(service(null), ACCOUNT, media())).toBe('failed')
+    expect(
+      await downloadMedia(service(null), ACCOUNT, media(), browserPlatform()),
+    ).toBe('failed')
   })
 
   it('falls back to an anchor when the platform cannot share files', async () => {
@@ -82,6 +85,7 @@ describe('downloadMedia', () => {
       service(new Blob(['x'])),
       ACCOUNT,
       media(),
+      browserPlatform(),
     )
     expect(outcome).toBe('saved')
     expect(click).toHaveBeenCalledOnce()
@@ -96,6 +100,7 @@ describe('downloadMedia', () => {
       service(new Blob(['x'])),
       ACCOUNT,
       media(),
+      browserPlatform(),
     )
     expect(outcome).toBe('shared')
     const shared = share.mock.calls[0][0] as { files: File[] }
@@ -111,7 +116,12 @@ describe('downloadMedia', () => {
       .mockRejectedValue(new DOMException('cancelled', 'AbortError'))
 
     expect(
-      await downloadMedia(service(new Blob(['x'])), ACCOUNT, media()),
+      await downloadMedia(
+        service(new Blob(['x'])),
+        ACCOUNT,
+        media(),
+        browserPlatform(),
+      ),
     ).toBe('cancelled')
   })
 
@@ -132,7 +142,12 @@ describe('downloadMedia', () => {
     nav.share = vi.fn().mockRejectedValue(new Error('not supported'))
 
     expect(
-      await downloadMedia(service(new Blob(['x'])), ACCOUNT, media()),
+      await downloadMedia(
+        service(new Blob(['x'])),
+        ACCOUNT,
+        media(),
+        browserPlatform(),
+      ),
     ).toBe('saved')
     expect(click).toHaveBeenCalledOnce()
   })
@@ -154,7 +169,12 @@ describe('downloadMedia', () => {
     nav.share = share
 
     expect(
-      await downloadMedia(service(new Blob(['x'])), ACCOUNT, media()),
+      await downloadMedia(
+        service(new Blob(['x'])),
+        ACCOUNT,
+        media(),
+        browserPlatform(),
+      ),
     ).toBe('saved')
     expect(share).not.toHaveBeenCalled()
     expect(click).toHaveBeenCalledOnce()

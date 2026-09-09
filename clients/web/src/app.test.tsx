@@ -284,6 +284,88 @@ describe('App', () => {
     anchor.remove()
   })
 
+  it('takes a modified or middle click too, where there is no tab to open', async () => {
+    // The browser's ctrl/cmd/shift click opens a tab or a window, which is why
+    // the handler steps aside for it. The shell has neither: the same click
+    // sends its only window to the page, and there is no back button to
+    // return by. So there the click is the app's to answer, not the webview's.
+    const openExternal = vi.fn()
+    const services = {
+      ...testServices(),
+      platform: { ...testServices().platform, openExternal },
+    }
+    render(<App services={services} />)
+    await waitFor(() =>
+      expect(services.accounts.accounts.value).toHaveLength(1),
+    )
+    const anchor = document.createElement('a')
+    anchor.href = 'https://example.com/docs'
+    document.body.append(anchor)
+
+    for (const modifier of [
+      { ctrlKey: true },
+      { metaKey: true },
+      { shiftKey: true },
+      { altKey: true },
+    ]) {
+      openExternal.mockClear()
+      const event = new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        ...modifier,
+      })
+      anchor.dispatchEvent(event)
+      expect(openExternal).toHaveBeenCalledWith('https://example.com/docs')
+      expect(event.defaultPrevented).toBe(true)
+    }
+
+    // A middle click raises `auxclick`, never `click`.
+    openExternal.mockClear()
+    anchor.dispatchEvent(
+      new MouseEvent('auxclick', {
+        bubbles: true,
+        cancelable: true,
+        button: 1,
+      }),
+    )
+    expect(openExternal).toHaveBeenCalledWith('https://example.com/docs')
+
+    // A right click is a context menu, not a request to open anything.
+    openExternal.mockClear()
+    anchor.dispatchEvent(
+      new MouseEvent('auxclick', {
+        bubbles: true,
+        cancelable: true,
+        button: 2,
+      }),
+    )
+    expect(openExternal).not.toHaveBeenCalled()
+    anchor.remove()
+  })
+
+  it('leaves a modified click to the browser, which has a tab for it', async () => {
+    // The other half of the pair: intercepting here would break the native
+    // open-in-a-new-tab that a browser user is entitled to.
+    const services = testServices()
+    render(<App services={services} />)
+    await waitFor(() =>
+      expect(services.accounts.accounts.value).toHaveLength(1),
+    )
+    const anchor = document.createElement('a')
+    anchor.href = 'https://example.com/docs'
+    document.body.append(anchor)
+
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+    })
+    anchor.dispatchEvent(event)
+
+    expect(event.defaultPrevented).toBe(false)
+    anchor.remove()
+  })
+
   it('does not treat a same-origin link as external', async () => {
     // Those are the client's own routes and must stay in-window.
     const openExternal = vi.fn()

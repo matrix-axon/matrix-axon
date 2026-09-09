@@ -973,14 +973,32 @@ function ShellChrome() {
       })
   }, [location, pendingMatrixJoin, rooms])
   useEffect(() => {
+    // `openExternal` is null exactly when the browser's own defaults are right,
+    // which makes it the honest test for "this build has tabs". A packaged
+    // build has one window, no tabs and no back button.
+    const hasTabs = svcPlatform.openExternal === null
     const onClick = (event: MouseEvent) => {
+      if (event.defaultPrevented) {
+        return
+      }
+      // `auxclick` covers every non-primary button, right-click included, and
+      // a context menu is not a request to open anything. Only the middle
+      // button is a navigation gesture.
+      if (event.type === 'auxclick' && event.button !== 1) {
+        return
+      }
+      // A modified or non-primary click belongs to the browser: ctrl/cmd opens
+      // a tab, shift a window, and taking those here would break both — see
+      // `app.test.tsx`. None of that exists in the shell, where the same click
+      // instead sends the only window to the page and strands the user with no
+      // way back, so there every click is ours to answer.
       if (
-        event.defaultPrevented ||
-        event.button !== 0 ||
-        event.ctrlKey ||
-        event.metaKey ||
-        event.altKey ||
-        event.shiftKey
+        hasTabs &&
+        (event.button !== 0 ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.altKey ||
+          event.shiftKey)
       ) {
         return
       }
@@ -1026,7 +1044,17 @@ function ShellChrome() {
       )
     }
     document.addEventListener('click', onClick)
-    return () => document.removeEventListener('click', onClick)
+    // A middle click raises `auxclick`, not `click`, in every engine this runs
+    // on. In a browser that is the tab-opening gesture and must be left alone;
+    // in the shell it is one more way to lose the window, so listen for it
+    // there and nowhere else.
+    if (!hasTabs) {
+      document.addEventListener('auxclick', onClick)
+    }
+    return () => {
+      document.removeEventListener('click', onClick)
+      document.removeEventListener('auxclick', onClick)
+    }
   }, [
     accounts.accounts.value,
     location,
