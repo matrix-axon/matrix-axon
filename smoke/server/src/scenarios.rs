@@ -13,6 +13,52 @@ use crate::wire::{EventDto, RoomDto};
 /// ordering guarantee relative to timeline persistence) didn't react to it.
 const UNREAD_COUNTS_OWN_MESSAGE_SETTLE: Duration = Duration::from_secs(3);
 
+/// Wait until the seeded room projections required by the server scenarios are
+/// available.
+///
+/// Local-stack's startup probe intentionally waits for one room, which is
+/// enough for an interactive client to connect but does not order the other
+/// room projections behind it.
+/// Server smoke needs all of its fixtures before its first assertion: the
+/// room-list scenario reads every room, `timeline_read` reads the general
+/// timeline, and relation scenarios require the edited relations root.
+pub async fn seeded_fixtures_ready(ctx: &Ctx) -> anyhow::Result<()> {
+    wait_for("seeded server fixtures to project", ctx.timeout, || async {
+        let rooms = ctx.axon.list_rooms().await?;
+        let all_rooms_present = [
+            &ctx.manifest.rooms.general.room_id,
+            &ctx.manifest.rooms.long_timeline.room_id,
+            &ctx.manifest.rooms.relations.room_id,
+        ]
+        .into_iter()
+        .all(|room_id| rooms.iter().any(|room| room.room_id == *room_id));
+        if !all_rooms_present {
+            return Ok(false);
+        }
+
+        let account_id = ctx.manifest.axon_account_id;
+        let general = ctx
+            .axon
+            .timeline(account_id, &ctx.manifest.rooms.general.room_id, 20)
+            .await?;
+        let relations = ctx
+            .axon
+            .timeline(account_id, &ctx.manifest.rooms.relations.room_id, 20)
+            .await?;
+
+        Ok(general.events.iter().any(|event| {
+            event
+                .body
+                .as_deref()
+                .is_some_and(|body| body.contains("general"))
+        }) && relations
+            .events
+            .iter()
+            .any(|event| event.body.as_deref() == Some("relations root edited")))
+    })
+    .await
+}
+
 pub async fn boot_health(ctx: &Ctx) -> ScenarioOutcome {
     ScenarioOutcome::from_result(
         async {

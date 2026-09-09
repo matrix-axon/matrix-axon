@@ -383,9 +383,9 @@ pub async fn scroll_pin_on_relation_refresh(ctx: &Ctx) -> ScenarioOutcome {
 }
 
 /// `room_sort_filter_surface`: against the single-room stub, exercises the
-/// sort/filter command + key-chord surface (ADR 0042). Asserts on the status
-/// line the TUI writes for each change and on the live name-filter input, none
-/// of which depend on having multiple rooms.
+/// sort/filter command + key-chord surface (ADR 0042). Asserts on the durable
+/// room-panel state and on the live name-filter input, neither of which depend
+/// on having multiple rooms.
 pub async fn room_sort_filter_surface(ctx: &Ctx) -> ScenarioOutcome {
     let stub = match Stub::start(&ctx.run_id).await {
         Ok(stub) => stub,
@@ -403,27 +403,27 @@ pub async fn room_sort_filter_surface(ctx: &Ctx) -> ScenarioOutcome {
         wait_first_paint(&mut driver, &stub.state, ctx.timeout)?;
         let room = stub.state.room_name.clone();
 
-        // Sort commands report the active mode in the status line.
+        // The panel title is durable state. Startup work can replace a transient
+        // command status before the PTY observes it.
         submit_command(&mut driver, "/sort oldest")?;
-        wait_for_text(&driver, "sort: Oldest", ctx.timeout)?;
+        wait_for_room_list_state(&driver, "Rooms — Oldest", &[&room], ctx.timeout)?;
         submit_command(&mut driver, "/sort recent")?;
-        wait_for_text(&driver, "sort: Recent", ctx.timeout)?;
+        wait_for_room_list_state(&driver, "Rooms — Recent", &[&room], ctx.timeout)?;
 
         // The cycle chord (Alt-S) advances Recent -> Oldest.
         press_alt(&mut driver, 's')?;
-        wait_for_text(&driver, "sort: Oldest", ctx.timeout)?;
+        wait_for_room_list_state(&driver, "Rooms — Oldest", &[&room], ctx.timeout)?;
 
         // Filter commands likewise. The stub room is named, so it is a group and
         // remains visible under the Groups filter.
         submit_command(&mut driver, "/filter groups")?;
-        wait_for_text(&driver, "filter: Groups", ctx.timeout)?;
-        wait_for_text(&driver, &room, ctx.timeout)?;
+        wait_for_room_list_state(&driver, "Rooms — Groups · Oldest", &[&room], ctx.timeout)?;
 
         // The cycle chord (Alt-F) advances from the current filter.
         submit_command(&mut driver, "/filter all")?;
-        wait_for_text(&driver, "filter: All", ctx.timeout)?;
+        wait_for_room_list_state(&driver, "Rooms — Oldest", &[&room], ctx.timeout)?;
         press_alt(&mut driver, 'f')?;
-        wait_for_text(&driver, "filter: DMs", ctx.timeout)?;
+        wait_for_room_list_state(&driver, "Rooms — DMs · Oldest", &[&room], ctx.timeout)?;
 
         // The Alt-/ live name filter enters an input mode and narrows as typed;
         // a matching substring keeps the room visible.
@@ -875,30 +875,39 @@ pub async fn true_local_room_sort(ctx: &Ctx) -> ScenarioOutcome {
     let result = (|| {
         wait_for_room_and_input(&mut driver, general, ctx.timeout)?;
 
-        let all_three = |screen: &str| {
-            screen.contains(general) && screen.contains(timeline) && screen.contains(relations)
-        };
-
         submit_command(&mut driver, "/sort oldest")?;
-        wait_for_text(&driver, "sort: Oldest", ctx.timeout)?;
-        driver.wait_for_screen(
-            "all rooms visible under oldest sort",
+        wait_for_room_list_state(
+            &driver,
+            "Rooms — Oldest",
+            &[general, timeline, relations],
             ctx.timeout,
-            all_three,
         )?;
 
-        // Alphabetical (A–Z): assert the status surfaced and rooms still render.
+        // Alphabetical (A–Z): assert the visible state and rooms still render.
         submit_command(&mut driver, "/sort az")?;
-        wait_for_text(&driver, "sort: A", ctx.timeout)?;
-        driver.wait_for_screen("all rooms visible under A–Z sort", ctx.timeout, all_three)?;
+        wait_for_room_list_state(
+            &driver,
+            "Rooms — A–Z",
+            &[general, timeline, relations],
+            ctx.timeout,
+        )?;
 
         submit_command(&mut driver, "/sort recent")?;
-        wait_for_text(&driver, "sort: Recent", ctx.timeout)?;
+        wait_for_room_list_state(
+            &driver,
+            "Rooms — Recent",
+            &[general, timeline, relations],
+            ctx.timeout,
+        )?;
 
         // Cycle chord advances Recent -> Oldest.
         press_alt(&mut driver, 's')?;
-        wait_for_text(&driver, "sort: Oldest", ctx.timeout)?;
-        driver.wait_for_screen("all rooms visible after cycle", ctx.timeout, all_three)?;
+        wait_for_room_list_state(
+            &driver,
+            "Rooms — Oldest",
+            &[general, timeline, relations],
+            ctx.timeout,
+        )?;
 
         driver.terminate();
         Ok(())
@@ -938,30 +947,39 @@ pub async fn true_local_room_filter(ctx: &Ctx) -> ScenarioOutcome {
 
         // Groups: every named room stays visible.
         submit_command(&mut driver, "/filter groups")?;
-        wait_for_text(&driver, "filter: Groups", ctx.timeout)?;
-        driver.wait_for_screen("all rooms visible under groups", ctx.timeout, |screen| {
-            screen.contains(general) && screen.contains(timeline) && screen.contains(relations)
-        })?;
+        wait_for_room_list_state(
+            &driver,
+            "Rooms — Groups · Recent",
+            &[general, timeline, relations],
+            ctx.timeout,
+        )?;
 
         // DMs: the unselected named rooms drop out (heuristic excludes them);
         // the selected General stays by the keep-selected rule.
         submit_command(&mut driver, "/filter dms")?;
-        wait_for_text(&driver, "filter: DMs", ctx.timeout)?;
+        wait_for_room_list_state(&driver, "Rooms — DMs · Recent", &[general], ctx.timeout)?;
         driver.wait_for_screen("group rooms hidden under DMs", ctx.timeout, |screen| {
             !screen.contains(timeline) && !screen.contains(relations)
         })?;
 
         // All: everything returns.
         submit_command(&mut driver, "/filter all")?;
-        wait_for_text(&driver, "filter: All", ctx.timeout)?;
-        driver.wait_for_screen("all rooms visible again", ctx.timeout, |screen| {
-            screen.contains(timeline) && screen.contains(relations)
-        })?;
+        wait_for_room_list_state(
+            &driver,
+            "Rooms — Recent",
+            &[general, timeline, relations],
+            ctx.timeout,
+        )?;
 
         // Favourites: pin the selected General, then only pinned rooms remain.
         submit_command(&mut driver, "/pin")?;
         submit_command(&mut driver, "/filter fav")?;
-        wait_for_text(&driver, "filter: Favorites", ctx.timeout)?;
+        wait_for_room_list_state(
+            &driver,
+            "Rooms — Favorites · Recent",
+            &[general],
+            ctx.timeout,
+        )?;
         driver.wait_for_screen(
             "only the pinned room under favourites",
             ctx.timeout,
@@ -974,6 +992,12 @@ pub async fn true_local_room_filter(ctx: &Ctx) -> ScenarioOutcome {
 
         // Live name filter (Alt-/): narrows to a typed substring.
         submit_command(&mut driver, "/filter all")?;
+        wait_for_room_list_state(
+            &driver,
+            "Rooms — Recent",
+            &[general, timeline, relations],
+            ctx.timeout,
+        )?;
         press_alt(&mut driver, '/')?;
         driver.wait_for_screen("name-filter input to open", ctx.timeout, |screen| {
             screen.contains("Filter:") || screen.contains("Room filter")
@@ -1019,6 +1043,17 @@ fn switch_room(driver: &mut PtyDriver, room_name: &str, timeout: Duration) -> an
 
 fn wait_for_text(driver: &PtyDriver, text: &str, timeout: Duration) -> anyhow::Result<()> {
     driver.wait_for_screen("text to render", timeout, |screen| screen.contains(text))
+}
+
+fn wait_for_room_list_state(
+    driver: &PtyDriver,
+    title: &str,
+    rooms: &[&str],
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    driver.wait_for_screen("room-list state to render", timeout, |screen| {
+        screen.contains(title) && rooms.iter().all(|room| screen.contains(room))
+    })
 }
 
 fn failed_before_spawn(err: anyhow::Error) -> ScenarioOutcome {
