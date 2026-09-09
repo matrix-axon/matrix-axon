@@ -132,10 +132,10 @@ test('the full reaction emoji picker anchors to the more button when space allow
   // it to its anchor. The picker element being visible does not prove that
   // positioning state has committed yet.
   await expect
-    .poll(async () => (await pickerAnchorOffset(page, anchorBox)).horizontal)
-    .toBeLessThanOrEqual(1)
-  await expect
-    .poll(async () => (await pickerAnchorOffset(page, anchorBox)).vertical)
+    .poll(async () => {
+      const offset = await pickerAnchorOffset(page, anchorBox)
+      return Math.max(offset.horizontal, offset.vertical)
+    })
     .toBeLessThanOrEqual(1)
 
   const geometry = await page.evaluate(() => {
@@ -153,7 +153,6 @@ test('the full reaction emoji picker anchors to the more button when space allow
     return {
       dialogHeight: dialogBox.height,
       dialogWidth: dialogBox.width,
-      dialogLeft: dialogBox.left,
       dialogTop: dialogBox.top,
       dialogBottom: dialogBox.bottom,
       hostHeight: hostBox.height,
@@ -179,8 +178,6 @@ test('the full reaction emoji picker anchors to the more button when space allow
   expect(geometry.dialogZIndex).toBeGreaterThan(geometry.composerZIndex)
   expect(geometry.parentTag).toBe('BODY')
   expect(geometry.rowContainsDialog).toBe(false)
-  expect(Math.abs(geometry.dialogLeft - anchorBox.right)).toBeLessThanOrEqual(1)
-  expect(Math.abs(geometry.dialogBottom - anchorBox.top)).toBeLessThanOrEqual(1)
   expect(geometry.dialogTop).toBeGreaterThanOrEqual(0)
   expect(geometry.dialogBottom).toBeLessThanOrEqual(geometry.viewportHeight)
   expect(geometry.dialogHeight).toBeLessThanOrEqual(geometry.viewportHeight)
