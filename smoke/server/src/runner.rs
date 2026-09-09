@@ -150,6 +150,19 @@ pub async fn run(
         artifacts_dir: artifacts_dir.clone(),
         ws_frames: Arc::new(Mutex::new(Vec::new())),
     };
+    if let Err(err) = crate::scenarios::seeded_fixtures_ready(&ctx).await {
+        eprintln!("smoke(server): ✗ seeded fixture readiness: {err:#}");
+        match ctx.write_artifacts("seeded-fixture-readiness") {
+            Ok(dir) => eprintln!("smoke(server):   artifacts → {}", dir.display()),
+            Err(write_err) => {
+                eprintln!("smoke(server):   (failed to write artifacts: {write_err:#})")
+            }
+        }
+        if let Err(teardown_err) = stack.down() {
+            return Err(teardown_err.context("tear down stack after fixture readiness failure"));
+        }
+        return Err(err);
+    }
     eprintln!(
         "smoke(server): run {run_id}, profile={profile}, {} scenario(s), axon {}",
         selected.len(),
