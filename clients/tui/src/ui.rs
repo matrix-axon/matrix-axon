@@ -190,9 +190,14 @@ fn command_response_needs_popup(app: &App, input_area: Rect) -> bool {
 /// keystroke arriving before the first paint had to be written by hand, and
 /// nothing said so at the sites that depended on it.
 ///
-/// `screen` is the terminal size as of the top of the loop. A resize landing
-/// between here and the paint is corrected on the following frame, exactly as
-/// a resize between two frames always was.
+/// `screen` must be the area the paint that follows will actually use —
+/// `frame.area()`, taken inside the `terminal.draw` callback. `Terminal::draw`
+/// autoresizes before it hands out the frame, so measuring off `terminal.size()`
+/// beforehand opens a window where a resize lands between the two: the page
+/// sizes and the wrapped layout would then describe the old viewport while the
+/// pane rects describe the new one, and the popup would be painted at a rect
+/// the occlusion math no longer agrees with. Feeding both halves one area is
+/// what closes that.
 pub(crate) fn prepare(app: &mut App, screen: Rect) {
     let areas = pane_areas(app, screen);
     prepare_accounts(app, &areas);
@@ -3071,7 +3076,6 @@ mod tests {
     use crate::app::{Status, UnreadThread, UnreadThreadPreview};
     use crate::config::TuiConfig;
     use ratatui::backend::TestBackend;
-    use ratatui::layout::Position;
     use ratatui::Terminal;
     use std::collections::HashMap;
     use uuid::Uuid;
@@ -3085,10 +3089,11 @@ mod tests {
     /// before the split, every one of them was silently relying on the
     /// renderer to compute the state it then asserted against.
     fn draw_frame(terminal: &mut Terminal<TestBackend>, app: &mut App) {
-        let area = Rect::from((Position::ORIGIN, terminal.size().expect("terminal size")));
-        prepare(app, area);
         terminal
-            .draw(|frame| draw(frame, app))
+            .draw(|frame| {
+                prepare(app, frame.area());
+                draw(frame, app);
+            })
             .expect("draw succeeds");
     }
 

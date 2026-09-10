@@ -7,7 +7,6 @@ use crate::app::*;
 use crate::ui::{draw, prepare};
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Position, Rect};
 use ratatui::Terminal;
 use unicode_width::UnicodeWidthStr;
 
@@ -884,12 +883,11 @@ fn decoded_thumbnail() -> ImageState {
 fn draw_frame(app: &mut App) -> Buffer {
     let mut terminal =
         Terminal::new(TestBackend::new(FRAME_WIDTH, FRAME_HEIGHT)).expect("terminal");
-    prepare(
-        app,
-        Rect::from((Position::ORIGIN, terminal.size().expect("terminal size"))),
-    );
     let completed = terminal
-        .draw(|frame| draw(frame, app))
+        .draw(|frame| {
+            prepare(app, frame.area());
+            draw(frame, app);
+        })
         .expect("draw succeeds");
     completed.buffer.clone()
 }
