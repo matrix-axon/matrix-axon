@@ -29,6 +29,7 @@ use crossterm::terminal::{
     LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Position, Rect};
 use ratatui::Terminal;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::FontSize;
@@ -499,6 +500,12 @@ async fn run_app(
     let mut tick = time::interval(Duration::from_millis(100));
     let mut next_sixel_inline_refresh = Instant::now() + app::SIXEL_REFRESH_INTERVAL;
     loop {
+        // Settle everything this frame's geometry decides *before* painting it,
+        // so `draw` is read-only over the state key handling also reads (#70).
+        // `size()` is the backend's, which for a fullscreen viewport is the
+        // area `draw` is about to get; a resize landing in between is corrected
+        // on the next frame, as one landing between two frames always was.
+        ui::prepare(&mut app, Rect::from((Position::ORIGIN, terminal.size()?)));
         terminal.draw(|frame| draw(frame, &mut app))?;
 
         tokio::select! {

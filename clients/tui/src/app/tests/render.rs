@@ -4,9 +4,10 @@
 
 use super::support::*;
 use crate::app::*;
-use crate::ui::draw;
+use crate::ui::{draw, prepare};
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::layout::{Position, Rect};
 use ratatui::Terminal;
 use unicode_width::UnicodeWidthStr;
 
@@ -877,25 +878,33 @@ fn decoded_thumbnail() -> ImageState {
     ImageState::Ready(Arc::new(image::DynamicImage::new_rgb8(40, 40)))
 }
 
+/// One full main-loop frame: resolve the state the geometry decides, then
+/// paint it. `draw` alone is not a supported sequence — `prepare` measures the
+/// panes and fills the layout cache it paints from (#70).
 fn draw_frame(app: &mut App) -> Buffer {
     let mut terminal =
         Terminal::new(TestBackend::new(FRAME_WIDTH, FRAME_HEIGHT)).expect("terminal");
+    prepare(
+        app,
+        Rect::from((Position::ORIGIN, terminal.size().expect("terminal size"))),
+    );
     let completed = terminal
         .draw(|frame| draw(frame, app))
         .expect("draw succeeds");
     completed.buffer.clone()
 }
 
-/// Fill the layout cache from the current state, and settle the state `draw`
-/// itself owns.
+/// Fill the layout cache from the current state, and settle the per-frame
+/// state a paint leaves behind.
 ///
 /// Both halves matter. Priming is what gives the comparison its teeth: the
 /// cached pass afterwards holds a layout built *before* the mutation, which is
 /// precisely the stale frame a digest that missed an input would draw.
-/// Settling matters because `draw` mutates `App` in ways that have nothing to
-/// do with the layout — `clear_media_preview`, `force_terminal_clear`, the
-/// pin-to-bottom scroll sentinel — and a first-frame-only effect would
-/// otherwise register as a difference between the two frames compared below.
+/// Settling matters because a frame leaves marks that have nothing to do with
+/// the layout — `clear_media_preview` and `force_terminal_clear` consumed,
+/// the pin-to-bottom scroll sentinel resolved — and a first-frame-only effect
+/// would otherwise register as a difference between the two frames compared
+/// below.
 fn prime_layout_cache(app: &mut App) {
     let _ = draw_frame(app);
 }
