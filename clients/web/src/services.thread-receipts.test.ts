@@ -28,7 +28,10 @@ import { EPHEMERAL_PASSTHROUGH } from './api/frames'
 import { connectThreadReceipts } from './services'
 import type { AccountsStore } from './stores/accounts'
 import { createDeviceStateStore } from './stores/device-state'
-import { createLiveConnection } from './stores/live-connection'
+import {
+  createLiveConnection,
+  INITIAL_BACKOFF_MS,
+} from './stores/live-connection'
 import type { RoomsStore } from './stores/rooms'
 import { createThreadUnreadStore } from './stores/thread-unread'
 import type { EventDto } from './stores/timeline'
@@ -81,13 +84,15 @@ afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
 function harness(options: { accountsEmptyUntilRefresh?: boolean } = {}) {
-  let socket: FakeWebSocket | undefined
+  const sockets: FakeWebSocket[] = []
   const live = createLiveConnection({
     socketFactory: () => {
-      socket = new FakeWebSocket()
+      const socket = new FakeWebSocket()
+      sockets.push(socket)
       return socket.asWebSocket()
     },
   })
+  let clock = NOW
   const api = createApiClient(
     {
       getToken: () => 't',
@@ -122,10 +127,10 @@ function harness(options: { accountsEmptyUntilRefresh?: boolean } = {}) {
     accounts,
     deviceState,
     threadUnread,
-    () => NOW,
+    () => clock,
   )
   live.start()
-  socket!.emitOpen()
+  sockets[0].emitOpen()
 
   // Something to clear: a live reply nobody has read.
   threadUnread.recordLiveEvent(
@@ -142,8 +147,24 @@ function harness(options: { accountsEmptyUntilRefresh?: boolean } = {}) {
   return {
     deviceState,
     threadUnread,
-    socket: () => socket!,
+    socket: () => sockets[sockets.length - 1],
     refreshes: () => refreshes,
+    /**
+     * Drop the socket and bring it back at `at` on the connector's clock. Only
+     * the backoff timer is faked, and only for the duration, so the msw round
+     * trips that follow run on real timers.
+     */
+    reconnectAt: (at: number) => {
+      vi.useFakeTimers()
+      try {
+        sockets[sockets.length - 1].emitClose()
+        clock = at
+        vi.advanceTimersByTime(INITIAL_BACKOFF_MS)
+        sockets[sockets.length - 1].emitOpen()
+      } finally {
+        vi.useRealTimers()
+      }
+    },
   }
 }
 
@@ -367,6 +388,29 @@ describe('connectThreadReceipts', () => {
     // The clear goes with it: an old read position says nothing about the
     // reply that is flagged now.
     expect(threadUnread.isUnread(ACCT, ROOM, ROOT)).toBe(true)
+  })
+
+  it('moves the cutoff forward when the socket reconnects', async () => {
+    const { deviceState, threadUnread, socket, reconnectAt } = harness()
+    const RECONNECTED = NOW + 60 * 60_000
+    reconnectAt(RECONNECTED)
+
+    // Stamped after page load, but long before the reconnect. The socket is
+    // lossy, so a receipt sent while it was down was never delivered; arriving
+    // now makes this a redelivery. A cutoff taken at page load would admit it.
+    socket().emitMessage(
+      receiptFrame({ ts: NOW + 10 * 60_000, thread_id: ROOT }),
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).toBeNull()
+    expect(threadUnread.isUnread(ACCT, ROOM, ROOT)).toBe(true)
+
+    // The new socket is wired up: a receipt sent after it opened still lands.
+    socket().emitMessage(receiptFrame({ ts: RECONNECTED + 1, thread_id: ROOT }))
+    await vi.waitFor(() =>
+      expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).not.toBeNull(),
+    )
   })
 
   it('keeps a receipt inside the clock-skew slack window', async () => {

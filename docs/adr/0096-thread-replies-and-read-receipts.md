@@ -331,7 +331,8 @@ In 29 of those threads a later reply sat past the marker, so `reconcileSummary` 
 None of the 29 was actually unread: in 22 the only later replies were the user's own, and all 29 were covered by a later _unthreaded_ receipt, which MSC3771 defines as reading every thread in the room.
 
 **Receipt gate.**
-`connectThreadReceipts` now acts only on a receipt whose homeserver `ts` falls at or after the moment the connection was wired, less the same five-minute slack as the live gate, via an injected clock (`connectThreadReceipts(…, now)`).
+`connectThreadReceipts` now acts only on a receipt whose homeserver `ts` falls at or after the moment the live socket last opened, less the same five-minute slack as the live gate, via an injected clock (`connectThreadReceipts(…, now)`).
+The cutoff moves forward on every reconnect, not only at wiring: the socket is lossy, so a receipt first seen after a drop is a redelivery however recent its stamp, and a cutoff taken at page load would still admit one stamped between page load and the reconnect.
 A receipt without a `ts` is dropped, since nothing places it after that moment.
 The in-memory clear is dropped along with the marker, because an old read position says nothing about whether the reply flagged now was read.
 

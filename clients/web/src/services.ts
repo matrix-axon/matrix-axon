@@ -350,17 +350,23 @@ export function connectReadMarkers(
  * the marker also carries the knowledge to this account's other axon clients,
  * the same way opening the thread here would.
  *
- * Only a receipt *sent* since this connection was wired is acted on, judged by
- * its homeserver `ts`. The frame alone is not proof the receipt is new: sliding
- * sync can deliver the user's standing receipts again, axon forwards them
- * verbatim (ADR 0056), and a thread last read in Element years ago comes back
- * with them. Written down, that stale position is a per-thread marker, which
+ * Only a receipt *sent* since the socket last opened is acted on, judged by its
+ * homeserver `ts`. The frame alone is not proof the receipt is new: sliding sync
+ * can deliver the user's standing receipts again, axon forwards them verbatim
+ * (ADR 0056), and a thread last read in Element years ago comes back with them.
+ * Written down, that stale position is a per-thread marker, which
  * `reconcileSummary` trusts at any age — so any later reply, even one the user
  * sent, lights the thread up in the drawer on every visit to its room until the
- * thread is opened here. The clear is dropped with the
- * marker: an old position says nothing about whether the thread's newest reply
- * was read. A receipt without a `ts` cannot be placed in time and is dropped
- * the same way. `connectLiveThreadUnread` applies the same gate to replies.
+ * thread is opened here. The clear is dropped with the marker: an old position
+ * says nothing about whether the thread's newest reply was read. A receipt
+ * without a `ts` cannot be placed in time and is dropped the same way.
+ *
+ * The cutoff moves forward on every reconnect, not only when this is wired. The
+ * socket is lossy (`live-connection.ts`): nothing sent during a drop is
+ * delivered, so a receipt first seen after one is a redelivery however recent
+ * its stamp — and one stamped between page load and the reconnect would
+ * otherwise still clear a cutoff taken at page load. Each frame is judged
+ * against the cutoff in force when it arrived.
  *
  * The receipt names an event but not its `origin_ts`, and the marker is ordered
  * on `origin_ts`, so the event is resolved through the API. One fetch per
@@ -376,7 +382,16 @@ export function connectThreadReceipts(
   threadUnread: ThreadUnreadStore,
   now: () => number = () => Date.now(),
 ): () => void {
-  const liveSince = now() - LIVE_THREAD_REPLAY_SLACK_MS
+  let liveSince = now() - LIVE_THREAD_REPLAY_SLACK_MS
+  // `reconnects` is bumped in the new socket's `onopen`, and effects run
+  // synchronously on the write, so the cutoff has moved before that socket
+  // delivers its first frame.
+  const disposeReconnects = effect(() => {
+    if (live.reconnects.value === 0) {
+      return
+    }
+    liveSince = now() - LIVE_THREAD_REPLAY_SLACK_MS
+  })
   const seen = new Set<string>()
   /** One shared accounts refresh for frames that beat the store's first load. */
   let accountsLoad: Promise<void> | null = null
@@ -389,7 +404,7 @@ export function connectThreadReceipts(
     )?.account_user_id ??
     null
 
-  return live.subscribe((frame) => {
+  const unsubscribe = live.subscribe((frame) => {
     const passthrough = ephemeralPassthrough(frame)
     if (
       passthrough === null ||
@@ -400,6 +415,10 @@ export function connectThreadReceipts(
     }
     const roomId = passthrough.roomId
     const content = passthrough.content
+    // Read now, not after the awaits below: a reconnect can move `liveSince`
+    // mid-flight, and the claim and the release in `catch` must agree on which
+    // receipts this frame owns.
+    const since = liveSince
     inBackground(
       (async () => {
         let ownUserId = ownUserIdFor(frame.accountId, roomId)
@@ -420,7 +439,7 @@ export function connectThreadReceipts(
         for (const [eventId, threadRootId] of ownThreadedReceipts(
           content,
           ownUserId,
-          liveSince,
+          since,
         )) {
           const key = `${frame.accountId}\u0000${roomId}\u0000${eventId}`
           if (seen.has(key)) {
@@ -479,13 +498,17 @@ export function connectThreadReceipts(
         for (const [eventId] of ownThreadedReceipts(
           content,
           ownUserIdFor(frame.accountId, roomId) ?? '',
-          liveSince,
+          since,
         )) {
           seen.delete(`${frame.accountId}\u0000${roomId}\u0000${eventId}`)
         }
       }),
     )
   })
+  return () => {
+    unsubscribe()
+    disposeReconnects()
+  }
 }
 
 /**
