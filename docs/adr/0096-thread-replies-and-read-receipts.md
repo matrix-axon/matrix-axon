@@ -316,3 +316,26 @@ silent until a room's first post-fix visit. This is the case §6's server-side
 per-room thread-unread signal is for; it remains the real fix, and the recency
 window and live gate are removable (or demotable to a pure offline fallback)
 once it lands.
+
+### Follow-up: replayed threaded receipts
+
+The stopgap did not empty the drawer on the production instance, and the cause was a third feed the addendum missed.
+`connectThreadReceipts` (#209) turns the user's own thread-scoped `m.receipt` into a durable per-thread marker, on the assumption that receipts only ever arrive live.
+They do not.
+Sliding sync can deliver the user's standing receipts again, and axon forwards them verbatim (ADR 0056).
+On one account a single burst wrote 257 thread markers in a few batches over twelve minutes, every one of them exactly an Element threaded receipt stamped between 2023 and 2025.
+What made the homeserver resend them was not pinned down; the gate below does not depend on it.
+
+A marker like that is a real read position, but an old one, and the recency window exempts every per-thread marker.
+In 29 of those threads a later reply sat past the marker, so `reconcileSummary` promoted the thread at any age, on every visit to its room.
+None of the 29 was actually unread: in 22 the only later replies were the user's own, and all 29 were covered by a later _unthreaded_ receipt, which MSC3771 defines as reading every thread in the room.
+
+**Receipt gate.**
+`connectThreadReceipts` now acts only on a receipt whose homeserver `ts` falls at or after the moment the connection was wired, less the same five-minute slack as the live gate, via an injected clock (`connectThreadReceipts(…, now)`).
+A receipt without a `ts` is dropped, since nothing places it after that moment.
+The in-memory clear is dropped along with the marker, because an old read position says nothing about whether the reply flagged now was read.
+
+This gives up one thing the replay was accidentally providing: a thread read in Element while no axon client was connected, delivered again later, no longer clears here and has to be opened once.
+That is the same loss #213 already records for any receipt missed while disconnected, and it errs toward a thread that clears when opened rather than a permanent false positive.
+Markers already written from replayed receipts are not repaired, because nothing in a stored marker records where it came from; opening the thread advances the marker past its newest reply and clears it for good.
+The two rules that would repair them without a visit, treating the user's own replies as read and honouring an unthreaded receipt that covers a thread's newest reply, both need data the client does not have — the sender of a thread's newest reply, and the user's unthreaded receipt position — and belong with §6's server-side signal.
