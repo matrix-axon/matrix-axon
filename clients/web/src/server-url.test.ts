@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   apiUrl,
   clearStoredServerUrl,
+  httpFallbackFor,
   normalizeServerUrl,
   readStoredServerUrl,
   SERVER_URL_KEY,
@@ -156,5 +157,51 @@ describe('what a person actually types', () => {
     // `https://mailto:a@b.c` parses as user `mailto`, password `a`, host `b.c`.
     // Credentials would ride into every request and the cache namespace.
     expect(normalizeServerUrl('mailto:a@b.c')).toBeNull()
+  })
+})
+
+describe('httpFallbackFor', () => {
+  /** What the setup screen probes second, for what the user typed. */
+  const fallback = (typed: string): string | null => {
+    const normalized = normalizeServerUrl(typed)
+    return normalized === null ? null : httpFallbackFor(typed, normalized)
+  }
+
+  it('offers plain http for the addresses that cannot have a certificate', () => {
+    expect(fallback('axon.local:8080')).toBe('http://axon.local:8080')
+    expect(fallback('nas:8080')).toBe('http://nas:8080')
+    expect(fallback('localhost:8080')).toBe('http://localhost:8080')
+    expect(fallback('192.168.1.5:8080')).toBe('http://192.168.1.5:8080')
+    expect(fallback('10.0.0.2')).toBe('http://10.0.0.2')
+    expect(fallback('172.16.0.9')).toBe('http://172.16.0.9')
+    expect(fallback('127.0.0.1:8080')).toBe('http://127.0.0.1:8080')
+    // The CGNAT block a Tailnet address comes from — the case this exists for.
+    expect(fallback('100.101.102.103')).toBe('http://100.101.102.103')
+  })
+
+  it('refuses to downgrade a public address that merely looks local', () => {
+    // The shape check this replaced took every one of these. A downgrade puts
+    // the bearer token on the open internet in cleartext, and the probe that
+    // triggers it fails for a self-signed certificate or a closed port just as
+    // readily as for a server that has no TLS at all.
+    expect(fallback('203.0.113.5')).toBeNull()
+    expect(fallback('8.8.8.8:8080')).toBeNull()
+    // 172.32 is outside 172.16/12; 100.128 is outside 100.64/10.
+    expect(fallback('172.32.0.1')).toBeNull()
+    expect(fallback('100.128.0.1')).toBeNull()
+    expect(fallback('axon.example.org')).toBeNull()
+  })
+
+  it('reads an IPv6 literal by range, not by its brackets', () => {
+    expect(fallback('[::1]:8080')).toBe('http://[::1]:8080')
+    expect(fallback('[fd7a:115c:a1e0::1]')).toBe('http://[fd7a:115c:a1e0::1]')
+    expect(fallback('[fe80::1]')).toBe('http://[fe80::1]')
+    expect(fallback('[2001:db8::1]')).toBeNull()
+  })
+
+  it('never second-guesses a scheme the user typed', () => {
+    // Asking for https by name is a decision, not a guess to be improved on.
+    expect(fallback('https://axon.local:8080')).toBeNull()
+    expect(fallback('http://axon.local:8080')).toBeNull()
   })
 })
