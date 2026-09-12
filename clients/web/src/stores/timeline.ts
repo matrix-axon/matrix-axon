@@ -671,6 +671,12 @@ export function createTimelineStore(
     const generation = sliceGeneration
     const page = await fetchPage({})
     if (page === null) {
+      // As `replaceSlice` does when its newest load fails: lift a placeholder
+      // nothing else will. After `resumeAtHead` the flag can belong to a
+      // discarded jump. Never under a jump still in flight.
+      if (generation === sliceGeneration && parkedGeneration < generation) {
+        loading.value = false
+      }
       return 'failed'
     }
     if (generation !== sliceGeneration) {
@@ -1432,9 +1438,13 @@ export function createTimelineStore(
     },
 
     resumeAtHead() {
-      // Discard results from requests issued against the parked cursor.
-      sliceGeneration += 1
+      // Discard results from requests issued against the parked cursor. Park
+      // *at* the generation they carry, then bump past it: the head load that
+      // follows is issued at the bumped value, and parking there too left
+      // `foldHead` unable to clear a `loading` raised by a jump that will never
+      // apply (PR #389 review).
       parkedGeneration = sliceGeneration
+      sliceGeneration += 1
       events.value = events.value.filter(
         (event) => event.localEcho !== undefined,
       )

@@ -314,6 +314,75 @@ describe('createTimelineStore', () => {
       expect(store.loading.value).toBe(false)
       expect(store.events.value.map((e) => e.event_id)).toEqual(['$old'])
     })
+
+    /**
+     * The warm re-entry path (ADR 0085): a store kept only because it holds an
+     * unsent send, left while a jump was still in flight, is resumed at the head
+     * on re-entry. That jump raised `loading` and will never apply, so the head
+     * load that follows must be the one to clear it (PR #389 review).
+     */
+    describe('after resumeAtHead over a jump still in flight', () => {
+      function setUp(head: () => Response | Promise<Response>) {
+        let releaseJump!: () => void
+        const jumpGate = new Promise<void>((resolve) => {
+          releaseJump = resolve
+        })
+        let heads = 0
+        server.use(
+          http.get(TIMELINE_PATH, async ({ request }) => {
+            if (new URL(request.url).searchParams.get('at_ts') !== null) {
+              await jumpGate
+              return page([event('$old', 100)])
+            }
+            heads += 1
+            return heads === 1 ? page([event('$head', 900)]) : head()
+          }),
+          http.post(SEND_PATH, () =>
+            HttpResponse.json(
+              { error: { code: 'x', message: 'nope' } },
+              { status: 500 },
+            ),
+          ),
+        )
+        return { releaseJump }
+      }
+
+      async function parkedWithUnsentWork() {
+        const store = makeStore()
+        await store.loadLatest()
+        await store.send('draft', { senderId: '@alice:hs' })
+        const jump = store.jumpTo(100)
+        expect(store.loading.value).toBe(true)
+        // What `TimelineStoreCache.acquire` does for a parked store it keeps.
+        store.resumeAtHead()
+        return { store, jump }
+      }
+
+      it('clears loading once the head paints', async () => {
+        const { releaseJump } = setUp(() => page([event('$head', 900)]))
+        const { store, jump } = await parkedWithUnsentWork()
+
+        expect(await store.loadLatest()).toBe('applied')
+        expect(store.loading.value).toBe(false)
+        expect(store.events.value[0].event_id).toBe('$head')
+        expect(store.events.value.at(-1)?.localEcho?.status).toBe('failed')
+
+        // The discarded jump landing late changes nothing.
+        releaseJump()
+        await jump
+        expect(store.loading.value).toBe(false)
+        expect(store.events.value[0].event_id).toBe('$head')
+      })
+
+      it('clears loading when the head load fails, keeping the unsent send', async () => {
+        setUp(() => HttpResponse.json({}, { status: 503 }))
+        const { store } = await parkedWithUnsentWork()
+
+        expect(await store.loadLatest()).toBe('failed')
+        expect(store.loading.value).toBe(false)
+        expect(store.events.value.at(-1)?.localEcho?.status).toBe('failed')
+      })
+    })
   })
 
   it('loadOlder prepends and flags the room start', async () => {
