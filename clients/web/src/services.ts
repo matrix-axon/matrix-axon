@@ -236,9 +236,10 @@ export function connectUnreadCounts(
 }
 
 /**
- * How far before this connection was wired a live reply's `origin_ts` may sit
- * and still badge. Covers homeserver clock skew and the gap between graph
- * construction and the first frame; anything older is a replay, not news.
+ * How far before this connection was wired a homeserver timestamp may sit and
+ * still count as live — a reply's `origin_ts` for the badge, a receipt's `ts`
+ * for a thread read elsewhere. Covers homeserver clock skew and the gap between
+ * graph construction and the first frame; anything older is a replay, not news.
  */
 const LIVE_THREAD_REPLAY_SLACK_MS = 5 * 60_000
 
@@ -342,11 +343,29 @@ export function connectReadMarkers(
  * somewhere else — no echo to suppress, unlike the device-state paths above.
  *
  * The receipt is turned into a durable `thread_read_markers` entry rather than
- * just clearing the in-memory flag. Receipts are live-only and never replayed,
- * so a session-scoped clear would last until the next reload and no longer —
- * which is the complaint this exists to answer. Writing the marker also carries
- * the knowledge to this account's other axon clients, the same way opening the
- * thread here would.
+ * just clearing the in-memory flag. Nothing backfills a receipt missed while no
+ * client was connected, so a session-scoped clear would last until the next
+ * reload and no longer — which is the complaint this exists to answer. Writing
+ * the marker also carries the knowledge to this account's other axon clients,
+ * the same way opening the thread here would.
+ *
+ * Only a receipt *sent* since the socket last opened is acted on, judged by its
+ * homeserver `ts`. The frame alone is not proof the receipt is new: sliding sync
+ * can deliver the user's standing receipts again, axon forwards them verbatim
+ * (ADR 0056), and a thread last read in Element years ago comes back with them.
+ * Written down, that stale position is a per-thread marker, which
+ * `reconcileSummary` trusts at any age — so any later reply, even one the user
+ * sent, lights the thread up in the drawer on every visit to its room until the
+ * thread is opened here. The clear is dropped with the marker: an old position
+ * says nothing about whether the thread's newest reply was read. A receipt
+ * without a `ts` cannot be placed in time and is dropped the same way.
+ *
+ * The cutoff moves forward on every reconnect, not only when this is wired. The
+ * socket is lossy (`live-connection.ts`): nothing sent during a drop is
+ * delivered, so a receipt first seen after one is a redelivery however recent
+ * its stamp — and one stamped between page load and the reconnect would
+ * otherwise still clear a cutoff taken at page load. Each frame is judged
+ * against the cutoff in force when it arrived.
  *
  * The receipt names an event but not its `origin_ts`, and the marker is ordered
  * on `origin_ts`, so the event is resolved through the API. One fetch per
@@ -360,7 +379,18 @@ export function connectThreadReceipts(
   accounts: AccountsStore,
   deviceState: DeviceStateStore,
   threadUnread: ThreadUnreadStore,
+  now: () => number = () => Date.now(),
 ): () => void {
+  let liveSince = now() - LIVE_THREAD_REPLAY_SLACK_MS
+  // `reconnects` is bumped in the new socket's `onopen`, and effects run
+  // synchronously on the write, so the cutoff has moved before that socket
+  // delivers its first frame.
+  const disposeReconnects = effect(() => {
+    if (live.reconnects.value === 0) {
+      return
+    }
+    liveSince = now() - LIVE_THREAD_REPLAY_SLACK_MS
+  })
   const seen = new Set<string>()
   /** One shared accounts refresh for frames that beat the store's first load. */
   let accountsLoad: Promise<void> | null = null
@@ -373,7 +403,7 @@ export function connectThreadReceipts(
     )?.account_user_id ??
     null
 
-  return live.subscribe((frame) => {
+  const unsubscribe = live.subscribe((frame) => {
     const passthrough = ephemeralPassthrough(frame)
     if (
       passthrough === null ||
@@ -384,6 +414,10 @@ export function connectThreadReceipts(
     }
     const roomId = passthrough.roomId
     const content = passthrough.content
+    // Read now, not after the awaits below: a reconnect can move `liveSince`
+    // mid-flight, and the claim and the release in `catch` must agree on which
+    // receipts this frame owns.
+    const since = liveSince
     inBackground(
       (async () => {
         let ownUserId = ownUserIdFor(frame.accountId, roomId)
@@ -404,6 +438,7 @@ export function connectThreadReceipts(
         for (const [eventId, threadRootId] of ownThreadedReceipts(
           content,
           ownUserId,
+          since,
         )) {
           const key = `${frame.accountId}\u0000${roomId}\u0000${eventId}`
           if (seen.has(key)) {
@@ -462,34 +497,44 @@ export function connectThreadReceipts(
         for (const [eventId] of ownThreadedReceipts(
           content,
           ownUserIdFor(frame.accountId, roomId) ?? '',
+          since,
         )) {
           seen.delete(`${frame.accountId}\u0000${roomId}\u0000${eventId}`)
         }
       }),
     )
   })
+  return () => {
+    unsubscribe()
+    disposeReconnects()
+  }
 }
 
 /**
  * The `(event id, thread root)` pairs in one `m.receipt` content that are this
- * user's own thread-scoped receipts.
+ * user's own thread-scoped receipts, sent at or after `since`.
  *
  * `thread_id: "main"` is the main timeline, not a thread, and is deliberately
  * ignored — acting on it would be a claim about the room stream, which has its
- * own read position. The wire shape itself is walked by
+ * own read position. A receipt stamped before `since` is a redelivered
+ * standing receipt, and one with no stamp cannot be shown to be anything else
+ * (see `connectThreadReceipts`). The wire shape itself is walked by
  * [`walkReceiptContent`](./stores/ephemeral.ts), shared with the ephemeral
  * overlay so one parser knows it.
  */
 function ownThreadedReceipts(
   content: unknown,
   ownUserId: string,
+  since: number,
 ): [string, string][] {
   const found: [string, string][] = []
   for (const record of walkReceiptContent(content)) {
     if (
       record.userId === ownUserId &&
       record.threadId !== null &&
-      record.threadId !== 'main'
+      record.threadId !== 'main' &&
+      record.ts !== null &&
+      record.ts >= since
     ) {
       found.push([record.eventId, record.threadId])
     }

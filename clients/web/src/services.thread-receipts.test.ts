@@ -6,6 +6,10 @@
  * through the ADR 0056 passthrough. Axon's own receipts are always unthreaded
  * (ADR 0096), so a `thread_id` on our own user's receipt can only have come
  * from elsewhere.
+ *
+ * Receipt `ts` values are homeserver-stamped, so the connector's clock is pinned
+ * to `NOW` and each receipt is sent a moment after it: a receipt stamped before
+ * the connection was wired is a redelivered standing receipt, not a read.
  */
 import { computed, signal } from '@preact/signals'
 import { HttpResponse, http } from 'msw'
@@ -24,7 +28,10 @@ import { EPHEMERAL_PASSTHROUGH } from './api/frames'
 import { connectThreadReceipts } from './services'
 import type { AccountsStore } from './stores/accounts'
 import { createDeviceStateStore } from './stores/device-state'
-import { createLiveConnection } from './stores/live-connection'
+import {
+  createLiveConnection,
+  INITIAL_BACKOFF_MS,
+} from './stores/live-connection'
 import type { RoomsStore } from './stores/rooms'
 import { createThreadUnreadStore } from './stores/thread-unread'
 import type { EventDto } from './stores/timeline'
@@ -37,6 +44,7 @@ const ROOT = '$root'
 const REPLY = '$reply'
 const REPLY_TS = Date.UTC(2026, 7, 19, 12, 0, 0)
 const ME = '@me:hs'
+const NOW = Date.UTC(2026, 7, 19, 12, 5, 0)
 const BASE = 'http://axon.test'
 
 const server = setupServer(
@@ -76,13 +84,15 @@ afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
 function harness(options: { accountsEmptyUntilRefresh?: boolean } = {}) {
-  let socket: FakeWebSocket | undefined
+  const sockets: FakeWebSocket[] = []
   const live = createLiveConnection({
     socketFactory: () => {
-      socket = new FakeWebSocket()
+      const socket = new FakeWebSocket()
+      sockets.push(socket)
       return socket.asWebSocket()
     },
   })
+  let clock = NOW
   const api = createApiClient(
     {
       getToken: () => 't',
@@ -110,9 +120,17 @@ function harness(options: { accountsEmptyUntilRefresh?: boolean } = {}) {
   const rooms = {
     rooms: computed(() => signal([]).value),
   } as unknown as RoomsStore
-  connectThreadReceipts(api, live, rooms, accounts, deviceState, threadUnread)
+  connectThreadReceipts(
+    api,
+    live,
+    rooms,
+    accounts,
+    deviceState,
+    threadUnread,
+    () => clock,
+  )
   live.start()
-  socket!.emitOpen()
+  sockets[0].emitOpen()
 
   // Something to clear: a live reply nobody has read.
   threadUnread.recordLiveEvent(
@@ -129,8 +147,24 @@ function harness(options: { accountsEmptyUntilRefresh?: boolean } = {}) {
   return {
     deviceState,
     threadUnread,
-    socket: () => socket!,
+    socket: () => sockets[sockets.length - 1],
     refreshes: () => refreshes,
+    /**
+     * Drop the socket and bring it back at `at` on the connector's clock. Only
+     * the backoff timer is faked, and only for the duration, so the msw round
+     * trips that follow run on real timers.
+     */
+    reconnectAt: (at: number) => {
+      vi.useFakeTimers()
+      try {
+        sockets[sockets.length - 1].emitClose()
+        clock = at
+        vi.advanceTimersByTime(INITIAL_BACKOFF_MS)
+        sockets[sockets.length - 1].emitOpen()
+      } finally {
+        vi.useRealTimers()
+      }
+    },
   }
 }
 
@@ -150,10 +184,10 @@ describe('connectThreadReceipts', () => {
     const { deviceState, threadUnread, socket } = harness()
     expect(threadUnread.isUnread(ACCT, ROOM, ROOT)).toBe(true)
 
-    socket().emitMessage(receiptFrame({ ts: 1, thread_id: ROOT }))
+    socket().emitMessage(receiptFrame({ ts: NOW + 1, thread_id: ROOT }))
 
-    // The marker, not just the in-memory flag: receipts are live-only and never
-    // replayed, so a session-scoped clear would come back on the next reload —
+    // The marker, not just the in-memory flag: nothing backfills a missed
+    // receipt, so a session-scoped clear would come back on the next reload —
     // which is the complaint this exists to answer.
     await vi.waitFor(() =>
       expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).toEqual({
@@ -198,13 +232,13 @@ describe('connectThreadReceipts', () => {
       }),
     )
 
-    socket().emitMessage(receiptFrame({ ts: 1, thread_id: ROOT }))
+    socket().emitMessage(receiptFrame({ ts: NOW + 1, thread_id: ROOT }))
     await vi.waitFor(() => expect(attempts).toBe(1))
 
     // A dropped connection is not a verdict about the event. Holding the dedup
-    // key would discard this thread's read signal for the whole session, and
-    // receipts are never replayed.
-    socket().emitMessage(receiptFrame({ ts: 2, thread_id: ROOT }))
+    // key would discard this thread's read signal for the whole session, and a
+    // later redelivery of the same receipt would be too old to act on.
+    socket().emitMessage(receiptFrame({ ts: NOW + 2, thread_id: ROOT }))
     await vi.waitFor(() =>
       expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).not.toBeNull(),
     )
@@ -224,15 +258,15 @@ describe('connectThreadReceipts', () => {
       }),
     )
 
-    socket().emitMessage(receiptFrame({ ts: 1, thread_id: ROOT }))
+    socket().emitMessage(receiptFrame({ ts: NOW + 1, thread_id: ROOT }))
     await vi.waitFor(() => expect(attempts).toBe(1))
 
     // Retried, because the 500 released the dedup key.
-    socket().emitMessage(receiptFrame({ ts: 2, thread_id: ROOT }))
+    socket().emitMessage(receiptFrame({ ts: NOW + 2, thread_id: ROOT }))
     await vi.waitFor(() => expect(attempts).toBe(2))
 
     // Not retried after the 404, which is final.
-    socket().emitMessage(receiptFrame({ ts: 3, thread_id: ROOT }))
+    socket().emitMessage(receiptFrame({ ts: NOW + 3, thread_id: ROOT }))
     await new Promise((resolve) => setTimeout(resolve, 60))
     expect(attempts).toBe(2)
     expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).toBeNull()
@@ -273,7 +307,7 @@ describe('connectThreadReceipts', () => {
     // Nothing has opened a room, so this namespace has never been hydrated —
     // the state a live receipt meets right after login.
     expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).toBeNull()
-    socket().emitMessage(receiptFrame({ ts: 1, thread_id: ROOT }))
+    socket().emitMessage(receiptFrame({ ts: NOW + 1, thread_id: ROOT }))
 
     await vi.waitFor(() => expect(stateGets).toBeGreaterThan(0))
     await vi.waitFor(() =>
@@ -301,13 +335,13 @@ describe('connectThreadReceipts', () => {
 
     // A receipt can beat the stores on a reconnect. Returning here loses it for
     // good: receipts are live-only and nothing backfills them (#213).
-    socket().emitMessage(receiptFrame({ ts: 1, thread_id: ROOT }))
+    socket().emitMessage(receiptFrame({ ts: NOW + 1, thread_id: ROOT }))
     await vi.waitFor(() =>
       expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).not.toBeNull(),
     )
 
     // A burst of frames must not become a burst of requests.
-    socket().emitMessage(receiptFrame({ ts: 2, thread_id: '$other' }))
+    socket().emitMessage(receiptFrame({ ts: NOW + 2, thread_id: '$other' }))
     await new Promise((resolve) => setTimeout(resolve, 40))
     expect(refreshes()).toBe(1)
   })
@@ -315,7 +349,7 @@ describe('connectThreadReceipts', () => {
   it('ignores a main-timeline receipt', async () => {
     const { deviceState, threadUnread, socket } = harness()
 
-    socket().emitMessage(receiptFrame({ ts: 1, thread_id: 'main' }))
+    socket().emitMessage(receiptFrame({ ts: NOW + 1, thread_id: 'main' }))
 
     // `main` is a claim about the room stream, which has its own read position.
     // Asserting only on ROOT would pass either way — the bug this guards is a
@@ -331,7 +365,70 @@ describe('connectThreadReceipts', () => {
 
     // What axon's own receipts look like coming back around (ADR 0096): no
     // thread scope, so they say nothing about any thread.
-    socket().emitMessage(receiptFrame({ ts: 1 }))
+    socket().emitMessage(receiptFrame({ ts: NOW + 1 }))
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).toBeNull()
+    expect(threadUnread.isUnread(ACCT, ROOM, ROOT)).toBe(true)
+  })
+
+  it('ignores a standing receipt redelivered on a resync', async () => {
+    const { deviceState, threadUnread, socket } = harness()
+
+    // Element read this thread long ago, and sliding sync hands that receipt
+    // back. Written down, it would be a per-thread marker far
+    // behind the thread's newest reply, and `reconcileSummary` trusts a
+    // per-thread marker at any age — a years-old thread in the drawer for good.
+    socket().emitMessage(
+      receiptFrame({ ts: NOW - 365 * 24 * 60 * 60_000, thread_id: ROOT }),
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).toBeNull()
+    // The clear goes with it: an old read position says nothing about the
+    // reply that is flagged now.
+    expect(threadUnread.isUnread(ACCT, ROOM, ROOT)).toBe(true)
+  })
+
+  it('moves the cutoff forward when the socket reconnects', async () => {
+    const { deviceState, threadUnread, socket, reconnectAt } = harness()
+    const RECONNECTED = NOW + 60 * 60_000
+    reconnectAt(RECONNECTED)
+
+    // Stamped after page load, but long before the reconnect. The socket is
+    // lossy, so a receipt sent while it was down was never delivered; arriving
+    // now makes this a redelivery. A cutoff taken at page load would admit it.
+    socket().emitMessage(
+      receiptFrame({ ts: NOW + 10 * 60_000, thread_id: ROOT }),
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).toBeNull()
+    expect(threadUnread.isUnread(ACCT, ROOM, ROOT)).toBe(true)
+
+    // The new socket is wired up: a receipt sent after it opened still lands.
+    socket().emitMessage(receiptFrame({ ts: RECONNECTED + 1, thread_id: ROOT }))
+    await vi.waitFor(() =>
+      expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).not.toBeNull(),
+    )
+  })
+
+  it('keeps a receipt inside the clock-skew slack window', async () => {
+    const { deviceState, socket } = harness()
+
+    socket().emitMessage(receiptFrame({ ts: NOW - 60_000, thread_id: ROOT }))
+
+    await vi.waitFor(() =>
+      expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).not.toBeNull(),
+    )
+  })
+
+  it('ignores a threaded receipt with no timestamp', async () => {
+    const { deviceState, threadUnread, socket } = harness()
+
+    // Nothing places it after the connection opened, so it is not proof of a
+    // read that happened since.
+    socket().emitMessage(receiptFrame({ thread_id: ROOT }))
 
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(deviceState.threadReadMarker(ACCT, ROOM, ROOT)).toBeNull()
@@ -342,7 +439,7 @@ describe('connectThreadReceipts', () => {
     const { deviceState, threadUnread, socket } = harness()
 
     socket().emitMessage(
-      receiptFrame({ ts: 1, thread_id: ROOT }, '@someone:hs'),
+      receiptFrame({ ts: NOW + 1, thread_id: ROOT }, '@someone:hs'),
     )
 
     await new Promise((resolve) => setTimeout(resolve, 50))
