@@ -289,7 +289,12 @@ before starting a milestone.
   Withholding alone is not enough: no read position means `reconcileSummary` records nothing, which is silent in a different way.
 - **A thread read in another client comes back as a receipt, not as device state** (`connectThreadReceipts`).
   Element sends a thread-scoped `m.read` (MSC3771) and it reaches us verbatim through ADR 0056's passthrough; axon's own receipts are always unthreaded (ADR 0096), so a `thread_id` on _our_ user's receipt can only have come from somewhere else — no echo suppression needed, unlike the `device_state.changed` paths.
-  Write it through to a `thread_read_markers` entry rather than just clearing the in-memory flag: receipts are live-only and never replayed, so a session-scoped clear is undone by the next reload.
+  Write it through to a `thread_read_markers` entry rather than just clearing the in-memory flag: nothing backfills a receipt missed while no client was connected, so a session-scoped clear is undone by the next reload (#213).
+  Receipts are **not** live-only, though, and this bullet used to say they were.
+  Sliding sync can redeliver the user's standing receipts and ADR 0056 forwards them verbatim, so a receipt sent years ago arrives looking like news; written through, it becomes a per-thread marker that `reconcileSummary` trusts at any age, and every later reply in that thread lights up the drawer for good (PR #388).
+  Only a receipt whose homeserver `ts` falls at or after the moment the socket last opened is acted on, and that cutoff moves forward on every reconnect — a receipt first seen after a drop is a redelivery however recent its stamp.
+  See ADR 0096's "Follow-up: replayed threaded receipts".
+  The sibling live-reply gate in `connectLiveThreadUnread` still takes its cutoff once, at wiring time: #396.
   `thread_id: "main"` is the room stream, not a thread, and is ignored — acting on it would be a claim about a read position that has its own owner.
 - **Debounced device-state writes need an unload flush.** Every write — draft, read marker, thread read marker — sits behind an 800 ms debounce, and `flushPending` was wired only into the auto-refresh path (ADR 0087), which additionally returns early in dev.
   A reload inside that window silently dropped the write, which presented as a thread the user had just opened coming back unread.

@@ -232,9 +232,10 @@ Condition 2 of the gate is a fact about client state — which threads the user 
     What it costs is more persistent unread, with one sharp edge: a thread read in Element would otherwise stay flagged here forever.
 - **So axon consumes the thread-scoped receipts other clients send** (MSC3771), which arrive verbatim through ADR 0056's passthrough and were previously parsed away.
   Axon's own receipts are always unthreaded, so a `thread_id` on this user's own receipt can only have come from another client — there is no echo to suppress.
-  It is recorded as a durable `thread_read_markers` entry rather than an in-memory clear, because receipts are live-only and never replayed: a session-scoped clear would come back on the next reload, which is the complaint it exists to answer.
+  It is recorded as a durable `thread_read_markers` entry rather than an in-memory clear, because nothing backfills a receipt missed while no client was connected: a session-scoped clear would come back on the next reload, which is the complaint it exists to answer.
+  The "never replayed" half of that reasoning, as this section first stated it, is false — see the "Follow-up: replayed threaded receipts" addendum below, which is what the assumption cost.
   This is also a better source of truth than the marker fallback ever was — it is what the homeserver actually knows about what the user read.
-  That path is live-only — nothing backfills the receipts Synapse already holds, so a thread read in Element before the tab opened stays unread here and blocks the room until it is opened again (#213).
+  That path only hears what arrives while a client is connected — nothing backfills the receipts Synapse already holds, so a thread read in Element before the tab opened stays unread here and blocks the room until it is opened again (#213).
   What remains of #209 is the cross-room half: the unread-thread store is fed from `RoomPage` and from live frames, so on a cold load it knows only about rooms visited this session.
 - **Flushing device state on `visibilitychange` changes timing elsewhere, not just durability.**
   Debounced writes had no unload flush at all, so a reload inside the 800 ms window dropped them — a thread just opened came back unread, and drafts had always had the same exposure.
@@ -316,3 +317,27 @@ silent until a room's first post-fix visit. This is the case §6's server-side
 per-room thread-unread signal is for; it remains the real fix, and the recency
 window and live gate are removable (or demotable to a pure offline fallback)
 once it lands.
+
+### Follow-up: replayed threaded receipts
+
+The stopgap did not empty the drawer on the production instance, and the cause was a third feed the addendum missed.
+`connectThreadReceipts` (#209) turns the user's own thread-scoped `m.receipt` into a durable per-thread marker, on the assumption that receipts only ever arrive live.
+They do not.
+Sliding sync can deliver the user's standing receipts again, and axon forwards them verbatim (ADR 0056).
+On one account a single burst wrote 257 thread markers in a few batches over twelve minutes, every one of them exactly an Element threaded receipt stamped between 2023 and 2025.
+What made the homeserver resend them was not pinned down; the gate below does not depend on it.
+
+A marker like that is a real read position, but an old one, and the recency window exempts every per-thread marker.
+In 29 of those threads a later reply sat past the marker, so `reconcileSummary` promoted the thread at any age, on every visit to its room.
+None of the 29 was actually unread: in 22 the only later replies were the user's own, and all 29 were covered by a later _unthreaded_ receipt, which MSC3771 defines as reading every thread in the room.
+
+**Receipt gate.**
+`connectThreadReceipts` now acts only on a receipt whose homeserver `ts` falls at or after the moment the live socket last opened, less the same five-minute slack as the live gate, via an injected clock (`connectThreadReceipts(…, now)`).
+The cutoff moves forward on every reconnect, not only at wiring: the socket is lossy, so a receipt first seen after a drop is a redelivery however recent its stamp, and a cutoff taken at page load would still admit one stamped between page load and the reconnect.
+A receipt without a `ts` is dropped, since nothing places it after that moment.
+The in-memory clear is dropped along with the marker, because an old read position says nothing about whether the reply flagged now was read.
+
+This gives up one thing the replay was accidentally providing: a thread read in Element while no axon client was connected, delivered again later, no longer clears here and has to be opened once.
+That is the same loss #213 already records for any receipt missed while disconnected, and it errs toward a thread that clears when opened rather than a permanent false positive.
+Markers already written from replayed receipts are not repaired, because nothing in a stored marker records where it came from; opening the thread advances the marker past its newest reply and clears it for good.
+The two rules that would repair them without a visit, treating the user's own replies as read and honouring an unthreaded receipt that covers a thread's newest reply, both need data the client does not have — the sender of a thread's newest reply, and the user's unthreaded receipt position — and belong with §6's server-side signal.
