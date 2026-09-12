@@ -10,7 +10,7 @@ use ratatui::Frame;
 use ratatui_image::{FontSize, Image, Resize};
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::frame::PopupView;
+use crate::app::frame::{PaneAreas, PopupView};
 use crate::app::{
     account_localpart, date_separator_line, format_date, format_time, overlay_selection_on_page,
     selected_line_style, AccountSelection, App, ImageState, MediaKey, Mode, PopupKind, ProtocolKey,
@@ -40,25 +40,10 @@ const PREVIEW_MAX_PCT: u16 = 88;
 /// Where every pane lands on a screen of the given size.
 ///
 /// A pure function of the display settings, the panel toggles, and the screen.
-/// Both [`prepare`] and [`draw`] call it, so the geometry that decides a pane's
-/// `page_size` is by construction the geometry its rows are painted into. That
-/// used to hold only because one pass did both (#70); now it is a property of
-/// the code rather than of the order two things happened to run in.
-struct PaneAreas {
-    /// Everything above the entry box. The panes are carved out of this, and a
-    /// full-screen search result list replaces it wholesale.
-    body: Rect,
-    accounts: Option<Rect>,
-    rooms: Option<Rect>,
-    messages: Rect,
-    input: Rect,
-    /// Content rows the entry box ended up with, after any `max_input_lines`
-    /// growth. Excludes its two borders.
-    input_lines: u16,
-    /// The room pane is wide enough to give each room a single row.
-    rooms_wide: bool,
-}
-
+/// Called once per frame, by [`prepare`], which stores the answer in
+/// `app.frame.areas` for [`draw`] to paint into — so the geometry that decides
+/// a pane's `page_size` is the same object as the geometry its rows land in,
+/// not a second evaluation that happens to agree.
 fn pane_areas(app: &App, screen: Rect) -> PaneAreas {
     let effective_input_lines = if let Some(max_lines) = app.display.max_input_lines {
         let inner_width = screen.width.saturating_sub(2) as usize;
@@ -200,6 +185,7 @@ fn command_response_needs_popup(app: &App, input_area: Rect) -> bool {
 /// what closes that.
 pub(crate) fn prepare(app: &mut App, screen: Rect) {
     let areas = pane_areas(app, screen);
+    app.frame.areas = areas;
     prepare_accounts(app, &areas);
     prepare_rooms(app, &areas);
     prepare_messages(app, &areas);
@@ -453,6 +439,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // ghost pixels left wherever an image was drawn last frame but not this one.
     let mut frame_image_rects: Vec<Rect> = Vec::new();
 
+    // Measured by `prepare`, not remeasured here. `PaneAreas` is `Copy`, so
+    // this takes no borrow of `app` that the media dispatch below would fight.
     let PaneAreas {
         body: body_area,
         accounts: accounts_area,
@@ -461,7 +449,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         input: input_area,
         input_lines: effective_input_lines,
         rooms_wide,
-    } = pane_areas(app, frame.area());
+    } = app.frame.areas;
 
     // Accounts panel
     if let Some(accounts_area) = accounts_area {
@@ -3180,6 +3168,20 @@ mod tests {
             3,
             "the two accounts plus the All row"
         );
+
+        // The stored geometry has to be a real tiling of the screen, because
+        // `draw` now paints into it without remeasuring: three panes left to
+        // right above an entry box that spans the full width.
+        let areas = app.frame.areas;
+        let accounts = areas.accounts.expect("accounts pane is shown");
+        let rooms = areas.rooms.expect("rooms pane is shown");
+        assert_eq!(accounts.x, RESOLVE_AREA.x);
+        assert_eq!(rooms.x, accounts.right());
+        assert_eq!(areas.messages.x, rooms.right());
+        assert_eq!(areas.messages.right(), RESOLVE_AREA.right());
+        assert_eq!(areas.body.height + areas.input.height, RESOLVE_AREA.height);
+        assert_eq!(areas.input.width, RESOLVE_AREA.width);
+        assert_eq!(areas.input.height, areas.input_lines + 2, "plus borders");
     }
 
     /// Painting settles none of the state a keystroke reads.

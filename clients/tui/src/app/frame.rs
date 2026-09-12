@@ -18,8 +18,33 @@ use ratatui::text::Line;
 
 use super::AccountSelection;
 
+/// Where every pane landed on this frame's screen.
+///
+/// Computed once by [`ui::pane_areas`](crate::ui::pane_areas) and stored here,
+/// rather than recomputed by each half — the renderer and the update step
+/// painting to two different sets of rects is exactly the failure this split
+/// exists to prevent (#70), and one stored answer makes it unrepresentable
+/// instead of merely unlikely.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct PaneAreas {
+    /// Everything above the entry box. The panes are carved out of this, and a
+    /// full-screen search result list replaces it wholesale.
+    pub(crate) body: Rect,
+    pub(crate) accounts: Option<Rect>,
+    pub(crate) rooms: Option<Rect>,
+    pub(crate) messages: Rect,
+    pub(crate) input: Rect,
+    /// Content rows the entry box ended up with, after any `max_input_lines`
+    /// growth. Excludes its two borders.
+    pub(crate) input_lines: u16,
+    /// The room pane is wide enough to give each room a single row.
+    pub(crate) rooms_wide: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct FrameState {
+    /// This frame's pane geometry, measured once.
+    pub(crate) areas: PaneAreas,
     /// Accounts-pane rows surviving the active search filter, in display
     /// order. Empty while the pane is hidden.
     pub(crate) accounts: Vec<(String, AccountSelection)>,
