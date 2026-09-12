@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex};
 use axon_store::Store;
 
 use axon_core::{
-    CreateRoomRequest, Formatted, MatrixProfile, MediaAttachment, MediaSendKind, PowerLevelChanges,
-    PublicRoomSummary, PublicRoomsPage, PublicRoomsQuery, Relation, ResolvedPowerLevels,
-    RoomPreset,
+    AccountDataFrame, CreateRoomRequest, Formatted, LiveFrame, MatrixProfile, MediaAttachment,
+    MediaSendKind, PowerLevelChanges, PublicRoomSummary, PublicRoomsPage, PublicRoomsQuery,
+    Relation, ResolvedPowerLevels, RoomPreset,
 };
 use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseFileInfo, BaseImageInfo};
 use matrix_sdk::room::reply::{EnforceThread, Reply};
@@ -50,6 +50,7 @@ use matrix_sdk::ruma::{
 };
 use matrix_sdk::{Client, Room, RoomState};
 use serde_json::{json, Value};
+use tokio::sync::broadcast;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
@@ -366,6 +367,54 @@ fn validate_tag_order(order: Option<f64>) -> Result<Option<f64>, GatewayError> {
             "tag order must be between 0 and 1, got {value}"
         ))),
         _ => Ok(order),
+    }
+}
+
+/// Local `m.tag` mutation to persist after the homeserver write succeeds
+/// (ADR 0103). `Room::set_tag` / `remove_tag` only talk to the homeserver —
+/// they do not update the SDK's local account-data store — so the next
+/// `GET /v1/rooms` would otherwise wait for the sync echo.
+enum TagWrite<'a> {
+    Set { tag: &'a str, order: Option<f64> },
+    Remove { tag: &'a str },
+}
+
+/// Upsert the room's `m.tag` row and fan out `account_data.changed`. A store
+/// failure is logged, never fatal to the homeserver write: the sync echo will
+/// reconcile, and failing the HTTP call after the tag is already set upstream
+/// would make a retry look like a duplicate.
+async fn persist_local_m_tag(
+    store: &Store,
+    live_tx: &broadcast::Sender<LiveFrame>,
+    account_id: Uuid,
+    room_id: &str,
+    write: TagWrite<'_>,
+) {
+    let result = match write {
+        TagWrite::Set { tag, order } => store
+            .apply_room_tag(account_id, room_id, tag, order)
+            .await
+            .map(Some),
+        TagWrite::Remove { tag } => store.remove_room_tag(account_id, room_id, tag).await,
+    };
+    match result {
+        Ok(Some(content)) => {
+            let _ = live_tx.send(LiveFrame::AccountDataChanged(AccountDataFrame {
+                account_id,
+                room_id: Some(room_id.to_owned()),
+                event_type: "m.tag".to_owned(),
+                content,
+            }));
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::warn!(
+                account_id = %account_id,
+                room_id,
+                error = %err,
+                "failed to upsert local m.tag after homeserver write"
+            );
+        }
     }
 }
 
@@ -686,21 +735,30 @@ pub enum LeaveOutcome {
 #[derive(Clone)]
 pub struct SdkGateway {
     manager: ClientManager,
-    /// Read-only handle to the event store, used by
+    /// Event-store handle, used by
     /// [`SdkGateway::note_room_reachability`] to record what a room-scoped send
-    /// revealed about whether the homeserver still serves the room (ADR 0090).
-    /// Nothing else in this type touches the store.
+    /// revealed about whether the homeserver still serves the room (ADR 0090),
+    /// and by `set_tag` / `remove_tag` to upsert the local `m.tag` row so
+    /// `GET /v1/rooms` is immediately correct (ADR 0103).
     store: Store,
+    /// Producer end of the live-event bus, so a write-path `m.tag` upsert can
+    /// fan out `account_data.changed` the same way sync ingest does.
+    live_tx: broadcast::Sender<LiveFrame>,
     power_level_locks: PowerLevelLocks,
 }
 
 impl SdkGateway {
     /// Build a gateway over a client manager. Constructed by the sync engine and
     /// exposed via [`SyncEngine::gateway`](crate::SyncEngine::gateway).
-    pub(crate) fn new(manager: ClientManager, store: Store) -> Self {
+    pub(crate) fn new(
+        manager: ClientManager,
+        store: Store,
+        live_tx: broadcast::Sender<LiveFrame>,
+    ) -> Self {
         Self {
             manager,
             store,
+            live_tx,
             power_level_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -1398,6 +1456,14 @@ impl SdkGateway {
         room.set_tag(tag_name, tag_info)
             .await
             .map_err(map_sdk_err)?;
+        persist_local_m_tag(
+            &self.store,
+            &self.live_tx,
+            account_id,
+            room_id,
+            TagWrite::Set { tag, order },
+        )
+        .await;
         Ok(())
     }
 
@@ -1412,6 +1478,14 @@ impl SdkGateway {
         let room = self.room(account_id, room_id).await?;
         let tag_name = parse_tag_name(tag)?;
         room.remove_tag(tag_name).await.map_err(map_sdk_err)?;
+        persist_local_m_tag(
+            &self.store,
+            &self.live_tx,
+            account_id,
+            room_id,
+            TagWrite::Remove { tag },
+        )
+        .await;
         Ok(())
     }
 
@@ -1692,7 +1766,8 @@ mod tests {
         check_self_demotion_guardrail, denies_knowing_room, effective_mime, is_room_gone_answer,
         leave_fallback_is_unconfirmed, media_message_type, merge_power_level_changes,
         message_relates_to, parse_room_id_or_alias, parse_server_name, parse_server_names,
-        parse_tag_name, parse_user_id, thread_member_root, validate_tag_order, MAX_TAG_NAME_BYTES,
+        parse_tag_name, parse_user_id, persist_local_m_tag, thread_member_root, validate_tag_order,
+        TagWrite, MAX_TAG_NAME_BYTES,
     };
     use crate::error::GatewayError;
 
@@ -1881,6 +1956,102 @@ mod tests {
                 matches!(err, GatewayError::Invalid(message) if message.starts_with("tag order"))
             );
         }
+    }
+
+    /// After a successful homeserver write, the local `m.tag` row is upserted
+    /// and an `account_data.changed` frame is published so `GET /v1/rooms` and
+    /// live clients agree without waiting for the sync echo (ADR 0103).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn persist_local_m_tag_upserts_and_publishes() {
+        use axon_core::LiveFrame;
+        use axon_store::Store;
+        use tokio::sync::broadcast;
+
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for these tests");
+        let store = Store::connect(&url, 5).await.expect("connect + migrate");
+        let account = store
+            .upsert_account(
+                &format!("@tag-write-{}:localhost", uuid::Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .expect("account");
+        let account_id = account.account_id;
+        let room_id = format!("!fav-{}:localhost", uuid::Uuid::new_v4());
+        let (live_tx, mut live_rx) = broadcast::channel(16);
+
+        persist_local_m_tag(
+            &store,
+            &live_tx,
+            account_id,
+            &room_id,
+            TagWrite::Set {
+                tag: "m.favourite",
+                order: Some(0.25),
+            },
+        )
+        .await;
+
+        let stored = store
+            .account_data(account_id, Some(&room_id), "m.tag")
+            .await
+            .expect("read")
+            .expect("m.tag row");
+        assert_eq!(stored.content["tags"]["m.favourite"]["order"], 0.25);
+
+        let frame = live_rx.try_recv().expect("account_data.changed frame");
+        match frame {
+            LiveFrame::AccountDataChanged(frame) => {
+                assert_eq!(frame.account_id, account_id);
+                assert_eq!(frame.room_id.as_deref(), Some(room_id.as_str()));
+                assert_eq!(frame.event_type, "m.tag");
+                assert_eq!(frame.content["tags"]["m.favourite"]["order"], 0.25);
+            }
+            other => panic!("expected AccountDataChanged, got {other:?}"),
+        }
+
+        persist_local_m_tag(
+            &store,
+            &live_tx,
+            account_id,
+            &room_id,
+            TagWrite::Remove { tag: "m.favourite" },
+        )
+        .await;
+        let stored = store
+            .account_data(account_id, Some(&room_id), "m.tag")
+            .await
+            .expect("read")
+            .expect("m.tag row");
+        assert!(stored.content["tags"].get("m.favourite").is_none());
+        let _ = live_rx
+            .try_recv()
+            .expect("remove still publishes when a row existed");
+
+        let never = format!("!never-{}:localhost", uuid::Uuid::new_v4());
+        persist_local_m_tag(
+            &store,
+            &live_tx,
+            account_id,
+            &never,
+            TagWrite::Remove { tag: "m.favourite" },
+        )
+        .await;
+        assert!(
+            live_rx.try_recv().is_err(),
+            "removing a tag from a room with no m.tag row must not publish"
+        );
+        assert!(store
+            .account_data(account_id, Some(&never), "m.tag")
+            .await
+            .expect("read")
+            .is_none());
+
+        let _ = sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+            .bind(account_id)
+            .execute(store.pool())
+            .await;
     }
 
     #[test]
@@ -2501,6 +2672,7 @@ mod disowned_room_tests {
     use matrix_sdk::store::RoomLoadSettings;
     use matrix_sdk::{SessionMeta, SessionTokens};
     use serde_json::json;
+    use tokio::sync::broadcast;
     use uuid::Uuid;
 
     use super::*;
@@ -2573,7 +2745,8 @@ mod disowned_room_tests {
             .expect("restore a session so the leave is actually sent");
         manager.inject_for_test(account_id, client).await;
 
-        (SdkGateway::new(manager.clone(), store), manager)
+        let (live_tx, _rx) = broadcast::channel(16);
+        (SdkGateway::new(manager.clone(), store, live_tx), manager)
     }
 
     const DEAD_ROOM: &str = "!disowned:localhost";

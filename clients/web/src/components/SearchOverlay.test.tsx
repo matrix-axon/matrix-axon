@@ -31,6 +31,7 @@ function room(): components['schemas']['RoomDto'] {
     last_activity_ts: 1000,
     highlight_count: 0,
     notification_count: 0,
+    is_direct: false,
   }
 }
 

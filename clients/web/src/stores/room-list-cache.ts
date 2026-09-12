@@ -54,6 +54,7 @@ function persistable(room: RoomDto): RoomDto {
     last_activity_ts: room.last_activity_ts,
     notification_count: count(room.notification_count),
     highlight_count: count(room.highlight_count),
+    is_direct: room.is_direct === true,
   }
 }
 

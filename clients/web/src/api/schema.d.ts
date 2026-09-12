@@ -1491,6 +1491,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/preferences/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read one instance preference. An allowlisted key that has never been
+         *     written is a `404` so a client can tell "unset" from an empty value
+         *     (ADR 0103's one-shot upload of local `spaceOrder`).
+         */
+        get: operations["get_preference"];
+        /**
+         * Write one instance preference. Last-write-wins on the whole value. A
+         *     successful write fans out `preferences.changed` carrying this `device_id`.
+         */
+        put: operations["put_preference"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/rooms": {
         parameters: {
             query?: never;
@@ -2005,6 +2030,18 @@ export interface components {
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_PreferenceDto: {
+            /** @description One instance preference (`GET /v1/preferences/{key}`, ADR 0103). */
+            data: {
+                /** @description Allowlisted key, currently `space_order`. */
+                key: string;
+                /** @description When the value was last written (server clock), RFC 3339. */
+                updated_at: string;
+                /** @description The stored JSON value. */
+                value: unknown;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_PublicRoomsPageDto: {
             /**
              * @description Response for `GET …/directory/public_rooms` (ADR 0068 M19f): one page of
@@ -2026,6 +2063,14 @@ export interface components {
                  * @description When the write landed (server clock), RFC 3339 — the last-write-wins
                  *     ordering all devices share.
                  */
+                updated_at: string;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_PutPreferenceResponse: {
+            /** @description Response of `PUT /v1/preferences/{key}` (ADR 0103). */
+            data: {
+                /** @description When the write landed (server clock), RFC 3339. */
                 updated_at: string;
             };
         };
@@ -2479,6 +2524,11 @@ export interface components {
                  */
                 highlight_count: number;
                 /**
+                 * @description Whether this room appears in the account's global `m.direct` map
+                 *     (ADR 0103 / ADR 0055 Tier 1).
+                 */
+                is_direct: boolean;
+                /**
                  * Format: int64
                  * @description `origin_server_ts` of the most recent content-bearing event (a real
                  *     message, not a membership/state/redaction/reaction event), in
@@ -2507,6 +2557,11 @@ export interface components {
                 room_id: string;
                 /** @description The room's `m.room.create` `type`, if any (for example `m.space`). */
                 room_type?: string | null;
+                /**
+                 * @description This account's `m.tag` entries on the room (ADR 0103). Omitted when
+                 *     empty so untagged rooms do not grow the already-large list.
+                 */
+                tags?: components["schemas"]["RoomTag"][];
                 /** @description Room topic (`m.room.topic`), if set. */
                 topic?: string | null;
             }[];
@@ -3279,6 +3334,15 @@ export interface components {
             /** Format: int64 */
             users_default: number;
         };
+        /** @description One instance preference (`GET /v1/preferences/{key}`, ADR 0103). */
+        PreferenceDto: {
+            /** @description Allowlisted key, currently `space_order`. */
+            key: string;
+            /** @description When the value was last written (server clock), RFC 3339. */
+            updated_at: string;
+            /** @description The stored JSON value. */
+            value: unknown;
+        };
         /** @description One room in a [`PublicRoomsPageDto`]. */
         PublicRoomSummaryDto: {
             avatar_url?: string | null;
@@ -3322,6 +3386,24 @@ export interface components {
              * @description When the write landed (server clock), RFC 3339 — the last-write-wins
              *     ordering all devices share.
              */
+            updated_at: string;
+        };
+        /**
+         * @description Body of `PUT /v1/preferences/{key}` (ADR 0103). `device_id` is echoed on
+         *     the `preferences.changed` frame so the originator can drop it.
+         */
+        PutPreferenceRequest: {
+            /**
+             * Format: uuid
+             * @description The writing device (client-supplied UUID).
+             */
+            device_id: string;
+            /** @description The whole preference value. Last-write-wins. */
+            value: unknown;
+        };
+        /** @description Response of `PUT /v1/preferences/{key}` (ADR 0103). */
+        PutPreferenceResponse: {
+            /** @description When the write landed (server clock), RFC 3339. */
             updated_at: string;
         };
         /** @description Request body for reacting to an event (`POST …/events/{event_id}/reactions`). */
@@ -3443,6 +3525,11 @@ export interface components {
              */
             highlight_count: number;
             /**
+             * @description Whether this room appears in the account's global `m.direct` map
+             *     (ADR 0103 / ADR 0055 Tier 1).
+             */
+            is_direct: boolean;
+            /**
              * Format: int64
              * @description `origin_server_ts` of the most recent content-bearing event (a real
              *     message, not a membership/state/redaction/reaction event), in
@@ -3471,6 +3558,11 @@ export interface components {
             room_id: string;
             /** @description The room's `m.room.create` `type`, if any (for example `m.space`). */
             room_type?: string | null;
+            /**
+             * @description This account's `m.tag` entries on the room (ADR 0103). Omitted when
+             *     empty so untagged rooms do not grow the already-large list.
+             */
+            tags?: components["schemas"]["RoomTag"][];
             /** @description Room topic (`m.room.topic`), if set. */
             topic?: string | null;
         };
@@ -3512,6 +3604,20 @@ export interface components {
          * @enum {string}
          */
         RoomPresetDto: "private_chat" | "public_chat" | "trusted_private_chat";
+        /**
+         * @description One tag on a room (`GET /v1/rooms`, ADR 0103). `name` is the Matrix wire
+         *     form (`m.favourite`, `m.lowpriority`, `u.work`, …); `order` is the
+         *     optional sort key in `[0, 1]`.
+         */
+        RoomTag: {
+            /** @description Matrix tag name. */
+            name: string;
+            /**
+             * Format: double
+             * @description Optional sort order among this account's rooms with this tag.
+             */
+            order?: number | null;
+        };
         /**
          * @description Upgrade chain (`GET …/rooms/{room_id}/upgrade`, issue #404, ADR 0084):
          *     where a tombstoned room's replacement lives, and/or where this room was
@@ -9113,6 +9219,105 @@ export interface operations {
             /** @description OAuth is disabled */
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_preference: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Preference key; currently only `space_order` */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The stored preference */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_PreferenceDto"];
+                };
+            };
+            /** @description Unknown preference key */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Preference has never been written */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    put_preference: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Preference key; currently only `space_order` */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutPreferenceRequest"];
+            };
+        };
+        responses: {
+            /** @description The write's server timestamp */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_PutPreferenceResponse"];
+                };
+            };
+            /** @description Unknown key, invalid value, or value over 64 KiB */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
                     [name: string]: unknown;
                 };
                 content: {

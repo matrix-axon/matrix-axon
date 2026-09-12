@@ -23,6 +23,7 @@ function room(overrides: Partial<RoomDto> & { room_id: string }): RoomDto {
     last_activity_ts: 0,
     highlight_count: 0,
     notification_count: 0,
+    is_direct: false,
     ...overrides,
   }
 }

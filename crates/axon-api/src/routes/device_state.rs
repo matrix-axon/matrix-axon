@@ -27,19 +27,19 @@ use crate::dto::{
 };
 use crate::extract::{Json, Path, Query};
 use crate::response::{ApiError, ApiResponse};
+use crate::routes::MAX_OPAQUE_JSON_BYTES;
 
 /// Caps on a PUT (ADR 0048). The values are deliberately opaque — axon can't
 /// validate their *shape* without coupling the server to client semantics —
 /// so their *size* is bounded instead: without these, a client could park a
 /// multi-megabyte blob per key, per device, per namespace, bounded only by
 /// the HTTP body limit ("hostile input" boundary rule, AGENTS.md).
+/// Per-entry values share [`crate::routes::MAX_OPAQUE_JSON_BYTES`] with
+/// instance preferences.
 ///
 /// Max entries in one PUT's merge-upsert. Drafts and read markers write one
 /// key at a time; this leaves headroom for batch writers.
 const MAX_PUT_ENTRIES: usize = 64;
-/// Max serialized bytes per entry value — comfortably fits any draft (Matrix
-/// itself caps whole events at 64 KiB).
-const MAX_VALUE_BYTES: usize = 64 * 1024;
 /// Max bytes per entry key. Keys are typically room ids, which Matrix keeps
 /// well under this.
 const MAX_KEY_BYTES: usize = 512;
@@ -157,9 +157,9 @@ pub async fn put_device_state(
             .as_ref()
             .map(|v| v.to_string().len())
             .unwrap_or_default();
-        if value_bytes > MAX_VALUE_BYTES {
+        if value_bytes > MAX_OPAQUE_JSON_BYTES {
             return Err(ApiError::bad_request(format!(
-                "entry value for {key:?} exceeds {MAX_VALUE_BYTES} bytes"
+                "entry value for {key:?} exceeds {MAX_OPAQUE_JSON_BYTES} bytes"
             )));
         }
     }

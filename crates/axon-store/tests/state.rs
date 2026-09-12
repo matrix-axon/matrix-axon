@@ -301,3 +301,60 @@ async fn state_and_account_data_cascade_with_account() {
         assert_eq!(n, 0, "{table} should cascade-delete with the account");
     }
 }
+
+/// `apply_room_tag` creates the `m.tag` row, merges a second tag without
+/// clobbering the first, and `remove_room_tag` drops only the named key
+/// (ADR 0103 write-path upsert).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn apply_and_remove_room_tag_merges_json() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "tag-upsert").await;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+
+    let content = store
+        .apply_room_tag(account_id, &room_id, "m.favourite", Some(0.5))
+        .await
+        .expect("set favourite");
+    assert_eq!(content["tags"]["m.favourite"]["order"], 0.5);
+
+    let content = store
+        .apply_room_tag(account_id, &room_id, "u.work", None)
+        .await
+        .expect("set custom");
+    assert_eq!(content["tags"]["m.favourite"]["order"], 0.5);
+    assert_eq!(content["tags"]["u.work"], json!({}));
+
+    let content = store
+        .remove_room_tag(account_id, &room_id, "m.favourite")
+        .await
+        .expect("remove favourite")
+        .expect("row existed");
+    assert!(content["tags"].get("m.favourite").is_none());
+    assert_eq!(content["tags"]["u.work"], json!({}));
+
+    let row = store
+        .account_data(account_id, Some(&room_id), "m.tag")
+        .await
+        .expect("read")
+        .expect("present");
+    assert_eq!(row.content, content);
+
+    let missing = format!("!never-{}:localhost", Uuid::new_v4());
+    assert!(
+        store
+            .remove_room_tag(account_id, &missing, "m.favourite")
+            .await
+            .expect("no-op remove")
+            .is_none(),
+        "unpinning a room with no m.tag row must not insert one"
+    );
+    assert!(store
+        .account_data(account_id, Some(&missing), "m.tag")
+        .await
+        .expect("read missing")
+        .is_none());
+
+    common::cleanup_account(&pool, account_id).await;
+}
