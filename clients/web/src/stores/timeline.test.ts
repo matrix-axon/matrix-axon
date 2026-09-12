@@ -11,6 +11,7 @@ import {
 } from 'vitest'
 import { createApiClient } from '../api/client'
 import { createMediaService } from '../media/media-service'
+import { setPerfEnabled } from '../perf'
 import { createTimelineStore, inReplyToId, type EventDto } from './timeline'
 
 const BASE_URL = 'http://axon.test'
@@ -188,6 +189,41 @@ describe('createTimelineStore', () => {
       // And the store is holding the winner's head, not nothing — which is why
       // the loser must not be treated as a failure.
       expect(store.events.value.map((e) => e.event_id)).toEqual(['$fresh'])
+    })
+
+    /// The room-open readout reports each head load's outcome, because
+    /// `timeline:fetch:end` only says the request came back — not whether its
+    /// page was applied or thrown away.
+    it('marks what each head load did, for the room-open readout', async () => {
+      server.use(
+        http.get(TIMELINE_PATH, () =>
+          HttpResponse.json({
+            data: { events: [event('$1', 100)], next_cursor: null },
+          }),
+        ),
+      )
+      performance.clearMarks()
+      setPerfEnabled(true)
+      try {
+        const store = makeStore()
+        expect(await store.loadLatest()).toBe('applied')
+
+        const marks = performance.getEntriesByName(
+          'axon:timeline:head:settled',
+        ) as PerformanceMark[]
+        // `startedAt` lets the readout drop a settle from an abandoned open.
+        expect(marks.map((mark) => mark.detail)).toEqual([
+          {
+            roomId: ROOM,
+            thread: false,
+            outcome: 'applied',
+            startedAt: expect.any(Number),
+          },
+        ])
+      } finally {
+        setPerfEnabled(false)
+        performance.clearMarks()
+      }
     })
   })
 
