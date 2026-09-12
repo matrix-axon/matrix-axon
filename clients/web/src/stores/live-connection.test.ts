@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { TIMELINE_EVENT, type LiveFrame } from '../api/frames'
+import { setPerfEnabled } from '../perf'
 import { FakeWebSocket } from '../test/fake-socket'
 import { createLiveConnection, STABLE_CONNECTION_MS } from './live-connection'
 
@@ -31,6 +32,36 @@ describe('createLiveConnection', () => {
     expect(live.connection.value).toBe('connecting')
     socket().emitOpen()
     expect(live.connection.value).toBe('live')
+  })
+
+  // The room-open readout counts reconnects inside an open, since one landing
+  // mid-open is what doubled its head loads (#389).
+  it('marks each socket open and drop for the room-open readout', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    performance.clearMarks()
+    setPerfEnabled(true)
+    try {
+      const { live, socket } = harness()
+      live.start()
+      socket().emitOpen()
+      socket().emitClose()
+      vi.runOnlyPendingTimers()
+      socket().emitOpen()
+
+      const marks = performance
+        .getEntriesByType('mark')
+        .filter((mark) => mark.name.startsWith('axon:live:'))
+        .map((mark) => [mark.name, (mark as PerformanceMark).detail])
+      expect(marks).toEqual([
+        ['axon:live:open', { reconnect: false }],
+        ['axon:live:close', null],
+        ['axon:live:open', { reconnect: true }],
+      ])
+    } finally {
+      setPerfEnabled(false)
+      performance.clearMarks()
+      vi.useRealTimers()
+    }
   })
 
   it('delivers decoded frames to every subscriber', () => {
