@@ -25,6 +25,7 @@ mod bootstrap;
 mod completion;
 mod drafts;
 mod ephemeral;
+pub(crate) mod frame;
 pub(crate) use drafts::{load_or_create_device_id, DraftOutcome};
 mod layout_cache;
 mod lifecycle;
@@ -762,6 +763,9 @@ pub(crate) struct App {
     pub(crate) rooms: RoomsState,
     pub(crate) accounts: AccountsState,
     pub(crate) messages: MessagePane,
+    /// This frame's resolved view model, rebuilt by `ui::prepare` before every
+    /// paint. `draw` reads it; nothing else should (#70).
+    pub(crate) frame: frame::FrameState,
     pub(crate) input: InputState,
     pub(crate) live: LiveState,
     pub(crate) connection_state: ConnectionState,
@@ -901,12 +905,18 @@ pub(crate) struct App {
     /// without this explicit clear a ghost image lingers until something else
     /// overwrites those cells.
     pub(crate) clear_media_preview: bool,
-    /// Set to `true` by `open_thread_panel` / `close_thread_panel`.  The main
-    /// loop responds by emitting crossterm erase-line commands across every row
-    /// of `last_messages_area` before the next draw.  A targeted
-    /// `render_widget(Clear, area)` is insufficient when `messages_background`
-    /// is `Color::Reset`: both the old and new buffer cells compare equal so
-    /// ratatui's diff emits no terminal codes and sixel/halfblock pixels linger.
+    /// Set to `true` whenever the message pane is rebuilt under an image —
+    /// a thread panel opening or closing, a room switch, a search jump.  The
+    /// next `draw` consumes it and marks the blank cells inside this frame's
+    /// and the previous frame's image rects `CellDiffOption::AlwaysUpdate`.  A
+    /// targeted `render_widget(Clear, area)` is insufficient when
+    /// `messages_background` is `Color::Reset`: both the old and new buffer
+    /// cells compare equal, so ratatui's diff emits no terminal codes and
+    /// sixel/halfblock pixels linger.
+    ///
+    /// One of the three fields the update step writes and `draw` consumes —
+    /// see the note on `draw` about why those stay mutable while the viewport
+    /// state moved out (#70).
     pub(crate) force_terminal_clear: bool,
     /// Screen rects where pixel-protocol (sixel/iTerm2) image widgets were drawn
     /// on the previous frame.  These pixels are not part of ratatui's cell model,
@@ -1161,6 +1171,7 @@ impl App {
             rooms: RoomsState::default(),
             accounts: AccountsState::default(),
             messages: MessagePane::default(),
+            frame: frame::FrameState::default(),
             input: InputState::default(),
             live: LiveState::default(),
             connection_state: ConnectionState::Unknown,

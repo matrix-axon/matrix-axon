@@ -499,7 +499,19 @@ async fn run_app(
     let mut tick = time::interval(Duration::from_millis(100));
     let mut next_sixel_inline_refresh = Instant::now() + app::SIXEL_REFRESH_INTERVAL;
     loop {
-        terminal.draw(|frame| draw(frame, &mut app))?;
+        terminal.draw(|frame| {
+            // Settle everything this frame's geometry decides, then paint it,
+            // so `draw` stays read-only over the state key handling also reads
+            // (#70). Both halves must measure the *same* screen, which is why
+            // this runs in here off `frame.area()` and not off `terminal.size()`
+            // at the top of the loop: `draw` autoresizes before it hands out the
+            // frame, so a resize landing between the two calls would leave the
+            // page sizes and the wrapped layout describing a viewport the user
+            // can no longer see — and a key handled after that frame would page
+            // by it.
+            ui::prepare(&mut app, frame.area());
+            draw(frame, &mut app);
+        })?;
 
         tokio::select! {
             _ = tick.tick() => {

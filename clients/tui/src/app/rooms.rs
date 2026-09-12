@@ -15,9 +15,6 @@ use super::{
 /// fetched, so a short scroll does not stall waiting on a request.
 const ROOM_TITLE_LOOKAHEAD: usize = 8;
 
-/// Window height assumed before the first draw has measured the panel.
-const ROOM_TITLE_DEFAULT_PAGE: usize = 32;
-
 impl App {
     pub(crate) fn apply_room_refresh(&mut self, mut rooms: Vec<RoomDto>) {
         // A logged-out (deactivated) account keeps its rows in Axon's `events`
@@ -105,13 +102,12 @@ impl App {
         if visible.is_empty() {
             return;
         }
-        // `rooms.page_size` is zero until the first draw; the loop paints before
-        // the room list lands now, but a default keeps this correct either way.
-        let page = if self.rooms.page_size == 0 {
-            ROOM_TITLE_DEFAULT_PAGE
-        } else {
-            self.rooms.page_size
-        };
+        // `ui::prepare` measures the panel at the top of every loop iteration,
+        // so this is the height of the window the user is actually looking at,
+        // already set before the first paint and before the first keystroke
+        // (#70). The floor covers only the room panel being hidden, where the
+        // last measurement stands and nothing re-measures it.
+        let page = self.rooms.page_size.max(1);
         let start = self.rooms.scroll.saturating_sub(ROOM_TITLE_LOOKAHEAD);
         let end = self
             .rooms

@@ -10,6 +10,7 @@ use ratatui::Frame;
 use ratatui_image::{FontSize, Image, Resize};
 use unicode_width::UnicodeWidthChar;
 
+use crate::app::frame::{PaneAreas, PopupView};
 use crate::app::{
     account_localpart, date_separator_line, format_date, format_time, overlay_selection_on_page,
     selected_line_style, AccountSelection, App, ImageState, MediaKey, Mode, PopupKind, ProtocolKey,
@@ -36,27 +37,16 @@ use crate::wrap::{plain_rich_lines, rich_lines_to_spans, wrap_rich_lines};
 /// the image it encloses.
 const PREVIEW_MAX_PCT: u16 = 88;
 
-pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
-    // On the frame immediately after the media-preview popup is closed, emit a
-    // targeted Clear over the region the popup occupied.  Sixel/iTerm2 pixels
-    // are not part of the ratatui cell model, so the cell-diff renderer cannot
-    // erase them; without this explicit clear a ghost image lingers until
-    // something else overwrites those cells.  Halfblocks are ordinary Unicode
-    // characters and are already handled by the normal diff pass.
-    if std::mem::take(&mut app.clear_media_preview)
-        && !matches!(app.picker.protocol_type(), ProtocolType::Halfblocks)
-    {
-        let ghost_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, frame.area());
-        frame.render_widget(Clear, ghost_area);
-    }
-
-    // Screen rects where a pixel-protocol image widget is drawn this frame.
-    // Compared against `app.prev_image_rects` at the end of `draw()` to erase
-    // ghost pixels left wherever an image was drawn last frame but not this one.
-    let mut frame_image_rects: Vec<Rect> = Vec::new();
-
+/// Where every pane lands on a screen of the given size.
+///
+/// A pure function of the display settings, the panel toggles, and the screen.
+/// Called once per frame, by [`prepare`], which stores the answer in
+/// `app.frame.areas` for [`draw`] to paint into — so the geometry that decides
+/// a pane's `page_size` is the same object as the geometry its rows land in,
+/// not a second evaluation that happens to agree.
+fn pane_areas(app: &App, screen: Rect) -> PaneAreas {
     let effective_input_lines = if let Some(max_lines) = app.display.max_input_lines {
-        let inner_width = frame.area().width.saturating_sub(2) as usize;
+        let inner_width = screen.width.saturating_sub(2) as usize;
         let actual_lines = if inner_width > 0 {
             let (rows, _, _) = compose_layout(&app.input.buffer, app.input.cursor, inner_width);
             rows.max(1) as u16
@@ -71,7 +61,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(input_box_height)])
-        .split(frame.area());
+        .split(screen);
     const ROOMS_NARROW_WIDTH: u16 = 32;
     const ROOMS_WIDE_MIN: u16 = 44;
     const ROOMS_WIDE_MAX: u16 = 70;
@@ -81,7 +71,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     let show_accounts = app.accounts_panel_visible();
     let show_rooms = app.rooms_panel_visible();
-    let total_width = frame.area().width;
+    let total_width = screen.width;
     let wide_enough = total_width >= WIDE_THRESHOLD;
     let rooms_wide = total_width >= ROOMS_WIDE_THRESHOLD;
     let accounts_width = app.display.accounts_panel_width;
@@ -142,57 +132,333 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             (None, None, outer[0])
         }
     };
-    let command_response_will_popup =
-        app.pending_command_response
-            .as_deref()
-            .is_some_and(|response| {
-                let inner_width = outer[1].width.saturating_sub(2);
-                let prefix_width = command_response_prefix_width(app);
-                command_response_line_count(response, inner_width, prefix_width)
-                    > usize::from(app.display.input_lines)
-            });
+
+    PaneAreas {
+        body: outer[0],
+        accounts: accounts_area,
+        rooms: rooms_area,
+        messages: messages_area,
+        input: outer[1],
+        input_lines: effective_input_lines,
+        rooms_wide,
+    }
+}
+
+/// Whether a queued command response is too tall for the entry box and must
+/// become a popup instead.
+///
+/// Shared so that `prepare`, which acts on the answer, and `draw`, which only
+/// keeps the entry line's status out of its way, can never reach different
+/// conclusions about the same response on the same frame.
+fn command_response_needs_popup(app: &App, input_area: Rect) -> bool {
+    app.pending_command_response
+        .as_deref()
+        .is_some_and(|response| {
+            let inner_width = input_area.width.saturating_sub(2);
+            let prefix_width = command_response_prefix_width(app);
+            command_response_line_count(response, inner_width, prefix_width)
+                > usize::from(app.display.input_lines)
+        })
+}
+
+/// Resolve everything about this frame that is *model* state, before [`draw`]
+/// paints it: the three panes' page sizes and scroll offsets, the cached
+/// message layout, a command response that has outgrown the entry box, and the
+/// open popup's body.
+///
+/// Runs once per main-loop iteration, immediately before `terminal.draw`.
+/// Every value it writes is one a key handler also reads — `PageDown` pages by
+/// `rooms.page_size`, `sweep_visible_room_titles` fetches titles around
+/// `rooms.scroll`, the popup scroll keys move `popup_scroll` — which is why it
+/// cannot stay inside the renderer (#70). While it did, those numbers were
+/// whatever the *previous* repaint had measured, every guard against a first
+/// keystroke arriving before the first paint had to be written by hand, and
+/// nothing said so at the sites that depended on it.
+///
+/// `screen` must be the area the paint that follows will actually use —
+/// `frame.area()`, taken inside the `terminal.draw` callback. `Terminal::draw`
+/// autoresizes before it hands out the frame, so measuring off `terminal.size()`
+/// beforehand opens a window where a resize lands between the two: the page
+/// sizes and the wrapped layout would then describe the old viewport while the
+/// pane rects describe the new one, and the popup would be painted at a rect
+/// the occlusion math no longer agrees with. Feeding both halves one area is
+/// what closes that.
+pub(crate) fn prepare(app: &mut App, screen: Rect) {
+    let areas = pane_areas(app, screen);
+    app.frame.areas = areas;
+    prepare_accounts(app, &areas);
+    prepare_rooms(app, &areas);
+    prepare_messages(app, &areas);
+    // Ordering: this can move `mode` into `Popup(CommandResponse)`, and
+    // `prepare_popup` reads `mode` to decide which body to build. Promoting
+    // first is what lets the response appear on the very next frame.
+    promote_command_response(app, &areas);
+    prepare_popup(app, screen);
+}
+
+/// Accounts pane: the rows surviving the search filter, and the scroll offset
+/// that keeps the selected account among them.
+fn prepare_accounts(app: &mut App, areas: &PaneAreas) {
+    let Some(accounts_area) = areas.accounts else {
+        // Hidden pane. `toggle_accounts_panel` has already moved focus out of
+        // `AccountList`, so nothing reads the page size until it comes back and
+        // this runs again — but leave no stale rows behind for `draw` to paint.
+        app.frame.accounts.clear();
+        return;
+    };
+    let acct_page_size = accounts_area.height.saturating_sub(2).max(1) as usize;
+    app.accounts.page_size = acct_page_size;
+
+    let acct_search_query = match &app.mode {
+        Mode::Search(SearchKind::Accounts, q) => Some(q.to_lowercase()),
+        _ => None,
+    };
+
+    let all_acct_entries: Vec<(String, AccountSelection)> = std::iter::once((
+        AccountSelection::All.display_label(None),
+        AccountSelection::All,
+    ))
+    .chain(app.accounts.accounts.iter().enumerate().map(|(i, a)| {
+        let selection = AccountSelection::Account(i);
+        (selection.display_label(Some(&a.user_id)), selection)
+    }))
+    .filter(|(label, _)| {
+        acct_search_query
+            .as_ref()
+            .is_none_or(|q| label.to_lowercase().contains(q.as_str()))
+    })
+    .collect();
+
+    let acct_sel_pos = all_acct_entries
+        .iter()
+        .position(|(_, sel)| *sel == app.accounts.selected)
+        .unwrap_or(0);
+    let total_acct_items = all_acct_entries.len();
+
+    if acct_sel_pos < app.accounts.scroll {
+        app.accounts.scroll = acct_sel_pos;
+    } else if acct_sel_pos >= app.accounts.scroll + acct_page_size {
+        app.accounts.scroll = acct_sel_pos + 1 - acct_page_size;
+    }
+    let acct_max_scroll = total_acct_items.saturating_sub(acct_page_size);
+    app.accounts.scroll = app.accounts.scroll.min(acct_max_scroll);
+
+    app.frame.accounts = all_acct_entries;
+}
+
+/// Room pane: which rooms it shows, how many rows it has for them, and the
+/// scroll offset that keeps the selected room on screen.
+fn prepare_rooms(app: &mut App, areas: &PaneAreas) {
+    let Some(rooms_area) = areas.rooms else {
+        // See `prepare_accounts` — focus has already left `RoomList`.
+        app.frame.rooms.clear();
+        app.frame.pinned_rooms = 0;
+        return;
+    };
+    let visible_indices = app.visible_room_indices();
+    let rooms_selected_vis = app
+        .rooms
+        .selected
+        .and_then(|sel| visible_indices.iter().position(|&i| i == sel))
+        .unwrap_or(0);
+    let rows_available = rooms_area.height.saturating_sub(2) as usize;
+    let rooms_page_size = if areas.rooms_wide {
+        rows_available.max(1)
+    } else {
+        (rows_available / 2).max(1)
+    };
+    // Pinned rooms are sorted to the front, so the leading run of visible
+    // rooms that are pinned marks the boundary for the separator (ADR 0038).
+    let pinned_visible_count = visible_indices
+        .iter()
+        .take_while(|&&i| app.is_room_pinned(&RoomKey::from(&app.rooms.rooms[i])))
+        .count();
+    app.rooms.page_size = rooms_page_size;
+    app.rooms.scroll = divider_aware_room_scroll(
+        app.rooms.scroll,
+        rooms_selected_vis,
+        rooms_page_size,
+        visible_indices.len(),
+        pinned_visible_count,
+    );
+    app.frame.pinned_rooms = pinned_visible_count;
+    app.frame.rooms = visible_indices;
+}
+
+/// Message pane: the viewport the timeline is measured against, and the layout
+/// built from it.
+fn prepare_messages(app: &mut App, areas: &PaneAreas) {
+    let message_page_size = usize::from(areas.messages.height.saturating_sub(2)).max(1);
+    let message_width = usize::from(areas.messages.width.saturating_sub(2)).max(1);
+    app.set_message_viewport(message_page_size, message_width);
+    // One layout per change, shared with the nav math rather than recomputed
+    // every frame (#54, #52). Must follow the viewport write: `width` is one of
+    // the inputs its digest keys on.
+    app.ensure_message_layout();
+}
+
+/// Promote a queued command response that no longer fits the entry box into a
+/// popup — or drop it, once it is clear it will be read in the entry box
+/// instead.
+fn promote_command_response(app: &mut App, areas: &PaneAreas) {
+    if app.mode != Mode::Compose || app.pending_command_response.is_none() {
+        return;
+    }
+    if command_response_needs_popup(app, areas.input) {
+        app.mode = Mode::Popup(PopupKind::CommandResponse);
+        app.popup_scroll = 0;
+    } else {
+        app.pending_command_response = None;
+    }
+}
+
+/// Build the open popup's body and settle its scroll against it.
+///
+/// The clamp at the end is load-bearing: the popup scroll keys add and
+/// subtract without an upper bound of their own (`keymap.rs`), because only
+/// here is the line count known.
+fn prepare_popup(app: &mut App, screen: Rect) {
+    let Mode::Popup(kind) = app.mode else {
+        app.frame.popup = None;
+        return;
+    };
+    if kind == PopupKind::MediaPreview {
+        // Pixels, not lines, and possibly still decoding: `draw` owns it.
+        app.frame.popup = None;
+        return;
+    }
+    let area = blocking_popup_area(app, screen).unwrap_or(screen);
+    let page_size = usize::from(area.height.saturating_sub(2)).max(1);
+    let (title, lines) = match kind {
+        PopupKind::Help => {
+            let lines = popup_help_lines(app);
+            let sel_line = help_line_of_selection(app.help_selection);
+            if sel_line < app.popup_scroll {
+                app.popup_scroll = sel_line;
+            } else if sel_line >= app.popup_scroll.saturating_add(page_size) {
+                app.popup_scroll = sel_line.saturating_add(1).saturating_sub(page_size);
+            }
+            ("Help  (Enter to select, Esc to close)", lines)
+        }
+        PopupKind::Shortcuts => (
+            "Shortcuts  (Esc to close)",
+            popup_shortcuts_lines(&app.shortcuts),
+        ),
+        PopupKind::UnreadThreads => {
+            let entries = app.unread_thread_entries();
+            app.sync_unread_thread_selection(&entries);
+            let (lines, ranges) =
+                popup_unread_thread_lines(app, &entries, usize::from(area.width.saturating_sub(2)));
+            let entries_len = ranges.len();
+            if entries_len == 0 {
+                app.unread_thread_selection = 0;
+                app.unread_thread_selected = None;
+            } else {
+                app.sync_unread_thread_selection(&entries);
+            }
+            if let Some(range) = ranges.get(app.unread_thread_selection) {
+                if range.start < app.popup_scroll {
+                    app.popup_scroll = range.start;
+                } else if range.end > app.popup_scroll.saturating_add(page_size) {
+                    app.popup_scroll = range.end.saturating_sub(page_size);
+                }
+            }
+            ("Unread Threads  (Enter to open, Esc to close)", lines)
+        }
+        PopupKind::RoomInfo => (
+            "Room Info  (Esc to close, Up/Down scroll)",
+            popup_room_info_lines(app)
+                .into_iter()
+                .map(Line::from)
+                .collect(),
+        ),
+        PopupKind::Status => (
+            "Status  (Esc to close)",
+            popup_status_lines(app)
+                .into_iter()
+                .map(Line::from)
+                .collect(),
+        ),
+        PopupKind::CommandResponse => {
+            // Cloned rather than borrowed: the arms above mutate `app`, so the
+            // match cannot hold a reference into it across all of them.
+            let response = app.pending_command_response.clone().unwrap_or_default();
+            (
+                "Command Response  (Esc to close)",
+                wrap_command_response(&response, area.width.saturating_sub(2))
+                    .into_iter()
+                    .map(Line::from)
+                    .collect(),
+            )
+        }
+        PopupKind::MediaPreview => unreachable!("media preview returned above"),
+    };
+    let max_scroll = lines.len().saturating_sub(page_size);
+    app.popup_scroll = app.popup_scroll.min(max_scroll);
+    app.frame.popup = Some(PopupView {
+        title,
+        area,
+        lines,
+        page_size,
+    });
+}
+
+/// Paint one frame from the state [`prepare`] resolved.
+///
+/// `draw` reads `App`. The `&mut` it still takes covers exactly three things,
+/// none of which any other code reads (#70):
+///
+/// 1. The one-shot render flags the update step sets and the renderer
+///    consumes — `clear_media_preview` and `force_terminal_clear`.
+/// 2. `prev_image_rects`, this frame's record of where pixel-protocol images
+///    landed, which only the next frame's ghost-clearing pass consults.
+/// 3. Demand-driven media fetch — `request_image` / `request_protocol` for the
+///    thumbnails and preview actually on screen. Which images those are is a
+///    fact about the painted frame, and the requests are coalesced and
+///    idempotent (ADR 0093).
+///
+/// Anything else — a page size, a scroll offset, a selection, the mode — must
+/// be settled in `prepare`, or a keystroke and a repaint will disagree about
+/// who decided it.
+pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
+    // On the frame immediately after the media-preview popup is closed, emit a
+    // targeted Clear over the region the popup occupied.  Sixel/iTerm2 pixels
+    // are not part of the ratatui cell model, so the cell-diff renderer cannot
+    // erase them; without this explicit clear a ghost image lingers until
+    // something else overwrites those cells.  Halfblocks are ordinary Unicode
+    // characters and are already handled by the normal diff pass.
+    if std::mem::take(&mut app.clear_media_preview)
+        && !matches!(app.picker.protocol_type(), ProtocolType::Halfblocks)
+    {
+        let ghost_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, frame.area());
+        frame.render_widget(Clear, ghost_area);
+    }
+
+    // Screen rects where a pixel-protocol image widget is drawn this frame.
+    // Compared against `app.prev_image_rects` at the end of `draw()` to erase
+    // ghost pixels left wherever an image was drawn last frame but not this one.
+    let mut frame_image_rects: Vec<Rect> = Vec::new();
+
+    // Measured by `prepare`, not remeasured here. `PaneAreas` is `Copy`, so
+    // this takes no borrow of `app` that the media dispatch below would fight.
+    let PaneAreas {
+        body: body_area,
+        accounts: accounts_area,
+        rooms: rooms_area,
+        messages: messages_area,
+        input: input_area,
+        input_lines: effective_input_lines,
+        rooms_wide,
+    } = app.frame.areas;
 
     // Accounts panel
     if let Some(accounts_area) = accounts_area {
-        let acct_page_size = accounts_area.height.saturating_sub(2).max(1) as usize;
-        app.accounts.page_size = acct_page_size;
-
-        let acct_search_query = match &app.mode {
-            Mode::Search(SearchKind::Accounts, q) => Some(q.to_lowercase()),
-            _ => None,
-        };
-
-        let all_acct_entries: Vec<(String, AccountSelection)> = std::iter::once((
-            AccountSelection::All.display_label(None),
-            AccountSelection::All,
-        ))
-        .chain(app.accounts.accounts.iter().enumerate().map(|(i, a)| {
-            let selection = AccountSelection::Account(i);
-            (selection.display_label(Some(&a.user_id)), selection)
-        }))
-        .filter(|(label, _)| {
-            acct_search_query
-                .as_ref()
-                .is_none_or(|q| label.to_lowercase().contains(q.as_str()))
-        })
-        .collect();
-
-        let acct_sel_pos = all_acct_entries
-            .iter()
-            .position(|(_, sel)| *sel == app.accounts.selected)
-            .unwrap_or(0);
-        let total_acct_items = all_acct_entries.len();
-
-        if acct_sel_pos < app.accounts.scroll {
-            app.accounts.scroll = acct_sel_pos;
-        } else if acct_page_size > 0 && acct_sel_pos >= app.accounts.scroll + acct_page_size {
-            app.accounts.scroll = acct_sel_pos + 1 - acct_page_size;
-        }
-        let acct_max_scroll = total_acct_items.saturating_sub(acct_page_size);
-        app.accounts.scroll = app.accounts.scroll.min(acct_max_scroll);
+        let acct_page_size = app.accounts.page_size;
         let acct_scroll = app.accounts.scroll;
 
-        let acct_items: Vec<ListItem> = all_acct_entries
+        let acct_items: Vec<ListItem> = app
+            .frame
+            .accounts
             .iter()
             .skip(acct_scroll)
             .take(acct_page_size)
@@ -253,39 +519,15 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     // Room list with account filter
     if let Some(rooms_area) = rooms_area {
-        let visible_indices = app.visible_room_indices();
         let show_account_label =
             app.active_account_filter().is_none() && app.accounts_panel_visible();
-        let rooms_selected_vis = app
-            .rooms
-            .selected
-            .and_then(|sel| visible_indices.iter().position(|&i| i == sel))
-            .unwrap_or(0);
-        let rows_available = rooms_area.height.saturating_sub(2) as usize;
-        let rooms_page_size = if rooms_wide {
-            rows_available.max(1)
-        } else {
-            (rows_available / 2).max(1)
-        };
-        // Pinned rooms are sorted to the front, so the leading run of visible
-        // rooms that are pinned marks the boundary for the separator (ADR 0038).
-        let pinned_visible_count = visible_indices
-            .iter()
-            .take_while(|&&i| app.is_room_pinned(&RoomKey::from(&app.rooms.rooms[i])))
-            .count();
-        app.rooms.page_size = rooms_page_size;
-        app.rooms.scroll = divider_aware_room_scroll(
-            app.rooms.scroll,
-            rooms_selected_vis,
-            rooms_page_size,
-            visible_indices.len(),
-            pinned_visible_count,
-        );
+        let rooms_page_size = app.rooms.page_size;
+        let pinned_visible_count = app.frame.pinned_rooms;
         let rooms_scroll = app.rooms.scroll;
 
         let separator_width = usize::from(rooms_area.width.saturating_sub(2)).max(1);
         let mut room_items: Vec<ListItem> = Vec::new();
-        for (vis_pos, &full_index) in visible_indices.iter().enumerate().skip(rooms_scroll) {
+        for (vis_pos, &full_index) in app.frame.rooms.iter().enumerate().skip(rooms_scroll) {
             if room_items.len() >= rooms_page_size {
                 break;
             }
@@ -421,13 +663,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         frame.render_widget(rooms, rooms_area);
     }
 
-    let message_page_size = usize::from(messages_area.height.saturating_sub(2)).max(1);
-    let message_width = usize::from(messages_area.width.saturating_sub(2)).max(1);
-    app.set_message_viewport(message_page_size, message_width);
-    // One layout per change, shared with the nav math rather than recomputed
-    // here every frame (#54, #52). Must follow the viewport write: `width` is
-    // one of the inputs its digest keys on.
-    app.ensure_message_layout();
+    let message_page_size = app.messages.page_size;
+    let message_width = app.messages.width;
     let selected_events = app.selected_events();
     let font_size = app.picker.font_size();
     // Built alongside the cached layout, not rederived here: this is the same
@@ -436,7 +673,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let image_thumb_rows = &app.messages.layout_image_thumb_rows;
     let layout = app
         .cached_message_layout()
-        .expect("ensure_message_layout stores one before returning");
+        .expect("ui::prepare fills the layout cache before every draw");
     let total_lines = layout
         .ranges
         .last()
@@ -670,7 +907,13 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
     }
 
-    let (command_line, command_title, mut cursor_col) = match &app.mode {
+    // A pure read: `prepare` has already acted on this same predicate, either by
+    // promoting the response to a popup or by discarding it. Draw consults it
+    // only to keep the entry line's trailing status out of the way of a
+    // response that is about to become (or has just become) a popup.
+    let command_response_will_popup = command_response_needs_popup(app, input_area);
+
+    let (command_line, command_title, cursor_col) = match &app.mode {
         Mode::Search(kind, q) => {
             let kind_label = match kind {
                 SearchKind::Rooms => "Rooms",
@@ -900,17 +1143,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .border_style(input_border),
         )
         .wrap(Wrap { trim: false });
-    if app.mode == Mode::Compose && app.pending_command_response.is_some() {
-        if command_response_will_popup {
-            app.mode = Mode::Popup(PopupKind::CommandResponse);
-            app.popup_scroll = 0;
-            cursor_col = None;
-        } else {
-            app.pending_command_response = None;
-        }
-    }
     if let Some(col) = cursor_col {
-        let inner_width = outer[1].width.saturating_sub(2) as usize;
+        let inner_width = input_area.width.saturating_sub(2) as usize;
         // In compose, the buffer can span multiple hard lines (Shift+Enter), so
         // resolve the cursor against the same layout the box renders; other input
         // modes are always a single (wrapping) logical line.
@@ -929,22 +1163,25 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             0
         };
         let input = input.scroll((scroll_row, 0));
-        frame.render_widget(input, outer[1]);
+        frame.render_widget(input, input_area);
         frame.set_cursor_position((
-            outer[1].x.saturating_add(1).saturating_add(vis_col as u16),
-            outer[1]
+            input_area
+                .x
+                .saturating_add(1)
+                .saturating_add(vis_col as u16),
+            input_area
                 .y
                 .saturating_add(1)
                 .saturating_add((vis_row as u16).saturating_sub(scroll_row)),
         ));
     } else {
-        frame.render_widget(input, outer[1]);
+        frame.render_widget(input, input_area);
     }
 
     if app.mode == Mode::SearchResults
         || (app.mode == Mode::SearchForm && app.search_results.is_some())
     {
-        render_search_results(frame, app, outer[0]);
+        render_search_results(frame, app, body_area);
     }
 
     if app.mode == Mode::SearchForm {
@@ -973,90 +1210,28 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         if let Some(rect) = render_media_preview(frame, app, frame.area()) {
             frame_image_rects.push(rect);
         }
-    } else if let Mode::Popup(kind) = app.mode {
-        let area = blocking_popup_area(app, frame.area()).unwrap_or_else(|| frame.area());
-        let command_response = app.pending_command_response.as_deref().unwrap_or_default();
-        frame.render_widget(Clear, area);
-        let page_size = usize::from(area.height.saturating_sub(2)).max(1);
-        let (popup_title, lines) = match kind {
-            PopupKind::Help => {
-                let lines = popup_help_lines(app);
-                let sel_line = help_line_of_selection(app.help_selection);
-                if sel_line < app.popup_scroll {
-                    app.popup_scroll = sel_line;
-                } else if sel_line >= app.popup_scroll.saturating_add(page_size) {
-                    app.popup_scroll = sel_line.saturating_add(1).saturating_sub(page_size);
-                }
-                ("Help  (Enter to select, Esc to close)", lines)
-            }
-            PopupKind::Shortcuts => (
-                "Shortcuts  (Esc to close)",
-                popup_shortcuts_lines(&app.shortcuts),
-            ),
-            PopupKind::UnreadThreads => {
-                let entries = app.unread_thread_entries();
-                app.sync_unread_thread_selection(&entries);
-                let (lines, ranges) = popup_unread_thread_lines(
-                    app,
-                    &entries,
-                    usize::from(area.width.saturating_sub(2)),
-                );
-                let entries_len = ranges.len();
-                if entries_len == 0 {
-                    app.unread_thread_selection = 0;
-                    app.unread_thread_selected = None;
-                } else {
-                    app.sync_unread_thread_selection(&entries);
-                }
-                if let Some(range) = ranges.get(app.unread_thread_selection) {
-                    if range.start < app.popup_scroll {
-                        app.popup_scroll = range.start;
-                    } else if range.end > app.popup_scroll.saturating_add(page_size) {
-                        app.popup_scroll = range.end.saturating_sub(page_size);
-                    }
-                }
-                ("Unread Threads  (Enter to open, Esc to close)", lines)
-            }
-            PopupKind::RoomInfo => (
-                "Room Info  (Esc to close, Up/Down scroll)",
-                popup_room_info_lines(app)
-                    .into_iter()
-                    .map(Line::from)
-                    .collect(),
-            ),
-            PopupKind::Status => (
-                "Status  (Esc to close)",
-                popup_status_lines(app)
-                    .into_iter()
-                    .map(Line::from)
-                    .collect(),
-            ),
-            PopupKind::CommandResponse => (
-                "Command Response  (Esc to close)",
-                wrap_command_response(command_response, area.width.saturating_sub(2))
-                    .into_iter()
-                    .map(Line::from)
-                    .collect(),
-            ),
-            PopupKind::MediaPreview => unreachable!("media preview handled above"),
-        };
-        let max_scroll = lines.len().saturating_sub(page_size);
-        app.popup_scroll = app.popup_scroll.min(max_scroll);
-        let visible_lines = lines
-            .into_iter()
+    } else if let Some(popup_view) = app.frame.popup.as_ref() {
+        // Body, rect and scroll were all settled by `prepare`; painting them
+        // cannot move the popup or its selection out from under the keystroke
+        // that arrives next (#70).
+        frame.render_widget(Clear, popup_view.area);
+        let visible_lines = popup_view
+            .lines
+            .iter()
             .skip(app.popup_scroll)
-            .take(page_size)
+            .take(popup_view.page_size)
+            .cloned()
             .collect::<Vec<_>>();
         let popup = Paragraph::new(visible_lines)
             .block(
                 Block::default()
                     .style(Style::default().bg(app.colors.popup_background))
-                    .title(popup_title)
+                    .title(popup_view.title)
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(app.colors.selected_room)),
             )
             .wrap(Wrap { trim: false });
-        frame.render_widget(popup, area);
+        frame.render_widget(popup, popup_view.area);
     }
 
     // Erase pixel-protocol ghosts: any cell an image occupied last frame but
@@ -2893,6 +3068,199 @@ mod tests {
     use std::collections::HashMap;
     use uuid::Uuid;
 
+    /// Drive one frame the way the main loop does: resolve the frame's state,
+    /// then paint it.
+    ///
+    /// Calling `draw` on its own is not a supported sequence and will panic on
+    /// the missing layout — `prepare` is what measures the panes and fills the
+    /// caches `draw` reads (#70). That the tests have to say so is the point:
+    /// before the split, every one of them was silently relying on the
+    /// renderer to compute the state it then asserted against.
+    fn draw_frame(terminal: &mut Terminal<TestBackend>, app: &mut App) {
+        terminal
+            .draw(|frame| {
+                prepare(app, frame.area());
+                draw(frame, app);
+            })
+            .expect("draw succeeds");
+    }
+
+    /// Screen the frame-resolution tests below measure against. Wide enough
+    /// for the three-column layout, so every pane is present.
+    const RESOLVE_AREA: Rect = Rect::new(0, 0, 120, 30);
+
+    /// Two accounts (so the accounts pane is shown at all) and enough rooms to
+    /// scroll.
+    fn app_for_frame_resolution() -> App {
+        let mut app = App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+        app.show_input_help = false;
+        app.status = Status::Info(String::new());
+        for i in 0..2 {
+            app.accounts.accounts.push(crate::api::AccountDto {
+                account_id: Uuid::from_u128(i as u128 + 1),
+                user_id: format!("@user{i}:example.com"),
+                state: crate::api::AccountState::Active,
+                device_id: None,
+                verified: Some(true),
+                backup: Default::default(),
+            });
+        }
+        for i in 0..40 {
+            app.rooms.rooms.push(RoomDto {
+                account_id: Uuid::from_u128(1),
+                account_user_id: Some("@user0:example.com".to_owned()),
+                room_id: format!("!room{i}:example.com"),
+                name: Some(format!("Room {i}")),
+                topic: None,
+                avatar_url: None,
+                canonical_alias: None,
+                last_activity_ts: 0,
+                last_event_id: None,
+            });
+        }
+        app.rooms.selected = Some(0);
+        app
+    }
+
+    /// Every viewport the key handlers page by is measured in the update step,
+    /// with nothing painted.
+    ///
+    /// This is the shape of #70. `PageDown` in the room list moves
+    /// `rooms.page_size` rooms and `sweep_visible_room_titles` fetches titles
+    /// for the window at `rooms.scroll`; while the renderer owned those
+    /// numbers, both read whatever the previous repaint had left behind, and
+    /// on the first keystroke of a session that was nothing at all.
+    #[test]
+    fn the_update_step_measures_every_pane_before_anything_paints() {
+        let mut app = app_for_frame_resolution();
+
+        // Nothing has drawn, so nothing has been measured: these are the
+        // placeholder defaults, which is precisely what the key handlers used
+        // to page by if a keystroke beat the first paint.
+        assert_eq!(app.rooms.page_size, 0);
+        assert_eq!(app.accounts.page_size, 1);
+        assert_eq!(app.messages.page_size, 1);
+
+        prepare(&mut app, RESOLVE_AREA);
+
+        // A 30-row screen less the entry box and the panel borders. The exact
+        // numbers matter less than that a full page is more than the one row
+        // `max(1)` used to floor these to.
+        assert!(
+            app.rooms.page_size > 1,
+            "room list should page by its measured height, got {}",
+            app.rooms.page_size
+        );
+        assert!(app.accounts.page_size > 1);
+        assert!(app.messages.page_size > 1);
+        assert!(
+            app.messages.width > 1,
+            "message width feeds the layout digest and the wrap"
+        );
+        assert_eq!(app.frame.rooms.len(), 40, "every room passes the filter");
+        assert_eq!(
+            app.frame.accounts.len(),
+            3,
+            "the two accounts plus the All row"
+        );
+
+        // The stored geometry has to be a real tiling of the screen, because
+        // `draw` now paints into it without remeasuring: three panes left to
+        // right above an entry box that spans the full width.
+        let areas = app.frame.areas;
+        let accounts = areas.accounts.expect("accounts pane is shown");
+        let rooms = areas.rooms.expect("rooms pane is shown");
+        assert_eq!(accounts.x, RESOLVE_AREA.x);
+        assert_eq!(rooms.x, accounts.right());
+        assert_eq!(areas.messages.x, rooms.right());
+        assert_eq!(areas.messages.right(), RESOLVE_AREA.right());
+        assert_eq!(areas.body.height + areas.input.height, RESOLVE_AREA.height);
+        assert_eq!(areas.input.width, RESOLVE_AREA.width);
+        assert_eq!(areas.input.height, areas.input_lines + 2, "plus borders");
+    }
+
+    /// Painting settles none of the state a keystroke reads.
+    ///
+    /// The guard for #70: `draw` may still consume the one-shot render flags
+    /// and record where images landed, but every number a key handler,
+    /// `sweep_visible_room_titles`, or the search paging math reads must be
+    /// exactly what `prepare` left.
+    #[test]
+    fn painting_settles_no_state_the_key_handlers_read() {
+        let mut app = app_for_frame_resolution();
+        app.mode = Mode::Popup(PopupKind::Help);
+        prepare(&mut app, RESOLVE_AREA);
+
+        let before = (
+            app.rooms.page_size,
+            app.rooms.scroll,
+            app.accounts.page_size,
+            app.accounts.scroll,
+            app.messages.page_size,
+            app.messages.width,
+            app.popup_scroll,
+            app.mode.clone(),
+            app.unread_thread_selection,
+            app.pending_command_response.clone(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(RESOLVE_AREA.width, RESOLVE_AREA.height))
+            .expect("terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw succeeds");
+
+        let after = (
+            app.rooms.page_size,
+            app.rooms.scroll,
+            app.accounts.page_size,
+            app.accounts.scroll,
+            app.messages.page_size,
+            app.messages.width,
+            app.popup_scroll,
+            app.mode.clone(),
+            app.unread_thread_selection,
+            app.pending_command_response.clone(),
+        );
+
+        assert_eq!(
+            before, after,
+            "draw must not decide state the update step already settled (#70)"
+        );
+    }
+
+    /// The popup scroll keys have no upper bound of their own — only the frame
+    /// resolution knows how many lines the popup has — so the clamp has to
+    /// happen before the frame that scrolls by it, not during.
+    #[test]
+    fn popup_scroll_is_clamped_before_the_frame_that_scrolls_by_it() {
+        let mut app = app_for_frame_resolution();
+        // Shortcuts rather than Help: Help's scroll follows its selection,
+        // which would settle the offset for reasons other than the clamp.
+        app.mode = Mode::Popup(PopupKind::Shortcuts);
+        // What `keymap`'s `saturating_add(8)` leaves behind after enough
+        // presses: past the end, with nothing having clamped it yet.
+        app.popup_scroll = 10_000;
+
+        prepare(&mut app, RESOLVE_AREA);
+
+        let popup = app.frame.popup.as_ref().expect("shortcuts popup resolved");
+        let max_scroll = popup.lines.len().saturating_sub(popup.page_size);
+        assert_eq!(
+            app.popup_scroll, max_scroll,
+            "an out-of-range scroll must be clamped by the update step"
+        );
+        assert!(
+            max_scroll < 10_000,
+            "the clamp has to actually bind for this test to mean anything"
+        );
+    }
+
     fn line_text(line: &Line<'_>) -> String {
         line.spans
             .iter()
@@ -3145,9 +3513,7 @@ mod tests {
 
         // First pass: let `draw` compute the reserved geometry and request the
         // encode, so the test never has to replicate the layout math.
-        terminal
-            .draw(|frame| draw(frame, &mut app))
-            .expect("draw succeeds");
+        draw_frame(&mut terminal, &mut app);
         let requested: Vec<_> = app.proto_cache.keys().cloned().collect();
         assert!(!requested.is_empty(), "draw should request an encode");
 
@@ -3158,9 +3524,7 @@ mod tests {
                 crate::app::ProtocolState::Failed("decode blew up".to_owned()),
             );
         }
-        terminal
-            .draw(|frame| draw(frame, &mut app))
-            .expect("draw succeeds");
+        draw_frame(&mut terminal, &mut app);
 
         let buffer = terminal.backend().buffer();
         let screen = (0..buffer.area.height)
@@ -3418,9 +3782,7 @@ mod tests {
         app.pending_command_response = Some(response.to_owned());
         let mut terminal = Terminal::new(TestBackend::new(40, 20)).expect("terminal");
 
-        terminal
-            .draw(|frame| draw(frame, &mut app))
-            .expect("draw succeeds");
+        draw_frame(&mut terminal, &mut app);
 
         assert_eq!(app.mode, Mode::Popup(PopupKind::CommandResponse));
         assert_eq!(app.pending_command_response.as_deref(), Some(response));
@@ -3470,9 +3832,7 @@ mod tests {
         );
 
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).expect("terminal");
-        terminal
-            .draw(|frame| draw(frame, &mut app))
-            .expect("draw succeeds");
+        draw_frame(&mut terminal, &mut app);
 
         let buffer = terminal.backend().buffer();
         let rendered = (0..buffer.area.height)
@@ -3500,9 +3860,7 @@ mod tests {
         app.input.buffer = "first\nsecond".to_owned();
         app.input.cursor = app.input.buffer.len();
         let mut terminal = Terminal::new(TestBackend::new(40, 20)).expect("terminal");
-        terminal
-            .draw(|frame| draw(frame, &mut app))
-            .expect("draw succeeds");
+        draw_frame(&mut terminal, &mut app);
 
         // Collect each rendered row as a string and locate the two hard lines.
         let buffer = terminal.backend().buffer();
@@ -3600,9 +3958,7 @@ mod tests {
         app.pending_command_response = Some("done".to_owned());
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
 
-        terminal
-            .draw(|frame| draw(frame, &mut app))
-            .expect("draw succeeds");
+        draw_frame(&mut terminal, &mut app);
 
         assert_eq!(app.mode, Mode::Compose);
         assert!(app.pending_command_response.is_none());
@@ -3623,9 +3979,7 @@ mod tests {
         app.pending_command_response = Some("recovery failed".to_owned());
         let mut terminal = Terminal::new(TestBackend::new(30, 20)).expect("terminal");
 
-        terminal
-            .draw(|frame| draw(frame, &mut app))
-            .expect("draw succeeds");
+        draw_frame(&mut terminal, &mut app);
 
         assert_eq!(app.mode, Mode::Popup(PopupKind::CommandResponse));
     }
