@@ -398,6 +398,117 @@ describe('room-open summary', () => {
     perfMark('threads:refresh:start', { roomId: ROOM })
   }
 
+  /**
+   * The capture behind #389: two head loads, `attempts=2`, and nothing on the
+   * line to say whether either had landed or whether the pane was still showing
+   * its placeholder — so "server slow", "link stalled" and "page arrived but
+   * was thrown away" all read the same.
+   */
+  it('shows a head that landed while the pane still says "Loading messages…"', async () => {
+    openRoom()
+    const head = { kind: 'head', roomId: ROOM, thread: false }
+    perfMark('timeline:fetch:start', head)
+    perfMark('timeline:fetch:start', head)
+    settleCompetitors()
+    perfMark('room-page:timeline-render', {
+      roomId: ROOM,
+      loading: true,
+      visible: 0,
+      hasRows: false,
+    })
+    perfMark('timeline:fetch:end', { ...head, ok: true })
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'superseded',
+    })
+    // A thread panel's head load, and another room's, are not this open's.
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: true,
+      outcome: 'applied',
+    })
+    perfMark('timeline:head:settled', {
+      roomId: '!other:example.org',
+      thread: false,
+      outcome: 'applied',
+    })
+    await frames()
+
+    const summary = roomOpenSummary()
+    expect(summary).not.toBeNull()
+    expect(summary!.rows).toBeNull()
+    expect(summary!.loading).toBe(true)
+    expect(summary!.heads).toBe('superseded+pending')
+    expect(summary!.attempts).toBe(2)
+  })
+
+  /**
+   * A warm store outlives leaving the room (ADR 0085) and nothing aborts its
+   * head load, so a load from an abandoned open can settle during the next open
+   * of the same room. Its outcome belongs to neither line (PR #390 review).
+   */
+  it('ignores a head load that started before this open', async () => {
+    const earlier = performance.now() - 1
+    openRoom()
+    const head = { kind: 'head', roomId: ROOM, thread: false }
+    perfMark('timeline:fetch:start', head)
+    settleCompetitors()
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'superseded',
+      startedAt: earlier,
+    })
+    perfMark('timeline:fetch:end', { ...head, ok: true })
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'applied',
+      startedAt: performance.now(),
+    })
+    perfMark('room-page:timeline-render', {
+      roomId: ROOM,
+      loading: false,
+      visible: 1,
+      hasRows: true,
+    })
+    await frames()
+
+    const summary = roomOpenSummary()
+    expect(summary).not.toBeNull()
+    expect(summary!.heads).toBe('applied')
+  })
+
+  /**
+   * iOS pauses `performance.now()` while the phone sleeps, so a line's offset
+   * cannot be dated from the session header; and a socket reconnecting during
+   * the open is what doubled its head loads. Both belong on the line itself.
+   */
+  it("stamps the line with wall-clock time and the socket's reconnects", () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-12T18:25:44.000Z'))
+    try {
+      perfMark('live:open', { reconnect: false })
+      openRoom()
+      perfMark('timeline:fetch:start', { kind: 'head', thread: false })
+      perfMark('live:close')
+      perfMark('live:open', { reconnect: true })
+      vi.advanceTimersByTime(10_000)
+
+      const summary = roomOpenSummary()
+      expect(summary).not.toBeNull()
+      expect(summary!.phase).toBe('waiting')
+      expect(summary!.wall).toBe('2026-09-12T18:25:54.000Z')
+      expect(summary!.live).toBe('open')
+      expect(summary!.reconnects).toBe(1)
+      expect(summary!.heads).toBe('pending')
+      expect(summary!.loading).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('names the three requests the timeline page competed with', async () => {
     openRoom()
     perfMark('timeline:fetch:start', { kind: 'head', thread: false })
