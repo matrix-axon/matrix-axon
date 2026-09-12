@@ -155,49 +155,13 @@ jobs:
   # exercises an unstable Matrix protocol with real OAuth and E2EE secrets.
   matrix-oauth:
     if: github.event_name == 'push' || github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      CARGO_INCREMENTAL: 0
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo registry and build
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-matrix-oauth-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-matrix-oauth-
-
-      - name: Run Matrix OAuth QR interoperability
-        run: |
-          failed=0
-          for lane in api acquire grant unsupported; do
-            if ! scripts/matrix-oauth-test.sh "$lane"; then
-              echo "::error title=Matrix OAuth QR smoke::$lane lane failed"
-              failed=1
-            fi
-          done
-          exit "$failed"
-
-      # OAuth and encryption secrets exist only in the harness's throwaway
-      # directory. Never upload failure artifacts from this job.
-      - name: Notify axon-developer room of result
-        if: ${{ always() }}
-        continue-on-error: true
-        env:
-          NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
-          NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
-          SMOKE_LANE: matrix-oauth-all
-          JOB_LABEL: matrix-oauth
-          STATUS: ${{ job.status }}
-        run: ./scripts/notify-smoke-result.sh
+    uses: ./.github/workflows/matrix-oauth.yml
+    with:
+      suite: matrix-oauth-all
+      notify: true
+    secrets:
+      NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
+      NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
 
   # Exercises the notification path itself, by hand, without paying for a lane.
   # Reaching the webhook at all is the whole result, so this job deliberately

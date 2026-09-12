@@ -60,47 +60,6 @@ jobs:
 
   matrix-oauth:
     if: inputs.suite != 'redecryption'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      CARGO_INCREMENTAL: 0
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo registry and build
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-matrix-oauth-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-matrix-oauth-
-
-      - name: Run Matrix OAuth QR interoperability
-        env:
-          MATRIX_OAUTH_SUITE: ${{ inputs.suite }}
-        run: |
-          case "$MATRIX_OAUTH_SUITE" in
-            matrix-oauth-api) lanes=(api) ;;
-            matrix-oauth-acquire) lanes=(acquire) ;;
-            matrix-oauth-grant) lanes=(grant) ;;
-            matrix-oauth-unsupported) lanes=(unsupported) ;;
-            matrix-oauth-all|all) lanes=(api acquire grant unsupported) ;;
-            *) echo "unknown Matrix OAuth suite" >&2; exit 2 ;;
-          esac
-          failed=0
-          for lane in "${lanes[@]}"; do
-            if ! scripts/matrix-oauth-test.sh "$lane"; then
-              echo "::error title=Matrix OAuth QR integration::$lane lane failed"
-              failed=1
-            fi
-          done
-          exit "$failed"
-
-      # These lanes handle OAuth and Matrix secrets in a throwaway directory.
-      # The harness scans Axon's log, deletes the directory, and deliberately
-      # uploads no failure artifact that could persist protocol material.
+    uses: ./.github/workflows/matrix-oauth.yml
+    with:
+      suite: ${{ inputs.suite }}

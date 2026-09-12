@@ -8,7 +8,7 @@
 
 use std::{
     fs::OpenOptions,
-    future::IntoFuture,
+    future::{Future, IntoFuture},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
@@ -48,6 +48,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(120);
 // Leave room for the surrounding HTTP and process teardown before escalating.
 const AXON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 const BODY_LIMIT: usize = 1024 * 1024;
+const FLOW_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 struct Config {
@@ -149,6 +150,7 @@ impl AxonProcess {
         let store_key = format!("matrix-oauth-smoke-{}", Uuid::new_v4());
         let bearer_token = issue_axon_token(&config, &store_key)?;
         secrets.remember(config.compatibility_token.clone());
+        secrets.remember(config.matrix_password.clone());
         secrets.remember(store_key.clone());
         secrets.remember(bearer_token.clone());
 
@@ -185,8 +187,15 @@ impl AxonProcess {
             .stderr(Stdio::from(stderr))
             .spawn()
             .context("spawn axon-server")?;
+        let port = self.config.axon_port;
         self.child = Some(child);
-        wait_for_health(self.config.axon_port).await
+        wait_for_health(
+            port,
+            self.child
+                .as_mut()
+                .expect("spawned Axon child remains owned"),
+        )
+        .await
     }
 
     async fn stop(&mut self) -> Result<()> {
@@ -274,7 +283,17 @@ fn apply_axon_env(command: &mut Command, config: &Config, store_key: &str) {
         );
 }
 
-async fn wait_for_health(port: u16) -> Result<()> {
+fn ensure_axon_is_running(child: &mut Child) -> Result<()> {
+    if let Some(status) = child
+        .try_wait()
+        .context("inspect axon-server during startup")?
+    {
+        bail!("axon-server exited before becoming healthy with {status}");
+    }
+    Ok(())
+}
+
+async fn wait_for_health(port: u16, child: &mut Child) -> Result<()> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
@@ -282,6 +301,7 @@ async fn wait_for_health(port: u16) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/healthz");
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     loop {
+        ensure_axon_is_running(child)?;
         if http
             .get(&url)
             .send()
@@ -290,6 +310,7 @@ async fn wait_for_health(port: u16) -> Result<()> {
         {
             return Ok(());
         }
+        ensure_axon_is_running(child)?;
         if tokio::time::Instant::now() >= deadline {
             bail!("axon-server did not become healthy");
         }
@@ -334,17 +355,13 @@ impl Api {
         }
         let response = request.send().await.context("Axon API request failed")?;
         let status = response.status();
-        if response
-            .content_length()
-            .is_some_and(|size| size > BODY_LIMIT as u64)
-        {
-            bail!("Axon API response exceeded the harness limit");
-        }
-        let bytes = response.bytes().await.context("read Axon API response")?;
-        if bytes.len() > BODY_LIMIT {
-            bail!("Axon API response exceeded the harness limit");
-        }
-        let text = String::from_utf8(bytes.to_vec()).context("Axon API response was not UTF-8")?;
+        let bytes = bounded_body(
+            response,
+            "read Axon API response failed",
+            "Axon API response exceeded the harness limit",
+        )
+        .await?;
+        let text = String::from_utf8(bytes).context("Axon API response was not UTF-8")?;
         Ok((status, text))
     }
 
@@ -548,6 +565,22 @@ struct GrantFlow {
     check_code: Option<String>,
     verification_uri: Option<String>,
     error_code: Option<String>,
+}
+
+trait FlowState {
+    fn stage(&self) -> &str;
+}
+
+impl FlowState for AcquireFlow {
+    fn stage(&self) -> &str {
+        &self.stage
+    }
+}
+
+impl FlowState for GrantFlow {
+    fn stage(&self) -> &str {
+        &self.stage
+    }
 }
 
 #[derive(Deserialize)]
@@ -764,22 +797,37 @@ async fn bounded_html(response: reqwest::Response) -> Result<(Url, String)> {
     if !response.status().is_success() {
         bail!("MAS returned an unexpected status");
     }
+    let url = response.url().clone();
+    let bytes = bounded_body(
+        response,
+        "read MAS page failed",
+        "MAS page exceeded the harness limit",
+    )
+    .await?;
+    let body = String::from_utf8(bytes).map_err(|_| anyhow!("MAS page was not UTF-8"))?;
+    Ok((url, body))
+}
+
+async fn bounded_body(
+    mut response: reqwest::Response,
+    read_error: &'static str,
+    limit_error: &'static str,
+) -> Result<Vec<u8>> {
     if response
         .content_length()
         .is_some_and(|size| size > BODY_LIMIT as u64)
     {
-        bail!("MAS page exceeded the harness limit");
+        bail!("{limit_error}");
     }
-    let url = response.url().clone();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| anyhow!("read MAS page failed"))?;
-    if bytes.len() > BODY_LIMIT {
-        bail!("MAS page exceeded the harness limit");
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| anyhow!(read_error))? {
+        if chunk.len() > BODY_LIMIT.saturating_sub(body.len()) {
+            bail!("{limit_error}");
+        }
+        body.extend_from_slice(&chunk);
     }
-    let body = String::from_utf8(bytes.to_vec()).map_err(|_| anyhow!("MAS page was not UTF-8"))?;
-    Ok((url, body))
+    Ok(body)
 }
 
 fn extract_csrf(page: &str) -> Result<String> {
@@ -852,7 +900,7 @@ async fn drive_peer_grant(
                     secrets.remember(user_code);
                     let uri = verification_uri.to_string();
                     secrets.remember(uri.clone());
-                    assert_acquire_waits_for_approval(api, flow_id).await?;
+                    assert_waits_for_approval(|| api.acquire(flow_id), "acquire").await?;
                     approver.act(&uri, approval).await?;
                 }
                 Some(GrantLoginProgress::Done) | None => progress_ended = true,
@@ -902,7 +950,7 @@ async fn drive_fresh_login(
                     let state = wait_grant_stage(api, account_id, flow_id, "waiting_for_authorization", FLOW_TIMEOUT).await?;
                     let uri = state.verification_uri.ok_or_else(|| anyhow!("grant flow omitted its authorization URI"))?;
                     secrets.remember(uri.clone());
-                    assert_grant_waits_for_approval(api, account_id, flow_id).await?;
+                    assert_waits_for_approval(|| api.grant(account_id, flow_id), "grant").await?;
                     approver.act(&uri, Approval::Consent).await?;
                 }
                 Some(LoginProgress::Done) | None => progress_ended = true,
@@ -919,20 +967,61 @@ fn parse_check_code(value: Option<&str>) -> Result<u8> {
         .map_err(|_| anyhow!("flow returned an invalid check code"))
 }
 
-async fn assert_acquire_waits_for_approval(api: &Api, flow_id: Uuid) -> Result<()> {
+async fn assert_waits_for_approval<T, F, Fut>(mut fetch: F, flow: &'static str) -> Result<()>
+where
+    T: FlowState,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
     tokio::time::sleep(Duration::from_secs(2)).await;
-    if api.acquire(flow_id).await?.stage != "waiting_for_authorization" {
-        bail!("acquire flow completed without explicit authorization-server approval");
+    if fetch().await?.stage() != "waiting_for_authorization" {
+        bail!("{flow} flow completed without explicit authorization-server approval");
     }
     Ok(())
 }
 
-async fn assert_grant_waits_for_approval(api: &Api, account_id: Uuid, flow_id: Uuid) -> Result<()> {
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    if api.grant(account_id, flow_id).await?.stage != "waiting_for_authorization" {
-        bail!("grant flow completed without explicit authorization-server approval");
+#[derive(Clone, Copy)]
+enum FlowWait<'a> {
+    Stage(&'a str),
+    Terminal,
+}
+
+fn is_terminal(stage: &str) -> bool {
+    matches!(stage, "failed" | "cancelled" | "done")
+}
+
+async fn wait_for_flow<T, F, Fut>(
+    mut fetch: F,
+    target: FlowWait<'_>,
+    timeout: Duration,
+    flow: &'static str,
+) -> Result<T>
+where
+    T: FlowState,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let state = fetch().await?;
+        let terminal = is_terminal(state.stage());
+        match target {
+            FlowWait::Stage(wanted) if state.stage() == wanted => return Ok(state),
+            FlowWait::Terminal if terminal => return Ok(state),
+            FlowWait::Stage(_) if terminal => {
+                bail!("{flow} flow reached an unexpected terminal stage");
+            }
+            FlowWait::Stage(_) | FlowWait::Terminal => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let target_name = match target {
+                FlowWait::Stage(_) => "stage",
+                FlowWait::Terminal => "terminal",
+            };
+            bail!("{flow} {target_name} wait timed out");
+        }
+        tokio::time::sleep(FLOW_POLL_INTERVAL).await;
     }
-    Ok(())
 }
 
 async fn wait_acquire_stage(
@@ -941,20 +1030,13 @@ async fn wait_acquire_stage(
     wanted: &str,
     timeout: Duration,
 ) -> Result<AcquireFlow> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let state = api.acquire(flow_id).await?;
-        if state.stage == wanted {
-            return Ok(state);
-        }
-        if matches!(state.stage.as_str(), "failed" | "cancelled" | "done") {
-            bail!("acquire flow reached an unexpected terminal stage");
-        }
-        if tokio::time::Instant::now() >= deadline {
-            bail!("acquire stage wait timed out");
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    wait_for_flow(
+        || api.acquire(flow_id),
+        FlowWait::Stage(wanted),
+        timeout,
+        "acquire",
+    )
+    .await
 }
 
 async fn wait_grant_stage(
@@ -964,34 +1046,23 @@ async fn wait_grant_stage(
     wanted: &str,
     timeout: Duration,
 ) -> Result<GrantFlow> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let state = api.grant(account_id, flow_id).await?;
-        if state.stage == wanted {
-            return Ok(state);
-        }
-        if matches!(state.stage.as_str(), "failed" | "cancelled" | "done") {
-            bail!("grant flow reached an unexpected terminal stage");
-        }
-        if tokio::time::Instant::now() >= deadline {
-            bail!("grant stage wait timed out");
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    wait_for_flow(
+        || api.grant(account_id, flow_id),
+        FlowWait::Stage(wanted),
+        timeout,
+        "grant",
+    )
+    .await
 }
 
 async fn wait_acquire_terminal(api: &Api, flow_id: Uuid) -> Result<AcquireFlow> {
-    let deadline = tokio::time::Instant::now() + FLOW_TIMEOUT;
-    loop {
-        let state = api.acquire(flow_id).await?;
-        if matches!(state.stage.as_str(), "failed" | "cancelled" | "done") {
-            return Ok(state);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            bail!("acquire terminal wait timed out");
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    wait_for_flow(
+        || api.acquire(flow_id),
+        FlowWait::Terminal,
+        FLOW_TIMEOUT,
+        "acquire",
+    )
+    .await
 }
 
 async fn wait_grant_terminal(
@@ -1000,17 +1071,13 @@ async fn wait_grant_terminal(
     flow_id: Uuid,
     timeout: Duration,
 ) -> Result<GrantFlow> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let state = api.grant(account_id, flow_id).await?;
-        if matches!(state.stage.as_str(), "failed" | "cancelled" | "done") {
-            return Ok(state);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            bail!("grant terminal wait timed out");
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    wait_for_flow(
+        || api.grant(account_id, flow_id),
+        FlowWait::Terminal,
+        timeout,
+        "grant",
+    )
+    .await
 }
 
 async fn acquire_axon(
@@ -1489,9 +1556,82 @@ fn combine_run_outcomes(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        process::{Command, Stdio},
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
+
     use anyhow::anyhow;
 
-    use super::{assert_mas_decision, combine_run_outcomes, Approval};
+    use super::{
+        assert_mas_decision, bounded_body, combine_run_outcomes, wait_for_health, Approval,
+        BODY_LIMIT,
+    };
+
+    #[tokio::test]
+    async fn bounded_body_rejects_an_unfinished_chunked_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("read test server address");
+        let (release_send, release_receive) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .expect("write test headers");
+            let payload = vec![b'x'; BODY_LIMIT + 1];
+            write!(stream, "{:x}\r\n", payload.len()).expect("write test chunk length");
+            let _ = stream.write_all(&payload);
+            let _ = stream.write_all(b"\r\n");
+            let _ = stream.flush();
+            let _ = release_receive.recv_timeout(Duration::from_secs(5));
+        });
+
+        let response = reqwest::get(format!("http://{address}"))
+            .await
+            .expect("request chunked test response");
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            bounded_body(response, "test read failed", "test body exceeded limit"),
+        )
+        .await;
+        let _ = release_send.send(());
+        server.join().expect("join test server");
+
+        let error = result
+            .expect("body limit must be enforced before the stream ends")
+            .expect_err("oversized chunked body must fail")
+            .to_string();
+        assert_eq!(error, "test body exceeded limit");
+    }
+
+    #[tokio::test]
+    async fn health_wait_reports_a_child_that_exited() {
+        let mut child = Command::new(std::env::current_exe().expect("find test executable"))
+            .arg("--help")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn short-lived test child");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let error = tokio::time::timeout(Duration::from_secs(2), wait_for_health(9, &mut child))
+            .await
+            .expect("exited child must be reported without the startup timeout")
+            .expect_err("exited child must fail its health wait")
+            .to_string();
+        let _ = child.wait();
+
+        assert!(error.starts_with("axon-server exited before becoming healthy with "));
+    }
 
     #[test]
     fn run_outcomes_retain_lane_and_disclosure_failures() {

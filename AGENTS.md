@@ -65,6 +65,7 @@ matrix-axon/
     lint-and-clippy.yml      # required PR/main Rust gate: cargo fmt + clippy + test
     lint-and-test.yml        # cargo fmt + clippy + test
     integration.yml          # selectable E2EE re-decryption and Matrix OAuth QR real-service suites
+    matrix-oauth.yml         # reusable Matrix OAuth QR real-service workflow used by integration and smoke
     smoke.yml                # S1 black-box smoke (PR 1: TUI PTY suite; PR 2 added the server gate)
   .github/actions/           # actions relied on by the workflows
     check-environment/       # check environment on local runners before proceeding
