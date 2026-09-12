@@ -232,9 +232,10 @@ Condition 2 of the gate is a fact about client state — which threads the user 
     What it costs is more persistent unread, with one sharp edge: a thread read in Element would otherwise stay flagged here forever.
 - **So axon consumes the thread-scoped receipts other clients send** (MSC3771), which arrive verbatim through ADR 0056's passthrough and were previously parsed away.
   Axon's own receipts are always unthreaded, so a `thread_id` on this user's own receipt can only have come from another client — there is no echo to suppress.
-  It is recorded as a durable `thread_read_markers` entry rather than an in-memory clear, because receipts are live-only and never replayed: a session-scoped clear would come back on the next reload, which is the complaint it exists to answer.
+  It is recorded as a durable `thread_read_markers` entry rather than an in-memory clear, because nothing backfills a receipt missed while no client was connected: a session-scoped clear would come back on the next reload, which is the complaint it exists to answer.
+  The "never replayed" half of that reasoning, as this section first stated it, is false — see the "Follow-up: replayed threaded receipts" addendum below, which is what the assumption cost.
   This is also a better source of truth than the marker fallback ever was — it is what the homeserver actually knows about what the user read.
-  That path is live-only — nothing backfills the receipts Synapse already holds, so a thread read in Element before the tab opened stays unread here and blocks the room until it is opened again (#213).
+  That path only hears what arrives while a client is connected — nothing backfills the receipts Synapse already holds, so a thread read in Element before the tab opened stays unread here and blocks the room until it is opened again (#213).
   What remains of #209 is the cross-room half: the unread-thread store is fed from `RoomPage` and from live frames, so on a cold load it knows only about rooms visited this session.
 - **Flushing device state on `visibilitychange` changes timing elsewhere, not just durability.**
   Debounced writes had no unload flush at all, so a reload inside the 800 ms window dropped them — a thread just opened came back unread, and drafts had always had the same exposure.
