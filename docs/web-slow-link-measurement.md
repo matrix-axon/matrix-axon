@@ -85,6 +85,7 @@ The `:req` lines below add the other requests it shared the link with.
 - `attempts` — entry fetches for this one open. Above 1 is H4.
 - `heads` — what each head load did, in the order they settled: `applied`, `superseded` (a sibling load won the race), `declined` or `failed`, followed by `pending` for each still in flight.
   `timeline:fetch:end` only says a request came back; this says whether its page was used.
+  Only loads started during this open count: a load left over from an earlier visit to the same room can settle mid-open, and is not this open's.
   **`applied` or `superseded` with `loading=true` and no `rows` is H5.**
 - `loading` — whether the pane was still showing "Loading messages…" at its last render (`null` if it never rendered).
 - `live` / `reconnects` — the socket's state when the line was written, and how many times it reconnected during the open.

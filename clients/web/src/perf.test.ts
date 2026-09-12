@@ -444,6 +444,43 @@ describe('room-open summary', () => {
   })
 
   /**
+   * A warm store outlives leaving the room (ADR 0085) and nothing aborts its
+   * head load, so a load from an abandoned open can settle during the next open
+   * of the same room. Its outcome belongs to neither line (PR #390 review).
+   */
+  it('ignores a head load that started before this open', async () => {
+    const earlier = performance.now() - 1
+    openRoom()
+    const head = { kind: 'head', roomId: ROOM, thread: false }
+    perfMark('timeline:fetch:start', head)
+    settleCompetitors()
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'superseded',
+      startedAt: earlier,
+    })
+    perfMark('timeline:fetch:end', { ...head, ok: true })
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'applied',
+      startedAt: performance.now(),
+    })
+    perfMark('room-page:timeline-render', {
+      roomId: ROOM,
+      loading: false,
+      visible: 1,
+      hasRows: true,
+    })
+    await frames()
+
+    const summary = roomOpenSummary()
+    expect(summary).not.toBeNull()
+    expect(summary!.heads).toBe('applied')
+  })
+
+  /**
    * iOS pauses `performance.now()` while the phone sleeps, so a line's offset
    * cannot be dated from the session header; and a socket reconnecting during
    * the open is what doubled its head loads. Both belong on the line itself.

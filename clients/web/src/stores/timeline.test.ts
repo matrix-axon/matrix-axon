@@ -211,8 +211,14 @@ describe('createTimelineStore', () => {
         const marks = performance.getEntriesByName(
           'axon:timeline:head:settled',
         ) as PerformanceMark[]
+        // `startedAt` lets the readout drop a settle from an abandoned open.
         expect(marks.map((mark) => mark.detail)).toEqual([
-          { roomId: ROOM, thread: false, outcome: 'applied' },
+          {
+            roomId: ROOM,
+            thread: false,
+            outcome: 'applied',
+            startedAt: expect.any(Number),
+          },
         ])
       } finally {
         setPerfEnabled(false)

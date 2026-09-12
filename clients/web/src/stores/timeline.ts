@@ -1317,6 +1317,10 @@ export function createTimelineStore(
     // `atEnd` flips inside the load's success path, never eagerly — a failed
     // head fetch must leave a jumped-back slice marked as history.
     loadLatest: () => {
+      // When the load began, so the readout can tell a settle from an
+      // abandoned open of this room apart from one belonging to the current
+      // open: this store outlives the page, and nothing aborts its fetch.
+      const startedAt = performance.now()
       const load = events.value.length === 0 ? replaceSlice({}) : refreshHead()
       // The room-open readout needs the outcome, because `timeline:fetch:end`
       // only says the request came back, not whether its page was applied.
@@ -1329,7 +1333,11 @@ export function createTimelineStore(
             roomId,
             thread: threadRoot !== undefined,
             outcome,
+            startedAt,
           }),
+        // Defensive: neither loader rejects today (both resolve `'failed'`),
+        // but this chain is discarded, so a future rejection must not surface
+        // as an unhandled one.
         () => {},
       )
       return load

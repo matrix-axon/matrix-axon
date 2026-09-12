@@ -652,8 +652,16 @@ function noteRoomOpen(
       }
       break
     case 'timeline:head:settled':
-      // A thread panel's head load opens over an already-painted room.
-      if (detail?.thread !== true && typeof detail?.outcome === 'string') {
+      // A thread panel's head load opens over an already-painted room. And a
+      // load from an abandoned open of this same room can settle during this
+      // one — the store outlives the page and nothing aborts its fetch — so a
+      // load that started before this open belongs to neither line; `headStarts`
+      // never counted it either (PR #390 review).
+      if (
+        detail?.thread !== true &&
+        typeof detail?.outcome === 'string' &&
+        !(typeof detail.startedAt === 'number' && detail.startedAt < open.start)
+      ) {
         open.heads.push(detail.outcome)
       }
       break
