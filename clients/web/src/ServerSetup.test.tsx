@@ -152,4 +152,48 @@ describe('ServerSetup', () => {
       vi.useRealTimers()
     }
   })
+
+  it('still tries plain http after the https probe times out', async () => {
+    // The case the fallback exists for: a LAN box that only speaks plain http
+    // and stalls the TLS handshake rather than refusing it. Sharing one abort
+    // signal across both candidates meant the https timeout fired and the http
+    // attempt was handed an already-aborted signal, so it rejected without
+    // reaching the network and the fallback never ran at all.
+    vi.useFakeTimers()
+    try {
+      const fetchImpl = vi.fn<FetchFn>((url, init) => {
+        // As a real fetch does, and as the http plugin does: a signal that has
+        // already fired is refused before anything reaches the network.
+        if (init?.signal?.aborted === true) {
+          return Promise.reject(new DOMException('aborted', 'AbortError'))
+        }
+        if (String(url).startsWith('https:')) {
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            )
+          })
+        }
+        return Promise.resolve(new Response('{"status":"ok"}', { status: 200 }))
+      })
+      const { input, connect, onConnected, storage } = setup(fetchImpl)
+
+      fireEvent.input(input, { target: { value: 'axon.local:8080' } })
+      fireEvent.click(connect())
+      await vi.advanceTimersByTimeAsync(8000)
+
+      await vi.waitFor(() =>
+        expect(onConnected).toHaveBeenCalledWith('http://axon.local:8080'),
+      )
+      expect(storage.getItem(SERVER_URL_KEY)).toBe('http://axon.local:8080')
+      expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+        'https://axon.local:8080/healthz',
+        'http://axon.local:8080/healthz',
+      ])
+      // The second probe got a live bound of its own, not the spent one.
+      expect(fetchImpl.mock.calls[1]?.[1]?.signal?.aborted).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

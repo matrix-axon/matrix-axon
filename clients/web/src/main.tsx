@@ -1,6 +1,7 @@
 import { render } from 'preact'
 import './index.css'
 import { AppRoot } from './app-root.tsx'
+import { browserPlatform, isTauriRuntime } from './platform/index.ts'
 import { BUILD_INFO } from './build-info.ts'
 import {
   browserReloadEnvironment,
@@ -35,4 +36,20 @@ window.addEventListener('vite:preloadError', (event) => {
   reloadOnce(BUILD_INFO.version, CHUNK_TARGET, reloadEnv)
 })
 
-render(<AppRoot />, document.getElementById('app')!)
+const root = document.getElementById('app')!
+
+/**
+ * Pick the transport before the first render, because `createServices()` builds
+ * the whole graph around it (ADR 0102 § 2).
+ *
+ * The browser branch is deliberately synchronous — no promise, no dynamic
+ * import — so the boot path ADR 0085 and ADR 0087 measure is byte-for-byte what
+ * it was. Only the shell pays for its own plugins, and only it waits a tick.
+ */
+if (isTauriRuntime()) {
+  void import('./platform/tauri.ts').then(({ tauriPlatform }) => {
+    render(<AppRoot platform={tauriPlatform()} />, root)
+  })
+} else {
+  render(<AppRoot platform={browserPlatform()} />, root)
+}
