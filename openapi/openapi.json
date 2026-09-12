@@ -4,8 +4,8 @@
     "title": "Axon API",
     "description": "Read API for a personal Matrix state layer. Account-scoped resources nest under /v1/accounts/{account_id}; /v1/rooms is the cross-account aggregate.",
     "license": {
-      "name": "LicenseRef-axon",
-      "identifier": "LicenseRef-axon"
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
     },
     "version": "0.1.0"
   },

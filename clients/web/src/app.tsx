@@ -145,6 +145,7 @@ interface PendingMatrixJoin {
 export function App({
   services,
   platform,
+  storage,
 }: {
   services?: AppServices
   /**
@@ -152,14 +153,17 @@ export function App({
    * rather than defaulted here: the shell selects its platform at boot, and a
    * default would silently rebuild the graph on the browser's `fetch` — the
    * server probe would succeed and every request after it would go through the
-   * webview, failing on CORS or as mixed content (ADR 0102 § 2).
+   * webview, failing on CORS or as mixed content (ADR 0102 § 2). The symptom
+   * is a "Load failed" banner and a socket stuck reconnecting, with nothing
+   * naming the cause.
    */
   platform?: Platform
+  storage?: Storage
 }) {
   const svc = useMemo(
-    // Third positional: (storage, sessionStorage, platform). Passing it second
-    // would land it in the sessionStorage slot.
-    () => services ?? createServices(undefined, undefined, platform),
+    // Positional: (storage, sessionStorage, platform). Passing the platform
+    // second would land it in the sessionStorage slot.
+    () => services ?? createServices(storage, undefined, platform),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- build the real graph exactly once
     [],
   )
@@ -605,6 +609,27 @@ function SidebarPaneHandle({
  * it on a room switch would throw away its scroll position and the room list's
  * session-only name/account filters.
  */
+/**
+ * Whether this href leaves the app.
+ *
+ * Same-origin links are the client's own routes and must stay in-window; a
+ * `matrix:` link is handled by the caller before this is reached. Anything
+ * http(s) elsewhere is a link to the web, which in a packaged build has to be
+ * handed to the user's real browser.
+ */
+function isExternalHref(href: string): boolean {
+  let url: URL
+  try {
+    url = new URL(href, window.location.href)
+  } catch {
+    return false
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return false
+  }
+  return url.origin !== window.location.origin
+}
+
 function ShellChrome() {
   const location = useLocation()
   const { path, query } = location
@@ -616,6 +641,7 @@ function ShellChrome() {
     spaces,
     threadUnread,
     verification,
+    platform: svcPlatform,
   } = useServices()
   const mode = layoutMode(path)
   perfMark('shell:render', { path, mode })
@@ -947,14 +973,32 @@ function ShellChrome() {
       })
   }, [location, pendingMatrixJoin, rooms])
   useEffect(() => {
+    // `openExternal` is null exactly when the browser's own defaults are right,
+    // which makes it the honest test for "this build has tabs". A packaged
+    // build has one window, no tabs and no back button.
+    const hasTabs = svcPlatform.openExternal === null
     const onClick = (event: MouseEvent) => {
+      if (event.defaultPrevented) {
+        return
+      }
+      // `auxclick` covers every non-primary button, right-click included, and
+      // a context menu is not a request to open anything. Only the middle
+      // button is a navigation gesture.
+      if (event.type === 'auxclick' && event.button !== 1) {
+        return
+      }
+      // A modified or non-primary click belongs to the browser: ctrl/cmd opens
+      // a tab, shift a window, and taking those here would break both — see
+      // `app.test.tsx`. None of that exists in the shell, where the same click
+      // instead sends the only window to the page and strands the user with no
+      // way back, so there every click is ours to answer.
       if (
-        event.defaultPrevented ||
-        event.button !== 0 ||
-        event.ctrlKey ||
-        event.metaKey ||
-        event.altKey ||
-        event.shiftKey
+        hasTabs &&
+        (event.button !== 0 ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.altKey ||
+          event.shiftKey)
       ) {
         return
       }
@@ -967,6 +1011,16 @@ function ShellChrome() {
       }
       const reference = parseMatrixRoomReference(anchor.href)
       if (reference === null) {
+        // Not a room link. In a browser the anchor's own `target="_blank"` is
+        // already right and this must not interfere; in a packaged build there
+        // is no tab to open into, so an untouched external link navigates the
+        // *app window* to that page and the app is gone until restarted.
+        // `openExternal` is null exactly when the default is correct.
+        const openExternal = svcPlatform.openExternal
+        if (openExternal !== null && isExternalHref(anchor.href)) {
+          event.preventDefault()
+          openExternal(anchor.href)
+        }
         return
       }
       const accountId = accountIdForRoomEntry(
@@ -990,12 +1044,23 @@ function ShellChrome() {
       )
     }
     document.addEventListener('click', onClick)
-    return () => document.removeEventListener('click', onClick)
+    // A middle click raises `auxclick`, not `click`, in every engine this runs
+    // on. In a browser that is the tab-opening gesture and must be left alone;
+    // in the shell it is one more way to lose the window, so listen for it
+    // there and nowhere else.
+    if (!hasTabs) {
+      document.addEventListener('auxclick', onClick)
+    }
+    return () => {
+      document.removeEventListener('click', onClick)
+      document.removeEventListener('auxclick', onClick)
+    }
   }, [
     accounts.accounts.value,
     location,
     path,
     rooms,
+    svcPlatform,
     settings.activeAccountId.value,
   ])
 

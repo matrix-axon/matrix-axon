@@ -17,11 +17,19 @@ members = [
     "smoke/tui",
 ]
 
+# The Tauri shell (ADR 0102, M-W12) carries its own [workspace] table and is
+# deliberately not a member of this one: `cargo build --workspace` runs on
+# every platform in cross-build.yml, and `cargo clippy --all-targets` runs in
+# the pre-push gate, none of which should need webkit2gtk or should be building
+# a desktop app. Listed here so cargo treats the nested package as excluded on
+# purpose rather than reporting it as an unlisted workspace member.
+exclude = ["clients/web/src-tauri"]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.86"
-license = "LicenseRef-axon"  # TODO: pick license for this repository
+license = "Apache-2.0"
 
 [workspace.dependencies]
 axon-core   = { path = "crates/axon-core" }

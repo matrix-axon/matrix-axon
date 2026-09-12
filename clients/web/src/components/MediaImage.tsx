@@ -72,7 +72,7 @@ export function MediaImage({
   content?: unknown
 }) {
   const viewer = useMediaViewer()
-  const { media: service } = useServices()
+  const { media: service, platform } = useServices()
   const [status, setStatus] = useState<'idle' | 'error'>('idle')
   const { displayUrl, thumbnail } = useThumbnailFallback(media, status)
   // Retry generation. Part of the media cache key, so bumping it re-fetches
@@ -130,7 +130,7 @@ export function MediaImage({
   const saveUndisplayable = async () => {
     setDownloading(true)
     setDownloadError(null)
-    const outcome = await downloadMedia(service, accountId, media)
+    const outcome = await downloadMedia(service, accountId, media, platform)
     setDownloading(false)
     if (outcome === 'failed') {
       setDownloadError('Download failed')
