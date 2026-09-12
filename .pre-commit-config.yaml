@@ -117,8 +117,10 @@ repos:
         #   LICENSE.md      license text is not ours to reflow
         #   docs/adr/       historical records; reformatting costs blame and
         #                   buys consistency in files nobody edits after merge
-        #   clients/web/*   mirror of clients/web/.prettierignore
-        exclude: '^(THIRDPARTY\.md|LICENSE\.md|docs/adr/|clients/web/(dist/|pnpm-lock\.yaml|src/api/schema\.d\.ts|public/emoji-picker-data-en\.json))'
+        #   clients/web/*   mirror of clients/web/.prettierignore, including
+        #                   src-tauri/{target,gen}: cargo build output, which
+        #                   contains JavaScript tauri-build generates and embeds
+        exclude: '^(THIRDPARTY\.md|LICENSE\.md|docs/adr/|clients/web/(dist/|pnpm-lock\.yaml|src/api/schema\.d\.ts|public/emoji-picker-data-en\.json|src-tauri/(target|gen)/))'
         pass_filenames: true
         stages: [pre-push]
       # Before any pnpm-backed hook: the web hooks use the repo's real
@@ -166,6 +168,7 @@ repos:
         # Same reasoning as rustfmt: gates web-test and web-build below.
         fail_fast: true
         files: &web_sources '^(\.github/workflows/web-lint-and-test\.yml|clients/web/|\.pre-commit-config\.yaml)'
+        exclude: &shell_excluded_from_web "^clients/web/src-tauri/"
         pass_filenames: false
         stages: [pre-push]
       - id: web-test
@@ -173,6 +176,7 @@ repos:
         language: system
         entry: pnpm --dir clients/web test
         files: *web_sources
+        exclude: *shell_excluded_from_web
         pass_filenames: false
         stages: [pre-push]
       - id: web-build
@@ -184,6 +188,7 @@ repos:
         # unit tests do not. A YAML alias cannot extend a scalar, so this one
         # is spelled out -- scripts/check-hook-filters.py pins both shapes.
         files: '^(\.github/workflows/web-lint-and-test\.yml|openapi/openapi\.json|clients/web/|\.pre-commit-config\.yaml)'
+        exclude: *shell_excluded_from_web
         pass_filenames: false
         stages: [pre-push]
       # Workspace members: crates/*, clients/tui, smoke/{tui,server,local-stack}.
@@ -240,6 +245,34 @@ repos:
         language: system
         entry: cargo test --all
         files: *rust_files
+        pass_filenames: false
+        stages: [pre-push]
+      # The Tauri shell (ADR 0102, M-W12) is its own cargo workspace, so none of
+      # the three hooks above reach it -- *rust_files covers crates/, clients/tui
+      # and smoke/ only, and it is excluded from the root workspace on purpose so
+      # `cargo build --workspace` never has to find webkit2gtk. It therefore
+      # needs its own gate, filtered so that a contributor who never touches
+      # src-tauri never needs the system libraries it links against.
+      - id: shell-fmt
+        name: rustfmt (tauri shell)
+        language: system
+        entry: cargo fmt --manifest-path clients/web/src-tauri/Cargo.toml --check
+        fail_fast: true
+        files: &shell_files '^clients/web/src-tauri/(src/.*\.rs|build\.rs|Cargo\.(toml|lock)|tauri\.conf\.json|capabilities/.*\.json)$'
+        pass_filenames: false
+        stages: [pre-push]
+      - id: shell-clippy
+        name: clippy (tauri shell)
+        language: system
+        entry: cargo clippy --manifest-path clients/web/src-tauri/Cargo.toml --all-targets -- -D warnings
+        files: *shell_files
+        pass_filenames: false
+        stages: [pre-push]
+      - id: shell-test
+        name: cargo test (tauri shell)
+        language: system
+        entry: cargo test --manifest-path clients/web/src-tauri/Cargo.toml
+        files: *shell_files
         pass_filenames: false
         stages: [pre-push]
       # Last, and a no-op unless RUN_SMOKE names a lane. Docker + minutes.
