@@ -44,5 +44,5 @@ export function AppRoot({
       />
     )
   }
-  return <App services={services} platform={platform} />
+  return <App services={services} platform={platform} storage={storage} />
 }

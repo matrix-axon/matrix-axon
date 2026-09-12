@@ -1,5 +1,6 @@
 import { computed, signal, type ReadonlySignal } from '@preact/signals'
 import { decodeFrame, type LiveFrame } from '../api/frames'
+import { perfMark } from '../perf'
 import type { LiveSocket } from '../platform'
 
 /**
@@ -156,6 +157,9 @@ export function createLiveConnection(
     socket = opened
     opened.onopen = () => {
       openedAtMs = Date.now()
+      // The room-open readout counts these: a reconnect mid-open re-issues
+      // the room's head load (ADR 0061 gap-fill).
+      perfMark('live:open', { reconnect: everConnected })
       if (everConnected) {
         reconnects.value += 1
       }
@@ -170,6 +174,7 @@ export function createLiveConnection(
     opened.onclose = () => {
       // Ignore a stale socket's close (one replaced by stop() or a reconnect).
       if (socket === opened) {
+        perfMark('live:close')
         // Only a connection that stayed up counts as recovery; an
         // accept-then-close cycle keeps growing the backoff.
         if (
