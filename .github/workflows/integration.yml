@@ -1,12 +1,27 @@
 name: Integration test
 
-# End-to-end test of the M3c re-decryption queue and encrypted media proxy
-# against a real Synapse. It's slower than the unit/lint lane (it pulls Synapse
-# + Postgres images and runs a full seed → sync → recover → media-fetch flow),
-# so it lives in its own workflow rather than gating every push.
+# Real-service integration suites that are too expensive for the unit/lint lane.
+# The original lane covers the M3c re-decryption queue and encrypted media proxy.
+# ADR 0097 adds pinned Synapse + MAS API, acquisition, grant, and unsupported
+# Matrix OAuth QR lanes. This workflow selects them manually; smoke.yml also
+# runs all four after main pushes and nightly. The secret-bearing OAuth lanes
+# deliberately upload no artifacts in either workflow.
 
 on:
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Which real-service integration suite to run
+        type: choice
+        default: redecryption
+        options:
+          - redecryption
+          - matrix-oauth-api
+          - matrix-oauth-acquire
+          - matrix-oauth-grant
+          - matrix-oauth-unsupported
+          - matrix-oauth-all
+          - all
 
 permissions:
   contents: read
@@ -16,10 +31,11 @@ env:
 
 jobs:
   integration:
+    if: inputs.suite == 'redecryption' || inputs.suite == 'all'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -41,3 +57,9 @@ jobs:
         run: scripts/integration-test.sh
         env:
           TIMEOUT: 180
+
+  matrix-oauth:
+    if: inputs.suite != 'redecryption'
+    uses: ./.github/workflows/matrix-oauth.yml
+    with:
+      suite: ${{ inputs.suite }}
