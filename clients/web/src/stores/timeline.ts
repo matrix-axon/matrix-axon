@@ -334,6 +334,18 @@ export function createTimelineStore(
    * of two racing replacements the *older* response could win (WCR-03).
    */
   let sliceGeneration = 0
+  /**
+   * The generation of the newest replacement that moves the slice somewhere
+   * other than the head — a jump, a date jump, or `resumeAtHead`. A head load
+   * issued before one of these must not paint: the reader asked to be elsewhere.
+   */
+  let parkedGeneration = 0
+  /**
+   * The issuing generation of the newest head page applied. Head loads ask for
+   * the same thing, so whichever lands first may paint — but not one issued
+   * before a head that already has, whose rows would be older.
+   */
+  let headGeneration = 0
   const collapsedRelationTargets = new Map<string, string>()
 
   /**
@@ -528,8 +540,26 @@ export function createTimelineStore(
     // timeline on every reconnect (see `refreshHead`).
     loading.value = true
     const generation = ++sliceGeneration
+    const head = query.at_ts === undefined
+    if (!head) {
+      parkedGeneration = generation
+    }
     const page = await fetchPage(query)
-    if (page !== null && generation === sliceGeneration) {
+    // A jump is owned by the newest replacement alone. A head load is also
+    // owned past a *sibling head load*, since both ask for the same page:
+    // waiting on the newest alone let a sibling stalled on a slow link hold
+    // "Loading messages…" over a page that had already arrived.
+    const owns = head
+      ? parkedGeneration < generation && headGeneration < generation
+      : generation === sliceGeneration
+    if (page !== null && owns) {
+      if (head && headGeneration > parkedGeneration) {
+        // A sibling head painted first, and the reader may already be
+        // scrolling it: fold this page in as a gap-fill would, not replace.
+        const outcome = foldHead(page, generation)
+        loading.value = false
+        return outcome
+      }
       events.value = page.events
       nextCursor.value = page.next
       reachedStart.value = page.next === null
@@ -537,18 +567,20 @@ export function createTimelineStore(
       // flag before the fetch resolves let a failed load leave `atEnd` true
       // while the slice was still parked in history, and live frames then
       // spliced "now" onto "then". A jump's page ends at `at_ts`, in history.
-      reachedEnd.value = query.at_ts === undefined
+      reachedEnd.value = head
+      if (head) {
+        headGeneration = generation
+      }
       resolveReplyTargets(page.events)
+      loading.value = false
+      return 'applied'
     }
     // A superseding replacement owns the flag now; racing it here would
     // unveil the stale slice while the newer page is still in flight.
     if (generation === sliceGeneration) {
       loading.value = false
     }
-    if (page === null) {
-      return 'failed'
-    }
-    return generation === sliceGeneration ? 'applied' : 'superseded'
+    return page === null ? 'failed' : 'superseded'
   }
 
   async function replaceSliceForDate(
@@ -558,6 +590,7 @@ export function createTimelineStore(
   ): Promise<void> {
     loading.value = true
     const generation = ++sliceGeneration
+    parkedGeneration = generation
     let page = await fetchPage({ at_ts: endTs })
     let anchors = page === null ? [] : dateJumpAnchors(page.events, anchor)
     while (
@@ -643,6 +676,30 @@ export function createTimelineStore(
     if (generation !== sliceGeneration) {
       return 'superseded'
     }
+    return foldHead(page, generation)
+  }
+
+  /**
+   * `refreshHead`'s reconciliation, for a head page issued at `issued`. Also
+   * where a sibling head load lands when another already painted.
+   *
+   * Clears `loading` when it applies, unless a jump is still the newest
+   * replacement: a live frame can reach an empty slice while the first page is
+   * in flight, which sends the gap-fill here rather than through
+   * `replaceSlice`, and a painted head with the placeholder still over it was a
+   * room stuck on "Loading messages…".
+   */
+  function foldHead(
+    page: { events: EventDto[]; next: string | null },
+    issued: number,
+  ): HeadLoadOutcome {
+    const painted = (): HeadLoadOutcome => {
+      headGeneration = Math.max(headGeneration, issued)
+      if (parkedGeneration < issued) {
+        loading.value = false
+      }
+      return 'applied'
+    }
     const loaded = events.value
     const headIds = new Set(page.events.map((e) => e.event_id))
     const overlaps = loaded.some((e) => headIds.has(e.event_id))
@@ -671,7 +728,7 @@ export function createTimelineStore(
       // The slice *is* the head now, wherever it was parked before.
       reachedEnd.value = true
       resolveReplyTargets(page.events)
-      return 'applied'
+      return painted()
     }
     // Overlap: merge. No generation bump — an in-flight `loadOlder` prepend
     // still applies, since the old history and cursor survive.
@@ -685,7 +742,7 @@ export function createTimelineStore(
     // The merged slice provably ends at the head just fetched.
     reachedEnd.value = true
     resolveReplyTargets(page.events)
-    return 'applied'
+    return painted()
   }
 
   /**
@@ -1377,6 +1434,7 @@ export function createTimelineStore(
     resumeAtHead() {
       // Discard results from requests issued against the parked cursor.
       sliceGeneration += 1
+      parkedGeneration = sliceGeneration
       events.value = events.value.filter(
         (event) => event.localEcho !== undefined,
       )

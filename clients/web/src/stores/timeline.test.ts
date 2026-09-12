@@ -191,6 +191,131 @@ describe('createTimelineStore', () => {
     })
   })
 
+  /**
+   * Two head loads for the same room ask for the same thing, so whichever lands
+   * first paints. Waiting only for the *newest* one let a request stalled on a
+   * cell link hold "Loading messages…" up indefinitely over a page that had
+   * already arrived — the room open that stuck on an iPhone until the user
+   * backed out and re-entered.
+   */
+  describe('concurrent head loads', () => {
+    const page = (events: EventDto[]) =>
+      HttpResponse.json({ data: { events, next_cursor: null } })
+
+    it('paints the earlier head load when a later sibling stalls', async () => {
+      let calls = 0
+      server.use(
+        http.get(TIMELINE_PATH, async () => {
+          calls += 1
+          if (calls > 1) {
+            await new Promise(() => {})
+          }
+          return page([event('$1', 100)])
+        }),
+      )
+      const store = makeStore()
+
+      const first = store.loadLatest()
+      void store.loadLatest() // stalls, and never settles
+
+      expect(await first).toBe('applied')
+      expect(calls).toBe(2)
+      expect(store.loading.value).toBe(false)
+      expect(store.events.value.map((e) => e.event_id)).toEqual(['$1'])
+    })
+
+    it('folds a later sibling into the page an earlier one painted', async () => {
+      let releaseSecond!: () => void
+      const secondGate = new Promise<void>((resolve) => {
+        releaseSecond = resolve
+      })
+      let calls = 0
+      server.use(
+        http.get(TIMELINE_PATH, async () => {
+          calls += 1
+          if (calls === 1) {
+            return page([event('$1', 100)])
+          }
+          await secondGate
+          return page([event('$2', 200), event('$1', 100)])
+        }),
+      )
+      const store = makeStore()
+
+      const first = store.loadLatest()
+      const second = store.loadLatest()
+      expect(await first).toBe('applied')
+      releaseSecond()
+
+      expect(await second).toBe('applied')
+      expect(store.loading.value).toBe(false)
+      expect(store.events.value.map((e) => e.event_id)).toEqual(['$1', '$2'])
+    })
+
+    it('clears loading when a gap-fill paints over a live frame before the first page', async () => {
+      let releaseFirst!: () => void
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve
+      })
+      let calls = 0
+      server.use(
+        http.get(TIMELINE_PATH, async () => {
+          calls += 1
+          if (calls === 1) {
+            await firstGate
+          }
+          return page([event('$live', 200), event('$1', 100)])
+        }),
+      )
+      const store = makeStore()
+
+      const first = store.loadLatest() // stalled
+      // A frame reaches the empty slice, so the reconnect gap-fill that follows
+      // takes `refreshHead`'s path rather than `replaceSlice`'s.
+      store.ingestLive(event('$live', 200))
+      expect(await store.loadLatest()).toBe('applied')
+      expect(store.loading.value).toBe(false)
+
+      releaseFirst()
+      expect(await first).toBe('superseded')
+      expect(store.loading.value).toBe(false)
+      expect(store.events.value.map((e) => e.event_id)).toEqual(['$1', '$live'])
+    })
+
+    it('does not let a head load unveil the pane under a jump still in flight', async () => {
+      let releaseHead!: () => void
+      const headGate = new Promise<void>((resolve) => {
+        releaseHead = resolve
+      })
+      let releaseJump!: () => void
+      const jumpGate = new Promise<void>((resolve) => {
+        releaseJump = resolve
+      })
+      server.use(
+        http.get(TIMELINE_PATH, async ({ request }) => {
+          if (new URL(request.url).searchParams.get('at_ts') === null) {
+            await headGate
+            return page([event('$head', 900)])
+          }
+          await jumpGate
+          return page([event('$old', 100)])
+        }),
+      )
+      const store = makeStore()
+
+      const head = store.loadLatest()
+      const jump = store.jumpTo(100)
+      releaseHead()
+
+      expect(await head).toBe('superseded')
+      expect(store.loading.value).toBe(true)
+      releaseJump()
+      await jump
+      expect(store.loading.value).toBe(false)
+      expect(store.events.value.map((e) => e.event_id)).toEqual(['$old'])
+    })
+  })
+
   it('loadOlder prepends and flags the room start', async () => {
     server.use(
       http.get(TIMELINE_PATH, ({ request }) => {

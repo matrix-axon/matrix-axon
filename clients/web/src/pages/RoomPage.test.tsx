@@ -216,6 +216,7 @@ function renderRoom(
     rooms?: RoomDto[]
     roomsPending?: boolean
     roomId?: string
+    services?: ReturnType<typeof testServices>
     storage?: Storage
     url?: string
   } = {},
@@ -271,7 +272,8 @@ function renderRoom(
     '',
     options.url ?? `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
   )
-  const services = testServices({ storage: options.storage })
+  const services =
+    options.services ?? testServices({ storage: options.storage })
   const utils = render(routedRoomPage(services))
   return { services, ...utils }
 }
@@ -4644,5 +4646,73 @@ describe('RoomPage', () => {
       expect(queryByText('body of $new')).toBeNull()
       expect(await findByText('body of $jump')).toBeTruthy()
     })
+  })
+})
+
+/**
+ * The reconnect gap-fill (ADR 0061) refetches the head when the socket comes
+ * back. Once a session had reconnected at all — on a phone, any trip to the
+ * background — it also fired on every room mount, doubling the mount effect's
+ * head load; the two then raced, and a stalled second request held "Loading
+ * messages…" over a page that had already arrived.
+ */
+describe('RoomPage reconnect gap-fill', () => {
+  afterEach(() => server.events.removeAllListeners())
+
+  /** Drop the socket and let the backoff reopen it: one real reconnect. */
+  function reconnect(services: ReturnType<typeof testServices>) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      if (services.sockets.length === 0) {
+        services.live.start()
+        services.sockets[0].emitOpen()
+      }
+      services.sockets.at(-1)!.emitClose()
+      vi.runOnlyPendingTimers()
+      services.sockets.at(-1)!.emitOpen()
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+
+  function countHeadLoads(): () => number {
+    let count = 0
+    server.events.on('request:start', ({ request }) => {
+      const url = new URL(request.url)
+      if (
+        url.pathname.endsWith('/timeline') &&
+        !url.searchParams.has('cursor') &&
+        !url.searchParams.has('at_ts')
+      ) {
+        count += 1
+      }
+    })
+    return () => count
+  }
+
+  it('does not refetch the head on mount after an earlier reconnect', async () => {
+    const services = testServices()
+    reconnect(services)
+    expect(services.live.reconnects.value).toBe(1)
+    const headLoads = countHeadLoads()
+
+    const { findByText } = renderRoom([event('$1', T0)], { services })
+    expect(await findByText('body of $1')).toBeTruthy()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(headLoads()).toBe(1)
+  })
+
+  it('still refetches the head when the socket reconnects in the room', async () => {
+    const services = testServices()
+    services.live.start()
+    services.sockets[0].emitOpen()
+    const { findByText } = renderRoom([event('$1', T0)], { services })
+    expect(await findByText('body of $1')).toBeTruthy()
+    const headLoads = countHeadLoads()
+
+    reconnect(services)
+
+    await waitFor(() => expect(headLoads()).toBe(1))
   })
 })
