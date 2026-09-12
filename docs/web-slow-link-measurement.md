@@ -34,6 +34,7 @@ They predict different fixes, which is why this is measured rather than guessed.
 | **H2** | No timeout floor — a request stalls and nothing bounds it      | `phase: waiting`, or a `total` clustering near ~30 s / ~60 s rather than scaling with size |
 | **H3** | Media and reply-target contention saturate the link            | many `/v1/media/*` and `/events/{id}` entries overlapping the open                         |
 | **H4** | Reconnect loop re-triggers the mount fetches                   | `attempts` above 1                                                                         |
+| **H5** | A head page arrives but the pane keeps its placeholder         | `heads` includes `applied` or `superseded` while `loading=true` and `rows` is null         |
 
 H1 and H2 are the leading candidates and are not mutually exclusive.
 
@@ -50,7 +51,7 @@ Timings only: the marks that carry room and account identifiers are never writte
 Cleared on sign-out with the rest of the cache.
 
 ```
-boot:room-open  phase=settled rows=980 net=940 q=780 conn=0 ttfb=120 xfer=40 reqs=31 kb=402 list=3120 pending=null members=8800 threads=610 people=4200 attempts=1 warm=false
+boot:room-open  phase=settled rows=980 net=940 q=780 conn=0 ttfb=120 xfer=40 reqs=31 kb=402 list=3120 pending=null members=8800 threads=610 people=4200 attempts=1 warm=false heads=applied loading=false live=open reconnects=0 wall=2026-09-12T18:25:44.123Z
 boot:room-open:req  route=accounts/{account}/rooms/{id}/members total=8800 wait=7900 conn=0 ttfb=120 xfer=780 bytes=41000 gzip=true proto=h2 cors=false
 ```
 
@@ -82,6 +83,14 @@ The `:req` lines below add the other requests it shared the link with.
   `?event=` deep link, whose load `RoomPage`'s mount effect hands to the jump effect), or `paint` (rows appeared with no fetch this recognised).
   A missing line usually means none of the three was reached.
 - `attempts` — entry fetches for this one open. Above 1 is H4.
+- `heads` — what each head load did, in the order they settled: `applied`, `superseded` (a sibling load won the race), `declined` or `failed`, followed by `pending` for each still in flight.
+  `timeline:fetch:end` only says a request came back; this says whether its page was used.
+  **`applied` or `superseded` with `loading=true` and no `rows` is H5.**
+- `loading` — whether the pane was still showing "Loading messages…" at its last render (`null` if it never rendered).
+- `live` / `reconnects` — the socket's state when the line was written, and how many times it reconnected during the open.
+  A reconnect landing mid-open re-issues the head load, which is one way `attempts` reaches 2.
+- `wall` — wall-clock time the line was written.
+  **Use this, not the offset, to find the open in a server log.** iOS pauses the offset clock while the phone sleeps, so adding an offset to the session header's start time drifts by however long it slept.
 - `warm` — a re-entry served from the ADR 0085 phase 1 store. **A warm line is
   not a cold open** and must not be read as one.
 - `phase` — `settled`, or `waiting` if the timeline page had still not landed

@@ -439,6 +439,20 @@ interface RoomOpen {
   roomId: string | null
   /** Head fetches issued for this open. More than one is the reconnect-loop signal. */
   attempts: number
+  /** Of those, the `head` kind — what `heads` counts as still pending. */
+  headStarts: number
+  /**
+   * What each head load did, in the order they settled.
+   *
+   * `timeline:fetch:end` only says a request came back. A page can come back
+   * and still be thrown away (a sibling load superseded it), which is how a room
+   * sat on "Loading messages…" with its timeline already fetched (#389).
+   */
+  heads: string[]
+  /** The pane's `loading` flag at its last render; null if it never rendered. */
+  loading: boolean | null
+  /** Socket reconnects that landed during this open. */
+  reconnects: number
   /** When the head fetch settled — the request that alone gates first paint. */
   head: number | null
   /**
@@ -508,6 +522,12 @@ let roomOpen: RoomOpen | null = null
  */
 const inFlight = { list: false, members: false, threads: false }
 
+/**
+ * The live socket's state as of its last mark — global for the same reason as
+ * `inFlight`: it connects during boot, before any room open exists to watch it.
+ */
+let liveState: 'open' | 'closed' | null = null
+
 function detailOf(detail: unknown): Record<string, unknown> | undefined {
   return typeof detail === 'object' && detail !== null
     ? (detail as Record<string, unknown>)
@@ -548,6 +568,12 @@ function noteRoomOpen(
     case 'threads:refresh:end':
       inFlight.threads = false
       break
+    case 'live:open':
+      liveState = 'open'
+      break
+    case 'live:close':
+      liveState = 'closed'
+      break
     default:
       break
   }
@@ -568,6 +594,10 @@ function noteRoomOpen(
       warm: detail?.warm === true,
       roomId: typeof detail?.roomId === 'string' ? detail.roomId : null,
       attempts: 0,
+      headStarts: 0,
+      heads: [],
+      loading: null,
+      reconnects: 0,
       head: null,
       headAt: null,
       via: null,
@@ -617,6 +647,20 @@ function noteRoomOpen(
       if (roomEntryFetch) {
         open.attempts += 1
       }
+      if (detail?.kind === 'head' && detail.thread !== true) {
+        open.headStarts += 1
+      }
+      break
+    case 'timeline:head:settled':
+      // A thread panel's head load opens over an already-painted room.
+      if (detail?.thread !== true && typeof detail?.outcome === 'string') {
+        open.heads.push(detail.outcome)
+      }
+      break
+    case 'live:open':
+      if (detail?.reconnect === true) {
+        open.reconnects += 1
+      }
       break
     case 'timeline:fetch:end':
       if (roomEntryFetch && !open.settled) {
@@ -636,6 +680,9 @@ function noteRoomOpen(
       open.previews += 1
       break
     case 'room-page:timeline-render':
+      if (typeof detail?.loading === 'boolean') {
+        open.loading = detail.loading
+      }
       // `hasRows` and not merely "rendered": the pane renders while empty too,
       // and counting that as a paint would flatter every cold open.
       if (open.rows === null && detail?.hasRows === true) {
@@ -785,6 +832,14 @@ function emitRoomOpen(phase: 'settled' | 'waiting'): void {
     pending: pendingOf(open),
     attempts: open.attempts,
     warm: open.warm,
+    heads: headsOf(open),
+    loading: open.loading,
+    live: liveState,
+    reconnects: open.reconnects,
+    // Wall clock, because the offset cannot be dated: iOS pauses
+    // `performance.now()` while the phone sleeps, so offset + session start
+    // drifts from real time by however long it slept.
+    wall: new Date().toISOString(),
   })
   summariseRequests(entries, headEntry)
   if (phase === 'settled') {
@@ -897,6 +952,20 @@ function roomHeadEntry(
     }
   }
   return best
+}
+
+/**
+ * `heads` as one field: outcomes in settle order, then `pending` for each head
+ * fetch that has not settled. `superseded+pending` with `loading=true` is a
+ * page that arrived and was thrown away while the pane waited on a sibling.
+ */
+function headsOf(open: RoomOpen): string | null {
+  const pending = Math.max(0, open.headStarts - open.heads.length)
+  const names = [
+    ...open.heads,
+    ...Array.from({ length: pending }, () => 'pending'),
+  ]
+  return names.length === 0 ? null : names.join('+')
 }
 
 /** The requested-but-unsettled competitors at emit time, or `null` if none. */

@@ -1316,8 +1316,24 @@ export function createTimelineStore(
     // slice — the reconnect gap-fill — merges instead (WCR-05).
     // `atEnd` flips inside the load's success path, never eagerly — a failed
     // head fetch must leave a jumped-back slice marked as history.
-    loadLatest: () =>
-      events.value.length === 0 ? replaceSlice({}) : refreshHead(),
+    loadLatest: () => {
+      const load = events.value.length === 0 ? replaceSlice({}) : refreshHead()
+      // The room-open readout needs the outcome, because `timeline:fetch:end`
+      // only says the request came back, not whether its page was applied.
+      // Marked beside the returned promise rather than chained into it: an
+      // extra microtask before callers resolve is the perturbation
+      // `fetchPage`'s comment warns about.
+      load.then(
+        (outcome) =>
+          perfMark('timeline:head:settled', {
+            roomId,
+            thread: threadRoot !== undefined,
+            outcome,
+          }),
+        () => {},
+      )
+      return load
+    },
     jumpTo: async (atTs: number) => {
       // The page at `atTs` ends somewhere in history. Pessimistic on purpose:
       // a jump near the present costs one `loadNewer` that comes back empty
