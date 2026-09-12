@@ -30,6 +30,7 @@ use axon_core::{
     ResolvedPowerLevels,
 };
 use axon_store::Store;
+use futures_util::future::FutureExt;
 use futures_util::StreamExt;
 use uuid::Uuid;
 
@@ -98,25 +99,42 @@ where
         .execute(store.pool())
         .await
         .expect("clear space_order");
-    body().await;
-    match previous {
-        Some(row) => {
-            store
-                .upsert_instance_preference("space_order", &row.value)
-                .await
-                .expect("restore space_order");
-        }
+    // Catch a panic from the wrapped test so we still restore and unlock.
+    // A session advisory lock survives `Drop` of a pooled connection, so
+    // leaking it turns one assertion failure into a hung later test.
+    let panicked = std::panic::AssertUnwindSafe(body())
+        .catch_unwind()
+        .await
+        .err();
+    let restore_err = match &previous {
+        Some(row) => store
+            .upsert_instance_preference("space_order", &row.value)
+            .await
+            .err()
+            .map(|err| err.to_string()),
         None => {
             sqlx_core::query::query("DELETE FROM instance_preferences WHERE key = 'space_order'")
                 .execute(store.pool())
                 .await
-                .expect("keep space_order unset");
+                .err()
+                .map(|err| err.to_string())
         }
+    };
+    let unlock_err =
+        sqlx_core::query::query("SELECT pg_advisory_unlock(hashtext('axon.test.space_order'))")
+            .execute(&mut *lock_conn)
+            .await
+            .err()
+            .map(|err| err.to_string());
+    if let Some(payload) = panicked {
+        std::panic::resume_unwind(payload);
     }
-    sqlx_core::query::query("SELECT pg_advisory_unlock(hashtext('axon.test.space_order'))")
-        .execute(&mut *lock_conn)
-        .await
-        .expect("advisory unlock");
+    if let Some(err) = restore_err {
+        panic!("restore space_order: {err}");
+    }
+    if let Some(err) = unlock_err {
+        panic!("advisory unlock: {err}");
+    }
 }
 
 /// One recorded call to the stub, with the arguments the handler passed through.

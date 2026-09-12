@@ -16,12 +16,11 @@ use uuid::Uuid;
 use crate::dto::{PreferenceDto, PutPreferenceRequest, PutPreferenceResponse};
 use crate::extract::{Json, Path};
 use crate::response::{ApiError, ApiResponse};
+use crate::routes::{json_exceeds_byte_cap, MAX_OPAQUE_JSON_BYTES};
 
 /// The only key this endpoint accepts today. Opening a new key is a
 /// deliberate, allowlisted addition — not a generic KV dump.
 const ALLOWED_KEYS: &[&str] = &["space_order"];
-/// Size cap matching device_state values (ADR 0048 / ADR 0103).
-const MAX_VALUE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,7 +63,9 @@ fn validate_value(key: &str, value: &serde_json::Value) -> Result<(), ApiError> 
             }
             Ok(())
         }
-        _ => Ok(()),
+        other => Err(ApiError::bad_request(format!(
+            "preference key {other:?} has no value schema"
+        ))),
     }
 }
 
@@ -122,10 +123,9 @@ pub async fn put_preference(
     Json(body): Json<PutPreferenceRequest>,
 ) -> Result<ApiResponse<PutPreferenceResponse>, ApiError> {
     require_allowed_key(&key)?;
-    let value_bytes = body.value.to_string().len();
-    if value_bytes > MAX_VALUE_BYTES {
+    if json_exceeds_byte_cap(&body.value, MAX_OPAQUE_JSON_BYTES) {
         return Err(ApiError::bad_request(format!(
-            "preference value exceeds {MAX_VALUE_BYTES} bytes"
+            "preference value exceeds {MAX_OPAQUE_JSON_BYTES} bytes"
         )));
     }
     validate_value(&key, &body.value)?;
@@ -148,6 +148,9 @@ pub async fn put_preference(
 #[cfg(test)]
 mod tests {
     use super::validate_space_order_entry;
+    use super::validate_value;
+    use crate::routes::json_exceeds_byte_cap;
+    use serde_json::json;
     use uuid::Uuid;
 
     #[test]
@@ -162,5 +165,23 @@ mod tests {
         )));
         assert!(!validate_space_order_entry(&format!("{account}/!")));
         assert!(!validate_space_order_entry("!space:localhost"));
+    }
+
+    #[test]
+    fn validate_value_rejects_a_key_with_no_schema() {
+        assert!(
+            validate_value("theme", &json!({})).is_err(),
+            "an allowlisted-but-unschematized key must 400, not accept arbitrary JSON"
+        );
+    }
+
+    #[test]
+    fn json_exceeds_byte_cap_stops_at_the_limit() {
+        assert!(!json_exceeds_byte_cap(&json!({ "spaces": [] }), 64 * 1024));
+        let big = "x".repeat(64 * 1024 + 1);
+        assert!(json_exceeds_byte_cap(
+            &json!({ "spaces": [big] }),
+            64 * 1024
+        ));
     }
 }

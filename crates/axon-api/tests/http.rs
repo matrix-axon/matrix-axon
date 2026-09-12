@@ -4052,3 +4052,33 @@ async fn preferences_put_get_allowlist_and_validation() {
     })
     .await;
 }
+
+/// A panic inside the wrapped body must still unlock the advisory lock, or
+/// the next caller hangs until the connection is closed.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn space_order_lock_releases_on_panic() {
+    use futures_util::future::FutureExt;
+    use std::time::Duration;
+
+    let store = store().await;
+    let panicked = std::panic::AssertUnwindSafe(async {
+        with_isolated_space_order(&store, || async {
+            panic!("boom");
+        })
+        .await;
+    })
+    .catch_unwind()
+    .await;
+    assert!(panicked.is_err(), "inner panic must propagate");
+
+    let second = tokio::time::timeout(
+        Duration::from_secs(5),
+        with_isolated_space_order(&store, || async {}),
+    )
+    .await;
+    assert!(
+        second.is_ok(),
+        "a later with_isolated_space_order must not hang on a leaked lock"
+    );
+}
