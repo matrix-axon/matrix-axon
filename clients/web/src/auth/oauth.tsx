@@ -133,10 +133,25 @@ export interface OAuthAuthProvider extends AuthProvider {
   providers: ReadonlySignal<readonly OAuthProviderConfig[]>
   /**
    * Ask the server which providers it has enabled, replacing the built-in
-   * list. Idempotent and safe to call repeatedly; the first call wins.
+   * list. Idempotent and safe to call repeatedly: concurrent calls share one
+   * request, and an answer is asked for only once.
+   *
+   * An attempt that *could not* answer is not an answer, and is not kept — the
+   * next call tries again. See the body for why that distinction matters more
+   * to a packaged build than to a browser one.
    */
   discoverProviders(): Promise<void>
   clearToken(): void
+  /**
+   * Whether completing a sign-in happens somewhere other than this app.
+   *
+   * `false` in a browser, where `startSignIn` navigates the page and simply
+   * never returns. `true` in a shell, where it hands a URL to the user's real
+   * browser and comes straight back — so the caller is still on screen, still
+   * responsible for what it shows, and must not present the hand-off as
+   * something it is waiting on.
+   */
+  signInLeavesTheApp: boolean
   startSignIn(provider: string): Promise<void>
   completeRedirect(url: URL): Promise<OAuthCallbackResult>
 }
@@ -166,7 +181,14 @@ export interface OAuthAuthOptions {
   sessionStorage?: Storage
   rememberMeDefault?: boolean
   pendingStorage?: Storage
-  navigate?: (url: string) => void
+  /**
+   * Send the user to the authorization URL. Defaults to replacing this page.
+   *
+   * May return a promise, and `startSignIn` awaits it: a shell hands the URL
+   * to the user's real browser and that hand-off can fail, which is the only
+   * failure mode `startSignIn` has left once the request is built.
+   */
+  navigate?: (url: string) => void | Promise<void>
   /**
    * Transport seam (ADR 0102 § 2) for the token exchange. This one call is not
    * an `openapi-fetch` operation — the token endpoint is form-encoded per
@@ -262,9 +284,14 @@ export function createOAuthAuthProvider({
   sessionStorage,
   rememberMeDefault,
   pendingStorage = window.sessionStorage,
-  navigate = (url) => window.location.assign(url),
+  navigate,
   platform = browserPlatform(),
 }: OAuthAuthOptions): OAuthAuthProvider {
+  // An injected `navigate` is the shell handing off to another application;
+  // the default replaces this page and never comes back. That difference is
+  // the whole of `signInLeavesTheApp`.
+  const signInLeavesTheApp = navigate !== undefined
+  const goTo = navigate ?? ((url: string) => window.location.assign(url))
   const fetch = platform.fetch
   const persistence =
     providedPersistence ??
@@ -399,6 +426,7 @@ export function createOAuthAuthProvider({
     },
     signedIn: computed(() => session.value !== null),
     providers: computed(() => providerList.value),
+    signInLeavesTheApp,
     discoverProviders() {
       discovery ??= (async () => {
         const names = await fetchProviderNames(baseUrl, fetch)
@@ -407,6 +435,15 @@ export function createOAuthAuthProvider({
           // has OAuth off. Keep the configured list: for a browser deployment
           // that is the correct answer and always was, and replacing it with an
           // empty one would delete working sign-in buttons over a 404.
+          //
+          // But do not remember this as the answer. "Could not ask" is not a
+          // result, and caching it makes a moment's unavailability permanent:
+          // a packaged build has no configured list to fall back on, so a
+          // server that was briefly down at launch left no sign-in buttons at
+          // all, for the life of the process, after the server came back.
+          // Cleared *after* the await, so concurrent callers still share this
+          // one request and only a later call re-asks.
+          discovery = null
           return
         }
         providerList.value = withLabels(names, providers)
@@ -445,7 +482,12 @@ export function createOAuthAuthProvider({
       authorize.searchParams.set('code_challenge_method', 'S256')
       authorize.searchParams.set('provider', providerName)
       authorize.searchParams.set('state', state)
-      navigate(authorize.toString())
+      // Awaited. In a browser this resolves and the page is replaced moments
+      // later, so nothing observes it. In a shell it is the whole hand-off,
+      // and `openExternal` rejects when the URL could not be opened at all --
+      // a denied capability scope, or no browser registered. Dropping that
+      // rejection left the caller believing a sign-in had started.
+      await goTo(authorize.toString())
     },
     async completeRedirect(url: URL): Promise<OAuthCallbackResult> {
       const error = url.searchParams.get('error')
@@ -498,6 +540,7 @@ export function createOAuthAuthProvider({
 
 function OAuthButtons({ provider }: { provider: OAuthAuthProvider }) {
   const [busy, setBusy] = useState<string | null>(null)
+  const [handedOff, setHandedOff] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   // Ask the server what it offers, here rather than at construction: this
@@ -506,6 +549,29 @@ function OAuthButtons({ provider }: { provider: OAuthAuthProvider }) {
   // the early return below, since hook order cannot be conditional.
   useEffect(() => {
     void provider.discoverProviders()
+  }, [provider])
+
+  // Ask again when the window comes back to the front, and only in a shell.
+  //
+  // A browser tab that regains focus has not changed its mind about anything,
+  // and a browser build always has its configured list. A packaged build has
+  // no such fallback, so a server that was unreachable at launch leaves the
+  // screen with no sign-in buttons at all — and the gesture of someone who
+  // has just gone and started that server is to click back into this window.
+  // `discoverProviders` no longer caches an attempt that could not answer, so
+  // this re-asks rather than replaying a failure.
+  useEffect(() => {
+    if (!provider.signInLeavesTheApp) {
+      return
+    }
+    const onFocus = () => {
+      void provider.discoverProviders()
+      // Whatever the browser was doing with the sign-in, it is not something
+      // this window is waiting on any more.
+      setBusy(null)
+    }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
   }, [provider])
 
   if (provider.providers.value.length === 0) {
@@ -525,10 +591,29 @@ function OAuthButtons({ provider }: { provider: OAuthAuthProvider }) {
             onClick={() => {
               setBusy(id)
               setError(null)
-              void provider.startSignIn(id).catch((err) => {
-                setBusy(null)
-                setError(err instanceof Error ? err.message : 'Sign-in failed')
-              })
+              setHandedOff(false)
+              void provider
+                .startSignIn(id)
+                .then(() => {
+                  // In a browser this is unobservable: the page is being
+                  // replaced. In a shell it means the URL reached the user's
+                  // real browser, and nothing here is pending any more — so
+                  // the button must not stay latched. It used to, and closing
+                  // the browser or declining at the provider then left every
+                  // button disabled reading "Opening..." until the app was
+                  // restarted. Clicking again simply starts over.
+                  if (provider.signInLeavesTheApp) {
+                    setBusy(null)
+                    setHandedOff(true)
+                  }
+                })
+                .catch((err: unknown) => {
+                  setBusy(null)
+                  setHandedOff(false)
+                  setError(
+                    err instanceof Error ? err.message : 'Sign-in failed',
+                  )
+                })
             }}
           >
             <span class="sso-icon" aria-hidden="true">
@@ -538,6 +623,12 @@ function OAuthButtons({ provider }: { provider: OAuthAuthProvider }) {
           </button>
         )
       })}
+      {handedOff && error === null && (
+        <p class="muted" role="status">
+          Continue signing in in your browser, then come back. Choose again if
+          you would rather start over.
+        </p>
+      )}
       {error !== null && <p class="error">{error}</p>}
     </div>
   )

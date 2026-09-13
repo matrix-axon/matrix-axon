@@ -98,8 +98,13 @@ export interface Platform {
    * do and intercepting would only break middle-click and modifiers. A shell
    * must supply one — an unhandled external link navigates the app window away
    * from the app, with no back button to return.
+   *
+   * Resolves once the link has been handed to the browser, and **rejects if it
+   * could not be**. A caller that only wants the link opened may discard the
+   * promise; OAuth cannot, because handing off is the whole of `startSignIn`
+   * and a failure there is a sign-in that silently never begins.
    */
-  openExternal: ((url: string) => void) | null
+  openExternal: ((url: string) => Promise<void>) | null
 
   /**
    * How this build identifies itself to the Axon authorization server, or

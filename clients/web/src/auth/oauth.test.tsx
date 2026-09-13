@@ -1,3 +1,4 @@
+import { fireEvent, render, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import {
@@ -530,7 +531,9 @@ describe('a shell callback URI', () => {
       redirectUri: 'org.matrixaxon.axon:/oauth/callback',
       storage: memoryStorage(),
       pendingStorage: pending,
-      navigate: (url) => navigated.push(url),
+      navigate: (url) => {
+        navigated.push(url)
+      },
     })
 
     await auth.startSignIn('google')
@@ -553,7 +556,9 @@ describe('a shell callback URI', () => {
       baseUrl: BASE_URL,
       storage: memoryStorage(),
       pendingStorage: memoryStorage(),
-      navigate: (url) => navigated.push(url),
+      navigate: (url) => {
+        navigated.push(url)
+      },
     })
 
     await auth.startSignIn('google')
@@ -673,5 +678,134 @@ describe('discovering providers from the server', () => {
     expect(auth.providers.value).toEqual([
       { provider: 'apple', label: 'Apple' },
     ])
+  })
+
+  it('asks again after an attempt that could not answer', async () => {
+    // "Could not ask" is not an answer, and caching it makes a moment's
+    // unavailability permanent. A packaged build has no configured list to
+    // fall back on, so this was the difference between sign-in buttons
+    // appearing when the server came back and never appearing again.
+    let calls = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () => {
+        calls += 1
+        return calls === 1
+          ? HttpResponse.error()
+          : HttpResponse.json({ data: [{ provider: 'google' }] })
+      }),
+    )
+    const auth = provider()
+
+    await auth.discoverProviders()
+    expect(auth.providers.value).toEqual([])
+
+    await auth.discoverProviders()
+    expect(calls).toBe(2)
+    expect(auth.providers.value).toEqual([
+      { provider: 'google', label: 'Google' },
+    ])
+  })
+
+  it('still shares one request while an unanswerable attempt is in flight', async () => {
+    // Not remembering the attempt must not cost the single-flight property:
+    // concurrent callers share the request, and only a *later* call re-asks.
+    let calls = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () => {
+        calls += 1
+        return HttpResponse.error()
+      }),
+    )
+    const auth = provider()
+    await Promise.all([
+      auth.discoverProviders(),
+      auth.discoverProviders(),
+      auth.discoverProviders(),
+    ])
+
+    expect(calls).toBe(1)
+  })
+
+  it('keeps a determinate answer without re-asking', async () => {
+    // The counterpart: an empty list *is* an answer, and must not be retried.
+    let calls = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () => {
+        calls += 1
+        return HttpResponse.json({ data: [] })
+      }),
+    )
+    const auth = provider({
+      providers: [{ provider: 'google', label: 'Google' }],
+    })
+    await auth.discoverProviders()
+    await auth.discoverProviders()
+
+    expect(calls).toBe(1)
+    expect(auth.providers.value).toEqual([])
+  })
+})
+
+describe('handing a sign-in to an external browser', () => {
+  const shellProvider = (
+    navigate: (url: string) => void | Promise<void>,
+  ): ReturnType<typeof createOAuthAuthProvider> =>
+    createOAuthAuthProvider({
+      providers: [{ provider: 'google', label: 'Google' }],
+      baseUrl: BASE_URL,
+      clientId: 'axon-desktop',
+      redirectUri: 'org.matrixaxon.axon:/oauth/callback',
+      storage: memoryStorage(),
+      pendingStorage: memoryStorage(),
+      navigate,
+    })
+
+  it('reports that sign-in leaves the app only when it does', () => {
+    // The browser's default navigation replaces this page and never returns,
+    // so there is no caller left to tell anything to. An injected one hands
+    // off to another application and comes straight back.
+    expect(shellProvider(() => {}).signInLeavesTheApp).toBe(true)
+    expect(
+      createOAuthAuthProvider({
+        providers: [],
+        baseUrl: BASE_URL,
+        storage: memoryStorage(),
+        pendingStorage: memoryStorage(),
+      }).signInLeavesTheApp,
+    ).toBe(false)
+  })
+
+  it('fails the sign-in when the browser could not be opened', async () => {
+    // `openExternal` used to swallow this, so a denied capability scope or an
+    // absent handler resolved `startSignIn` as though a sign-in had begun.
+    const auth = shellProvider(() =>
+      Promise.reject(new Error('could not open an external link (https://x)')),
+    )
+
+    await expect(auth.startSignIn('google')).rejects.toThrow(
+      'could not open an external link',
+    )
+  })
+
+  it('does not leave the buttons latched once the browser has the URL', async () => {
+    // The bug this replaces: the button set `busy` and cleared it only if
+    // `startSignIn` rejected. Handing off to a browser resolves, so closing
+    // that browser, declining at the provider, or getting a failed callback
+    // left every button disabled reading "Opening..." until the app was
+    // restarted. Nothing in this app is pending at that point.
+    const auth = shellProvider(() => {})
+    const { findByRole, getByRole } = render(<auth.LoginBootstrap />)
+
+    const button = (await findByRole('button', {
+      name: /google/i,
+    })) as HTMLButtonElement
+    fireEvent.click(button)
+
+    await waitFor(() => expect(button.disabled).toBe(false))
+    expect(getByRole('status').textContent).toMatch(/continue signing in/i)
+
+    // And it can simply be used again.
+    fireEvent.click(button)
+    await waitFor(() => expect(button.disabled).toBe(false))
   })
 })

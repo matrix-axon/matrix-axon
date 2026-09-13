@@ -56,10 +56,18 @@ load whatever _else_ is on 5173 — a different app, with no error anywhere.
 pnpm exec tauri icon src-tauri/icon-source.png -o src-tauri/icons
 ```
 
-## The bundle identifier is provisional
+## The bundle identifier is settled
 
-`org.matrixaxon.axon`. It becomes a permanent store identity and cannot be
-changed later without shipping a new app, so settle it before any submission.
+`org.matrixaxon.axon`, confirmed for ADR 0102 § 4. It is a permanent store
+identity and cannot be changed later without shipping a new application, so
+treat it as fixed rather than as a default to revisit.
+
+It is also the OAuth callback scheme — the callback is
+`org.matrixaxon.axon:/oauth/callback` — which is why a reverse-domain
+identifier rather than a short one matters beyond the stores: a private-use
+scheme is claimed first-come and unauthenticated on every desktop OS, so
+anything registering a bare `axon` could receive an authorization code meant
+for this app (RFC 8252 § 8.4, § 8.6).
 
 ## Sign-in needs an entry on the server
 

@@ -703,7 +703,10 @@ describe('OAuth client identity from the platform', () => {
         clientId: 'axon-desktop',
         redirectUri: 'org.matrixaxon.axon:/oauth/callback',
       },
-      openExternal: (url) => navigated.push(url),
+      openExternal: (url) => {
+        navigated.push(url)
+        return Promise.resolve()
+      },
       fetch: (() =>
         Promise.resolve(
           new Response(JSON.stringify({ data: [{ provider: 'google' }] }), {

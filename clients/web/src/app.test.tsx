@@ -299,7 +299,7 @@ describe('App', () => {
     // window* to that page, and the shell has no back button to return with —
     // the app is gone until restarted. Message bodies render arbitrary user
     // links, so this has to be caught centrally rather than per-component.
-    const openExternal = vi.fn()
+    const openExternal = vi.fn(() => Promise.resolve())
     const services = {
       ...testServices(),
       platform: { ...testServices().platform, openExternal },
@@ -345,7 +345,7 @@ describe('App', () => {
     // the handler steps aside for it. The shell has neither: the same click
     // sends its only window to the page, and there is no back button to
     // return by. So there the click is the app's to answer, not the webview's.
-    const openExternal = vi.fn()
+    const openExternal = vi.fn(() => Promise.resolve())
     const services = {
       ...testServices(),
       platform: { ...testServices().platform, openExternal },
@@ -424,7 +424,7 @@ describe('App', () => {
 
   it('does not treat a same-origin link as external', async () => {
     // Those are the client's own routes and must stay in-window.
-    const openExternal = vi.fn()
+    const openExternal = vi.fn(() => Promise.resolve())
     const services = {
       ...testServices(),
       platform: { ...testServices().platform, openExternal },

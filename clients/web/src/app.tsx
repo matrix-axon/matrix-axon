@@ -1094,7 +1094,10 @@ function ShellChrome() {
         const openExternal = svcPlatform.openExternal
         if (openExternal !== null && isExternalHref(anchor.href)) {
           event.preventDefault()
-          openExternal(anchor.href)
+          // Discarded deliberately. The click is already prevented, so there
+          // is no fallback to take and nothing to tell the user to do
+          // differently; the origin-only message is already on the console.
+          void openExternal(anchor.href).catch(() => {})
         }
         return
       }
