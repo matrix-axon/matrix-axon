@@ -56,6 +56,7 @@ shows it.
 | Full-size image preview                                 | `media`               | `media`                                                                                                   | `media`         |
 | Image galleries (adjacency grouping, ADR 0081)          | **n/a**               | `media`                                                                                                   | `media`         |
 | Lightbox paging across a gallery run                    | **n/a**               | `media`                                                                                                   | `media`         |
+| Upright thumbnail of an EXIF-rotated photo              | **not covered**       | **not covered** — no corpus photo carries an orientation tag or a sender thumbnail                        | **not covered** |
 | Full-text search across rooms (Tantivy)                 | `search`              | `search`                                                                                                  | `search`        |
 | Search field filters (`room:`, `all:true`)              | `search`              | `search`                                                                                                  | `search`        |
 | Search hit as a deep link into a room                   | **not covered**       | `search`                                                                                                  | `search`        |
@@ -121,6 +122,18 @@ shows it.
   to see. Both are TUI-only — the web renders images natively with no encode
   step (see the inline-images row) and has no equivalent overlay — hence `n/a`
   rather than a gap.
+- **Upright thumbnail of an EXIF-rotated photo.** A phone photo is often stored
+  with sideways pixels plus an EXIF orientation tag, and bridges attach a
+  sender thumbnail that keeps the pixels but drops the tag. The web client
+  therefore asks the homeserver for plaintext images' thumbnails even when a
+  sender thumbnail exists (Synapse applies the tag); the TUI decodes the
+  original and applies the tag itself (`clients/tui/src/app/media.rs`). The
+  `media` scenes render corpus photos, but none of the six in
+  `smoke/local-stack/corpus/media/photos/` carries an orientation tag, and the
+  corpus attaches no sender thumbnail — so a scene would look identical before
+  and after the fix and prove nothing. Covering it honestly means adding a
+  tagged photo, with a stripped sideways thumbnail, to the corpus, not writing
+  a longer scene.
 - **Typing indicators and read receipts, and a reaction badge updating live.**
   All need a second live client acting concurrently; the corpus is seeded history, not a running participant.
   The reaction case is worth distinguishing from the two rows above it:
