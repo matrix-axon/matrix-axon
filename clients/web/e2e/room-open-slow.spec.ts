@@ -1,6 +1,7 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type CDPSession, type Page } from '@playwright/test'
 import { ACCOUNT_ID, ROOM_URL, signIn } from './helpers'
 import {
+  enablePerf,
   roomOpenRequests,
   roomOpenSummary,
   throttleNetwork,
@@ -50,31 +51,51 @@ test.afterEach(async ({ page }) => {
 })
 
 /**
- * Load the app, then throttle — in that order, deliberately. The throttle
- * applies to the whole context, so throttling first would spend the budget on
- * the bundle and measure a download this lane does not care about.
+ * Token, viewport, and the stored perf flag — no navigation.
+ *
+ * A second `page.goto` on the same WebKit page is the Linux CI flake
+ * (`page.goto: WebKit encountered an internal error` waiting until `load`).
+ * Each test therefore does at most one document load of the room, except the
+ * Chromium slow-link case which caches the bundle first.
  */
-async function coldRoomOpenOnSlowLink(page: Page): Promise<void> {
+async function bootPerf(page: Page): Promise<void> {
   await signIn(page)
   await page.setViewportSize({ width: 1400, height: 900 })
   // Instrumentation through the stored flag, not `?perf=1`: the URL flag
   // latches inside `perfEnabled()` before any store exists, which is the
   // ordering trap `boot-telemetry.spec.ts` documents.
-  await page.addInitScript(() => sessionStorage.setItem('axon.perf', '1'))
+  await enablePerf(page)
+}
+
+async function openSecondRoom(page: Page): Promise<void> {
+  await page.goto(SECOND_ROOM_URL)
+  await expect(page.getByText('only in the second room')).toBeVisible({
+    timeout: 30_000,
+  })
+}
+
+/**
+ * Chromium-only: load `/` on an unthrottled link so the bundle is cached, then
+ * emulate slow-3g. Elsewhere this is a no-op — the CDP throttle does not exist
+ * off Chromium, and a second document load on the same WebKit page is what
+ * flakes Linux CI.
+ */
+async function cacheBundleThenThrottle(page: Page): Promise<CDPSession | null> {
+  if (page.context().browser()?.browserType().name() !== 'chromium') {
+    return null
+  }
   await page.goto('/')
   await expect(page.getByText('E2E Room')).toBeVisible()
+  return throttleNetwork(page, 'slow-3g')
 }
 
 test('the room-open summary carries real numbers from a real browser', async ({
   page,
 }) => {
-  await coldRoomOpenOnSlowLink(page)
-  const cdp = await throttleNetwork(page, 'slow-3g')
+  await bootPerf(page)
+  const cdp = await cacheBundleThenThrottle(page)
   try {
-    await page.goto(SECOND_ROOM_URL)
-    await expect(page.getByText('only in the second room')).toBeVisible({
-      timeout: 30_000,
-    })
+    await openSecondRoom(page)
 
     // Painted rows are not the summary: it is emitted two frames after the
     // head fetch settles, and only once the requests beside it have settled
@@ -111,15 +132,15 @@ test('the room-open summary carries real numbers from a real browser', async ({
 test('the summary separates the timeline page from the room list beside it', async ({
   page,
 }) => {
-  await coldRoomOpenOnSlowLink(page)
-  // Hold the room-list GET. The timeline page does not depend on it, so a
-  // readout that cannot tell them apart would report the room open as slow.
+  await bootPerf(page)
+  // Hold the room-list GET before the first load. The timeline page does not
+  // depend on it, so a readout that cannot tell them apart would report the
+  // room open as slow. Visiting `/` first is unnecessary: `RoomPage` calls
+  // `rooms.ensureLoaded()` on mount, and a second document load is the WebKit
+  // flake this file used to hit.
   await setRoomsHold(page, HELD)
 
-  await page.goto(SECOND_ROOM_URL)
-  await expect(page.getByText('only in the second room')).toBeVisible({
-    timeout: 30_000,
-  })
+  await openSecondRoom(page)
   // The room list settles a second or more later; wait for it so `list` is
   // filled in rather than racing the summary.
   await expect
@@ -143,9 +164,8 @@ test('the summary separates the timeline page from the room list beside it', asy
 test('a warm re-entry is labelled, so it cannot be read as a cold open', async ({
   page,
 }) => {
-  await coldRoomOpenOnSlowLink(page)
-  await page.goto(SECOND_ROOM_URL)
-  await expect(page.getByText('only in the second room')).toBeVisible()
+  await bootPerf(page)
+  await openSecondRoom(page)
 
   // Leave and return within the session: ADR 0085 phase 1 keeps the store warm,
   // so this paints instantly and measures the gap-fill, not a cold open. A
