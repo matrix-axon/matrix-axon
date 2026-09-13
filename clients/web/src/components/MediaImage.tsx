@@ -27,9 +27,10 @@ function thumbnailWidth(w: number, h: number): number {
 }
 
 /**
- * An inline image or sticker (ADR 0064). Shows the sender-embedded thumbnail
- * when present, else a homeserver-generated thumbnail for plaintext media,
- * else the full-size image; a click opens the full-size `Lightbox`. The
+ * An inline image or sticker (ADR 0064). Shows a homeserver-generated
+ * thumbnail for plaintext media, else the sender-embedded thumbnail when
+ * present, else the full-size image (see `useThumbnailFallback` for why that
+ * order); a click opens the full-size `Lightbox`. The
  * wrapper reserves the image's aspect ratio *before* the blob resolves — the
  * timeline is not re-anchored after mount, so an image that grew on load would
  * shove scrolled-back content around.
