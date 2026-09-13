@@ -14,6 +14,7 @@ vi.mock('@tauri-apps/plugin-websocket', () => ({
 }))
 
 import { save } from '@tauri-apps/plugin-dialog'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import { adapt, boundedSignal, tauriPlatform } from './tauri'
 
 /**
@@ -151,6 +152,51 @@ describe('the shell socket connect bound', () => {
     expect(disconnect).toHaveBeenCalled()
     expect(events).toEqual(['close'])
     warn.mockRestore()
+  })
+})
+
+describe('the shell external opener', () => {
+  it('rejects when the link could not be opened, naming only the origin', async () => {
+    // It used to log and swallow, which suited the link handler and stranded
+    // OAuth: handing off to the browser *is* `startSignIn`, so a failure that
+    // never reached the caller was a sign-in that silently never began.
+    const opener = vi.mocked(openUrl)
+    opener.mockClear()
+    opener.mockRejectedValue(
+      new Error('opener denied https://media.example/x?sig=SECRET'),
+    )
+
+    await expect(
+      tauriPlatform().openExternal?.(
+        'https://media.example/x?sig=SECRET&token=ALSO_SECRET',
+      ),
+    ).rejects.toThrow('could not open an external link (https://media.example)')
+  })
+
+  it('does not carry the query into the failure', async () => {
+    // The plugin repeats the URL it was given, and a link in a room can carry
+    // a signed media URL or credentials in its query — so the message is
+    // rewritten rather than forwarded, or reporting an error writes secrets
+    // the user never chose to record.
+    const opener = vi.mocked(openUrl)
+    opener.mockClear()
+    opener.mockRejectedValue(new Error('opener denied https://x/y?sig=SECRET'))
+
+    const failure = await tauriPlatform()
+      .openExternal?.('https://x/y?sig=SECRET')
+      .catch((err: unknown) => (err as Error).message)
+
+    expect(failure).not.toContain('SECRET')
+  })
+
+  it('resolves when the link opened', async () => {
+    const opener = vi.mocked(openUrl)
+    opener.mockClear()
+    opener.mockResolvedValue(undefined)
+
+    await expect(
+      tauriPlatform().openExternal?.('https://example.org/docs'),
+    ).resolves.toBeUndefined()
   })
 })
 

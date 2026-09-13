@@ -98,8 +98,43 @@ export interface Platform {
    * do and intercepting would only break middle-click and modifiers. A shell
    * must supply one — an unhandled external link navigates the app window away
    * from the app, with no back button to return.
+   *
+   * Resolves once the link has been handed to the browser, and **rejects if it
+   * could not be**. A caller that only wants the link opened may discard the
+   * promise; OAuth cannot, because handing off is the whole of `startSignIn`
+   * and a failure there is a sign-in that silently never begins.
    */
-  openExternal: ((url: string) => void) | null
+  openExternal: ((url: string) => Promise<void>) | null
+
+  /**
+   * How this build identifies itself to the Axon authorization server, or
+   * `null` to use the build-time client id and a callback composed from the
+   * page origin.
+   *
+   * One object because the two halves are one registration. The server
+   * allow-lists redirect URIs *per client id*
+   * (`OAuthClients::redirect_uri_allowed`), so a client id paired with the
+   * wrong URI is not a partial configuration — it is an unregistered pair, and
+   * `/v1/oauth/authorize` rejects it with "unknown client_id or redirect_uri".
+   * Setting one without the other is exactly the shape of that mistake, so
+   * they cannot be set separately.
+   *
+   * A shell's callback also cannot be composed from a base: resolving
+   * `/oauth/callback` against `org.matrixaxon.axon:/oauth` yields
+   * `org.matrixaxon.axon:/oauth/oauth/callback`. It is carried whole.
+   */
+  oauthClient: { clientId: string; redirectUri: string } | null
+
+  /**
+   * Subscribe to URLs the OS hands this app, or `null` where there is no such
+   * channel.
+   *
+   * This is how the authorization code comes back: the sign-in happens in the
+   * user's real browser (RFC 8252 — never in an embedded webview, which would
+   * hand the app the user's IdP credentials), and the browser redirects to the
+   * registered scheme, which the OS routes here. Returns an unsubscribe.
+   */
+  onDeepLink: ((handler: (url: URL) => void) => () => void) | null
 
   /**
    * The API base to fall back on when the user has configured none and no
@@ -149,6 +184,11 @@ export function browserPlatform(): Platform {
     saveFile: saveInBrowser,
     // The anchor already does the right thing here; see `openExternal`.
     openExternal: null,
+    // The build-time client id, and a callback composed from this origin.
+    oauthClient: null,
+    // A browser has no OS-level URL channel; the callback arrives as a
+    // navigation to `/oauth/callback` instead.
+    onDeepLink: null,
     // Same-origin: the deployment that serves this bundle also proxies /v1.
     defaultApiBaseUrl: '/',
   }

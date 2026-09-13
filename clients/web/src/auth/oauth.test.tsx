@@ -1,3 +1,4 @@
+import { fireEvent, render, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import {
@@ -514,55 +515,297 @@ describe('createOAuthAuthProvider', () => {
   })
 })
 
-describe('the transport seam (ADR 0102 § 2)', () => {
-  /**
-   * The token exchange defaults to `browserPlatform()`, so msw keeps every
-   * other test here green whether or not the injected platform is threaded
-   * through. This one registers no msw handler, and the server errors on any
-   * unhandled request — so a fall-back to the global `fetch` fails outright.
-   */
-  it('redeems the code through the injected fetch', async () => {
-    const storage = memoryStorage()
-    const pending = memoryStorage({
-      'axon.oauth.pending': JSON.stringify({
-        state: 'state-seam',
-        codeVerifier: 'verifier-seam',
-        provider: 'google',
-        redirectUri: 'http://localhost:3000/oauth/callback',
-        createdAt: Date.now(),
-      }),
-    })
-
-    const calls: string[] = []
-    const injected: typeof globalThis.fetch = async (input) => {
-      calls.push(String(input instanceof Request ? input.url : input))
-      return new Response(
-        JSON.stringify({
-          access_token: 'access-seam',
-          token_type: 'Bearer',
-          expires_in: 3600,
-          refresh_token: 'refresh-seam',
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    }
-
+describe('a shell callback URI', () => {
+  it('is used verbatim, not composed from a base', async () => {
+    // Composition mangles a custom scheme: resolving `/oauth/callback` against
+    // `org.matrixaxon.axon:/oauth` gives
+    // `org.matrixaxon.axon:/oauth/oauth/callback`. It is also the value
+    // the server allow-lists *exactly* (`OAuthClients::redirect_uri_allowed`),
+    // so a derived one would be rejected at `/v1/oauth/authorize`.
+    const pending = memoryStorage()
+    const navigated: string[] = []
     const auth = createOAuthAuthProvider({
       providers: [{ provider: 'google', label: 'Google' }],
       baseUrl: BASE_URL,
-      storage,
+      clientId: 'axon-desktop',
+      redirectUri: 'org.matrixaxon.axon:/oauth/callback',
+      storage: memoryStorage(),
       pendingStorage: pending,
-      platform: { fetch: injected },
+      navigate: (url) => {
+        navigated.push(url)
+      },
     })
-    const result = await auth.completeRedirect(
-      new URL(
-        'http://localhost:3000/oauth/callback?code=code-seam&state=state-seam',
+
+    await auth.startSignIn('google')
+
+    const authorize = new URL(navigated[0])
+    expect(authorize.searchParams.get('redirect_uri')).toBe(
+      'org.matrixaxon.axon:/oauth/callback',
+    )
+    expect(authorize.searchParams.get('client_id')).toBe('axon-desktop')
+    // And it must be what the token exchange later presents back, since the
+    // server checks the two match.
+    const stored = JSON.parse(pending.getItem('axon.oauth.pending') ?? '{}')
+    expect(stored.redirectUri).toBe('org.matrixaxon.axon:/oauth/callback')
+  })
+
+  it('still composes from the origin when no URI is given', async () => {
+    const navigated: string[] = []
+    const auth = createOAuthAuthProvider({
+      providers: [{ provider: 'google', label: 'Google' }],
+      baseUrl: BASE_URL,
+      storage: memoryStorage(),
+      pendingStorage: memoryStorage(),
+      navigate: (url) => {
+        navigated.push(url)
+      },
+    })
+
+    await auth.startSignIn('google')
+
+    expect(new URL(navigated[0]).searchParams.get('redirect_uri')).toBe(
+      'http://localhost:3000/oauth/callback',
+    )
+  })
+})
+
+describe('discovering providers from the server', () => {
+  const provider = (
+    options: Partial<Parameters<typeof createOAuthAuthProvider>[0]> = {},
+  ) =>
+    createOAuthAuthProvider({
+      providers: [],
+      baseUrl: BASE_URL,
+      storage: memoryStorage(),
+      pendingStorage: memoryStorage(),
+      ...options,
+    })
+
+  it('replaces the built-in list with what the server offers', async () => {
+    // The list is a property of the server. A binary pointed at someone else's
+    // axon cannot have been built knowing it.
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () =>
+        HttpResponse.json({ data: [{ provider: 'google' }] }),
       ),
     )
+    const auth = provider()
+    await auth.discoverProviders()
 
-    expect(result).toEqual({ ok: true })
-    expect(calls).toHaveLength(1)
-    expect(calls[0]).toBe(TOKEN_URL)
-    expect(auth.signedIn.value).toBe(true)
+    expect(auth.providers.value).toEqual([
+      { provider: 'google', label: 'Google' },
+    ])
+  })
+
+  it('keeps a configured label for a provider the server names', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () =>
+        HttpResponse.json({ data: [{ provider: 'google' }] }),
+      ),
+    )
+    const auth = provider({
+      providers: [{ provider: 'google', label: 'Work Google' }],
+    })
+    await auth.discoverProviders()
+
+    expect(auth.providers.value).toEqual([
+      { provider: 'google', label: 'Work Google' },
+    ])
+  })
+
+  it('keeps the configured list when the server has no such route', async () => {
+    // A server older than GET /v1/oauth/providers, or one with OAuth off,
+    // 404s. Treating that as "no providers" would delete working sign-in
+    // buttons from every existing browser deployment.
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () =>
+        HttpResponse.json(
+          { error: { code: 'not_found', message: 'nope' } },
+          { status: 404 },
+        ),
+      ),
+    )
+    const configured = [{ provider: 'google', label: 'Google' }]
+    const auth = provider({ providers: configured })
+    await auth.discoverProviders()
+
+    expect(auth.providers.value).toEqual(configured)
+  })
+
+  it('keeps the configured list when the server cannot be reached', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () => HttpResponse.error()),
+    )
+    const configured = [{ provider: 'google', label: 'Google' }]
+    const auth = provider({ providers: configured })
+    await auth.discoverProviders()
+
+    expect(auth.providers.value).toEqual(configured)
+  })
+
+  it('reports an empty server list as empty', async () => {
+    // Distinct from the failures above: OAuth is on and the server genuinely
+    // has nothing configured, so the buttons should go away.
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    )
+    const auth = provider({
+      providers: [{ provider: 'google', label: 'Google' }],
+    })
+    await auth.discoverProviders()
+
+    expect(auth.providers.value).toEqual([])
+  })
+
+  it('asks once however many times it is called', async () => {
+    let calls = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () => {
+        calls += 1
+        return HttpResponse.json({ data: [{ provider: 'apple' }] })
+      }),
+    )
+    const auth = provider()
+    await Promise.all([
+      auth.discoverProviders(),
+      auth.discoverProviders(),
+      auth.discoverProviders(),
+    ])
+
+    expect(calls).toBe(1)
+    expect(auth.providers.value).toEqual([
+      { provider: 'apple', label: 'Apple' },
+    ])
+  })
+
+  it('asks again after an attempt that could not answer', async () => {
+    // "Could not ask" is not an answer, and caching it makes a moment's
+    // unavailability permanent. A packaged build has no configured list to
+    // fall back on, so this was the difference between sign-in buttons
+    // appearing when the server came back and never appearing again.
+    let calls = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () => {
+        calls += 1
+        return calls === 1
+          ? HttpResponse.error()
+          : HttpResponse.json({ data: [{ provider: 'google' }] })
+      }),
+    )
+    const auth = provider()
+
+    await auth.discoverProviders()
+    expect(auth.providers.value).toEqual([])
+
+    await auth.discoverProviders()
+    expect(calls).toBe(2)
+    expect(auth.providers.value).toEqual([
+      { provider: 'google', label: 'Google' },
+    ])
+  })
+
+  it('still shares one request while an unanswerable attempt is in flight', async () => {
+    // Not remembering the attempt must not cost the single-flight property:
+    // concurrent callers share the request, and only a *later* call re-asks.
+    let calls = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () => {
+        calls += 1
+        return HttpResponse.error()
+      }),
+    )
+    const auth = provider()
+    await Promise.all([
+      auth.discoverProviders(),
+      auth.discoverProviders(),
+      auth.discoverProviders(),
+    ])
+
+    expect(calls).toBe(1)
+  })
+
+  it('keeps a determinate answer without re-asking', async () => {
+    // The counterpart: an empty list *is* an answer, and must not be retried.
+    let calls = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/oauth/providers`, () => {
+        calls += 1
+        return HttpResponse.json({ data: [] })
+      }),
+    )
+    const auth = provider({
+      providers: [{ provider: 'google', label: 'Google' }],
+    })
+    await auth.discoverProviders()
+    await auth.discoverProviders()
+
+    expect(calls).toBe(1)
+    expect(auth.providers.value).toEqual([])
+  })
+})
+
+describe('handing a sign-in to an external browser', () => {
+  const shellProvider = (
+    navigate: (url: string) => void | Promise<void>,
+  ): ReturnType<typeof createOAuthAuthProvider> =>
+    createOAuthAuthProvider({
+      providers: [{ provider: 'google', label: 'Google' }],
+      baseUrl: BASE_URL,
+      clientId: 'axon-desktop',
+      redirectUri: 'org.matrixaxon.axon:/oauth/callback',
+      storage: memoryStorage(),
+      pendingStorage: memoryStorage(),
+      navigate,
+    })
+
+  it('reports that sign-in leaves the app only when it does', () => {
+    // The browser's default navigation replaces this page and never returns,
+    // so there is no caller left to tell anything to. An injected one hands
+    // off to another application and comes straight back.
+    expect(shellProvider(() => {}).signInLeavesTheApp).toBe(true)
+    expect(
+      createOAuthAuthProvider({
+        providers: [],
+        baseUrl: BASE_URL,
+        storage: memoryStorage(),
+        pendingStorage: memoryStorage(),
+      }).signInLeavesTheApp,
+    ).toBe(false)
+  })
+
+  it('fails the sign-in when the browser could not be opened', async () => {
+    // `openExternal` used to swallow this, so a denied capability scope or an
+    // absent handler resolved `startSignIn` as though a sign-in had begun.
+    const auth = shellProvider(() =>
+      Promise.reject(new Error('could not open an external link (https://x)')),
+    )
+
+    await expect(auth.startSignIn('google')).rejects.toThrow(
+      'could not open an external link',
+    )
+  })
+
+  it('does not leave the buttons latched once the browser has the URL', async () => {
+    // The bug this replaces: the button set `busy` and cleared it only if
+    // `startSignIn` rejected. Handing off to a browser resolves, so closing
+    // that browser, declining at the provider, or getting a failed callback
+    // left every button disabled reading "Opening..." until the app was
+    // restarted. Nothing in this app is pending at that point.
+    const auth = shellProvider(() => {})
+    const { findByRole, getByRole } = render(<auth.LoginBootstrap />)
+
+    const button = (await findByRole('button', {
+      name: /google/i,
+    })) as HTMLButtonElement
+    fireEvent.click(button)
+
+    await waitFor(() => expect(button.disabled).toBe(false))
+    expect(getByRole('status').textContent).toMatch(/continue signing in/i)
+
+    // And it can simply be used again.
+    fireEvent.click(button)
+    await waitFor(() => expect(button.disabled).toBe(false))
   })
 })

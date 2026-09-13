@@ -1,3 +1,4 @@
+import { onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
@@ -251,6 +252,41 @@ export function boundedSignal(
     : AbortSignal.any([caller, backstop])
 }
 
+/**
+ * How this shell identifies itself to the Axon authorization server.
+ *
+ * `clientId` and `redirectUri` are one registration, not two settings: the
+ * server allow-lists URIs per client id, so `axon-desktop` with the browser's
+ * callback — or `axon-web` with this one — is an unregistered *pair* and is
+ * refused with "unknown client_id or redirect_uri". The shell previously set
+ * only the URI and kept the build-time `axon-web`, which is precisely that.
+ *
+ * The redirect is a reverse-domain scheme per RFC 8252 § 7.1 and ADR 0102 § 4,
+ * not a short `axon:`. A private-use scheme is claimed first-come and
+ * unauthenticated on every desktop OS, so a generic one is both easy to collide
+ * with and easy to impersonate: any application registering `axon` could
+ * receive an authorization code meant for this one (§ 8.4, § 8.6). Single
+ * slash, because there is no authority component and `://` would make `oauth`
+ * look like a host.
+ *
+ * It is *not* the scheme the bundle is served from. `APP_SCHEME` in
+ * `src-tauri/src/lib.rs` stays `axon`: that is an in-webview protocol handler,
+ * never registered with the OS, and takes no part in OAuth.
+ *
+ * The scheme must also match `plugins.deep-link.desktop.schemes` in
+ * `tauri.conf.json`, and the operator's server needs the matching entry:
+ *
+ * ```toml
+ * [[oauth.clients]]
+ * client_id = "axon-desktop"
+ * redirect_uris = ["org.matrixaxon.axon:/oauth/callback"]
+ * ```
+ */
+const OAUTH_CLIENT = {
+  clientId: 'axon-desktop',
+  redirectUri: 'org.matrixaxon.axon:/oauth/callback',
+}
+
 export function tauriPlatform(): Platform {
   return {
     // The plugin's fetch is signature-compatible with the global, but has no
@@ -276,23 +312,43 @@ export function tauriPlatform(): Platform {
     // Hand the link to the user's real browser. Left to itself, an external
     // anchor navigates the *app window* to that page, and the shell has no
     // back button to return with — the app is simply gone until restarted.
-    openExternal: (url) => {
-      // Not swallowed. The click has already been `preventDefault`ed — letting
-      // the navigation through instead would take the app window to the page
-      // and there is no way back — so a rejection here means the user clicked
-      // a link and nothing happened, with the reason known only to us. It is
-      // also exactly how a mis-scoped capability presents: the opener denies
-      // every URL unless its scope says otherwise, and the first version of
-      // this granted the command without one.
-      void openUrl(url).catch(() => {
-        // Origin only, and no raw error. A link in a room can carry a signed
-        // media URL or credentials in its query, and the plugin's error text
-        // repeats the URL it was given — so logging either writes secrets a
-        // user never chose to record into a file they may well attach to a bug
-        // report. The origin is enough to tell a denied scope from an absent
-        // handler, which is all this line was ever for.
-        console.error('could not open an external link', originOf(url))
+    // The failure is returned, not swallowed. It used to be logged here and
+    // discarded, which suited the link handler — the click is already
+    // `preventDefault`ed, so there is nothing left to fall back to — and
+    // stranded OAuth, where handing off to the browser *is* the sign-in and a
+    // failure that never reaches the caller is a sign-in that silently never
+    // begins. This is also exactly how a mis-scoped capability presents: the
+    // opener denies every URL unless its scope says so, and the first version
+    // of this granted the command without one.
+    //
+    // The message is rewritten rather than passed on. A link in a room can
+    // carry a signed media URL or credentials in its query, and the plugin's
+    // error text repeats the URL it was given — so forwarding it writes
+    // secrets a user never chose to record into wherever the caller reports
+    // errors. The origin is enough to tell a denied scope from an absent
+    // handler, which is all anyone has ever needed from it.
+    openExternal: (url) =>
+      openUrl(url).catch(() => {
+        throw new Error(`could not open an external link (${originOf(url)})`)
+      }),
+    oauthClient: OAUTH_CLIENT,
+    onDeepLink: (handler) => {
+      // `onOpenUrl` resolves to its own unlisten function; the subscription is
+      // established asynchronously, so unsubscribing has to wait for it rather
+      // than race it.
+      const ready = onOpenUrl((urls) => {
+        for (const raw of urls) {
+          try {
+            handler(new URL(raw))
+          } catch {
+            // The OS can hand us anything registered to the scheme; a URL we
+            // cannot parse is not ours to act on.
+          }
+        }
       })
+      return () => {
+        void ready.then((unlisten) => unlisten()).catch(() => {})
+      }
     },
     // A packaged build has no same-origin API to assume: it must be told.
     defaultApiBaseUrl: null,
