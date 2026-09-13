@@ -286,8 +286,8 @@ why the shell is its own cargo workspace rather than a member of the root one.
 
 The web client consumes Axon's OAuth authorization-code + PKCE flow
 (`GET /v1/oauth/authorize` → `/oauth/callback` → `POST /v1/oauth/token`).
-The server must have `oauth.enabled = true`, a matching `[[oauth.clients]]`
-entry for `axon-web`, and an exact redirect URI for this web origin:
+The server must have `oauth.enabled = true` and a `[[oauth.clients]]` entry
+whose `client_id` and redirect URI both match what the client sends:
 
 ```toml
 [[oauth.clients]]
@@ -295,17 +295,60 @@ client_id = "axon-web"
 redirect_uris = ["https://myaxon.example.com/oauth/callback"]
 ```
 
-Provider buttons are configured in the web build until the server exposes
-provider discovery (tracked in issue #264):
+The desktop shell is a **separate registration**, not a variant of that one
+(ADR 0102 § 4). Every packaged build needs this entry as well:
+
+```toml
+[[oauth.clients]]
+client_id = "axon-desktop"
+redirect_uris = ["org.matrixaxon.axon:/oauth/callback"]
+```
+
+Three things about that entry are easy to get wrong, and all three fail the
+same way:
+
+- **The redirect URI is matched byte for byte**, never parsed or normalised
+  (`OAuthClients::redirect_uri_allowed`). A reverse-domain scheme with a single
+  slash is what the shell sends — `org.matrixaxon.axon:/oauth/callback`, per
+  RFC 8252 § 7.1, because a bare `axon:` is claimed first-come and
+  unauthenticated on every desktop OS. An older `axon://oauth/callback` entry
+  does not match it.
+- **The id and the URI are one registration.** Redirect URIs are allow-listed
+  _per client id_, so `axon-desktop` with the browser's callback, or
+  `axon-web` with the shell's, is an unregistered pair rather than a
+  half-configured client.
+- **Clients are read once at boot**, so the server needs a restart after this
+  is edited.
+
+All three are rejected with the same message, which by design does not say
+which half was wrong:
+
+```json
+{
+  "error": {
+    "code": "bad_request",
+    "message": "unknown client_id or redirect_uri"
+  }
+}
+```
+
+Provider buttons are discovered at runtime from `GET /v1/oauth/providers`, so
+a client can be pointed at a server it was not built against and still offer
+the right ones. `VITE_AXON_OAUTH_PROVIDERS` remains the fallback for a server
+that predates that endpoint or has OAuth disabled — discovery failing keeps
+the configured list rather than emptying it, so an existing deployment's
+buttons never disappear:
 
 ```sh
 VITE_AXON_OAUTH_PROVIDERS=google:Google,microsoft:Microsoft pnpm build
 ```
 
 Use `VITE_AXON_OAUTH_CLIENT_ID` only if the server registered this web app
-under a different OAuth client id. If no providers are configured, the sign-in
-screen shows only the manual token form. Manual tokens minted with
-`axon token issue` remain supported as a fallback.
+under a different OAuth client id; it does not apply to the shell, which
+carries its own id and callback together on the platform seam. If no providers
+are configured and none can be discovered, the sign-in screen shows only the
+manual token form. Manual tokens minted with `axon-server token issue` remain
+supported as a fallback.
 
 ## Generated API client
 
