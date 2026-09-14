@@ -7426,7 +7426,7 @@
           {
             "name": "key",
             "in": "path",
-            "description": "Preference key; currently only `space_order`",
+            "description": "Preference key: `space_order` or `message_gestures`",
             "required": true,
             "schema": {
               "type": "string"
@@ -7494,7 +7494,7 @@
           {
             "name": "key",
             "in": "path",
-            "description": "Preference key; currently only `space_order`",
+            "description": "Preference key: `space_order` or `message_gestures`",
             "required": true,
             "schema": {
               "type": "string"
@@ -8572,7 +8572,7 @@
         "properties": {
           "data": {
             "type": "object",
-            "description": "One instance preference (`GET /v1/preferences/{key}`, ADR 0103).",
+            "description": "One instance preference (`GET /v1/preferences/{key}`, ADRs 0103 and 0104).",
             "required": [
               "key",
               "value",
@@ -8581,7 +8581,7 @@
             "properties": {
               "key": {
                 "type": "string",
-                "description": "Allowlisted key, currently `space_order`."
+                "description": "Allowlisted key, such as `space_order` or `message_gestures`."
               },
               "updated_at": {
                 "type": "string",
@@ -8669,7 +8669,7 @@
         "properties": {
           "data": {
             "type": "object",
-            "description": "Response of `PUT /v1/preferences/{key}` (ADR 0103).",
+            "description": "Response of `PUT /v1/preferences/{key}` (ADRs 0103 and 0104).",
             "required": [
               "updated_at"
             ],
@@ -11083,7 +11083,7 @@
       },
       "PreferenceDto": {
         "type": "object",
-        "description": "One instance preference (`GET /v1/preferences/{key}`, ADR 0103).",
+        "description": "One instance preference (`GET /v1/preferences/{key}`, ADRs 0103 and 0104).",
         "required": [
           "key",
           "value",
@@ -11092,7 +11092,7 @@
         "properties": {
           "key": {
             "type": "string",
-            "description": "Allowlisted key, currently `space_order`."
+            "description": "Allowlisted key, such as `space_order` or `message_gestures`."
           },
           "updated_at": {
             "type": "string",
@@ -11230,7 +11230,7 @@
       },
       "PutPreferenceRequest": {
         "type": "object",
-        "description": "Body of `PUT /v1/preferences/{key}` (ADR 0103). `device_id` is echoed on\nthe `preferences.changed` frame so the originator can drop it.",
+        "description": "Body of `PUT /v1/preferences/{key}` (ADRs 0103 and 0104). `device_id` is\nechoed on the `preferences.changed` frame so the originator can drop it.",
         "required": [
           "device_id",
           "value"
@@ -11248,7 +11248,7 @@
       },
       "PutPreferenceResponse": {
         "type": "object",
-        "description": "Response of `PUT /v1/preferences/{key}` (ADR 0103).",
+        "description": "Response of `PUT /v1/preferences/{key}` (ADRs 0103 and 0104).",
         "required": [
           "updated_at"
         ],

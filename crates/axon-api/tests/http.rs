@@ -33,7 +33,7 @@ use axon_store::{
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use common::{
-    with_isolated_space_order, ConfiguredMediaProxy, DeleteOutcome, ImportTokenCall, LoginCall,
+    with_isolated_preference, ConfiguredMediaProxy, DeleteOutcome, ImportTokenCall, LoginCall,
     LoginOutcome, LogoutOutcome, MediaOutcome, RecoverOutcome, RedecryptOutcome, StubDeviceList,
     StubLifecycle, StubMediaProxy, StubMemberProfiles, StubSender, StubSyncState,
     StubTokenVerifier, StubTrust, StubVerification, VerifyCall, VerifyOutcome, TEST_TOKEN,
@@ -3972,7 +3972,7 @@ async fn list_invites_returns_persisted_rows() {
 #[ignore = "requires Postgres"]
 async fn preferences_put_get_allowlist_and_validation() {
     let store = store().await;
-    with_isolated_space_order(&store, || async {
+    with_isolated_preference(&store, "space_order", || async {
         let app = read_app(store.clone());
         let device_id = Uuid::new_v4();
         let account = Uuid::new_v4();
@@ -4053,6 +4053,76 @@ async fn preferences_put_get_allowlist_and_validation() {
     .await;
 }
 
+/// The message-gesture key accepts the complete v1 document and rejects a
+/// duplicate action through the real authenticated route.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn message_gesture_preferences_put_get_and_validate() {
+    let store = store().await;
+    with_isolated_preference(&store, "message_gestures", || async {
+        let app = read_app(store.clone());
+        let device_id = Uuid::new_v4();
+        let uri = "/v1/preferences/message_gestures";
+        let default_value = json!({
+            "schema_version": 1,
+            "bindings": {
+                "double_tap": "react",
+                "touch_and_hold": "thread",
+                "swipe_left": "reply",
+            },
+            "reaction_emoji": "👍",
+        });
+
+        let (status, body) = get(&app, uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "not_found");
+
+        let (status, body) = request(
+            &app,
+            "PUT",
+            uri,
+            Some(json!({ "device_id": device_id, "value": default_value })),
+            Some(&bearer()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["data"]["updated_at"].is_string());
+
+        let (status, body) = get(&app, uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["key"], "message_gestures");
+        assert_eq!(body["data"]["value"], default_value);
+
+        let duplicate = json!({
+            "schema_version": 1,
+            "bindings": {
+                "double_tap": "reply",
+                "touch_and_hold": null,
+                "swipe_left": "reply",
+            },
+            "reaction_emoji": "👍",
+        });
+        let (status, body) = request(
+            &app,
+            "PUT",
+            uri,
+            Some(json!({ "device_id": device_id, "value": duplicate })),
+            Some(&bearer()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "bad_request");
+
+        let (status, body) = get(&app, uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["data"]["value"], default_value,
+            "a rejected write must not replace the valid preference"
+        );
+    })
+    .await;
+}
+
 /// A panic inside the wrapped body must still unlock the advisory lock, or
 /// the next caller hangs until the connection is closed.
 #[tokio::test]
@@ -4063,7 +4133,7 @@ async fn space_order_lock_releases_on_panic() {
 
     let store = store().await;
     let panicked = std::panic::AssertUnwindSafe(async {
-        with_isolated_space_order(&store, || async {
+        with_isolated_preference(&store, "space_order", || async {
             panic!("boom");
         })
         .await;
@@ -4074,11 +4144,11 @@ async fn space_order_lock_releases_on_panic() {
 
     let second = tokio::time::timeout(
         Duration::from_secs(5),
-        with_isolated_space_order(&store, || async {}),
+        with_isolated_preference(&store, "space_order", || async {}),
     )
     .await;
     assert!(
         second.is_ok(),
-        "a later with_isolated_space_order must not hang on a leaked lock"
+        "a later with_isolated_preference must not hang on a leaked lock"
     );
 }
