@@ -7,10 +7,21 @@ import {
 } from 'preact/hooks'
 import type { ComponentChildren } from 'preact'
 import { EMOJI_PICKER_DATA_SOURCE } from '../emoji'
+import {
+  isHorizontallyScrollable,
+  SWIPE_AXIS_RATIO,
+  SWIPE_DECISION_THRESHOLD,
+  SWIPE_MIN_X,
+  swipeDirection,
+} from '../gestures'
 import { parseMedia } from '../media/parse-media'
 import { localRoomHref, localThreadEventHref } from '../matrix-to'
 import { useShortcuts } from '../shortcuts'
 import type { SettingsStore } from '../stores/settings'
+import type {
+  MessageGestureAction,
+  MessageGesturePreferences,
+} from '../stores/message-gestures'
 import type { ThreadsStore } from '../stores/threads'
 import type { ReadReceipt } from '../stores/ephemeral'
 import {
@@ -46,6 +57,19 @@ const REACTION_TOUCH_HOLD_MS = 450
 const EVENT_ACTION_TOUCH_HOLD_MS = 550
 /** Finger travel that still counts as a tap on the row, matching the room list. */
 const ACTION_ROW_TAP_SLOP_PX = 10
+const MESSAGE_DOUBLE_TAP_MS = 300
+const MESSAGE_DOUBLE_TAP_SLOP_PX = 24
+const MESSAGE_GESTURE_FEEDBACK_MS = 1600
+const MESSAGE_REACTION_BURST_MS = 450
+const MESSAGE_SWIPE_MAX_X = 96
+const MESSAGE_SWIPE_SETTLE_MS = 180
+
+type ReactionTally = NonNullable<EventDto['reactions']>[string]
+
+type GestureReactionPresentation = {
+  emoji: string
+  removing: boolean
+}
 
 type EmojiPickerClickDetail = {
   unicode?: string
@@ -212,6 +236,68 @@ function isRowControl(target: EventTarget | null): boolean {
   )
 }
 
+function isInlineLink(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest('a') !== null
+}
+
+function isTimestampControl(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element && target.closest('.event-time-copy') !== null
+  )
+}
+
+function isMessageBodyTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest('.event-body') !== null
+}
+
+function messageGestureActionLabel(action: MessageGestureAction): string {
+  switch (action) {
+    case 'reply':
+      return 'Reply'
+    case 'thread':
+      return 'Thread'
+    case 'react':
+      return 'React'
+    case 'edit':
+      return 'Edit'
+    case 'delete':
+      return 'Delete'
+  }
+}
+
+function presentedReactionTally(
+  tally: ReactionTally,
+  presentation: GestureReactionPresentation | null,
+  emoji: string,
+  ownUserId: string | null,
+): ReactionTally {
+  if (presentation?.emoji !== emoji) return tally
+  if (presentation.removing) {
+    if (!tally.me || tally.count <= 1) return tally
+    return {
+      ...tally,
+      count: tally.count - 1,
+      me: false,
+      senders:
+        ownUserId === null
+          ? tally.senders
+          : tally.senders.filter((sender) => sender !== ownUserId),
+      my_event_ids: [],
+    }
+  }
+  if (tally.me) return tally
+  return {
+    ...tally,
+    count: tally.count + 1,
+    me: true,
+    senders:
+      ownUserId === null || tally.senders.includes(ownUserId)
+        ? tally.senders
+        : [...tally.senders, ownUserId],
+    my_event_ids: [],
+  }
+}
+
 export function MessageEventRow({
   event,
   timeline,
@@ -223,6 +309,7 @@ export function MessageEventRow({
   readReceipts = [],
   highlighted = false,
   settings,
+  messageGestures,
   reactionPickerOpen,
   onSetReactionPicker,
   actionsOpen,
@@ -245,6 +332,7 @@ export function MessageEventRow({
   readReceipts?: readonly ReadReceipt[]
   highlighted?: boolean
   settings: SettingsStore
+  messageGestures: MessageGesturePreferences | null
   reactionPickerOpen: boolean
   onSetReactionPicker: (eventId: string | null) => void
   /**
@@ -264,15 +352,44 @@ export function MessageEventRow({
   /** Clears transient UI state after a successful event mutation. */
   onMutation?: () => void
 }) {
+  const rowRef = useRef<HTMLLIElement>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [confirmingRedact, setConfirmingRedact] = useState(false)
   const [inspectOpen, setInspectOpen] = useState(false)
-  const touchTap = useRef<{
+  const gesturePointer = useRef<{
     pointerId: number
     startX: number
     startY: number
-    moved: boolean
+    startedAt: number
+    direction: 'none' | 'left' | 'right' | 'vertical'
+    held: boolean
+    linkOnly: boolean
+    swipeAction: MessageGestureAction | null
   } | null>(null)
+  const holdTimer = useRef<number | null>(null)
+  const pendingTap = useRef<{
+    x: number
+    y: number
+    at: number
+    timer: number
+  } | null>(null)
+  const desktopClickTimer = useRef<number | null>(null)
+  const lastPointerType = useRef<string | null>(null)
+  const suppressNextClick = useRef(false)
+  const feedbackTimer = useRef<number | null>(null)
+  const revealTimer = useRef<number | null>(null)
+  const reactionBurstTimer = useRef<number | null>(null)
+  const gestureReactionRequest = useRef<number | null>(null)
+  const nextGestureReactionRequest = useRef(0)
+  const [gestureFeedback, setGestureFeedback] = useState<string | null>(null)
+  const [reactionBurst, setReactionBurst] = useState<string | null>(null)
+  const [gestureReaction, setGestureReaction] =
+    useState<GestureReactionPresentation | null>(null)
+  const [swipeReveal, setSwipeReveal] = useState<MessageGestureAction | null>(
+    null,
+  )
+  const [swipeArmed, setSwipeArmed] = useState(false)
+  const [swipeSettling, setSwipeSettling] = useState(false)
   const isState = isStateEvent(event)
   const replyTo = inReplyToId(event)
   const threadSummary = threads?.summaries.value.get(event.event_id)
@@ -284,10 +401,22 @@ export function MessageEventRow({
   const hasMessageActions = isMessageActionable(event)
   const senderDisplay = members.displayName(event.sender)
   const canOpenThread = showThreadAction && onOpenThread !== undefined
+  const gestureEligible =
+    hasMessageActions && parseMedia(event) === null && messageGestures !== null
+  const doubleClickAction = gestureEligible
+    ? (messageGestures?.bindings.double_tap ?? null)
+    : null
+  const touchHoldEnabled =
+    gestureEligible && messageGestures.bindings.touch_and_hold !== null
   const visibleReadReceipts = readReceipts.filter(
     (receipt) =>
       receipt.userId !== ownUserId && receipt.userId !== event.sender,
   )
+  const reactionEntries = Object.entries(event.reactions ?? {})
+  const pendingNewReaction =
+    gestureReaction !== null &&
+    !gestureReaction.removing &&
+    event.reactions?.[gestureReaction.emoji] === undefined
 
   useEffect(() => {
     if (!actionsOpen) {
@@ -300,75 +429,420 @@ export function MessageEventRow({
     }
   }, [actionsOpen])
 
+  useEffect(
+    () => () => {
+      if (holdTimer.current !== null) window.clearTimeout(holdTimer.current)
+      if (pendingTap.current !== null)
+        window.clearTimeout(pendingTap.current.timer)
+      if (desktopClickTimer.current !== null)
+        window.clearTimeout(desktopClickTimer.current)
+      if (feedbackTimer.current !== null)
+        window.clearTimeout(feedbackTimer.current)
+      if (revealTimer.current !== null) window.clearTimeout(revealTimer.current)
+      if (reactionBurstTimer.current !== null)
+        window.clearTimeout(reactionBurstTimer.current)
+      gestureReactionRequest.current = null
+    },
+    [],
+  )
+
+  const clearHoldTimer = () => {
+    if (holdTimer.current !== null) {
+      window.clearTimeout(holdTimer.current)
+      holdTimer.current = null
+    }
+  }
+
+  const cancelPendingTap = () => {
+    if (pendingTap.current !== null) {
+      window.clearTimeout(pendingTap.current.timer)
+      pendingTap.current = null
+    }
+  }
+
+  const cancelDesktopClick = () => {
+    if (desktopClickTimer.current !== null) {
+      window.clearTimeout(desktopClickTimer.current)
+      desktopClickTimer.current = null
+    }
+  }
+
+  const showGestureFeedback = (message: string) => {
+    setGestureFeedback(message)
+    if (feedbackTimer.current !== null)
+      window.clearTimeout(feedbackTimer.current)
+    feedbackTimer.current = window.setTimeout(() => {
+      setGestureFeedback(null)
+      feedbackTimer.current = null
+    }, MESSAGE_GESTURE_FEEDBACK_MS)
+  }
+
+  const clearSwipePresentation = () => {
+    if (revealTimer.current !== null) window.clearTimeout(revealTimer.current)
+    revealTimer.current = null
+    const row = rowRef.current
+    row?.style.removeProperty('--message-swipe-offset')
+    row?.style.removeProperty('--message-swipe-reveal-width')
+    row?.classList.remove('gesture-swipe-settling')
+    setSwipeReveal(null)
+    setSwipeArmed(false)
+    setSwipeSettling(false)
+  }
+
+  const previewSwipeAction = (action: MessageGestureAction, dx: number) => {
+    const distance = Math.min(Math.max(-dx, 0), MESSAGE_SWIPE_MAX_X)
+    if (revealTimer.current !== null) {
+      window.clearTimeout(revealTimer.current)
+      revealTimer.current = null
+    }
+    const row = rowRef.current
+    row?.style.setProperty('--message-swipe-offset', `${-distance}px`)
+    row?.style.setProperty('--message-swipe-reveal-width', `${distance}px`)
+    setSwipeReveal(action)
+    setSwipeArmed(-dx >= SWIPE_MIN_X)
+    setSwipeSettling(false)
+  }
+
+  const settleSwipeAction = () => {
+    const row = rowRef.current
+    if (row === null || swipeReveal === null) return
+    // Put the transition class on the live node before changing the custom
+    // properties; the following state update keeps it there across the action's
+    // own render (reply/edit state, reaction reconciliation, and so on).
+    row.classList.add('gesture-swipe-settling')
+    row.style.setProperty('--message-swipe-offset', '0px')
+    row.style.setProperty('--message-swipe-reveal-width', '0px')
+    setSwipeArmed(false)
+    setSwipeSettling(true)
+    if (revealTimer.current !== null) window.clearTimeout(revealTimer.current)
+    revealTimer.current = window.setTimeout(() => {
+      clearSwipePresentation()
+      revealTimer.current = null
+    }, MESSAGE_SWIPE_SETTLE_MS)
+  }
+
+  const runGestureReaction = (emoji: string) => {
+    // The event remains unchanged until the authoritative refresh lands. Do
+    // not issue a second toggle against that stale snapshot in the meantime.
+    if (gestureReactionRequest.current !== null) return
+    const request = ++nextGestureReactionRequest.current
+    const removing = event.reactions?.[emoji]?.me === true
+    gestureReactionRequest.current = request
+    setGestureReaction({ emoji, removing })
+
+    if (reactionBurstTimer.current !== null)
+      window.clearTimeout(reactionBurstTimer.current)
+    if (removing) {
+      setReactionBurst(null)
+    } else {
+      setReactionBurst(emoji)
+      reactionBurstTimer.current = window.setTimeout(() => {
+        setReactionBurst(null)
+        reactionBurstTimer.current = null
+      }, MESSAGE_REACTION_BURST_MS)
+    }
+
+    void timeline.toggleReaction(event, emoji).then((ok) => {
+      if (gestureReactionRequest.current !== request) return
+      gestureReactionRequest.current = null
+      setGestureReaction(null)
+      if (ok) {
+        onMutation?.()
+      } else {
+        if (reactionBurstTimer.current !== null) {
+          window.clearTimeout(reactionBurstTimer.current)
+          reactionBurstTimer.current = null
+        }
+        setReactionBurst(null)
+        showGestureFeedback('Reaction could not be updated')
+      }
+    })
+  }
+
+  const runGestureAction = (action: MessageGestureAction): void => {
+    switch (action) {
+      case 'reply':
+        onReply(event)
+        return
+      case 'thread':
+        if (!canOpenThread) {
+          showGestureFeedback('Thread is unavailable for this message')
+          return
+        }
+        onOpenThread?.(event.event_id)
+        return
+      case 'react':
+        runGestureReaction(messageGestures?.reaction_emoji ?? '👍')
+        return
+      case 'edit':
+        if (!editable) {
+          showGestureFeedback('Edit is unavailable for this message')
+          return
+        }
+        onEdit(event)
+        return
+      case 'delete':
+        if (!own) {
+          showGestureFeedback('Delete is unavailable for this message')
+          return
+        }
+        onOpenActions()
+        setConfirmingRedact(true)
+    }
+  }
+
+  const finishTap = (x: number, y: number): void => {
+    const action = gestureEligible
+      ? (messageGestures?.bindings.double_tap ?? null)
+      : null
+    if (action === null) {
+      onOpenActions()
+      return
+    }
+    const now = performance.now()
+    const first = pendingTap.current
+    if (
+      first !== null &&
+      now - first.at <= MESSAGE_DOUBLE_TAP_MS &&
+      Math.hypot(x - first.x, y - first.y) <= MESSAGE_DOUBLE_TAP_SLOP_PX
+    ) {
+      window.clearTimeout(first.timer)
+      pendingTap.current = null
+      runGestureAction(action)
+      return
+    }
+    if (first !== null) window.clearTimeout(first.timer)
+    const timer = window.setTimeout(() => {
+      pendingTap.current = null
+      onOpenActions()
+    }, MESSAGE_DOUBLE_TAP_MS)
+    pendingTap.current = { x, y, at: now, timer }
+  }
+
   return (
     <li
-      class={`event-row${isState ? ' state-event' : ''}${highlighted ? ' highlighted' : ''}${pending ? ' pending' : ''}${failed ? ' failed' : ''}${actionsOpen ? ' actions-open' : ''}`}
+      ref={rowRef}
+      class={`event-row${isState ? ' state-event' : ''}${highlighted ? ' highlighted' : ''}${pending ? ' pending' : ''}${failed ? ' failed' : ''}${actionsOpen ? ' actions-open' : ''}${touchHoldEnabled ? ' touch-hold-enabled' : ''}${swipeReveal !== null ? ' gesture-swipe-reveal' : ''}${swipeArmed ? ' gesture-swipe-armed' : ''}${swipeSettling ? ' gesture-swipe-settling' : ''}`}
       data-event-id={event.event_id}
       onPointerDown={(pointerEvent) => {
+        lastPointerType.current = pointerEvent.pointerType
         // Same reason the thread badge opens on pointerdown: iOS does not
         // synthesize `click` on a non-button `<li>`, and mobile CSS hides the
         // hover bar, so a real tap would otherwise do nothing. Mouse keeps
         // `click` below. Scroll is filtered on move/cancel, like the room list.
-        if (
-          pointerEvent.pointerType === 'mouse' ||
-          isRowControl(pointerEvent.target)
-        ) {
-          // Drop any tap a missing `pointerup` (finger left the row) left
-          // behind, so it cannot be mistaken for this gesture's start.
-          touchTap.current = null
+        if (pointerEvent.pointerType === 'mouse') {
+          clearHoldTimer()
+          gesturePointer.current = null
+          rowRef.current?.classList.remove('touch-gesture-active')
           return
         }
-        touchTap.current = {
+        cancelDesktopClick()
+        if (pendingTap.current !== null) {
+          // A second contact may become the second tap, a hold, or a drag.
+          // Keep its first-tap coordinates for now, but do not let the delayed
+          // action bar open underneath the new gesture.
+          window.clearTimeout(pendingTap.current.timer)
+        }
+        if (
+          gesturePointer.current !== null &&
+          gesturePointer.current.pointerId !== pointerEvent.pointerId
+        ) {
+          clearHoldTimer()
+          gesturePointer.current = null
+          return
+        }
+        clearHoldTimer()
+        gesturePointer.current = null
+        suppressNextClick.current = false
+        clearSwipePresentation()
+        const linkOnly = isInlineLink(pointerEvent.target)
+        if (isRowControl(pointerEvent.target) && !linkOnly) return
+        if (isHorizontallyScrollable(pointerEvent.target)) return
+        if (linkOnly && !touchHoldEnabled) return
+        if (touchHoldEnabled) {
+          rowRef.current?.classList.add('touch-gesture-active')
+        }
+        gesturePointer.current = {
           pointerId: pointerEvent.pointerId,
           startX: pointerEvent.clientX,
           startY: pointerEvent.clientY,
-          moved: false,
+          startedAt: performance.now(),
+          direction: 'none',
+          held: false,
+          linkOnly,
+          swipeAction:
+            gestureEligible && !linkOnly
+              ? (messageGestures?.bindings.swipe_left ?? null)
+              : null,
+        }
+        const holdAction = gestureEligible
+          ? (messageGestures?.bindings.touch_and_hold ?? null)
+          : null
+        if (holdAction !== null) {
+          holdTimer.current = window.setTimeout(() => {
+            const gesture = gesturePointer.current
+            if (gesture === null || gesture.direction !== 'none') return
+            cancelPendingTap()
+            gesture.held = true
+            suppressNextClick.current = true
+            runGestureAction(holdAction)
+          }, EVENT_ACTION_TOUCH_HOLD_MS)
         }
       }}
       onPointerMove={(pointerEvent) => {
-        const tap = touchTap.current
-        if (
-          tap === null ||
-          tap.pointerId !== pointerEvent.pointerId ||
-          tap.moved
-        ) {
+        const gesture = gesturePointer.current
+        if (gesture === null || gesture.pointerId !== pointerEvent.pointerId) {
           return
         }
-        if (
-          Math.hypot(
-            pointerEvent.clientX - tap.startX,
-            pointerEvent.clientY - tap.startY,
-          ) > ACTION_ROW_TAP_SLOP_PX
-        ) {
-          tap.moved = true
+        const dx = pointerEvent.clientX - gesture.startX
+        const dy = pointerEvent.clientY - gesture.startY
+        if (gesture.direction === 'left') {
+          if (gesture.swipeAction !== null) {
+            previewSwipeAction(gesture.swipeAction, dx)
+            pointerEvent.preventDefault()
+          }
+          return
+        }
+        if (gesture.direction !== 'none') return
+        const absX = Math.abs(dx)
+        const absY = Math.abs(dy)
+        if (absX < SWIPE_DECISION_THRESHOLD && absY < SWIPE_DECISION_THRESHOLD)
+          return
+        clearHoldTimer()
+        cancelPendingTap()
+        if (absX >= absY * SWIPE_AXIS_RATIO) {
+          gesture.direction = dx < 0 ? 'left' : 'right'
+          if (dx < 0 && gesture.swipeAction !== null) {
+            previewSwipeAction(gesture.swipeAction, dx)
+            pointerEvent.preventDefault()
+          }
+        } else {
+          gesture.direction = 'vertical'
         }
       }}
       onPointerCancel={() => {
-        touchTap.current = null
+        rowRef.current?.classList.remove('touch-gesture-active')
+        clearHoldTimer()
+        cancelPendingTap()
+        gesturePointer.current = null
+        settleSwipeAction()
       }}
       onPointerUp={(pointerEvent) => {
-        const tap = touchTap.current
-        touchTap.current = null
+        rowRef.current?.classList.remove('touch-gesture-active')
+        clearHoldTimer()
+        const gesture = gesturePointer.current
+        gesturePointer.current = null
         if (
           pointerEvent.pointerType === 'mouse' ||
-          tap === null ||
-          tap.pointerId !== pointerEvent.pointerId ||
-          tap.moved ||
-          Math.hypot(
-            pointerEvent.clientX - tap.startX,
-            pointerEvent.clientY - tap.startY,
-          ) > ACTION_ROW_TAP_SLOP_PX ||
-          isRowControl(pointerEvent.target)
+          gesture === null ||
+          gesture.pointerId !== pointerEvent.pointerId
         ) {
           return
         }
+        if (gesture.held) {
+          pointerEvent.preventDefault()
+          return
+        }
+        if (!touchHoldEnabled && performance.now() - gesture.startedAt >= 550)
+          return
+        if (gesture.linkOnly) {
+          if (
+            gesture.direction !== 'none' ||
+            Math.hypot(
+              pointerEvent.clientX - gesture.startX,
+              pointerEvent.clientY - gesture.startY,
+            ) > ACTION_ROW_TAP_SLOP_PX
+          ) {
+            suppressNextClick.current = true
+          }
+          return
+        }
+        if (gesture.direction === 'left' && gestureEligible) {
+          suppressNextClick.current = true
+          settleSwipeAction()
+          if (
+            swipeDirection(
+              { x: gesture.startX, y: gesture.startY },
+              pointerEvent.clientX,
+              pointerEvent.clientY,
+            ) === 'left'
+          ) {
+            const action = gesture.swipeAction
+            if (action !== null) {
+              pointerEvent.preventDefault()
+              suppressNextClick.current = true
+              runGestureAction(action)
+            }
+          }
+          return
+        }
+        if (
+          gesture.direction !== 'none' ||
+          Math.hypot(
+            pointerEvent.clientX - gesture.startX,
+            pointerEvent.clientY - gesture.startY,
+          ) > ACTION_ROW_TAP_SLOP_PX
+        ) {
+          suppressNextClick.current = true
+          return
+        }
         pointerEvent.preventDefault()
-        onOpenActions()
+        suppressNextClick.current = true
+        finishTap(pointerEvent.clientX, pointerEvent.clientY)
+      }}
+      onContextMenu={(event) => {
+        if (
+          touchHoldEnabled &&
+          gesturePointer.current !== null &&
+          !isTimestampControl(event.target)
+        )
+          event.preventDefault()
       }}
       onClick={(click) => {
+        if (suppressNextClick.current) {
+          suppressNextClick.current = false
+          click.preventDefault()
+          return
+        }
         if (!isRowControl(click.target)) {
+          if (
+            doubleClickAction !== null &&
+            lastPointerType.current === 'mouse' &&
+            isMessageBodyTarget(click.target)
+          ) {
+            if (click.detail === 1) {
+              cancelDesktopClick()
+              desktopClickTimer.current = window.setTimeout(() => {
+                desktopClickTimer.current = null
+                onOpenActions()
+              }, MESSAGE_DOUBLE_TAP_MS)
+            }
+            return
+          }
           onOpenActions()
         }
+      }}
+      onMouseDown={(mouseDown) => {
+        if (
+          doubleClickAction !== null &&
+          mouseDown.detail === 2 &&
+          isMessageBodyTarget(mouseDown.target) &&
+          !isRowControl(mouseDown.target)
+        ) {
+          mouseDown.preventDefault()
+        }
+      }}
+      onDblClick={(click) => {
+        if (
+          doubleClickAction === null ||
+          lastPointerType.current !== 'mouse' ||
+          !isMessageBodyTarget(click.target) ||
+          isRowControl(click.target)
+        )
+          return
+        cancelDesktopClick()
+        click.preventDefault()
+        runGestureAction(doubleClickAction)
       }}
     >
       <UserAvatar
@@ -380,7 +854,11 @@ export function MessageEventRow({
       <div class="event-content">
         <div class="event-head">
           <span class="event-sender">{senderDisplay}</span>
-          <EventTime event={event} format={settings.timeFormat.value} />
+          <EventTime
+            event={event}
+            format={settings.timeFormat.value}
+            touchHoldEnabled={touchHoldEnabled}
+          />
           <FailedSend event={event} timeline={timeline} />
           {event.edited && (
             <button
@@ -502,22 +980,56 @@ export function MessageEventRow({
             resolveName={members.displayName}
           />
         </div>
+        {reactionBurst !== null && (
+          <span class="message-reaction-burst" aria-hidden="true">
+            {reactionBurst}
+          </span>
+        )}
         {inspectOpen && <EventInspector event={event} />}
-        {event.reactions != null && Object.keys(event.reactions).length > 0 && (
+        {(reactionEntries.length > 0 || pendingNewReaction) && (
           <div class="reactions">
-            {Object.entries(event.reactions).map(([emoji, tally]) => (
+            {reactionEntries.map(([emoji, tally]) => {
+              const shownTally = presentedReactionTally(
+                tally,
+                gestureReaction,
+                emoji,
+                ownUserId,
+              )
+              const pending =
+                gestureReaction?.emoji === emoji
+                  ? gestureReaction.removing
+                    ? 'removing'
+                    : 'adding'
+                  : null
+              return (
+                <ReactionChip
+                  key={emoji}
+                  emoji={emoji}
+                  tally={shownTally}
+                  tooltip={reactionTooltip(emoji, shownTally, members)}
+                  pending={pending}
+                  onToggle={() =>
+                    void timeline.toggleReaction(event, emoji).then((ok) => {
+                      if (ok) onMutation?.()
+                    })
+                  }
+                />
+              )
+            })}
+            {pendingNewReaction && gestureReaction !== null && (
               <ReactionChip
-                key={emoji}
-                emoji={emoji}
-                tally={tally}
-                tooltip={reactionTooltip(emoji, tally, members)}
-                onToggle={() =>
-                  void timeline.toggleReaction(event, emoji).then((ok) => {
-                    if (ok) onMutation?.()
-                  })
-                }
+                key={`pending-${gestureReaction.emoji}`}
+                emoji={gestureReaction.emoji}
+                tally={{
+                  count: 1,
+                  me: true,
+                  senders: ownUserId === null ? [] : [ownUserId],
+                  my_event_ids: [],
+                }}
+                tooltip={`Adding ${gestureReaction.emoji} reaction`}
+                pending="adding"
               />
-            ))}
+            )}
           </div>
         )}
         {visibleReadReceipts.length > 0 && (
@@ -565,7 +1077,18 @@ export function MessageEventRow({
             onClose={() => setHistoryOpen(false)}
           />
         )}
+        {gestureFeedback !== null && (
+          <span class="message-gesture-feedback" role="status">
+            {gestureFeedback}
+          </span>
+        )}
       </div>
+      {swipeReveal !== null && (
+        <span class="gesture-swipe-affordance" aria-hidden="true">
+          <EventActionIcon name={swipeReveal} />
+          <span>{messageGestureActionLabel(swipeReveal)}</span>
+        </span>
+      )}
     </li>
   )
 }
@@ -733,14 +1256,16 @@ function EventInspector({ event }: { event: TimelineEvent }) {
   )
 }
 
-function ReactionPicker({
+export function ReactionPicker({
   onClose,
   settings,
   onReact,
+  ariaLabel = 'React with',
 }: {
   onClose: () => void
   settings: SettingsStore
   onReact: (key: string) => void
+  ariaLabel?: string
 }) {
   const { containerRef } = useModalFocus<HTMLDivElement>()
   const fullPickerDialogRef = useRef<HTMLDivElement>(null)
@@ -952,7 +1477,7 @@ function ReactionPicker({
       ref={mode === 'compact' ? containerRef : null}
       class="reaction-picker-shell"
       role="group"
-      aria-label="React with"
+      aria-label={ariaLabel}
     >
       <div class="reaction-picker">
         {quickReactions.map((key) => (
@@ -1154,18 +1679,18 @@ export function canonicalReactionKey(key: string): string {
     : key
 }
 
-type ReactionTally = NonNullable<EventDto['reactions']>[string]
-
 function ReactionChip({
   emoji,
   tally,
   tooltip,
+  pending = null,
   onToggle,
 }: {
   emoji: string
   tally: ReactionTally
   tooltip: string
-  onToggle: () => void
+  pending?: 'adding' | 'removing' | null
+  onToggle?: () => void
 }) {
   const [tooltipOpen, setTooltipOpen] = useState(false)
   const root = useRef<HTMLSpanElement>(null)
@@ -1228,8 +1753,10 @@ function ReactionChip({
     >
       <button
         type="button"
-        class={`reaction-chip${tally.me ? ' mine' : ''}`}
+        class={`reaction-chip${tally.me ? ' mine' : ''}${pending === null ? '' : ` gesture-reaction-pending gesture-reaction-${pending}`}`}
+        aria-busy={pending === null ? undefined : 'true'}
         aria-describedby={tooltipOpen ? tooltipId : undefined}
+        disabled={pending !== null}
         onFocus={() => setTooltipOpen(true)}
         onBlur={() => setTooltipOpen(false)}
         onTouchStart={() => {
@@ -1252,7 +1779,7 @@ function ReactionChip({
             suppressNextClick.current = false
             return
           }
-          onToggle()
+          onToggle?.()
         }}
       >
         {emoji} {tally.count}

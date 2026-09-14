@@ -49,6 +49,10 @@ import {
   type LiveConnection,
 } from './stores/live-connection'
 import {
+  createMessageGestureStore,
+  type MessageGestureStore,
+} from './stores/message-gestures'
+import {
   cacheNamespace,
   createIndexedDbCacheStore,
   requestPersistentStorage,
@@ -109,6 +113,8 @@ export interface AppServices {
   threadUnread: ThreadUnreadStore
   live: LiveConnection
   deviceState: DeviceStateStore
+  /** Axon-wide, cross-device mobile message gesture bindings (ADR 0104). */
+  messageGestures: MessageGestureStore
   ephemeral: EphemeralStore
   /** Outbound read receipts + typing notices to the homeserver (ADR 0067/0068). */
   ephemeralSender: EphemeralSender
@@ -782,6 +788,20 @@ export function connectVerificationSessionReset(
   })
 }
 
+/** Load and clear Axon-wide gesture preferences with the authenticated session. */
+export function connectMessageGestureSession(
+  auth: CompositeAuthProvider,
+  messageGestures: MessageGestureStore,
+): () => void {
+  return effect(() => {
+    if (auth.signedIn.value) {
+      void messageGestures.hydrate()
+    } else {
+      messageGestures.resetSession()
+    }
+  })
+}
+
 /**
  * Keep SAS verification live (ADR 0027/0061). GET is the source of truth on
  * reconnect and visibility; the first-load GET is `ensureLoaded` from the
@@ -1063,6 +1083,11 @@ export function createServices(
   const activeThread = signal<ActiveThread | null>(null)
   const composerFocus = signal(0)
   const deviceState = createDeviceStateStore(api, live, storage)
+  const messageGestures = createMessageGestureStore(
+    api,
+    live,
+    deviceState.deviceId,
+  )
   const spaces = createSpacesStore(api, rooms, live)
   const invites = createInvitesStore(api, rooms)
   const verification = createVerificationStore(api)
@@ -1072,6 +1097,7 @@ export function createServices(
   connectInvitesSessionReset(auth, invites)
   connectLiveVerification(live, verification, accounts)
   connectVerificationSessionReset(auth, verification)
+  connectMessageGestureSession(auth, messageGestures)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
@@ -1107,6 +1133,7 @@ export function createServices(
     threadUnread,
     live,
     deviceState,
+    messageGestures,
     ephemeral,
     ephemeralSender,
     activeRoom,

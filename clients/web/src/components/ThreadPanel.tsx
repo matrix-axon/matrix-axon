@@ -151,6 +151,7 @@ export function ThreadPanel({
     media,
     search,
     settings,
+    messageGestures,
     attachments: staging,
   } = useServices()
   const location = useLocation()
@@ -533,6 +534,7 @@ export function ThreadPanel({
       ownUserId={ownUserId}
       highlighted={event.event_id === targetEventId}
       settings={settings}
+      messageGestures={messageGestures.preferences.value}
       reactionPickerOpen={reactionPickerEventId === event.event_id}
       onSetReactionPicker={setReactionPickerEventId}
       actionsOpen={actionsOpenEventId === event.event_id}
@@ -591,6 +593,7 @@ export function ThreadPanel({
                   ownUserId={ownUserId}
                   highlighted={root.event_id === targetEventId}
                   settings={settings}
+                  messageGestures={messageGestures.preferences.value}
                   reactionPickerOpen={reactionPickerEventId === root.event_id}
                   onSetReactionPicker={setReactionPickerEventId}
                   actionsOpen={actionsOpenEventId === root.event_id}
