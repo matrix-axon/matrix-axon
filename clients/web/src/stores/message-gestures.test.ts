@@ -245,6 +245,174 @@ describe('createMessageGestureStore', () => {
     expect(store.preferences.value).toEqual(value)
   })
 
+  it('applies changes immediately and coalesces edits made during a write', async () => {
+    let releaseFirst!: () => void
+    const firstWrite = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const writes: MessageGesturePreferences[] = []
+    server.use(
+      http.put(URL, async ({ request }) => {
+        const body = (await request.json()) as {
+          value: MessageGesturePreferences
+        }
+        writes.push(body.value)
+        if (writes.length === 1) {
+          await firstWrite
+        }
+        return HttpResponse.json({ data: { updated_at: 'now' } })
+      }),
+    )
+    const { store } = harness()
+    const first = {
+      ...defaultMessageGestures(),
+      reaction_emoji: '🎉',
+    }
+    const intermediate = {
+      ...first,
+      reaction_emoji: '❤️',
+    }
+    const latest = {
+      ...intermediate,
+      reaction_emoji: '🚀',
+    }
+
+    const firstResult = store.save(first)
+    expect(store.preferences.value).toEqual(first)
+    expect(store.saving.value).toBe(true)
+    const intermediateResult = store.save(intermediate)
+    const latestResult = store.save(latest)
+    expect(store.preferences.value).toEqual(latest)
+
+    releaseFirst()
+    expect(
+      await Promise.all([firstResult, intermediateResult, latestResult]),
+    ).toEqual([true, true, true])
+    expect(writes).toEqual([first, latest])
+    expect(store.preferences.value).toEqual(latest)
+    expect(store.saving.value).toBe(false)
+  })
+
+  it('keeps an optimistic local edit visible while reconciling a sibling write', async () => {
+    let releaseWrite!: () => void
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve
+    })
+    const local = {
+      ...defaultMessageGestures(),
+      reaction_emoji: '🚀',
+    }
+    const sibling = {
+      ...defaultMessageGestures(),
+      reaction_emoji: '🎉',
+    }
+    server.use(
+      http.put(URL, async () => {
+        await writeGate
+        return HttpResponse.json({ data: { updated_at: 'now' } })
+      }),
+      http.get(URL, () => preferenceResponse(sibling)),
+    )
+    const { store, emit } = harness()
+
+    const saving = store.save(local)
+    emit(sibling)
+    expect(store.preferences.value).toEqual(local)
+
+    releaseWrite()
+    expect(await saving).toBe(true)
+    expect(store.preferences.value).toEqual(sibling)
+  })
+
+  it('writes a newer local edit that arrives during sibling reconciliation', async () => {
+    let releaseFirstWrite!: () => void
+    const firstWrite = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve
+    })
+    let noteGetStarted!: () => void
+    const getStarted = new Promise<void>((resolve) => {
+      noteGetStarted = resolve
+    })
+    let releaseGet!: () => void
+    const getGate = new Promise<void>((resolve) => {
+      releaseGet = resolve
+    })
+    const writes: MessageGesturePreferences[] = []
+    const first = {
+      ...defaultMessageGestures(),
+      reaction_emoji: '🚀',
+    }
+    const sibling = {
+      ...defaultMessageGestures(),
+      reaction_emoji: '🎉',
+    }
+    const latest = {
+      ...defaultMessageGestures(),
+      reaction_emoji: '❤️',
+    }
+    server.use(
+      http.put(URL, async ({ request }) => {
+        const body = (await request.json()) as {
+          value: MessageGesturePreferences
+        }
+        writes.push(body.value)
+        if (writes.length === 1) {
+          await firstWrite
+        }
+        return HttpResponse.json({ data: { updated_at: 'now' } })
+      }),
+      http.get(URL, async () => {
+        noteGetStarted()
+        await getGate
+        return preferenceResponse(sibling)
+      }),
+    )
+    const { store, emit } = harness()
+
+    const firstResult = store.save(first)
+    emit(sibling)
+    releaseFirstWrite()
+    await getStarted
+    const latestResult = store.save(latest)
+    expect(store.preferences.value).toEqual(latest)
+    releaseGet()
+
+    expect(await Promise.all([firstResult, latestResult])).toEqual([true, true])
+    expect(writes).toEqual([first, latest])
+    expect(store.preferences.value).toEqual(latest)
+  })
+
+  it('keeps a failed optimistic edit available for retry', async () => {
+    let fail = true
+    let writes = 0
+    server.use(
+      http.put(URL, () => {
+        writes += 1
+        return fail
+          ? HttpResponse.json(
+              { error: { code: 'unavailable', message: 'try again' } },
+              { status: 503 },
+            )
+          : HttpResponse.json({ data: { updated_at: 'now' } })
+      }),
+    )
+    const { store } = harness()
+    const desired = {
+      ...defaultMessageGestures(),
+      reaction_emoji: '🚀',
+    }
+
+    expect(await store.save(desired)).toBe(false)
+    expect(store.preferences.value).toEqual(desired)
+    expect(store.error.value).toBe('try again')
+
+    fail = false
+    expect(await store.save(desired)).toBe(true)
+    expect(store.error.value).toBeNull()
+    expect(store.preferences.value).toEqual(desired)
+    expect(writes).toBe(2)
+  })
+
   it('applies sibling frames, ignores echoes, and refetches after reconnect', async () => {
     let reads = 0
     let serverValue = defaultMessageGestures()

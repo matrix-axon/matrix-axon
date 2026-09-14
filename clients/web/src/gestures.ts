@@ -47,11 +47,14 @@ export interface SwipeStart {
  * Whether `target` sits inside content that pans horizontally on its own, such
  * as a wide code block or table. Room and row swipe recognizers both yield to
  * it so the same touch cannot mean content pan in one layer and an action in
- * another. Walking stops at the room swipe region's boundary.
+ * another. Walking stops at the enclosing swipe-back surface.
  */
 export function isHorizontallyScrollable(target: EventTarget | null): boolean {
   let element = target instanceof Element ? target : null
-  while (element !== null && !element.classList.contains('room-body')) {
+  while (
+    element !== null &&
+    !element.classList.contains('mobile-back-surface')
+  ) {
     if (
       element instanceof HTMLElement &&
       element.scrollWidth > element.clientWidth &&

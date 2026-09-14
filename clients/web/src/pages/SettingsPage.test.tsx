@@ -196,10 +196,24 @@ describe('SettingsPage', () => {
         name: 'Choose reaction emoji, currently 🎉',
       }),
     ).toBeTruthy()
+    expect(queryByRole('button', { name: 'Save gestures' })).toBeNull()
+    await waitFor(() =>
+      expect(body).toEqual({
+        device_id: services.deviceState.deviceId,
+        value: {
+          schema_version: 1,
+          bindings: {
+            double_tap: 'edit',
+            touch_and_hold: null,
+            swipe_left: 'delete',
+          },
+          reaction_emoji: '🎉',
+        },
+      }),
+    )
 
     fireEvent.click(getByRole('button', { name: 'Restore defaults' }))
-    fireEvent.click(getByRole('button', { name: 'Save gestures' }))
-    await waitFor(() => getByText('Gestures saved'))
+    await waitFor(() => getByText('Defaults restored'))
 
     expect(body).toEqual({
       device_id: services.deviceState.deviceId,

@@ -194,6 +194,8 @@ export function createMessageGestureStore(
   let hydration: Promise<void> | null = null
   let writeInFlight = false
   let siblingFrameDuringWrite = false
+  let queuedSave: MessageGesturePreferences | null = null
+  let saveLoop: Promise<boolean> | null = null
 
   function apply(value: MessageGesturePreferences): void {
     preferences.value = clonePreferences(value)
@@ -275,6 +277,7 @@ export function createMessageGestureStore(
     }
     if (writeInFlight) {
       siblingFrameDuringWrite = true
+      return
     }
     apply(parsed)
   })
@@ -295,45 +298,84 @@ export function createMessageGestureStore(
     hydrate,
     async save(value) {
       const parsed = parseMessageGestures(value)
-      if (parsed === null || saving.peek()) {
+      if (parsed === null) {
         return false
+      }
+      // The selected value takes effect in this client immediately. While a
+      // PUT is in flight, retain only the newest complete snapshot; preference
+      // writes are last-write-wins, so sending intermediate UI states would
+      // add latency without preserving useful intent.
+      apply(parsed)
+      queuedSave = clonePreferences(parsed)
+      if (saveLoop !== null) {
+        return saveLoop
       }
       const generation = sessionGeneration
       saving.value = true
       writeInFlight = true
       siblingFrameDuringWrite = false
-      try {
-        const result = await api.PUT('/v1/preferences/{key}', {
-          params: { path: { key: MESSAGE_GESTURES_KEY } },
-          body: { device_id: deviceId, value: parsed },
-        })
-        if (generation !== sessionGeneration) {
-          return false
+      const started = (async () => {
+        let ok = true
+        try {
+          while (generation === sessionGeneration && ok) {
+            while (queuedSave !== null) {
+              const attempted = queuedSave
+              queuedSave = null
+              try {
+                const result = await api.PUT('/v1/preferences/{key}', {
+                  params: { path: { key: MESSAGE_GESTURES_KEY } },
+                  body: { device_id: deviceId, value: attempted },
+                })
+                if (generation !== sessionGeneration) {
+                  return false
+                }
+                if (result.error !== undefined || !result.response.ok) {
+                  error.value =
+                    result.error === undefined
+                      ? 'message gesture preferences failed'
+                      : apiErrorMessage(result.error)
+                  ok = false
+                  queuedSave = null
+                  break
+                }
+              } catch (cause) {
+                if (generation !== sessionGeneration) {
+                  return false
+                }
+                error.value =
+                  cause instanceof Error ? cause.message : String(cause)
+                ok = false
+                queuedSave = null
+                break
+              }
+            }
+            // A sibling write can race the local PUT at the server. Once the
+            // local queue drains, read the authoritative last-write-wins
+            // value; until then, keep the user's optimistic selection on
+            // screen. Loop again because a local edit can arrive while that
+            // GET is in flight and must still be written afterward.
+            if (ok && siblingFrameDuringWrite) {
+              siblingFrameDuringWrite = false
+              await fetchPreference()
+              continue
+            }
+            break
+          }
+          return ok
+        } finally {
+          if (generation === sessionGeneration) {
+            writeInFlight = false
+            saving.value = false
+          }
         }
-        if (result.error !== undefined || !result.response.ok) {
-          error.value =
-            result.error === undefined
-              ? 'message gesture preferences failed'
-              : apiErrorMessage(result.error)
-          return false
+      })()
+      saveLoop = started
+      void started.finally(() => {
+        if (saveLoop === started) {
+          saveLoop = null
         }
-        if (siblingFrameDuringWrite) {
-          await fetchPreference()
-        } else {
-          apply(parsed)
-        }
-        return true
-      } catch (cause) {
-        if (generation === sessionGeneration) {
-          error.value = cause instanceof Error ? cause.message : String(cause)
-        }
-        return false
-      } finally {
-        if (generation === sessionGeneration) {
-          writeInFlight = false
-          saving.value = false
-        }
-      }
+      })
+      return started
     },
     resetSession() {
       sessionGeneration += 1
@@ -341,6 +383,8 @@ export function createMessageGestureStore(
       hydration = null
       writeInFlight = false
       siblingFrameDuringWrite = false
+      queuedSave = null
+      saveLoop = null
       if (
         preferences.peek() === null &&
         status.peek() === 'idle' &&
