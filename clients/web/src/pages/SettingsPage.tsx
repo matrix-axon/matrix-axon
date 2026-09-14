@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import {
   appBadgeAvailable,
   badgeNeedsNotificationPermission,
@@ -7,6 +7,7 @@ import {
 } from '../app-badge'
 import { BUILD_INFO } from '../build-info'
 import { CopyableText } from '../components/CopyableText'
+import { ReactionPicker } from '../components/MessageEventRow'
 import {
   installOutcome,
   installPromptAvailable,
@@ -26,6 +27,15 @@ import type {
   Theme,
   TimeFormat,
 } from '../stores/settings'
+import {
+  assignMessageGestureAction,
+  defaultMessageGestures,
+  isSingleEmoji,
+  MESSAGE_GESTURE_ACTIONS,
+  type MessageGesture,
+  type MessageGestureAction,
+  type MessageGesturePreferences,
+} from '../stores/message-gestures'
 
 const THEMES: { value: Theme; label: string }[] = [
   { value: 'system', label: 'System' },
@@ -43,6 +53,23 @@ const STATE_EVENTS: { value: StateEventVisibility; label: string }[] = [
   { value: 'important', label: 'Membership and profile changes' },
   { value: 'all', label: 'All state events' },
 ]
+
+const MESSAGE_GESTURES: {
+  value: MessageGesture
+  label: string
+}[] = [
+  { value: 'double_tap', label: 'Double tap' },
+  { value: 'touch_and_hold', label: 'Touch and hold' },
+  { value: 'swipe_left', label: 'Swipe left' },
+]
+
+const MESSAGE_GESTURE_ACTION_LABELS: Record<MessageGestureAction, string> = {
+  reply: 'Reply',
+  thread: 'Open thread',
+  react: 'React',
+  edit: 'Edit',
+  delete: 'Delete',
+}
 
 /** Theme + (schema-versioned) local settings (ADR 0046, M-W3). */
 export function SettingsPage() {
@@ -115,6 +142,7 @@ export function SettingsPage() {
       </section>
       <section class="panel">
         <h2>Messages</h2>
+        <MessageGestureSettings />
         <h3 class="settings-group-label" id="settings-state-events">
           State events
         </h3>
@@ -259,7 +287,10 @@ export function SettingsPage() {
           are kept.
         </p>
       </section>
-      <p class="muted">These settings are stored locally, not on the server.</p>
+      <p class="muted">
+        Gestures sync through Axon. Other settings on this page are stored only
+        in this client.
+      </p>
       <footer class="settings-version muted">
         Web client{' '}
         <CopyableText
@@ -275,6 +306,332 @@ export function SettingsPage() {
         <br />
         <UpdateCheckControl />
       </footer>
+    </div>
+  )
+}
+
+function sameMessageGestures(
+  left: MessageGesturePreferences,
+  right: MessageGesturePreferences,
+): boolean {
+  return (
+    left.reaction_emoji === right.reaction_emoji &&
+    MESSAGE_GESTURES.every(
+      ({ value }) => left.bindings[value] === right.bindings[value],
+    )
+  )
+}
+
+function cloneMessageGestures(
+  value: MessageGesturePreferences,
+): MessageGesturePreferences {
+  return {
+    schema_version: 1,
+    bindings: { ...value.bindings },
+    reaction_emoji: value.reaction_emoji,
+  }
+}
+
+function duplicateMessageGestureAction(
+  value: MessageGesturePreferences,
+): boolean {
+  const actions = Object.values(value.bindings).filter(
+    (action): action is MessageGestureAction => action !== null,
+  )
+  return new Set(actions).size !== actions.length
+}
+
+function MessageGestureSettings() {
+  const { messageGestures, settings } = useServices()
+  const current = messageGestures.preferences.value
+  const revision = messageGestures.revision.value
+  const [draft, setDraft] = useState(defaultMessageGestures)
+  const [baseline, setBaseline] = useState(defaultMessageGestures)
+  const [dirty, setDirty] = useState(false)
+  const [conflict, setConflict] = useState(false)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [helpOpen, setHelpOpen] = useState(false)
+  const [saveStatus, setSaveStatus] = useState<string | null>(null)
+  const handledRevision = useRef(-1)
+  const helpContainer = useRef<HTMLDivElement>(null)
+  const helpButton = useRef<HTMLButtonElement>(null)
+
+  const closeHelp = () => {
+    setHelpOpen(false)
+    helpButton.current?.focus()
+  }
+
+  useEffect(() => {
+    void messageGestures.hydrate()
+  }, [messageGestures])
+
+  useEffect(() => {
+    if (!helpOpen) {
+      return
+    }
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node &&
+        !helpContainer.current?.contains(event.target)
+      ) {
+        setHelpOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer)
+    return () =>
+      document.removeEventListener('pointerdown', closeOnOutsidePointer)
+  }, [helpOpen])
+
+  useEffect(() => {
+    if (handledRevision.current === revision) {
+      return
+    }
+    handledRevision.current = revision
+    if (current === null) {
+      return
+    }
+    if (!dirty) {
+      const next = cloneMessageGestures(current)
+      setDraft(next)
+      setBaseline(next)
+      setConflict(false)
+      return
+    }
+    if (
+      !sameMessageGestures(current, baseline) &&
+      !sameMessageGestures(current, draft)
+    ) {
+      setConflict(true)
+    }
+  }, [baseline, current, dirty, draft, revision])
+
+  const updateBinding = (
+    gesture: MessageGesture,
+    action: MessageGestureAction | null,
+  ) => {
+    const assignment = assignMessageGestureAction(draft, gesture, action)
+    setDirty(true)
+    setDraft(assignment.value)
+    if (assignment.displaced === null) {
+      setSaveStatus(null)
+      return
+    }
+    const displacedLabel = MESSAGE_GESTURES.find(
+      ({ value }) => value === assignment.displaced,
+    )!.label
+    const replacementLabel =
+      assignment.replacement === null
+        ? 'Off'
+        : MESSAGE_GESTURE_ACTION_LABELS[assignment.replacement]
+    setSaveStatus(`${displacedLabel} changed to ${replacementLabel}`)
+  }
+
+  const updateEmoji = (emoji: string) => {
+    setDirty(true)
+    setDraft((value) => ({ ...value, reaction_emoji: emoji }))
+    setSaveStatus(null)
+    setPickerOpen(false)
+  }
+
+  const useCurrent = () => {
+    if (current === null) {
+      return
+    }
+    const next = cloneMessageGestures(current)
+    setDraft(next)
+    setBaseline(next)
+    setDirty(false)
+    setConflict(false)
+    setSaveStatus('Updated settings loaded')
+  }
+
+  const save = async () => {
+    const attempted = cloneMessageGestures(draft)
+    const ok = await messageGestures.save(attempted)
+    const winner = messageGestures.preferences.peek()
+    if (!ok) {
+      setSaveStatus('Could not save gestures')
+      return
+    }
+    if (winner !== null && !sameMessageGestures(winner, attempted)) {
+      const next = cloneMessageGestures(winner)
+      setDraft(next)
+      setBaseline(next)
+      setSaveStatus('Another device updated gestures')
+    } else {
+      setBaseline(attempted)
+      setSaveStatus('Gestures saved')
+    }
+    setDirty(false)
+    setConflict(false)
+  }
+
+  const invalid =
+    duplicateMessageGestureAction(draft) || !isSingleEmoji(draft.reaction_emoji)
+  const loading =
+    current === null &&
+    (messageGestures.status.value === 'idle' ||
+      messageGestures.status.value === 'loading')
+
+  return (
+    <div class="message-gesture-settings">
+      <div class="message-gesture-heading">
+        <h3 class="settings-group-label">Gestures</h3>
+        <div
+          class="message-gesture-help"
+          ref={helpContainer}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape' && helpOpen) {
+              event.preventDefault()
+              closeHelp()
+            }
+          }}
+        >
+          <button
+            type="button"
+            class="message-gesture-help-button"
+            ref={helpButton}
+            aria-label="About gestures"
+            aria-expanded={helpOpen}
+            aria-controls="mobile-gesture-help"
+            title="About gestures"
+            onClick={() => setHelpOpen((open) => !open)}
+          >
+            <span aria-hidden="true">i</span>
+          </button>
+          {helpOpen && (
+            <div
+              id="mobile-gesture-help"
+              class="message-gesture-help-popover"
+              role="note"
+              aria-label="Gesture help"
+            >
+              <p>
+                Gesture settings sync across clients. Swipe right returns from
+                threads to messages or from messages to rooms. Tap or click a
+                timestamp to copy a link to the message. Long tap (or
+                double-click) a timestamp to copy the text of the message. Set
+                Double tap to Off to restore native double-tap/double-click word
+                selection.
+              </p>
+              <button type="button" class="ghost" onClick={closeHelp}>
+                Close
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+      <p class="muted message-gesture-swap-help">
+        Choosing an action already used by another gesture swaps their
+        assignments.
+      </p>
+      {loading ? (
+        <p class="muted" role="status">
+          Loading gestures…
+        </p>
+      ) : (
+        <>
+          <div class="message-gesture-bindings">
+            {MESSAGE_GESTURES.map(({ value: gesture, label }) => (
+              <label key={gesture}>
+                {label}
+                <select
+                  value={draft.bindings[gesture] ?? ''}
+                  onChange={(event) =>
+                    updateBinding(
+                      gesture,
+                      event.currentTarget.value === ''
+                        ? null
+                        : (event.currentTarget.value as MessageGestureAction),
+                    )
+                  }
+                >
+                  <option value="">Off</option>
+                  {MESSAGE_GESTURE_ACTIONS.map((action) => (
+                    <option key={action} value={action}>
+                      {MESSAGE_GESTURE_ACTION_LABELS[action]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ))}
+            <div class="message-gesture-fixed">
+              <span>Swipe right</span>
+              <span>Go back</span>
+            </div>
+          </div>
+          <div class="message-gesture-emoji">
+            <span>Default reaction</span>
+            <button
+              type="button"
+              class="message-gesture-emoji-button"
+              aria-label={`Choose reaction emoji, currently ${draft.reaction_emoji}`}
+              aria-expanded={pickerOpen}
+              onClick={() => setPickerOpen((open) => !open)}
+            >
+              <span aria-hidden="true">{draft.reaction_emoji}</span>
+            </button>
+          </div>
+          {pickerOpen && (
+            <ReactionPicker
+              ariaLabel="Choose gesture reaction"
+              settings={settings}
+              onClose={() => setPickerOpen(false)}
+              onReact={updateEmoji}
+            />
+          )}
+          {draft.bindings.touch_and_hold === null && (
+            <p class="muted">
+              Native text selection and link previews are available while touch
+              and hold is Off. Timestamp hold-to-copy is also disabled.
+            </p>
+          )}
+          {conflict && (
+            <div class="message-gesture-conflict" role="status">
+              <span>Gestures changed on another device.</span>
+              <button type="button" class="ghost" onClick={useCurrent}>
+                Use updated settings
+              </button>
+            </div>
+          )}
+          {messageGestures.error.value !== null && (
+            <p class="error" role="alert">
+              {messageGestures.error.value}
+            </p>
+          )}
+          {invalid && (
+            <p class="error" role="alert">
+              Choose one emoji and assign each action at most once.
+            </p>
+          )}
+          <div class="message-gesture-settings-actions">
+            <button
+              type="button"
+              disabled={!dirty || invalid || messageGestures.saving.value}
+              onClick={() => void save()}
+            >
+              {messageGestures.saving.value
+                ? 'Saving…'
+                : conflict
+                  ? 'Save anyway'
+                  : 'Save gestures'}
+            </button>
+            <button
+              type="button"
+              class="ghost"
+              disabled={messageGestures.saving.value}
+              onClick={() => {
+                setDirty(true)
+                setDraft(defaultMessageGestures())
+                setSaveStatus(null)
+              }}
+            >
+              Restore defaults
+            </button>
+          </div>
+          {saveStatus !== null && <p role="status">{saveStatus}</p>}
+        </>
+      )}
     </div>
   )
 }

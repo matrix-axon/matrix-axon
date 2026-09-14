@@ -44,6 +44,27 @@ export interface SwipeStart {
 }
 
 /**
+ * Whether `target` sits inside content that pans horizontally on its own, such
+ * as a wide code block or table. Room and row swipe recognizers both yield to
+ * it so the same touch cannot mean content pan in one layer and an action in
+ * another. Walking stops at the room swipe region's boundary.
+ */
+export function isHorizontallyScrollable(target: EventTarget | null): boolean {
+  let element = target instanceof Element ? target : null
+  while (element !== null && !element.classList.contains('room-body')) {
+    if (
+      element instanceof HTMLElement &&
+      element.scrollWidth > element.clientWidth &&
+      /(auto|scroll)/.test(getComputedStyle(element).overflowX)
+    ) {
+      return true
+    }
+    element = element.parentElement
+  }
+  return false
+}
+
+/**
  * Whether a completed touch counts as a swipe, and in which direction. `null`
  * means it does not qualify.
  *

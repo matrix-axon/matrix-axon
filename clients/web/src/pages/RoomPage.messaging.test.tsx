@@ -1287,7 +1287,17 @@ describe('threads', () => {
       )
       const panel = await findByLabelText('Thread')
 
-      swipeRight(panel)
+      fireEvent.touchStart(panel, {
+        touches: [{ clientX: 90, clientY: 220 }],
+      })
+      fireEvent.touchMove(panel, {
+        touches: [{ clientX: 150, clientY: 223 }],
+      })
+      expect(panel.classList.contains('mobile-back-dragging')).toBe(true)
+      expect(panel.style.getPropertyValue('--mobile-back-offset')).toBe('60px')
+      fireEvent.touchEnd(panel, {
+        changedTouches: [{ clientX: 198, clientY: 226 }],
+      })
 
       await waitFor(() => expect(queryByLabelText('Thread')).toBeNull())
       expect(window.location.search).toBe('')
@@ -1444,6 +1454,16 @@ describe('threads', () => {
       })
 
       expect(notPrevented).toBe(false)
+      const pane = container.querySelector('.room-stream') as HTMLElement
+      expect(pane.classList.contains('mobile-back-dragging')).toBe(true)
+      expect(pane.style.getPropertyValue('--mobile-back-offset')).toBe('36px')
+
+      fireEvent.touchEnd(body, {
+        changedTouches: [{ clientX: 126, clientY: 222 }],
+      })
+      expect(window.location.pathname).toContain('/rooms/')
+      expect(pane.classList.contains('mobile-back-settling')).toBe(true)
+      expect(pane.style.getPropertyValue('--mobile-back-offset')).toBe('0px')
     } finally {
       media.mockRestore()
     }

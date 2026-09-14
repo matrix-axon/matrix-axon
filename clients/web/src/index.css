@@ -999,6 +999,10 @@ h2 {
   min-height: 0;
 }
 
+.mobile-back-affordance {
+  display: none;
+}
+
 .room-stream {
   display: flex;
   flex-direction: column;
@@ -2034,6 +2038,104 @@ p.timeline-edge {
   border-left: 3px solid var(--danger);
 }
 
+/* Touch-and-hold replaces native selection/callouts only for the lifetime of
+   an active touch gesture. A configured binding must never disable mouse text
+   selection or the desktop context menu, including on hybrid devices. */
+.event-row.touch-hold-enabled.touch-gesture-active .event-body {
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
+.event-row.gesture-swipe-reveal {
+  overflow: hidden;
+}
+
+.event-row.gesture-swipe-reveal > .user-avatar,
+.event-row.gesture-swipe-reveal > .event-content {
+  position: relative;
+  z-index: 2;
+  transform: translate3d(var(--message-swipe-offset, 0), 0, 0);
+  will-change: transform;
+}
+
+.event-row.gesture-swipe-settling > .user-avatar,
+.event-row.gesture-swipe-settling > .event-content {
+  transition: transform 180ms ease-out;
+}
+
+.gesture-swipe-affordance {
+  position: absolute;
+  inset-inline-end: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  width: var(--message-swipe-reveal-width, 0);
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.3rem;
+  overflow: hidden;
+  padding-inline-end: 0.65rem;
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+  pointer-events: none;
+  transition:
+    color 100ms ease,
+    background-color 100ms ease;
+}
+
+.event-row.gesture-swipe-settling .gesture-swipe-affordance {
+  transition:
+    width 180ms ease-out,
+    color 100ms ease,
+    background-color 100ms ease;
+}
+
+.gesture-swipe-affordance .event-action-icon {
+  flex: none;
+  width: 1.15rem;
+  height: 1.15rem;
+  transform: scale(0.9);
+  transition: transform 100ms ease;
+}
+
+.event-row.gesture-swipe-armed .gesture-swipe-affordance {
+  color: var(--bg);
+  background: var(--accent);
+}
+
+.event-row.gesture-swipe-armed .gesture-swipe-affordance .event-action-icon {
+  transform: scale(1.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .event-row.gesture-swipe-settling > .user-avatar,
+  .event-row.gesture-swipe-settling > .event-content,
+  .gesture-swipe-affordance,
+  .gesture-swipe-affordance .event-action-icon {
+    transition-duration: 0.01ms;
+  }
+}
+
+.message-gesture-feedback {
+  position: absolute;
+  inset-inline-end: 0.75rem;
+  bottom: 0.25rem;
+  z-index: 1;
+  max-width: calc(100% - 3rem);
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  color: var(--muted);
+  background: var(--bg-raised);
+  font-size: 0.75rem;
+  text-align: end;
+  pointer-events: none;
+}
+
 .local-echo-status {
   font-size: 0.85rem;
 }
@@ -2546,6 +2648,35 @@ a.utd-recover:hover {
   flex-wrap: wrap;
 }
 
+.message-reaction-burst {
+  position: absolute;
+  inset-inline-start: 50%;
+  top: 50%;
+  z-index: 25;
+  font-size: 3rem;
+  line-height: 1;
+  filter: drop-shadow(0 0.15rem 0.35rem rgb(0 0 0 / 0.3));
+  pointer-events: none;
+  animation: message-reaction-burst 450ms ease-out both;
+}
+
+@keyframes message-reaction-burst {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -35%) scale(0.65);
+  }
+
+  22% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.08);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -80%) scale(1.22);
+  }
+}
+
 .reaction-chip-wrap {
   position: relative;
   display: inline-flex;
@@ -2562,6 +2693,59 @@ a.utd-recover:hover {
 .reaction-chip.mine {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.reaction-chip.gesture-reaction-pending {
+  border-style: dashed;
+  opacity: 0.72;
+}
+
+.reaction-chip.gesture-reaction-adding {
+  animation: gesture-reaction-pending 600ms ease-in-out infinite alternate;
+}
+
+.reaction-chip.gesture-reaction-removing {
+  opacity: 0.45;
+  transform: scale(0.88);
+}
+
+@keyframes gesture-reaction-pending {
+  from {
+    opacity: 0.55;
+  }
+
+  to {
+    opacity: 0.85;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-reaction-burst {
+    animation-name: message-reaction-burst-reduced;
+  }
+
+  .reaction-chip.gesture-reaction-adding {
+    animation: none;
+    background: var(--accent-soft);
+  }
+
+  .reaction-chip.gesture-reaction-removing {
+    transform: none;
+  }
+}
+
+@keyframes message-reaction-burst-reduced {
+  0%,
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%);
+  }
+
+  20%,
+  70% {
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
 }
 
 .reaction-senders-tooltip {
@@ -3226,11 +3410,78 @@ span.composer-attachment-thumb {
 }
 
 @media (max-width: 47.99rem) {
+  .room-body {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .mobile-back-affordance {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 0;
+    display: flex;
+    width: var(--mobile-back-reveal-width, 0);
+    box-sizing: border-box;
+    align-items: center;
+    gap: 0.25rem;
+    overflow: hidden;
+    padding-inline-start: 0.75rem;
+    color: var(--accent);
+    background: var(--accent-soft);
+    font-size: 0.85rem;
+    font-weight: 700;
+    white-space: nowrap;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .room-body.mobile-back-active .mobile-back-affordance {
+    visibility: visible;
+  }
+
+  .mobile-back-affordance > :first-child {
+    font-size: 1.5rem;
+    line-height: 1;
+  }
+
+  .room-stream.mobile-back-dragging,
+  .thread-panel.mobile-back-dragging,
+  .room-stream.mobile-back-settling,
+  .thread-panel.mobile-back-settling {
+    transform: translate3d(var(--mobile-back-offset, 0), 0, 0);
+    background: var(--bg);
+    box-shadow: -4px 0 16px rgb(0 0 0 / 0.15);
+    will-change: transform;
+  }
+
+  .room-stream.mobile-back-settling,
+  .thread-panel.mobile-back-settling {
+    transition: transform 180ms ease-out;
+  }
+
+  .room-body.mobile-back-settling .mobile-back-affordance {
+    transition: width 180ms ease-out;
+  }
+
+  .room-body.mobile-back-armed .mobile-back-affordance {
+    color: var(--bg);
+    background: var(--accent);
+  }
+
   .side-panel,
   .thread-panel {
     width: var(--app-viewport-width, 100%);
     border-left: 0;
     box-shadow: none;
+  }
+}
+
+@media (max-width: 47.99rem) and (prefers-reduced-motion: reduce) {
+  .mobile-back-affordance,
+  .room-body.mobile-back-settling .mobile-back-affordance,
+  .room-stream.mobile-back-settling,
+  .thread-panel.mobile-back-settling {
+    transition-duration: 0.01ms;
   }
 }
 
@@ -4254,6 +4505,145 @@ input[type='checkbox'] {
   margin: 0 0 0.4rem;
   font-size: 0.9rem;
   font-weight: 600;
+}
+
+.message-gesture-settings {
+  container-type: inline-size;
+  margin-bottom: 1.25rem;
+  padding-bottom: 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.message-gesture-heading {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.4rem;
+}
+
+.message-gesture-heading .settings-group-label {
+  margin: 0;
+}
+
+.message-gesture-help {
+  position: static;
+}
+
+.message-gesture-help-button {
+  display: grid;
+  min-width: 1.25rem;
+  width: 1.25rem;
+  min-height: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--muted);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.message-gesture-help-button:hover,
+.message-gesture-help-button:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.message-gesture-help-popover {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  z-index: 45;
+  box-sizing: border-box;
+  width: min(32rem, calc(100vw - 3rem));
+  max-height: min(24rem, calc(100dvh - 6rem));
+  overflow: auto;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+}
+
+.message-gesture-help-popover p {
+  margin: 0;
+}
+
+.message-gesture-help-popover button {
+  margin-top: 0.65rem;
+}
+
+.message-gesture-swap-help {
+  margin-top: 0;
+}
+
+.message-gesture-bindings {
+  display: grid;
+  gap: 0.55rem;
+  max-width: 28rem;
+}
+
+.message-gesture-bindings label,
+.message-gesture-fixed,
+.message-gesture-emoji {
+  display: grid;
+  grid-template-columns: minmax(7.5rem, 1fr) minmax(10rem, 1fr);
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.message-gesture-fixed > :last-child {
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--muted);
+  background: var(--bg);
+}
+
+.message-gesture-emoji {
+  max-width: 28rem;
+  margin-top: 0.75rem;
+}
+
+.message-gesture-emoji-button {
+  justify-self: start;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0.35rem 0.6rem;
+  border-color: var(--border);
+  background: var(--bg);
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.message-gesture-settings .reaction-picker-shell {
+  margin-top: 0.5rem;
+}
+
+.message-gesture-conflict,
+.message-gesture-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+/* The two columns need 18.25rem including their gap. Query the panel rather
+   than the viewport so embedding or surrounding padding cannot make them
+   overflow; a 390px iPhone has room, while a 320px display still stacks. */
+@container (max-width: 18.25rem) {
+  .message-gesture-bindings label,
+  .message-gesture-fixed,
+  .message-gesture-emoji {
+    grid-template-columns: 1fr;
+    gap: 0.25rem;
+  }
 }
 
 .inline-form {
