@@ -366,6 +366,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "emojis",
  "futures-util",
  "governor",
  "jsonwebtoken",

@@ -21,7 +21,7 @@ use axon_api::AppState;
 use axon_core::{EphemeralFrame, LiveEvent, LiveFrame, VerificationFrame, VerificationFrameKind};
 use axon_store::Store;
 use common::{
-    with_isolated_space_order, StubDeviceList, StubLifecycle, StubMediaProxy, StubSender,
+    with_isolated_preference, StubDeviceList, StubLifecycle, StubMediaProxy, StubSender,
     StubTokenVerifier, StubTrust, StubVerification, TEST_TOKEN,
 };
 use futures_util::StreamExt;
@@ -570,13 +570,13 @@ async fn ws_streams_device_state_changes() {
         .expect("cleanup");
 }
 
-/// ADR 0103: a `PUT /v1/preferences/{key}` fans out one `preferences.changed`
-/// frame carrying the originator device (echo suppression) and the new value.
+/// A `PUT /v1/preferences/{key}` fans out one `preferences.changed` frame
+/// carrying the originator device (echo suppression) and the new value.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn ws_streams_preferences_changes() {
     let store = store().await;
-    with_isolated_space_order(&store, || async {
+    with_isolated_preference(&store, "message_gestures", || async {
         let (live, _) = broadcast::channel::<LiveFrame>(16);
         let app = axon_api::router(AppState::new(
             store.clone(),
@@ -606,12 +606,19 @@ async fn ws_streams_preferences_changes() {
             .expect("ws connect");
 
         let device_id = Uuid::new_v4();
-        let account = Uuid::new_v4();
-        let space = format!("{account}/!space:localhost");
-        let body = json!({ "device_id": device_id, "value": { "spaces": [space] } });
+        let value = json!({
+            "schema_version": 1,
+            "bindings": {
+                "double_tap": "react",
+                "touch_and_hold": "thread",
+                "swipe_left": "reply",
+            },
+            "reaction_emoji": "👍",
+        });
+        let body = json!({ "device_id": device_id, "value": value });
         let req = axum::http::Request::builder()
             .method("PUT")
-            .uri("/v1/preferences/space_order")
+            .uri("/v1/preferences/message_gestures")
             .header("authorization", format!("Bearer {TEST_TOKEN}"))
             .header("content-type", "application/json")
             .body(axum::body::Body::from(body.to_string()))
@@ -632,9 +639,9 @@ async fn ws_streams_preferences_changes() {
         let envelope: Value = serde_json::from_str(text.as_str()).expect("json frame");
         assert_eq!(envelope["type"], "preferences.changed");
         assert_eq!(envelope["account_id"], Uuid::nil().to_string());
-        assert_eq!(envelope["payload"]["key"], "space_order");
+        assert_eq!(envelope["payload"]["key"], "message_gestures");
         assert_eq!(envelope["payload"]["device_id"], device_id.to_string());
-        assert_eq!(envelope["payload"]["value"]["spaces"][0], space);
+        assert_eq!(envelope["payload"]["value"], value);
 
         ws.close(None).await.ok();
         server.abort();
