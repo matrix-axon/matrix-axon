@@ -3395,7 +3395,7 @@ span.composer-attachment-thumb {
 }
 
 @media (max-width: 47.99rem) {
-  .room-body {
+  .mobile-back-surface {
     position: relative;
     overflow: hidden;
   }
@@ -3420,7 +3420,7 @@ span.composer-attachment-thumb {
     pointer-events: none;
   }
 
-  .room-body.mobile-back-active .mobile-back-affordance {
+  .mobile-back-surface.mobile-back-active .mobile-back-affordance {
     visibility: visible;
   }
 
@@ -3429,26 +3429,23 @@ span.composer-attachment-thumb {
     line-height: 1;
   }
 
-  .room-stream.mobile-back-dragging,
-  .thread-panel.mobile-back-dragging,
-  .room-stream.mobile-back-settling,
-  .thread-panel.mobile-back-settling {
+  .mobile-back-surface > .mobile-back-dragging,
+  .mobile-back-surface > .mobile-back-settling {
     transform: translate3d(var(--mobile-back-offset, 0), 0, 0);
     background: var(--bg);
     box-shadow: -4px 0 16px rgb(0 0 0 / 0.15);
     will-change: transform;
   }
 
-  .room-stream.mobile-back-settling,
-  .thread-panel.mobile-back-settling {
+  .mobile-back-surface > .mobile-back-settling {
     transition: transform 180ms ease-out;
   }
 
-  .room-body.mobile-back-settling .mobile-back-affordance {
+  .mobile-back-surface.mobile-back-settling .mobile-back-affordance {
     transition: width 180ms ease-out;
   }
 
-  .room-body.mobile-back-armed .mobile-back-affordance {
+  .mobile-back-surface.mobile-back-armed .mobile-back-affordance {
     color: var(--bg);
     background: var(--accent);
   }
@@ -3463,9 +3460,8 @@ span.composer-attachment-thumb {
 
 @media (max-width: 47.99rem) and (prefers-reduced-motion: reduce) {
   .mobile-back-affordance,
-  .room-body.mobile-back-settling .mobile-back-affordance,
-  .room-stream.mobile-back-settling,
-  .thread-panel.mobile-back-settling {
+  .mobile-back-surface.mobile-back-settling .mobile-back-affordance,
+  .mobile-back-surface > .mobile-back-settling {
     transition-duration: 0.01ms;
   }
 }
@@ -4545,7 +4541,7 @@ input[type='checkbox'] {
   left: 0;
   z-index: 45;
   box-sizing: border-box;
-  width: min(32rem, calc(100vw - 3rem));
+  width: min(32rem, 100%);
   max-height: min(24rem, calc(100dvh - 6rem));
   overflow: auto;
   padding: 0.75rem;

@@ -57,16 +57,8 @@ import {
 import { viewMayClaimReadState } from '../timeline/arrival-order'
 import { hiddenByRedaction } from '../timeline/visibility'
 import { computeRoomReceipt } from '../timeline/room-receipt'
-import {
-  isHorizontallyScrollable,
-  NATIVE_BACK_EDGE_PX,
-  SWIPE_AXIS_RATIO,
-  SWIPE_DECISION_THRESHOLD,
-  SWIPE_MAX_Y,
-  SWIPE_MIN_X,
-} from '../gestures'
+import { useMobileSwipeBack } from '../components/use-mobile-swipe-back'
 import { resolveEmojiShortcode, type EmojiEntry } from '../emoji'
-import { SINGLE_PANE_QUERY } from '../layout'
 import { perfMark, perfMarkFrames } from '../perf'
 import { withSearchParam, withoutQueryParam } from '../search-tokens'
 import { useServices } from '../services'
@@ -126,13 +118,6 @@ const LAST_JOINED_MEMBER_LEAVE_CONFIRM =
 // timeout code here if the `/rooms/{join,knock}` error envelope grows one.
 const ROOM_ENTRY_TIMEOUT = /^(join|knock) timed out after \d+s$/i
 
-// Swipe thresholds live in `src/gestures.ts` so the room and the media
-// viewer's swipe paging (ADR 0081) cannot drift apart. Kept as local aliases
-// so the call sites below read unchanged.
-const SWIPE_RIGHT_MIN_X = SWIPE_MIN_X
-const SWIPE_RIGHT_MAX_Y = SWIPE_MAX_Y
-const SWIPE_RIGHT_AXIS_RATIO = SWIPE_AXIS_RATIO
-const MOBILE_BACK_SETTLE_MS = 180
 // How far above the scroller a page starts loading, so it arrives during the
 // scroll rather than after the reader has stopped at the top edge.
 const SCROLL_BACK_PREFETCH_PX = 400
@@ -149,12 +134,6 @@ const AUTO_SCROLL_BACK_PAGES = 5
 // correction, so not too eagerly either.
 const ANCHOR_REACH = 1.5
 
-type SwipeStart = {
-  x: number
-  y: number
-  pane: HTMLElement
-}
-
 function isUnableToDecrypt(event: EventDto): boolean {
   return event.type === 'm.room.encrypted' && event.content === null
 }
@@ -164,15 +143,6 @@ function timelineContainsEvent(
   eventId: string | null,
 ): boolean {
   return events.some((event) => event.event_id === eventId)
-}
-
-function isGestureControl(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    target.closest(
-      'a, button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="textbox"], emoji-picker',
-    ) !== null
-  )
 }
 
 function roomEntryPendingMessage(
@@ -273,10 +243,6 @@ export function RoomPage() {
   const roomBody = useRef<HTMLDivElement>(null)
   /** Scopes the media viewer's focus-restore lookup to this room's rows. */
   const roomStream = useRef<HTMLDivElement>(null)
-  const swipeStart = useRef<SwipeStart | null>(null)
-  const swipeLocked = useRef(false)
-  const mobileBackPane = useRef<HTMLElement | null>(null)
-  const mobileBackResetTimer = useRef<number | null>(null)
   const highlighted = typeof query.event === 'string' ? query.event : null
   // Whether this view may claim read state at all — the invariant the three
   // effects below share (see `clients/web/AGENTS.md`). Derived once rather than
@@ -1829,153 +1795,16 @@ export function RoomPage() {
     }
   }
 
-  const clearMobileBackPresentation = () => {
-    if (mobileBackResetTimer.current !== null) {
-      window.clearTimeout(mobileBackResetTimer.current)
-      mobileBackResetTimer.current = null
-    }
-    const pane = mobileBackPane.current
-    pane?.classList.remove('mobile-back-dragging', 'mobile-back-settling')
-    pane?.style.removeProperty('--mobile-back-offset')
-    mobileBackPane.current = null
-    const body = roomBody.current
-    body?.classList.remove(
-      'mobile-back-active',
-      'mobile-back-dragging',
-      'mobile-back-settling',
-      'mobile-back-armed',
-    )
-    body?.style.removeProperty('--mobile-back-reveal-width')
-  }
-
-  const previewMobileBack = (pane: HTMLElement, dx: number) => {
-    const distance = Math.min(Math.max(dx, 0), window.innerWidth)
-    mobileBackPane.current = pane
-    pane.classList.add('mobile-back-dragging')
-    pane.classList.remove('mobile-back-settling')
-    pane.style.setProperty('--mobile-back-offset', `${distance}px`)
-    const body = roomBody.current
-    body?.classList.add('mobile-back-active', 'mobile-back-dragging')
-    body?.classList.remove('mobile-back-settling')
-    body?.classList.toggle('mobile-back-armed', dx >= SWIPE_RIGHT_MIN_X)
-    body?.style.setProperty('--mobile-back-reveal-width', `${distance}px`)
-  }
-
-  const settleMobileBack = (pane: HTMLElement) => {
-    if (!pane.classList.contains('mobile-back-dragging')) return
-    pane.classList.remove('mobile-back-dragging')
-    pane.classList.add('mobile-back-settling')
-    pane.style.setProperty('--mobile-back-offset', '0px')
-    const body = roomBody.current
-    body?.classList.remove('mobile-back-dragging', 'mobile-back-armed')
-    body?.classList.add('mobile-back-settling')
-    body?.style.setProperty('--mobile-back-reveal-width', '0px')
-    if (mobileBackResetTimer.current !== null)
-      window.clearTimeout(mobileBackResetTimer.current)
-    mobileBackResetTimer.current = window.setTimeout(() => {
-      clearMobileBackPresentation()
-    }, MOBILE_BACK_SETTLE_MS)
-  }
-
-  useEffect(
-    () => () => {
-      if (mobileBackResetTimer.current !== null)
-        window.clearTimeout(mobileBackResetTimer.current)
-    },
-    [],
-  )
-
-  const handleTouchStart = (event: JSX.TargetedTouchEvent<HTMLDivElement>) => {
-    clearMobileBackPresentation()
-    swipeLocked.current = false
-    const touch = event.touches[0]
-    const pane =
+  const mobileSwipeBack = useMobileSwipeBack<HTMLDivElement>({
+    getPane: (surface) =>
       openThread === null
         ? roomStream.current
-        : event.currentTarget.querySelector<HTMLElement>('.thread-panel')
-    if (
-      !window.matchMedia(SINGLE_PANE_QUERY).matches ||
-      event.touches.length !== 1 ||
-      // Guarded by the length check above, so `touch` is present here.
-      touch.clientX < NATIVE_BACK_EDGE_PX ||
-      isGestureControl(event.target) ||
-      isHorizontallyScrollable(event.target) ||
-      pane === null
-    ) {
-      swipeStart.current = null
-      return
-    }
-    swipeStart.current = { x: touch.clientX, y: touch.clientY, pane }
-  }
-
-  /**
-   * Claims the gesture as soon as it looks like a rightward swipe, well
-   * before the touch travels far enough to satisfy the touchend thresholds.
-   * `preventDefault` here suppresses the scrolling and text selection that
-   * would otherwise fight our pan; CSS `touch-action` can't do that without
-   * also disabling touch-scrolling for the code blocks/tables nested inside
-   * the timeline (both need real horizontal panning), so this has to be a
-   * targeted, per-gesture opt-out instead.
-   *
-   * What it does *not* do is stop the browser's native edge-swipe-back —
-   * that recognizer ignores cancelled touch events, which is why
-   * `handleTouchStart` declines the edge band outright (ADR 0075).
-   */
-  const handleTouchMove = (event: JSX.TargetedTouchEvent<HTMLDivElement>) => {
-    const start = swipeStart.current
-    if (start === null || event.touches.length !== 1) {
-      return
-    }
-    const touch = event.touches[0]
-    const dx = touch.clientX - start.x
-    const dy = touch.clientY - start.y
-    if (swipeLocked.current) {
-      previewMobileBack(start.pane, dx)
-      event.preventDefault()
-      return
-    }
-    const absX = Math.abs(dx)
-    const absY = Math.abs(dy)
-    if (absX < SWIPE_DECISION_THRESHOLD && absY < SWIPE_DECISION_THRESHOLD) {
-      return
-    }
-    if (dx > 0 && absX > absY * SWIPE_RIGHT_AXIS_RATIO) {
-      swipeLocked.current = true
-      previewMobileBack(start.pane, dx)
-      event.preventDefault()
-    } else {
-      // Vertical scroll or a leftward drag: not ours, leave it to the browser.
-      swipeStart.current = null
-    }
-  }
-
-  const handleTouchEnd = (event: JSX.TargetedTouchEvent<HTMLDivElement>) => {
-    const start = swipeStart.current
-    swipeStart.current = null
-    swipeLocked.current = false
-    if (
-      start === null ||
-      !window.matchMedia(SINGLE_PANE_QUERY).matches ||
-      event.changedTouches.length === 0
-    ) {
-      return
-    }
-    const touch = event.changedTouches[0]
-    const dx = touch.clientX - start.x
-    const dy = touch.clientY - start.y
-    const absY = Math.abs(dy)
-    if (
-      dx < SWIPE_RIGHT_MIN_X ||
-      absY > SWIPE_RIGHT_MAX_Y ||
-      dx < absY * SWIPE_RIGHT_AXIS_RATIO
-    ) {
-      settleMobileBack(start.pane)
-      return
-    }
-    perfMark('room-page:swipe-right-accepted', { dx, dy })
-    settleMobileBack(start.pane)
-    navigateBackOneMobilePane()
-  }
+        : surface.querySelector<HTMLElement>('.thread-panel'),
+    onAccepted: (dx, dy) => {
+      perfMark('room-page:swipe-right-accepted', { dx, dy })
+    },
+    onBack: navigateBackOneMobilePane,
+  })
 
   const roomCompletions = (query: string): ComposerAutocompleteOption[] => {
     const visibleRooms = rooms.rooms.value.filter(
@@ -2075,16 +1904,8 @@ export function RoomPage() {
           CSS reverts the panel to an overlay drawer. */}
       <div
         ref={roomBody}
-        class="room-body"
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-        onTouchCancel={() => {
-          const start = swipeStart.current
-          swipeStart.current = null
-          swipeLocked.current = false
-          if (start !== null) settleMobileBack(start.pane)
-        }}
+        class="room-body mobile-back-surface"
+        {...mobileSwipeBack}
       >
         <span class="mobile-back-affordance" aria-hidden="true">
           <span>‹</span>

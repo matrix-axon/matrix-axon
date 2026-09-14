@@ -81,7 +81,7 @@ async function roomTouch(
 }
 
 /**
- * Dispatch the touch stream the room-level recognizer receives on iOS.
+ * Dispatch the touch stream a pane-level recognizer receives on iOS.
  * Pointer events drive message gestures; this separate stream proves a swipe
  * beginning on a message still bubbles to the existing room navigation.
  */
@@ -112,7 +112,7 @@ async function sendMessage(page: Page, body: string): Promise<Locator> {
   return row
 }
 
-test('settings save the Axon-wide bindings and restore them after reload', async ({
+test('settings autosave the Axon-wide bindings and restore them after reload', async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -156,9 +156,17 @@ test('settings save the Axon-wide bindings and restore them after reload', async
     'Gesture settings sync across clients',
   )
   const gestureHelpBox = await gestureHelp.boundingBox()
+  const gestureSettingsBox = await page
+    .locator('.message-gesture-settings')
+    .boundingBox()
   expect(gestureHelpBox).not.toBeNull()
+  expect(gestureSettingsBox).not.toBeNull()
   expect(gestureHelpBox!.x).toBeGreaterThanOrEqual(0)
   expect(gestureHelpBox!.x + gestureHelpBox!.width).toBeLessThanOrEqual(320)
+  expect(gestureHelpBox!.x).toBeGreaterThanOrEqual(gestureSettingsBox!.x)
+  expect(gestureHelpBox!.x + gestureHelpBox!.width).toBeLessThanOrEqual(
+    gestureSettingsBox!.x + gestureSettingsBox!.width,
+  )
   await gestureHelp.getByRole('button', { name: 'Close' }).click()
   await expect(gestureHelp).not.toBeVisible()
   await page.setViewportSize(iphoneViewport!)
@@ -176,8 +184,10 @@ test('settings save the Axon-wide bindings and restore them after reload', async
     .getByRole('button')
     .filter({ hasText: '🎉' })
     .click()
-  await page.getByRole('button', { name: 'Save gestures' }).click()
   await expect(page.getByText('Gestures saved')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Save gestures' })).toHaveCount(
+    0,
+  )
 
   await page.reload()
   await expect(page.getByLabel('Double tap')).toHaveValue('edit')
@@ -191,6 +201,22 @@ test('settings save the Axon-wide bindings and restore them after reload', async
   await expect(
     page.getByText(/Native text selection and link previews/),
   ).toBeVisible()
+
+  const settingsPane = page.locator('.settings-back-pane')
+  const backAffordance = page.locator(
+    '.settings-back-surface .mobile-back-affordance',
+  )
+  await expect(backAffordance).toHaveCSS('visibility', 'hidden')
+  await swipeRight(settingsPane, async () => {
+    await expect(backAffordance).toHaveCSS('visibility', 'visible')
+    await expect(settingsPane).toHaveCSS(
+      'transform',
+      /matrix\(1, 0, 0, 1, 60, 0\)/,
+    )
+    await expect(backAffordance).toContainText('Rooms')
+  })
+  await expect(page).toHaveURL('/')
+  await expect(page.getByRole('navigation', { name: 'Rooms' })).toBeVisible()
 })
 
 test('default message gestures arbitrate with preserved swipe-right navigation', async ({
@@ -323,7 +349,6 @@ test('desktop preserves selection and supports timestamp and message double-clic
   await page.goto('/settings')
   await expect(page.getByLabel('Double tap')).toHaveValue('react')
   await page.getByLabel('Double tap').selectOption('')
-  await page.getByRole('button', { name: 'Save gestures' }).click()
   await expect(page.getByText('Gestures saved')).toBeVisible()
   await page.goto(ROOM_URL)
   await expectLive(page)

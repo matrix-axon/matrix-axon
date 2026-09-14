@@ -1,3 +1,4 @@
+import { useLocation } from 'preact-iso'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import {
   appBadgeAvailable,
@@ -8,6 +9,7 @@ import {
 import { BUILD_INFO } from '../build-info'
 import { CopyableText } from '../components/CopyableText'
 import { ReactionPicker } from '../components/MessageEventRow'
+import { useMobileSwipeBack } from '../components/use-mobile-swipe-back'
 import {
   installOutcome,
   installPromptAvailable,
@@ -73,6 +75,27 @@ const MESSAGE_GESTURE_ACTION_LABELS: Record<MessageGestureAction, string> = {
 
 /** Theme + (schema-versioned) local settings (ADR 0046, M-W3). */
 export function SettingsPage() {
+  const location = useLocation()
+  const settingsPane = useRef<HTMLDivElement>(null)
+  const mobileSwipeBack = useMobileSwipeBack<HTMLDivElement>({
+    getPane: () => settingsPane.current,
+    onBack: () => location.route('/'),
+  })
+
+  return (
+    <div class="settings-back-surface mobile-back-surface" {...mobileSwipeBack}>
+      <span class="mobile-back-affordance" aria-hidden="true">
+        <span>‹</span>
+        Rooms
+      </span>
+      <div ref={settingsPane} class="settings-back-pane">
+        <SettingsPageContents />
+      </div>
+    </div>
+  )
+}
+
+function SettingsPageContents() {
   const { auth, settings, rooms, deviceState } = useServices()
   const [markingRead, setMarkingRead] = useState(false)
   const [protocolMessage, setProtocolMessage] = useState<string | null>(null)
@@ -310,6 +333,16 @@ export function SettingsPage() {
   )
 }
 
+function cloneMessageGestures(
+  value: MessageGesturePreferences,
+): MessageGesturePreferences {
+  return {
+    schema_version: 1,
+    bindings: { ...value.bindings },
+    reaction_emoji: value.reaction_emoji,
+  }
+}
+
 function sameMessageGestures(
   left: MessageGesturePreferences,
   right: MessageGesturePreferences,
@@ -320,16 +353,6 @@ function sameMessageGestures(
       ({ value }) => left.bindings[value] === right.bindings[value],
     )
   )
-}
-
-function cloneMessageGestures(
-  value: MessageGesturePreferences,
-): MessageGesturePreferences {
-  return {
-    schema_version: 1,
-    bindings: { ...value.bindings },
-    reaction_emoji: value.reaction_emoji,
-  }
 }
 
 function duplicateMessageGestureAction(
@@ -346,13 +369,10 @@ function MessageGestureSettings() {
   const current = messageGestures.preferences.value
   const revision = messageGestures.revision.value
   const [draft, setDraft] = useState(defaultMessageGestures)
-  const [baseline, setBaseline] = useState(defaultMessageGestures)
-  const [dirty, setDirty] = useState(false)
-  const [conflict, setConflict] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
   const [saveStatus, setSaveStatus] = useState<string | null>(null)
-  const handledRevision = useRef(-1)
+  const saveRequest = useRef(0)
   const helpContainer = useRef<HTMLDivElement>(null)
   const helpButton = useRef<HTMLButtonElement>(null)
 
@@ -383,37 +403,39 @@ function MessageGestureSettings() {
   }, [helpOpen])
 
   useEffect(() => {
-    if (handledRevision.current === revision) {
-      return
-    }
-    handledRevision.current = revision
     if (current === null) {
       return
     }
-    if (!dirty) {
-      const next = cloneMessageGestures(current)
-      setDraft(next)
-      setBaseline(next)
-      setConflict(false)
-      return
-    }
-    if (
-      !sameMessageGestures(current, baseline) &&
-      !sameMessageGestures(current, draft)
-    ) {
-      setConflict(true)
-    }
-  }, [baseline, current, dirty, draft, revision])
+    setDraft(cloneMessageGestures(current))
+  }, [current, revision])
+
+  const autosave = (
+    next: MessageGesturePreferences,
+    statusAfterSave = 'Gestures saved',
+  ) => {
+    const attempted = cloneMessageGestures(next)
+    const request = ++saveRequest.current
+    setDraft(attempted)
+    setSaveStatus(null)
+    void messageGestures.save(attempted).then((ok) => {
+      if (ok && request === saveRequest.current) {
+        const winner = messageGestures.preferences.peek()
+        setSaveStatus(
+          winner !== null && !sameMessageGestures(winner, attempted)
+            ? 'Another device updated gestures'
+            : statusAfterSave,
+        )
+      }
+    })
+  }
 
   const updateBinding = (
     gesture: MessageGesture,
     action: MessageGestureAction | null,
   ) => {
     const assignment = assignMessageGestureAction(draft, gesture, action)
-    setDirty(true)
-    setDraft(assignment.value)
     if (assignment.displaced === null) {
-      setSaveStatus(null)
+      autosave(assignment.value)
       return
     }
     const displacedLabel = MESSAGE_GESTURES.find(
@@ -423,47 +445,15 @@ function MessageGestureSettings() {
       assignment.replacement === null
         ? 'Off'
         : MESSAGE_GESTURE_ACTION_LABELS[assignment.replacement]
-    setSaveStatus(`${displacedLabel} changed to ${replacementLabel}`)
+    autosave(
+      assignment.value,
+      `${displacedLabel} changed to ${replacementLabel}`,
+    )
   }
 
   const updateEmoji = (emoji: string) => {
-    setDirty(true)
-    setDraft((value) => ({ ...value, reaction_emoji: emoji }))
-    setSaveStatus(null)
+    autosave({ ...draft, reaction_emoji: emoji })
     setPickerOpen(false)
-  }
-
-  const useCurrent = () => {
-    if (current === null) {
-      return
-    }
-    const next = cloneMessageGestures(current)
-    setDraft(next)
-    setBaseline(next)
-    setDirty(false)
-    setConflict(false)
-    setSaveStatus('Updated settings loaded')
-  }
-
-  const save = async () => {
-    const attempted = cloneMessageGestures(draft)
-    const ok = await messageGestures.save(attempted)
-    const winner = messageGestures.preferences.peek()
-    if (!ok) {
-      setSaveStatus('Could not save gestures')
-      return
-    }
-    if (winner !== null && !sameMessageGestures(winner, attempted)) {
-      const next = cloneMessageGestures(winner)
-      setDraft(next)
-      setBaseline(next)
-      setSaveStatus('Another device updated gestures')
-    } else {
-      setBaseline(attempted)
-      setSaveStatus('Gestures saved')
-    }
-    setDirty(false)
-    setConflict(false)
   }
 
   const invalid =
@@ -586,18 +576,18 @@ function MessageGestureSettings() {
               and hold is Off. Timestamp hold-to-copy is also disabled.
             </p>
           )}
-          {conflict && (
-            <div class="message-gesture-conflict" role="status">
-              <span>Gestures changed on another device.</span>
-              <button type="button" class="ghost" onClick={useCurrent}>
-                Use updated settings
+          {messageGestures.error.value !== null && (
+            <div class="message-gesture-conflict error" role="alert">
+              <span>Could not sync gestures.</span>
+              <button
+                type="button"
+                class="ghost"
+                disabled={messageGestures.saving.value}
+                onClick={() => autosave(draft)}
+              >
+                Retry
               </button>
             </div>
-          )}
-          {messageGestures.error.value !== null && (
-            <p class="error" role="alert">
-              {messageGestures.error.value}
-            </p>
           )}
           {invalid && (
             <p class="error" role="alert">
@@ -607,29 +597,20 @@ function MessageGestureSettings() {
           <div class="message-gesture-settings-actions">
             <button
               type="button"
-              disabled={!dirty || invalid || messageGestures.saving.value}
-              onClick={() => void save()}
-            >
-              {messageGestures.saving.value
-                ? 'Saving…'
-                : conflict
-                  ? 'Save anyway'
-                  : 'Save gestures'}
-            </button>
-            <button
-              type="button"
               class="ghost"
-              disabled={messageGestures.saving.value}
-              onClick={() => {
-                setDirty(true)
-                setDraft(defaultMessageGestures())
-                setSaveStatus(null)
-              }}
+              disabled={invalid}
+              onClick={() =>
+                autosave(defaultMessageGestures(), 'Defaults restored')
+              }
             >
               Restore defaults
             </button>
           </div>
-          {saveStatus !== null && <p role="status">{saveStatus}</p>}
+          {(messageGestures.saving.value || saveStatus !== null) && (
+            <p role="status">
+              {messageGestures.saving.value ? 'Saving gestures…' : saveStatus}
+            </p>
+          )}
         </>
       )}
     </div>
