@@ -354,6 +354,76 @@ test('individual images preserve tap-to-open and use configured gestures', async
   await expect(viewer).not.toBeVisible()
 })
 
+test('gallery gestures target the loaded tile where they begin', async ({
+  page,
+  request,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== 'webkit-iphone',
+    'gallery gestures require the opt-in iPhone WebKit project',
+  )
+  await request.put('/v1/preferences/message_gestures', {
+    data: {
+      device_id: 'gallery-gesture-test',
+      value: {
+        schema_version: 1,
+        bindings: {
+          double_tap: 'reply',
+          touch_and_hold: 'thread',
+          swipe_left: 'react',
+        },
+        reaction_emoji: '👍',
+      },
+    },
+  })
+  await openMobileRoom(page)
+
+  const gallery = page.locator('.gallery-row')
+  await gallery.scrollIntoViewIfNeeded()
+  const firstTile = gallery.locator(
+    '.gallery-cell[data-event-id="$gallery-0:hs"]',
+  )
+  const firstImage = firstTile.locator('.gallery-cell-open')
+  await expect(firstImage).toBeVisible()
+  await expect(firstTile).toHaveClass(/touch-hold-enabled/)
+
+  await tapMedia(firstImage)
+  const viewer = page.getByRole('dialog', { name: 'gallery-0.png' })
+  await expect(viewer).toBeVisible()
+  await viewer.getByRole('button', { name: 'Close' }).click()
+
+  await hold(firstImage)
+  const threadPanel = page.getByRole('complementary', { name: 'Thread' })
+  await expect(threadPanel).toBeVisible()
+  await expect
+    .poll(() =>
+      page.evaluate(() => new URL(location.href).searchParams.get('thread')),
+    )
+    .toBe('$gallery-0:hs')
+  await swipeRight(threadPanel)
+  await expect(threadPanel).not.toBeVisible()
+
+  await tapMedia(firstImage)
+  await tapMedia(firstImage)
+  await expect(page.getByText('Replying to')).toBeVisible()
+  await expect(viewer).not.toBeVisible()
+
+  const lastTile = gallery.locator(
+    '.gallery-cell[data-event-id="$gallery-3:hs"]',
+  )
+  const lastImage = lastTile.locator('.gallery-cell-open')
+  await swipeLeft(lastImage, async () => {
+    await expect(lastTile.locator('.gallery-cell-box')).toHaveCSS(
+      'transform',
+      /matrix\(1, 0, 0, 1, -50, 0\)/,
+    )
+    await expect(lastTile.locator('.gesture-swipe-affordance')).toContainText(
+      'React',
+    )
+  })
+  await expect(lastTile.locator('.message-reaction-burst')).toHaveText('👍')
+})
+
 test('desktop preserves selection and supports timestamp and message double-clicks', async ({
   page,
 }, testInfo) => {

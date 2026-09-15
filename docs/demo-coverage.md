@@ -140,9 +140,9 @@ shows it.
   during back navigation, and reaction feedback are mobile-only behavior, but
   the current tour has no gesture-configuration scene and synthetic pointer
   input would not make the physical gesture legible in a recording.
-  Gestures on individual images reuse the same feedback while retaining the
-  existing tap-to-open viewer, so they do not add a distinct demo scene;
-  collapsed galleries remain outside the gesture surface.
+  Gestures on individual images and loaded gallery tiles reuse the same
+  feedback while retaining the existing tap-to-open viewer, so they do not add
+  a distinct demo scene.
   The desktop timestamp and message double-clicks reuse the existing clipboard
   and configured-action feedback, so neither adds a distinct visual state worth
   a separate scene.

@@ -2057,7 +2057,8 @@ p.timeline-edge {
 }
 
 .event-row.gesture-swipe-reveal > .user-avatar,
-.event-row.gesture-swipe-reveal > .event-content {
+.event-row.gesture-swipe-reveal > .event-content,
+.gallery-cell.gesture-swipe-reveal > .gallery-cell-box {
   position: relative;
   z-index: 2;
   transform: translate3d(var(--message-swipe-offset, 0), 0, 0);
@@ -2065,7 +2066,8 @@ p.timeline-edge {
 }
 
 .event-row.gesture-swipe-settling > .user-avatar,
-.event-row.gesture-swipe-settling > .event-content {
+.event-row.gesture-swipe-settling > .event-content,
+.gallery-cell.gesture-swipe-settling > .gallery-cell-box {
   transition: transform 180ms ease-out;
 }
 
@@ -2094,7 +2096,8 @@ p.timeline-edge {
     background-color 100ms ease;
 }
 
-.event-row.gesture-swipe-settling .gesture-swipe-affordance {
+.event-row.gesture-swipe-settling .gesture-swipe-affordance,
+.gallery-cell.gesture-swipe-settling .gesture-swipe-affordance {
   transition:
     width 180ms ease-out,
     color 100ms ease,
@@ -2109,18 +2112,21 @@ p.timeline-edge {
   transition: transform 100ms ease;
 }
 
-.event-row.gesture-swipe-armed .gesture-swipe-affordance {
+.event-row.gesture-swipe-armed .gesture-swipe-affordance,
+.gallery-cell.gesture-swipe-armed .gesture-swipe-affordance {
   color: var(--bg);
   background: var(--accent);
 }
 
-.event-row.gesture-swipe-armed .gesture-swipe-affordance .event-action-icon {
+.event-row.gesture-swipe-armed .gesture-swipe-affordance .event-action-icon,
+.gallery-cell.gesture-swipe-armed .gesture-swipe-affordance .event-action-icon {
   transform: scale(1.08);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .event-row.gesture-swipe-settling > .user-avatar,
   .event-row.gesture-swipe-settling > .event-content,
+  .gallery-cell.gesture-swipe-settling > .gallery-cell-box,
   .gesture-swipe-affordance,
   .gesture-swipe-affordance .event-action-icon {
     transition-duration: 0.01ms;
@@ -5735,6 +5741,35 @@ audio.media-player {
   inset: 0;
   background: rgba(0, 0, 0, 0.25);
   pointer-events: none;
+}
+
+.gallery-gesture-feedback {
+  inset-inline: 0.2rem;
+  bottom: 0.2rem;
+  z-index: 4;
+  max-width: none;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gallery-gesture-confirm {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.5rem;
+  background: color-mix(in srgb, var(--bg-raised) 92%, transparent);
+}
+
+.gallery-gesture-confirm button {
+  min-height: 2rem;
+  padding: 0.25rem;
 }
 
 .gallery-expander {

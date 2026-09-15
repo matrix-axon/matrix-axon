@@ -1,10 +1,19 @@
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { ServicesContext } from '../services'
 import type { MembersStore } from '../stores/members'
-import type { TimelineEvent } from '../stores/timeline'
+import { defaultMessageGestures } from '../stores/message-gestures'
+import type { TimelineEvent, TimelineStore } from '../stores/timeline'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { resetGalleryExpansion } from '../timeline/gallery-expansion'
 import { GALLERY_EAGER_BYTES } from './MediaGalleryCell'
@@ -19,6 +28,7 @@ afterEach(() => {
   cleanup()
   server.resetHandlers()
   resetGalleryExpansion()
+  vi.clearAllMocks()
 })
 afterAll(() => server.close())
 
@@ -110,6 +120,11 @@ const members = {
   members: { value: new Map() },
 } as unknown as MembersStore
 
+const timeline = {
+  toggleReaction: vi.fn(async () => true),
+  redact: vi.fn(async () => true),
+} as unknown as TimelineStore
+
 function renderRow(events: TimelineEvent[], highlighted: string | null = null) {
   return render(
     <ServicesContext.Provider value={testServices()}>
@@ -119,6 +134,11 @@ function renderRow(events: TimelineEvent[], highlighted: string | null = null) {
           accountId={ACCOUNT}
           members={members}
           highlighted={highlighted}
+          timeline={timeline}
+          ownUserId="@alice:hs"
+          messageGestures={defaultMessageGestures()}
+          onReply={() => {}}
+          onEdit={() => {}}
           renderEvent={(event) => (
             <li class="stub-row" data-event-id={event.event_id}>
               {event.body}
@@ -130,7 +150,123 @@ function renderRow(events: TimelineEvent[], highlighted: string | null = null) {
   )
 }
 
+function pointer(
+  target: Element,
+  kind: 'down' | 'move' | 'up',
+  x: number,
+  y = 40,
+) {
+  const init = {
+    pointerType: 'touch',
+    pointerId: 1,
+    clientX: x,
+    clientY: y,
+  }
+  if (kind === 'down') fireEvent.pointerDown(target, init)
+  else if (kind === 'move') fireEvent.pointerMove(target, init)
+  else fireEvent.pointerUp(target, init)
+}
+
 describe('MediaGalleryRow', () => {
+  it('targets a loaded tile with the configured swipe action', async () => {
+    serveBytes()
+    const onReply = vi.fn()
+    const events = [image('$1'), image('$2')]
+    const { container } = render(
+      <ServicesContext.Provider value={testServices()}>
+        <ol>
+          <MediaGalleryRow
+            events={events}
+            accountId={ACCOUNT}
+            members={members}
+            timeline={timeline}
+            ownUserId="@alice:hs"
+            messageGestures={defaultMessageGestures()}
+            onReply={onReply}
+            onEdit={() => {}}
+            renderEvent={() => null}
+          />
+        </ol>
+      </ServicesContext.Provider>,
+    )
+    const open = await waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>(
+        '.gallery-cell[data-event-id="$2"] .gallery-cell-open',
+      )
+      expect(button).not.toBeNull()
+      return button!
+    })
+    const tile = open.closest('.gallery-cell')!
+
+    pointer(open, 'down', 260)
+    pointer(open, 'move', 210)
+    await waitFor(() =>
+      expect(tile.classList.contains('gesture-swipe-reveal')).toBe(true),
+    )
+    expect(tile.querySelector('.gesture-swipe-affordance')?.textContent).toBe(
+      'Reply',
+    )
+    pointer(open, 'move', 140)
+    pointer(open, 'up', 140)
+
+    expect(onReply).toHaveBeenCalledOnce()
+    expect(onReply).toHaveBeenCalledWith(
+      expect.objectContaining({ event_id: '$2' }),
+    )
+  })
+
+  it('confirms a tile delete before redacting its event', async () => {
+    serveBytes()
+    const preferences = defaultMessageGestures()
+    preferences.bindings = {
+      double_tap: 'delete',
+      touch_and_hold: 'thread',
+      swipe_left: 'reply',
+    }
+    const { container } = render(
+      <ServicesContext.Provider value={testServices()}>
+        <ol>
+          <MediaGalleryRow
+            events={[image('$1'), image('$2')]}
+            accountId={ACCOUNT}
+            members={members}
+            timeline={timeline}
+            ownUserId="@alice:hs"
+            messageGestures={preferences}
+            onReply={() => {}}
+            onEdit={() => {}}
+            renderEvent={() => null}
+          />
+        </ol>
+      </ServicesContext.Provider>,
+    )
+    const open = await waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>(
+        '.gallery-cell[data-event-id="$2"] .gallery-cell-open',
+      )
+      expect(button).not.toBeNull()
+      return button!
+    })
+
+    pointer(open, 'down', 40)
+    pointer(open, 'up', 40)
+    pointer(open, 'down', 41)
+    pointer(open, 'up', 41)
+
+    const confirmation = await waitFor(() => {
+      const group = open
+        .closest('.gallery-cell')!
+        .querySelector('.gallery-gesture-confirm')
+      expect(group).not.toBeNull()
+      return group!
+    })
+    expect(timeline.redact).not.toHaveBeenCalled()
+    fireEvent.click(
+      confirmation.querySelector<HTMLButtonElement>('button.danger')!,
+    )
+    await waitFor(() => expect(timeline.redact).toHaveBeenCalledWith('$2'))
+  })
+
   it('is one li.event-row in the list, as scroll anchoring requires', () => {
     // `captureAnchor` binary-searches `li.event-row` assuming document order
     // is monotonic in position; a gallery that rendered otherwise would break
@@ -586,6 +722,11 @@ describe('MediaGalleryRow', () => {
             accountId={ACCOUNT}
             members={members}
             readReceipts={[{ userId: '@bob:hs', ts: 1 }]}
+            timeline={timeline}
+            ownUserId="@alice:hs"
+            messageGestures={defaultMessageGestures()}
+            onReply={() => {}}
+            onEdit={() => {}}
             renderEvent={() => null}
           />
         </ol>
@@ -610,6 +751,11 @@ describe('MediaGalleryRow', () => {
             accountId={ACCOUNT}
             members={members}
             readReceipts={viewers}
+            timeline={timeline}
+            ownUserId="@alice:hs"
+            messageGestures={defaultMessageGestures()}
+            onReply={() => {}}
+            onEdit={() => {}}
             renderEvent={() => null}
           />
         </ol>

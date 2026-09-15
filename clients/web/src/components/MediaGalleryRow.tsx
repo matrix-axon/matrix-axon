@@ -3,11 +3,19 @@ import { useMemo, useRef, useState } from 'preact/hooks'
 import { eventMedia } from '../media/event-media'
 import { useMediaViewer } from '../media/media-viewer'
 import type { MembersStore } from '../stores/members'
-import type { TimelineEvent } from '../stores/timeline'
+import type { EventDto, TimelineEvent, TimelineStore } from '../stores/timeline'
+import type {
+  MessageGestureAction,
+  MessageGesturePreferences,
+} from '../stores/message-gestures'
 import { useGalleryExpansion } from '../timeline/gallery-expansion'
 import { MediaCaption } from './MediaCaption'
 import { GALLERY_EAGER_BYTES, MediaGalleryCell } from './MediaGalleryCell'
 import { ReadReceiptsSummary } from './MessageEventRow'
+import { isMessageActionable } from './event-action-eligibility'
+import { runAvailableMessageGestureAction } from './message-gesture-actions'
+import { useGestureReaction } from './use-gesture-reaction'
+import { useGestureFeedback } from './use-gesture-feedback'
 import type { ReadReceipt } from '../stores/ephemeral'
 import { UserAvatar } from './UserAvatar'
 
@@ -40,6 +48,14 @@ export function MediaGalleryRow({
   readReceipts = [],
   highlighted = null,
   renderEvent,
+  timeline,
+  ownUserId,
+  messageGestures,
+  onReply,
+  onEdit,
+  onOpenThread,
+  showThreadAction = true,
+  onMutation,
 }: {
   events: readonly TimelineEvent[]
   accountId: string
@@ -53,6 +69,14 @@ export function MediaGalleryRow({
   readReceipts?: readonly ReadReceipt[]
   /** The jump target, when a deep link lands inside this run. */
   highlighted?: string | null
+  timeline: TimelineStore
+  ownUserId: string | null
+  messageGestures: MessageGesturePreferences | null
+  onReply: (event: EventDto) => void
+  onEdit: (event: EventDto) => void
+  onOpenThread?: (rootId: string) => void
+  showThreadAction?: boolean
+  onMutation?: () => void
   /**
    * Render one event as an ordinary row. Used by the expander, which is what
    * keeps *every* per-event affordance — reply, edit, delete, react, thread,
@@ -78,6 +102,36 @@ export function MediaGalleryRow({
    * because the cell holding `tabIndex={0}` was not focusable.
    */
   const [focusedId, setFocusedId] = useState<string | null>(null)
+  const gestureFeedbacks = useGestureFeedback()
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(
+    null,
+  )
+  const showGestureFeedback = gestureFeedbacks.show
+
+  const gestureReactions = useGestureReaction({
+    timeline,
+    onMutation,
+    onFeedback: showGestureFeedback,
+  })
+
+  const runGestureAction = (
+    event: TimelineEvent,
+    action: MessageGestureAction,
+  ) => {
+    setConfirmingDeleteId(null)
+    runAvailableMessageGestureAction(action, {
+      event,
+      ownUserId,
+      canOpenThread: showThreadAction && onOpenThread !== undefined,
+      reactionEmoji: messageGestures?.reaction_emoji ?? '👍',
+      onReply: () => onReply(event),
+      onOpenThread: () => onOpenThread?.(event.event_id),
+      onReact: (emoji) => gestureReactions.run(event, emoji),
+      onEdit: () => onEdit(event),
+      onDelete: () => setConfirmingDeleteId(event.event_id),
+      onUnavailable: (message) => showGestureFeedback(event.event_id, message),
+    })
+  }
 
   const sender = events[0].sender
   const senderDisplay = members.displayName(sender)
@@ -274,6 +328,35 @@ export function MediaGalleryRow({
                   viewer?.open(event.event_id)
                 }}
                 onCellKeyDown={onCellKeyDown(event.event_id)}
+                gestures={
+                  messageGestures !== null && isMessageActionable(event)
+                    ? {
+                        preferences: messageGestures,
+                        onAction: (action) => runGestureAction(event, action),
+                        feedback:
+                          gestureFeedbacks.feedback?.eventId === event.event_id
+                            ? gestureFeedbacks.feedback.message
+                            : null,
+                        reactionBurst:
+                          gestureReactions.burst?.eventId === event.event_id
+                            ? gestureReactions.burst.emoji
+                            : null,
+                        confirmingDelete: confirmingDeleteId === event.event_id,
+                        onConfirmDelete: () => {
+                          void timeline.redact(event.event_id).then((ok) => {
+                            if (ok) onMutation?.()
+                            else
+                              showGestureFeedback(
+                                event.event_id,
+                                'Message could not be deleted',
+                              )
+                            setConfirmingDeleteId(null)
+                          })
+                        },
+                        onCancelDelete: () => setConfirmingDeleteId(null),
+                      }
+                    : null
+                }
               />
             )
           })}

@@ -75,8 +75,10 @@ and swipe left as unique bindings for reply, thread, reaction, edit, or delete.
 The default preset reacts with 👍 on double tap, opens a thread on hold, and
 replies on swipe left; swipe right always keeps its mobile back-navigation
 behavior.
-Individual images use the same configured actions while retaining a single tap
-to open the full-size viewer; collapsed galleries remain gesture-free.
+Individual images and loaded tiles in collapsed galleries use the same
+configured actions while retaining a single tap to open the full-size viewer.
+Each gallery gesture targets the tile where it begins; gallery whitespace and
+tiles that are loading, failed, or still uploading remain gesture-free.
 During swipe-right navigation, the current pane follows the finger while the
 room list or timeline underneath is revealed and settles fully into view.
 Choosing an action already assigned to another gesture swaps the two
