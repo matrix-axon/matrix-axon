@@ -57,7 +57,10 @@ import {
 import { viewMayClaimReadState } from '../timeline/arrival-order'
 import { hiddenByRedaction } from '../timeline/visibility'
 import { computeRoomReceipt } from '../timeline/room-receipt'
-import { useMobileSwipeBack } from '../components/use-mobile-swipe-back'
+import {
+  roomListBackPresentation,
+  useMobileSwipeBack,
+} from '../components/use-mobile-swipe-back'
 import { resolveEmojiShortcode, type EmojiEntry } from '../emoji'
 import { perfMark, perfMarkFrames } from '../perf'
 import { withSearchParam, withoutQueryParam } from '../search-tokens'
@@ -1796,10 +1799,15 @@ export function RoomPage() {
   }
 
   const mobileSwipeBack = useMobileSwipeBack<HTMLDivElement>({
-    getPane: (surface) =>
-      openThread === null
-        ? roomStream.current
-        : surface.querySelector<HTMLElement>('.thread-panel'),
+    getPresentation: (surface) => {
+      if (openThread === null) {
+        return roomListBackPresentation(surface, roomStream.current)
+      }
+      const foreground = surface.querySelector<HTMLElement>('.thread-panel')
+      return foreground === null || roomStream.current === null
+        ? null
+        : { foreground, destination: roomStream.current }
+    },
     onAccepted: (dx, dy) => {
       perfMark('room-page:swipe-right-accepted', { dx, dy })
     },
@@ -1907,10 +1915,6 @@ export function RoomPage() {
         class="room-body mobile-back-surface"
         {...mobileSwipeBack}
       >
-        <span class="mobile-back-affordance" aria-hidden="true">
-          <span>‹</span>
-          {openThread === null ? 'Rooms' : 'Messages'}
-        </span>
         {/* Drop scoped to this pane, not the page: a file dropped on the thread
             panel beside it must stage there, not here (ADR 0065). */}
         <div

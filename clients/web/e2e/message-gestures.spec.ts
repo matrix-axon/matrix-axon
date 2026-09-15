@@ -203,17 +203,17 @@ test('settings autosave the Axon-wide bindings and restore them after reload', a
   ).toBeVisible()
 
   const settingsPane = page.locator('.settings-back-pane')
-  const backAffordance = page.locator(
-    '.settings-back-surface .mobile-back-affordance',
-  )
-  await expect(backAffordance).toHaveCSS('visibility', 'hidden')
+  const foregroundPane = page.locator('.shell-body > main')
+  const roomList = page.locator('#room-sidebar')
+  await expect(roomList).not.toBeVisible()
   await swipeRight(settingsPane, async () => {
-    await expect(backAffordance).toHaveCSS('visibility', 'visible')
-    await expect(settingsPane).toHaveCSS(
+    await expect(roomList).toBeVisible()
+    await expect(roomList).toContainText('E2E Room')
+    await expect(roomList).toHaveClass(/mobile-back-destination-active/)
+    await expect(foregroundPane).toHaveCSS(
       'transform',
       /matrix\(1, 0, 0, 1, 60, 0\)/,
     )
-    await expect(backAffordance).toContainText('Rooms')
   })
   await expect(page).toHaveURL('/')
   await expect(page.getByRole('navigation', { name: 'Rooms' })).toBeVisible()
@@ -230,9 +230,6 @@ test('default message gestures arbitrate with preserved swipe-right navigation',
   const body = `gesture target ${Date.now()}`
   let row = await sendMessage(page, body)
   let target = row.locator('.event-body')
-  const backAffordance = page.locator('.mobile-back-affordance')
-
-  await expect(backAffordance).toHaveCSS('visibility', 'hidden')
 
   await tap(target)
   await tap(target)
@@ -244,16 +241,19 @@ test('default message gestures arbitrate with preserved swipe-right navigation',
   await hold(target)
   const threadPanel = page.getByRole('complementary', { name: 'Thread' })
   await expect(threadPanel).toBeVisible()
+  const timelinePane = page.locator('.room-stream')
 
   await swipeRight(threadPanel, async () => {
-    await expect(backAffordance).toHaveCSS('visibility', 'visible')
+    await expect(timelinePane).toHaveClass(/mobile-back-destination-active/)
+    expect(await timelinePane.evaluate((element) => element.inert)).toBe(true)
     await expect(threadPanel).toHaveCSS(
       'transform',
       /matrix\(1, 0, 0, 1, 60, 0\)/,
     )
   })
   await expect(threadPanel).not.toBeVisible()
-  await expect(backAffordance).toHaveCSS('visibility', 'hidden')
+  await expect(timelinePane).not.toHaveClass(/mobile-back-destination-active/)
+  expect(await timelinePane.evaluate((element) => element.inert)).toBe(false)
 
   row = page.locator('.event-row').filter({ hasText: body }).last()
   target = row.locator('.event-body')
@@ -272,13 +272,28 @@ test('default message gestures arbitrate with preserved swipe-right navigation',
   await page.goto(ROOM_URL)
   await expectLive(page)
   row = page.locator('.event-row').filter({ hasText: body }).last()
-  await swipeRight(row.locator('.event-body'), async () => {
-    await expect(backAffordance).toHaveCSS('visibility', 'visible')
-    await expect(page.locator('.room-stream')).toHaveCSS(
+  const roomList = page.locator('#room-sidebar')
+  const foregroundPane = page.locator('.shell-body > main')
+  target = row.locator('.event-body')
+
+  await roomTouch(target, 'touchstart', 90, 300)
+  await roomTouch(target, 'touchmove', 140, 302)
+  await expect(roomList).toBeVisible()
+  await roomTouch(target, 'touchend', 140, 302)
+  expect(await page.evaluate(() => window.location.pathname)).toContain(
+    '/rooms/',
+  )
+  await expect(roomList).not.toBeVisible()
+  await expect(foregroundPane).toHaveCSS('transform', 'none')
+
+  await swipeRight(target, async () => {
+    await expect(roomList).toBeVisible()
+    await expect(roomList).toContainText('E2E Room')
+    await expect(roomList).toHaveClass(/mobile-back-destination-active/)
+    await expect(foregroundPane).toHaveCSS(
       'transform',
       /matrix\(1, 0, 0, 1, 60, 0\)/,
     )
-    await expect(page.locator('.mobile-back-affordance')).toContainText('Rooms')
   })
   await expect(page).toHaveURL('/')
   await expect(page.getByRole('navigation', { name: 'Rooms' })).toBeVisible()
