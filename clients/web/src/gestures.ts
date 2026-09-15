@@ -1,15 +1,16 @@
 /**
  * Touch-gesture constants shared by every horizontal swipe surface.
  *
- * These were tuned for the room's swipe-back (ADR 0075) and now also drive the
- * media viewer's swipe paging (ADR 0081). They live here rather than in
- * `RoomPage` so the two cannot drift apart: a lightbox that committed to a
- * swipe at a different distance than the timeline underneath it would feel
- * like two different apps.
+ * The general thresholds drive message actions and the media viewer's swipe
+ * paging (ADR 0081). Interactive back navigation has a shorter completion
+ * threshold because its destination is already visible and a short drag can
+ * visibly cancel back into the current pane.
  */
 
-/** Minimum horizontal travel before a swipe counts. */
+/** Minimum horizontal travel before a message or media swipe counts. */
 export const SWIPE_MIN_X = 72
+/** Minimum horizontal travel before an interactive back swipe completes. */
+export const SWIPE_BACK_MIN_X = 48
 /** Maximum vertical drift a horizontal swipe may accumulate. */
 export const SWIPE_MAX_Y = 64
 /** How much more horizontal than vertical the travel must be. */

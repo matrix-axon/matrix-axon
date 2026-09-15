@@ -90,10 +90,10 @@ async function swipeRight(
   onPreview?: () => Promise<void>,
 ): Promise<void> {
   await roomTouch(target, 'touchstart', 90, 300)
-  await roomTouch(target, 'touchmove', 150, 302)
+  await roomTouch(target, 'touchmove', 125, 302)
   await onPreview?.()
-  await roomTouch(target, 'touchmove', 210, 304)
-  await roomTouch(target, 'touchend', 210, 304)
+  await roomTouch(target, 'touchmove', 140, 304)
+  await roomTouch(target, 'touchend', 140, 304)
 }
 
 async function openMobileRoom(page: Page): Promise<void> {
@@ -212,7 +212,7 @@ test('settings autosave the Axon-wide bindings and restore them after reload', a
     await expect(roomList).toHaveClass(/mobile-back-destination-active/)
     await expect(foregroundPane).toHaveCSS(
       'transform',
-      /matrix\(1, 0, 0, 1, 60, 0\)/,
+      /matrix\(1, 0, 0, 1, 35, 0\)/,
     )
   })
   await expect(page).toHaveURL('/')
@@ -248,7 +248,7 @@ test('default message gestures arbitrate with preserved swipe-right navigation',
     expect(await timelinePane.evaluate((element) => element.inert)).toBe(true)
     await expect(threadPanel).toHaveCSS(
       'transform',
-      /matrix\(1, 0, 0, 1, 60, 0\)/,
+      /matrix\(1, 0, 0, 1, 35, 0\)/,
     )
   })
   await expect(threadPanel).not.toBeVisible()
@@ -277,9 +277,9 @@ test('default message gestures arbitrate with preserved swipe-right navigation',
   target = row.locator('.event-body')
 
   await roomTouch(target, 'touchstart', 90, 300)
-  await roomTouch(target, 'touchmove', 140, 302)
+  await roomTouch(target, 'touchmove', 120, 302)
   await expect(roomList).toBeVisible()
-  await roomTouch(target, 'touchend', 140, 302)
+  await roomTouch(target, 'touchend', 120, 302)
   expect(await page.evaluate(() => window.location.pathname)).toContain(
     '/rooms/',
   )
@@ -292,7 +292,7 @@ test('default message gestures arbitrate with preserved swipe-right navigation',
     await expect(roomList).toHaveClass(/mobile-back-destination-active/)
     await expect(foregroundPane).toHaveCSS(
       'transform',
-      /matrix\(1, 0, 0, 1, 60, 0\)/,
+      /matrix\(1, 0, 0, 1, 35, 0\)/,
     )
   })
   await expect(page).toHaveURL('/')

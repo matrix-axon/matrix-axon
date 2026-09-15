@@ -222,7 +222,7 @@ function mockSinglePane() {
 
 // The defaults start clear of the left edge band that the browser's own
 // swipe-back owns (`NATIVE_BACK_EDGE_PX`), which the handler declines.
-function swipeRight(target: Element, startX = 90, endX = 198) {
+function swipeRight(target: Element, startX = 90, endX = 140) {
   fireEvent.touchStart(target, {
     touches: [{ clientX: startX, clientY: 220 }],
   })
