@@ -236,6 +236,14 @@ function isRowControl(target: EventTarget | null): boolean {
   )
 }
 
+function mediaOpenControl(
+  target: EventTarget | null,
+): HTMLButtonElement | null {
+  if (!(target instanceof Element)) return null
+  const control = target.closest('.media-open')
+  return control instanceof HTMLButtonElement ? control : null
+}
+
 function isInlineLink(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest('a') !== null
 }
@@ -364,6 +372,7 @@ export function MessageEventRow({
     direction: 'none' | 'left' | 'right' | 'vertical'
     held: boolean
     linkOnly: boolean
+    mediaOpen: HTMLButtonElement | null
     swipeAction: MessageGestureAction | null
   } | null>(null)
   const holdTimer = useRef<number | null>(null)
@@ -376,6 +385,11 @@ export function MessageEventRow({
   const desktopClickTimer = useRef<number | null>(null)
   const lastPointerType = useRef<string | null>(null)
   const suppressNextClick = useRef(false)
+  // Opening on the first touch click would move the second tap into the
+  // viewer. After the double-tap window closes, replay one allowed click on
+  // the same button while continuing to suppress the touch compatibility
+  // click that would otherwise open it early.
+  const programmaticMediaOpen = useRef(false)
   const feedbackTimer = useRef<number | null>(null)
   const revealTimer = useRef<number | null>(null)
   const reactionBurstTimer = useRef<number | null>(null)
@@ -401,8 +415,11 @@ export function MessageEventRow({
   const hasMessageActions = isMessageActionable(event)
   const senderDisplay = members.displayName(event.sender)
   const canOpenThread = showThreadAction && onOpenThread !== undefined
+  const parsedMedia = parseMedia(event)
   const gestureEligible =
-    hasMessageActions && parseMedia(event) === null && messageGestures !== null
+    hasMessageActions &&
+    (parsedMedia === null || parsedMedia.kind === 'image') &&
+    messageGestures !== null
   const doubleClickAction = gestureEligible
     ? (messageGestures?.bindings.double_tap ?? null)
     : null
@@ -591,12 +608,16 @@ export function MessageEventRow({
     }
   }
 
-  const finishTap = (x: number, y: number): void => {
+  const finishTap = (
+    x: number,
+    y: number,
+    onSingleTap: () => void = onOpenActions,
+  ): void => {
     const action = gestureEligible
       ? (messageGestures?.bindings.double_tap ?? null)
       : null
     if (action === null) {
-      onOpenActions()
+      onSingleTap()
       return
     }
     const now = performance.now()
@@ -614,7 +635,7 @@ export function MessageEventRow({
     if (first !== null) window.clearTimeout(first.timer)
     const timer = window.setTimeout(() => {
       pendingTap.current = null
-      onOpenActions()
+      onSingleTap()
     }, MESSAGE_DOUBLE_TAP_MS)
     pendingTap.current = { x, y, at: now, timer }
   }
@@ -633,6 +654,8 @@ export function MessageEventRow({
         if (pointerEvent.pointerType === 'mouse') {
           clearHoldTimer()
           gesturePointer.current = null
+          suppressNextClick.current = false
+          programmaticMediaOpen.current = false
           rowRef.current?.classList.remove('touch-gesture-active')
           return
         }
@@ -656,7 +679,13 @@ export function MessageEventRow({
         suppressNextClick.current = false
         clearSwipePresentation()
         const linkOnly = isInlineLink(pointerEvent.target)
-        if (isRowControl(pointerEvent.target) && !linkOnly) return
+        const mediaOpen = mediaOpenControl(pointerEvent.target)
+        if (
+          isRowControl(pointerEvent.target) &&
+          !linkOnly &&
+          mediaOpen === null
+        )
+          return
         if (isHorizontallyScrollable(pointerEvent.target)) return
         if (linkOnly && !touchHoldEnabled) return
         if (touchHoldEnabled) {
@@ -670,6 +699,7 @@ export function MessageEventRow({
           direction: 'none',
           held: false,
           linkOnly,
+          mediaOpen,
           swipeAction:
             gestureEligible && !linkOnly
               ? (messageGestures?.bindings.swipe_left ?? null)
@@ -788,7 +818,17 @@ export function MessageEventRow({
         }
         pointerEvent.preventDefault()
         suppressNextClick.current = true
-        finishTap(pointerEvent.clientX, pointerEvent.clientY)
+        finishTap(
+          pointerEvent.clientX,
+          pointerEvent.clientY,
+          gesture.mediaOpen === null
+            ? onOpenActions
+            : () => {
+                if (!gesture.mediaOpen?.isConnected) return
+                programmaticMediaOpen.current = true
+                gesture.mediaOpen.click()
+              },
+        )
       }}
       onContextMenu={(event) => {
         if (
@@ -798,7 +838,25 @@ export function MessageEventRow({
         )
           event.preventDefault()
       }}
+      onClickCapture={(click) => {
+        // This runs before MediaImage's own click handler. Only the delayed
+        // replay is allowed through to it; keyboard and mouse clicks never set
+        // suppressNextClick and retain their immediate behavior.
+        if (
+          !programmaticMediaOpen.current &&
+          suppressNextClick.current &&
+          mediaOpenControl(click.target) !== null
+        ) {
+          suppressNextClick.current = false
+          click.preventDefault()
+          click.stopPropagation()
+        }
+      }}
       onClick={(click) => {
+        if (programmaticMediaOpen.current) {
+          programmaticMediaOpen.current = false
+          return
+        }
         if (suppressNextClick.current) {
           suppressNextClick.current = false
           click.preventDefault()
