@@ -739,6 +739,11 @@ body {
    the timeline — exactly the pre-0062 behavior, reached via the brand link or
    browser back. */
 @media (max-width: 47.99rem) {
+  .shell-body {
+    position: relative;
+    overflow: hidden;
+  }
+
   .sidebar {
     display: block;
     overflow-y: auto;
@@ -822,6 +827,26 @@ body {
 
   .shell-body.mode-room-entry .sidebar {
     display: none;
+  }
+
+  .shell-body.mode-room > .sidebar.mobile-back-destination-active,
+  .shell-body.mode-room-entry > .sidebar.mobile-back-destination-active {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    display: block;
+    width: 100%;
+    max-width: none;
+    flex-basis: 100% !important;
+    border-right: none;
+    background: var(--bg);
+  }
+
+  .shell-body > main.mobile-back-pane {
+    position: relative;
+    z-index: 1;
+    flex: 1 0 100%;
+    width: 100%;
   }
 
   .shell-body.mode-rooms main {
@@ -997,10 +1022,6 @@ h2 {
   display: flex;
   flex: 1;
   min-height: 0;
-}
-
-.mobile-back-affordance {
-  display: none;
 }
 
 .room-stream {
@@ -3415,54 +3436,27 @@ span.composer-attachment-thumb {
     overflow: hidden;
   }
 
-  .mobile-back-affordance {
-    position: absolute;
-    inset: 0 auto 0 0;
-    z-index: 0;
-    display: flex;
-    width: var(--mobile-back-reveal-width, 0);
-    box-sizing: border-box;
-    align-items: center;
-    gap: 0.25rem;
-    overflow: hidden;
-    padding-inline-start: 0.75rem;
-    color: var(--accent);
-    background: var(--accent-soft);
-    font-size: 0.85rem;
-    font-weight: 700;
-    white-space: nowrap;
-    visibility: hidden;
+  .mobile-back-destination-active {
+    transform: translate3d(var(--mobile-back-destination-offset, 0), 0, 0);
+    will-change: transform;
     pointer-events: none;
   }
 
-  .mobile-back-surface.mobile-back-active .mobile-back-affordance {
-    visibility: visible;
+  .mobile-back-destination-settling {
+    transition: transform 180ms ease-out;
   }
 
-  .mobile-back-affordance > :first-child {
-    font-size: 1.5rem;
-    line-height: 1;
-  }
-
-  .mobile-back-surface > .mobile-back-dragging,
-  .mobile-back-surface > .mobile-back-settling {
+  .mobile-back-pane.mobile-back-dragging,
+  .mobile-back-pane.mobile-back-settling {
     transform: translate3d(var(--mobile-back-offset, 0), 0, 0);
     background: var(--bg);
     box-shadow: -4px 0 16px rgb(0 0 0 / 0.15);
     will-change: transform;
   }
 
-  .mobile-back-surface > .mobile-back-settling {
+  .mobile-back-pane.mobile-back-settling {
     transition: transform 180ms ease-out;
-  }
-
-  .mobile-back-surface.mobile-back-settling .mobile-back-affordance {
-    transition: width 180ms ease-out;
-  }
-
-  .mobile-back-surface.mobile-back-armed .mobile-back-affordance {
-    color: var(--bg);
-    background: var(--accent);
+    pointer-events: none;
   }
 
   .side-panel,
@@ -3474,9 +3468,8 @@ span.composer-attachment-thumb {
 }
 
 @media (max-width: 47.99rem) and (prefers-reduced-motion: reduce) {
-  .mobile-back-affordance,
-  .mobile-back-surface.mobile-back-settling .mobile-back-affordance,
-  .mobile-back-surface > .mobile-back-settling {
+  .mobile-back-destination-settling,
+  .mobile-back-pane.mobile-back-settling {
     transition-duration: 0.01ms;
   }
 }

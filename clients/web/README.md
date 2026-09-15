@@ -75,6 +75,8 @@ and swipe left as unique bindings for reply, thread, reaction, edit, or delete.
 The default preset reacts with 👍 on double tap, opens a thread on hold, and
 replies on swipe left; swipe right always keeps its mobile back-navigation
 behavior.
+During swipe-right navigation, the current pane follows the finger while the
+room list or timeline underneath is revealed and settles fully into view.
 Choosing an action already assigned to another gesture swaps the two
 assignments, keeping mappings unique without requiring an intermediate Off.
 Holding a timestamp copies the message body while touch and hold is enabled,

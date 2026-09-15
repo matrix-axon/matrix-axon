@@ -226,6 +226,9 @@ function swipeRight(target: Element, startX = 90, endX = 198) {
   fireEvent.touchStart(target, {
     touches: [{ clientX: startX, clientY: 220 }],
   })
+  fireEvent.touchMove(target, {
+    touches: [{ clientX: (startX + endX) / 2, clientY: 223 }],
+  })
   fireEvent.touchEnd(target, {
     changedTouches: [{ clientX: endX, clientY: 226 }],
   })
@@ -1286,6 +1289,9 @@ describe('threads', () => {
         `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
       )
       const panel = await findByLabelText('Thread')
+      const timeline = panel.parentElement?.querySelector(
+        '.room-stream',
+      ) as HTMLElement
 
       fireEvent.touchStart(panel, {
         touches: [{ clientX: 90, clientY: 220 }],
@@ -1295,12 +1301,20 @@ describe('threads', () => {
       })
       expect(panel.classList.contains('mobile-back-dragging')).toBe(true)
       expect(panel.style.getPropertyValue('--mobile-back-offset')).toBe('60px')
+      expect(
+        timeline.classList.contains('mobile-back-destination-active'),
+      ).toBe(true)
+      expect(timeline.inert).toBe(true)
       fireEvent.touchEnd(panel, {
         changedTouches: [{ clientX: 198, clientY: 226 }],
       })
 
       await waitFor(() => expect(queryByLabelText('Thread')).toBeNull())
       expect(window.location.search).toBe('')
+      expect(
+        timeline.classList.contains('mobile-back-destination-active'),
+      ).toBe(false)
+      expect(timeline.inert).toBe(false)
     } finally {
       media.mockRestore()
     }

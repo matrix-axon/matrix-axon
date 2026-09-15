@@ -149,10 +149,10 @@ shows it.
   panel, and touch-sized message actions. Worth revisiting if the mobile room
   list ever diverges from the desktop one.
 - **Configurable message gestures on web mobile (ADR 0104).** The settings
-  panel, direct movement of messages and panes, and reaction feedback are
-  mobile-only behavior, but the current tour has no gesture-configuration scene
-  and synthetic pointer input would not make the physical gesture legible in a
-  recording.
+  panel, direct movement of messages and panes, interactive destination reveal
+  during back navigation, and reaction feedback are mobile-only behavior, but
+  the current tour has no gesture-configuration scene and synthetic pointer
+  input would not make the physical gesture legible in a recording.
   The desktop timestamp and message double-clicks reuse the existing clipboard
   and configured-action feedback, so neither adds a distinct visual state worth
   a separate scene.

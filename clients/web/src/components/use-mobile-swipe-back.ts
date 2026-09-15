@@ -11,11 +11,17 @@ import {
 import { SINGLE_PANE_QUERY } from '../layout'
 
 const MOBILE_BACK_SETTLE_MS = 180
+const MOBILE_BACK_PARALLAX = 0.18
+
+export type MobileBackPresentation = {
+  foreground: HTMLElement
+  destination?: HTMLElement
+}
 
 type SwipeStart<T extends HTMLElement> = {
   x: number
   y: number
-  pane: HTMLElement
+  presentation: MobileBackPresentation
   surface: T
 }
 
@@ -29,6 +35,25 @@ function isGestureControl(target: EventTarget | null): boolean {
 }
 
 /**
+ * Use the shell's already-mounted room list as the destination behind a page.
+ * The fallback keeps page-level tests and any future non-shell mount usable.
+ */
+export function roomListBackPresentation(
+  surface: HTMLElement,
+  fallback: HTMLElement | null,
+): MobileBackPresentation | null {
+  const main = surface.closest('main')
+  const shellBody = main?.parentElement
+  const destination = shellBody?.querySelector<HTMLElement>(
+    ':scope > #room-sidebar',
+  )
+  if (main !== null && destination !== null) {
+    return { foreground: main, destination }
+  }
+  return fallback === null ? null : { foreground: fallback }
+}
+
+/**
  * The shared narrow-screen rightward pane gesture.
  *
  * The caller supplies the pane that should follow the finger and the action
@@ -36,11 +61,11 @@ function isGestureControl(target: EventTarget | null): boolean {
  * band are always left alone.
  */
 export function useMobileSwipeBack<T extends HTMLElement>({
-  getPane,
+  getPresentation,
   onAccepted,
   onBack,
 }: {
-  getPane: (surface: T) => HTMLElement | null
+  getPresentation: (surface: T) => MobileBackPresentation | null
   onAccepted?: (dx: number, dy: number) => void
   onBack: () => void
 }): {
@@ -51,19 +76,34 @@ export function useMobileSwipeBack<T extends HTMLElement>({
 } {
   const swipeStart = useRef<SwipeStart<T> | null>(null)
   const swipeLocked = useRef(false)
-  const presentedPane = useRef<HTMLElement | null>(null)
+  const presented = useRef<MobileBackPresentation | null>(null)
   const presentedSurface = useRef<T | null>(null)
   const resetTimer = useRef<number | null>(null)
+  const destinationWasInert = useRef(false)
 
   const clearPresentation = () => {
     if (resetTimer.current !== null) {
       window.clearTimeout(resetTimer.current)
       resetTimer.current = null
     }
-    const pane = presentedPane.current
-    pane?.classList.remove('mobile-back-dragging', 'mobile-back-settling')
-    pane?.style.removeProperty('--mobile-back-offset')
-    presentedPane.current = null
+    const presentation = presented.current
+    presentation?.foreground.classList.remove(
+      'mobile-back-pane',
+      'mobile-back-dragging',
+      'mobile-back-settling',
+    )
+    presentation?.foreground.style.removeProperty('--mobile-back-offset')
+    const destination = presentation?.destination
+    destination?.classList.remove(
+      'mobile-back-destination-active',
+      'mobile-back-destination-dragging',
+      'mobile-back-destination-settling',
+    )
+    destination?.style.removeProperty('--mobile-back-destination-offset')
+    if (destination !== undefined) {
+      destination.inert = destinationWasInert.current
+    }
+    presented.current = null
     const surface = presentedSurface.current
     surface?.classList.remove(
       'mobile-back-active',
@@ -71,50 +111,71 @@ export function useMobileSwipeBack<T extends HTMLElement>({
       'mobile-back-settling',
       'mobile-back-armed',
     )
-    surface?.style.removeProperty('--mobile-back-reveal-width')
     presentedSurface.current = null
   }
 
   const preview = (start: SwipeStart<T>, dx: number) => {
     const distance = Math.min(Math.max(dx, 0), window.innerWidth)
-    presentedPane.current = start.pane
+    const { foreground, destination } = start.presentation
+    if (presented.current === null && destination !== undefined) {
+      destinationWasInert.current = destination.inert === true
+      destination.inert = true
+    }
+    presented.current = start.presentation
     presentedSurface.current = start.surface
-    start.pane.classList.add('mobile-back-dragging')
-    start.pane.classList.remove('mobile-back-settling')
-    start.pane.style.setProperty('--mobile-back-offset', `${distance}px`)
+    foreground.classList.add('mobile-back-pane', 'mobile-back-dragging')
+    foreground.classList.remove('mobile-back-settling')
+    foreground.style.setProperty('--mobile-back-offset', `${distance}px`)
+    destination?.classList.add(
+      'mobile-back-destination-active',
+      'mobile-back-destination-dragging',
+    )
+    destination?.classList.remove('mobile-back-destination-settling')
+    destination?.style.setProperty(
+      '--mobile-back-destination-offset',
+      `${-(window.innerWidth - distance) * MOBILE_BACK_PARALLAX}px`,
+    )
     start.surface.classList.add('mobile-back-active', 'mobile-back-dragging')
     start.surface.classList.remove('mobile-back-settling')
     start.surface.classList.toggle('mobile-back-armed', dx >= SWIPE_MIN_X)
-    start.surface.style.setProperty(
-      '--mobile-back-reveal-width',
-      `${distance}px`,
-    )
   }
 
-  const settle = (start: SwipeStart<T>) => {
-    if (!start.pane.classList.contains('mobile-back-dragging')) {
+  const settle = (start: SwipeStart<T>, accepted: boolean) => {
+    const { foreground, destination } = start.presentation
+    if (!foreground.classList.contains('mobile-back-dragging')) {
       return
     }
-    start.pane.classList.remove('mobile-back-dragging')
-    start.pane.classList.add('mobile-back-settling')
-    start.pane.style.setProperty('--mobile-back-offset', '0px')
+    foreground.classList.remove('mobile-back-dragging')
+    foreground.classList.add('mobile-back-settling')
+    foreground.style.setProperty(
+      '--mobile-back-offset',
+      accepted ? `${window.innerWidth}px` : '0px',
+    )
+    destination?.classList.remove('mobile-back-destination-dragging')
+    destination?.classList.add('mobile-back-destination-settling')
+    destination?.style.setProperty(
+      '--mobile-back-destination-offset',
+      accepted ? '0px' : `${-window.innerWidth * MOBILE_BACK_PARALLAX}px`,
+    )
     start.surface.classList.remove('mobile-back-dragging', 'mobile-back-armed')
     start.surface.classList.add('mobile-back-settling')
-    start.surface.style.setProperty('--mobile-back-reveal-width', '0px')
     if (resetTimer.current !== null) {
       window.clearTimeout(resetTimer.current)
     }
-    resetTimer.current = window.setTimeout(
-      clearPresentation,
-      MOBILE_BACK_SETTLE_MS,
-    )
+    const delay = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      ? 0
+      : MOBILE_BACK_SETTLE_MS
+    resetTimer.current = window.setTimeout(() => {
+      if (accepted) {
+        onBack()
+      }
+      clearPresentation()
+    }, delay)
   }
 
   useEffect(
     () => () => {
-      if (resetTimer.current !== null) {
-        window.clearTimeout(resetTimer.current)
-      }
+      clearPresentation()
     },
     [],
   )
@@ -122,23 +183,25 @@ export function useMobileSwipeBack<T extends HTMLElement>({
   const onTouchStart = (event: JSX.TargetedTouchEvent<T>) => {
     clearPresentation()
     swipeLocked.current = false
-    const touch = event.touches[0]
-    const pane = getPane(event.currentTarget)
     if (
       !window.matchMedia(SINGLE_PANE_QUERY).matches ||
       event.touches.length !== 1 ||
-      touch.clientX < NATIVE_BACK_EDGE_PX ||
       isGestureControl(event.target) ||
-      isHorizontallyScrollable(event.target) ||
-      pane === null
+      isHorizontallyScrollable(event.target)
     ) {
+      swipeStart.current = null
+      return
+    }
+    const touch = event.touches[0]
+    const presentation = getPresentation(event.currentTarget)
+    if (touch.clientX < NATIVE_BACK_EDGE_PX || presentation === null) {
       swipeStart.current = null
       return
     }
     swipeStart.current = {
       x: touch.clientX,
       y: touch.clientY,
-      pane,
+      presentation,
       surface: event.currentTarget,
     }
   }
@@ -190,12 +253,16 @@ export function useMobileSwipeBack<T extends HTMLElement>({
       absY > SWIPE_MAX_Y ||
       dx < absY * SWIPE_AXIS_RATIO
     ) {
-      settle(start)
+      settle(start, false)
       return
     }
     onAccepted?.(dx, dy)
-    settle(start)
-    onBack()
+    if (
+      !start.presentation.foreground.classList.contains('mobile-back-dragging')
+    ) {
+      preview(start, dx)
+    }
+    settle(start, true)
   }
 
   const onTouchCancel = () => {
@@ -203,7 +270,7 @@ export function useMobileSwipeBack<T extends HTMLElement>({
     swipeStart.current = null
     swipeLocked.current = false
     if (start !== null) {
-      settle(start)
+      settle(start, false)
     }
   }
 

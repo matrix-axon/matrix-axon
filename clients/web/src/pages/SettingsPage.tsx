@@ -9,7 +9,10 @@ import {
 import { BUILD_INFO } from '../build-info'
 import { CopyableText } from '../components/CopyableText'
 import { ReactionPicker } from '../components/MessageEventRow'
-import { useMobileSwipeBack } from '../components/use-mobile-swipe-back'
+import {
+  roomListBackPresentation,
+  useMobileSwipeBack,
+} from '../components/use-mobile-swipe-back'
 import {
   installOutcome,
   installPromptAvailable,
@@ -78,16 +81,13 @@ export function SettingsPage() {
   const location = useLocation()
   const settingsPane = useRef<HTMLDivElement>(null)
   const mobileSwipeBack = useMobileSwipeBack<HTMLDivElement>({
-    getPane: () => settingsPane.current,
+    getPresentation: (surface) =>
+      roomListBackPresentation(surface, settingsPane.current),
     onBack: () => location.route('/'),
   })
 
   return (
     <div class="settings-back-surface mobile-back-surface" {...mobileSwipeBack}>
-      <span class="mobile-back-affordance" aria-hidden="true">
-        <span>‹</span>
-        Rooms
-      </span>
       <div ref={settingsPane} class="settings-back-pane">
         <SettingsPageContents />
       </div>
