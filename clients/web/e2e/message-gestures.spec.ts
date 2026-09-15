@@ -33,6 +33,18 @@ async function tap(target: Locator): Promise<void> {
   await touchPointer(target, 'pointerup', 200, 300)
 }
 
+async function tapMedia(target: Locator): Promise<void> {
+  await tap(target)
+  // A real touch produces a compatibility click after pointerup. dispatchEvent
+  // deliberately does not synthesize one, so supply it to exercise the row's
+  // suppression before its deferred click opens the viewer.
+  await target.dispatchEvent('click', {
+    bubbles: true,
+    cancelable: true,
+    detail: 1,
+  })
+}
+
 async function hold(target: Locator): Promise<void> {
   await touchPointer(target, 'pointerdown', 200, 300)
   await target.page().waitForTimeout(650)
@@ -297,6 +309,49 @@ test('default message gestures arbitrate with preserved swipe-right navigation',
   })
   await expect(page).toHaveURL('/')
   await expect(page.getByRole('navigation', { name: 'Rooms' })).toBeVisible()
+})
+
+test('individual images preserve tap-to-open and use configured gestures', async ({
+  page,
+  request,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== 'webkit-iphone',
+    'image gestures require the opt-in iPhone WebKit project',
+  )
+  await request.put('/v1/preferences/message_gestures', {
+    data: {
+      device_id: 'image-gesture-test',
+      value: {
+        schema_version: 1,
+        bindings: {
+          double_tap: 'reply',
+          touch_and_hold: 'thread',
+          swipe_left: 'react',
+        },
+        reaction_emoji: '👍',
+      },
+    },
+  })
+  await openMobileRoom(page)
+
+  const row = page.locator('.event-row[data-event-id="$seed-image-a:hs"]')
+  const image = row.getByRole('button', {
+    name: 'Open image: seed-image-a.png',
+  })
+  await expect(image).toBeVisible()
+  await expect(row).toHaveClass(/touch-hold-enabled/)
+
+  await tapMedia(image)
+  const viewer = page.getByRole('dialog', { name: 'seed-image-a.png' })
+  await expect(viewer).toBeVisible()
+  await viewer.getByRole('button', { name: 'Close' }).click()
+  await expect(viewer).not.toBeVisible()
+
+  await tapMedia(image)
+  await tapMedia(image)
+  await expect(page.getByText('Replying to')).toBeVisible()
+  await expect(viewer).not.toBeVisible()
 })
 
 test('desktop preserves selection and supports timestamp and message double-clicks', async ({

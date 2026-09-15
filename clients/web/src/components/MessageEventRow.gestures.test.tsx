@@ -479,19 +479,64 @@ describe('MessageEventRow gestures', () => {
     expect(view.timeline.redact).not.toHaveBeenCalled()
   })
 
-  it('does not enable custom gestures for media or failed sends', () => {
+  it('defers an image tap to open media but uses a double tap to edit its caption', () => {
+    vi.useFakeTimers()
+    const preferences: MessageGesturePreferences = {
+      schema_version: 1,
+      bindings: {
+        double_tap: 'edit',
+        touch_and_hold: 'thread',
+        swipe_left: 'reply',
+      },
+      reaction_emoji: '👍',
+    }
     const media = event({
-      body: 'photo.png',
+      body: 'A caption',
       content: {
         msgtype: 'm.image',
-        body: 'photo.png',
+        body: 'A caption',
+        filename: 'photo.png',
         url: 'mxc://hs/photo',
       } as unknown as TimelineEvent['content'],
     })
-    const mediaView = renderRow({ rowEvent: media })
-    expect(mediaView.row.classList.contains('touch-hold-enabled')).toBe(false)
-    mediaView.unmount()
+    const view = renderRow({ preferences, rowEvent: media })
+    const open = document.createElement('button')
+    open.className = 'media-open'
+    const onOpen = vi.fn()
+    open.addEventListener('click', onOpen)
+    view.body.append(open)
 
+    expect(view.row.classList.contains('touch-hold-enabled')).toBe(true)
+
+    pointer(open, 'down', 40)
+    pointer(open, 'up', 40)
+    fireEvent.click(open)
+    expect(onOpen).not.toHaveBeenCalled()
+    act(() => {
+      vi.advanceTimersByTime(300)
+    })
+    expect(onOpen).toHaveBeenCalledOnce()
+    expect(view.onOpenActions).not.toHaveBeenCalled()
+
+    onOpen.mockClear()
+    pointer(open, 'down', 40)
+    pointer(open, 'up', 40)
+    fireEvent.click(open)
+    pointer(open, 'down', 41)
+    pointer(open, 'up', 41)
+    fireEvent.click(open)
+
+    expect(view.onEdit).toHaveBeenCalledWith(
+      expect.objectContaining({ event_id: '$event', body: 'A caption' }),
+    )
+    expect(onOpen).not.toHaveBeenCalled()
+    act(() => {
+      vi.advanceTimersByTime(300)
+    })
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it('still excludes failed sends from custom gestures', () => {
     const failedView = renderRow({
       rowEvent: event({
         localEcho: { status: 'failed', body: 'hello', options: {} },
