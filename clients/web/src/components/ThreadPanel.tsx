@@ -691,6 +691,17 @@ export function ThreadPanel({
                             members={members}
                             highlighted={targetEventId}
                             renderEvent={renderRow}
+                            timeline={thread}
+                            ownUserId={ownUserId}
+                            messageGestures={messageGestures.preferences.value}
+                            onReply={(replyTo) =>
+                              setAction({ kind: 'reply', event: replyTo })
+                            }
+                            onEdit={(editing) =>
+                              setAction({ kind: 'edit', event: editing })
+                            }
+                            showThreadAction={false}
+                            onMutation={search.clear}
                           />
                         ) : (
                           renderRow(row.event)

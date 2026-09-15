@@ -2954,6 +2954,13 @@ function Timeline({
                   readReceipts={galleryReceipts(row.events)}
                   highlighted={highlighted}
                   renderEvent={renderRow}
+                  timeline={timeline}
+                  ownUserId={ownUserId}
+                  messageGestures={messageGesturePreferences}
+                  onReply={onReply}
+                  onEdit={onEdit}
+                  onOpenThread={onOpenThread}
+                  onMutation={onMutation}
                 />
               ) : (
                 renderRow(row.event)
