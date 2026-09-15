@@ -4,9 +4,9 @@ import {
   isHorizontallyScrollable,
   NATIVE_BACK_EDGE_PX,
   SWIPE_AXIS_RATIO,
+  SWIPE_BACK_MIN_X,
   SWIPE_DECISION_THRESHOLD,
   SWIPE_MAX_Y,
-  SWIPE_MIN_X,
 } from '../gestures'
 import { SINGLE_PANE_QUERY } from '../layout'
 
@@ -137,7 +137,7 @@ export function useMobileSwipeBack<T extends HTMLElement>({
     )
     start.surface.classList.add('mobile-back-active', 'mobile-back-dragging')
     start.surface.classList.remove('mobile-back-settling')
-    start.surface.classList.toggle('mobile-back-armed', dx >= SWIPE_MIN_X)
+    start.surface.classList.toggle('mobile-back-armed', dx >= SWIPE_BACK_MIN_X)
   }
 
   const settle = (start: SwipeStart<T>, accepted: boolean) => {
@@ -249,7 +249,7 @@ export function useMobileSwipeBack<T extends HTMLElement>({
     const dy = touch.clientY - start.y
     const absY = Math.abs(dy)
     if (
-      dx < SWIPE_MIN_X ||
+      dx < SWIPE_BACK_MIN_X ||
       absY > SWIPE_MAX_Y ||
       dx < absY * SWIPE_AXIS_RATIO
     ) {

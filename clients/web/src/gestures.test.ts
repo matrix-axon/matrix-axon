@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   NATIVE_BACK_EDGE_PX,
   SWIPE_AXIS_RATIO,
+  SWIPE_BACK_MIN_X,
+  SWIPE_DECISION_THRESHOLD,
   SWIPE_MAX_Y,
   SWIPE_MIN_X,
   SWIPE_MIN_Y,
@@ -100,8 +102,15 @@ describe('swipeDirection', () => {
 describe('NATIVE_BACK_EDGE_PX', () => {
   it('is narrower than the travel a swipe needs', () => {
     // The band is declined outright (ADR 0075). If it were wider than
-    // `SWIPE_MIN_X`, a swipe could start outside it and still be refused for
-    // reasons the reader could not see.
-    expect(NATIVE_BACK_EDGE_PX).toBeLessThan(SWIPE_MIN_X)
+    // `SWIPE_BACK_MIN_X`, a swipe could start outside it and still be refused
+    // for reasons the reader could not see.
+    expect(NATIVE_BACK_EDGE_PX).toBeLessThan(SWIPE_BACK_MIN_X)
+  })
+})
+
+describe('SWIPE_BACK_MIN_X', () => {
+  it('commits after an intentional drag while retaining a cancelable preview', () => {
+    expect(SWIPE_BACK_MIN_X).toBeLessThan(SWIPE_MIN_X)
+    expect(SWIPE_BACK_MIN_X).toBeGreaterThan(SWIPE_DECISION_THRESHOLD)
   })
 })
