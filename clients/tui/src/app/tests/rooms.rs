@@ -694,6 +694,102 @@ fn a_pin_this_session_does_not_count_as_homeserver_favourites() {
 }
 
 #[test]
+fn pin_migration_drops_pins_for_rooms_no_longer_in_the_list() {
+    let here = room("!here:example.com", None, Some("Here"));
+    let mut app = app_with_rooms(vec![here.clone()]);
+    app.pinned_rooms = vec![
+        RoomKey::from(&here),
+        RoomKey {
+            account_id: Uuid::nil(),
+            room_id: "!gone:example.com".to_owned(),
+        },
+    ];
+    app.set_accounts(vec![account_with_id(
+        Uuid::nil(),
+        "@alice:example.com",
+        AccountState::Active,
+    )]);
+
+    app.maybe_start_pin_migration();
+
+    assert!(app.rooms.rooms[0].is_favourite());
+    assert!(!app
+        .pinned_rooms
+        .iter()
+        .any(|key| key.room_id == "!gone:example.com"));
+}
+
+#[test]
+fn pin_migration_uploads_known_accounts_without_waiting_on_others() {
+    let mine = Uuid::from_u128(1);
+    let other = Uuid::from_u128(2);
+    let mut visible = room("!mine:example.com", None, Some("Mine"));
+    visible.account_id = mine;
+    let mut app = app_with_rooms(vec![visible.clone()]);
+    app.pinned_rooms = vec![
+        RoomKey::from(&visible),
+        RoomKey {
+            account_id: other,
+            room_id: "!other:example.com".to_owned(),
+        },
+    ];
+    app.set_accounts(vec![
+        account_with_id(mine, "@me:example.com", AccountState::Active),
+        account_with_id(other, "@other:example.com", AccountState::Active),
+    ]);
+
+    app.maybe_start_pin_migration();
+
+    assert!(app.rooms.rooms[0].is_favourite());
+    assert_eq!(app.pinned_rooms.len(), 1);
+    assert_eq!(app.pinned_rooms[0].account_id, other);
+}
+
+#[test]
+fn pin_migration_does_not_start_while_a_tag_write_is_in_flight() {
+    let room = room("!room:example.com", None, Some("Ops"));
+    let mut app = app_with_rooms(vec![room.clone()]);
+    app.pinned_rooms = vec![RoomKey::from(&room)];
+    app.tag_write_busy = true;
+    app.set_accounts(vec![account_with_id(
+        Uuid::nil(),
+        "@alice:example.com",
+        AccountState::Active,
+    )]);
+
+    app.maybe_start_pin_migration();
+
+    assert_eq!(app.pin_migration, PinMigration::Pending);
+    assert_eq!(app.pinned_rooms.len(), 1);
+    assert!(!app.rooms.rooms[0].is_favourite());
+}
+
+#[tokio::test]
+async fn a_failed_pin_keeps_the_local_pin() {
+    let room = room("!room:example.com", None, Some("Ops"));
+    let key = RoomKey::from(&room);
+    let mut app = app_with_rooms(vec![room]);
+    app.client = AxonClient::new("http://127.0.0.1:1".to_owned(), None);
+    app.pinned_rooms = vec![key.clone()];
+    app.rooms.selected = Some(0);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.set_tag_write_sender(tx);
+
+    app.pin_room(None);
+
+    assert!(
+        app.pinned_rooms.contains(&key),
+        "must not drop the local pin before the PUT"
+    );
+    let outcome = rx.recv().await.expect("pin write outcome");
+    assert!(outcome.result.is_err());
+    app.handle_tag_write_outcome(outcome).await;
+
+    assert!(app.pinned_rooms.contains(&key));
+    assert!(!app.rooms.rooms[0].is_favourite());
+}
+
+#[test]
 fn account_data_changed_patches_tags_and_resorts() {
     let older = room("!a:example.com", None, Some("A"));
     let newer = room("!b:example.com", None, Some("B"));

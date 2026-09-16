@@ -2,7 +2,7 @@
 //! migration of `[display] pinned_rooms` (ADR 0103 / issue #369).
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
@@ -34,7 +34,10 @@ pub(crate) struct TagWriteOutcome {
     /// Rooms whose tags we changed locally so a failed write can restore them.
     previous_tags: HashMap<RoomKey, Vec<RoomTag>>,
     title: String,
-    result: Result<(), String>,
+    pub(crate) result: Result<(), String>,
+    /// Local pins to drop from `pinned_rooms` only after the write succeeds,
+    /// so a failed PUT cannot erase a not-yet-migrated config entry.
+    drop_local_on_success: Vec<RoomKey>,
 }
 
 /// One `PUT m.favourite` with an explicit order.
@@ -65,13 +68,20 @@ impl App {
         let assignments = pin_to_top_assignments(&self.rooms.rooms, &key);
         let previous_tags = snapshot_tags(&self.rooms.rooms, assignments.iter().map(|a| &a.key));
         apply_favourite_assignments(&mut self.rooms.rooms, &assignments);
-        let local_len = self.pinned_rooms.len();
-        self.pinned_rooms.retain(|existing| existing != &key);
-        if self.pinned_rooms.len() != local_len {
-            let _ = self.persist_remaining_local_pins();
-        }
+        let drop_local_on_success = if self.pinned_rooms.iter().any(|existing| existing == &key) {
+            vec![key.clone()]
+        } else {
+            Vec::new()
+        };
         self.resort_rooms();
-        self.spawn_tag_write(TagWriteKind::Pin, previous_tags, title, assignments, None);
+        self.spawn_tag_write(
+            TagWriteKind::Pin,
+            previous_tags,
+            title,
+            assignments,
+            None,
+            drop_local_on_success,
+        );
     }
 
     /// Unpin the target room. No-op (with a status message) if it is not a
@@ -92,16 +102,18 @@ impl App {
             self.status = Status::from(format!("{title} is not pinned"));
             return;
         }
-        let local_len = self.pinned_rooms.len();
-        self.pinned_rooms.retain(|existing| existing != &key);
-        if self.pinned_rooms.len() != local_len {
-            let _ = self.persist_remaining_local_pins();
-        }
         if !was_favourite {
+            self.pinned_rooms.retain(|existing| existing != &key);
+            let _ = self.persist_remaining_local_pins();
             self.resort_rooms();
             self.status = Status::from(format!("unpinned {title}"));
             return;
         }
+        let drop_local_on_success = if was_local {
+            vec![key.clone()]
+        } else {
+            Vec::new()
+        };
         let previous_tags = snapshot_tags(&self.rooms.rooms, std::iter::once(&key));
         clear_favourite(&mut self.rooms.rooms[index]);
         self.resort_rooms();
@@ -111,6 +123,7 @@ impl App {
             title,
             Vec::new(),
             Some(key),
+            drop_local_on_success,
         );
     }
 
@@ -148,18 +161,23 @@ impl App {
         title: String,
         assignments: Vec<FavouriteAssignment>,
         delete: Option<RoomKey>,
+        drop_local_on_success: Vec<RoomKey>,
     ) {
         let Some(tx) = self.tag_write_tx.clone() else {
-            // Unit tests have no channel: local tags already applied.
+            // Unit tests have no channel: treat the local update as success.
+            self.drop_local_pins(&drop_local_on_success);
+            if kind == TagWriteKind::Migrate {
+                self.pin_migration = if self.pinned_rooms.is_empty() {
+                    PinMigration::Done
+                } else {
+                    PinMigration::Pending
+                };
+            }
             self.status = match kind {
                 TagWriteKind::Pin => Status::from(format!("pinned {title}")),
                 TagWriteKind::Unpin => Status::from(format!("unpinned {title}")),
                 TagWriteKind::Migrate => Status::from("migrated local pins".to_owned()),
             };
-            if kind == TagWriteKind::Migrate {
-                self.pinned_rooms.clear();
-                self.pin_migration = PinMigration::Done;
-            }
             return;
         };
         self.tag_write_busy = true;
@@ -196,6 +214,7 @@ impl App {
                 previous_tags,
                 title,
                 result,
+                drop_local_on_success,
             });
         });
     }
@@ -204,15 +223,13 @@ impl App {
         self.tag_write_busy = false;
         match outcome.result {
             Ok(()) => {
+                self.drop_local_pins(&outcome.drop_local_on_success);
                 if outcome.kind == TagWriteKind::Migrate {
-                    self.pinned_rooms.clear();
-                    self.pin_migration = PinMigration::Done;
-                    if let Err(err) = self.clear_local_pins_config() {
-                        self.status = Status::from(format!(
-                            "migrated local pins (config clear failed: {err})"
-                        ));
-                        return;
-                    }
+                    self.pin_migration = if self.pinned_rooms.is_empty() {
+                        PinMigration::Done
+                    } else {
+                        PinMigration::Pending
+                    };
                 }
                 let refresh_warning = match self.client.list_rooms(self.account_filter).await {
                     Ok(rooms) => {
@@ -261,6 +278,9 @@ impl App {
         if self.pin_migration != PinMigration::Pending {
             return;
         }
+        if self.tag_write_busy {
+            return;
+        }
         if self.pinned_rooms.is_empty() {
             self.pin_migration = PinMigration::Done;
             return;
@@ -282,46 +302,56 @@ impl App {
             );
         }
 
-        let mut known_accounts: std::collections::HashSet<Uuid> = self
+        let present_rooms: HashSet<RoomKey> = self.rooms.rooms.iter().map(RoomKey::from).collect();
+        let accounts_in_rooms: HashSet<Uuid> = self
             .rooms
             .rooms
             .iter()
             .map(|room| room.account_id)
             .collect();
-        known_accounts.extend(self.accounts.inactive_ids.iter().copied());
-        known_accounts.extend(
+        let mut listed_accounts: HashSet<Uuid> = self
+            .accounts
+            .client_visible
+            .iter()
+            .map(|account| account.account_id)
+            .collect();
+        listed_accounts.extend(
             self.accounts
                 .accounts
                 .iter()
                 .map(|account| account.account_id),
         );
-        if self
-            .pinned_rooms
-            .iter()
-            .any(|key| !known_accounts.contains(&key.account_id))
-        {
-            // An account's rooms have not landed yet; try again on the next refresh.
+        listed_accounts.extend(self.accounts.inactive_ids.iter().copied());
+        let accounts_loaded = !listed_accounts.is_empty();
+        let hs_wins = self.server_favourite_accounts.clone().unwrap_or_default();
+
+        let mut to_upload = Vec::new();
+        let mut to_drop: HashSet<RoomKey> = HashSet::new();
+        for key in &self.pinned_rooms {
+            if self.accounts.inactive_ids.contains(&key.account_id)
+                || (accounts_loaded && !listed_accounts.contains(&key.account_id))
+                || hs_wins.contains(&key.account_id)
+            {
+                to_drop.insert(key.clone());
+            } else if present_rooms.contains(key) {
+                to_upload.push(key.clone());
+            } else if accounts_in_rooms.contains(&key.account_id) {
+                // This account's rooms loaded; the pin's room is gone (left).
+                to_drop.insert(key.clone());
+            }
+        }
+        if !to_drop.is_empty() {
+            self.pinned_rooms.retain(|key| !to_drop.contains(key));
+            let _ = self.persist_remaining_local_pins();
+        }
+        if to_upload.is_empty() {
+            if self.pinned_rooms.is_empty() {
+                self.pin_migration = PinMigration::Done;
+            }
             return;
         }
 
-        let accounts_with_favourite = self
-            .server_favourite_accounts
-            .clone()
-            .expect("captured on the first non-empty room list");
-        // Homeserver wins: drop local pins for any account that already had a
-        // favourite on the first room list (not one we wrote this session).
-        self.pinned_rooms
-            .retain(|key| !accounts_with_favourite.contains(&key.account_id));
-        self.pinned_rooms
-            .retain(|key| !self.accounts.inactive_ids.contains(&key.account_id));
-
-        if self.pinned_rooms.is_empty() {
-            self.pin_migration = PinMigration::Done;
-            let _ = self.clear_local_pins_config();
-            return;
-        }
-
-        let assignments = migration_assignments(&self.pinned_rooms);
+        let assignments = migration_assignments(&to_upload);
         let previous_tags = snapshot_tags(&self.rooms.rooms, assignments.iter().map(|a| &a.key));
         apply_favourite_assignments(&mut self.rooms.rooms, &assignments);
         self.resort_rooms();
@@ -332,7 +362,20 @@ impl App {
             String::new(),
             assignments,
             None,
+            to_upload,
         );
+    }
+
+    fn drop_local_pins(&mut self, keys: &[RoomKey]) {
+        if keys.is_empty() {
+            return;
+        }
+        let before = self.pinned_rooms.len();
+        self.pinned_rooms
+            .retain(|existing| !keys.contains(existing));
+        if self.pinned_rooms.len() != before {
+            let _ = self.persist_remaining_local_pins();
+        }
     }
 
     fn persist_remaining_local_pins(&self) -> Result<(), String> {
@@ -342,10 +385,6 @@ impl App {
             .map(RoomKey::to_config_entry)
             .collect();
         TuiConfig::save_pinned_rooms(&self.config_path, &entries).map_err(|err| err.to_string())
-    }
-
-    fn clear_local_pins_config(&self) -> Result<(), String> {
-        TuiConfig::save_pinned_rooms(&self.config_path, &[]).map_err(|err| err.to_string())
     }
 
     /// Apply a live `account_data.changed` frame: patch `tags` or `is_direct`.
@@ -384,16 +423,21 @@ impl App {
     }
 }
 
-/// Pin-to-top: one PUT with `min/2` (or `0.5` when this is the first
-/// favourite). If the current minimum cannot fit a new order, rebalance every
-/// favourite as `i / (n + 1)` with the newly pinned room at index 0.
+/// Pin-to-top among this account's favourites: one PUT with `min/2` (or `0.5`
+/// when this is the first). Orders stay in `(0, 1)`. If the current minimum
+/// cannot fit a new order, rebalance this account's favourites as
+/// `(i + 1) / (n + 1)` with the newly pinned room at index 0.
 pub(crate) fn pin_to_top_assignments(
     rooms: &[RoomDto],
     target: &RoomKey,
 ) -> Vec<FavouriteAssignment> {
     let mut others: Vec<&RoomDto> = rooms
         .iter()
-        .filter(|room| RoomKey::from(*room) != *target && room.is_favourite())
+        .filter(|room| {
+            room.account_id == target.account_id
+                && RoomKey::from(*room) != *target
+                && room.is_favourite()
+        })
         .collect();
     others.sort_by(|a, b| compare_favourite_order(a.favourite_order(), b.favourite_order()));
     let min = others.iter().find_map(|room| room.favourite_order());
@@ -411,12 +455,12 @@ pub(crate) fn pin_to_top_assignments(
             let denom = (n + 1) as f64;
             let mut assignments = vec![FavouriteAssignment {
                 key: target.clone(),
-                order: 0.0,
+                order: 1.0 / denom,
             }];
             for (index, room) in others.iter().enumerate() {
                 assignments.push(FavouriteAssignment {
                     key: RoomKey::from(*room),
-                    order: (index + 1) as f64 / denom,
+                    order: (index + 2) as f64 / denom,
                 });
             }
             assignments
@@ -431,11 +475,12 @@ fn migration_assignments(pinned: &[RoomKey]) -> Vec<FavouriteAssignment> {
     }
     let mut assignments = Vec::new();
     for keys in by_account.values() {
-        let n = keys.len() as f64;
+        let n = keys.len();
+        let denom = (n + 1) as f64;
         for (index, key) in keys.iter().enumerate() {
             assignments.push(FavouriteAssignment {
                 key: (*key).clone(),
-                order: index as f64 / n,
+                order: (index + 1) as f64 / denom,
             });
         }
     }
@@ -455,7 +500,7 @@ fn snapshot_tags<'a>(
     rooms: &[RoomDto],
     keys: impl Iterator<Item = &'a RoomKey>,
 ) -> HashMap<RoomKey, Vec<RoomTag>> {
-    let wanted: std::collections::HashSet<RoomKey> = keys.cloned().collect();
+    let wanted: HashSet<RoomKey> = keys.cloned().collect();
     rooms
         .iter()
         .filter(|room| wanted.contains(&RoomKey::from(*room)))
@@ -571,10 +616,44 @@ mod tests {
         };
         let assignments = pin_to_top_assignments(&rooms, &target);
         assert_eq!(assignments[0].key.room_id, "!c:srv");
-        assert_eq!(assignments[0].order, 0.0);
+        assert_eq!(assignments[0].order, 0.25);
         assert_eq!(assignments.len(), 3);
-        assert!(assignments[1].order > 0.0);
+        assert!(assignments.iter().all(|item| item.order > 0.0));
+        assert!(assignments[1].order > assignments[0].order);
         assert!(assignments[2].order > assignments[1].order);
+        let next = pin_to_top_assignments(
+            &[
+                favourite(room(acct, "!c:srv", 3), Some(assignments[0].order)),
+                favourite(room(acct, "!a:srv", 1), Some(assignments[1].order)),
+                favourite(room(acct, "!b:srv", 2), Some(assignments[2].order)),
+            ],
+            &RoomKey {
+                account_id: acct,
+                room_id: "!d:srv".to_owned(),
+            },
+        );
+        assert_eq!(next.len(), 1, "a later pin must not rebalance again");
+        assert!(next[0].order > 0.0);
+        assert!(next[0].order < assignments[0].order);
+    }
+
+    #[test]
+    fn pin_to_top_only_rewrites_the_same_account() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let rooms = vec![
+            favourite(room(a, "!a:srv", 1), Some(0.4)),
+            favourite(room(b, "!b:srv", 2), Some(0.1)),
+            room(a, "!c:srv", 3),
+        ];
+        let target = RoomKey {
+            account_id: a,
+            room_id: "!c:srv".to_owned(),
+        };
+        let assignments = pin_to_top_assignments(&rooms, &target);
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].key.account_id, a);
+        assert_eq!(assignments[0].order, 0.2);
     }
 
     #[test]
@@ -615,12 +694,12 @@ mod tests {
             .filter(|item| item.key.account_id == a)
             .map(|item| item.order)
             .collect();
-        assert_eq!(a_orders, vec![0.0, 0.5]);
+        assert_eq!(a_orders, vec![1.0 / 3.0, 2.0 / 3.0]);
         let b_orders: Vec<f64> = assignments
             .iter()
             .filter(|item| item.key.account_id == b)
             .map(|item| item.order)
             .collect();
-        assert_eq!(b_orders, vec![0.0]);
+        assert_eq!(b_orders, vec![0.5]);
     }
 }
