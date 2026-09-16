@@ -55,6 +55,15 @@ pub enum LiveFrame {
     InviteAdded(InviteAddedFrame),
     /// A pending invite is gone — accepted, rejected, or withdrawn (ADR 0091).
     InviteRemoved(InviteRemovedFrame),
+    /// Matrix account data was persisted (ADR 0103) — sync ingest of `m.tag` /
+    /// `m.direct`, or a write-path `m.tag` upsert. Other account-data types
+    /// are stored and not pushed. Clients that care about `m.tag` patch
+    /// `RoomDto.tags`; `m.direct` updates `is_direct`.
+    AccountDataChanged(AccountDataFrame),
+    /// An instance preference was written (ADR 0103). Receivers drop frames
+    /// whose `device_id` is their own (echo suppression, same rule as
+    /// [`DeviceStateFrame`]).
+    PreferencesChanged(PreferencesFrame),
 }
 
 impl From<LiveEvent> for LiveFrame {
@@ -108,6 +117,18 @@ impl From<InviteAddedFrame> for LiveFrame {
 impl From<InviteRemovedFrame> for LiveFrame {
     fn from(frame: InviteRemovedFrame) -> Self {
         LiveFrame::InviteRemoved(frame)
+    }
+}
+
+impl From<AccountDataFrame> for LiveFrame {
+    fn from(frame: AccountDataFrame) -> Self {
+        LiveFrame::AccountDataChanged(frame)
+    }
+}
+
+impl From<PreferencesFrame> for LiveFrame {
+    fn from(frame: PreferencesFrame) -> Self {
+        LiveFrame::PreferencesChanged(frame)
     }
 }
 
@@ -216,6 +237,38 @@ pub struct InviteAddedFrame {
 pub struct InviteRemovedFrame {
     pub account_id: Uuid,
     pub room_id: String,
+}
+
+/// Matrix account data was persisted (ADR 0103), ready to fan out over the
+/// live-event bus. `room_id` is `None` for global account data (`m.direct`).
+#[derive(Debug, Clone)]
+pub struct AccountDataFrame {
+    /// Axon account this data belongs to.
+    pub account_id: Uuid,
+    /// Matrix room ID for per-room account data. `None` for global types.
+    pub room_id: Option<String>,
+    /// Account-data event type, e.g. `m.tag`, `m.direct`.
+    pub event_type: String,
+    /// The account-data `content`.
+    pub content: Value,
+}
+
+/// An instance preference was written (ADR 0103), ready to fan out over the
+/// live-event bus. Not account-scoped: the wire envelope still carries
+/// `account_id` (the nil UUID) so existing clients that require the field
+/// on every frame can ignore an unknown `type` instead of treating the
+/// frame as a protocol error. A client that self-filters live frames by
+/// known account ids must treat this type as instance-scoped and not drop
+/// it for a nil `account_id`.
+#[derive(Debug, Clone)]
+pub struct PreferencesFrame {
+    /// Preference key, currently allowlisted to `space_order`.
+    pub key: String,
+    /// The stored JSON value.
+    pub value: Value,
+    /// The device that wrote the change — receivers matching this id ignore
+    /// the frame.
+    pub device_id: Uuid,
 }
 
 /// A change in a *sender's* current device trust (M7c), ready to fan out over the

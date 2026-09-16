@@ -1089,3 +1089,82 @@ async fn unbind_succeeds_for_an_identity_bound_via_the_bind_flow() {
         .expect("delete identity must not fail with a foreign-key violation");
     assert!(deleted);
 }
+
+/// The two halves of a client registration are refused with different
+/// messages, so a reader can tell a client that was never registered from one
+/// whose callback has drifted.
+///
+/// The second is by far the more common: a client and a server that disagree
+/// about the redirect URI, which is what a scheme change or an older config
+/// produces. One combined message could not name it, and the server logged
+/// nothing, so the only evidence anywhere was in the user's URL bar.
+#[tokio::test]
+#[ignore = "requires empty Postgres"]
+async fn an_unregistered_client_id_says_so() {
+    let store = store().await;
+    let (app, _provider) = app_with_oauth(store);
+
+    let (_verifier, challenge) = pkce_pair();
+    let uri = format!(
+        "/v1/oauth/authorize?response_type=code&client_id=no-such-client&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&provider={TEST_PROVIDER}",
+        urlencoding_encode(REDIRECT_URI),
+    );
+    let resp = get_no_body(&app, &uri).await;
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: Value = serde_json::from_slice(&bytes).expect("json body");
+    assert_eq!(json["error"]["message"], "unknown client_id");
+}
+
+#[tokio::test]
+#[ignore = "requires empty Postgres"]
+async fn a_registered_client_with_the_wrong_callback_says_which() {
+    let store = store().await;
+    let (app, _provider) = app_with_oauth(store);
+
+    let (_verifier, challenge) = pkce_pair();
+    let uri = format!(
+        "/v1/oauth/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&provider={TEST_PROVIDER}",
+        urlencoding_encode("https://somewhere.else/oauth/callback"),
+    );
+    let resp = get_no_body(&app, &uri).await;
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: Value = serde_json::from_slice(&bytes).expect("json body");
+    assert_eq!(
+        json["error"]["message"],
+        "redirect_uri is not registered for this client_id"
+    );
+}
+
+/// The refusal must not echo the caller's own `redirect_uri` back at them. It
+/// tells the user nothing they cannot see in their address bar, and it is
+/// caller-supplied input being reflected into a response.
+#[tokio::test]
+#[ignore = "requires empty Postgres"]
+async fn a_refusal_does_not_reflect_the_requested_uri() {
+    let store = store().await;
+    let (app, _provider) = app_with_oauth(store);
+
+    let (_verifier, challenge) = pkce_pair();
+    let uri = format!(
+        "/v1/oauth/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&provider={TEST_PROVIDER}",
+        urlencoding_encode("https://attacker.test/steal?marker=NOTECHOED"),
+    );
+    let resp = get_no_body(&app, &uri).await;
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body = String::from_utf8(bytes.to_vec()).expect("utf8 body");
+    assert!(
+        !body.contains("NOTECHOED"),
+        "the response must not reflect the requested redirect_uri: {body}"
+    );
+}

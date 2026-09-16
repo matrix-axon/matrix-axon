@@ -236,10 +236,9 @@ repos:
         files: *rust_files
         pass_filenames: false
         stages: [pre-push]
-      # The expensive gate, and the only thing in this file that is not also a
-      # push-triggered CI job: lint-and-test.yml is workflow_dispatch-only and
-      # lint-and-clippy.yml has no test step, so nothing else runs the suite
-      # before review. `SKIP=cargo-test` to skip it deliberately.
+      # The expensive gate. The required lint-and-test PR job runs the same
+      # command in CI; keeping it here catches failures before review begins.
+      # `SKIP=cargo-test` skips only the local copy deliberately.
       - id: cargo-test
         name: cargo test --all
         language: system
