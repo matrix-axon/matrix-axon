@@ -190,8 +190,9 @@ It lists the hooks top to bottom in the order they run, each with its command, i
 Two copies of one list is the problem ADR 0092 exists to fix;
 a copy here would go stale the first time a hook is added.
 
-**`cargo test --all` runs in no automatic CI job** — `lint-and-test.yml` is `workflow_dispatch`-only and `lint-and-clippy.yml` has no test step — so skipping the hook means the suite has not run at all.
-CI does gate `cargo fmt --all --check` and `cargo clippy --all-targets --all-features -- -D warnings` on every push, plus the whole web job on web pull requests.
+The required `lint-and-test` pull-request job runs `cargo test --all` after formatting and clippy.
+The local hook runs the same suite so failures are caught before review begins; skipping that hook no longer skips the required CI copy.
+CI also gates the whole web job on web pull requests.
 
 To skip deliberately:
 

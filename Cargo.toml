@@ -13,6 +13,7 @@ members = [
     "crates/axon-itest",
     "clients/tui",
     "smoke/local-stack",
+    "smoke/matrix-oauth",
     "smoke/server",
     "smoke/tui",
 ]

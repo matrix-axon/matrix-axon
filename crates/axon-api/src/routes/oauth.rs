@@ -32,7 +32,7 @@ use uuid::Uuid;
 use crate::extract::{Path, Query};
 use crate::oauth::provider::OidcError;
 use crate::oauth::tokens::{self, TokenError, TokenPair};
-use crate::oauth::{OAuthRuntime, OidcProvider};
+use crate::oauth::{ClientCheck, OAuthRuntime, OidcProvider};
 use crate::response::{ApiError, ApiResponse};
 use crate::routes::bootstrap::{self, BOOTSTRAP_STATE_PREFIX};
 use crate::state::BootstrapConfig;
@@ -153,8 +153,34 @@ pub async fn authorize(
             "code_challenge_method must be \"S256\"",
         ));
     }
-    if !runtime.redirect_uri_allowed(&q.client_id, &q.redirect_uri) {
-        return Err(ApiError::bad_request("unknown client_id or redirect_uri"));
+    // Logged as well as answered. This response is shown to the user rather
+    // than redirected (RFC 6749 § 4.1.2.1), so it reaches a browser and not an
+    // operator — and before this, the server's only record of a refused
+    // sign-in was TraceLayer's access line, which carries method, path and
+    // status and no reason at all. The requested `redirect_uri` is what an
+    // operator has to compare against `[[oauth.clients]]`, so it goes in the
+    // log; it stays out of the response body, where it would only reflect the
+    // caller's own input back at them.
+    match runtime.check_client(&q.client_id, &q.redirect_uri) {
+        ClientCheck::Allowed => {}
+        ClientCheck::UnknownClient => {
+            tracing::warn!(
+                client_id = %q.client_id,
+                redirect_uri = %q.redirect_uri,
+                "oauth authorize refused: no client is registered under this client_id"
+            );
+            return Err(ApiError::bad_request("unknown client_id"));
+        }
+        ClientCheck::RedirectUriNotRegistered => {
+            tracing::warn!(
+                client_id = %q.client_id,
+                redirect_uri = %q.redirect_uri,
+                "oauth authorize refused: redirect_uri is not registered for this client_id"
+            );
+            return Err(ApiError::bad_request(
+                "redirect_uri is not registered for this client_id",
+            ));
+        }
     }
     let Some(provider) = runtime.provider(&q.provider) else {
         return Err(ApiError::bad_request("unknown or disabled provider"));

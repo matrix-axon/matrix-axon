@@ -27,14 +27,16 @@ use axon_api::{
     MatrixOAuthQrGrantService, MatrixOAuthQrPresentation, MatrixOAuthQrStage, MediaProxy,
     RedecryptUtdsStats,
 };
-use axon_store::{AccountState, NewEvent, RoomInviteSnapshot, RoomStateUpsert, Store};
+use axon_store::{
+    AccountDataUpsert, AccountState, NewEvent, RoomInviteSnapshot, RoomStateUpsert, Store,
+};
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use common::{
-    ConfiguredMediaProxy, DeleteOutcome, ImportTokenCall, LoginCall, LoginOutcome, LogoutOutcome,
-    MediaOutcome, RecoverOutcome, RedecryptOutcome, StubDeviceList, StubLifecycle, StubMediaProxy,
-    StubMemberProfiles, StubSender, StubSyncState, StubTokenVerifier, StubTrust, StubVerification,
-    VerifyCall, VerifyOutcome, TEST_TOKEN,
+    with_isolated_space_order, ConfiguredMediaProxy, DeleteOutcome, ImportTokenCall, LoginCall,
+    LoginOutcome, LogoutOutcome, MediaOutcome, RecoverOutcome, RedecryptOutcome, StubDeviceList,
+    StubLifecycle, StubMediaProxy, StubMemberProfiles, StubSender, StubSyncState,
+    StubTokenVerifier, StubTrust, StubVerification, VerifyCall, VerifyOutcome, TEST_TOKEN,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
@@ -1075,6 +1077,24 @@ async fn read_api_end_to_end() {
         .upsert_room_unread_counts(account_id, &room_id, 3, 1)
         .await
         .expect("seed unread counts");
+    store
+        .upsert_account_data(&AccountDataUpsert {
+            account_id,
+            room_id: Some(&room_id),
+            event_type: "m.tag",
+            content: json!({ "tags": { "m.favourite": { "order": 0.25 } } }),
+        })
+        .await
+        .expect("seed m.tag");
+    store
+        .upsert_account_data(&AccountDataUpsert {
+            account_id,
+            room_id: None,
+            event_type: "m.direct",
+            content: json!({ "@bob:localhost": [room_id] }),
+        })
+        .await
+        .expect("seed m.direct");
 
     // The read endpoints don't touch the live-event bus or the message sender;
     // throwaway instances satisfy `AppState`.
@@ -1115,6 +1135,11 @@ async fn read_api_end_to_end() {
     assert_eq!(room["room_type"], "m.space");
     assert_eq!(room["notification_count"], 3);
     assert_eq!(room["highlight_count"], 1);
+    assert_eq!(room["is_direct"], true);
+    assert_eq!(
+        room["tags"],
+        json!([{ "name": "m.favourite", "order": 0.25 }])
+    );
 
     // Timeline, page 1 (newest): limit 1 -> [e2] with a next_cursor.
     let base = format!("/v1/accounts/{account_id}/rooms/{room_id}/timeline");
@@ -3938,4 +3963,122 @@ async fn list_invites_returns_persisted_rows() {
         .execute(&pool)
         .await
         .expect("cleanup");
+}
+
+/// Instance preferences (ADR 0103): GET 404 when unset, PUT last-write-wins,
+/// unknown keys and invalid `space_order` values are 400, oversized values
+/// are 400.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn preferences_put_get_allowlist_and_validation() {
+    let store = store().await;
+    with_isolated_space_order(&store, || async {
+        let app = read_app(store.clone());
+        let device_id = Uuid::new_v4();
+        let account = Uuid::new_v4();
+        let uri = "/v1/preferences/space_order";
+        let space = format!("{account}/!space:localhost");
+
+        let (status, body) = get(&app, uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "not_found");
+
+        let (status, body) = get(&app, "/v1/preferences/not_a_real_key").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "bad_request");
+
+        let (status, body) = request(
+            &app,
+            "PUT",
+            uri,
+            Some(json!({ "device_id": device_id, "value": { "spaces": [space] } })),
+            Some(&bearer()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["data"]["updated_at"].is_string());
+
+        let (status, body) = get(&app, uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["key"], "space_order");
+        assert_eq!(body["data"]["value"]["spaces"][0], space);
+
+        let (status, _) = request(
+            &app,
+            "PUT",
+            uri,
+            Some(json!({ "device_id": device_id, "value": { "spaces": [] } })),
+            Some(&bearer()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = get(&app, uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["value"]["spaces"], json!([]));
+
+        let (status, body) = request(
+            &app,
+            "PUT",
+            uri,
+            Some(json!({ "device_id": device_id, "value": { "spaces": ["not-a-key"] } })),
+            Some(&bearer()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "bad_request");
+
+        let (status, body) = request(
+            &app,
+            "PUT",
+            "/v1/preferences/nope",
+            Some(json!({ "device_id": device_id, "value": { "spaces": [] } })),
+            Some(&bearer()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "bad_request");
+
+        let big = "x".repeat(64 * 1024 + 1);
+        let (status, body) = request(
+            &app,
+            "PUT",
+            uri,
+            Some(json!({ "device_id": device_id, "value": { "spaces": [big] } })),
+            Some(&bearer()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "bad_request");
+    })
+    .await;
+}
+
+/// A panic inside the wrapped body must still unlock the advisory lock, or
+/// the next caller hangs until the connection is closed.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn space_order_lock_releases_on_panic() {
+    use futures_util::future::FutureExt;
+    use std::time::Duration;
+
+    let store = store().await;
+    let panicked = std::panic::AssertUnwindSafe(async {
+        with_isolated_space_order(&store, || async {
+            panic!("boom");
+        })
+        .await;
+    })
+    .catch_unwind()
+    .await;
+    assert!(panicked.is_err(), "inner panic must propagate");
+
+    let second = tokio::time::timeout(
+        Duration::from_secs(5),
+        with_isolated_space_order(&store, || async {}),
+    )
+    .await;
+    assert!(
+        second.is_ok(),
+        "a later with_isolated_space_order must not hang on a leaked lock"
+    );
 }

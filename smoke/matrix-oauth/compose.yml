@@ -1,0 +1,70 @@
+services:
+  axon-postgres:
+    image: "${MATRIX_OAUTH_POSTGRES_IMAGE}"
+    environment:
+      POSTGRES_USER: axon
+      POSTGRES_PASSWORD: axon
+      POSTGRES_DB: axon
+    ports:
+      - "127.0.0.1:${MATRIX_OAUTH_POSTGRES_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U axon -d axon"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  mas-postgres:
+    image: "${MATRIX_OAUTH_POSTGRES_IMAGE}"
+    environment:
+      POSTGRES_USER: mas
+      POSTGRES_PASSWORD: mas
+      POSTGRES_DB: mas
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mas -d mas"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  synapse:
+    image: "${MATRIX_OAUTH_SYNAPSE_IMAGE}"
+    user: root
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        python -m synapse.app.homeserver -c /etc/synapse/homeserver.yaml --generate-keys &&
+        exec python -m synapse.app.homeserver -c /etc/synapse/homeserver.yaml
+    volumes:
+      - "${MATRIX_OAUTH_RUN_DIR}/synapse:/data"
+      - "${MATRIX_OAUTH_RUN_DIR}/synapse-homeserver.yaml:/etc/synapse/homeserver.yaml:ro"
+      - "${MATRIX_OAUTH_RUN_DIR}/synapse-log.config:/etc/synapse/log.config:ro"
+    ports:
+      - "127.0.0.1:${MATRIX_OAUTH_SYNAPSE_PORT}:8008"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8008/health')"
+      interval: 3s
+      timeout: 5s
+      retries: 60
+
+  mas:
+    image: "${MATRIX_OAUTH_MAS_IMAGE}"
+    user: root
+    environment:
+      MAS_CONFIG: /run/matrix-oauth/generated.yaml:/etc/mas/overrides.yaml
+    command: ["server"]
+    volumes:
+      - "mas-config:/run/matrix-oauth:ro"
+      - "${MATRIX_OAUTH_RUN_DIR}/mas-overrides.yaml:/etc/mas/overrides.yaml:ro"
+    ports:
+      - "127.0.0.1:${MATRIX_OAUTH_MAS_PORT}:8080"
+    depends_on:
+      mas-postgres:
+        condition: service_healthy
+      synapse:
+        condition: service_healthy
+
+volumes:
+  mas-config:
+    external: true
+    name: "${MATRIX_OAUTH_MAS_CONFIG_VOLUME}"

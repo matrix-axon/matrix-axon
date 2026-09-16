@@ -120,15 +120,47 @@ impl OAuthRuntime {
     }
 
     /// Whether `redirect_uri` is exactly (not prefix-) allow-listed for
-    /// `client_id`. This is the one place `client_id` is a genuine security
-    /// boundary in this design (Path A) — a loose match would let a
-    /// malicious app registered under the same `client_id` redirect an
-    /// authorization code to itself.
-    pub fn redirect_uri_allowed(&self, client_id: &str, redirect_uri: &str) -> bool {
-        self.clients
-            .get(client_id)
-            .is_some_and(|uris| uris.iter().any(|u| u == redirect_uri))
+    /// `client_id`, and if not, which half was wrong.
+    ///
+    /// Exact matching is the one place `client_id` is a genuine security
+    /// boundary in this design (Path A) — a loose match would let a malicious
+    /// app registered under the same `client_id` redirect an authorization
+    /// code to itself.
+    ///
+    /// The two failures are reported apart rather than collapsed into one
+    /// `bool`, which is what the caller needs to say anything useful. That
+    /// costs only the knowledge that a client id exists, and these ids are
+    /// public by construction: they are RFC 8252 public clients, registered in
+    /// operator config, shipped inside the client binaries and printed in
+    /// `clients/web/README.md`. There is nothing here to enumerate, and
+    /// `/v1/oauth/*` is rate limited regardless (`oauth::rate_limit`).
+    pub fn check_client(&self, client_id: &str, redirect_uri: &str) -> ClientCheck {
+        let Some(uris) = self.clients.get(client_id) else {
+            return ClientCheck::UnknownClient;
+        };
+        if uris.iter().any(|u| u == redirect_uri) {
+            ClientCheck::Allowed
+        } else {
+            ClientCheck::RedirectUriNotRegistered
+        }
     }
+}
+
+/// The verdict on a `client_id`/`redirect_uri` pair.
+///
+/// The two refusals are distinct because they need different things of
+/// whoever reads them: one means the client was never registered, the other
+/// that it was but with a different callback — the shape of a client and a
+/// server that have drifted apart, which is by far the more common of the two
+/// and the one a single combined message could not name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientCheck {
+    /// Registered, with this exact redirect URI.
+    Allowed,
+    /// No client is registered under this id.
+    UnknownClient,
+    /// The client is registered, but not for this redirect URI.
+    RedirectUriNotRegistered,
 }
 
 /// Build the shared HTTP client used for every outbound oauth call
