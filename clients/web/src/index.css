@@ -2877,6 +2877,15 @@ a.utd-recover:hover {
   box-sizing: border-box;
 }
 
+/* WebKit draws its native blue focus outline outside the composer border on
+   iOS. The caret and keyboard already identify the active field on touch
+   devices; preserve the focus outline for desktop keyboard navigation. */
+@media (hover: none) and (pointer: coarse) {
+  .composer textarea:focus {
+    outline: none;
+  }
+}
+
 @media (max-width: 47.99rem) {
   .composer textarea {
     min-height: 2.1rem;
