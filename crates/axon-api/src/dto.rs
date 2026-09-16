@@ -649,6 +649,15 @@ pub struct SendMediaRequest {
     /// Matrix event body.
     #[serde(default)]
     pub caption: Option<String>,
+    /// Markup name for `formatted_body` — only `org.matrix.custom.html`. Must be
+    /// paired with `formatted_body`, and requires `caption`: Matrix defines
+    /// formatting only for a media caption (MSC2530).
+    #[serde(default)]
+    pub format: Option<String>,
+    /// The caption rendered as HTML. Must be paired with `format`; `caption` is
+    /// its plain-text fallback.
+    #[serde(default)]
+    pub formatted_body: Option<String>,
     /// Send as a reply to this event id (`m.in_reply_to`). Optional.
     #[serde(default)]
     pub reply_to: Option<String>,
@@ -665,9 +674,16 @@ pub struct SendMediaRequest {
 ///
 /// Like [`SendMessageRequest`], `format` + `formatted_body` are optional and must
 /// be supplied together to set rich text on the replacement.
+///
+/// The replacement keeps the target's `msgtype`. For a text, notice, or emote,
+/// `body` is the new text. For an image, file, audio, or video message, `body`
+/// is the new *caption*: the media and its filename are kept, and an empty
+/// `body` (or one equal to the filename) removes the caption. Editing any other
+/// kind of message is a `400`.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct EditRequest {
-    /// The new plain-text message body (and formatting fallback).
+    /// The new plain-text message body, or a media message's new caption (and
+    /// formatting fallback).
     pub body: String,
     /// Markup name for `formatted_body` — only `org.matrix.custom.html`. Must be
     /// paired with `formatted_body`.

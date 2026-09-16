@@ -163,12 +163,14 @@ impl MessageSender for GatewayAdapter {
         room_id: &str,
         attachment: MediaAttachment,
         caption: Option<&str>,
+        formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
     ) -> Result<String, SendError> {
         tokio::time::timeout(
             self.upstream_upload_timeout,
-            self.gateway
-                .send_media(account_id, room_id, attachment, caption, relation),
+            self.gateway.send_media(
+                account_id, room_id, attachment, caption, formatted, relation,
+            ),
         )
         .await
         .map_err(|_| timed_out("media send", self.upstream_upload_timeout))?

@@ -106,6 +106,13 @@ pub async fn send_media(
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Json(req): Json<SendMediaRequest>,
 ) -> Result<ApiResponse<SendResultDto>, ApiError> {
+    // Validate before claiming: a malformed request must not consume the upload.
+    let fmt = formatted(&req.format, &req.formatted_body)?;
+    if fmt.is_some() && req.caption.is_none() {
+        return Err(ApiError::bad_request(
+            "format and formatted_body require a caption",
+        ));
+    }
     let relation = Relation {
         reply_to: req.reply_to.as_deref(),
         thread_root: req.thread_root.as_deref(),
@@ -134,6 +141,7 @@ pub async fn send_media(
             &room_id,
             attachment,
             req.caption.as_deref(),
+            fmt,
             relation,
         )
         .await;

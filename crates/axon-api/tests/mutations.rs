@@ -225,6 +225,7 @@ async fn send_media_claims_sends_and_completes_upload() {
                 bytes: b"abc".to_vec(),
             },
             caption: Some("look".to_owned()),
+            formatted: None,
             reply_to: Some("$reply:localhost".to_owned()),
             thread_root: Some("$root:localhost".to_owned()),
         }]
@@ -254,6 +255,90 @@ async fn send_media_releases_upload_after_sender_failure() {
     assert_eq!(uploads.claims(), vec![(account_id, upload_id)]);
     assert!(uploads.completes().is_empty());
     assert_eq!(uploads.releases(), vec![(account_id, upload_id)]);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_media_formatted_caption_reaches_the_sender() {
+    let store = store().await;
+    let sender = Arc::new(StubSender::ok("$media:localhost"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store, sender.clone(), uploads.clone());
+
+    let account_id = Uuid::new_v4();
+    let upload_id = Uuid::new_v4();
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/rooms/!room:localhost/send-media"),
+        Some(json!({
+            "upload_id": upload_id,
+            "caption": "a **cat**",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "a <strong>cat</strong>",
+        })),
+    )
+    .await;
+
+    // Issue #237: the caption's HTML is no longer dropped at the API boundary.
+    assert_eq!(status, StatusCode::OK);
+    let calls = sender.calls();
+    let [Call::SendMedia {
+        caption, formatted, ..
+    }] = calls.as_slice()
+    else {
+        panic!("expected one media send, got {calls:?}");
+    };
+    assert_eq!(caption.as_deref(), Some("a **cat**"));
+    assert_eq!(
+        formatted.clone(),
+        Some((
+            "org.matrix.custom.html".to_owned(),
+            "a <strong>cat</strong>".to_owned(),
+        ))
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_media_invalid_formatting_is_400_and_keeps_the_upload() {
+    let store = store().await;
+    let sender = Arc::new(StubSender::ok("$media:localhost"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store, sender.clone(), uploads.clone());
+    let account_id = Uuid::new_v4();
+    let uri = format!("/v1/accounts/{account_id}/rooms/!room:localhost/send-media");
+
+    for body in [
+        // Formatting with no caption: Matrix formats only a caption.
+        json!({
+            "upload_id": Uuid::new_v4(),
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<strong>hi</strong>",
+        }),
+        // Half of the pair.
+        json!({
+            "upload_id": Uuid::new_v4(),
+            "caption": "hi",
+            "formatted_body": "<strong>hi</strong>",
+        }),
+        // An unrecognized format.
+        json!({
+            "upload_id": Uuid::new_v4(),
+            "caption": "hi",
+            "format": "text/markdown",
+            "formatted_body": "**hi**",
+        }),
+    ] {
+        let (status, err) = send(&app, "POST", &uri, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(err["error"]["code"], "bad_request", "{body}");
+    }
+
+    // Rejected before the claim, so no staged upload was consumed or released.
+    assert!(uploads.claims().is_empty());
+    assert!(uploads.releases().is_empty());
+    assert!(sender.calls().is_empty());
 }
 
 #[tokio::test]

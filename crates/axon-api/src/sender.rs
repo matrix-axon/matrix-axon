@@ -66,17 +66,22 @@ pub trait MessageSender: Send + Sync {
     /// attachment bytes are already claimed from the staging service; the sender
     /// owns only the Matrix SDK upload/send operation. `caption`, when present,
     /// becomes the media event body, otherwise the filename is the body.
+    /// `formatted`, when present, is the caption's rich-text rendering
+    /// (validated at the handler, which also requires a `caption` with it).
     async fn send_media(
         &self,
         account_id: Uuid,
         room_id: &str,
         attachment: MediaAttachment,
         caption: Option<&str>,
+        formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
     ) -> Result<String, SendError>;
 
     /// Edit an existing message (`m.replace`); returns the replacement event id.
-    /// `formatted` sets rich text on the replacement (see [`send_message`]).
+    /// `formatted` sets rich text on the replacement (see [`send_message`]). The
+    /// replacement keeps the original's `msgtype`; for a media message `body` is
+    /// the new caption (see [`EditRequest`](crate::dto::EditRequest)).
     ///
     /// [`send_message`]: MessageSender::send_message
     async fn edit(
