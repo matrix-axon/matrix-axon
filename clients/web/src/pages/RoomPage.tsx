@@ -1147,12 +1147,17 @@ export function RoomPage() {
   }, [live, timeline, threads, members, accountId, roomId])
 
   // Gap-fill: the bus is lossy and cursor-less, so on reconnect refetch the
-  // room's head and reconcile by event id (ADR 0061). `reconnects` starts at 0
-  // and only bumps on an actual reconnect, so the initial load isn't doubled.
+  // room's head and reconcile by event id (ADR 0061). Compared against the
+  // count this page last handled, not against zero: once a session had
+  // reconnected at all — on a phone, any trip to the background — a zero test
+  // fired on every room mount too, doubling the mount effect's head load.
+  const handledReconnects = useRef(live.reconnects.peek())
   useEffect(() => {
-    if (live.reconnects.value === 0) {
+    const reconnects = live.reconnects.value
+    if (reconnects === handledReconnects.current) {
       return
     }
+    handledReconnects.current = reconnects
     void timeline.loadLatest()
     inBackground(members.refresh())
   }, [live.reconnects.value, timeline, members])
