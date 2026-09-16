@@ -23,6 +23,10 @@ use crate::routes::{json_exceeds_byte_cap, MAX_OPAQUE_JSON_BYTES};
 /// dump. Each entry must also have a closed value schema in `validate_value`.
 const ALLOWED_KEYS: &[&str] = &["space_order", "message_gestures"];
 
+/// Reject implausibly large invalid values before handing them to the emoji
+/// lookup. Valid Unicode emoji sequences are comfortably below this bound.
+const MAX_REACTION_EMOJI_BYTES: usize = 64;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpaceOrderValue {
@@ -52,14 +56,14 @@ struct MessageGestureBindings {
 #[serde(untagged)]
 enum MessageGestureBinding {
     Action(MessageGestureAction),
-    Off(()),
+    Off,
 }
 
 impl MessageGestureBinding {
     fn action(&self) -> Option<MessageGestureAction> {
         match self {
             Self::Action(action) => Some(*action),
-            Self::Off(()) => None,
+            Self::Off => None,
         }
     }
 }
@@ -119,7 +123,9 @@ fn validate_message_gestures(value: &serde_json::Value) -> Result<(), ApiError> 
         }
     }
 
-    if parsed.reaction_emoji.len() > 64 || emojis::get(&parsed.reaction_emoji).is_none() {
+    if parsed.reaction_emoji.len() > MAX_REACTION_EMOJI_BYTES
+        || emojis::get(&parsed.reaction_emoji).is_none()
+    {
         return Err(ApiError::bad_request(
             "message_gestures reaction_emoji must be one Unicode emoji",
         ));
