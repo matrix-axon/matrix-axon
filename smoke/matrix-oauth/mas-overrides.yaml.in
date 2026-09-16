@@ -1,0 +1,20 @@
+http:
+  public_base: "@MAS_PUBLIC_BASE@"
+  issuer: "@MAS_PUBLIC_BASE@"
+
+database:
+  uri: postgresql://mas:mas@mas-postgres:5432/mas
+
+matrix:
+  kind: synapse
+  homeserver: localhost
+  endpoint: http://synapse:8008
+  secret: axon-matrix-oauth-smoke-shared-secret
+
+oauth:
+  device_code_grant_enabled: @DEVICE_CODE_GRANT_ENABLED@
+  device_code_user_code_auto_fill_enabled: true
+
+experimental:
+  access_token_ttl: 60
+  compat_token_ttl: 3600
