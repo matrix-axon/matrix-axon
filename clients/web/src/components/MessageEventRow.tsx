@@ -7,6 +7,7 @@ import {
 } from 'preact/hooks'
 import type { ComponentChildren } from 'preact'
 import { EMOJI_PICKER_DATA_SOURCE } from '../emoji'
+import { isGestureControlTarget, MESSAGE_TOUCH_HOLD_MS } from '../gestures'
 import { parseMedia } from '../media/parse-media'
 import { localRoomHref, localThreadEventHref } from '../matrix-to'
 import { useShortcuts } from '../shortcuts'
@@ -57,7 +58,6 @@ export {
 export const QUICK_REACTIONS = ['👍', '❤️', '😂', '🎉', '😮', '😢']
 const REACTION_TOOLTIP_NAME_LIMIT = 10
 const REACTION_TOUCH_HOLD_MS = 450
-const EVENT_ACTION_TOUCH_HOLD_MS = 550
 const MESSAGE_DOUBLE_TAP_MS = 300
 
 type ReactionTally = NonNullable<EventDto['reactions']>[string]
@@ -187,7 +187,7 @@ function EventActionButton({
           longPressTimer.current = window.setTimeout(() => {
             suppressNextClick.current = true
             setTooltipOpen(true)
-          }, EVENT_ACTION_TOUCH_HOLD_MS)
+          }, MESSAGE_TOUCH_HOLD_MS)
         }}
         onTouchMove={clearLongPress}
         onTouchEnd={clearLongPress}
@@ -218,15 +218,6 @@ function hasVisibleBody(event: EventDto): boolean {
   )
 }
 
-function isRowControl(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    target.closest(
-      'a, button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="textbox"], emoji-picker',
-    ) !== null
-  )
-}
-
 function isMessageBodyTarget(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest('.event-body') !== null
 }
@@ -239,10 +230,10 @@ function presentedReactionTally(
 ): ReactionTally {
   if (presentation?.emoji !== emoji) return tally
   if (presentation.removing) {
-    if (!tally.me || tally.count <= 1) return tally
+    if (!tally.me) return tally
     return {
       ...tally,
-      count: tally.count - 1,
+      count: Math.max(0, tally.count - 1),
       me: false,
       senders:
         ownUserId === null
@@ -456,7 +447,7 @@ export function MessageEventRow({
           click.preventDefault()
           return
         }
-        if (!isRowControl(click.target)) {
+        if (!isGestureControlTarget(click.target)) {
           if (
             doubleClickAction !== null &&
             lastPointerType.current === 'mouse' &&
@@ -479,7 +470,7 @@ export function MessageEventRow({
           doubleClickAction !== null &&
           mouseDown.detail === 2 &&
           isMessageBodyTarget(mouseDown.target) &&
-          !isRowControl(mouseDown.target)
+          !isGestureControlTarget(mouseDown.target)
         ) {
           mouseDown.preventDefault()
         }
@@ -489,7 +480,7 @@ export function MessageEventRow({
           doubleClickAction === null ||
           lastPointerType.current !== 'mouse' ||
           !isMessageBodyTarget(click.target) ||
-          isRowControl(click.target)
+          isGestureControlTarget(click.target)
         )
           return
         cancelDesktopClick()

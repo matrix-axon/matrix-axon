@@ -34,6 +34,7 @@ import type {
 } from '../stores/settings'
 import {
   assignMessageGestureAction,
+  cloneMessageGesturePreferences,
   defaultMessageGestures,
   isSingleEmoji,
   MESSAGE_GESTURE_ACTIONS,
@@ -333,16 +334,6 @@ function SettingsPageContents() {
   )
 }
 
-function cloneMessageGestures(
-  value: MessageGesturePreferences,
-): MessageGesturePreferences {
-  return {
-    schema_version: 1,
-    bindings: { ...value.bindings },
-    reaction_emoji: value.reaction_emoji,
-  }
-}
-
 function sameMessageGestures(
   left: MessageGesturePreferences,
   right: MessageGesturePreferences,
@@ -406,14 +397,14 @@ function MessageGestureSettings() {
     if (current === null) {
       return
     }
-    setDraft(cloneMessageGestures(current))
+    setDraft(cloneMessageGesturePreferences(current))
   }, [current, revision])
 
   const autosave = (
     next: MessageGesturePreferences,
     statusAfterSave = 'Gestures saved',
   ) => {
-    const attempted = cloneMessageGestures(next)
+    const attempted = cloneMessageGesturePreferences(next)
     const request = ++saveRequest.current
     setDraft(attempted)
     setSaveStatus(null)

@@ -103,10 +103,11 @@ function pointer(
   kind: 'down' | 'move' | 'up',
   x: number,
   y = 40,
+  pointerId = 1,
 ) {
   const init = {
     pointerType: 'touch',
-    pointerId: 1,
+    pointerId,
     clientX: x,
     clientY: y,
   }
@@ -264,6 +265,8 @@ describe('MessageEventRow gestures', () => {
       '.reaction-chip.gesture-reaction-pending',
     ) as HTMLButtonElement
     expect(pending.classList.contains('gesture-reaction-removing')).toBe(true)
+    expect(pending.classList.contains('mine')).toBe(false)
+    expect(pending.textContent).toContain('👍 0')
     expect(pending.disabled).toBe(true)
 
     await act(async () => finishReaction(false))
@@ -286,6 +289,24 @@ describe('MessageEventRow gestures', () => {
 
     expect(view.onOpenThread).toHaveBeenCalledWith('$event')
     expect(view.row.classList.contains('touch-hold-enabled')).toBe(true)
+  })
+
+  it('opens actions after a slow tap when touch and hold is off', () => {
+    vi.useFakeTimers()
+    const preferences = defaultMessageGestures()
+    preferences.bindings.touch_and_hold = null
+    const view = renderRow({ preferences })
+
+    pointer(view.body, 'down', 40)
+    act(() => {
+      vi.advanceTimersByTime(600)
+    })
+    pointer(view.body, 'up', 40)
+    act(() => {
+      vi.advanceTimersByTime(300)
+    })
+
+    expect(view.onOpenActions).toHaveBeenCalledOnce()
   })
 
   it('limits selection and context-menu suppression to an active touch', () => {
@@ -386,6 +407,24 @@ describe('MessageEventRow gestures', () => {
     expect(view.row.style.getPropertyValue('--message-swipe-offset')).toBe(
       '0px',
     )
+  })
+
+  it('settles the swipe preview when a second pointer cancels the gesture', () => {
+    vi.useFakeTimers()
+    const view = renderRow()
+
+    pointer(view.body, 'down', 130)
+    pointer(view.body, 'move', 90)
+    expect(view.row.classList.contains('gesture-swipe-reveal')).toBe(true)
+
+    pointer(view.body, 'down', 90, 40, 2)
+    act(() => {
+      vi.advanceTimersByTime(180)
+    })
+
+    expect(view.row.classList.contains('gesture-swipe-reveal')).toBe(false)
+    expect(view.row.style.getPropertyValue('--message-swipe-offset')).toBe('')
+    expect(view.onReply).not.toHaveBeenCalled()
   })
 
   it('yields a left swipe to horizontally scrollable message content', () => {

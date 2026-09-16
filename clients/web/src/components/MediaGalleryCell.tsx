@@ -128,16 +128,28 @@ export function MediaGalleryCell({
     onAction: (action) => gestures?.onAction(action),
     onSingleTap: onOpen,
   })
-  const cellClass = `gallery-cell${highlighted ? ' highlighted' : ''}${touchGestures.touchHoldEnabled ? ' touch-hold-enabled' : ''}${touchGestures.swipeReveal !== null ? ' gesture-swipe-reveal' : ''}${touchGestures.swipeArmed ? ' gesture-swipe-armed' : ''}${touchGestures.swipeSettling ? ' gesture-swipe-settling' : ''}`
+  const {
+    surfaceRef,
+    touchHoldEnabled,
+    swipeReveal,
+    swipeArmed,
+    swipeSettling,
+    onPointerDown,
+    onPointerMove,
+    onPointerCancel,
+    onPointerUp,
+    onContextMenu,
+    onClickCapture,
+  } = touchGestures
+  const cellClass = `gallery-cell${highlighted ? ' highlighted' : ''}${touchHoldEnabled ? ' touch-hold-enabled' : ''}${swipeReveal !== null ? ' gesture-swipe-reveal' : ''}${swipeArmed ? ' gesture-swipe-armed' : ''}${swipeSettling ? ' gesture-swipe-settling' : ''}`
   const gestureAttributes = gestureEligible
     ? {
-        ref: touchGestures.surfaceRef,
-        onPointerDown: touchGestures.onPointerDown,
-        onPointerMove: touchGestures.onPointerMove,
-        onPointerCancel: touchGestures.onPointerCancel,
-        onPointerUp: touchGestures.onPointerUp,
-        onContextMenu: touchGestures.onContextMenu,
-        onClickCapture: touchGestures.onClickCapture,
+        onPointerDown,
+        onPointerMove,
+        onPointerCancel,
+        onPointerUp,
+        onContextMenu,
+        onClickCapture,
       }
     : {}
 
@@ -165,7 +177,12 @@ export function MediaGalleryCell({
   }
 
   return (
-    <li class={cellClass} data-event-id={eventId} {...gestureAttributes}>
+    <li
+      ref={surfaceRef}
+      class={cellClass}
+      data-event-id={eventId}
+      {...gestureAttributes}
+    >
       <div ref={ref} class="gallery-cell-box">
         {previewUrl !== null ? (
           // Still uploading: the local file, and not a button — there is
@@ -210,10 +227,10 @@ export function MediaGalleryCell({
         )}
       </div>
       {pending && <span class="gallery-cell-pending" aria-hidden="true" />}
-      {touchGestures.swipeReveal !== null && (
+      {swipeReveal !== null && (
         <span class="gesture-swipe-affordance" aria-hidden="true">
-          <EventActionIcon name={touchGestures.swipeReveal} />
-          {messageGestureActionLabel(touchGestures.swipeReveal)}
+          <EventActionIcon name={swipeReveal} />
+          {messageGestureActionLabel(swipeReveal)}
         </span>
       )}
       {gestures?.reactionBurst !== null &&

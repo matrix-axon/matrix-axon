@@ -1,6 +1,8 @@
 import type { JSX } from 'preact'
 import { useEffect, useRef } from 'preact/hooks'
 import {
+  GESTURE_SWIPE_SETTLE_MS,
+  isGestureControlTarget,
   isHorizontallyScrollable,
   NATIVE_BACK_EDGE_PX,
   SWIPE_AXIS_RATIO,
@@ -10,7 +12,6 @@ import {
 } from '../gestures'
 import { SINGLE_PANE_QUERY } from '../layout'
 
-const MOBILE_BACK_SETTLE_MS = 180
 const MOBILE_BACK_PARALLAX = 0.18
 
 export type MobileBackPresentation = {
@@ -23,15 +24,6 @@ type SwipeStart<T extends HTMLElement> = {
   y: number
   presentation: MobileBackPresentation
   surface: T
-}
-
-function isGestureControl(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    target.closest(
-      'a, button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="textbox"], emoji-picker',
-    ) !== null
-  )
 }
 
 /**
@@ -164,7 +156,7 @@ export function useMobileSwipeBack<T extends HTMLElement>({
     }
     const delay = window.matchMedia('(prefers-reduced-motion: reduce)').matches
       ? 0
-      : MOBILE_BACK_SETTLE_MS
+      : GESTURE_SWIPE_SETTLE_MS
     resetTimer.current = window.setTimeout(() => {
       if (accepted) {
         onBack()
@@ -186,7 +178,7 @@ export function useMobileSwipeBack<T extends HTMLElement>({
     if (
       !window.matchMedia(SINGLE_PANE_QUERY).matches ||
       event.touches.length !== 1 ||
-      isGestureControl(event.target) ||
+      isGestureControlTarget(event.target) ||
       isHorizontallyScrollable(event.target)
     ) {
       swipeStart.current = null

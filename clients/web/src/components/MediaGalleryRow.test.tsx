@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  waitFor,
+} from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import {
@@ -213,6 +219,64 @@ describe('MediaGalleryRow', () => {
     expect(onReply).toHaveBeenCalledWith(
       expect.objectContaining({ event_id: '$2' }),
     )
+  })
+
+  it('allows reactions on different tiles to overlap', async () => {
+    serveBytes()
+    const finishes = new Map<string, (ok: boolean) => void>()
+    const concurrentTimeline = {
+      ...timeline,
+      toggleReaction: vi.fn(
+        (event: TimelineEvent) =>
+          new Promise<boolean>((resolve) => {
+            finishes.set(event.event_id, resolve)
+          }),
+      ),
+    } as unknown as TimelineStore
+    const { container } = render(
+      <ServicesContext.Provider value={testServices()}>
+        <ol>
+          <MediaGalleryRow
+            events={[image('$1'), image('$2')]}
+            accountId={ACCOUNT}
+            members={members}
+            timeline={concurrentTimeline}
+            ownUserId="@alice:hs"
+            messageGestures={defaultMessageGestures()}
+            onReply={() => {}}
+            onEdit={() => {}}
+            renderEvent={() => null}
+          />
+        </ol>
+      </ServicesContext.Provider>,
+    )
+    const buttons = await waitFor(() => {
+      const found = [
+        ...container.querySelectorAll<HTMLElement>('.gallery-cell-open'),
+      ]
+      expect(found).toHaveLength(2)
+      return found
+    })
+
+    for (const button of buttons) {
+      pointer(button, 'down', 40)
+      pointer(button, 'up', 40)
+      pointer(button, 'down', 41)
+      pointer(button, 'up', 41)
+    }
+
+    expect(concurrentTimeline.toggleReaction).toHaveBeenCalledTimes(2)
+    expect(
+      vi
+        .mocked(concurrentTimeline.toggleReaction)
+        .mock.calls.map(([event]) => event.event_id),
+    ).toEqual(['$1', '$2'])
+
+    await act(async () => {
+      finishes.get('$1')?.(true)
+      finishes.get('$2')?.(true)
+      await Promise.resolve()
+    })
   })
 
   it('confirms a tile delete before redacting its event', async () => {

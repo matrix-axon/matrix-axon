@@ -114,6 +114,51 @@ describe('EventTime event permalink copy', () => {
     expect(getByText('Text copied')).toBeTruthy()
   })
 
+  it('keeps the primary timestamp hold active through a second touch', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const { getByRole } = render(<EventTime event={event()} touchHoldEnabled />)
+    const timestamp = getByRole('button', { name: 'Copy link' })
+
+    fireEvent.pointerDown(timestamp, {
+      pointerId: 1,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 20,
+      clientY: 20,
+    })
+    fireEvent.pointerDown(timestamp, {
+      pointerId: 2,
+      pointerType: 'touch',
+      isPrimary: false,
+      clientX: 24,
+      clientY: 20,
+    })
+    fireEvent.pointerUp(timestamp, {
+      pointerId: 2,
+      pointerType: 'touch',
+      isPrimary: false,
+      clientX: 24,
+      clientY: 20,
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(550)
+      await Promise.resolve()
+    })
+    fireEvent.pointerUp(timestamp, {
+      pointerId: 1,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 20,
+      clientY: 20,
+    })
+    fireEvent.click(timestamp)
+
+    expect(writeText).toHaveBeenCalledOnce()
+    expect(writeText).toHaveBeenCalledWith('hello')
+  })
+
   it('copies the message body on a desktop double-click without copying the link', async () => {
     vi.useFakeTimers()
     const writeText = vi.fn().mockResolvedValue(undefined)

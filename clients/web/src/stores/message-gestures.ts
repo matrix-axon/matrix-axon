@@ -162,7 +162,7 @@ export function parseMessageGestures(
   }
 }
 
-function clonePreferences(
+export function cloneMessageGesturePreferences(
   value: MessageGesturePreferences,
 ): MessageGesturePreferences {
   return {
@@ -198,7 +198,7 @@ export function createMessageGestureStore(
   let saveLoop: Promise<boolean> | null = null
 
   function apply(value: MessageGesturePreferences): void {
-    preferences.value = clonePreferences(value)
+    preferences.value = cloneMessageGesturePreferences(value)
     status.value = 'ready'
     error.value = null
     revision.value += 1
@@ -306,7 +306,7 @@ export function createMessageGestureStore(
       // writes are last-write-wins, so sending intermediate UI states would
       // add latency without preserving useful intent.
       apply(parsed)
-      queuedSave = clonePreferences(parsed)
+      queuedSave = cloneMessageGesturePreferences(parsed)
       if (saveLoop !== null) {
         return saveLoop
       }
@@ -317,7 +317,7 @@ export function createMessageGestureStore(
       const started = (async () => {
         let ok = true
         try {
-          while (generation === sessionGeneration && ok) {
+          while (generation === sessionGeneration) {
             while (queuedSave !== null) {
               const attempted = queuedSave
               queuedSave = null

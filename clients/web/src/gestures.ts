@@ -21,6 +21,10 @@ export const SWIPE_AXIS_RATIO = 1.4
  * a swipe.
  */
 export const SWIPE_DECISION_THRESHOLD = 10
+/** Hold duration shared by message surfaces and their action controls. */
+export const MESSAGE_TOUCH_HOLD_MS = 550
+/** Settle duration shared by message and pane swipe animations. */
+export const GESTURE_SWIPE_SETTLE_MS = 180
 /**
  * Minimum vertical travel for a downward dismiss. Deliberately longer than
  * the horizontal minimum: paging is cheap to undo, closing the viewer is not,
@@ -42,6 +46,16 @@ export const NATIVE_BACK_EDGE_PX = 30
 export interface SwipeStart {
   x: number
   y: number
+}
+
+/** Whether a gesture began on an interactive control that owns the input. */
+export function isGestureControlTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    target.closest(
+      'a, button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="textbox"], emoji-picker',
+    ) !== null
+  )
 }
 
 /**

@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import {
+  GESTURE_SWIPE_SETTLE_MS,
+  isGestureControlTarget,
   isHorizontallyScrollable,
+  MESSAGE_TOUCH_HOLD_MS,
   SWIPE_AXIS_RATIO,
   SWIPE_DECISION_THRESHOLD,
   SWIPE_MIN_X,
@@ -15,18 +18,7 @@ import type {
 const ACTION_ROW_TAP_SLOP_PX = 10
 const MESSAGE_DOUBLE_TAP_MS = 300
 const MESSAGE_DOUBLE_TAP_SLOP_PX = 24
-const EVENT_ACTION_TOUCH_HOLD_MS = 550
 const MESSAGE_SWIPE_MAX_X = 96
-const MESSAGE_SWIPE_SETTLE_MS = 180
-
-function isControl(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    target.closest(
-      'a, button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="textbox"], emoji-picker',
-    ) !== null
-  )
-}
 
 function closestButton(
   target: EventTarget | null,
@@ -77,7 +69,6 @@ export function useTouchMessageGestures<T extends HTMLElement>({
     pointerId: number
     startX: number
     startY: number
-    startedAt: number
     direction: 'none' | 'left' | 'right' | 'vertical'
     held: boolean
     linkOnly: boolean
@@ -103,21 +94,21 @@ export function useTouchMessageGestures<T extends HTMLElement>({
   const touchHoldEnabled =
     eligible && preferences?.bindings.touch_and_hold !== null
 
-  const clearHoldTimer = () => {
+  const clearHoldTimer = useCallback(() => {
     if (holdTimer.current !== null) {
       window.clearTimeout(holdTimer.current)
       holdTimer.current = null
     }
-  }
+  }, [])
 
-  const cancelPendingTap = () => {
+  const cancelPendingTap = useCallback(() => {
     if (pendingTap.current !== null) {
       window.clearTimeout(pendingTap.current.timer)
       pendingTap.current = null
     }
-  }
+  }, [])
 
-  const clearSwipePresentation = () => {
+  const clearSwipePresentation = useCallback(() => {
     if (revealTimer.current !== null) window.clearTimeout(revealTimer.current)
     revealTimer.current = null
     const surface = surfaceRef.current
@@ -127,7 +118,7 @@ export function useTouchMessageGestures<T extends HTMLElement>({
     setSwipeReveal(null)
     setSwipeArmed(false)
     setSwipeSettling(false)
-  }
+  }, [])
 
   const previewSwipeAction = (action: MessageGestureAction, dx: number) => {
     const distance = Math.min(Math.max(-dx, 0), MESSAGE_SWIPE_MAX_X)
@@ -143,7 +134,7 @@ export function useTouchMessageGestures<T extends HTMLElement>({
     setSwipeSettling(false)
   }
 
-  const settleSwipeAction = () => {
+  const settleSwipeAction = useCallback(() => {
     const surface = surfaceRef.current
     if (surface === null || swipeReveal === null) return
     surface.classList.add('gesture-swipe-settling')
@@ -155,8 +146,16 @@ export function useTouchMessageGestures<T extends HTMLElement>({
     revealTimer.current = window.setTimeout(() => {
       clearSwipePresentation()
       revealTimer.current = null
-    }, MESSAGE_SWIPE_SETTLE_MS)
-  }
+    }, GESTURE_SWIPE_SETTLE_MS)
+  }, [clearSwipePresentation, swipeReveal])
+
+  const cancelGesture = useCallback(() => {
+    surfaceRef.current?.classList.remove('touch-gesture-active')
+    clearHoldTimer()
+    cancelPendingTap()
+    pointer.current = null
+    settleSwipeAction()
+  }, [cancelPendingTap, clearHoldTimer, settleSwipeAction])
 
   const finishTap = (x: number, y: number, singleTap: () => void): void => {
     const action = eligible ? (preferences?.bindings.double_tap ?? null) : null
@@ -184,13 +183,17 @@ export function useTouchMessageGestures<T extends HTMLElement>({
     pendingTap.current = { x, y, at: now, timer }
   }
 
+  useEffect(() => {
+    if (!eligible) cancelGesture()
+  }, [cancelGesture, eligible])
+
   useEffect(
     () => () => {
       clearHoldTimer()
       cancelPendingTap()
       if (revealTimer.current !== null) window.clearTimeout(revealTimer.current)
     },
-    [],
+    [cancelPendingTap, clearHoldTimer],
   )
 
   return {
@@ -219,8 +222,7 @@ export function useTouchMessageGestures<T extends HTMLElement>({
         pointer.current !== null &&
         pointer.current.pointerId !== pointerEvent.pointerId
       ) {
-        clearHoldTimer()
-        pointer.current = null
+        cancelGesture()
         return
       }
       clearHoldTimer()
@@ -232,7 +234,11 @@ export function useTouchMessageGestures<T extends HTMLElement>({
         pointerEvent.target,
         openControlSelector,
       )
-      if (isControl(pointerEvent.target) && !linkOnly && openControl === null)
+      if (
+        isGestureControlTarget(pointerEvent.target) &&
+        !linkOnly &&
+        openControl === null
+      )
         return
       if (isHorizontallyScrollable(pointerEvent.target)) return
       if (linkOnly && !touchHoldEnabled) return
@@ -243,7 +249,6 @@ export function useTouchMessageGestures<T extends HTMLElement>({
         pointerId: pointerEvent.pointerId,
         startX: pointerEvent.clientX,
         startY: pointerEvent.clientY,
-        startedAt: performance.now(),
         direction: 'none',
         held: false,
         linkOnly,
@@ -264,7 +269,7 @@ export function useTouchMessageGestures<T extends HTMLElement>({
           gesture.held = true
           suppressNextClick.current = true
           onAction(holdAction)
-        }, EVENT_ACTION_TOUCH_HOLD_MS)
+        }, MESSAGE_TOUCH_HOLD_MS)
       }
     },
     onPointerMove: (pointerEvent: PointerEvent) => {
@@ -298,13 +303,7 @@ export function useTouchMessageGestures<T extends HTMLElement>({
         gesture.direction = 'vertical'
       }
     },
-    onPointerCancel: () => {
-      surfaceRef.current?.classList.remove('touch-gesture-active')
-      clearHoldTimer()
-      cancelPendingTap()
-      pointer.current = null
-      settleSwipeAction()
-    },
+    onPointerCancel: cancelGesture,
     onPointerUp: (pointerEvent: PointerEvent) => {
       surfaceRef.current?.classList.remove('touch-gesture-active')
       clearHoldTimer()
@@ -321,11 +320,6 @@ export function useTouchMessageGestures<T extends HTMLElement>({
         pointerEvent.preventDefault()
         return
       }
-      if (
-        !touchHoldEnabled &&
-        performance.now() - gesture.startedAt >= EVENT_ACTION_TOUCH_HOLD_MS
-      )
-        return
       if (gesture.linkOnly) {
         if (
           gesture.direction !== 'none' ||

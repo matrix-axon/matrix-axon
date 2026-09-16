@@ -133,13 +133,10 @@ export function EventTime({
         title={title}
         aria-label="Copy link"
         onPointerDown={(pointerEvent) => {
+          if (pointerEvent.isPrimary === false) return
           lastPointerType.current = pointerEvent.pointerType
           suppressNextClick.current = false
-          if (
-            !touchHoldEnabled ||
-            pointerEvent.pointerType === 'mouse' ||
-            pointerEvent.isPrimary === false
-          ) {
+          if (!touchHoldEnabled || pointerEvent.pointerType === 'mouse') {
             clearHold()
             holdPointer.current = null
             return
@@ -174,12 +171,15 @@ export function EventTime({
           }
         }}
         onPointerUp={(pointerEvent) => {
-          const completed = holdPointer.current?.completed === true
+          const pointer = holdPointer.current
+          if (pointer === null || pointer.id !== pointerEvent.pointerId) return
+          const completed = pointer.completed
           clearHold()
           holdPointer.current = null
           if (completed) pointerEvent.preventDefault()
         }}
-        onPointerCancel={() => {
+        onPointerCancel={(pointerEvent) => {
+          if (holdPointer.current?.id !== pointerEvent.pointerId) return
           clearHold()
           holdPointer.current = null
         }}
