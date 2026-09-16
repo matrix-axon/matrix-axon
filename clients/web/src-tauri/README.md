@@ -68,46 +68,46 @@ name rather than the package's.
 
 ## Icons
 
-`icons/` is 52 files generated from `icon-source.svg`:
+`icons/` is 52 files generated from the shared master in the browser client:
 
 ```sh
-cd clients/web && pnpm exec tauri icon src-tauri/icon-source.svg -o src-tauri/icons
+cd clients/web && pnpm exec tauri icon public/favicon.svg -o src-tauri/icons
 ```
 
-**The source is an SVG on purpose.** `tauri icon` takes one directly, and a
-vector master costs nothing and settles two things a raster one cannot: it
-rasterises crisply at every size from 16px to the 1024px the App Store
-inspects, and it is a text file, so a change to it is legible in review
-instead of an opaque binary blob.
+**One artwork file serves both clients.** `clients/web/public/favicon.svg` is
+the browser's favicon, loaded directly by `index.html`, and it is what this set
+is rasterised from. A second copy here is the drift problem in waiting, and
+this directory has already had it once: the committed set was generated from a
+source two commits behind the one sitting beside it, so all 52 files disagreed
+with their own source and the whole set was opaque where the source was not.
 
-Keep it to plain geometry — strokes and paths, one colour, no text, no filters,
-no external references. `tauri icon` rasterises with resvg rather than a
-browser engine, and anything beyond flat geometry is where renderers start to
-disagree. Text in particular depends on fonts the rasteriser may not have.
+The master is an SVG on purpose. `tauri icon` takes one directly, a browser
+takes one directly, it rasterises crisply from 16px to the 1024px the App Store
+inspects, and it is a text file — so a change to the artwork reads as a diff
+rather than an opaque binary blob. Keep it to plain geometry: strokes and
+paths, one colour, no text, no filters, no external references. `tauri icon`
+rasterises with resvg rather than a browser engine, and anything beyond flat
+geometry is where renderers start to disagree.
 
-The artwork is a neuron composed on the square's diagonal: dendrites at lower
-left, the soma, then an axon running up and right and arborising into three
-terminals, the upper of which branches again. Diagonal because an app icon is a
-square and a horizontally-composed mark wastes most of it — the mark this
-replaced spanned 93% of the width and 56% of the height, which at 32px left a
-thin strip floating in empty space.
+Both generated sets are committed, and the `icons-regenerated` pre-push hook
+refuses a master change that does not regenerate both — `tauri icon` for this
+directory and `scripts/build-web-icons.sh` for the browser's PNGs. Nothing in
+either build reads the master except as a static asset, so a forgotten
+regeneration is silent.
 
-Two stroke weights keep it from reading as a diagram: the soma and axon carry
-the mass at 104, the dendrites and terminals taper to 80. Branch points are
-staggered and the angles uneven on purpose — evenly spaced branches of equal
-length read as a snowflake rather than a cell.
+The hook checks only that they changed together, not that the output matches.
+`tauri icon` is not reproducible: two runs over one source give 51
+byte-identical files and an `icon.icns` whose members come out in a different
+order each time. That is also why generation is not part of the build — every
+release would otherwise carry a different `.icns` than the last, for no reason,
+and macOS notarization eventually signs over those bytes.
 
-**32px is the ceiling on detail**, not 1024. A Linux launcher and a Windows
-taskbar draw it at 32, and every further branch costs separation there first.
-Look at `icons/32x32.png` before adding one.
-
-It is transparent, which is what Linux, Windows and macOS all want: those show
-a _shaped_ icon, and `icon.icns` and `icon.ico` both carry real transparency.
-iOS is the exception — it wants a full-bleed square and masks its own corners —
-and `tauri icon` composites an opaque background for that set alone. The
-default is white, which is deliberate here: the obvious-looking
-`--ios-color '#5142E6'` paints the background in the same colour as the glyph
-and yields a plain blue square.
+Transparency is kept for Linux, Windows and macOS, which all draw a _shaped_
+icon — `icon.icns` and `icon.ico` both carry it. iOS is the exception: it wants
+a full-bleed square and masks its own corners, so `tauri icon` composites an
+opaque background for that set alone. Its white default is deliberate. The
+obvious-looking `--ios-color '#5142E6'` paints the background in the same
+colour as the glyph and yields a plain blue square.
 
 Note the iOS files still carry an _alpha channel_ even though nothing in them
 is transparent. App Store Connect rejects an app icon with one at all
@@ -116,18 +116,9 @@ is transparent. App Store Connect rejects an app icon with one at all
 RGBA — so it needs a post-processing step. Tracked as #410 for M-W13 rather
 than built here, where nothing consumes `icons/ios/` yet.
 
-Both sides are committed, and the `icons-regenerated` pre-push hook refuses a
-change to `icon-source.svg` that does not regenerate them — the five files
-`tauri.conf.json` bundles all live under `icons/`, nothing in the build reads
-the source, so a forgotten regeneration silently ships the old artwork. That
-had already happened once: the source was replaced and the icons were not.
-
-The hook checks only that the two changed together, not that the output
-matches. `tauri icon` is not reproducible: two runs over one source give 51
-byte-identical files and an `icon.icns` whose members come out in a different
-order each time. That is also why generation is not part of the build — every
-release would otherwise carry a different `.icns` than the last, for no reason,
-and macOS notarization eventually signs over those bytes.
+**32px is the ceiling on detail**, not 1024. A Linux launcher and a Windows
+taskbar draw it at 32, and every further branch costs separation there first.
+Look at `icons/32x32.png` before adding one.
 
 Note `icons/icon.png` and `icons/64x64.png` are emitted by the generator but
 referenced by nothing here; `icons/android/` and `icons/ios/` are for M-W13.
