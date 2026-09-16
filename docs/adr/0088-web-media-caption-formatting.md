@@ -86,7 +86,7 @@ The store's same-msgtype rule is unchanged.
 
 ### Phase 2 — TUI
 
-- A media row with a thumbnail renders as header, thumbnail, then the caption beneath it: the formatted caption if present, otherwise the plain caption, otherwise the filename. A kind marker remains when no thumbnail can be drawn, so the row is never blank.
+- A media row with a thumbnail renders as header (plus any reply or thread context line), thumbnail, then the caption beneath it, indented to the thumbnail's left edge: the formatted caption if present, otherwise the plain caption, otherwise the filename, dimmed so it does not read as a caption. No `[image: …]` label is drawn above the thumbnail; the filename under the reserved rows identifies an image that is still loading, and a failed decode already paints `[image unavailable: …]` into those rows.
 - `message_body_lines` no longer lets a media event's `formatted_body` replace its label. HTML is used only for the caption text itself.
 - Rows without thumbnails (files, audio, video) keep the label with the caption after it. Reply snippets, search results, and the media preview popup are unchanged.
 - This phase should land before phase 3 starts sending formatted captions.
