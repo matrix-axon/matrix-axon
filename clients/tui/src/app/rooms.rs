@@ -4,7 +4,6 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::api::{ApiError, AxonClient, EventDto, MemberDto, RoomDto, TimelinePage};
-use crate::config::TuiConfig;
 
 use super::{
     display_body_with_sender, format_time, match_status, next_match_index, relative_room_index,
@@ -68,6 +67,7 @@ impl App {
             self.status = Status::from(format!("refreshed {} rooms", self.rooms.rooms.len()));
         }
         self.sweep_visible_room_titles();
+        self.maybe_start_pin_migration();
     }
 
     fn prune_room_caches(&mut self, key: &RoomKey) {
@@ -118,7 +118,7 @@ impl App {
         let keys: Vec<RoomKey> = visible[start.min(end)..end]
             .iter()
             .filter_map(|index| self.rooms.rooms.get(*index))
-            .filter(|room| is_likely_dm(room))
+            .filter(|room| needs_derived_title(room))
             .map(RoomKey::from)
             .filter(|key| {
                 !self.room_titles.contains_key(key)
@@ -130,10 +130,14 @@ impl App {
         }
     }
 
-    /// Whether `key` is currently pinned. Used by the renderer to draw the
-    /// pinned/unpinned separator (ADR 0038).
+    /// Whether `key` is currently a favourite (`m.favourite`) or a not-yet
+    /// migrated local pin. Used by the renderer to draw the separator.
     pub(crate) fn is_room_pinned(&self, key: &RoomKey) -> bool {
-        self.pinned_rooms.contains(key)
+        self.rooms
+            .rooms
+            .iter()
+            .any(|room| RoomKey::from(room) == *key && room.is_favourite())
+            || self.pinned_rooms.contains(key)
     }
 
     /// Re-sort the loaded rooms in place after a pin/unpin or sort-mode change,
@@ -153,78 +157,6 @@ impl App {
                 .iter()
                 .position(|room| RoomKey::from(room) == key);
         }
-    }
-
-    /// Resolve the room a `/pin`/`/unpin` request targets: the explicit argument
-    /// if given, otherwise the currently selected room. Sets a status message and
-    /// returns `None` when resolution fails.
-    fn resolve_pin_room_index(&mut self, target: Option<&str>) -> Option<usize> {
-        match target {
-            Some(target) => match self.resolve_room_target(target) {
-                RoomTargetResolution::Match(index) => Some(index),
-                RoomTargetResolution::Ambiguous(options) => {
-                    self.status =
-                        Status::Info(format!("room name is ambiguous: {}", options.join(", ")));
-                    None
-                }
-                RoomTargetResolution::Missing => {
-                    self.status = Status::from(format!("room not found: {target}"));
-                    None
-                }
-            },
-            None => {
-                let index = self.rooms.selected;
-                if index.is_none() {
-                    self.status = Status::from("select a room to pin".to_owned());
-                }
-                index
-            }
-        }
-    }
-
-    /// Pin the target room (or re-pin an already-pinned room to the top of the
-    /// pinned section). Writes the new state to the config file immediately.
-    pub(crate) fn pin_room(&mut self, target: Option<&str>) {
-        let Some(index) = self.resolve_pin_room_index(target) else {
-            return;
-        };
-        let key = RoomKey::from(&self.rooms.rooms[index]);
-        let title = self.rooms.rooms[index].title().to_owned();
-        self.pinned_rooms.retain(|existing| existing != &key);
-        self.pinned_rooms.insert(0, key);
-        self.resort_rooms();
-        self.status = match self.persist_pinned_rooms() {
-            Ok(()) => Status::from(format!("pinned {title}")),
-            Err(err) => Status::from(format!("pinned {title} (config save failed: {err})")),
-        };
-    }
-
-    /// Unpin the target room. No-op (with a status message) if it is not pinned.
-    pub(crate) fn unpin_room(&mut self, target: Option<&str>) {
-        let Some(index) = self.resolve_pin_room_index(target) else {
-            return;
-        };
-        let key = RoomKey::from(&self.rooms.rooms[index]);
-        let title = self.rooms.rooms[index].title().to_owned();
-        if !self.pinned_rooms.iter().any(|existing| existing == &key) {
-            self.status = Status::from(format!("{title} is not pinned"));
-            return;
-        }
-        self.pinned_rooms.retain(|existing| existing != &key);
-        self.resort_rooms();
-        self.status = match self.persist_pinned_rooms() {
-            Ok(()) => Status::from(format!("unpinned {title}")),
-            Err(err) => Status::from(format!("unpinned {title} (config save failed: {err})")),
-        };
-    }
-
-    fn persist_pinned_rooms(&self) -> Result<(), String> {
-        let entries: Vec<String> = self
-            .pinned_rooms
-            .iter()
-            .map(RoomKey::to_config_entry)
-            .collect();
-        TuiConfig::save_pinned_rooms(&self.config_path, &entries).map_err(|err| err.to_string())
     }
 
     /// Whether `account_id` is an account we've listed and that is *not* active
@@ -1104,12 +1036,13 @@ pub(super) async fn fetch_straddling_timeline_page(
     }))
 }
 
-/// Whether a room is *likely* a DM (ADR 0042). Interim heuristic: a room with no
-/// `name` and no `canonical_alias` is treated as an unnamed/direct room. This is
-/// imperfect (a named two-person room reads as a group, an unnamed small group
-/// reads as a DM) and is slated to be replaced by the server-derived `is_direct`
-/// from ADR 0043 / PR #174 — swap the body here when that lands.
+/// Whether a room is a DM: the server-derived `m.direct` flag (ADR 0103).
 pub(crate) fn is_likely_dm(room: &RoomDto) -> bool {
+    room.is_direct
+}
+
+/// Rooms without a name or alias get a member-derived title in the list.
+fn needs_derived_title(room: &RoomDto) -> bool {
     room.name.as_deref().is_none_or(|n| n.trim().is_empty())
         && room
             .canonical_alias
@@ -1117,10 +1050,8 @@ pub(crate) fn is_likely_dm(room: &RoomDto) -> bool {
             .is_none_or(|a| a.trim().is_empty())
 }
 
-/// Order rooms with pinned rooms first (by their position in `pinned`, most
-/// recently pinned first — ADR 0038), then unpinned rooms by the active
-/// [`RoomSort`] (ADR 0042). The pinned section keeps its pin order regardless of
-/// the sort mode, since distinct pin ranks never reach the tiebreak.
+/// Order rooms with favourites first (by `m.favourite` `order`, then leftover
+/// local pins), then unpinned rooms by the active [`RoomSort`] (ADR 0103 / 0042).
 pub(crate) fn sort_rooms_by_pin_with_title<F>(
     rooms: &mut [RoomDto],
     pinned: &[RoomKey],
@@ -1129,26 +1060,37 @@ pub(crate) fn sort_rooms_by_pin_with_title<F>(
 ) where
     F: Fn(&RoomDto) -> String,
 {
-    // Both halves of the key used to be recomputed inside the comparator: the
-    // pin rank was a linear scan of `pinned`, and the alpha tiebreak allocated
-    // two lowercased `String`s — so O(n log n) scans and allocations for a
-    // sort that runs on every room refresh (#189). Index the pins once, and let
-    // `sort_by_cached_key` compute each room's key exactly once.
-    //
-    // Borrowing `pinned` (not `rooms`) keeps this free of the `&mut rooms`
-    // borrow, and the tuple key avoids building a `RoomKey` per lookup.
-    let pin_rank: HashMap<(Uuid, &str), usize> = pinned
+    // Local-pin overlay is only consulted when the room is not already a
+    // favourite. Index it once so the comparator stays O(1) per room.
+    let local_n = pinned.len().max(1) as f64;
+    let local_rank: HashMap<(Uuid, &str), f64> = pinned
         .iter()
         .enumerate()
-        .map(|(index, key)| ((key.account_id, key.room_id.as_str()), index))
+        .map(|(index, key)| {
+            (
+                (key.account_id, key.room_id.as_str()),
+                index as f64 / local_n,
+            )
+        })
         .collect();
-    // Lower rank (earlier in `pinned`) sorts first; unpinned rooms get
-    // usize::MAX and fall to the bottom. Ties use the active sort mode.
-    let rank = |room: &RoomDto| {
-        pin_rank
+    let favourite_key = |room: &RoomDto| -> Option<u64> {
+        if let Some(order) = room.favourite_order() {
+            return Some(order.to_bits());
+        }
+        if room.is_favourite() {
+            return Some(f64::INFINITY.to_bits());
+        }
+        local_rank
             .get(&(room.account_id, room.room_id.as_str()))
             .copied()
-            .unwrap_or(usize::MAX)
+            .map(f64::to_bits)
+    };
+    // Favourites (or overlay pins) sort first; among them, lower order first.
+    // Unpinned rooms use the active sort mode. `to_bits` is monotonic for the
+    // non-negative finite orders Matrix allows.
+    let rank = |room: &RoomDto| match favourite_key(room) {
+        Some(order_bits) => (0u8, order_bits),
+        None => (1u8, 0),
     };
     match sort {
         RoomSort::RecentActivity => {
@@ -1167,7 +1109,7 @@ pub(crate) fn sort_rooms_by_pin_with_title<F>(
 }
 
 #[cfg(test)]
-fn sort_rooms_by_pin(rooms: &mut [RoomDto], pinned: &[RoomKey], sort: RoomSort) {
+pub(crate) fn sort_rooms_by_pin(rooms: &mut [RoomDto], pinned: &[RoomKey], sort: RoomSort) {
     sort_rooms_by_pin_with_title(rooms, pinned, sort, |room| room.title().to_owned());
 }
 
@@ -1422,8 +1364,11 @@ mod tests {
             topic: None,
             avatar_url: None,
             canonical_alias: None,
+            room_type: None,
             last_activity_ts,
             last_event_id: None,
+            tags: Vec::new(),
+            is_direct: false,
         }
     }
 
@@ -1552,20 +1497,16 @@ mod tests {
     }
 
     #[test]
-    fn is_likely_dm_uses_name_and_alias_heuristic() {
+    fn is_likely_dm_uses_is_direct() {
         let acct = Uuid::nil();
-        // No name, no alias → treated as a DM.
-        assert!(is_likely_dm(&room_with_activity(acct, "!dm:srv", 1)));
-        // A blank name is also treated as unnamed.
-        let mut blank = room_with_activity(acct, "!blank:srv", 1);
-        blank.name = Some("   ".to_owned());
-        assert!(is_likely_dm(&blank));
-        // A named room is a group.
+        let mut dm = room_with_activity(acct, "!dm:srv", 1);
+        dm.is_direct = true;
+        dm.name = Some("Alice".to_owned());
+        assert!(is_likely_dm(&dm));
+        // A named group is not a DM even with no alias.
         assert!(!is_likely_dm(&named_room(acct, "!g:srv", "Team", 1)));
-        // An aliased but unnamed room is a group too.
-        let mut aliased = room_with_activity(acct, "!al:srv", 1);
-        aliased.canonical_alias = Some("#team:srv".to_owned());
-        assert!(!is_likely_dm(&aliased));
+        // An unnamed room is not a DM unless `is_direct` says so.
+        assert!(!is_likely_dm(&room_with_activity(acct, "!opaque:srv", 1)));
     }
 
     fn msg(event_id: &str, body: &str) -> EventDto {

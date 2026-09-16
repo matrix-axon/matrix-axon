@@ -237,8 +237,9 @@ impl TuiConfig {
     }
 
     /// Persist the pinned-room list back to the `[display]` section of the config
-    /// file, leaving every other setting and the file's comments intact. Written
-    /// eagerly on each pin/unpin (ADR 0038).
+    /// file, leaving every other setting and the file's comments intact.
+    /// Used to clear leftover local pins after they migrate to `m.favourite`
+    /// (ADR 0103); the key stays readable so older TUI builds still parse.
     pub fn save_pinned_rooms(path: &Path, pinned_rooms: &[String]) -> Result<(), ConfigError> {
         let text = fs::read_to_string(path)?;
         let (raw, _) = RawConfig::load_with_defaults(&text)?;
@@ -414,8 +415,9 @@ pub struct DisplayOptions {
     pub accept_incoming_verification: bool,
     pub accounts_panel_width: u16,
     pub rooms_panel_width_adj: i16,
-    /// Pinned rooms, serialized as `"account_id:room_id"`, ordered most recently
-    /// pinned first (index 0 = top of the pinned section). See ADR 0038.
+    /// Legacy local pins, serialized as `"account_id:room_id"`. Migrated to
+    /// `m.favourite` on the first room-list load (ADR 0103); kept so older
+    /// TUI builds still parse the file.
     pub pinned_rooms: Vec<String>,
     /// Room-list sort mode token (`recent`/`oldest`/`az`/`za`). See ADR 0042.
     pub room_sort: String,

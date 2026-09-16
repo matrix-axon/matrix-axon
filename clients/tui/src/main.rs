@@ -478,6 +478,7 @@ async fn run_app(
     let (members_tx, mut members_rx) = mpsc::unbounded_channel();
     let (drafts_tx, mut drafts_rx) = mpsc::unbounded_channel();
     let (room_action_tx, mut room_action_rx) = mpsc::unbounded_channel();
+    let (tag_write_tx, mut tag_write_rx) = mpsc::unbounded_channel();
     let (bootstrap_tx, mut bootstrap_rx) = mpsc::unbounded_channel();
     let mut app = App::new(client, account_filter, config, picker);
     app.set_lifecycle_sender(lifecycle_tx);
@@ -487,6 +488,7 @@ async fn run_app(
     app.set_members_sender(members_tx);
     app.set_drafts_sender(drafts_tx);
     app.set_room_action_sender(room_action_tx);
+    app.set_tag_write_sender(tag_write_tx);
     app.set_bootstrap_sender(bootstrap_tx);
     app.set_device_id(app::load_or_create_device_id(&app.config_path));
     // Startup runs as spawned stages drained below, so the loop paints and
@@ -639,6 +641,9 @@ async fn run_app(
             }
             Some(outcome) = room_action_rx.recv() => {
                 app.handle_room_action_outcome(outcome).await;
+            }
+            Some(outcome) = tag_write_rx.recv() => {
+                app.handle_tag_write_outcome(outcome).await;
             }
             Some(result) = media_rx.recv() => {
                 app.handle_media_result(result);
