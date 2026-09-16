@@ -6,8 +6,8 @@ browser loads it directly as a favicon; everything else is rasterised from it
 and committed rather than built:
 
 - `clients/web/src-tauri/icons/` — 52 files, by `pnpm exec tauri icon`
-- `clients/web/public/{favicon,icon-152,icon-167,icon-180}.png` — by
-  `scripts/build-web-icons.sh`
+- `clients/web/public/{favicon,icon-152,icon-167,icon-180}.png` and the
+  `docs/brand/` marks — by `scripts/build-brand-assets.py`
 
 Changing the master without rerunning both ships the old artwork, and nothing
 would notice: no build reads the SVG except as a static asset, and the five
@@ -55,7 +55,12 @@ DERIVED = (
         "the browser set",
         lambda name: name.startswith("clients/web/public/")
         and name.endswith(".png"),
-        "scripts/build-web-icons.sh",
+        "scripts/build-brand-assets.py",
+    ),
+    (
+        "the brand marks",
+        lambda name: name.startswith("docs/brand/axon-mark-"),
+        "scripts/build-brand-assets.py",
     ),
 )
 
@@ -71,13 +76,19 @@ def main(argv: list[str]) -> int:
     ]
     if not stale:
         return 0
-    print(f"{SOURCE} changed but {' and '.join(l for l, _ in stale)} did not.", file=sys.stderr)
+    missing = [label for label, _ in stale]
+    if len(missing) > 1:
+        missing = [", ".join(missing[:-1]), missing[-1]]
+    print(f"{SOURCE} changed but {' and '.join(missing)} did not.", file=sys.stderr)
     print(file=sys.stderr)
     print("The icons are generated and committed, not built. Regenerate in the", file=sys.stderr)
     print("same commit:", file=sys.stderr)
     print(file=sys.stderr)
+    seen: list[str] = []
     for _, command in stale:
-        print(f"    {command}", file=sys.stderr)
+        if command not in seen:
+            seen.append(command)
+            print(f"    {command}", file=sys.stderr)
     print(file=sys.stderr)
     print(
         "If you meant to change only the source -- to record better artwork for\n"

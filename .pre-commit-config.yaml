@@ -259,7 +259,7 @@ repos:
         name: app icons match their source
         language: system
         entry: scripts/check-icons-regenerated.py
-        files: '^clients/web/(public/(favicon\.svg|favicon\.png|icon-1[0-9]+\.png)|src-tauri/icons/)'
+        files: '^(clients/web/(public/(favicon\.svg|favicon\.png|icon-1[0-9]+\.png)|src-tauri/icons/)|docs/brand/axon-mark-)'
         pass_filenames: true
         stages: [pre-push]
       - id: shell-fmt

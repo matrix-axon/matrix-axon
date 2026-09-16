@@ -313,8 +313,8 @@ is rasterised from it. One file, so the two cannot drift.
 Everything else is generated and committed:
 
 ```sh
-scripts/build-web-icons.sh                                             # this client
-pnpm exec tauri icon public/favicon.svg -o src-tauri/icons             # the shell
+scripts/build-brand-assets.py                                # this client, and docs/brand/
+pnpm exec tauri icon public/favicon.svg -o src-tauri/icons   # the shell
 ```
 
 The `icons-regenerated` pre-push hook refuses a change to the master that does
@@ -322,8 +322,9 @@ not regenerate both. Nothing in either build reads it except as a static asset,
 so a forgotten regeneration ships the old mark silently — which has happened
 here before.
 
-`favicon.png` is transparent, because a browser tab composites it onto its own
-chrome. The `icon-*.png` apple-touch icons are opaque on white, because iOS
+`docs/brand/` holds the same mark on solid backgrounds, for slides and
+documents — see its README. `favicon.png` is transparent, because a browser tab
+composites it onto its own chrome. The `icon-*.png` apple-touch icons are opaque on white, because iOS
 renders a transparent one against black. See `src-tauri/README.md` for the rest
 of the reasoning, including why the shell's iOS set is treated differently
 again.

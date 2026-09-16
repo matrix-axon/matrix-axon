@@ -144,6 +144,10 @@ CASES: list[tuple[str, set[str]]] = [
         {"icons-regenerated", "web-lint", "web-test", "web-build"},
     ),
     ("clients/web/src-tauri/icons/128x128.png", {"icons-regenerated"}),
+    # Brand marks for documents and slides. Derived from the same master, so
+    # they drift the same way; outside clients/ because they are not part of
+    # any client.
+    ("docs/brand/axon-mark-dark.png", {"icons-regenerated"}),
     # Cargo build output is not ours -- not linted, not formatted, not a gate.
     ("clients/web/src-tauri/target/debug/build/x/out/__global-api-script.js", set()),
     # ...but the root workspace's own manifest still gates the workspace hooks
