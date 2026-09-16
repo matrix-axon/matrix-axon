@@ -10,8 +10,8 @@ use axon_core::{
     ResolvedPowerLevels, RoomPreset,
 };
 use axon_store::{
-    Account, AccountState, DeviceStateRow, ReactionTally, RoomInvite, RoomSummary, SpaceChildRow,
-    SpaceParentRow, ThreadSummary, TimelineRow,
+    Account, AccountState, DeviceStateRow, ReactionTally, RoomInvite, RoomSummary,
+    RoomTag as StoreRoomTag, SpaceChildRow, SpaceParentRow, ThreadSummary, TimelineRow,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,6 +56,35 @@ pub struct RoomDto {
     /// SDK-derived highlight count (issue #313, ADR 0070), from
     /// `Room::num_unread_mentions()`.
     pub highlight_count: i64,
+    /// This account's `m.tag` entries on the room (ADR 0103). Omitted when
+    /// empty so untagged rooms do not grow the already-large list.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(required = false)]
+    pub tags: Vec<RoomTag>,
+    /// Whether this room appears in the account's global `m.direct` map
+    /// (ADR 0103 / ADR 0055 Tier 1).
+    pub is_direct: bool,
+}
+
+/// One tag on a room (`GET /v1/rooms`, ADR 0103). `name` is the Matrix wire
+/// form (`m.favourite`, `m.lowpriority`, `u.work`, …); `order` is the
+/// optional sort key in `[0, 1]`.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct RoomTag {
+    /// Matrix tag name.
+    pub name: String,
+    /// Optional sort order among this account's rooms with this tag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<f64>,
+}
+
+impl From<StoreRoomTag> for RoomTag {
+    fn from(tag: StoreRoomTag) -> Self {
+        RoomTag {
+            name: tag.name,
+            order: tag.order,
+        }
+    }
 }
 
 impl From<RoomSummary> for RoomDto {
@@ -73,6 +102,8 @@ impl From<RoomSummary> for RoomDto {
             last_event_id: r.last_event_id,
             notification_count: r.notification_count,
             highlight_count: r.highlight_count,
+            tags: r.tags.into_iter().map(RoomTag::from).collect(),
+            is_direct: r.is_direct,
         }
     }
 }
@@ -1847,5 +1878,33 @@ pub struct PutDeviceStateRequest {
 pub struct PutDeviceStateResponse {
     /// When the write landed (server clock), RFC 3339 — the last-write-wins
     /// ordering all devices share.
+    pub updated_at: String,
+}
+
+/// One instance preference (`GET /v1/preferences/{key}`, ADR 0103).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PreferenceDto {
+    /// Allowlisted key, currently `space_order`.
+    pub key: String,
+    /// The stored JSON value.
+    pub value: Value,
+    /// When the value was last written (server clock), RFC 3339.
+    pub updated_at: String,
+}
+
+/// Body of `PUT /v1/preferences/{key}` (ADR 0103). `device_id` is echoed on
+/// the `preferences.changed` frame so the originator can drop it.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PutPreferenceRequest {
+    /// The writing device (client-supplied UUID).
+    pub device_id: Uuid,
+    /// The whole preference value. Last-write-wins.
+    pub value: Value,
+}
+
+/// Response of `PUT /v1/preferences/{key}` (ADR 0103).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PutPreferenceResponse {
+    /// When the write landed (server clock), RFC 3339.
     pub updated_at: String,
 }

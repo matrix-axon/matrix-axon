@@ -12,7 +12,7 @@
 
 mod common;
 
-use axon_store::{AccountState, NewEvent, RoomStateUpsert, Store};
+use axon_store::{AccountDataUpsert, AccountState, NewEvent, RoomStateUpsert, RoomTag, Store};
 use common::{insert_message, test_account};
 use serde_json::{json, Value};
 use sqlx_postgres::Postgres;
@@ -149,6 +149,8 @@ async fn list_rooms_orders_by_activity_with_summary_fields() {
         "room B has no unread-counts row yet — reads as 0, not NULL"
     );
     assert_eq!(rooms[0].highlight_count, 0);
+    assert!(rooms[0].tags.is_empty(), "untagged rooms carry no tags");
+    assert!(!rooms[0].is_direct);
 
     assert_eq!(rooms[1].room_id, room_a);
     assert!(rooms[1].account_user_id.starts_with("@rooms-"));
@@ -164,6 +166,8 @@ async fn list_rooms_orders_by_activity_with_summary_fields() {
     assert_eq!(rooms[1].room_type.as_deref(), Some("m.space"));
     assert_eq!(rooms[1].notification_count, 4);
     assert_eq!(rooms[1].highlight_count, 1);
+    assert!(rooms[1].tags.is_empty());
+    assert!(!rooms[1].is_direct);
 
     common::cleanup_account(&pool, account_id).await;
 }
@@ -844,4 +848,89 @@ async fn get_event_hit_miss_and_redaction_masking() {
     );
 
     common::cleanup_account(&pool, account_id).await;
+}
+
+/// Tags come from the per-room `m.tag` account-data row; `is_direct` is true
+/// when the room id appears in any array of the account's global `m.direct`
+/// map (ADR 0103). A sibling account's `m.direct` does not leak.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn list_rooms_exposes_tags_and_is_direct() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "tags").await;
+    let other = test_account(&store, "tags-other").await;
+    let fav = format!("!fav-{}:localhost", Uuid::new_v4());
+    let dm = format!("!dm-{}:localhost", Uuid::new_v4());
+    let plain = format!("!plain-{}:localhost", Uuid::new_v4());
+    insert_message(&store, account_id, &fav, 3_000, "fav").await;
+    insert_message(&store, account_id, &dm, 2_000, "dm").await;
+    insert_message(&store, account_id, &plain, 1_000, "plain").await;
+
+    store
+        .upsert_account_data(&AccountDataUpsert {
+            account_id,
+            room_id: Some(&fav),
+            event_type: "m.tag",
+            content: json!({
+                "tags": {
+                    "m.favourite": { "order": 0.25 },
+                    "u.work": {}
+                }
+            }),
+        })
+        .await
+        .expect("m.tag");
+    store
+        .upsert_account_data(&AccountDataUpsert {
+            account_id,
+            room_id: None,
+            event_type: "m.direct",
+            content: json!({ "@bob:localhost": [dm] }),
+        })
+        .await
+        .expect("m.direct");
+    // A different account marking `plain` as a DM must not flip this account.
+    store
+        .upsert_account_data(&AccountDataUpsert {
+            account_id: other,
+            room_id: None,
+            event_type: "m.direct",
+            content: json!({ "@alice:localhost": [plain] }),
+        })
+        .await
+        .expect("other m.direct");
+
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    let by_id = |id: &str| rooms.iter().find(|r| r.room_id == id).expect("room");
+
+    let fav_room = by_id(&fav);
+    assert_eq!(
+        fav_room.tags,
+        vec![
+            RoomTag {
+                name: "m.favourite".to_owned(),
+                order: Some(0.25),
+            },
+            RoomTag {
+                name: "u.work".to_owned(),
+                order: None,
+            },
+        ]
+    );
+    assert!(!fav_room.is_direct);
+
+    let dm_room = by_id(&dm);
+    assert!(dm_room.tags.is_empty());
+    assert!(dm_room.is_direct);
+
+    let plain_room = by_id(&plain);
+    assert!(plain_room.tags.is_empty());
+    assert!(
+        !plain_room.is_direct,
+        "sibling account's m.direct must not leak"
+    );
+
+    common::cleanup_account(&pool, account_id).await;
+    common::cleanup_account(&pool, other).await;
 }

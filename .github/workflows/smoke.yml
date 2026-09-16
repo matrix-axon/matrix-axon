@@ -12,6 +12,11 @@ name: smoke
 # regression through; the honest alternative — blocking every PR on a Docker
 # stack — costs more than it saves at this size.
 #
+# `matrix-oauth` independently runs the four ADR 0097 API and interoperability
+# lanes on the same post-merge and nightly events. It stays in its own job so
+# its secret-safe no-artifact policy and failure signal cannot be confused with
+# the ordinary smoke harness.
+#
 # Before this split the whole gate was workflow_dispatch-only, so nothing ran
 # it automatically and `scroll_pin_on_relation_refresh` sat broken on main long
 # enough that its start could not be dated (#190).
@@ -72,7 +77,7 @@ jobs:
 
       - name: Upload failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: smoke-artifacts-stub
           path: smoke-artifacts/
@@ -127,7 +132,7 @@ jobs:
 
       - name: Upload failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: smoke-artifacts-true-local
           path: smoke-artifacts/
@@ -145,6 +150,18 @@ jobs:
           JOB_LABEL: true-local
           STATUS: ${{ job.status }}
         run: ./scripts/notify-smoke-result.sh
+
+  # Does not gate pull requests: this pulls pinned Synapse and MAS images and
+  # exercises an unstable Matrix protocol with real OAuth and E2EE secrets.
+  matrix-oauth:
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    uses: ./.github/workflows/matrix-oauth.yml
+    with:
+      suite: matrix-oauth-all
+      notify: true
+    secrets:
+      NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
+      NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
 
   # Exercises the notification path itself, by hand, without paying for a lane.
   # Reaching the webhook at all is the whole result, so this job deliberately

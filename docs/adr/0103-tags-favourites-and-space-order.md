@@ -1,8 +1,8 @@
 # ADR 0103 — Tags, favourites, and space order
 
-**Status:** Proposed — design only. Tracked in issue #365;
-this document is #366. Implementation is #367 (server), #368 (web),
-#369 (TUI favs), #370 (TUI spaces).
+**Status:** Accepted — server (#367) has landed.
+Web (#368), TUI favs (#369), and TUI spaces (#370) are still open.
+Tracked in issue #365; this document is #366.
 
 Supersedes ADR 0038 Phase 2 and the still-open half of ADR 0055 Tier 1
 (`tags` / `is_direct` on `RoomDto`; `room_type` already shipped).
@@ -72,7 +72,8 @@ Older clients ignore unknown fields.
 After a successful `set_tag` / `remove_tag`, upsert the room's `m.tag` row so
 the next `GET /v1/rooms` is correct without waiting for the sync echo.
 
-On every `persist_account_data` (sync ingest **and** that upsert), publish:
+On a successful `persist_account_data` for `m.tag` or `m.direct` (sync ingest
+**and** the write-path upsert), publish:
 
 ```text
 type: "account_data.changed"
@@ -83,10 +84,9 @@ payload: { room_id?: string, event_type: string, content: object }
 care about `m.tag` patch `RoomDto.tags`. This is the account-data analogue of
 `unread_counts.changed` (ADR 0070), not a raw timeline event.
 
-A tags-only frame would also work; a generic Matrix account-data frame also
-carries `m.direct` without a second type. Issue #343's "push resolved
-metadata" point applies to **state** events (`m.room.name`) and is not this
-ADR.
+Other account-data types (`m.push_rules`, SSSS/backup blobs, per-room `m.fully_read`) are stored and not pushed — the same fail-closed allowlist ADR 0056 uses for ephemeral passthrough, so an initial sync cannot lag a connected client out of its timeline frames.
+A tags-only frame would also work; one generic type covering `m.tag` and `m.direct` avoids a second frame.
+Issue #343's "push resolved metadata" point applies to **state** events (`m.room.name`) and is not this ADR.
 
 Do **not** build generic Matrix account-data GET/PUT here. Tags ride
 `RoomDto`; space order is not Matrix account data (below). ADR 0055 Tier 2
@@ -114,6 +114,8 @@ KEY`, `value JSONB NOT NULL`, `updated_at` via the shared trigger). No
 - PUT body includes `device_id` so the live frame can echo-suppress.
 - After PUT: persist and emit `preferences.changed` `{ key, value, device_id }`.
   Receivers drop frames whose `device_id` is their own (ADR 0048's rule).
+  The `/v1/ws` envelope still carries `account_id` (the nil UUID) so existing clients that require the field can ignore an unknown `type`.
+  A consumer that self-filters live frames by known account ids must treat this type as instance-scoped and not drop it.
 
 This follows every Axon client of **this** instance. It does not go to the
 homeserver, so it does not follow the user to Element or to a freshly

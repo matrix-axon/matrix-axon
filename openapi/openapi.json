@@ -7415,6 +7415,144 @@
         "security": []
       }
     },
+    "/v1/preferences/{key}": {
+      "get": {
+        "tags": [
+          "preferences"
+        ],
+        "summary": "Read one instance preference. An allowlisted key that has never been\nwritten is a `404` so a client can tell \"unset\" from an empty value\n(ADR 0103's one-shot upload of local `spaceOrder`).",
+        "operationId": "get_preference",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Preference key; currently only `space_order`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stored preference",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_PreferenceDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown preference key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Preference has never been written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "preferences"
+        ],
+        "summary": "Write one instance preference. Last-write-wins on the whole value. A\nsuccessful write fans out `preferences.changed` carrying this `device_id`.",
+        "operationId": "put_preference",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Preference key; currently only `space_order`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutPreferenceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The write's server timestamp",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_PutPreferenceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown key, invalid value, or value over 64 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/rooms": {
       "get": {
         "tags": [
@@ -8425,6 +8563,37 @@
           }
         }
       },
+      "ApiResponse_PreferenceDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One instance preference (`GET /v1/preferences/{key}`, ADR 0103).",
+            "required": [
+              "key",
+              "value",
+              "updated_at"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "description": "Allowlisted key, currently `space_order`."
+              },
+              "updated_at": {
+                "type": "string",
+                "description": "When the value was last written (server clock), RFC 3339."
+              },
+              "value": {
+                "description": "The stored JSON value."
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_PublicRoomsPageDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -8486,6 +8655,28 @@
               "updated_at": {
                 "type": "string",
                 "description": "When the write landed (server clock), RFC 3339 — the last-write-wins\nordering all devices share."
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_PutPreferenceResponse": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response of `PUT /v1/preferences/{key}` (ADR 0103).",
+            "required": [
+              "updated_at"
+            ],
+            "properties": {
+              "updated_at": {
+                "type": "string",
+                "description": "When the write landed (server clock), RFC 3339."
               }
             }
           }
@@ -9348,7 +9539,8 @@
                 "room_id",
                 "last_activity_ts",
                 "notification_count",
-                "highlight_count"
+                "highlight_count",
+                "is_direct"
               ],
               "properties": {
                 "account_id": {
@@ -9378,6 +9570,10 @@
                   "type": "integer",
                   "format": "int64",
                   "description": "SDK-derived highlight count (issue #313, ADR 0070), from\n`Room::num_unread_mentions()`."
+                },
+                "is_direct": {
+                  "type": "boolean",
+                  "description": "Whether this room appears in the account's global `m.direct` map\n(ADR 0103 / ADR 0055 Tier 1)."
                 },
                 "last_activity_ts": {
                   "type": "integer",
@@ -9413,6 +9609,13 @@
                     "null"
                   ],
                   "description": "The room's `m.room.create` `type`, if any (for example `m.space`)."
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RoomTag"
+                  },
+                  "description": "This account's `m.tag` entries on the room (ADR 0103). Omitted when\nempty so untagged rooms do not grow the already-large list."
                 },
                 "topic": {
                   "type": [
@@ -10878,6 +11081,28 @@
           }
         }
       },
+      "PreferenceDto": {
+        "type": "object",
+        "description": "One instance preference (`GET /v1/preferences/{key}`, ADR 0103).",
+        "required": [
+          "key",
+          "value",
+          "updated_at"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Allowlisted key, currently `space_order`."
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "When the value was last written (server clock), RFC 3339."
+          },
+          "value": {
+            "description": "The stored JSON value."
+          }
+        }
+      },
       "PublicRoomSummaryDto": {
         "type": "object",
         "description": "One room in a [`PublicRoomsPageDto`].",
@@ -11000,6 +11225,37 @@
           "updated_at": {
             "type": "string",
             "description": "When the write landed (server clock), RFC 3339 — the last-write-wins\nordering all devices share."
+          }
+        }
+      },
+      "PutPreferenceRequest": {
+        "type": "object",
+        "description": "Body of `PUT /v1/preferences/{key}` (ADR 0103). `device_id` is echoed on\nthe `preferences.changed` frame so the originator can drop it.",
+        "required": [
+          "device_id",
+          "value"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The writing device (client-supplied UUID)."
+          },
+          "value": {
+            "description": "The whole preference value. Last-write-wins."
+          }
+        }
+      },
+      "PutPreferenceResponse": {
+        "type": "object",
+        "description": "Response of `PUT /v1/preferences/{key}` (ADR 0103).",
+        "required": [
+          "updated_at"
+        ],
+        "properties": {
+          "updated_at": {
+            "type": "string",
+            "description": "When the write landed (server clock), RFC 3339."
           }
         }
       },
@@ -11155,7 +11411,8 @@
           "room_id",
           "last_activity_ts",
           "notification_count",
-          "highlight_count"
+          "highlight_count",
+          "is_direct"
         ],
         "properties": {
           "account_id": {
@@ -11185,6 +11442,10 @@
             "type": "integer",
             "format": "int64",
             "description": "SDK-derived highlight count (issue #313, ADR 0070), from\n`Room::num_unread_mentions()`."
+          },
+          "is_direct": {
+            "type": "boolean",
+            "description": "Whether this room appears in the account's global `m.direct` map\n(ADR 0103 / ADR 0055 Tier 1)."
           },
           "last_activity_ts": {
             "type": "integer",
@@ -11220,6 +11481,13 @@
               "null"
             ],
             "description": "The room's `m.room.create` `type`, if any (for example `m.space`)."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoomTag"
+            },
+            "description": "This account's `m.tag` entries on the room (ADR 0103). Omitted when\nempty so untagged rooms do not grow the already-large list."
           },
           "topic": {
             "type": [
@@ -11284,6 +11552,27 @@
           "public_chat",
           "trusted_private_chat"
         ]
+      },
+      "RoomTag": {
+        "type": "object",
+        "description": "One tag on a room (`GET /v1/rooms`, ADR 0103). `name` is the Matrix wire\nform (`m.favourite`, `m.lowpriority`, `u.work`, …); `order` is the\noptional sort key in `[0, 1]`.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Matrix tag name."
+          },
+          "order": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Optional sort order among this account's rooms with this tag."
+          }
+        }
       },
       "RoomUpgradeDto": {
         "type": "object",
@@ -12029,6 +12318,10 @@
     {
       "name": "device-state",
       "description": "Per-device client state: drafts, read markers"
+    },
+    {
+      "name": "preferences",
+      "description": "Instance-wide preferences: mixed-account space order"
     }
   ]
 }

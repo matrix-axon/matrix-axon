@@ -29,6 +29,8 @@ use axon_core::{
     CreateRoomRequest, MatrixProfile, PowerLevelChanges, PublicRoomsPage, PublicRoomsQuery,
     ResolvedPowerLevels,
 };
+use axon_store::Store;
+use futures_util::future::FutureExt;
 use futures_util::StreamExt;
 use uuid::Uuid;
 
@@ -70,6 +72,68 @@ impl StubTokenVerifier {
 impl TokenVerifier for StubTokenVerifier {
     async fn verify(&self, token: &str) -> Result<bool, ApiError> {
         Ok(token == self.accepted && self.active.load(Ordering::SeqCst))
+    }
+}
+
+/// Snapshot `space_order`, run `body` against a missing key, then restore.
+///
+/// `instance_preferences` is process-global, so a naive DELETE would clobber a
+/// live Axon's rail and race the other test binary that also writes this key.
+/// A session advisory lock held on one pool connection serializes callers
+/// (including `http.rs` and `ws.rs` running as separate processes).
+pub async fn with_isolated_space_order<F, Fut>(store: &Store, body: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut lock_conn = store.pool().acquire().await.expect("lock connection");
+    sqlx_core::query::query("SELECT pg_advisory_lock(hashtext('axon.test.space_order'))")
+        .execute(&mut *lock_conn)
+        .await
+        .expect("advisory lock");
+    let previous = store
+        .instance_preference("space_order")
+        .await
+        .expect("snapshot space_order");
+    sqlx_core::query::query("DELETE FROM instance_preferences WHERE key = 'space_order'")
+        .execute(store.pool())
+        .await
+        .expect("clear space_order");
+    // Catch a panic from the wrapped test so we still restore and unlock.
+    // A session advisory lock survives `Drop` of a pooled connection, so
+    // leaking it turns one assertion failure into a hung later test.
+    let panicked = std::panic::AssertUnwindSafe(body())
+        .catch_unwind()
+        .await
+        .err();
+    let restore_err = match &previous {
+        Some(row) => store
+            .upsert_instance_preference("space_order", &row.value)
+            .await
+            .err()
+            .map(|err| err.to_string()),
+        None => {
+            sqlx_core::query::query("DELETE FROM instance_preferences WHERE key = 'space_order'")
+                .execute(store.pool())
+                .await
+                .err()
+                .map(|err| err.to_string())
+        }
+    };
+    let unlock_err =
+        sqlx_core::query::query("SELECT pg_advisory_unlock(hashtext('axon.test.space_order'))")
+            .execute(&mut *lock_conn)
+            .await
+            .err()
+            .map(|err| err.to_string());
+    if let Some(payload) = panicked {
+        std::panic::resume_unwind(payload);
+    }
+    if let Some(err) = restore_err {
+        panic!("restore space_order: {err}");
+    }
+    if let Some(err) = unlock_err {
+        panic!("advisory unlock: {err}");
     }
 }
 

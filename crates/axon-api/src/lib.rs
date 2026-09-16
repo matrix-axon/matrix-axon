@@ -428,6 +428,12 @@ pub fn router(state: AppState) -> Router {
             "/v1/devices/{device_id}/state/{namespace}",
             get(routes::device_state::get_device_state).put(routes::device_state::put_device_state),
         )
+        // Instance-wide preferences (ADR 0103): space-rail order, not nested
+        // under an account. Allowlisted keys only; unknown keys 400.
+        .route(
+            "/v1/preferences/{key}",
+            get(routes::preferences::get_preference).put(routes::preferences::put_preference),
+        )
         // Media proxy. Authenticated download of an `mxc://` resource through
         // the account's live homeserver connection. Returns raw bytes, not the
         // JSON envelope, so it is not expressible cleanly in the same response

@@ -532,6 +532,7 @@ describe('RoomPage', () => {
           last_activity_ts: T0,
           highlight_count: 0,
           notification_count: 0,
+          is_direct: false,
         },
         {
           account_id: ACCOUNT,
@@ -542,6 +543,7 @@ describe('RoomPage', () => {
           last_activity_ts: T0 - 1,
           highlight_count: 0,
           notification_count: 0,
+          is_direct: false,
         },
       ],
     })
@@ -654,6 +656,7 @@ describe('RoomPage', () => {
             last_activity_ts: 10,
             notification_count: 0,
             highlight_count: 0,
+            is_direct: false,
           },
           {
             account_id: ACCOUNT,
@@ -665,6 +668,7 @@ describe('RoomPage', () => {
             last_activity_ts: 0,
             notification_count: 0,
             highlight_count: 0,
+            is_direct: false,
           },
         ],
         members: [
