@@ -693,7 +693,7 @@ describe('OAuth client identity from the platform', () => {
     // The bug this exists for: the shell overrode the redirect URI but kept
     // the build-time `axon-web` client id, and the server allow-lists URIs
     // *per client id* — so the pair was unregistered and every sign-in died
-    // at `/v1/oauth/authorize` with "unknown client_id or redirect_uri".
+    // at `/v1/oauth/authorize`, which names which half was wrong (#399).
     // Half-configuring is the whole failure mode, so assert both together.
     const navigated: string[] = []
     const services = createServices(memoryStorage(), memoryStorage(), {

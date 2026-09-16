@@ -258,7 +258,8 @@ export function boundedSignal(
  * `clientId` and `redirectUri` are one registration, not two settings: the
  * server allow-lists URIs per client id, so `axon-desktop` with the browser's
  * callback — or `axon-web` with this one — is an unregistered *pair* and is
- * refused with "unknown client_id or redirect_uri". The shell previously set
+ * refused -- the server names which half is wrong, and logs the pair it was
+ * sent (#399). The shell previously set
  * only the URI and kept the build-time `axon-web`, which is precisely that.
  *
  * The redirect is a reverse-domain scheme per RFC 8252 § 7.1 and ADR 0102 § 4,

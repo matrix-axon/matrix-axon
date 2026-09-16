@@ -115,7 +115,8 @@ export interface Platform {
    * allow-lists redirect URIs *per client id*
    * (`OAuthClients::redirect_uri_allowed`), so a client id paired with the
    * wrong URI is not a partial configuration — it is an unregistered pair, and
-   * `/v1/oauth/authorize` rejects it with "unknown client_id or redirect_uri".
+   * `/v1/oauth/authorize` rejects it with "unknown client_id" or
+   * "redirect_uri is not registered for this client_id".
    * Setting one without the other is exactly the shape of that mistake, so
    * they cannot be set separately.
    *

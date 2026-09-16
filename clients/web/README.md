@@ -320,17 +320,23 @@ same way:
 - **Clients are read once at boot**, so the server needs a restart after this
   is edited.
 
-All three are rejected with the same message, which by design does not say
-which half was wrong:
+Each is rejected at `/v1/oauth/authorize` with a `400` naming which half was
+wrong — `unknown client_id`, or:
 
 ```json
 {
   "error": {
     "code": "bad_request",
-    "message": "unknown client_id or redirect_uri"
+    "message": "redirect_uri is not registered for this client_id"
   }
 }
 ```
+
+The server also logs the requested `client_id` and `redirect_uri` at `WARN`, so
+the pair it actually received can be compared against `[[oauth.clients]]`
+without reading it out of someone's address bar (#399). A server older than
+that answers `unknown client_id or redirect_uri` for all three and logs
+nothing.
 
 Provider buttons are discovered at runtime from `GET /v1/oauth/providers`, so
 a client can be pointed at a server it was not built against and still offer
