@@ -303,19 +303,24 @@ pub(crate) fn message_layout(
                 .saturating_sub(glyph_cols)
                 .saturating_sub(thread_root_cols)
         };
-        let mut body_lines =
-            message_body_lines(event, sender_label, first_body_w, cont_body_w, colors);
-        let body_row_count = body_lines.len().max(1);
-        if let Some((account_id, mxc_url)) = event.image_mxc() {
+        // An image with an inline thumbnail has no body text above it: the
+        // thumbnail sits directly under the header (and any reply/thread
+        // context line), and the caption — or the filename — goes under the
+        // thumbnail, as in the web client. Other media keep their text label.
+        let thumbnail = event.image_mxc();
+        let mut caption_block = Vec::new();
+        let mut body_lines = if thumbnail.is_some() {
+            Vec::new()
+        } else {
+            message_body_lines(event, sender_label, first_body_w, cont_body_w, colors)
+        };
+        if let Some((account_id, mxc_url)) = thumbnail.clone() {
             let key = (account_id, mxc_url);
             // Rows from the message's first line down to the top of the thumbnail:
-            //   - the sender header line (always one), except dense mode folds the
-            //     first body row into it (only when there is no reply line),
-            //   - any reply/thread context line (wrapped to the same width as when
-            //     it is actually drawn), and
-            //   - the body text rows.
-            // Omitting the context rows drew the thumbnail over the filename when
-            // an image was sent as a reply.
+            // the sender header line, plus any reply/thread context line
+            // (wrapped to the same width as when it is actually drawn).
+            // Omitting the context rows drew the thumbnail over the text below
+            // the header when an image was sent as a reply.
             let context_rows = reply_line
                 .as_deref()
                 .or(thread_context_line.as_deref())
@@ -328,15 +333,13 @@ pub(crate) fn message_layout(
                     .len()
                 })
                 .unwrap_or(0);
-            let first_body_on_header = sender_on_header && !has_reply;
-            let rows_above_thumbnail =
-                1 + context_rows + body_row_count - usize::from(first_body_on_header);
-            image_body_rows.insert(key.clone(), rows_above_thumbnail);
+            image_body_rows.insert(key.clone(), 1 + context_rows);
             let thumbnail_rows = image_thumb_rows
                 .get(&key)
                 .copied()
                 .unwrap_or(IMAGE_THUMB_ROWS);
-            body_lines.resize_with(body_row_count + thumbnail_rows, Vec::new);
+            body_lines.resize_with(thumbnail_rows, Vec::new);
+            caption_block = thumbnail_caption_lines(event, cont_w, colors);
         }
 
         let range_start = lines.len();
@@ -374,7 +377,8 @@ pub(crate) fn message_layout(
         if is_thread_root {
             header.push(Span::styled("[thread root] ", relation_style));
         }
-        if sender_on_header && !has_reply {
+        // Never for a thumbnail: its first "body" row is the top of the image.
+        if sender_on_header && !has_reply && thumbnail.is_none() {
             if let Some(first) = body_iter.next() {
                 header.extend(first);
             }
@@ -405,6 +409,14 @@ pub(crate) fn message_layout(
         for body in body_iter {
             let mut spans = vec![Span::raw(body_indent.clone())];
             spans.extend(body);
+            lines.push(Line::from(spans));
+        }
+
+        // Indented like the other sub-rows, which is also the thumbnail's own
+        // left edge (`image_thumbnail_spec`), so the caption lines up under it.
+        for caption in caption_block {
+            let mut spans = vec![Span::raw("  ")];
+            spans.extend(caption);
             lines.push(Line::from(spans));
         }
 
@@ -582,6 +594,22 @@ fn message_body_lines(
     colors: &ColorScheme,
 ) -> Vec<Vec<Span<'static>>> {
     if !event.redacted && event.membership_change().is_none() {
+        // A media message's `formatted_body` is its caption, not the message:
+        // letting it stand in for the body dropped the `[kind: filename]`
+        // label entirely. Keep the label and render the caption after it.
+        if let Some(label) = event.media_kind_label() {
+            let mut lines = plain_lines(&label, first_width, continuation_width);
+            if let Some(caption) = event.media_caption() {
+                lines.extend(caption_lines(
+                    event,
+                    caption,
+                    continuation_width,
+                    continuation_width,
+                    colors,
+                ));
+            }
+            return lines;
+        }
         if let Some(lines) = event.formatted_body().and_then(|html| {
             formatted_message_body_lines(html, first_width, continuation_width, colors)
         }) {
@@ -593,6 +621,59 @@ fn message_body_lines(
         plain_rich_lines(&display_body_with_sender(event, sender_label)),
         first_width,
         continuation_width,
+    ))
+}
+
+fn plain_lines(
+    text: &str,
+    first_width: usize,
+    continuation_width: usize,
+) -> Vec<Vec<Span<'static>>> {
+    rich_lines_to_spans(wrap_rich_lines(
+        plain_rich_lines(text),
+        first_width,
+        continuation_width,
+    ))
+}
+
+/// A media caption, rendered from its HTML when it has any (falling back to
+/// the plain caption if the HTML sanitizes to nothing, as message bodies do).
+fn caption_lines(
+    event: &EventDto,
+    caption: &str,
+    first_width: usize,
+    continuation_width: usize,
+    colors: &ColorScheme,
+) -> Vec<Vec<Span<'static>>> {
+    event
+        .media_formatted_caption()
+        .and_then(|html| {
+            formatted_message_body_lines(html, first_width, continuation_width, colors)
+        })
+        .unwrap_or_else(|| plain_lines(caption, first_width, continuation_width))
+}
+
+/// The text drawn under an inline thumbnail: the caption, or — for an
+/// uncaptioned image — its filename, dimmed so it does not read as a caption.
+/// The web client puts a caption in the same place, and this keeps the
+/// thumbnail directly under the sender instead of below a `[image: filename]`
+/// label.
+fn thumbnail_caption_lines(
+    event: &EventDto,
+    width: usize,
+    colors: &ColorScheme,
+) -> Vec<Vec<Span<'static>>> {
+    if let Some(caption) = event.media_caption() {
+        return caption_lines(event, caption, width, width, colors);
+    }
+    let filename = event.image_filename().unwrap_or_default();
+    rich_lines_to_spans(wrap_rich_lines(
+        vec![vec![RichSpan::new(
+            filename,
+            Style::default().fg(colors.input_hint),
+        )]],
+        width,
+        width,
     ))
 }
 

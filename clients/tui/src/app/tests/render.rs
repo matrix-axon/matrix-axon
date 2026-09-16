@@ -3,10 +3,12 @@
 //! draws.
 
 use super::support::*;
+use crate::app::render::MessageLayout;
 use crate::app::*;
 use crate::ui::{draw, prepare};
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::text::Line;
 use ratatui::Terminal;
 use unicode_width::UnicodeWidthStr;
 
@@ -99,38 +101,69 @@ fn formatted_body_strips_unsupported_html_and_falls_back_when_empty() {
     assert!(!text.contains("alert"));
 }
 
-#[test]
-fn image_layout_counts_caption_and_cached_thumbnail_rows_once() {
+fn line_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+/// A single-event layout with a 2-row cached thumbnail for `IMAGE_MXC`.
+fn two_row_thumbnail_layout(event: &EventDto, density: MessageDensity) -> MessageLayout {
     let colors = TuiConfig::test_default().colors;
-    let event = event_with_id(
-        "$image:example.com",
-        "m.room.message",
-        Some("caption"),
-        serde_json::json!({
-            "msgtype": "m.image",
-            "body": "caption",
-            "filename": "photo.jpg",
-            "url": "mxc://example.com/photo"
-        }),
-    );
     let sender_labels = vec!["@alice:example.com".to_owned()];
-    let key = (event.account_id, "mxc://example.com/photo".to_owned());
-    let layout = message_layout(
-        &[&event],
+    message_layout(
+        &[event],
         sender_labels.as_slice(),
         &colors,
         80,
         &HashMap::new(),
         &HashMap::new(),
-        &HashMap::from([(key.clone(), 2)]),
+        &HashMap::from([((event.account_id, IMAGE_MXC.to_owned()), 2)]),
         &RelationContext::default(),
-        MessageDensity::Dense,
+        density,
         TimeFormat::H24,
-    );
+    )
+}
 
-    assert_eq!(layout.image_body_rows.get(&key), Some(&2));
-    assert_eq!(layout.ranges, vec![1..5]);
-    assert_eq!(layout.lines.len(), 5);
+fn captioned_image(event_id: &str, content_extra: serde_json::Value) -> EventDto {
+    let mut content = serde_json::json!({
+        "msgtype": "m.image",
+        "body": "caption",
+        "filename": "photo.jpg",
+        "url": IMAGE_MXC,
+    });
+    content
+        .as_object_mut()
+        .expect("object")
+        .extend(content_extra.as_object().expect("object").clone());
+    event_with_id(event_id, "m.room.message", Some("caption"), content)
+}
+
+#[test]
+fn image_layout_puts_caption_under_cached_thumbnail_rows() {
+    for density in [MessageDensity::Dense, MessageDensity::Normal] {
+        let event = captioned_image("$image:example.com", serde_json::json!({}));
+        let key = (event.account_id, IMAGE_MXC.to_owned());
+        let layout = two_row_thumbnail_layout(&event, density);
+
+        // The thumbnail starts right under the header: nothing above it but
+        // the header row, in either density.
+        assert_eq!(layout.image_body_rows.get(&key), Some(&1), "{density:?}");
+        // header(1) + thumbnail(2) + caption(1), after the date separator.
+        assert_eq!(layout.ranges, vec![1..5], "{density:?}");
+        let header = line_text(&layout.lines[1]);
+        assert!(
+            header.contains("@alice:example.com"),
+            "{density:?}: {header}"
+        );
+        assert!(!header.contains("caption"), "{density:?}: {header}");
+        assert!(!header.contains("[image:"), "{density:?}: {header}");
+        assert_eq!(line_text(&layout.lines[2]).trim(), "", "{density:?}");
+        assert_eq!(line_text(&layout.lines[3]).trim(), "", "{density:?}");
+        // Indented to the thumbnail's left edge (`image_thumbnail_spec`).
+        assert_eq!(line_text(&layout.lines[4]), "  caption", "{density:?}");
+    }
 }
 
 #[test]
@@ -176,62 +209,96 @@ fn normal_layout_puts_body_below_sender_header() {
 }
 
 #[test]
-fn normal_layout_image_body_rows_includes_header_row() {
-    let colors = TuiConfig::test_default().colors;
-    let event = event_with_id(
-        "$image:example.com",
-        "m.room.message",
-        Some("caption"),
-        serde_json::json!({
-            "msgtype": "m.image",
-            "body": "caption",
-            "filename": "photo.jpg",
-            "url": "mxc://example.com/photo"
-        }),
-    );
-    let sender_labels = vec!["@alice:example.com".to_owned()];
-    let key = (event.account_id, "mxc://example.com/photo".to_owned());
-    let layout = message_layout(
-        &[&event],
-        sender_labels.as_slice(),
-        &colors,
-        80,
-        &HashMap::new(),
-        &HashMap::new(),
-        &HashMap::from([(key.clone(), 2)]),
-        &RelationContext::default(),
-        MessageDensity::Normal,
-        TimeFormat::H24,
-    );
-
-    // Same 2 caption rows + 2 thumbnail rows as the dense case, but the
-    // thumbnail offset now includes the separate sender header line.
-    assert_eq!(layout.image_body_rows.get(&key), Some(&3));
-    assert_eq!(layout.ranges, vec![1..6]);
-    assert_eq!(layout.lines.len(), 6);
-}
-
-#[test]
 fn image_reply_offsets_thumbnail_below_the_reply_line() {
-    let colors = TuiConfig::test_default().colors;
-    let mut event = event_with_id(
-        "$image:example.com",
-        "m.room.message",
-        Some("caption"),
-        serde_json::json!({
-            "msgtype": "m.image",
-            "body": "caption",
-            "filename": "photo.jpg",
-            "url": "mxc://example.com/photo"
-        }),
-    );
+    let mut event = captioned_image("$image:example.com", serde_json::json!({}));
     // Mark the image as a reply: a reply-context line renders between the
-    // header and the body, so the thumbnail must drop below it.
+    // header and the thumbnail, so the thumbnail must drop below it.
     event.relates_to = Some(serde_json::json!({
         "m.in_reply_to": { "event_id": "$parent:example.com" }
     }));
+    let key = (event.account_id, IMAGE_MXC.to_owned());
+    let layout = two_row_thumbnail_layout(&event, MessageDensity::Normal);
+
+    // header(1) + reply line(1) = 2 rows above the thumbnail. Without the
+    // reply line counted, the thumbnail overwrote the row below the header.
+    assert_eq!(layout.image_body_rows.get(&key), Some(&2));
+    // + 2 thumbnail rows + 1 caption row.
+    assert_eq!(layout.ranges, vec![1..6]);
+    assert!(line_text(&layout.lines[2]).contains("reply context not loaded"));
+    assert_eq!(line_text(&layout.lines[5]), "  caption");
+}
+
+#[test]
+fn uncaptioned_image_shows_its_dimmed_filename_under_the_thumbnail() {
+    let colors = TuiConfig::test_default().colors;
+    // No `filename`: per MSC2530 the body is the file's name, not a caption.
+    let event = event_with_id(
+        "$image:example.com",
+        "m.room.message",
+        Some("IMG_1234.jpg"),
+        serde_json::json!({ "msgtype": "m.image", "body": "IMG_1234.jpg", "url": IMAGE_MXC }),
+    );
+    let layout = two_row_thumbnail_layout(&event, MessageDensity::Normal);
+
+    assert_eq!(layout.ranges, vec![1..5]);
+    let under = &layout.lines[4];
+    assert_eq!(line_text(under), "  IMG_1234.jpg");
+    assert!(under
+        .spans
+        .iter()
+        .any(|span| span.content.contains("IMG_1234.jpg")
+            && span.style.fg == Some(colors.input_hint)));
+    assert!(layout
+        .lines
+        .iter()
+        .all(|line| !line_text(line).contains("[image:")));
+}
+
+#[test]
+fn formatted_image_caption_renders_html_under_the_thumbnail() {
+    let event = captioned_image(
+        "$image:example.com",
+        serde_json::json!({
+            "body": "a **bold** caption",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "a <strong>bold</strong> caption",
+        }),
+    );
+    let layout = two_row_thumbnail_layout(&event, MessageDensity::Dense);
+
+    let under = &layout.lines[4];
+    assert_eq!(line_text(under), "  a bold caption");
+    assert!(under
+        .spans
+        .iter()
+        .any(|span| span.content.contains("bold")
+            && span.style.add_modifier.contains(Modifier::BOLD)));
+    assert!(layout
+        .lines
+        .iter()
+        .all(|line| !line_text(line).contains("**")));
+}
+
+/// A media event's `formatted_body` is its caption. Rendering it as the whole
+/// body dropped the `[file: …]` label, leaving a bare caption with nothing to
+/// say a file was attached.
+#[test]
+fn formatted_file_caption_keeps_the_media_label() {
+    let colors = TuiConfig::test_default().colors;
+    let event = event_with_id(
+        "$file:example.com",
+        "m.room.message",
+        Some("the **final** report"),
+        serde_json::json!({
+            "msgtype": "m.file",
+            "body": "the **final** report",
+            "filename": "report.pdf",
+            "url": "mxc://example.com/report",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "the <strong>final</strong> report",
+        }),
+    );
     let sender_labels = vec!["@alice:example.com".to_owned()];
-    let key = (event.account_id, "mxc://example.com/photo".to_owned());
     let layout = message_layout(
         &[&event],
         sender_labels.as_slice(),
@@ -239,18 +306,21 @@ fn image_reply_offsets_thumbnail_below_the_reply_line() {
         80,
         &HashMap::new(),
         &HashMap::new(),
-        &HashMap::from([(key.clone(), 2)]),
+        &ImageThumbRows::new(),
         &RelationContext::default(),
         MessageDensity::Normal,
         TimeFormat::H24,
     );
 
-    // header(1) + reply line(1) + caption(2) = 4 rows above the thumbnail.
-    // Before the fix this was 3, so the thumbnail overwrote the filename.
-    assert_eq!(layout.image_body_rows.get(&key), Some(&4));
-    // 4 rows + 2 thumbnail rows = 6 message rows after the date separator.
-    assert_eq!(layout.ranges, vec![1..7]);
-    assert_eq!(layout.lines.len(), 7);
+    assert_eq!(layout.ranges, vec![1..4]);
+    assert_eq!(line_text(&layout.lines[2]).trim(), "[file: report.pdf]");
+    let caption = &layout.lines[3];
+    assert_eq!(line_text(caption).trim(), "the final report");
+    assert!(caption
+        .spans
+        .iter()
+        .any(|span| span.content.contains("final")
+            && span.style.add_modifier.contains(Modifier::BOLD)));
 }
 
 /// Two `ensure_message_layout` calls with nothing changed in between must
@@ -1041,6 +1111,32 @@ fn an_edited_html_body_draws_the_same_frame_cached_and_uncached() {
     assert_cached_frame_matches_uncached(&mut app, "an edited HTML body");
 }
 
+/// A caption edit keeps the image's event id, media, and filename; only the
+/// caption under the thumbnail changes — here from none (the dimmed filename)
+/// to HTML long enough to wrap, so a stale layout differs in geometry too.
+#[test]
+fn an_edited_image_caption_draws_the_same_frame_cached_and_uncached() {
+    let mut app = app_with_timeline(vec![
+        image_message("$image:example.com"),
+        text_message("$after:example.com", "below the image"),
+    ]);
+    prime_layout_cache(&mut app);
+
+    let events = timeline_events(&mut app);
+    events[0].content = Some(serde_json::json!({
+        "msgtype": "m.image",
+        "body": "a caption",
+        "filename": "photo.jpg",
+        "url": IMAGE_MXC,
+        "format": "org.matrix.custom.html",
+        "formatted_body": "a <strong>caption</strong> added by an edit, with enough \
+                           markup to wrap onto a second rendered row under the \
+                           thumbnail",
+    }));
+
+    assert_cached_frame_matches_uncached(&mut app, "an edited image caption");
+}
+
 /// The one input class no event field announces: `image_thumb_rows` is derived
 /// from `image_cache`, so a decode landing changes the reserved row count with
 /// every event byte-identical.
@@ -1222,4 +1318,40 @@ fn moving_the_selection_draws_the_same_frame_cached_and_uncached() {
             &format!("the selection moving with highlight_selected_line = {highlight}"),
         );
     }
+}
+
+/// End to end through `prepare` + `draw`: the caption is painted on the row
+/// right after the rows reserved for the decoded thumbnail, which start right
+/// under the sender header — and the old `[image: …]` label is gone.
+#[test]
+fn a_drawn_image_puts_its_caption_under_the_thumbnail() {
+    let mut app = app_with_timeline(vec![
+        captioned_image(
+            "$image:example.com",
+            serde_json::json!({ "body": "under the picture" }),
+        ),
+        text_message("$after:example.com", "next message"),
+    ]);
+    // Decoded to two rows (see `decoded_thumbnail`).
+    app.image_cache.insert(
+        MediaKey::new(Uuid::nil(), IMAGE_MXC.to_owned()),
+        decoded_thumbnail(),
+    );
+    prime_layout_cache(&mut app);
+    let buffer = draw_frame(&mut app);
+    let rows: Vec<String> = (0..FRAME_HEIGHT).map(|y| row_text(&buffer, y)).collect();
+
+    let header = rows
+        .iter()
+        .position(|row| row.contains("@alice:example.com"))
+        .expect("image header drawn");
+    let caption = rows
+        .iter()
+        .position(|row| row.contains("under the picture"))
+        .expect("caption drawn");
+    assert_eq!(caption, header + 3, "header, two thumbnail rows, caption");
+    assert!(rows.iter().all(|row| !row.contains("[image:")));
+    // Nothing else is squeezed in: the next message's header follows directly.
+    assert!(rows[caption + 1].contains("@alice:example.com"));
+    assert!(rows[caption + 2].contains("next message"));
 }
