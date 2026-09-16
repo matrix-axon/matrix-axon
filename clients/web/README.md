@@ -389,8 +389,8 @@ the API layer consumes the `AuthProvider` interface (`src/auth/provider.ts` —
 `getToken()`, `onAuthFailure()`, a `LoginBootstrap` UI slot). The browser
 implementation is a composite provider: OAuth 2.0 + PKCE stores Axon-issued
 access/refresh tokens in `localStorage`, while token-paste remains available
-for locally minted tokens from `axon token issue`. A Tauri OS-keychain provider
-can still slot in later behind the same seam.
+for locally minted tokens from `axon-server token issue`. A Tauri OS-keychain
+provider can still slot in later behind the same seam.
 
 ## Scripts
 

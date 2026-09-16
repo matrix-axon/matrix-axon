@@ -233,6 +233,11 @@ export function App({
       if (!url.pathname.endsWith('/callback')) {
         return
       }
+      // A new callback supersedes whatever the last one said. Without this the
+      // banner outlives the attempt it describes: nothing else ever cleared
+      // it, so a failure stayed on screen through the retry that followed and
+      // reappeared on the next sign-out.
+      setOauthDeepLinkError(null)
       void svc.auth.completeOAuthRedirect(url).then((result) => {
         if (!result.ok) {
           setOauthDeepLinkError(result.message)
@@ -240,6 +245,16 @@ export function App({
       })
     })
   }, [svc])
+
+  // Signing in ends whatever the last callback failed at. The banner lives on
+  // this component, which outlives the signed-out screen, so without this a
+  // failure from before a successful sign-in is still in state and renders
+  // again the moment the user signs out.
+  useEffect(() => {
+    if (svc.auth.signedIn.value) {
+      setOauthDeepLinkError(null)
+    }
+  }, [svc, svc.auth.signedIn.value])
 
   // Hold the live socket open only while signed in; sign-out tears it down
   // (M-W6, ADR 0061). Reconnect/backoff on unexpected drops arrives in step 3.
@@ -1094,10 +1109,16 @@ function ShellChrome() {
         const openExternal = svcPlatform.openExternal
         if (openExternal !== null && isExternalHref(anchor.href)) {
           event.preventDefault()
-          // Discarded deliberately. The click is already prevented, so there
-          // is no fallback to take and nothing to tell the user to do
-          // differently; the origin-only message is already on the console.
-          void openExternal(anchor.href).catch(() => {})
+          // Logged, not swallowed. There is nothing to show the user — the
+          // click is already prevented, so no fallback remains and no advice
+          // would help — but a denied capability scope or an absent handler
+          // presents exactly as a link that does nothing, and that needs a
+          // trace somewhere. `openExternal` builds this message to be safe to
+          // record: an origin, never the query, which can carry a signed media
+          // URL or credentials.
+          void openExternal(anchor.href).catch((err: unknown) => {
+            console.error(err)
+          })
         }
         return
       }

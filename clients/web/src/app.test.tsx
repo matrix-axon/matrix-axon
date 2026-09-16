@@ -17,6 +17,7 @@ import {
   it,
   vi,
 } from 'vitest'
+import type { OAuthCallbackResult } from './auth/provider'
 import { App, accountIdForRoomEntry } from './app.tsx'
 import { layoutMode, SINGLE_PANE_QUERY } from './layout'
 import type { Account } from './stores/accounts'
@@ -294,6 +295,43 @@ describe('App', () => {
     expect(completeOAuthRedirect).not.toHaveBeenCalled()
   })
 
+  it('clears a failed callback error when another callback arrives', async () => {
+    // The banner used to outlive the attempt it described: nothing ever reset
+    // it, so a failure stayed on screen through the retry that followed.
+    let deliver: ((url: URL) => void) | null = null
+    const base = testServices()
+    const completeOAuthRedirect =
+      vi.fn<(url: URL) => Promise<OAuthCallbackResult>>()
+    // The second attempt succeeds, which is what makes this pin the clearing
+    // rather than a replacement: a second *failure* would overwrite the text
+    // whether or not anything ever reset it.
+    completeOAuthRedirect
+      .mockResolvedValueOnce({ ok: false, message: 'state did not match' })
+      .mockResolvedValueOnce({ ok: true })
+    const services = {
+      ...base,
+      auth: { ...base.auth, completeOAuthRedirect },
+      platform: {
+        ...base.platform,
+        onDeepLink: (handler: (url: URL) => void) => {
+          deliver = handler
+          return () => {}
+        },
+      },
+    }
+    // The banner lives on the signed-out screen; a signed-in graph renders
+    // `Shell` instead and there is nothing to assert against.
+    services.auth.clearToken()
+    const { findByText, queryByText } = render(<App services={services} />)
+    await waitFor(() => expect(deliver).not.toBeNull())
+
+    deliver!(new URL('org.matrixaxon.axon:/oauth/callback?code=c1&state=s1'))
+    expect(await findByText('state did not match')).toBeTruthy()
+
+    deliver!(new URL('org.matrixaxon.axon:/oauth/callback?code=c2&state=s2'))
+    await waitFor(() => expect(queryByText('state did not match')).toBeNull())
+  })
+
   it('hands an external link to the platform when it has an opener', async () => {
     // In a packaged build an untouched external link navigates the *app
     // window* to that page, and the shell has no back button to return with —
@@ -337,6 +375,33 @@ describe('App', () => {
     anchor.dispatchEvent(event)
 
     expect(event.defaultPrevented).toBe(false)
+    anchor.remove()
+  })
+
+  it('leaves a trace when the link could not be opened', async () => {
+    // A denied capability scope or an absent handler presents as a click that
+    // does nothing. There is nothing to show the user — the click is already
+    // prevented — but discarding the rejection left no record anywhere, which
+    // is what the empty catch here used to do.
+    const failure = new Error('could not open an external link (https://x)')
+    const openExternal = vi.fn(() => Promise.reject(failure))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const services = {
+      ...testServices(),
+      platform: { ...testServices().platform, openExternal },
+    }
+    render(<App services={services} />)
+    await waitFor(() =>
+      expect(services.accounts.accounts.value).toHaveLength(1),
+    )
+    const anchor = document.createElement('a')
+    anchor.href = 'https://example.com/docs'
+    document.body.append(anchor)
+
+    fireEvent.click(anchor)
+
+    await waitFor(() => expect(logged).toHaveBeenCalledWith(failure))
+    logged.mockRestore()
     anchor.remove()
   })
 
