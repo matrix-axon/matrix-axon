@@ -233,6 +233,42 @@ describe('MediaImage', () => {
     )
   })
 
+  it('prefers the server thumbnail over a sender thumbnail for plaintext images', async () => {
+    // A bridged iPhone photo arrives with a thumbnail whose pixels are sideways
+    // and whose EXIF orientation tag was stripped; only the homeserver, which
+    // reads the original's tag, can produce an upright one.
+    const requested: string[] = []
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/media/:account/:server/:media/thumbnail`,
+        ({ request }) => {
+          requested.push(request.url)
+          return new HttpResponse(PNG, {
+            headers: { 'content-type': 'image/png' },
+          })
+        },
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/media/:account/:server/:media`,
+        ({ request }) => {
+          requested.push(request.url)
+          return new HttpResponse(PNG, {
+            headers: { 'content-type': 'image/png' },
+          })
+        },
+      ),
+    )
+
+    const { findByRole } = renderImage(
+      image({ thumbnailUrl: 'mxc://hs/sender-thumb' }),
+    )
+
+    expect(await findByRole('img')).toBeTruthy()
+    expect(requested).toEqual([
+      `${TEST_BASE_URL}/v1/media/${ACCOUNT}/hs/full/thumbnail?width=320&height=320&method=scale`,
+    ])
+  })
+
   it('does not ask the server to generate thumbnails for encrypted images', async () => {
     let thumbnailFetches = 0
     server.use(
@@ -653,8 +689,10 @@ describe('MediaImage', () => {
               }),
       ),
     )
+    // Encrypted, so the sender's thumbnail is the one in play: plaintext media
+    // goes to the server's thumbnail first.
     const { findByRole } = renderImage(
-      image({ thumbnailUrl: 'mxc://hs/thumb' }),
+      image({ thumbnailUrl: 'mxc://hs/thumb', encrypted: true }),
     )
     // A broken sender-embedded thumbnail must not hide a loadable image.
     expect(await findByRole('img')).toBeTruthy()
