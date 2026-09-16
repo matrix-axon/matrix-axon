@@ -1320,6 +1320,44 @@ fn moving_the_selection_draws_the_same_frame_cached_and_uncached() {
     }
 }
 
+/// A tiny image's preview used to share one top-border title between the
+/// filename and "(Esc to close)", clipped to the image's own width. The hint
+/// now sits on the bottom border and the modal is as wide as its border text.
+#[test]
+fn a_tiny_image_preview_shows_its_whole_filename_and_close_hint() {
+    let filename = "IMG_20260916_123456.jpg";
+    let mut app = app_with_timeline(vec![event_with_id(
+        "$image:example.com",
+        "m.room.message",
+        Some(filename),
+        serde_json::json!({ "msgtype": "m.image", "body": filename, "url": IMAGE_MXC }),
+    )]);
+    // 10x20 px: one halfblock cell.
+    app.image_cache.insert(
+        MediaKey::new(Uuid::nil(), IMAGE_MXC.to_owned()),
+        ImageState::Ready(Arc::new(image::DynamicImage::new_rgb8(10, 20))),
+    );
+    app.messages.selection = Some("$image:example.com".to_owned());
+    app.mode = Mode::Popup(PopupKind::MediaPreview);
+
+    let buffer = draw_frame(&mut app);
+    let rows: Vec<String> = (0..FRAME_HEIGHT).map(|y| row_text(&buffer, y)).collect();
+
+    let title = rows
+        .iter()
+        .position(|row| row.contains(&format!(" {filename} ")))
+        .expect("whole filename on the top border");
+    let hint = rows
+        .iter()
+        .position(|row| row.contains(" Esc to close "))
+        .expect("close hint drawn");
+    assert!(
+        hint > title,
+        "hint {hint} should be below the title {title}"
+    );
+    assert!(!rows[title].contains("close"), "{}", rows[title]);
+}
+
 /// End to end through `prepare` + `draw`: the caption is painted on the row
 /// right after the rows reserved for the decoded thumbnail, which start right
 /// under the sender header — and the old `[image: …]` label is gone.
