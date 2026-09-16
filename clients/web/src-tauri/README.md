@@ -153,3 +153,36 @@ scheme is named in three places with no shared source — `OAUTH_CLIENT` in
 `../src/platform/tauri.ts`, `plugins.deep-link.desktop.schemes` in
 `tauri.conf.json`, and the operator's `redirect_uris` — so changing one alone
 produces a sign-in that dead-ends in the browser.
+
+## The glib advisory is not actionable here
+
+Dependabot reports **GHSA-wrw7-89jp-8q8g** (RUSTSEC-2024-0429) against this
+workspace's `Cargo.lock`: unsoundness in `glib::VariantStrIter`'s `Iterator`
+impls, affecting `>=0.15.0, <0.20.0`, fixed in 0.20.0. The lock carries 0.18.5.
+
+**It cannot be upgraded from here, and the block is not our dependency.** Every
+GTK binding in the graph caps glib at `^0.18`:
+
+```
+$ cargo update -p glib --precise 0.20.9
+error: failed to select a version for the requirement `glib = "^0.18.0"`
+  candidate versions found which didn't match: 0.20.9
+  required by package `webkit2gtk v2.0.2`
+```
+
+`webkit2gtk 2.0.2` is the latest published version of that crate, and it is not
+alone: `gtk`, `gio`, `atk`, `gdk`, `gdk-pixbuf`, `gdkx11`, `pango`, `soup3` and
+`javascriptcore-rs` all require `^0.18`, and they arrive through `tao` and
+`wry` — Tauri's own dependencies. Moving glib means moving Tauri's whole GTK
+stack to gtk-rs 0.20, which is upstream work. No lockfile edit, version bump or
+`[patch]` reaches it, and forcing it would mean vendoring a fork of the binding
+stack to fix an unsoundness nothing here calls.
+
+The affected API iterates GVariant string arrays. This crate touches glib in
+exactly one place — `use webkit2gtk::glib::Cast as _` in the permission
+handler — and `VariantStrIter` appears nowhere in `tao`, `wry`, `gtk`, `gio` or
+`webkit2gtk`. It is a soundness bug requiring that iterator to be used, not an
+attacker-reachable input path.
+
+Tracked in #413; recheck when Tauri bumps its GTK bindings. Note the root
+workspace has no glib at all, so this is the desktop shell alone.
