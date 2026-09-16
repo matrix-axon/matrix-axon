@@ -1,0 +1,99 @@
+name: Dependency advisories
+
+# Three lockfiles, two ecosystems, one concern.
+#
+# Both cargo workspaces, because the repo has two that share no lockfile: the
+# root one, and `clients/web/src-tauri`, which is deliberately excluded from it
+# (ADR 0102) so that `cargo build --workspace` never has to find webkit2gtk. A
+# single run over the root would say nothing about the desktop shell.
+#
+# And the web client's pnpm lockfile, which had no gate of any kind.
+#
+# One workflow rather than a Rust one and a web one — which is *not* how
+# `lint-and-test.yml` and `web-lint-and-test.yml` are split. Those are split so
+# each can be path-filtered to the tree it tests. Advisories must not be
+# path-filtered at all: they are published against code that has not changed,
+# which is the whole reason for the schedule below. With no filter to disagree
+# about, splitting would buy two schedules to keep in step and two places to
+# look for one answer.
+#
+# `pull_request` and a weekly schedule. The schedule matters more than the PR
+# trigger here: an advisory is published against code that has not changed, so
+# a check that only runs on new commits reports a clean tree right up until
+# somebody opens a PR months later. Also `workflow_dispatch`, because the first
+# question after a Dependabot alert is "does our gate agree?".
+on:
+  pull_request:
+  schedule:
+    # Mondays, 07:00 UTC.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    strategy:
+      # Report both, rather than stopping at whichever fails first.
+      fail-fast: false
+      matrix:
+        include:
+          - name: server and clients
+            manifest: Cargo.toml
+          - name: desktop shell
+            manifest: clients/web/src-tauri/Cargo.toml
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Deliberately not `EmbarkStudios/cargo-deny-action`. That action runs in
+      # a Docker container, so a `--config` path built from `github.workspace`
+      # does not exist inside it, and its `arguments` input is appended *after*
+      # the subcommand where cargo-deny's top-level `--config` is not accepted.
+      # Both failures are silent: it runs, ignores `deny.toml`, and reports
+      # against its own defaults — which is four unmaintained transitive crates
+      # this repo cannot act on.
+      #
+      # Installing the binary instead means the command below is exactly the
+      # one a developer runs locally, and the version is ours to pin.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+
+      - name: Check advisories
+        run: cargo deny --manifest-path ${{ matrix.manifest }} --config deny.toml check advisories
+
+  web:
+    runs-on: ubuntu-latest
+    name: web client
+    defaults:
+      run:
+        working-directory: clients/web
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: clients/web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      # `--frozen-lockfile` so this audits what the repo actually pins, rather
+      # than whatever resolving afresh happens to pick today.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Dev dependencies included, deliberately. They do not ship, but they run
+      # — on developer machines and on this runner, against repo contents and
+      # with a token in the environment — and the two advisories outstanding
+      # when this lane was written were both dev-only (a vitest path traversal
+      # and a js-yaml merge-key bomb). Excluding them would have reported a
+      # clean tree.
+      - name: Audit dependencies
+        run: pnpm audit

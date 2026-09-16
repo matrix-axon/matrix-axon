@@ -1,0 +1,40 @@
+# cargo-deny: advisories only.
+#
+# Licences are already gated, by `cargo-about` against the `accepted` list in
+# `build/about.toml`, enforced through `scripts/generate-thirdparty.sh` and
+# shipped as THIRDPARTY.md. Turning on cargo-deny's own `[licenses]` would put
+# two allowlists in the repo that must agree and would disagree silently, which
+# is the failure ADR 0092 exists to end. One list, in the tool that already
+# produces the disclosure users receive.
+#
+# `[bans]` is off for the same reason in reverse: nothing enforces a duplicate
+# policy today, so switching it on would fail the build on pre-existing
+# duplicates that nobody has decided about. Worth doing deliberately, not as a
+# side effect of wanting advisories.
+
+[advisories]
+# Fail on anything the database knows about, including unmaintained crates.
+# `unmaintained = "workspace"` limits that last one to crates this repo names
+# directly, since an unmaintained transitive dependency is not something a
+# lockfile edit here can fix.
+version = 2
+# Unmaintained crates, limited to ones this repo names directly. The default
+# (`all`) reports transitive ones too, which sounds stricter and is not
+# actionable: it currently names `bitmaps`, `paste`, `proc-macro-error2` and
+# `rustls-pemfile`, none of them ours, and RustSec's own entry for the last
+# says "No safe upgrade is available". A gate whose only available response is
+# a permanent ignore entry teaches people to add permanent ignore entries.
+unmaintained = "workspace"
+yanked = "deny"
+
+# The database here is RustSec's, which is **not** a superset of GitHub's.
+# GHSA-wrw7-89jp-8q8g — unsoundness in `glib::VariantStrIter`, which Dependabot
+# reports against the desktop shell — carries no CVE and no RUSTSEC id, and
+# cargo-deny does not see it at all (verified: it is not reported by either
+# workspace, with or without an ignore entry). So this lane *complements*
+# Dependabot rather than replacing it, and an empty `ignore` list is not
+# evidence that nothing is outstanding. See #413.
+#
+# Every entry below needs a reason and a way out, or the list becomes a place
+# advisories go to be forgotten.
+ignore = []
