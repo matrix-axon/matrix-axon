@@ -192,6 +192,8 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::routes::uploads::delete_upload,
         crate::routes::device_state::get_device_state,
         crate::routes::device_state::put_device_state,
+        crate::routes::preferences::get_preference,
+        crate::routes::preferences::put_preference,
     ),
     components(schemas(
         crate::dto::AccountDto,
@@ -204,6 +206,7 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::dto::EnableBackupRequest,
         crate::dto::EnableBackupResponseDto,
         crate::dto::RoomDto,
+        crate::dto::RoomTag,
         crate::dto::InviteDto,
         crate::dto::MemberDto,
         crate::dto::EventDto,
@@ -268,6 +271,9 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::dto::DeviceStateEntryDto,
         crate::dto::PutDeviceStateRequest,
         crate::dto::PutDeviceStateResponse,
+        crate::dto::PreferenceDto,
+        crate::dto::PutPreferenceRequest,
+        crate::dto::PutPreferenceResponse,
         crate::matrix_oauth_acquire::CreateMatrixOAuthQrRequest,
         crate::matrix_oauth_acquire::SubmitMatrixOAuthQrRequest,
         crate::matrix_oauth_acquire::SubmitMatrixOAuthCheckCodeRequest,
@@ -298,6 +304,7 @@ fn unauthorized_response() -> RefOr<Response> {
         (name = "devices", description = "Device-list / discovery, for the SAS verification picker"),
         (name = "media", description = "Authenticated MXC media proxy"),
         (name = "device-state", description = "Per-device client state: drafts, read markers"),
+        (name = "preferences", description = "Instance-wide preferences: mixed-account space order"),
     ),
 )]
 pub struct ApiDoc;

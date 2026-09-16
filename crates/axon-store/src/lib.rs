@@ -11,6 +11,7 @@ mod backfill;
 mod device_state;
 mod error;
 mod events;
+mod instance_preferences;
 mod invites;
 mod matrix_oauth_acquire;
 mod media_uploads;
@@ -38,6 +39,7 @@ pub use events::{
     EventCiphertext, EventCrypto, EventSenderTrust, NewEvent, PendingUtd, ReactionTally,
     ThreadSummary, TimelineCursor, TimelineRow,
 };
+pub use instance_preferences::InstancePreference;
 pub use invites::{RoomInvite, RoomInviteSnapshot};
 pub use matrix_oauth_acquire::{
     CommitMatrixOAuthAcquire, MatrixOAuthAcquireBreadcrumb, MatrixOAuthAcquireFinalization,
@@ -48,7 +50,7 @@ pub use oauth_authorization_requests::{AuthorizationRequest, NewAuthorizationReq
 pub use oauth_bind_requests::BindRequest;
 pub use oauth_identities::OauthIdentity;
 pub use oauth_refresh_tokens::{RedeemRefreshTokenError, RotatedRefreshToken};
-pub use rooms::RoomSummary;
+pub use rooms::{RoomSummary, RoomTag};
 pub use search::{
     room_purge_sentinel, IndexableEvent, SearchOutboxEntry, SEARCH_OUTBOX_PURGE,
     SEARCH_OUTBOX_ROOM_PURGE_PREFIX,
