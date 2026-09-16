@@ -17,7 +17,7 @@
 //! `invite.added` / `invite.removed` carry the pending-invite inbox (ADR 0091).
 //! `account_data.changed` carries persisted Matrix account data (`m.tag`,
 //! `m.direct`, …; ADR 0103). `preferences.changed` carries instance-wide
-//! preference writes (`space_order`).
+//! preference writes (`space_order`, `message_gestures`).
 //!
 //! Delivery is **best-effort live tail**, not a replay: a client sees events
 //! that arrive after it connects, and uses the HTTP read API for history. The

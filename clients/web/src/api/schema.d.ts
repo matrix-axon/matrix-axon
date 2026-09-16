@@ -2031,9 +2031,9 @@ export interface components {
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_PreferenceDto: {
-            /** @description One instance preference (`GET /v1/preferences/{key}`, ADR 0103). */
+            /** @description One instance preference (`GET /v1/preferences/{key}`, ADRs 0103 and 0104). */
             data: {
-                /** @description Allowlisted key, currently `space_order`. */
+                /** @description Allowlisted key, such as `space_order` or `message_gestures`. */
                 key: string;
                 /** @description When the value was last written (server clock), RFC 3339. */
                 updated_at: string;
@@ -2068,7 +2068,7 @@ export interface components {
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_PutPreferenceResponse: {
-            /** @description Response of `PUT /v1/preferences/{key}` (ADR 0103). */
+            /** @description Response of `PUT /v1/preferences/{key}` (ADRs 0103 and 0104). */
             data: {
                 /** @description When the write landed (server clock), RFC 3339. */
                 updated_at: string;
@@ -3334,9 +3334,9 @@ export interface components {
             /** Format: int64 */
             users_default: number;
         };
-        /** @description One instance preference (`GET /v1/preferences/{key}`, ADR 0103). */
+        /** @description One instance preference (`GET /v1/preferences/{key}`, ADRs 0103 and 0104). */
         PreferenceDto: {
-            /** @description Allowlisted key, currently `space_order`. */
+            /** @description Allowlisted key, such as `space_order` or `message_gestures`. */
             key: string;
             /** @description When the value was last written (server clock), RFC 3339. */
             updated_at: string;
@@ -3389,8 +3389,8 @@ export interface components {
             updated_at: string;
         };
         /**
-         * @description Body of `PUT /v1/preferences/{key}` (ADR 0103). `device_id` is echoed on
-         *     the `preferences.changed` frame so the originator can drop it.
+         * @description Body of `PUT /v1/preferences/{key}` (ADRs 0103 and 0104). `device_id` is
+         *     echoed on the `preferences.changed` frame so the originator can drop it.
          */
         PutPreferenceRequest: {
             /**
@@ -3401,7 +3401,7 @@ export interface components {
             /** @description The whole preference value. Last-write-wins. */
             value: unknown;
         };
-        /** @description Response of `PUT /v1/preferences/{key}` (ADR 0103). */
+        /** @description Response of `PUT /v1/preferences/{key}` (ADRs 0103 and 0104). */
         PutPreferenceResponse: {
             /** @description When the write landed (server clock), RFC 3339. */
             updated_at: string;
@@ -9232,7 +9232,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description Preference key; currently only `space_order` */
+                /** @description Preference key: `space_order` or `message_gestures` */
                 key: string;
             };
             cookie?: never;
@@ -9284,7 +9284,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description Preference key; currently only `space_order` */
+                /** @description Preference key: `space_order` or `message_gestures` */
                 key: string;
             };
             cookie?: never;

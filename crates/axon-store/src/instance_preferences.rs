@@ -1,9 +1,10 @@
-//! Instance-wide preferences (ADR 0103).
+//! Instance-wide preferences (ADRs 0103 and 0104).
 //!
-//! Not account-scoped: Axon is one human per process, and the first key
-//! (`space_order`) is a mixed-account sequence that cannot live in Matrix
-//! account data or in `device_state`. Last-write-wins on the whole JSON
-//! value; `updated_at` is maintained by trigger.
+//! Not account-scoped: Axon is one human per process, while preferences can
+//! span Matrix accounts (`space_order`) or clients (`message_gestures`) and
+//! cannot live in Matrix account data or account-scoped `device_state`.
+//! Last-write-wins on the whole JSON value; `updated_at` is maintained by
+//! trigger.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -15,7 +16,7 @@ use crate::{Store, StoreError};
 /// One instance-preference row as read back from the store.
 #[derive(Debug, Clone)]
 pub struct InstancePreference {
-    /// Allowlisted key, e.g. `space_order`.
+    /// Allowlisted key, e.g. `space_order` or `message_gestures`.
     pub key: String,
     /// The stored JSON value.
     pub value: Value,

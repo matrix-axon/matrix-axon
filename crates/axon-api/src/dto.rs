@@ -1881,10 +1881,10 @@ pub struct PutDeviceStateResponse {
     pub updated_at: String,
 }
 
-/// One instance preference (`GET /v1/preferences/{key}`, ADR 0103).
+/// One instance preference (`GET /v1/preferences/{key}`, ADRs 0103 and 0104).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PreferenceDto {
-    /// Allowlisted key, currently `space_order`.
+    /// Allowlisted key, such as `space_order` or `message_gestures`.
     pub key: String,
     /// The stored JSON value.
     pub value: Value,
@@ -1892,8 +1892,8 @@ pub struct PreferenceDto {
     pub updated_at: String,
 }
 
-/// Body of `PUT /v1/preferences/{key}` (ADR 0103). `device_id` is echoed on
-/// the `preferences.changed` frame so the originator can drop it.
+/// Body of `PUT /v1/preferences/{key}` (ADRs 0103 and 0104). `device_id` is
+/// echoed on the `preferences.changed` frame so the originator can drop it.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct PutPreferenceRequest {
     /// The writing device (client-supplied UUID).
@@ -1902,7 +1902,7 @@ pub struct PutPreferenceRequest {
     pub value: Value,
 }
 
-/// Response of `PUT /v1/preferences/{key}` (ADR 0103).
+/// Response of `PUT /v1/preferences/{key}` (ADRs 0103 and 0104).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PutPreferenceResponse {
     /// When the write landed (server clock), RFC 3339.
