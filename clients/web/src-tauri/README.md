@@ -156,9 +156,13 @@ produces a sign-in that dead-ends in the browser.
 
 ## The glib advisory is not actionable here
 
-Dependabot reports **GHSA-wrw7-89jp-8q8g** (RUSTSEC-2024-0429) against this
-workspace's `Cargo.lock`: unsoundness in `glib::VariantStrIter`'s `Iterator`
-impls, affecting `>=0.15.0, <0.20.0`, fixed in 0.20.0. The lock carries 0.18.5.
+Dependabot reports **GHSA-wrw7-89jp-8q8g** against this workspace's
+`Cargo.lock`: unsoundness in `glib::VariantStrIter`'s `Iterator` impls,
+affecting `>=0.15.0, <0.20.0`, fixed in 0.20.0. The lock carries 0.18.5.
+
+It has no CVE and no RUSTSEC alias, so `cargo deny check advisories` — whose
+database is RustSec's — does not report it, on this workspace or any other.
+GitHub's advisory database is the only one that carries it.
 
 **It cannot be upgraded from here, and the block is not our dependency.** Every
 GTK binding in the graph caps glib at `^0.18`:
