@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axon_core::{
-    EphemeralFrame, InviteAddedFrame, InviteRemovedFrame, LiveEvent, LiveFrame, SenderTrustFrame,
-    SyncConfig, SyncStateFrame, UnreadCountsFrame,
+    AccountDataFrame, EphemeralFrame, InviteAddedFrame, InviteRemovedFrame, LiveEvent, LiveFrame,
+    SenderTrustFrame, SyncConfig, SyncStateFrame, UnreadCountsFrame,
 };
 use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
@@ -317,7 +317,11 @@ impl SyncEngine {
     /// path. `axon-server` wraps this in an adapter implementing its
     /// `MessageSender` port; the returned value is cheap to construct and clone.
     pub fn gateway(&self) -> SdkGateway {
-        SdkGateway::new(self.manager.clone(), self.store.clone())
+        SdkGateway::new(
+            self.manager.clone(),
+            self.store.clone(),
+            self.live_tx.clone(),
+        )
     }
 
     /// An authenticated media fetcher over the per-account clients, for the API
@@ -1068,6 +1072,12 @@ async fn persist_account_data(ctx: &PersistContext, room_id: Option<&str>, raw: 
         return;
     };
 
+    // Persist every type (the table is the archive). Fan out only the two
+    // list-driving signals ADR 0103 named — a full-account sync otherwise
+    // floods the live bus with `m.push_rules`, SSSS blobs, and per-room
+    // `m.fully_read` (ADR 0056's fail-closed allowlist, one layer up).
+    let live = account_data_type_is_live(&event_type);
+    let content_for_frame = live.then(|| content.clone());
     let upsert = AccountDataUpsert {
         account_id: ctx.account_id,
         room_id,
@@ -1078,6 +1088,39 @@ async fn persist_account_data(ctx: &PersistContext, room_id: Option<&str>, raw: 
         tracing::warn!(account_id = %ctx.account_id, room_id = ?room_id, event_type = event_type.as_str(), error = %err, "failed to persist account data");
     } else {
         tracing::debug!(account_id = %ctx.account_id, room_id = ?room_id, event_type = event_type.as_str(), "persisted account data");
+        if let Some(content) = content_for_frame {
+            let _ = ctx
+                .live_tx
+                .send(LiveFrame::AccountDataChanged(AccountDataFrame {
+                    account_id: ctx.account_id,
+                    room_id: room_id.map(str::to_owned),
+                    event_type: event_type.clone(),
+                    content,
+                }));
+        }
+    }
+}
+
+/// Types that fan out as `account_data.changed` (ADR 0103). Everything else
+/// is stored and not pushed.
+fn account_data_type_is_live(event_type: &str) -> bool {
+    matches!(event_type, "m.tag" | "m.direct")
+}
+
+#[cfg(test)]
+mod account_data_live_tests {
+    use super::account_data_type_is_live;
+
+    #[test]
+    fn only_tag_and_direct_fan_out() {
+        assert!(account_data_type_is_live("m.tag"));
+        assert!(account_data_type_is_live("m.direct"));
+        assert!(!account_data_type_is_live("m.push_rules"));
+        assert!(!account_data_type_is_live("m.fully_read"));
+        assert!(!account_data_type_is_live("m.secret_storage.default_key"));
+        assert!(!account_data_type_is_live(
+            "m.megolm_backup.v1.aes-hmac-sha2"
+        ));
     }
 }
 
