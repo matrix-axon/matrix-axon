@@ -52,6 +52,9 @@ rand          = { workspace = true }
 sha2          = { workspace = true }
 chrono        = { workspace = true, features = ["clock"] }
 mime          = { workspace = true }
+# Validate the configurable quick-reaction value as one known Unicode emoji.
+# This is already in the workspace graph through axon-tui/matrix-sdk-ui.
+emojis        = "0.8"
 
 [dev-dependencies]
 # DB-gated HTTP integration test: drive the real router with tower's oneshot,

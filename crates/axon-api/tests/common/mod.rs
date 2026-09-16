@@ -75,30 +75,33 @@ impl TokenVerifier for StubTokenVerifier {
     }
 }
 
-/// Snapshot `space_order`, run `body` against a missing key, then restore.
+/// Snapshot one instance preference, run `body` against a missing key, then
+/// restore.
 ///
 /// `instance_preferences` is process-global, so a naive DELETE would clobber a
-/// live Axon's rail and race the other test binary that also writes this key.
-/// A session advisory lock held on one pool connection serializes callers
-/// (including `http.rs` and `ws.rs` running as separate processes).
-pub async fn with_isolated_space_order<F, Fut>(store: &Store, body: F)
+/// live Axon's setting and race another test binary writing the same key. A
+/// session advisory lock held on one pool connection serializes callers across
+/// test processes.
+pub async fn with_isolated_preference<F, Fut>(store: &Store, key: &str, body: F)
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     let mut lock_conn = store.pool().acquire().await.expect("lock connection");
-    sqlx_core::query::query("SELECT pg_advisory_lock(hashtext('axon.test.space_order'))")
+    sqlx_core::query::query("SELECT pg_advisory_lock(hashtext('axon.test.' || $1::text))")
+        .bind(key)
         .execute(&mut *lock_conn)
         .await
         .expect("advisory lock");
     let previous = store
-        .instance_preference("space_order")
+        .instance_preference(key)
         .await
-        .expect("snapshot space_order");
-    sqlx_core::query::query("DELETE FROM instance_preferences WHERE key = 'space_order'")
+        .expect("snapshot preference");
+    sqlx_core::query::query("DELETE FROM instance_preferences WHERE key = $1")
+        .bind(key)
         .execute(store.pool())
         .await
-        .expect("clear space_order");
+        .expect("clear preference");
     // Catch a panic from the wrapped test so we still restore and unlock.
     // A session advisory lock survives `Drop` of a pooled connection, so
     // leaking it turns one assertion failure into a hung later test.
@@ -108,20 +111,20 @@ where
         .err();
     let restore_err = match &previous {
         Some(row) => store
-            .upsert_instance_preference("space_order", &row.value)
+            .upsert_instance_preference(key, &row.value)
             .await
             .err()
             .map(|err| err.to_string()),
-        None => {
-            sqlx_core::query::query("DELETE FROM instance_preferences WHERE key = 'space_order'")
-                .execute(store.pool())
-                .await
-                .err()
-                .map(|err| err.to_string())
-        }
+        None => sqlx_core::query::query("DELETE FROM instance_preferences WHERE key = $1")
+            .bind(key)
+            .execute(store.pool())
+            .await
+            .err()
+            .map(|err| err.to_string()),
     };
     let unlock_err =
-        sqlx_core::query::query("SELECT pg_advisory_unlock(hashtext('axon.test.space_order'))")
+        sqlx_core::query::query("SELECT pg_advisory_unlock(hashtext('axon.test.' || $1::text))")
+            .bind(key)
             .execute(&mut *lock_conn)
             .await
             .err()
@@ -130,7 +133,7 @@ where
         std::panic::resume_unwind(payload);
     }
     if let Some(err) = restore_err {
-        panic!("restore space_order: {err}");
+        panic!("restore preference {key}: {err}");
     }
     if let Some(err) = unlock_err {
         panic!("advisory unlock: {err}");

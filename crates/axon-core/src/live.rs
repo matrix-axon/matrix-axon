@@ -60,8 +60,8 @@ pub enum LiveFrame {
     /// are stored and not pushed. Clients that care about `m.tag` patch
     /// `RoomDto.tags`; `m.direct` updates `is_direct`.
     AccountDataChanged(AccountDataFrame),
-    /// An instance preference was written (ADR 0103). Receivers drop frames
-    /// whose `device_id` is their own (echo suppression, same rule as
+    /// An instance preference was written (ADRs 0103 and 0104). Receivers drop
+    /// frames whose `device_id` is their own (echo suppression, same rule as
     /// [`DeviceStateFrame`]).
     PreferencesChanged(PreferencesFrame),
 }
@@ -253,8 +253,8 @@ pub struct AccountDataFrame {
     pub content: Value,
 }
 
-/// An instance preference was written (ADR 0103), ready to fan out over the
-/// live-event bus. Not account-scoped: the wire envelope still carries
+/// An instance preference was written (ADRs 0103 and 0104), ready to fan out
+/// over the live-event bus. Not account-scoped: the wire envelope still carries
 /// `account_id` (the nil UUID) so existing clients that require the field
 /// on every frame can ignore an unknown `type` instead of treating the
 /// frame as a protocol error. A client that self-filters live frames by
@@ -262,7 +262,8 @@ pub struct AccountDataFrame {
 /// it for a nil `account_id`.
 #[derive(Debug, Clone)]
 pub struct PreferencesFrame {
-    /// Preference key, currently allowlisted to `space_order`.
+    /// An allowlisted preference key, such as `space_order` or
+    /// `message_gestures`.
     pub key: String,
     /// The stored JSON value.
     pub value: Value,
