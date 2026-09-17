@@ -660,3 +660,93 @@ describe('the transport seam (ADR 0102 § 2)', () => {
     expect(methods).toEqual(['POST'])
   })
 })
+
+/**
+ * A media transfer holds one of the six concurrency permits for its whole
+ * life, so "slow" and "never" are not the same failure: unbounded, six
+ * requests caught by a network handover pin the pool and stop media across the
+ * whole app until the document reloads. The comment on
+ * `ERROR_ENVELOPE_MAX_BYTES` already names that hazard for the error-body read;
+ * these are the transfers themselves.
+ */
+describe('the transfer deadline', () => {
+  it('abandons a download that never answers', async () => {
+    server.use(
+      http.get(
+        `${BASE_URL}/v1/media/:account/:server/:media`,
+        () => new Promise(() => {}),
+      ),
+    )
+    const media = createMediaService({
+      auth: stubAuth(),
+      baseUrl: BASE_URL,
+      transferTimeoutMs: 40,
+    })
+
+    const handle = await media.acquire(ACCOUNT, 'mxc://hs/stuck')
+
+    expect(handle.result).toMatchObject({
+      ok: false,
+      error: { kind: 'network' },
+    })
+  })
+
+  /**
+   * The failure that actually matters. Six stuck downloads is the whole pool;
+   * without a deadline the seventh never runs, no matter how healthy the
+   * network is by then.
+   */
+  it('releases the permits, so media works again afterwards', async () => {
+    let stuck = true
+    server.use(
+      http.get(`${BASE_URL}/v1/media/:account/:server/:media`, async () => {
+        if (stuck) {
+          await new Promise(() => {})
+        }
+        return HttpResponse.arrayBuffer(REAL_PNG.buffer as ArrayBuffer, {
+          headers: { 'content-type': 'image/png' },
+        })
+      }),
+    )
+    const media = createMediaService({
+      auth: stubAuth(),
+      baseUrl: BASE_URL,
+      transferTimeoutMs: 40,
+    })
+
+    // Exactly `MAX_CONCURRENT` (6) transfers, each of which would hold its
+    // permit forever.
+    const wedged = await Promise.all(
+      Array.from({ length: 6 }, (_, i) =>
+        media.acquire(ACCOUNT, `mxc://hs/wedge-${i}`),
+      ),
+    )
+    expect(wedged.every((handle) => handle.result.ok === false)).toBe(true)
+
+    stuck = false
+    const after = await media.acquire(ACCOUNT, 'mxc://hs/after')
+
+    expect(after.result.ok).toBe(true)
+  })
+
+  it('abandons an upload that never answers', async () => {
+    server.use(
+      http.post(
+        `${BASE_URL}/v1/accounts/:account/media/uploads`,
+        () => new Promise(() => {}),
+      ),
+    )
+    const media = createMediaService({
+      auth: stubAuth(),
+      baseUrl: BASE_URL,
+      transferTimeoutMs: 40,
+    })
+
+    const result = await media.upload(
+      ACCOUNT,
+      new File([REAL_PNG], 'a.png', { type: 'image/png' }),
+    )
+
+    expect(result.ok).toBe(false)
+  })
+})
