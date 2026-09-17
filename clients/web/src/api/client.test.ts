@@ -15,6 +15,9 @@ import {
   apiErrorMessage,
   createApiClient,
   isErrorEnvelope,
+  REQUEST_TIMEOUT_MESSAGE,
+  REQUEST_UNREACHABLE_MESSAGE,
+  requestFailureMessage,
 } from './client'
 
 const BASE_URL = 'http://axon.test'
@@ -379,5 +382,60 @@ describe('the transport seam (ADR 0102 § 2)', () => {
     }
 
     expect(unhandled).not.toHaveBeenCalled()
+  })
+})
+
+describe('requestFailureMessage', () => {
+  /**
+   * What the reader used to be shown for our own 20 s deadline on an iPhone.
+   * WebKit rejects with a generic `AbortError` rather than the spec's
+   * `TimeoutError`, so both names have to land here or the engine the reports
+   * come from is the one engine this does not cover.
+   */
+  it('rewords both abort names as a timeout', () => {
+    for (const name of ['AbortError', 'TimeoutError']) {
+      expect(
+        requestFailureMessage(new DOMException('Fetch is aborted', name)),
+      ).toBe(REQUEST_TIMEOUT_MESSAGE)
+    }
+  })
+
+  /**
+   * A `DOMException` is *not* `instanceof Error` under jsdom, though it is in
+   * a browser. Classifying by that would pass on a hand-built `Error` and take
+   * the wrong branch on the real thing — so the name is read structurally, and
+   * this asserts the real type rather than a stand-in.
+   */
+  it('classifies a DOMException, which is not an Error here', () => {
+    const abort = new DOMException('Fetch is aborted', 'AbortError')
+
+    expect(abort instanceof Error).toBe(false)
+    expect(requestFailureMessage(abort)).toBe(REQUEST_TIMEOUT_MESSAGE)
+  })
+
+  it("rewords fetch's transport failure as unreachable", () => {
+    expect(requestFailureMessage(new TypeError('Load failed'))).toBe(
+      REQUEST_UNREACHABLE_MESSAGE,
+    )
+  })
+
+  it('leaves a real error its own message', () => {
+    expect(requestFailureMessage(new Error('room is not encrypted'))).toBe(
+      'room is not encrypted',
+    )
+  })
+
+  it('has something to say about a thrown non-error', () => {
+    expect(requestFailureMessage('nope')).toBe(REQUEST_UNREACHABLE_MESSAGE)
+    expect(requestFailureMessage(undefined)).toBe(REQUEST_UNREACHABLE_MESSAGE)
+  })
+
+  it('reaches a caller through the client, not just in isolation', async () => {
+    server.use(http.get(`${BASE_URL}/v1/accounts`, () => new Promise(() => {})))
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 40)
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow(
+      REQUEST_TIMEOUT_MESSAGE,
+    )
   })
 })

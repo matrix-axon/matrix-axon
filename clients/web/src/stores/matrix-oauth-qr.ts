@@ -190,7 +190,17 @@ function knownFailureMessage(
 }
 
 function transportMessage(cause: unknown, noun: string): string {
-  if (cause instanceof DOMException && cause.name === 'AbortError') {
+  // By `name`, read structurally: the API client now rejects with its own
+  // `RequestFailedError`, which carries the original name across (see
+  // `api/client.ts`), and an abort may arrive as a `DOMException`, which is
+  // not `instanceof Error` under jsdom. `TimeoutError` belongs here too — it
+  // is what a spec-correct engine raises for `AbortSignal.timeout`, where
+  // WebKit raises `AbortError`, and this branch caught only the latter.
+  const name =
+    typeof cause === 'object' && cause !== null && 'name' in cause
+      ? (cause as { name?: unknown }).name
+      : null
+  if (name === 'AbortError' || name === 'TimeoutError') {
     return `The ${noun} request timed out. Axon will check the flow before allowing a retry.`
   }
   return cause instanceof Error

@@ -119,6 +119,82 @@ function withinDeadline<T>(
 }
 
 /**
+ * What the reader sees when a request never got an answer.
+ *
+ * "Fetch is aborted" is WebKit's words for our own deadline firing, and it
+ * tells a reader nothing they can act on — it names a mechanism, blames
+ * something that sounds like a bug, and does not mention the one thing that
+ * would actually help. These say what happened and what to try, in the
+ * vocabulary `matrix-oauth-qr.ts` already uses for the same situation.
+ */
+export const REQUEST_TIMEOUT_MESSAGE =
+  'Axon did not respond in time. Check the connection and try again.'
+export const REQUEST_UNREACHABLE_MESSAGE =
+  'Could not reach Axon. Check the connection and try again.'
+
+/**
+ * A request that never produced a response, reworded for a reader.
+ *
+ * Both abort names are the deadline. Per spec `AbortSignal.timeout` aborts
+ * with a `TimeoutError`, and `AbortSignal.any` forwards that reason — but
+ * WebKit rejects the fetch with its own generic `AbortError` ("Fetch is
+ * aborted") instead, which is what an iPhone actually reports. Keying on
+ * either is what makes this work on the engine the reports come from.
+ *
+ * Treating an abort as a deadline is sound here because this client aborts
+ * for exactly one reason. The QR stores pass a signal of their own, but they
+ * decide what happened from `controller.signal.aborted` rather than from the
+ * message, so their classification is unaffected by this rewording.
+ *
+ * A `TypeError` is how `fetch` reports a transport failure — DNS, refused,
+ * connection cut mid-flight. Anything else keeps its own message: a real bug
+ * should not be dressed up as a network blip.
+ */
+export function requestFailureMessage(cause: unknown): string {
+  switch (causeField(cause, 'name')) {
+    case 'TimeoutError':
+    case 'AbortError':
+      return REQUEST_TIMEOUT_MESSAGE
+    case 'TypeError':
+      return REQUEST_UNREACHABLE_MESSAGE
+    default:
+      return causeField(cause, 'message') ?? REQUEST_UNREACHABLE_MESSAGE
+  }
+}
+
+/**
+ * Read a string field off a thrown value, whatever it is.
+ *
+ * Structural rather than `instanceof Error`, because **an abort is not
+ * necessarily an `Error`**. A fetch aborts with a `DOMException`, and while
+ * `DOMException` inherits from `Error` in a browser, it does not under jsdom —
+ * `new DOMException(…) instanceof Error` is `false` there. An `instanceof`
+ * guard therefore passes its unit tests on the exact input it is meant to
+ * classify and then takes the wrong branch, or the reverse. Reading the field
+ * is true in both.
+ */
+function causeField(cause: unknown, field: 'name' | 'message'): string | null {
+  if (typeof cause !== 'object' || cause === null || !(field in cause)) {
+    return null
+  }
+  const value = (cause as Record<string, unknown>)[field]
+  return typeof value === 'string' && value !== '' ? value : null
+}
+
+/**
+ * The rejection a caller sees for a request that never got a response.
+ *
+ * `name` and `cause` are carried over from the original so anything that
+ * classifies by them still can — only the human-facing `message` changes.
+ */
+export class RequestFailedError extends Error {
+  constructor(cause: unknown) {
+    super(requestFailureMessage(cause), { cause })
+    this.name = causeField(cause, 'name') ?? 'RequestFailedError'
+  }
+}
+
+/**
  * Build the API client over the auth seam (ADR 0046, M-W2).
  *
  * Two middleware concerns, matching the server's bearer scheme (ADR 0029):
@@ -174,6 +250,15 @@ export function createApiClient(
         auth.onAuthFailure()
       }
       return response
+    },
+    // One place to reword every request that never got an answer. Doing it
+    // here rather than at each `catch` is what makes the wording uniform:
+    // roughly twenty stores stringify a caught error straight into a signal
+    // the UI renders, and each one would otherwise have to remember.
+    onError({ error }) {
+      return error instanceof RequestFailedError
+        ? error
+        : new RequestFailedError(error)
     },
   }
   client.use(bearer)
