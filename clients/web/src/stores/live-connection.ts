@@ -1,5 +1,5 @@
 import { computed, signal, type ReadonlySignal } from '@preact/signals'
-import { decodeFrame, type LiveFrame } from '../api/frames'
+import { decodeFrame, HEARTBEAT, type LiveFrame } from '../api/frames'
 import { perfMark } from '../perf'
 import type { LiveSocket } from '../platform'
 
@@ -24,6 +24,58 @@ export const MAX_BACKOFF_MS = 30000
  * into a permanent 1 s open/close hammer with a gap-fill refetch per cycle.
  */
 export const STABLE_CONNECTION_MS = 10000
+
+/**
+ * How long the socket may go silent, once the server has proved it heartbeats,
+ * before the connection is treated as dead and replaced.
+ *
+ * A dropped socket normally announces itself: the transport fires `close` and
+ * `scheduleReconnect` takes over. A network *handover* does not. When an
+ * iPhone moves from WiFi to cell the old connection is left bound to an
+ * interface that no longer has a route; neither peer sends a FIN or an RST, so
+ * the socket sits in `OPEN` forever, `close` never fires, `connection` still
+ * reads `live`, and every consumer waits for frames that cannot arrive. The
+ * only thing that distinguishes that from an idle account is that the server's
+ * beat stopped landing too.
+ *
+ * Set well above the server's cadence (`DEFAULT_WS_HEARTBEAT_INTERVAL` in
+ * `crates/axon-api/src/state.rs`, 20 s) so an ordinary late beat — a slow link,
+ * a busy server, a briefly throttled background tab — is never mistaken for a
+ * dead path. Roughly two and a half beats have to go missing.
+ */
+export const HEARTBEAT_TIMEOUT_MS = 50000
+
+/**
+ * How long the page must have been hidden before becoming visible again counts
+ * as "the network may have changed under us".
+ *
+ * `online` covers a handover the page was awake for, but not the common iOS
+ * case: the phone switches networks while the app is backgrounded, the webview
+ * is frozen so no event is ever delivered, and by the time it thaws
+ * `navigator.onLine` has been `true` the whole time. Coming back to the
+ * foreground is the only signal left. Brief flicks away are excluded because
+ * replacing the socket costs every consumer a gap-fill refetch, and a two
+ * second tab switch has not changed anyone's network.
+ */
+export const REVIVE_AFTER_HIDDEN_MS = 10000
+
+/**
+ * Least time between two socket replacements.
+ *
+ * `online` is not guaranteed to arrive once per network change. A phone at the
+ * edge of coverage, handing between towers or between an access point and
+ * cell — the situation this whole mechanism exists for — can fire it several
+ * times in a few seconds. Each replacement is not free: it tears down a socket
+ * that may have just opened, and every one that opens bumps `reconnects`,
+ * which costs every timeline and room-list consumer a gap-fill refetch at the
+ * exact moment the network is least able to serve one.
+ *
+ * Short enough that a genuine second change moments later is still caught by
+ * the next trigger — the watchdog's window is an order of magnitude longer,
+ * and a socket that really is dead has `close` and silence still ahead of it.
+ * This coalesces a burst; it does not suppress a signal.
+ */
+export const REVIVE_COALESCE_MS = 2000
 
 export interface LiveConnection {
   /** The socket state, for the shell's connection indicator (step 4). */
@@ -59,6 +111,19 @@ export interface LiveConnectionOptions {
    * satisfies it structurally.
    */
   socketFactory: () => LiveSocket
+  /**
+   * Where `online` is observed, and the clock the hidden-for measurement uses.
+   * Injected so tests can drive a network change without a real browser; the
+   * defaults are the globals.
+   */
+  window?: Pick<Window, 'addEventListener' | 'removeEventListener'>
+  /** Where `visibilitychange` is observed, and what reports the hidden state. */
+  document?: Pick<
+    Document,
+    'addEventListener' | 'removeEventListener' | 'hidden'
+  >
+  /** Injected for the hidden-for threshold; `Date.now` in production. */
+  now?: () => number
 }
 
 /**
@@ -73,10 +138,29 @@ export interface LiveConnectionOptions {
  * `STABLE_CONNECTION_MS`. Because the bus
  * has no resume cursor, a reconnect can only signal that frames may have been
  * missed — consumers watch `reconnects` and re-read (gap-fill).
+ *
+ * A `close` is not the only way a socket dies, though, and on a phone it is
+ * not even the common one. Three further triggers replace the socket outright
+ * (`revive`), because after a network handover the transport reports an open
+ * connection that can no longer carry anything:
+ *
+ * - `online`, for a handover the page was awake to see;
+ * - returning to the foreground after `REVIVE_AFTER_HIDDEN_MS`, for the
+ *   handover that happened while the webview was frozen and delivered no
+ *   event at all;
+ * - `HEARTBEAT_TIMEOUT_MS` of silence once the server has shown it heartbeats,
+ *   for everything neither of those catches.
+ *
+ * Each of those takes the same path as a real drop, `reconnects` included, so
+ * the gap-fill consumers already implement is what repairs the stale state.
  */
 export function createLiveConnection(
   options: LiveConnectionOptions,
 ): LiveConnection {
+  const win = options.window ?? window
+  const doc = options.document ?? document
+  const clock = options.now ?? (() => Date.now())
+
   const connection = signal<ConnectionState>('offline')
   const reconnects = signal(0)
   const listeners = new Set<FrameListener>()
@@ -96,12 +180,24 @@ export function createLiveConnection(
   let lastFactoryError: string | null = null
   /** True between `start()` and `stop()` — whether a connection is wanted. */
   let wanted = false
+  /**
+   * The silence watchdog. Non-null exactly when it is armed, which is also how
+   * this knows whether the current socket's server has ever beaten: only a
+   * heartbeat arms it (`noteTraffic`), and every path that abandons a socket
+   * disarms it. One handle rather than a handle plus a parallel boolean, so
+   * there is no second piece of state to keep in step.
+   *
+   * Staying disarmed until the server proves it beats is what makes this client
+   * safe against a server that never does — it must not be force-reconnected
+   * every window. That matters because the two halves ship separately.
+   */
+  let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
+  /** When the page went hidden, for the `REVIVE_AFTER_HIDDEN_MS` threshold. */
+  let hiddenAt: number | null = null
+  /** When the socket was last replaced, for `REVIVE_COALESCE_MS`. */
+  let lastReviveAt: number | null = null
 
-  function dispatch(raw: string): void {
-    const frame = decodeFrame(raw)
-    if (frame === null) {
-      return
-    }
+  function dispatch(frame: LiveFrame): void {
     for (const listener of listeners) {
       // One misbehaving listener must not starve the others or drop the frame.
       try {
@@ -109,6 +205,113 @@ export function createLiveConnection(
       } catch {
         // Swallow: a consumer bug is not the transport's problem.
       }
+    }
+  }
+
+  /** Stop the silence watchdog; it re-arms on the next heartbeat. */
+  function disarmWatchdog(): void {
+    if (heartbeatTimer !== null) {
+      clearTimeout(heartbeatTimer)
+      heartbeatTimer = null
+    }
+  }
+
+  /**
+   * Note that something arrived from the server.
+   *
+   * *Any* frame proves the path is alive and pushes the deadline out — a busy
+   * room keeps the socket healthy without waiting on a beat. Only a heartbeat
+   * may *arm* the watchdog, though: until one has landed, this client has no
+   * evidence the server sends them, and arming on ordinary traffic would make
+   * a quiet hour on a pre-heartbeat server look identical to a dead link.
+   */
+  function noteTraffic(type: string | null): void {
+    // Unarmed and this is not a beat: the server has not shown it beats, so
+    // silence still proves nothing and there is no deadline to push out.
+    if (heartbeatTimer === null && type !== HEARTBEAT) {
+      return
+    }
+    disarmWatchdog()
+    heartbeatTimer = setTimeout(() => {
+      heartbeatTimer = null
+      console.warn(
+        'live connection: no server heartbeat for',
+        `${HEARTBEAT_TIMEOUT_MS}ms — replacing the socket`,
+      )
+      revive()
+    }, HEARTBEAT_TIMEOUT_MS)
+  }
+
+  /** Detach and close a socket without letting its `close` drive the state. */
+  function discard(closing: LiveSocket | null): void {
+    if (closing === null) {
+      return
+    }
+    closing.onclose = null
+    closing.onmessage = null
+    closing.onopen = null
+    closing.onerror = null
+    closing.close()
+  }
+
+  /**
+   * Replace the socket now, on the suspicion that the one we have is dead.
+   *
+   * The three callers — `online`, a long-hidden page coming back, and the
+   * silence watchdog — share a problem the transport cannot report: after a
+   * network handover the socket is still `OPEN` and still useless. `readyState`
+   * is no help, so this does not consult it; it closes whatever is there and
+   * opens a fresh one unconditionally.
+   *
+   * `everConnected` is deliberately left alone, so the new socket's `open`
+   * bumps `reconnects` and every consumer gap-fills (ADR 0061) — which is the
+   * actual repair. The backoff is reset because an external event arriving is
+   * new information, not another failed attempt.
+   */
+  function revive(): void {
+    if (!wanted) {
+      return
+    }
+    // A burst of triggers is one network change, not several — see
+    // `REVIVE_COALESCE_MS`. Measured from the last replacement rather than
+    // debounced with a timer, so the *first* event in a burst acts at once and
+    // the rest are dropped; delaying the first would be the wrong trade for a
+    // client that is trying to get back online.
+    const at = clock()
+    if (lastReviveAt !== null && at - lastReviveAt < REVIVE_COALESCE_MS) {
+      return
+    }
+    lastReviveAt = at
+    disarmWatchdog()
+    if (socket !== null) {
+      perfMark('live:close')
+    }
+    const closing = socket
+    socket = null
+    openedAtMs = null
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+    backoffMs = INITIAL_BACKOFF_MS
+    connection.value = 'connecting'
+    discard(closing)
+    openSocket()
+  }
+
+  const onOnline = () => {
+    revive()
+  }
+
+  const onVisibilityChange = () => {
+    if (doc.hidden) {
+      hiddenAt = clock()
+      return
+    }
+    const awayFor = hiddenAt === null ? 0 : clock() - hiddenAt
+    hiddenAt = null
+    if (awayFor >= REVIVE_AFTER_HIDDEN_MS) {
+      revive()
     }
   }
 
@@ -127,6 +330,11 @@ export function createLiveConnection(
   }
 
   function openSocket(): void {
+    // A closed socket keeps its handlers (the stale-close check below needs
+    // them), so a frame landing after its `close` can leave a watchdog armed
+    // for a socket that no longer exists. Clearing it here means no timer ever
+    // outlives the socket that armed it and fires into this one's window.
+    disarmWatchdog()
     let opened: LiveSocket
     try {
       opened = options.socketFactory()
@@ -167,14 +375,23 @@ export function createLiveConnection(
       connection.value = 'live'
     }
     opened.onmessage = (event) => {
-      if (typeof event.data === 'string') {
-        dispatch(event.data)
+      if (typeof event.data !== 'string') {
+        return
       }
+      const frame = decodeFrame(event.data)
+      // Before the null check: a frame this client cannot parse is still proof
+      // that the connection carries bytes, which is all the watchdog asks.
+      noteTraffic(frame?.type ?? null)
+      if (frame === null || frame.type === HEARTBEAT) {
+        return
+      }
+      dispatch(frame)
     }
     opened.onclose = () => {
       // Ignore a stale socket's close (one replaced by stop() or a reconnect).
       if (socket === opened) {
         perfMark('live:close')
+        disarmWatchdog()
         // Only a connection that stayed up counts as recovery; an
         // accept-then-close cycle keeps growing the backoff.
         if (
@@ -200,6 +417,12 @@ export function createLiveConnection(
     wanted = true
     everConnected = false
     backoffMs = INITIAL_BACKOFF_MS
+    hiddenAt = doc.hidden ? clock() : null
+    // Bound to the socket's own lifetime rather than mounted by a component:
+    // these exist to repair *this* socket, and a listener outliving it would
+    // revive a connection nobody wants.
+    win.addEventListener('online', onOnline)
+    doc.addEventListener('visibilitychange', onVisibilityChange)
     connection.value = 'connecting'
     openSocket()
   }
@@ -208,6 +431,11 @@ export function createLiveConnection(
     wanted = false
     everConnected = false
     backoffMs = INITIAL_BACKOFF_MS
+    hiddenAt = null
+    lastReviveAt = null
+    win.removeEventListener('online', onOnline)
+    doc.removeEventListener('visibilitychange', onVisibilityChange)
+    disarmWatchdog()
     if (reconnectTimer !== null) {
       clearTimeout(reconnectTimer)
       reconnectTimer = null
@@ -215,13 +443,7 @@ export function createLiveConnection(
     const closing = socket
     socket = null
     connection.value = 'offline'
-    if (closing !== null) {
-      closing.onclose = null
-      closing.onmessage = null
-      closing.onopen = null
-      closing.onerror = null
-      closing.close()
-    }
+    discard(closing)
   }
 
   return {

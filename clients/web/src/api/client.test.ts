@@ -1,12 +1,23 @@
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import type { AuthProvider } from '../auth/provider'
 import {
   apiErrorCode,
   apiErrorMessage,
   createApiClient,
   isErrorEnvelope,
+  REQUEST_TIMEOUT_MESSAGE,
+  REQUEST_UNREACHABLE_MESSAGE,
+  requestFailureMessage,
 } from './client'
 
 const BASE_URL = 'http://axon.test'
@@ -229,5 +240,226 @@ describe('the transport seam (ADR 0102 § 2)', () => {
     await api.GET('/v1/accounts')
 
     expect(seen).toBe('Bearer tok-2')
+  })
+
+  /**
+   * The iPhone report behind this: a request issued across a WiFi→cell
+   * handover never settles, because the connection it went out on no longer
+   * has a route and nothing ever tears it down. Every caller copes with a
+   * *rejected* request; none copes with one that never answers, so the room
+   * list and the timeline sit on their placeholders until the app is
+   * relaunched.
+   */
+  it('rejects a request that never answers, instead of hanging forever', async () => {
+    server.use(http.get(`${BASE_URL}/v1/accounts`, () => new Promise(() => {})))
+
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 40)
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow()
+  })
+
+  it('leaves a request that answers in time alone', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/accounts`, () =>
+        HttpResponse.json({ data: [ACCOUNT] }),
+      ),
+    )
+
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 5_000)
+    const { data, error } = await api.GET('/v1/accounts')
+
+    expect(error).toBeUndefined()
+    expect(data?.data).toEqual([ACCOUNT])
+  })
+
+  /**
+   * The QR stores pass their own 15 s signal per call and read
+   * `controller.signal.aborted` to tell their timeout apart from a transport
+   * failure. Replacing their signal rather than combining with it would make
+   * every one of those calls unabortable.
+   */
+  it("keeps the caller's own abort working", async () => {
+    server.use(http.get(`${BASE_URL}/v1/accounts`, () => new Promise(() => {})))
+
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 5_000)
+    const controller = new AbortController()
+    const pending = api.GET('/v1/accounts', { signal: controller.signal })
+    controller.abort()
+
+    await expect(pending).rejects.toThrow()
+    expect(controller.signal.aborted).toBe(true)
+  })
+
+  it('still sends the bearer token on a request it re-signed', async () => {
+    let seenAuthorization: string | null = null
+    server.use(
+      http.get(`${BASE_URL}/v1/accounts`, ({ request }) => {
+        seenAuthorization = request.headers.get('authorization')
+        return HttpResponse.json({ data: [ACCOUNT] })
+      }),
+    )
+
+    const api = createApiClient(
+      stubAuth('tok-deadline'),
+      BASE_URL,
+      undefined,
+      5_000,
+    )
+    await api.GET('/v1/accounts')
+
+    expect(seenAuthorization).toBe('Bearer tok-deadline')
+  })
+
+  /**
+   * The deadline is attached by rebuilding the request, because
+   * `Request.signal` is read-only. A rebuild that dropped the body would break
+   * every mutation in the client while leaving reads working — so the body is
+   * what this asserts, not the signal.
+   */
+  it('carries a request body through the re-signed request', async () => {
+    let seenBody: unknown = null
+    server.use(
+      http.post(`${BASE_URL}/v1/accounts/login`, async ({ request }) => {
+        seenBody = await request.json()
+        return HttpResponse.json({ data: ACCOUNT }, { status: 201 })
+      }),
+    )
+
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 5_000)
+    await api.POST('/v1/accounts/login', {
+      body: {
+        username: '@alice:example.org',
+        password: 'hunter2',
+        homeserver_url: 'https://matrix.example.org',
+      },
+    })
+
+    expect(seenBody).toMatchObject({ username: '@alice:example.org' })
+  })
+
+  /**
+   * The hole the first version of this deadline had. `auth.getToken()` can go
+   * to the network itself — the OAuth provider refreshes a near-expiry access
+   * token by POSTing the token endpoint — so a deadline attached to the
+   * outgoing request *after* awaiting the token never gets a chance to fire:
+   * the middleware never returns, `fetch` is never called, and the request
+   * hangs indefinitely while looking, in the bundle, exactly like a request
+   * that has a deadline.
+   */
+  it('gives up when the token itself never arrives', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/accounts`, () =>
+        HttpResponse.json({ data: [ACCOUNT] }),
+      ),
+    )
+    const hangingAuth: AuthProvider = {
+      getToken: () => new Promise<string | null>(() => {}),
+      onAuthFailure: () => {},
+      LoginBootstrap: () => null,
+    }
+
+    const api = createApiClient(hangingAuth, BASE_URL, undefined, 40)
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow()
+  })
+
+  it('does not leave a rejection behind when the token wins the race', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/accounts`, () =>
+        HttpResponse.json({ data: [ACCOUNT] }),
+      ),
+    )
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+    try {
+      // Deadline shorter than the wait that follows, so it fires well after
+      // the token resolved and the race was already decided.
+      const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 20)
+      await api.GET('/v1/accounts')
+      await new Promise((resolve) => setTimeout(resolve, 80))
+    } finally {
+      process.off('unhandledRejection', unhandled)
+    }
+
+    expect(unhandled).not.toHaveBeenCalled()
+  })
+})
+
+describe('requestFailureMessage', () => {
+  /**
+   * What the reader used to be shown for our own 20 s deadline on an iPhone.
+   * WebKit rejects with a generic `AbortError` rather than the spec's
+   * `TimeoutError`, so both names have to land here or the engine the reports
+   * come from is the one engine this does not cover.
+   */
+  it('rewords both abort names as a timeout', () => {
+    for (const name of ['AbortError', 'TimeoutError']) {
+      expect(
+        requestFailureMessage(new DOMException('Fetch is aborted', name)),
+      ).toBe(REQUEST_TIMEOUT_MESSAGE)
+    }
+  })
+
+  /**
+   * A `DOMException` is *not* `instanceof Error` under jsdom, though it is in
+   * a browser. Classifying by that would pass on a hand-built `Error` and take
+   * the wrong branch on the real thing — so the name is read structurally, and
+   * this asserts the real type rather than a stand-in.
+   */
+  it('classifies a DOMException, which is not an Error here', () => {
+    const abort = new DOMException('Fetch is aborted', 'AbortError')
+
+    expect(abort instanceof Error).toBe(false)
+    expect(requestFailureMessage(abort)).toBe(REQUEST_TIMEOUT_MESSAGE)
+  })
+
+  it("rewords fetch's transport failure as unreachable", () => {
+    expect(requestFailureMessage(new TypeError('Load failed'))).toBe(
+      REQUEST_UNREACHABLE_MESSAGE,
+    )
+  })
+
+  it('leaves a real error its own message', () => {
+    expect(requestFailureMessage(new Error('room is not encrypted'))).toBe(
+      'room is not encrypted',
+    )
+  })
+
+  it('has something to say about a thrown non-error', () => {
+    expect(requestFailureMessage('nope')).toBe(REQUEST_UNREACHABLE_MESSAGE)
+    expect(requestFailureMessage(undefined)).toBe(REQUEST_UNREACHABLE_MESSAGE)
+  })
+
+  it('reaches a caller through the client, not just in isolation', async () => {
+    server.use(http.get(`${BASE_URL}/v1/accounts`, () => new Promise(() => {})))
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 40)
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow(
+      REQUEST_TIMEOUT_MESSAGE,
+    )
+  })
+
+  /**
+   * The `instanceof Promise` this used to gate on is not true of a thenable
+   * from another realm or a polyfill, and such a value would have been awaited
+   * with no deadline — the unbounded hang this seam exists to prevent, on a
+   * path that reads exactly like the protected one.
+   */
+  it('races a thenable that is not a native Promise', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/accounts`, () =>
+        HttpResponse.json({ data: [ACCOUNT] }),
+      ),
+    )
+    const thenableAuth: AuthProvider = {
+      // A bare thenable: `instanceof Promise` is false, and it never settles.
+      getToken: () => ({ then: () => {} }) as unknown as Promise<string | null>,
+      onAuthFailure: () => {},
+      LoginBootstrap: () => null,
+    }
+
+    const api = createApiClient(thenableAuth, BASE_URL, undefined, 40)
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow()
   })
 })

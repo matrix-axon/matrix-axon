@@ -514,11 +514,24 @@ describe('sending', () => {
   })
 
   it('shows "Sending…" on the composed message immediately, before the POST resolves', async () => {
+    // `resolveSend` only exists once the handler has run, and the echo renders
+    // *before* the POST is issued — `send()` pushes it, then awaits. So
+    // "Sending…" being on screen says nothing about the request being in
+    // flight, and resolving too early resolves the placeholder instead of the
+    // real promise, leaving the echo pending forever. `sendIssued` is what
+    // makes the wait explicit rather than a bet on how many microtasks the
+    // request path happens to take.
     let resolveSend: (value: Response) => void = () => {}
+    let sendIssued: () => void = () => {}
+    const issued = new Promise<void>((resolve) => (sendIssued = resolve))
     server.use(
       http.post(
         `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/send`,
-        () => new Promise<Response>((resolve) => (resolveSend = resolve)),
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveSend = resolve
+            sendIssued()
+          }),
       ),
       http.get(EVENTS_PATH, () =>
         HttpResponse.json({
@@ -540,6 +553,7 @@ describe('sending', () => {
     expect(await findByText('hello there')).toBeTruthy()
     expect(await findByText('Sending…')).toBeTruthy()
 
+    await issued
     resolveSend(HttpResponse.json({ data: { event_id: '$new' } }))
     await waitFor(() => expect(queryByText('Sending…')).toBeNull())
   })

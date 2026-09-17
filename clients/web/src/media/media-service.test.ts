@@ -668,3 +668,132 @@ describe('the transport seam (ADR 0102 § 2)', () => {
     expect(methods).toEqual(['POST'])
   })
 })
+
+/**
+ * A media transfer holds one of the six concurrency permits for its whole
+ * life, so "slow" and "never" are not the same failure: unbounded, six
+ * requests caught by a network handover pin the pool and stop media across the
+ * whole app until the document reloads. The comment on
+ * `ERROR_ENVELOPE_MAX_BYTES` already names that hazard for the error-body read;
+ * these are the transfers themselves.
+ */
+describe('the transfer deadline', () => {
+  it('abandons a download that never answers', async () => {
+    server.use(
+      http.get(
+        `${BASE_URL}/v1/media/:account/:server/:media`,
+        () => new Promise(() => {}),
+      ),
+    )
+    const media = createMediaService({
+      auth: stubAuth(),
+      baseUrl: BASE_URL,
+      transferTimeoutMs: 40,
+    })
+
+    const handle = await media.acquire(ACCOUNT, 'mxc://hs/stuck')
+
+    expect(handle.result).toMatchObject({
+      ok: false,
+      error: { kind: 'network' },
+    })
+  })
+
+  /**
+   * The failure that actually matters. Six stuck downloads is the whole pool;
+   * without a deadline the seventh never runs, no matter how healthy the
+   * network is by then.
+   */
+  it('releases the permits, so media works again afterwards', async () => {
+    let stuck = true
+    server.use(
+      http.get(`${BASE_URL}/v1/media/:account/:server/:media`, async () => {
+        if (stuck) {
+          await new Promise(() => {})
+        }
+        return HttpResponse.arrayBuffer(REAL_PNG.buffer as ArrayBuffer, {
+          headers: { 'content-type': 'image/png' },
+        })
+      }),
+    )
+    const media = createMediaService({
+      auth: stubAuth(),
+      baseUrl: BASE_URL,
+      transferTimeoutMs: 40,
+    })
+
+    // Exactly `MAX_CONCURRENT` (6) transfers, each of which would hold its
+    // permit forever.
+    const wedged = await Promise.all(
+      Array.from({ length: 6 }, (_, i) =>
+        media.acquire(ACCOUNT, `mxc://hs/wedge-${i}`),
+      ),
+    )
+    expect(wedged.every((handle) => handle.result.ok === false)).toBe(true)
+
+    stuck = false
+    const after = await media.acquire(ACCOUNT, 'mxc://hs/after')
+
+    expect(after.result.ok).toBe(true)
+  })
+
+  /**
+   * The reviewer's case on #421: 90 MB at a healthy ~4 Mbps needs about three
+   * minutes and is progressing throughout. A flat two-minute bound would abort
+   * it for being large, which is worse than the unbounded behaviour it
+   * replaced — abandoning a transfer that is working destroys the send.
+   */
+  it('gives a large upload room to finish at a poor-but-real speed', async () => {
+    let seenTimeout: number | null = null
+    const injected: typeof globalThis.fetch = async (_input, init) => {
+      // `AbortSignal.timeout(n)` does not expose `n`, so the budget is read
+      // from how long the signal actually takes to abort.
+      const started = Date.now()
+      await new Promise<void>((resolve) => {
+        init?.signal?.addEventListener('abort', () => {
+          seenTimeout = Date.now() - started
+          resolve()
+        })
+      })
+      return new Response(null, { status: 500 })
+    }
+    const media = createMediaService({
+      auth: stubAuth(),
+      baseUrl: BASE_URL,
+      platform: { fetch: injected },
+      transferTimeoutMs: 20,
+    })
+
+    // 12_800 bytes at the 128 B/ms floor buys 100ms on top of the 20ms base.
+    await media.upload(
+      ACCOUNT,
+      new File([new Uint8Array(12_800)], 'big.bin', {
+        type: 'application/octet-stream',
+      }),
+    )
+
+    // Comfortably past the base alone, which is what a flat bound would give.
+    expect(seenTimeout).toBeGreaterThanOrEqual(100)
+  })
+
+  it('abandons an upload that never answers', async () => {
+    server.use(
+      http.post(
+        `${BASE_URL}/v1/accounts/:account/media/uploads`,
+        () => new Promise(() => {}),
+      ),
+    )
+    const media = createMediaService({
+      auth: stubAuth(),
+      baseUrl: BASE_URL,
+      transferTimeoutMs: 40,
+    })
+
+    const result = await media.upload(
+      ACCOUNT,
+      new File([REAL_PNG], 'a.png', { type: 'image/png' }),
+    )
+
+    expect(result.ok).toBe(false)
+  })
+})
