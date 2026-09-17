@@ -42,6 +42,15 @@
 //! happens out-of-process, via the CLI, so there is no push signal) and closes
 //! when the token is revoked — otherwise a revoked client would keep receiving
 //! frames forever.
+//!
+//! Finally, the socket emits a [`HEARTBEAT`] frame on an interval so that a
+//! client can tell an idle account from a connection that has silently stopped
+//! carrying bytes — the WiFi→cell handover case, where the socket stays `OPEN`
+//! on both sides with no route between them. It is an ordinary frame rather
+//! than a WebSocket ping because a browser answers pings inside its networking
+//! stack and surfaces nothing to the page; see `DEFAULT_WS_HEARTBEAT_INTERVAL`
+//! in `state.rs`. No client in this repository consumes it yet — the web
+//! client's watchdog is PR #421, the TUI's is #418.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,12 +70,19 @@ use uuid::Uuid;
 
 use crate::auth::{self, TokenVerifier};
 use crate::dto::EventDto;
-use crate::state::WsRevalidationInterval;
+use crate::state::{WsHeartbeatInterval, WsRevalidationInterval};
 
 /// The `type` tag for a live timeline event frame. Namespaced so other frame
 /// kinds (e.g. the `verification.*` frames below) extend the protocol without
 /// colliding.
 const TIMELINE_EVENT: &str = "timeline.event";
+
+/// The `type` tag for the periodic liveness beat. Carries no information: a
+/// client uses only the fact that it arrived, to distinguish a quiet socket
+/// from a dead one. The `account_id` is the nil UUID, because the beat belongs
+/// to the connection rather than to any account — every consumer self-filters
+/// on `account_id` (ADR 0020), so it reaches none of them.
+const HEARTBEAT: &str = "heartbeat";
 
 /// The benign WebSocket subprotocol the server negotiates when a browser client
 /// offers it. It carries no credential: browsers offer `axon, bearer.<token>`
@@ -110,6 +126,12 @@ struct VerificationFramePayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
 }
+
+/// The wire payload of a [`HEARTBEAT`] frame: empty, on purpose. The envelope's
+/// arrival is the whole signal, and an empty object leaves room to add fields
+/// later without changing the frame's shape.
+#[derive(Debug, Serialize)]
+struct HeartbeatPayload {}
 
 /// One SAS emoji: the symbol and its short English description.
 #[derive(Debug, Serialize)]
@@ -380,6 +402,7 @@ pub async fn ws_handler(
     State(live): State<broadcast::Sender<LiveFrame>>,
     State(verifier): State<Arc<dyn TokenVerifier>>,
     State(WsRevalidationInterval(revalidation)): State<WsRevalidationInterval>,
+    State(WsHeartbeatInterval(heartbeat)): State<WsHeartbeatInterval>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -408,7 +431,7 @@ pub async fn ws_handler(
     // clients (the TUI) offer no subprotocols, so nothing is negotiated for them.
     let rx = live.subscribe();
     ws.protocols([WS_SUBPROTOCOL])
-        .on_upgrade(move |socket| pump(socket, rx, verifier, token, revalidation))
+        .on_upgrade(move |socket| pump(socket, rx, verifier, token, revalidation, heartbeat))
 }
 
 /// Find a `bearer.<token>` entry in the `Sec-WebSocket-Protocol` header and
@@ -522,17 +545,33 @@ async fn send_with_timeout(socket: &mut WebSocket, message: Message) -> SendOutc
 /// `verifier` + `token` + `revalidation` drive a periodic token re-check:
 /// revocation happens out-of-process (the `axon token revoke` CLI writes the DB),
 /// so a live socket polls to notice it and closes when the token stops verifying.
+///
+/// `heartbeat` drives the [`HEARTBEAT`] beat that lets a client measure silence
+/// on an otherwise idle socket.
 async fn pump(
     mut socket: WebSocket,
     mut rx: broadcast::Receiver<LiveFrame>,
     verifier: Arc<dyn TokenVerifier>,
     token: String,
     revalidation: Duration,
+    heartbeat: Duration,
 ) {
     let mut revalidate = tokio::time::interval(revalidation);
     // The interval's first tick is immediate; consume it — we just verified the
     // token at upgrade, so the first *re*-check should be one interval out.
     revalidate.tick().await;
+
+    let mut beat = tokio::time::interval(heartbeat);
+    // A beat is only ever evidence about *now*, so a tick missed while this task
+    // was busy elsewhere has nothing to catch up on. The default `Burst`
+    // behaviour would fire every skipped tick back to back the moment the task
+    // resumes — a long `send_with_timeout` on a slow peer is enough — which
+    // would spend the client's whole silence budget in one instant and teach it
+    // nothing. `Delay` just resumes the cadence from here.
+    beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // As above: the first tick is immediate, and the client has just seen the
+    // 101 — the first *beat* belongs one interval out.
+    beat.tick().await;
 
     loop {
         tokio::select! {
@@ -550,6 +589,32 @@ async fn pump(
                     }
                     Err(err) => {
                         tracing::warn!(error = ?err, "websocket token revalidation failed; keeping socket open");
+                    }
+                }
+            }
+
+            // The periodic liveness beat. A failed or timed-out write means the
+            // same thing here as anywhere else in this loop: the peer is gone.
+            _ = beat.tick() => {
+                let text = match serde_json::to_string(&WsEnvelope {
+                    kind: HEARTBEAT,
+                    account_id: Uuid::nil(),
+                    payload: HeartbeatPayload {},
+                }) {
+                    Ok(text) => text,
+                    Err(err) => {
+                        // A fixed, field-less struct cannot realistically fail to
+                        // serialize; log and skip rather than dropping a live client.
+                        tracing::error!(error = %err, "failed to serialize heartbeat frame");
+                        continue;
+                    }
+                };
+                match send_with_timeout(&mut socket, Message::Text(text.into())).await {
+                    SendOutcome::Delivered => {}
+                    SendOutcome::Closed => break,
+                    SendOutcome::TimedOut => {
+                        tracing::info!("websocket heartbeat write timed out; closing socket");
+                        break;
                     }
                 }
             }
@@ -613,6 +678,24 @@ mod tests {
 
     fn decode(frame: LiveFrame) -> Value {
         serde_json::from_str(&encode_frame(frame).expect("encode")).expect("json")
+    }
+
+    /// The beat is an ordinary envelope, so a client that predates it decodes it
+    /// and routes it nowhere rather than choking. The nil `account_id` is what
+    /// keeps it out of every consumer's self-filter (ADR 0020).
+    #[test]
+    fn heartbeat_frame_keeps_its_wire_shape() {
+        let text = serde_json::to_string(&WsEnvelope {
+            kind: HEARTBEAT,
+            account_id: Uuid::nil(),
+            payload: HeartbeatPayload {},
+        })
+        .expect("encode");
+        let v: Value = serde_json::from_str(&text).expect("json");
+
+        assert_eq!(v["type"], "heartbeat");
+        assert_eq!(v["account_id"], Uuid::nil().to_string());
+        assert_eq!(v["payload"], serde_json::json!({}));
     }
 
     #[test]
