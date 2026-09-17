@@ -118,7 +118,13 @@ export interface TelemetryStoreOptions {
   cache: CacheStore
   /** The user's setting, read per call so a toggle takes effect at once. */
   enabled: () => boolean
-  /** Injected for tests; `crypto.randomUUID` in production. */
+  /**
+   * Injected for tests. The default is a short `Math.random` tag rather than
+   * `crypto.randomUUID`, which the comment here used to claim: a session id
+   * discriminates one run's entries from another's and is never a secret, and
+   * `randomUUID` would additionally throw on an insecure origin (see
+   * `random-id.ts`).
+   */
   sessionId?: () => string
   now?: () => number
 }
