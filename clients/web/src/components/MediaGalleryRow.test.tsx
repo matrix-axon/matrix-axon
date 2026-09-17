@@ -258,11 +258,38 @@ describe('MediaGalleryRow', () => {
       return found
     })
 
-    for (const button of buttons) {
-      pointer(button, 'down', 40)
-      pointer(button, 'up', 40)
-      pointer(button, 'down', 41)
-      pointer(button, 'up', 41)
+    const burstFor = (eventId: string) =>
+      container.querySelector(
+        `.gallery-cell[data-event-id="${eventId}"] .message-reaction-burst`,
+      )
+    vi.useFakeTimers()
+    try {
+      for (const [index, button] of buttons.entries()) {
+        pointer(button, 'down', 40)
+        pointer(button, 'up', 40)
+        pointer(button, 'down', 41)
+        pointer(button, 'up', 41)
+        expect(
+          container.querySelectorAll('.gallery-cell .message-reaction-burst'),
+        ).toHaveLength(index + 1)
+        if (index === 0) {
+          act(() => {
+            vi.advanceTimersByTime(200)
+          })
+        }
+      }
+
+      act(() => {
+        vi.advanceTimersByTime(250)
+      })
+      expect(burstFor('$1')).toBeNull()
+      expect(burstFor('$2')).not.toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(200)
+      })
+      expect(burstFor('$2')).toBeNull()
+    } finally {
+      vi.useRealTimers()
     }
 
     expect(concurrentTimeline.toggleReaction).toHaveBeenCalledTimes(2)

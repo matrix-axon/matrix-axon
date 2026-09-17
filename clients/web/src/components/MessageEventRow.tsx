@@ -379,13 +379,8 @@ export function MessageEventRow({
     onFeedback: (_eventId, message) => showGestureFeedback(message),
   })
   const gestureReaction =
-    gestureReactions.presentation?.eventId === event.event_id
-      ? gestureReactions.presentation
-      : null
-  const reactionBurst =
-    gestureReactions.burst?.eventId === event.event_id
-      ? gestureReactions.burst.emoji
-      : null
+    gestureReactions.presentations.get(event.event_id) ?? null
+  const reactionBurst = gestureReactions.bursts.get(event.event_id) ?? null
   const pendingNewReaction =
     gestureReaction !== null &&
     !gestureReaction.removing &&

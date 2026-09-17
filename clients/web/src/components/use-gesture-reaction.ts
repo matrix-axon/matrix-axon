@@ -21,23 +21,36 @@ export function useGestureReaction({
 }) {
   const activeRequests = useRef(new Map<string, number>())
   const nextRequest = useRef(0)
-  const burstTimer = useRef<number | null>(null)
-  const burstEventId = useRef<string | null>(null)
-  const [presentation, setPresentation] =
-    useState<GestureReactionPresentation | null>(null)
-  const [burst, setBurst] = useState<{
-    eventId: string
-    emoji: string
-  } | null>(null)
+  const burstTimers = useRef(new Map<string, number>())
+  const [presentations, setPresentations] = useState<
+    ReadonlyMap<string, GestureReactionPresentation>
+  >(new Map())
+  const [bursts, setBursts] = useState<ReadonlyMap<string, string>>(new Map())
 
   useEffect(
     () => () => {
-      if (burstTimer.current !== null) window.clearTimeout(burstTimer.current)
+      for (const timer of burstTimers.current.values()) {
+        window.clearTimeout(timer)
+      }
+      burstTimers.current.clear()
       activeRequests.current.clear()
-      burstEventId.current = null
     },
     [],
   )
+
+  const clearBurst = (eventId: string) => {
+    const timer = burstTimers.current.get(eventId)
+    if (timer !== undefined) {
+      window.clearTimeout(timer)
+      burstTimers.current.delete(eventId)
+    }
+    setBursts((current) => {
+      if (!current.has(eventId)) return current
+      const next = new Map(current)
+      next.delete(eventId)
+      return next
+    })
+  }
 
   const run = (event: TimelineEvent, emoji: string) => {
     // The event remains unchanged until the authoritative refresh lands. Do
@@ -47,46 +60,43 @@ export function useGestureReaction({
     const request = ++nextRequest.current
     const removing = event.reactions?.[emoji]?.me === true
     activeRequests.current.set(event.event_id, request)
-    setPresentation({ eventId: event.event_id, emoji, removing })
+    setPresentations((current) =>
+      new Map(current).set(event.event_id, {
+        eventId: event.event_id,
+        emoji,
+        removing,
+      }),
+    )
 
-    if (burstTimer.current !== null) window.clearTimeout(burstTimer.current)
-    if (removing) {
-      burstEventId.current = null
-      setBurst(null)
-    } else {
-      burstEventId.current = event.event_id
-      setBurst({ eventId: event.event_id, emoji })
-      burstTimer.current = window.setTimeout(() => {
-        if (burstEventId.current === event.event_id) {
-          burstEventId.current = null
-          setBurst(null)
+    clearBurst(event.event_id)
+    // A removal has only the pending chip, not an adding burst.
+    if (!removing) {
+      setBursts((current) => new Map(current).set(event.event_id, emoji))
+      const timer = window.setTimeout(() => {
+        if (burstTimers.current.get(event.event_id) === timer) {
+          clearBurst(event.event_id)
         }
-        burstTimer.current = null
       }, MESSAGE_REACTION_BURST_MS)
+      burstTimers.current.set(event.event_id, timer)
     }
 
     void timeline.toggleReaction(event, emoji).then((ok) => {
       if (activeRequests.current.get(event.event_id) !== request) return
       activeRequests.current.delete(event.event_id)
-      setPresentation((current) =>
-        current?.eventId === event.event_id ? null : current,
-      )
+      setPresentations((current) => {
+        if (!current.has(event.event_id)) return current
+        const next = new Map(current)
+        next.delete(event.event_id)
+        return next
+      })
       if (ok) {
         onMutation?.()
         return
       }
-      if (
-        burstEventId.current === event.event_id &&
-        burstTimer.current !== null
-      ) {
-        window.clearTimeout(burstTimer.current)
-        burstTimer.current = null
-        burstEventId.current = null
-        setBurst(null)
-      }
+      clearBurst(event.event_id)
       onFeedback(event.event_id, 'Reaction could not be updated')
     })
   }
 
-  return { presentation, burst, run }
+  return { presentations, bursts, run }
 }

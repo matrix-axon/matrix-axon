@@ -338,9 +338,7 @@ export function MediaGalleryRow({
                             ? gestureFeedbacks.feedback.message
                             : null,
                         reactionBurst:
-                          gestureReactions.burst?.eventId === event.event_id
-                            ? gestureReactions.burst.emoji
-                            : null,
+                          gestureReactions.bursts.get(event.event_id) ?? null,
                         confirmingDelete: confirmingDeleteId === event.event_id,
                         onConfirmDelete: () => {
                           void timeline.redact(event.event_id).then((ok) => {
