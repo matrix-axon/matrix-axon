@@ -95,7 +95,7 @@ function withDeadline(request: Request, deadline: AbortSignal | null): Request {
  * a failing vitest gate, not a stray warning.
  */
 function withinDeadline<T>(
-  work: Promise<T>,
+  work: PromiseLike<T>,
   deadline: AbortSignal,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -173,12 +173,39 @@ export function requestFailureMessage(cause: unknown): string {
  * classify and then takes the wrong branch, or the reverse. Reading the field
  * is true in both.
  */
-function causeField(cause: unknown, field: 'name' | 'message'): string | null {
+export function causeField(
+  cause: unknown,
+  field: 'name' | 'message',
+): string | null {
   if (typeof cause !== 'object' || cause === null || !(field in cause)) {
     return null
   }
   const value = (cause as Record<string, unknown>)[field]
   return typeof value === 'string' && value !== '' ? value : null
+}
+
+/**
+ * Whether a `getToken()` result is something that has to be waited on.
+ *
+ * Duck-typed rather than `instanceof Promise`, which is the narrower and more
+ * dangerous test: a polyfilled promise, or a genuine one built in another
+ * realm, is not an `instanceof` match. Either would fall to the unraced branch
+ * and be awaited with no deadline at all — reproducing the unbounded hang this
+ * whole seam exists to prevent, on a code path that reads identically to the
+ * protected one. No `AuthProvider` here returns such a value today, but the
+ * interface is a seam that third-party providers are meant to fit, and a
+ * thenable is exactly what a hand-rolled one is most likely to hand back.
+ *
+ * The synchronous case still bypasses the race: a string has no `then`, so a
+ * pasted token costs no extra microtask (which is load-bearing — see the
+ * comment at the call site).
+ */
+function isThenable(value: unknown): value is PromiseLike<string | null> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as PromiseLike<unknown>).then === 'function'
+  )
 }
 
 /**
@@ -236,7 +263,7 @@ export function createApiClient(
       // beside it.
       const pending = auth.getToken()
       const token =
-        deadline === null || !(pending instanceof Promise)
+        deadline === null || !isThenable(pending)
           ? await pending
           : await withinDeadline(pending, deadline)
       if (token !== null) {

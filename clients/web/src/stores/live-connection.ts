@@ -59,6 +59,24 @@ export const HEARTBEAT_TIMEOUT_MS = 50000
  */
 export const REVIVE_AFTER_HIDDEN_MS = 10000
 
+/**
+ * Least time between two socket replacements.
+ *
+ * `online` is not guaranteed to arrive once per network change. A phone at the
+ * edge of coverage, handing between towers or between an access point and
+ * cell — the situation this whole mechanism exists for — can fire it several
+ * times in a few seconds. Each replacement is not free: it tears down a socket
+ * that may have just opened, and every one that opens bumps `reconnects`,
+ * which costs every timeline and room-list consumer a gap-fill refetch at the
+ * exact moment the network is least able to serve one.
+ *
+ * Short enough that a genuine second change moments later is still caught by
+ * the next trigger — the watchdog's window is an order of magnitude longer,
+ * and a socket that really is dead has `close` and silence still ahead of it.
+ * This coalesces a burst; it does not suppress a signal.
+ */
+export const REVIVE_COALESCE_MS = 2000
+
 export interface LiveConnection {
   /** The socket state, for the shell's connection indicator (step 4). */
   connection: ReadonlySignal<ConnectionState>
@@ -162,18 +180,22 @@ export function createLiveConnection(
   let lastFactoryError: string | null = null
   /** True between `start()` and `stop()` — whether a connection is wanted. */
   let wanted = false
-  /** The silence watchdog, armed only once a heartbeat has been seen. */
-  let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
   /**
-   * Whether the *current* socket's server has sent a heartbeat. Per socket, not
-   * per session: a server that does not beat must never be force-reconnected
-   * every window, so the watchdog stays disarmed until the server proves it
-   * beats. That makes this client safe against an older server, which matters
-   * because the two halves ship as separate changes.
+   * The silence watchdog. Non-null exactly when it is armed, which is also how
+   * this knows whether the current socket's server has ever beaten: only a
+   * heartbeat arms it (`noteTraffic`), and every path that abandons a socket
+   * disarms it. One handle rather than a handle plus a parallel boolean, so
+   * there is no second piece of state to keep in step.
+   *
+   * Staying disarmed until the server proves it beats is what makes this client
+   * safe against a server that never does — it must not be force-reconnected
+   * every window. That matters because the two halves ship separately.
    */
-  let heartbeating = false
+  let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
   /** When the page went hidden, for the `REVIVE_AFTER_HIDDEN_MS` threshold. */
   let hiddenAt: number | null = null
+  /** When the socket was last replaced, for `REVIVE_COALESCE_MS`. */
+  let lastReviveAt: number | null = null
 
   function dispatch(frame: LiveFrame): void {
     for (const listener of listeners) {
@@ -204,11 +226,10 @@ export function createLiveConnection(
    * a quiet hour on a pre-heartbeat server look identical to a dead link.
    */
   function noteTraffic(type: string | null): void {
-    if (!heartbeating) {
-      if (type !== HEARTBEAT) {
-        return
-      }
-      heartbeating = true
+    // Unarmed and this is not a beat: the server has not shown it beats, so
+    // silence still proves nothing and there is no deadline to push out.
+    if (heartbeatTimer === null && type !== HEARTBEAT) {
+      return
     }
     disarmWatchdog()
     heartbeatTimer = setTimeout(() => {
@@ -251,6 +272,16 @@ export function createLiveConnection(
     if (!wanted) {
       return
     }
+    // A burst of triggers is one network change, not several — see
+    // `REVIVE_COALESCE_MS`. Measured from the last replacement rather than
+    // debounced with a timer, so the *first* event in a burst acts at once and
+    // the rest are dropped; delaying the first would be the wrong trade for a
+    // client that is trying to get back online.
+    const at = clock()
+    if (lastReviveAt !== null && at - lastReviveAt < REVIVE_COALESCE_MS) {
+      return
+    }
+    lastReviveAt = at
     disarmWatchdog()
     if (socket !== null) {
       perfMark('live:close')
@@ -334,7 +365,6 @@ export function createLiveConnection(
     socket = opened
     opened.onopen = () => {
       openedAtMs = Date.now()
-      heartbeating = false
       // The room-open readout counts these: a reconnect mid-open re-issues
       // the room's head load (ADR 0061 gap-fill).
       perfMark('live:open', { reconnect: everConnected })
@@ -402,7 +432,7 @@ export function createLiveConnection(
     everConnected = false
     backoffMs = INITIAL_BACKOFF_MS
     hiddenAt = null
-    heartbeating = false
+    lastReviveAt = null
     win.removeEventListener('online', onOnline)
     doc.removeEventListener('visibilitychange', onVisibilityChange)
     disarmWatchdog()

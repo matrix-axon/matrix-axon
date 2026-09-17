@@ -6,6 +6,7 @@ import {
   createLiveConnection,
   HEARTBEAT_TIMEOUT_MS,
   REVIVE_AFTER_HIDDEN_MS,
+  REVIVE_COALESCE_MS,
   STABLE_CONNECTION_MS,
 } from './live-connection'
 
@@ -469,6 +470,55 @@ describe('a socket factory that throws', () => {
       expect(h.sockets).toHaveLength(1)
       expect(h.live.reconnects.value).toBe(0)
       expect(h.live.connection.value).toBe('live')
+
+      h.live.stop()
+    })
+
+    /**
+     * A phone at the edge of coverage can fire `online` several times in a few
+     * seconds. Replacing the socket for each one tears down connections that
+     * just opened and bills every consumer a gap-fill refetch per cycle,
+     * precisely when the network can least afford it.
+     */
+    it('coalesces a burst of triggers into one replacement', () => {
+      const h = networkHarness()
+      h.live.start()
+      h.latest().emitOpen()
+
+      h.win.emit('online')
+      expect(h.sockets).toHaveLength(2)
+      h.latest().emitOpen()
+
+      // Three more within the window: all dropped.
+      h.advanceClock(REVIVE_COALESCE_MS - 1)
+      h.win.emit('online')
+      h.win.emit('online')
+      h.win.emit('online')
+      expect(h.sockets).toHaveLength(2)
+      expect(h.live.reconnects.value).toBe(1)
+
+      // Past the window, a genuine later change still acts.
+      h.advanceClock(1)
+      h.win.emit('online')
+      expect(h.sockets).toHaveLength(3)
+
+      h.live.stop()
+    })
+
+    it('does not carry the window across a restart', () => {
+      const h = networkHarness()
+      h.live.start()
+      h.latest().emitOpen()
+      h.win.emit('online')
+      expect(h.sockets).toHaveLength(2)
+      h.live.stop()
+
+      // No clock movement: a new session must not inherit the old window.
+      h.live.start()
+      h.latest().emitOpen()
+      h.win.emit('online')
+
+      expect(h.sockets).toHaveLength(4)
 
       h.live.stop()
     })

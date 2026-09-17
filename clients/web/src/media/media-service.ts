@@ -203,14 +203,43 @@ const ERROR_ENVELOPE_TIMEOUT_MS = 2_000
  *
  * It is a *total duration*, which is the honest weakness: an upload near
  * [`MAX_UPLOAD_BYTES`] on a genuinely slow uplink can exceed it while making
- * steady progress, and be cut off for being big rather than for being stuck.
- * The right shape is a stall timeout — abort only when no bytes have moved for
- * N seconds — but `fetch` exposes no upload progress in WebKit, so there is
- * nothing to hang one on. A send cut off this way surfaces as a failed echo
- * with Retry beside it, which is recoverable; a permanently wedged permit pool
- * is not.
+ * steady progress. Uploads therefore scale their budget by size — see
+ * [`uploadTimeoutMs`] — and this is their fixed part rather than their whole
+ * allowance. Downloads keep it flat, because the size is not known until the
+ * response arrives and the deadline has to exist before the request.
  */
 const MEDIA_TRANSFER_TIMEOUT_MS = 120_000
+
+/**
+ * The slowest uplink an upload is still given time to finish on: 128 KB/s,
+ * about 1 Mbps.
+ *
+ * A flat deadline cannot tell a stuck upload from a big one. At
+ * [`MAX_UPLOAD_BYTES`] (100 MB) a flat two minutes would abort a transfer
+ * moving steadily on any real mobile link — 90 MB at a healthy 4 Mbps needs
+ * about three minutes — and abandoning a send that is *working* is worse than
+ * the unbounded behaviour this deadline replaced.
+ *
+ * Scaling by size fixes that without giving up the bound: the same 90 MB gets
+ * roughly a quarter hour, so a stuck upload still dies, while anything making
+ * even poor progress finishes. The floor is deliberately well under what a
+ * usable connection delivers, since the cost of being too generous is a
+ * failed echo arriving late — with Retry beside it — and the cost of being too
+ * strict is destroying work that would have completed.
+ *
+ * Still a total duration, not a stall timeout. The right shape aborts when no
+ * bytes have moved for N seconds, and WebKit exposes no upload progress to
+ * hang one on; tracked in #422.
+ */
+const UPLOAD_MIN_BYTES_PER_MS = 128
+
+/**
+ * The deadline for uploading `bytes`, from the fixed part plus an allowance at
+ * [`UPLOAD_MIN_BYTES_PER_MS`].
+ */
+function uploadTimeoutMs(bytes: number, base: number): number {
+  return base + Math.ceil(bytes / UPLOAD_MIN_BYTES_PER_MS)
+}
 
 /**
  * The body of `res` as text, giving up past a byte or time bound.
@@ -709,7 +738,9 @@ export function createMediaService(deps: {
         method: 'POST',
         headers,
         body: file,
-        signal: AbortSignal.timeout(transferTimeoutMs),
+        signal: AbortSignal.timeout(
+          uploadTimeoutMs(file.size, transferTimeoutMs),
+        ),
       })
 
       if (res.ok) {

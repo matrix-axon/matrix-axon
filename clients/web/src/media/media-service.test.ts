@@ -737,6 +737,45 @@ describe('the transfer deadline', () => {
     expect(after.result.ok).toBe(true)
   })
 
+  /**
+   * The reviewer's case on #421: 90 MB at a healthy ~4 Mbps needs about three
+   * minutes and is progressing throughout. A flat two-minute bound would abort
+   * it for being large, which is worse than the unbounded behaviour it
+   * replaced — abandoning a transfer that is working destroys the send.
+   */
+  it('gives a large upload room to finish at a poor-but-real speed', async () => {
+    let seenTimeout: number | null = null
+    const injected: typeof globalThis.fetch = async (_input, init) => {
+      // `AbortSignal.timeout(n)` does not expose `n`, so the budget is read
+      // from how long the signal actually takes to abort.
+      const started = Date.now()
+      await new Promise<void>((resolve) => {
+        init?.signal?.addEventListener('abort', () => {
+          seenTimeout = Date.now() - started
+          resolve()
+        })
+      })
+      return new Response(null, { status: 500 })
+    }
+    const media = createMediaService({
+      auth: stubAuth(),
+      baseUrl: BASE_URL,
+      platform: { fetch: injected },
+      transferTimeoutMs: 20,
+    })
+
+    // 12_800 bytes at the 128 B/ms floor buys 100ms on top of the 20ms base.
+    await media.upload(
+      ACCOUNT,
+      new File([new Uint8Array(12_800)], 'big.bin', {
+        type: 'application/octet-stream',
+      }),
+    )
+
+    // Comfortably past the base alone, which is what a flat bound would give.
+    expect(seenTimeout).toBeGreaterThanOrEqual(100)
+  })
+
   it('abandons an upload that never answers', async () => {
     server.use(
       http.post(

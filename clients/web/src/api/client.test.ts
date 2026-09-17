@@ -438,4 +438,28 @@ describe('requestFailureMessage', () => {
       REQUEST_TIMEOUT_MESSAGE,
     )
   })
+
+  /**
+   * The `instanceof Promise` this used to gate on is not true of a thenable
+   * from another realm or a polyfill, and such a value would have been awaited
+   * with no deadline — the unbounded hang this seam exists to prevent, on a
+   * path that reads exactly like the protected one.
+   */
+  it('races a thenable that is not a native Promise', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/accounts`, () =>
+        HttpResponse.json({ data: [ACCOUNT] }),
+      ),
+    )
+    const thenableAuth: AuthProvider = {
+      // A bare thenable: `instanceof Promise` is false, and it never settles.
+      getToken: () => ({ then: () => {} }) as unknown as Promise<string | null>,
+      onAuthFailure: () => {},
+      LoginBootstrap: () => null,
+    }
+
+    const api = createApiClient(thenableAuth, BASE_URL, undefined, 40)
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow()
+  })
 })

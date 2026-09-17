@@ -4,7 +4,12 @@ import {
   type ReadonlySignal,
   type Signal,
 } from '@preact/signals'
-import { apiErrorCode, apiErrorMessage, type ApiClient } from '../api/client'
+import {
+  apiErrorCode,
+  apiErrorMessage,
+  causeField,
+  type ApiClient,
+} from '../api/client'
 import type { components } from '../api/schema'
 import type { AccountsStore } from './accounts'
 
@@ -190,16 +195,14 @@ function knownFailureMessage(
 }
 
 function transportMessage(cause: unknown, noun: string): string {
-  // By `name`, read structurally: the API client now rejects with its own
-  // `RequestFailedError`, which carries the original name across (see
-  // `api/client.ts`), and an abort may arrive as a `DOMException`, which is
-  // not `instanceof Error` under jsdom. `TimeoutError` belongs here too — it
-  // is what a spec-correct engine raises for `AbortSignal.timeout`, where
-  // WebKit raises `AbortError`, and this branch caught only the latter.
-  const name =
-    typeof cause === 'object' && cause !== null && 'name' in cause
-      ? (cause as { name?: unknown }).name
-      : null
+  // Through `causeField`, which is the one place that knows a thrown value's
+  // `name` has to be read structurally — a `DOMException` is not
+  // `instanceof Error` under jsdom. Shared rather than re-derived here so a
+  // future correction to that check has one home, not two. `TimeoutError`
+  // belongs beside `AbortError`: it is what a spec-correct engine raises for
+  // `AbortSignal.timeout`, where WebKit raises `AbortError`, and this branch
+  // caught only the latter.
+  const name = causeField(cause, 'name')
   if (name === 'AbortError' || name === 'TimeoutError') {
     return `The ${noun} request timed out. Axon will check the flow before allowing a retry.`
   }
