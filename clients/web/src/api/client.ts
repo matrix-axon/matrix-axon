@@ -66,12 +66,55 @@ export const API_REQUEST_TIMEOUT_MS = 20_000
  * Tauri plugin into the browser bundle. This runs a layer above the transport,
  * where the only handle on the request is the `Request` itself.
  */
-function withDeadline(request: Request, timeoutMs: number): Request {
-  if (timeoutMs <= 0) {
+function withDeadline(request: Request, deadline: AbortSignal | null): Request {
+  if (deadline === null) {
     return request
   }
   return new Request(request, {
-    signal: AbortSignal.any([request.signal, AbortSignal.timeout(timeoutMs)]),
+    signal: AbortSignal.any([request.signal, deadline]),
+  })
+}
+
+/**
+ * `work`, but rejecting as soon as `deadline` fires.
+ *
+ * The deadline has to cover **`auth.getToken()` as well as the request**, and
+ * that is not a refinement — it is the difference between the bound working
+ * and not existing at all. `getToken()` may itself go to the network: the
+ * OAuth provider refreshes an access token near expiry by POSTing the token
+ * endpoint (`auth/oauth.tsx`). Attaching a signal to the outgoing request
+ * *after* awaiting the token leaves that await unbounded, so on a dead path
+ * the middleware never returns, `fetch` is never called, no timer is ever
+ * created, and the request hangs forever with a deadline that was never
+ * reached. Starting the clock first and racing the token against it closes
+ * that.
+ *
+ * The listener is removed when `work` settles rather than left to `once`. A
+ * signal that aborts after the race was won would otherwise reject a promise
+ * nobody is holding — an unhandled rejection, which is the WCR-02 tripwire and
+ * a failing vitest gate, not a stray warning.
+ */
+function withinDeadline<T>(
+  work: Promise<T>,
+  deadline: AbortSignal,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (deadline.aborted) {
+      reject(deadline.reason)
+      return
+    }
+    const onAbort = () => reject(deadline.reason)
+    deadline.addEventListener('abort', onAbort)
+    work.then(
+      (value) => {
+        deadline.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (error: unknown) => {
+        deadline.removeEventListener('abort', onAbort)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      },
+    )
   })
 }
 
@@ -105,12 +148,26 @@ export function createApiClient(
 
   const bearer: Middleware = {
     async onRequest({ request }) {
-      const token = await auth.getToken()
+      // Created before the token is asked for, because acquiring one can be a
+      // network round trip of its own — see `withinDeadline`.
+      const deadline = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : null
+      // Only a provider that *went* somewhere can fail to come back, and the
+      // synchronous ones are the common case (a pasted token is a string).
+      // Racing those would add microtask hops to every request in the client
+      // for a hang that cannot happen — and the ordering shift is observable,
+      // not merely wasteful: it moves when the request leaves relative to the
+      // render that a caller may already have painted from the optimistic echo
+      // beside it.
+      const pending = auth.getToken()
+      const token =
+        deadline === null || !(pending instanceof Promise)
+          ? await pending
+          : await withinDeadline(pending, deadline)
       if (token !== null) {
         request.headers.set('authorization', `Bearer ${token}`)
       }
       // Last, so the rebuilt request carries the header just set on it.
-      return withDeadline(request, timeoutMs)
+      return withDeadline(request, deadline)
     },
     onResponse({ response }) {
       if (response.status === 401) {

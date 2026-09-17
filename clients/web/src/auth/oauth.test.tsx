@@ -231,6 +231,61 @@ describe('createOAuthAuthProvider', () => {
     expect(saved.refreshToken).toBe('new-refresh')
   })
 
+  /**
+   * The wedge. `refreshInFlight` is cleared in a `finally`, so a refresh whose
+   * fetch never settles parks that promise forever and every later
+   * `getToken()` hands back the same never-settling promise — auth is dead for
+   * the rest of the session, and the network coming back does not revive it.
+   * This is what a blackholed path does: no FIN, no RST, no answer.
+   */
+  it('abandons a refresh that never answers, and recovers afterwards', async () => {
+    const storage = memoryStorage({
+      'axon.oauth.session': JSON.stringify({
+        accessToken: 'old-access',
+        refreshToken: 'old-refresh',
+        expiresAt: Date.now() - 1000,
+        provider: 'microsoft',
+      }),
+    })
+    let answer = false
+    server.use(
+      http.post(TOKEN_URL, async () => {
+        if (!answer) {
+          await new Promise(() => {})
+        }
+        return HttpResponse.json({
+          access_token: 'new-access',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: 'new-refresh',
+        })
+      }),
+    )
+    const auth = createOAuthAuthProvider({
+      providers: [{ provider: 'microsoft', label: 'Microsoft' }],
+      baseUrl: BASE_URL,
+      storage,
+      pendingStorage: memoryStorage(),
+      tokenTimeoutMs: 40,
+    })
+
+    // Gives up rather than hanging, and hands back no token.
+    await expect(auth.getToken()).resolves.toBeNull()
+
+    // The credential survives: abandoning is a transport failure, never a
+    // verdict (`OAuthTransportError`). Signing out here would throw away a
+    // 30-day refresh token over a dropped packet.
+    expect(storage.getItem('axon.oauth.session')).not.toBeNull()
+    expect(
+      JSON.parse(storage.getItem('axon.oauth.session')!).refreshToken,
+    ).toBe('old-refresh')
+
+    // And the in-flight latch was released, so the next attempt is a real
+    // one rather than the wedged promise again.
+    answer = true
+    await expect(auth.getToken()).resolves.toBe('new-access')
+  })
+
   it('clears the OAuth session when refresh fails', async () => {
     const storage = memoryStorage({
       'axon.oauth.session': JSON.stringify({

@@ -1,6 +1,14 @@
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import type { AuthProvider } from '../auth/provider'
 import {
   apiErrorCode,
@@ -324,5 +332,52 @@ describe('the transport seam (ADR 0102 § 2)', () => {
     })
 
     expect(seenBody).toMatchObject({ username: '@alice:example.org' })
+  })
+
+  /**
+   * The hole the first version of this deadline had. `auth.getToken()` can go
+   * to the network itself — the OAuth provider refreshes a near-expiry access
+   * token by POSTing the token endpoint — so a deadline attached to the
+   * outgoing request *after* awaiting the token never gets a chance to fire:
+   * the middleware never returns, `fetch` is never called, and the request
+   * hangs indefinitely while looking, in the bundle, exactly like a request
+   * that has a deadline.
+   */
+  it('gives up when the token itself never arrives', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/accounts`, () =>
+        HttpResponse.json({ data: [ACCOUNT] }),
+      ),
+    )
+    const hangingAuth: AuthProvider = {
+      getToken: () => new Promise<string | null>(() => {}),
+      onAuthFailure: () => {},
+      LoginBootstrap: () => null,
+    }
+
+    const api = createApiClient(hangingAuth, BASE_URL, undefined, 40)
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow()
+  })
+
+  it('does not leave a rejection behind when the token wins the race', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/accounts`, () =>
+        HttpResponse.json({ data: [ACCOUNT] }),
+      ),
+    )
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+    try {
+      // Deadline shorter than the wait that follows, so it fires well after
+      // the token resolved and the race was already decided.
+      const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 20)
+      await api.GET('/v1/accounts')
+      await new Promise((resolve) => setTimeout(resolve, 80))
+    } finally {
+      process.off('unhandledRejection', unhandled)
+    }
+
+    expect(unhandled).not.toHaveBeenCalled()
   })
 })

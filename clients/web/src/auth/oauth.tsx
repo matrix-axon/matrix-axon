@@ -23,6 +23,29 @@ const DEFAULT_CLIENT_ID = 'axon-web'
 const AUTH_FAILURE_REFRESH_COOLDOWN_MS = 5_000
 
 /**
+ * How long the `/v1/oauth/token` exchange may run before it is abandoned.
+ *
+ * Without a bound this call is the one place a dead network wedges the whole
+ * client, and it does so permanently. `refreshInFlight` is cleared in a
+ * `finally`, which never runs while the fetch never settles — so a single
+ * refresh issued onto a path that has gone away (an iPhone mid-handover, a
+ * blackholed link) leaves that promise parked forever, and *every* later
+ * `getToken()` hands the same never-settling promise to its caller. The
+ * network coming back does not undo it; nothing short of a reload does.
+ *
+ * Short, because this is a small POST to a token endpoint rather than a
+ * transfer, and deliberately well under the API client's own deadline
+ * (`API_REQUEST_TIMEOUT_MS`) so a refresh that cannot complete fails *inside*
+ * the request that provoked it, leaving that request its own budget to fail
+ * cleanly rather than being cut off mid-flight by the outer bound.
+ *
+ * Abandoning a refresh is a transport failure, never a verdict: the `catch` in
+ * `redeem` turns any thrown fetch error into `OAuthTransportError`, so the
+ * refresh token survives. That is load-bearing — see `OAuthTransportError`.
+ */
+const TOKEN_ENDPOINT_TIMEOUT_MS = 10_000
+
+/**
  * The server answered and refused the grant — it is bad, expired, or revoked.
  * The only error that may end a session.
  */
@@ -153,6 +176,11 @@ export interface OAuthAuthOptions {
    * RFC 6749, not the `/v1` JSON envelope — so it takes the platform directly.
    */
   platform?: Pick<Platform, 'fetch'>
+  /**
+   * Deadline for the token exchange (see [`TOKEN_ENDPOINT_TIMEOUT_MS`]).
+   * Injected so tests can drive the abandon path without waiting it out.
+   */
+  tokenTimeoutMs?: number
 }
 
 export function parseOAuthProviders(
@@ -184,6 +212,7 @@ export function createOAuthAuthProvider({
   pendingStorage = window.sessionStorage,
   navigate = (url) => window.location.assign(url),
   platform = browserPlatform(),
+  tokenTimeoutMs = TOKEN_ENDPOINT_TIMEOUT_MS,
 }: OAuthAuthOptions): OAuthAuthProvider {
   const fetch = platform.fetch
   const persistence =
@@ -223,6 +252,7 @@ export function createOAuthAuthProvider({
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: form,
+        signal: AbortSignal.timeout(tokenTimeoutMs),
       })
     } catch (cause) {
       throw new OAuthTransportError('could not reach the server', { cause })
