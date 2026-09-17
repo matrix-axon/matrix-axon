@@ -46,6 +46,24 @@ use crate::verification::VerificationService;
 /// frames. Tests shorten it via [`AppState::with_ws_revalidation_interval`].
 const DEFAULT_WS_REVALIDATION_INTERVAL: Duration = Duration::from_secs(30);
 
+/// How often an established `/v1/ws` socket emits a `heartbeat` frame.
+///
+/// A live tail is silent whenever nothing is happening, so a client cannot tell
+/// an idle account from a connection that has stopped carrying bytes. That
+/// distinction matters most on a phone: a WiFi→cell handover leaves the socket
+/// bound to an interface with no route, and because neither peer sends a FIN or
+/// an RST it stays `OPEN` on both sides indefinitely. A periodic beat makes the
+/// silence measurable, so the client can replace a socket that has gone quiet
+/// (`HEARTBEAT_TIMEOUT_MS` in `clients/web/src/stores/live-connection.ts`).
+///
+/// This is deliberately *not* a protocol-level WebSocket ping. A browser
+/// answers those inside its networking stack and exposes nothing to JavaScript,
+/// so a ping tells the server its peer is alive but tells the page nothing at
+/// all. The beat rides the ordinary frame channel because that is the only
+/// channel a browser client can observe. Tests shorten it via
+/// [`AppState::with_ws_heartbeat_interval`].
+const DEFAULT_WS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+
 /// Everything the HTTP/WebSocket handlers share. Cheap to [`Clone`] (its fields
 /// are all handles).
 #[derive(Clone)]
@@ -119,6 +137,9 @@ pub struct AppState {
     /// How often a live `/v1/ws` socket revalidates its token (see
     /// [`DEFAULT_WS_REVALIDATION_INTERVAL`]).
     ws_revalidation_interval: Duration,
+    /// How often a live `/v1/ws` socket emits a liveness beat (see
+    /// [`DEFAULT_WS_HEARTBEAT_INTERVAL`]).
+    ws_heartbeat_interval: Duration,
     /// Media-proxy port for the `GET /v1/media/{account_id}/…` handler. The
     /// concrete implementation fetches via the SDK client's authenticated
     /// connection and is injected by the binary via an adapter.
@@ -296,6 +317,7 @@ impl AppState {
             devices,
             verifier,
             ws_revalidation_interval: DEFAULT_WS_REVALIDATION_INTERVAL,
+            ws_heartbeat_interval: DEFAULT_WS_HEARTBEAT_INTERVAL,
             media,
             member_profiles: Arc::new(NoopMemberProfileService),
             uploads: Arc::new(DisabledStagedUploads),
@@ -315,6 +337,13 @@ impl AppState {
     /// socket without waiting the full default.
     pub fn with_ws_revalidation_interval(mut self, interval: Duration) -> Self {
         self.ws_revalidation_interval = interval;
+        self
+    }
+
+    /// Override the `/v1/ws` heartbeat cadence. Production uses the default;
+    /// tests set a short interval to observe beats without waiting 20 s.
+    pub fn with_ws_heartbeat_interval(mut self, interval: Duration) -> Self {
+        self.ws_heartbeat_interval = interval;
         self
     }
 
@@ -1007,6 +1036,17 @@ pub struct WsRevalidationInterval(pub Duration);
 impl FromRef<AppState> for WsRevalidationInterval {
     fn from_ref(state: &AppState) -> WsRevalidationInterval {
         WsRevalidationInterval(state.ws_revalidation_interval)
+    }
+}
+
+/// The `/v1/ws` heartbeat cadence, extracted as router state by the WebSocket
+/// handler.
+#[derive(Clone, Copy)]
+pub struct WsHeartbeatInterval(pub Duration);
+
+impl FromRef<AppState> for WsHeartbeatInterval {
+    fn from_ref(state: &AppState) -> WsHeartbeatInterval {
+        WsHeartbeatInterval(state.ws_heartbeat_interval)
     }
 }
 
