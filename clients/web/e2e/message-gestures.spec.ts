@@ -114,7 +114,7 @@ async function openMobileRoom(page: Page): Promise<void> {
   await expectLive(page)
 }
 
-test('composer focus omits the touch ring and retains the desktop ring', async ({
+test('composer touch focus omits the ring while keyboard focus retains it', async ({
   page,
 }) => {
   await openMobileRoom(page)
@@ -125,17 +125,23 @@ test('composer focus omits the touch ring and retains the desktop ring', async (
   const unfocusedBorder = await composer.evaluate(
     (element) => getComputedStyle(element).borderColor,
   )
-  await composer.click()
-  const style = await composer.evaluate((element) => {
-    const computed = getComputedStyle(element)
-    return { outline: computed.outlineStyle, border: computed.borderColor }
-  })
+  const style = () =>
+    composer.evaluate((element) => {
+      const computed = getComputedStyle(element)
+      return { outline: computed.outlineStyle, border: computed.borderColor }
+    })
   if (touchDevice) {
-    expect(style.outline).toBe('none')
+    await composer.tap()
+    expect((await style()).outline).toBe('none')
+    await page.locator('.composer-file-input').focus()
+    await page.keyboard.press('Shift+Tab')
+    await expect(composer).toBeFocused()
+    expect((await style()).outline).not.toBe('none')
   } else {
-    expect(style.outline).not.toBe('none')
+    await composer.click()
+    expect((await style()).outline).not.toBe('none')
   }
-  expect(style.border).toBe(unfocusedBorder)
+  expect((await style()).border).toBe(unfocusedBorder)
 })
 
 async function sendMessage(page: Page, body: string): Promise<Locator> {
