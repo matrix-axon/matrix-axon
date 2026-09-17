@@ -744,12 +744,12 @@ function ServerSettings() {
       <button
         type="button"
         class="danger"
-        onClick={() => {
-          // Credentials go with the server that issued them; see
-          // `disconnectFromServer`.
+        // No navigation of its own: `disconnectFromServer` ends with
+        // `reload('/')`, and assigning `/` again here was a second document
+        // load racing the first.
+        onClick={() =>
           disconnectFromServer(window.localStorage, () => auth.clearToken())
-          window.location.assign('/')
-        }}
+        }
       >
         Change server
       </button>
