@@ -49,7 +49,8 @@
 //! on both sides with no route between them. It is an ordinary frame rather
 //! than a WebSocket ping because a browser answers pings inside its networking
 //! stack and surfaces nothing to the page; see `DEFAULT_WS_HEARTBEAT_INTERVAL`
-//! in `state.rs`.
+//! in `state.rs`. No client in this repository consumes it yet — the web
+//! client's watchdog is PR #421, the TUI's is #418.
 
 use std::sync::Arc;
 use std::time::Duration;

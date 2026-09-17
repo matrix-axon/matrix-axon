@@ -53,8 +53,12 @@ const DEFAULT_WS_REVALIDATION_INTERVAL: Duration = Duration::from_secs(30);
 /// distinction matters most on a phone: a WiFi→cell handover leaves the socket
 /// bound to an interface with no route, and because neither peer sends a FIN or
 /// an RST it stays `OPEN` on both sides indefinitely. A periodic beat makes the
-/// silence measurable, so the client can replace a socket that has gone quiet
-/// (`HEARTBEAT_TIMEOUT_MS` in `clients/web/src/stores/live-connection.ts`).
+/// silence measurable, so a client that watches for it can replace a socket
+/// that has gone quiet. Nothing consumes it in this repository yet: the web
+/// client's silence watchdog is PR #421 and the TUI's is tracked in #418, both
+/// separate under the one-silo rule. Until one lands this frame is emitted and
+/// ignored, which is intended and harmless — every client drops unknown tags
+/// by construction.
 ///
 /// This is deliberately *not* a protocol-level WebSocket ping. A browser
 /// answers those inside its networking stack and exposes nothing to JavaScript,
