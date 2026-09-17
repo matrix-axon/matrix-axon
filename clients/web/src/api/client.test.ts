@@ -230,4 +230,99 @@ describe('the transport seam (ADR 0102 § 2)', () => {
 
     expect(seen).toBe('Bearer tok-2')
   })
+
+  /**
+   * The iPhone report behind this: a request issued across a WiFi→cell
+   * handover never settles, because the connection it went out on no longer
+   * has a route and nothing ever tears it down. Every caller copes with a
+   * *rejected* request; none copes with one that never answers, so the room
+   * list and the timeline sit on their placeholders until the app is
+   * relaunched.
+   */
+  it('rejects a request that never answers, instead of hanging forever', async () => {
+    server.use(http.get(`${BASE_URL}/v1/accounts`, () => new Promise(() => {})))
+
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 40)
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow()
+  })
+
+  it('leaves a request that answers in time alone', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/accounts`, () =>
+        HttpResponse.json({ data: [ACCOUNT] }),
+      ),
+    )
+
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 5_000)
+    const { data, error } = await api.GET('/v1/accounts')
+
+    expect(error).toBeUndefined()
+    expect(data?.data).toEqual([ACCOUNT])
+  })
+
+  /**
+   * The QR stores pass their own 15 s signal per call and read
+   * `controller.signal.aborted` to tell their timeout apart from a transport
+   * failure. Replacing their signal rather than combining with it would make
+   * every one of those calls unabortable.
+   */
+  it("keeps the caller's own abort working", async () => {
+    server.use(http.get(`${BASE_URL}/v1/accounts`, () => new Promise(() => {})))
+
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 5_000)
+    const controller = new AbortController()
+    const pending = api.GET('/v1/accounts', { signal: controller.signal })
+    controller.abort()
+
+    await expect(pending).rejects.toThrow()
+    expect(controller.signal.aborted).toBe(true)
+  })
+
+  it('still sends the bearer token on a request it re-signed', async () => {
+    let seenAuthorization: string | null = null
+    server.use(
+      http.get(`${BASE_URL}/v1/accounts`, ({ request }) => {
+        seenAuthorization = request.headers.get('authorization')
+        return HttpResponse.json({ data: [ACCOUNT] })
+      }),
+    )
+
+    const api = createApiClient(
+      stubAuth('tok-deadline'),
+      BASE_URL,
+      undefined,
+      5_000,
+    )
+    await api.GET('/v1/accounts')
+
+    expect(seenAuthorization).toBe('Bearer tok-deadline')
+  })
+
+  /**
+   * The deadline is attached by rebuilding the request, because
+   * `Request.signal` is read-only. A rebuild that dropped the body would break
+   * every mutation in the client while leaving reads working — so the body is
+   * what this asserts, not the signal.
+   */
+  it('carries a request body through the re-signed request', async () => {
+    let seenBody: unknown = null
+    server.use(
+      http.post(`${BASE_URL}/v1/accounts/login`, async ({ request }) => {
+        seenBody = await request.json()
+        return HttpResponse.json({ data: ACCOUNT }, { status: 201 })
+      }),
+    )
+
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 5_000)
+    await api.POST('/v1/accounts/login', {
+      body: {
+        username: '@alice:example.org',
+        password: 'hunter2',
+        homeserver_url: 'https://matrix.example.org',
+      },
+    })
+
+    expect(seenBody).toMatchObject({ username: '@alice:example.org' })
+  })
 })

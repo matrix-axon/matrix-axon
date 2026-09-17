@@ -480,6 +480,23 @@ lessons that cost the most time in the ADR 0076 investigation:
   causing the jump — and every actual defect was ours. Reading a value back
   after writing it (`applied === requested`) falsified a day of theory in one
   recording.
+- **"Stuck on a placeholder after switching networks" is two bugs, not one.**
+  A WiFi→cell handover on iOS leaves the old TCP connection bound to an
+  interface with no route, and because neither peer sends a FIN or an RST
+  nothing reports it. That breaks two layers at once, and fixing either alone
+  leaves the report alive. The **socket** never fires `close`, so the drop path
+  never runs and `connection` still reads `live` while nothing arrives —
+  `live-connection.ts` therefore also replaces the socket on `online`, on a
+  foregrounding after `REVIVE_AFTER_HIDDEN_MS`, and on `HEARTBEAT_TIMEOUT_MS`
+  of silence, since none of those three alone covers a handover the page slept
+  through. Separately, an **HTTP request** issued across the switch never
+  settles at all, and a request that never settles is the only thing that pins
+  "Loading rooms…" or "Loading messages…" — every store clears its loading flag
+  on a _rejection_. `API_REQUEST_TIMEOUT_MS` (`api/client.ts`) is what turns
+  the hang into a rejection (not `platform/tauri.ts`'s longer, media-covering
+  `REQUEST_TIMEOUT_MS` — both exist, and the shorter one decides). When triaging a report like this, establish which of
+  the two you have: stale content that never updates is the socket, a
+  placeholder that never resolves is the request.
 - **Confirm the deployed bundle contains the fix before debugging it.** Mark
   names are string literals and survive minification, so
   `(await (await fetch(src)).text()).includes('some:mark:name')` settles it in
