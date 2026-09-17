@@ -472,6 +472,73 @@ async fn ws_socket_closes_when_token_is_revoked() {
     server.abort();
 }
 
+/// An idle socket still says something on an interval, so a client can tell a
+/// quiet account from a connection that has stopped carrying bytes — the
+/// WiFi→cell handover that leaves both ends `OPEN` with no route between them.
+///
+/// Asserted as a *frame*, not a protocol ping: a browser answers pings inside
+/// its networking stack and surfaces nothing to the page, so a ping would be
+/// invisible to the client this exists for.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn ws_socket_sends_periodic_heartbeats() {
+    let store = store().await;
+    let (live, _rx) = broadcast::channel::<LiveFrame>(16);
+    let app = axon_api::router(
+        AppState::new(
+            store,
+            live.clone(),
+            Arc::new(StubSender::ok("$unused:localhost")),
+            Arc::new(StubLifecycle::ok(Uuid::nil())),
+            Arc::new(StubVerification::ok("$unused-flow")),
+            Arc::new(StubTrust::ok()),
+            Arc::new(StubDeviceList::ok()),
+            Arc::new(StubTokenVerifier::ok()),
+            Arc::new(StubMediaProxy),
+            None,
+        )
+        // Short cadence so two beats land inside the test, not 40 s.
+        .with_ws_heartbeat_interval(Duration::from_millis(100)),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/v1/ws");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(authed_request(&url))
+        .await
+        .expect("ws connect");
+
+    // Nothing is ever published on the bus here: the beats are the only traffic,
+    // which is the situation they exist for.
+    for _ in 0..2 {
+        let text = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    Some(Ok(Message::Text(text))) => break text,
+                    // Control frames and anything else are not the assertion.
+                    Some(Ok(_)) => continue,
+                    other => panic!("the socket must stay open; got {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("a heartbeat within the timeout");
+
+        let v: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(v["type"], "heartbeat");
+        assert_eq!(v["account_id"], Uuid::nil().to_string());
+        assert_eq!(v["payload"], json!({}));
+    }
+
+    server.abort();
+}
+
 /// M12: a `PUT /v1/devices/…/state/…` fans out one `device_state.changed`
 /// frame carrying the originator device (for client-side echo suppression),
 /// the namespace, and the written entries — including `null` for a deleted key.

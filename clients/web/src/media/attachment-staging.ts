@@ -1,6 +1,7 @@
 import { signal, type ReadonlySignal } from '@preact/signals'
 import { MAX_UPLOAD_BYTES, uploadKind } from './media-service'
 import { downscalePreview } from './downscale-preview'
+import { randomId } from '../random-id'
 
 /** One file staged for sending, with its local preview (images only). */
 export interface StagedAttachment {
@@ -223,7 +224,7 @@ export function createAttachmentStaging(
           continue
         }
         bytes += file.size
-        const id = crypto.randomUUID()
+        const id = randomId()
         const url =
           uploadKind(file) === 'image' ? URL.createObjectURL(file) : null
         if (url !== null) {

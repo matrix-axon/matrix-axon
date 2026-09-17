@@ -70,6 +70,35 @@ describe('createDeviceStateStore', () => {
     expect(storage.getItem('axon.device_id')).toBe(first)
   })
 
+  /**
+   * The crash that made the app a blank page on a plain-http LAN origin.
+   * `crypto.randomUUID` is secure-context only, `loadDeviceId` mints one while
+   * `createServices()` builds the graph inside the first render, and a new
+   * origin has an empty `localStorage` — so there was nothing stored to skip
+   * the mint with, and the `TypeError` escaped before anything painted.
+   */
+  it('mints a device id on an insecure origin, where randomUUID is absent', () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'crypto')
+    Object.defineProperty(globalThis, 'crypto', {
+      value: {
+        getRandomValues: original?.value?.getRandomValues?.bind(original.value),
+      },
+      configurable: true,
+      writable: true,
+    })
+    try {
+      const storage = memoryStorage()
+      const { store } = setup(storage)
+
+      expect(store.deviceId).not.toBe('')
+      expect(storage.getItem('axon.device_id')).toBe(store.deviceId)
+    } finally {
+      if (original !== undefined) {
+        Object.defineProperty(globalThis, 'crypto', original)
+      }
+    }
+  })
+
   it('hydrates a draft from the merged GET (account-scoped)', async () => {
     server.use(
       http.get(STATE_PATH, ({ params, request }) => {

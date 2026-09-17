@@ -1112,3 +1112,36 @@ describe('readout visibility', () => {
     expect(perfActive.value).toBe(false)
   })
 })
+
+/**
+ * The socket marks have to reach the *overlay*, not just `performance`. On iOS
+ * there is no console to read them from, so a mark the overlay filters out is
+ * a mark nobody investigating a network-change report can see (ADR 0077).
+ */
+describe('socket lifecycle on the overlay', () => {
+  beforeEach(() => {
+    performance.clearMarks()
+    perfOverlayEntries.value = []
+    setPerfEnabled(true)
+  })
+  afterEach(() => {
+    setPerfEnabled(false)
+    performance.clearMarks()
+  })
+
+  it('shows a replaced socket, and whether consumers gap-filled', () => {
+    perfMark('live:open', { reconnect: false })
+    perfMark('live:close')
+    perfMark('live:open', { reconnect: true })
+
+    expect(
+      perfOverlayEntries.value.map((entry) => [entry.name, entry.detail]),
+    ).toEqual([
+      ['live:open', { reconnect: false }],
+      ['live:close', undefined],
+      // `reconnect: true` is the difference between a client that recovered
+      // and one that merely reopened a socket over stale rooms.
+      ['live:open', { reconnect: true }],
+    ])
+  })
+})
