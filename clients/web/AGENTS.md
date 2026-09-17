@@ -655,6 +655,15 @@ no service workers, `document.cookie`, or `window.open` anywhere, ever).
 
 ## Testing traps
 
+- **Never hand a jsdom `Blob`/`File` to `new Response(...)` in a fixture
+  either.** The constructor goes through undici's `extractBody`, which calls
+  `.stream()` on the body — and a jsdom `Blob` has none, so the _fixture_
+  throws `object.stream is not a function`, the code under test catches it as
+  an ordinary network failure, and the assertion that fails is several lines
+  from the cause. Which `Blob` is global depends on the jsdom/Node pairing, so
+  this reproduces on some machines and not others — it looked like a
+  pre-existing failure on `main` for a while, and was a local one. Build
+  response bodies from bytes (a `Uint8Array`, or `HttpResponse.arrayBuffer`).
 - **A jsdom `File` is not undici's `Blob`.** Hand a `File` to `fetch` as a
   request body under vitest and the body arrives at msw as the literal string
   `"undefined"` — the `Content-Type` still comes through, so the request _looks_

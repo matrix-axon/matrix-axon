@@ -623,7 +623,15 @@ describe('the transport seam (ADR 0102 § 2)', () => {
     const calls: string[] = []
     const injected: typeof globalThis.fetch = async (input) => {
       calls.push(String(input instanceof Request ? input.url : input))
-      return new Response(new Blob(['bytes']), { status: 200 })
+      // Bytes, not a `Blob`. `new Response(blob)` goes through undici's
+      // `extractBody`, which calls `.stream()` on the body — and a jsdom
+      // `Blob` has no `.stream()`, so the fixture throws `object.stream is
+      // not a function` *inside itself*, the service catches it as a network
+      // failure, and the test fails on an assertion three lines from the real
+      // cause. Which `Blob` is global depends on the jsdom/Node pairing, so
+      // this passed on some machines and not others. Same family as the
+      // `File`-as-request-body trap in AGENTS.md.
+      return new Response(REAL_PNG, { status: 200 })
     }
 
     const media = createMediaService({
