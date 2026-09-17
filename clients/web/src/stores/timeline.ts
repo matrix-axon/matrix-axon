@@ -7,6 +7,7 @@ import {
 import { apiErrorMessage, inBackground, type ApiClient } from '../api/client'
 import type { components } from '../api/schema'
 import { markdownToHtmlIfFormatted } from '../markdown/markdown'
+import { randomId } from '../random-id'
 import {
   uploadFailureMessage,
   uploadKind,
@@ -1192,7 +1193,7 @@ export function createTimelineStore(
     options: SendOptions = {},
   ): Promise<boolean> {
     const targetThread = options.threadRoot ?? threadRoot
-    const localId = `local:${crypto.randomUUID()}`
+    const localId = `local:${randomId()}`
     events.value = [
       ...events.value,
       buildLocalEcho(localId, body, options, options.senderId),
@@ -1242,7 +1243,7 @@ export function createTimelineStore(
     // there is none — so an echo built with the same rule is what the confirming
     // live frame's `confirmsEcho` body match recognizes, for free.
     const body = options.caption ?? file.name
-    const localId = `local:${crypto.randomUUID()}`
+    const localId = `local:${randomId()}`
     const previewUrl = kind === 'image' ? URL.createObjectURL(file) : null
 
     const echo = buildLocalEcho(localId, body, options, options.senderId)

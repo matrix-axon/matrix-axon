@@ -181,6 +181,67 @@ const ERROR_ENVELOPE_MAX_BYTES = 8 * 1024
 const ERROR_ENVELOPE_TIMEOUT_MS = 2_000
 
 /**
+ * How long one media transfer may run before it is abandoned.
+ *
+ * Media is deliberately outside `API_REQUEST_TIMEOUT_MS` (`api/client.ts`) —
+ * 20 s is a sane ceiling for a JSON read and a bad one for bytes. But "not that
+ * bound" was being served as "no bound at all", which is worse than either.
+ *
+ * A download holds one of [`MAX_CONCURRENT`] permits for its whole life, and
+ * the comment on [`ERROR_ENVELOPE_MAX_BYTES`] already spells out where that
+ * goes: six requests that never finish pin every permit and stop media across
+ * the app. Unbounded, that is not a stall but a permanent one — a handover
+ * with images in flight kills media until the document reloads, exactly the
+ * class of failure the live socket and the API deadline were fixed for.
+ *
+ * The value matches `platform/tauri.ts`'s `REQUEST_TIMEOUT_MS`, which has
+ * shipped as the packaged build's bound on these same transfers, for the
+ * reason stated there: generous enough for a large attachment on a slow link,
+ * short enough that a blackholed server cannot hold resources for the life of
+ * the session. Composing with it is harmless — `boundedSignal` takes whichever
+ * bound is shorter, and two equal ones are one.
+ *
+ * It is a *total duration*, which is the honest weakness: an upload near
+ * [`MAX_UPLOAD_BYTES`] on a genuinely slow uplink can exceed it while making
+ * steady progress. Uploads therefore scale their budget by size — see
+ * [`uploadTimeoutMs`] — and this is their fixed part rather than their whole
+ * allowance. Downloads keep it flat, because the size is not known until the
+ * response arrives and the deadline has to exist before the request.
+ */
+const MEDIA_TRANSFER_TIMEOUT_MS = 120_000
+
+/**
+ * The slowest uplink an upload is still given time to finish on: 128 KB/s,
+ * about 1 Mbps.
+ *
+ * A flat deadline cannot tell a stuck upload from a big one. At
+ * [`MAX_UPLOAD_BYTES`] (100 MB) a flat two minutes would abort a transfer
+ * moving steadily on any real mobile link — 90 MB at a healthy 4 Mbps needs
+ * about three minutes — and abandoning a send that is *working* is worse than
+ * the unbounded behaviour this deadline replaced.
+ *
+ * Scaling by size fixes that without giving up the bound: the same 90 MB gets
+ * roughly a quarter hour, so a stuck upload still dies, while anything making
+ * even poor progress finishes. The floor is deliberately well under what a
+ * usable connection delivers, since the cost of being too generous is a
+ * failed echo arriving late — with Retry beside it — and the cost of being too
+ * strict is destroying work that would have completed.
+ *
+ * Still a total duration, not a stall timeout. The right shape aborts when no
+ * bytes have moved for N seconds, and WebKit exposes no upload progress to
+ * hang one on; tracked in #422.
+ */
+const UPLOAD_MIN_BYTES_PER_MS = 128
+
+/**
+ * The deadline for uploading `bytes`, from the fixed part plus an allowance at
+ * [`UPLOAD_MIN_BYTES_PER_MS`].
+ */
+function uploadTimeoutMs(bytes: number, base: number): number {
+  return base + Math.ceil(bytes / UPLOAD_MIN_BYTES_PER_MS)
+}
+
+/**
  * The body of `res` as text, giving up past a byte or time bound.
  *
  * Reads `res.body` directly rather than `res.clone().json()`: cloning tees the
@@ -334,9 +395,15 @@ export function createMediaService(deps: {
    * platform's `fetch` directly. Defaulted to the browser's.
    */
   platform?: Pick<Platform, 'fetch'>
+  /**
+   * Per-transfer deadline (see [`MEDIA_TRANSFER_TIMEOUT_MS`]). Injected so
+   * tests can drive the abandon path without waiting two minutes.
+   */
+  transferTimeoutMs?: number
 }): MediaService {
   const root = deps.baseUrl.replace(/\/$/, '')
   const fetch = (deps.platform ?? browserPlatform()).fetch
+  const transferTimeoutMs = deps.transferTimeoutMs ?? MEDIA_TRANSFER_TIMEOUT_MS
   const gate = semaphore(MAX_CONCURRENT)
 
   // Refcounted object-URL cache. `refs > 0` entries are never revoked.
@@ -431,7 +498,10 @@ export function createMediaService(deps: {
         if (token !== null) {
           headers.set('authorization', `Bearer ${token}`)
         }
-        const res = await fetch(url, { headers })
+        const res = await fetch(url, {
+          headers,
+          signal: AbortSignal.timeout(transferTimeoutMs),
+        })
         if (res.ok) {
           const raw = await res.blob()
           const blob =
@@ -664,7 +734,14 @@ export function createMediaService(deps: {
       if (token !== null) {
         headers.set('authorization', `Bearer ${token}`)
       }
-      const res = await fetch(url, { method: 'POST', headers, body: file })
+      const res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: file,
+        signal: AbortSignal.timeout(
+          uploadTimeoutMs(file.size, transferTimeoutMs),
+        ),
+      })
 
       if (res.ok) {
         const body = (await res.json()) as { data?: { upload_id?: unknown } }

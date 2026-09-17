@@ -53,6 +53,14 @@ const OVERLAY_PREFIXES = [
   'timeline:keyboard',
   'transition:',
   'boot:',
+  // Socket lifecycle, for the network-change reports (`live-connection.ts`).
+  // The connection dot says the socket is up; these say whether it was
+  // *replaced* and whether consumers gap-filled — `live:open` carries
+  // `reconnect: true` only when it did, which is the difference between a
+  // recovered client and one that merely reconnected and kept showing stale
+  // rooms. Cheap to leave on: at most two marks per socket, where the
+  // ten-line buffer's real enemy is a mark that fires per scroll frame.
+  'live:',
 ]
 
 /**

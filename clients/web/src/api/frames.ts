@@ -11,7 +11,7 @@ export type EventDto = components['schemas']['EventDto']
  * server frame type reaches no handler until one is added, rather than
  * breaking decode. Known tags today: `timeline.event`, `verification.*`,
  * `sender_trust.violation`, `device_state.changed`, `ephemeral.passthrough`,
- * `unread_counts.changed`, `invite.added`, `invite.removed`.
+ * `unread_counts.changed`, `invite.added`, `invite.removed`, `heartbeat`.
  */
 export interface LiveFrame {
   /** Namespaced tag, e.g. `timeline.event`. */
@@ -39,6 +39,17 @@ export const INVITE_ADDED = 'invite.added'
 
 /** The `type` tag for a pending invite that is no longer pending (ADR 0091). */
 export const INVITE_REMOVED = 'invite.removed'
+
+/**
+ * The `type` tag for the server's liveness beat (`ws.rs` `HEARTBEAT`).
+ *
+ * Not a notification of anything: it exists so that silence on the socket can
+ * be told apart from a quiet room. `account_id` is the nil UUID, because the
+ * beat belongs to the connection rather than to any account — no consumer
+ * self-filter matches it, and `live-connection.ts` consumes it for the
+ * watchdog rather than routing it.
+ */
+export const HEARTBEAT = 'heartbeat'
 
 /**
  * The payload of a `device_state.changed` frame (M12, ADR 0048): the writing

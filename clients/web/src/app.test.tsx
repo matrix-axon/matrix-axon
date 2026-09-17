@@ -2,6 +2,7 @@ import {
   cleanup,
   fireEvent,
   render,
+  screen,
   waitFor,
   within,
 } from '@testing-library/preact'
@@ -16,6 +17,7 @@ import {
   it,
   vi,
 } from 'vitest'
+import type { OAuthCallbackResult } from './auth/provider'
 import { App, accountIdForRoomEntry } from './app.tsx'
 import { layoutMode, SINGLE_PANE_QUERY } from './layout'
 import type { Account } from './stores/accounts'
@@ -238,12 +240,104 @@ describe('App', () => {
     anchor.remove()
   })
 
+  it('completes an OAuth callback delivered as a deep link', async () => {
+    // A shell has no origin a browser can redirect to, so the code comes back
+    // over the OS scheme rather than as a navigation to /oauth/callback.
+    let deliver: ((url: URL) => void) | null = null
+    const base = testServices()
+    const completeOAuthRedirect = vi.fn<(url: URL) => Promise<{ ok: true }>>()
+    completeOAuthRedirect.mockResolvedValue({ ok: true })
+    const services = {
+      ...base,
+      auth: { ...base.auth, completeOAuthRedirect },
+      platform: {
+        ...base.platform,
+        onDeepLink: (handler: (url: URL) => void) => {
+          deliver = handler
+          return () => {}
+        },
+      },
+    }
+    render(<App services={services} />)
+    await waitFor(() => expect(deliver).not.toBeNull())
+
+    deliver!(new URL('org.matrixaxon.axon:/oauth/callback?code=c1&state=s1'))
+
+    expect(completeOAuthRedirect).toHaveBeenCalledOnce()
+    expect(completeOAuthRedirect.mock.calls[0][0].toString()).toContain(
+      'code=c1',
+    )
+  })
+
+  it('ignores a deep link that is not the OAuth callback', async () => {
+    // The same scheme carries anything else the OS routes here; handing an
+    // unrelated URL to the exchange would burn the pending PKCE verifier.
+    let deliver: ((url: URL) => void) | null = null
+    const base = testServices()
+    const completeOAuthRedirect = vi.fn<(url: URL) => Promise<{ ok: true }>>()
+    completeOAuthRedirect.mockResolvedValue({ ok: true })
+    const services = {
+      ...base,
+      auth: { ...base.auth, completeOAuthRedirect },
+      platform: {
+        ...base.platform,
+        onDeepLink: (handler: (url: URL) => void) => {
+          deliver = handler
+          return () => {}
+        },
+      },
+    }
+    render(<App services={services} />)
+    await waitFor(() => expect(deliver).not.toBeNull())
+
+    deliver!(new URL('axon://room/!abc:example.org'))
+
+    expect(completeOAuthRedirect).not.toHaveBeenCalled()
+  })
+
+  it('clears a failed callback error when another callback arrives', async () => {
+    // The banner used to outlive the attempt it described: nothing ever reset
+    // it, so a failure stayed on screen through the retry that followed.
+    let deliver: ((url: URL) => void) | null = null
+    const base = testServices()
+    const completeOAuthRedirect =
+      vi.fn<(url: URL) => Promise<OAuthCallbackResult>>()
+    // The second attempt succeeds, which is what makes this pin the clearing
+    // rather than a replacement: a second *failure* would overwrite the text
+    // whether or not anything ever reset it.
+    completeOAuthRedirect
+      .mockResolvedValueOnce({ ok: false, message: 'state did not match' })
+      .mockResolvedValueOnce({ ok: true })
+    const services = {
+      ...base,
+      auth: { ...base.auth, completeOAuthRedirect },
+      platform: {
+        ...base.platform,
+        onDeepLink: (handler: (url: URL) => void) => {
+          deliver = handler
+          return () => {}
+        },
+      },
+    }
+    // The banner lives on the signed-out screen; a signed-in graph renders
+    // `Shell` instead and there is nothing to assert against.
+    services.auth.clearToken()
+    const { findByText, queryByText } = render(<App services={services} />)
+    await waitFor(() => expect(deliver).not.toBeNull())
+
+    deliver!(new URL('org.matrixaxon.axon:/oauth/callback?code=c1&state=s1'))
+    expect(await findByText('state did not match')).toBeTruthy()
+
+    deliver!(new URL('org.matrixaxon.axon:/oauth/callback?code=c2&state=s2'))
+    await waitFor(() => expect(queryByText('state did not match')).toBeNull())
+  })
+
   it('hands an external link to the platform when it has an opener', async () => {
     // In a packaged build an untouched external link navigates the *app
     // window* to that page, and the shell has no back button to return with —
     // the app is gone until restarted. Message bodies render arbitrary user
     // links, so this has to be caught centrally rather than per-component.
-    const openExternal = vi.fn()
+    const openExternal = vi.fn(() => Promise.resolve())
     const services = {
       ...testServices(),
       platform: { ...testServices().platform, openExternal },
@@ -284,12 +378,39 @@ describe('App', () => {
     anchor.remove()
   })
 
+  it('leaves a trace when the link could not be opened', async () => {
+    // A denied capability scope or an absent handler presents as a click that
+    // does nothing. There is nothing to show the user — the click is already
+    // prevented — but discarding the rejection left no record anywhere, which
+    // is what the empty catch here used to do.
+    const failure = new Error('could not open an external link (https://x)')
+    const openExternal = vi.fn(() => Promise.reject(failure))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const services = {
+      ...testServices(),
+      platform: { ...testServices().platform, openExternal },
+    }
+    render(<App services={services} />)
+    await waitFor(() =>
+      expect(services.accounts.accounts.value).toHaveLength(1),
+    )
+    const anchor = document.createElement('a')
+    anchor.href = 'https://example.com/docs'
+    document.body.append(anchor)
+
+    fireEvent.click(anchor)
+
+    await waitFor(() => expect(logged).toHaveBeenCalledWith(failure))
+    logged.mockRestore()
+    anchor.remove()
+  })
+
   it('takes a modified or middle click too, where there is no tab to open', async () => {
     // The browser's ctrl/cmd/shift click opens a tab or a window, which is why
     // the handler steps aside for it. The shell has neither: the same click
     // sends its only window to the page, and there is no back button to
     // return by. So there the click is the app's to answer, not the webview's.
-    const openExternal = vi.fn()
+    const openExternal = vi.fn(() => Promise.resolve())
     const services = {
       ...testServices(),
       platform: { ...testServices().platform, openExternal },
@@ -368,7 +489,7 @@ describe('App', () => {
 
   it('does not treat a same-origin link as external', async () => {
     // Those are the client's own routes and must stay in-window.
-    const openExternal = vi.fn()
+    const openExternal = vi.fn(() => Promise.resolve())
     const services = {
       ...testServices(),
       platform: { ...testServices().platform, openExternal },
@@ -1549,5 +1670,41 @@ describe('shell keyboard shortcuts (ADR 0078)', () => {
       'Hide rooms (Ctrl-B); drag or use arrow keys to resize',
     )
     expect(toggle.getAttribute('aria-keyshortcuts')).toBe('Control+B')
+  })
+})
+
+describe('changing the server', () => {
+  /** A packaged build: no same-origin API to fall back on. */
+  const shellServices = () => {
+    const base = testServices()
+    return {
+      ...base,
+      platform: { ...base.platform, defaultApiBaseUrl: null },
+    }
+  }
+
+  it('offers a way off the current server from the sign-in screen', async () => {
+    // Signing out clears the credential but keeps the server, and Settings is
+    // behind the signed-in shell — so without this a packaged build pointed at
+    // a wrong or dead address has no route back to the setup screen at all,
+    // short of deleting its data directory by hand.
+    const services = shellServices()
+    services.auth.clearToken()
+    render(<App services={services} />)
+
+    expect(
+      await screen.findByRole('button', { name: /use a different server/i }),
+    ).toBeTruthy()
+  })
+
+  it('does not offer it in a browser, where the server is the origin', async () => {
+    const services = testServices()
+    services.auth.clearToken()
+    render(<App services={services} />)
+
+    await screen.findByText(/sign in with sso/i)
+    expect(
+      screen.queryByRole('button', { name: /use a different server/i }),
+    ).toBeNull()
   })
 })

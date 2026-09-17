@@ -1,6 +1,7 @@
 import { effect, signal } from '@preact/signals'
 import type { ApiClient } from '../api/client'
 import { deviceStateChange } from '../api/frames'
+import { randomId } from '../random-id'
 import type { LiveConnection } from './live-connection'
 import type { RoomDto } from './room-list'
 
@@ -231,7 +232,7 @@ function loadDeviceId(storage: Storage): string {
   if (existing !== null && existing !== '') {
     return existing
   }
-  const id = crypto.randomUUID()
+  const id = randomId()
   storage.setItem(DEVICE_ID_KEY, id)
   return id
 }
