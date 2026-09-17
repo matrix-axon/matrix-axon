@@ -260,7 +260,11 @@ repos:
         language: system
         entry: scripts/check-icons-regenerated.py
         files: '^(clients/web/(public/(favicon\.svg|favicon\.png|icon-1[0-9]+\.png)|src-tauri/icons/)|docs/brand/axon-mark-)'
-        pass_filenames: true
+        # Off, and load-bearing: pre-commit shards a hook's file list across
+        # parallel invocations, and this hook's question is whether two groups
+        # of files moved together — which a shard cannot answer. It reads the
+        # push range itself; the filter above only decides whether to run.
+        pass_filenames: false
         stages: [pre-push]
       - id: shell-fmt
         name: rustfmt (tauri shell)

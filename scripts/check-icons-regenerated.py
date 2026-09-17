@@ -35,11 +35,26 @@ and leaves the artwork itself to review, where a wrong icon is visible anyway.
 The inverse (regenerating without touching the source) is fine and is not
 flagged: a Tauri CLI upgrade legitimately produces that.
 
-Usage: scripts/check-icons-regenerated.py <changed file>...
+## Why this reads the range itself
+
+`pass_filenames` is off, deliberately. pre-commit shards a hook's file list
+across parallel invocations, so a hook given filenames sees a *subset* of the
+push -- fine for a linter, whose answer is per-file, and useless here, where
+the question is whether two groups of files moved *together*. A shard holding
+the master and none of its outputs is indistinguishable from a push that forgot
+to regenerate. That shipped once, and rejected a correct push.
+
+So pre-commit decides only *whether* to run this (the `files:` filter), and the
+range comes from `PRE_COMMIT_FROM_REF`/`PRE_COMMIT_TO_REF`, which it sets for
+pre-push hooks. Arguments still work for running it by hand.
+
+Usage: scripts/check-icons-regenerated.py [<changed file>...]
 """
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 
 SOURCE = "clients/web/public/favicon.svg"
@@ -65,8 +80,33 @@ DERIVED = (
 )
 
 
+def changed_files(argv: list[str]) -> set[str]:
+    """Everything the push touches, or the paths named on the command line."""
+    if len(argv) > 1:
+        return set(argv[1:])
+    before = os.environ.get("PRE_COMMIT_FROM_REF")
+    after = os.environ.get("PRE_COMMIT_TO_REF")
+    if not before or not after:
+        # Not a pre-push run and nothing named: compare against the previous
+        # commit, which is what someone poking at this by hand likely means.
+        before, after = "HEAD~1", "HEAD"
+    result = subprocess.run(
+        ["git", "diff", "--name-only", f"{before}...{after}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        print(
+            f"could not diff {before}...{after}; treating the push as unchanged",
+            file=sys.stderr,
+        )
+        return set()
+    return {line for line in result.stdout.splitlines() if line}
+
+
 def main(argv: list[str]) -> int:
-    changed = set(argv[1:])
+    changed = changed_files(argv)
     if SOURCE not in changed:
         return 0
     stale = [
