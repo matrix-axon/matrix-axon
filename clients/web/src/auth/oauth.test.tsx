@@ -515,6 +515,77 @@ describe('createOAuthAuthProvider', () => {
   })
 })
 
+describe('the transport seam (ADR 0102 § 2)', () => {
+  /**
+   * The one test here that proves the token exchange goes through the
+   * *injected* platform rather than the ambient `fetch`.
+   *
+   * Every other test in this file installs an msw handler, which intercepts
+   * the global `fetch` — so `redeem()` quietly falling back to it would keep
+   * all of them green. This one registers no handler at all. `server.listen`
+   * is configured with `onUnhandledRequest: 'error'`, so a request that
+   * reaches the global fetch fails outright instead of succeeding by
+   * accident.
+   *
+   * It matters more than a seam test usually would: this is the call that
+   * exchanges an authorization code for a bearer token. In a packaged build
+   * the ambient `fetch` is the webview's, which cannot reach a plain-http LAN
+   * server and sends no credentials the shell configured — so a silent
+   * fallback would not fail loudly, it would fail confusingly.
+   *
+   * An equivalent test was removed with the commit that added the shell
+   * callback and not replaced; this is its restoration.
+   */
+  it('redeems the code through the injected fetch, not the ambient one', async () => {
+    const pending = memoryStorage({
+      'axon.oauth.pending': JSON.stringify({
+        state: 'state-seam',
+        codeVerifier: 'verifier-seam',
+        provider: 'google',
+        redirectUri: 'org.matrixaxon.axon:/oauth/callback',
+        createdAt: Date.now(),
+        storageMode: 'session',
+      }),
+    })
+
+    const calls: string[] = []
+    const injected: typeof globalThis.fetch = (input) => {
+      calls.push(String(input instanceof Request ? input.url : input))
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            access_token: 'access-seam',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            refresh_token: 'refresh-seam',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+    }
+
+    const auth = createOAuthAuthProvider({
+      providers: [{ provider: 'google', label: 'Google' }],
+      baseUrl: BASE_URL,
+      clientId: 'axon-desktop',
+      redirectUri: 'org.matrixaxon.axon:/oauth/callback',
+      storage: memoryStorage(),
+      pendingStorage: pending,
+      platform: { fetch: injected } as never,
+    })
+
+    const result = await auth.completeRedirect(
+      new URL(
+        'org.matrixaxon.axon:/oauth/callback?code=code-seam&state=state-seam',
+      ),
+    )
+
+    expect(result).toEqual({ ok: true })
+    expect(calls).toEqual([TOKEN_URL])
+    expect(auth.signedIn.value).toBe(true)
+  })
+})
+
 describe('a shell callback URI', () => {
   it('is used verbatim, not composed from a base', async () => {
     // Composition mangles a custom scheme: resolving `/oauth/callback` against

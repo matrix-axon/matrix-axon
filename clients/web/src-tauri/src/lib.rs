@@ -78,11 +78,22 @@ pub fn run() {
         .expect("error while running the Axon shell");
 }
 
-/// Claim the `axon://` scheme with the OS — in development builds only.
+/// Claim the OAuth deep-link scheme with the OS — in development builds only.
+///
+/// The scheme is `org.matrixaxon.axon`, named once in
+/// `tauri.conf.json`'s `plugins.deep-link.desktop.schemes` and read from there;
+/// nothing here hard-codes it. Reverse-domain per RFC 8252 § 7.1, because a
+/// private-use scheme is claimed first-come on every desktop OS and a short one
+/// is trivial to collide with or impersonate.
+///
+/// Not to be confused with [`APP_SCHEME`], which is also spelled `axon` and is
+/// a different thing entirely: an in-webview protocol handler that serves the
+/// bundle, never registered with the OS, taking no part in OAuth.
 ///
 /// A release build must not do this. The installers already register the
 /// scheme (`plugins.deep-link.desktop.schemes` is compiled into them, and the
-/// generated `.deb` carries `MimeType=x-scheme-handler/axon`), and registering
+/// generated `.deb` carries `MimeType=x-scheme-handler/org.matrixaxon.axon`),
+/// and registering
 /// again at runtime writes a *second*, user-level `.desktop` file alongside the
 /// installed one. The user is then asked which of two identical-looking
 /// handlers should open the link, and the answer decides which binary runs —
@@ -117,7 +128,10 @@ fn log_scheme_registration(error: &tauri_plugin_deep_link::Error) {
         // nothing has gone wrong.
         return;
     }
-    eprintln!("could not register the axon:// scheme for development ({error})");
+    // The scheme is not named here: it comes from `tauri.conf.json`, and a
+    // message that repeats a hard-coded one is a message that can disagree
+    // with what was actually attempted — which is how this line read before.
+    eprintln!("could not register the deep-link scheme for development ({error})");
 }
 
 /// Create the app window.
