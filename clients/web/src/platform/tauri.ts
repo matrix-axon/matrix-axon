@@ -463,5 +463,8 @@ export function tauriPlatform(): Platform {
     },
     // A packaged build has no same-origin API to assume: it must be told.
     defaultApiBaseUrl: null,
+    // `dist` is compiled into this binary, so there is nothing for a reload to
+    // fetch that is not already running. See the field's own note.
+    updatesFromOrigin: false,
   }
 }

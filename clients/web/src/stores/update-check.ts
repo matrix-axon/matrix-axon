@@ -55,6 +55,19 @@ export interface UpdateCheckerOptions {
   intervalMs?: number
   /** Skip a scheduled poll while the document is hidden. */
   isVisible?: () => boolean
+  /**
+   * Whether there is anything to check against. `false` in a packaged build,
+   * where the bundle *is* the binary (ADR 0102): `version.json` is served by
+   * the shell's own scheme handler out of the very bundle being compared, so a
+   * check can only ever answer "current".
+   *
+   * Enforced here rather than at each caller. The UI gates
+   * (`UpdateBanner`, the Settings control, `autoRefreshApplies`) are what the
+   * user sees and they stay, but a gate per call site is a gate that the next
+   * call site forgets — as `connectUpdateChecks` did, re-checking on every
+   * socket reconnect (raised in review of #431).
+   */
+  enabled?: boolean
 }
 
 /**
@@ -180,6 +193,7 @@ export function createUpdateChecker(
     fetchManifest,
     intervalMs = DEFAULT_INTERVAL_MS,
     isVisible = () => true,
+    enabled = true,
   } = options
 
   const available = signal(false)
@@ -235,6 +249,13 @@ export function createUpdateChecker(
     status,
 
     check() {
+      if (!enabled) {
+        // Resolved rather than rejected, and silent: callers ask for a check
+        // as a matter of course, and "there is nothing to check" is a normal
+        // answer, not a failure. `status` stays `idle`, which is honest — no
+        // check ran.
+        return Promise.resolve()
+      }
       // `settleWithin`, not a bare `.finally`: this slot is what de-duplicates
       // every trigger, so a `fetchManifest` that never settles would not lose
       // one check — it would pin `inFlight` forever and every later
@@ -253,7 +274,7 @@ export function createUpdateChecker(
     },
 
     start() {
-      if (timer !== null) {
+      if (!enabled || timer !== null) {
         return
       }
       timer = setInterval(() => {

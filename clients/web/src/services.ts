@@ -1016,6 +1016,11 @@ export function createServices(
     currentVersion: BUILD_INFO.version,
     fetchManifest: () => fetchVersionManifest(VERSION_MANIFEST_PATH),
     isVisible: () => !document.hidden,
+    // A packaged build serves `version.json` out of the bundle it would be
+    // comparing, so every check answers "current". Gated at the checker so
+    // `connectUpdateChecks` below — which fires on every socket reconnect —
+    // does not have to remember.
+    enabled: platform.updatesFromOrigin,
   })
   const timelines = createTimelineStoreCache(api, media)
   const attachments = createAttachmentStaging()

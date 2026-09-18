@@ -206,7 +206,11 @@ copied client they are seeing. It reads `release+version` — for example
 `0.1.0+ab12cd34ef56`:
 
 - **release** — `version` from this package's `package.json`. The human-readable
-  number; bump it when you cut one.
+  number; bump it when you cut one. That file is the _only_ place it lives: the
+  desktop bundle reads it too, via `"version": "../package.json"` in
+  `src-tauri/tauri.conf.json`, so a bump is one edit and the `.deb`, `.dmg` and
+  installer names follow. (`src-tauri/Cargo.toml` also carries a `version`;
+  that one is crate metadata and is not the product version.)
 - **version** — the exact build id. By default the current git commit
   (`--short=12`), with `-dirty` appended when `clients/web` has uncommitted
   changes. This is what identifies a build; the release alone cannot, since

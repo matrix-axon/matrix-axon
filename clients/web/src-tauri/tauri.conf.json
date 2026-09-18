@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "axon-desktop",
-  "version": "0.1.0",
+  "productName": "Axon",
+  "version": "../package.json",
   "identifier": "org.matrixaxon.axon",
   "build": {
     "frontendDist": "../dist",
@@ -30,8 +30,8 @@
     "linux": {
       "deb": {
         "desktopTemplate": "bundle/axon.desktop",
-        "conflicts": ["axon"],
-        "replaces": ["axon"]
+        "conflicts": ["axon-desktop"],
+        "replaces": ["axon-desktop"]
       }
     }
   },

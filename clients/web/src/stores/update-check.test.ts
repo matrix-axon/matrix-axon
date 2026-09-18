@@ -392,3 +392,59 @@ describe('createUpdateChecker', () => {
     }
   })
 })
+
+describe('createUpdateChecker when updates do not come from the origin', () => {
+  it('does not check, so `available` cannot latch in a packaged build', async () => {
+    // The regression: `connectUpdateChecks` calls `check()` on every socket
+    // reconnect and was gated by nothing, so a packaged build re-read
+    // `version.json` from its own scheme handler on each reconnect. Harmless
+    // while the answer is always "current" — but `available` latches, so one
+    // mismatched build id would light the update banner for the session, in a
+    // build where reloading cannot change what is running.
+    const fetchManifest = vi.fn().mockResolvedValue(MANIFEST)
+    const updates = createUpdateChecker({
+      currentVersion: 'build-a',
+      fetchManifest,
+      enabled: false,
+    })
+
+    await updates.check()
+
+    expect(fetchManifest).not.toHaveBeenCalled()
+    expect(updates.available.value).toBe(false)
+    expect(updates.status.value).toBe('idle')
+  })
+
+  it('does not start the backstop poll', () => {
+    vi.useFakeTimers()
+    const fetchManifest = vi.fn().mockResolvedValue(MANIFEST)
+    const updates = createUpdateChecker({
+      currentVersion: 'build-a',
+      fetchManifest,
+      enabled: false,
+      intervalMs: 1000,
+    })
+
+    updates.start()
+    vi.advanceTimersByTime(10_000)
+
+    expect(fetchManifest).not.toHaveBeenCalled()
+    updates.stop()
+    vi.useRealTimers()
+  })
+
+  it('still checks when it is enabled, which is the default', async () => {
+    // Guards the gate itself: a mistake that disabled the checker everywhere
+    // would make every test above pass by doing nothing.
+    const fetchManifest = vi.fn().mockResolvedValue(MANIFEST)
+    const updates = createUpdateChecker({
+      currentVersion: 'build-a',
+      fetchManifest,
+    })
+
+    await updates.check()
+
+    expect(fetchManifest).toHaveBeenCalled()
+    expect(updates.available.value).toBe(true)
+  })
+})

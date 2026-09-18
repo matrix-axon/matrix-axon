@@ -15,9 +15,17 @@ import { useServices } from '../services'
  * dismissal that outlived the session would turn "not now" into "never".
  */
 export function UpdateBanner() {
-  const { updates } = useServices()
+  const { updates, platform } = useServices()
   const [dismissed, setDismissed] = useState(false)
 
+  // Stated here as well as at the checker, which no-ops entirely when updates
+  // do not come from the origin. Not redundant: `available` latches, so a
+  // single check that ever saw a different build id would light this banner
+  // for the rest of the session — in a build where reloading cannot change
+  // what is running, and where the banner's own "Reload" would be a lie.
+  if (!platform.updatesFromOrigin) {
+    return null
+  }
   if (!updates.available.value || dismissed) {
     return null
   }

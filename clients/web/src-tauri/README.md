@@ -1,4 +1,4 @@
-# axon-desktop
+# Axon desktop shell
 
 The native shell around the `clients/web` bundle (ADR 0102, M-W12). Desktop
 today; iOS and Android are M-W13.
@@ -18,6 +18,27 @@ embedded at compile time from `../dist`, which is generated and gitignored, so
 a fresh clone has none — and `tauri::generate_context!()` says nothing about it.
 The CLI is what runs the frontend build first (`beforeBuildCommand`); cargo on
 its own has no idea it needs to. The binary explains this if you hit it.
+
+## macOS: build for both architectures
+
+`tauri build` targets the host, so a build on Apple Silicon produces an arm64
+bundle that **will not open on an Intel Mac**. (An x86_64 bundle does run on
+Apple Silicon, under Rosetta 2 — the failure is one-directional, which makes it
+easy to miss when testing on the newer machine.)
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+pnpm tauri build --target universal-apple-darwin
+```
+
+Both slices are lipo'd into one bundle. The Intel slice cross-compiles from
+Apple Silicon; no second machine is needed, and the webview is a system
+framework (WKWebView), so there is no per-architecture native library to
+supply.
+
+Note this is the _opposite_ of what `.github/workflows/cross-build.yml` does
+for the server and TUI, which ship per-arch zips on purpose. ADR 0102 § 9 has
+the reasoning for the divergence.
 
 ## Its own cargo workspace
 
@@ -63,8 +84,9 @@ contributes the `MimeType` line but not the argument. The two halves have to
 agree or the association is decoration.
 
 `Name` is fixed rather than `{{name}}`. That variable is `productName`, which
-also names the package (`axon-desktop`), and a launcher should show the app's
-name rather than the package's.
+is now `Axon` and would give the same answer — but it also names the deb
+package and the macOS bundle, so pinning the launcher's `Name` keeps a future
+packaging rename out of what the user reads in their menu.
 
 ## Icons
 

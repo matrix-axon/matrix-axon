@@ -5,7 +5,7 @@ import {
   type UpdateChecker,
   type VersionManifest,
 } from './stores/update-check'
-import { AWAY_MS, startAutoRefresh } from './update-refresh'
+import { autoRefreshApplies, AWAY_MS, startAutoRefresh } from './update-refresh'
 import { memoryStorage } from './test/memory-storage'
 
 const NEWER: VersionManifest = {
@@ -321,5 +321,28 @@ describe('startAutoRefresh', () => {
     h.dispose()
     expect(h.doc.listenerCount()).toBe(0)
     expect(h.win.listenerCount()).toBe(0)
+  })
+})
+
+describe('autoRefreshApplies', () => {
+  it('runs for a deployed browser build, which is what it was designed for', () => {
+    expect(autoRefreshApplies({ isDev: false, updatesFromOrigin: true })).toBe(
+      true,
+    )
+  })
+
+  it('stays out of the way under vite dev, where HMR owns reloading', () => {
+    expect(autoRefreshApplies({ isDev: true, updatesFromOrigin: true })).toBe(
+      false,
+    )
+  })
+
+  it('does not run in a packaged build, whose bundle is its own binary', () => {
+    // Otherwise: a timer and a request every 15 minutes to compare the shipped
+    // manifest against the build that shipped it, plus a hidden-tab auto-reload
+    // that would restart the app to fetch what it already has.
+    expect(autoRefreshApplies({ isDev: false, updatesFromOrigin: false })).toBe(
+      false,
+    )
   })
 })

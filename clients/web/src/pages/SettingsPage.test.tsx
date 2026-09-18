@@ -647,3 +647,31 @@ function mockNavigatorProperty(
     }
   }
 }
+
+describe('the update control', () => {
+  function renderWith(platform?: { updatesFromOrigin: boolean }) {
+    const services = testServices(platform === undefined ? {} : { platform })
+    return render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+  }
+
+  it('offers a check in a browser, where a deploy can replace the bundle', () => {
+    const { getByRole } = renderWith()
+    expect(getByRole('button', { name: 'Check for updates' })).toBeTruthy()
+  })
+
+  it('says how updates arrive in a packaged build, and claims nothing else', () => {
+    // The shell's bundle is its binary, so this control could only ever answer
+    // "This is the latest version" — a currency claim it cannot establish,
+    // and one that would be wrong the moment a newer release exists.
+    const { queryByRole, getByText } = renderWith({ updatesFromOrigin: false })
+
+    expect(queryByRole('button', { name: 'Check for updates' })).toBeNull()
+    expect(getByText('Updates arrive by installing a new build.')).toBeTruthy()
+    // The build id stays: it is what a bug report actually needs.
+    expect(getByText(BUILD_INFO.displayVersion)).toBeTruthy()
+  })
+})

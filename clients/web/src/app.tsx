@@ -42,7 +42,7 @@ import { RoomsIndex } from './pages/RoomsIndex'
 import { SettingsPage } from './pages/SettingsPage'
 import { applyAppBadge } from './app-badge'
 import { BUILD_INFO } from './build-info'
-import { startAutoRefresh } from './update-refresh'
+import { autoRefreshApplies, startAutoRefresh } from './update-refresh'
 import {
   perfEnabled,
   perfMark,
@@ -197,16 +197,15 @@ export function App({
 
   // Notice a new build and, when it costs the user nothing, apply it (ADR
   // 0087). Runs signed out too: the sign-in screen is as capable of being a
-  // stale bundle as any other, and the manifest needs no auth.
-  //
-  // Never under `vite dev`, though. HMR already owns reloading there, and the
-  // dev stamp is not a deployment identity — it is a git hash plus a `-dirty`
-  // flag read once at server start, so it moves whenever the working tree does.
-  // Restart the dev server after a commit or an edit and every open tab would
-  // see a "new build" and reload itself, which is indistinguishable from a bug
-  // and fights the HMR update arriving at the same moment.
+  // stale bundle as any other, and the manifest needs no auth. Which builds
+  // this applies to, and why it excludes two of them, is `autoRefreshApplies`.
   useEffect(() => {
-    if (import.meta.env.DEV) {
+    if (
+      !autoRefreshApplies({
+        isDev: import.meta.env.DEV,
+        updatesFromOrigin: svc.platform.updatesFromOrigin,
+      })
+    ) {
       return
     }
     return startAutoRefresh({
