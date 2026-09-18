@@ -9,10 +9,11 @@
 # Precedence (lowest to highest): these defaults < this file < DATABASE_URL <
 # AXON_-prefixed env vars (nested with "__", e.g. AXON_SERVER__PORT=9090).
 #
-# axon looks for a config file at --config <PATH>, else $AXON_CONFIG, else
-# ./axon.toml, else <platform config dir>/axon.toml (e.g. ~/.config/axon/axon.toml
-# on Linux); if none exists it runs from environment variables and built-in
-# defaults alone.
+# axon-server looks for a config file at --config <PATH>, else $AXON_CONFIG, else
+# ./axon.toml, else <platform config dir>/config.toml
+# (e.g. ~/.config/axon-server/config.toml on Linux), else the pre-rename
+# ~/.config/axon/axon.toml. If none exists it runs from environment variables
+# and built-in defaults alone. `axon-server init` writes the new path only.
 
 [server]
 # Bind address. Defaults to loopback; put a reverse proxy in front for external
