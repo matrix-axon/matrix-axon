@@ -1,7 +1,7 @@
 # ADR 0103 — Tags, favourites, and space order
 
-**Status:** Accepted — server (#367) has landed.
-Web (#368), TUI favs (#369), and TUI spaces (#370) are still open.
+**Status:** Accepted — server (#367) and TUI favs (#369) have landed.
+Web (#368) and TUI spaces (#370) are still open.
 Tracked in issue #365; this document is #366.
 
 Supersedes ADR 0038 Phase 2 and the still-open half of ADR 0055 Tier 1

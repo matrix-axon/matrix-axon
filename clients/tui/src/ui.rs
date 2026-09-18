@@ -271,7 +271,7 @@ fn prepare_rooms(app: &mut App, areas: &PaneAreas) {
     // rooms that are pinned marks the boundary for the separator (ADR 0038).
     let pinned_visible_count = visible_indices
         .iter()
-        .take_while(|&&i| app.is_room_pinned(&RoomKey::from(&app.rooms.rooms[i])))
+        .take_while(|&&i| app.is_room_pinned(&app.rooms.rooms[i]))
         .count();
     app.rooms.page_size = rooms_page_size;
     app.rooms.scroll = divider_aware_room_scroll(
@@ -3119,8 +3119,11 @@ mod tests {
                 topic: None,
                 avatar_url: None,
                 canonical_alias: None,
+                room_type: None,
                 last_activity_ts: 0,
                 last_event_id: None,
+                tags: Vec::new(),
+                is_direct: false,
             });
         }
         app.rooms.selected = Some(0);
@@ -3333,8 +3336,11 @@ mod tests {
             topic: None,
             avatar_url: None,
             canonical_alias: Some("#room:example.com".to_owned()),
+            room_type: None,
             last_activity_ts: 0,
             last_event_id: None,
+            tags: Vec::new(),
+            is_direct: false,
         };
         let key = RoomKey::from(&room);
         app.rooms.rooms.push(room);
@@ -3394,8 +3400,11 @@ mod tests {
             topic: None,
             avatar_url: None,
             canonical_alias: Some("#room:example.com".to_owned()),
+            room_type: None,
             last_activity_ts: 0,
             last_event_id: None,
+            tags: Vec::new(),
+            is_direct: false,
         };
         let key = RoomKey::from(&room);
         app.rooms.rooms.push(room);
@@ -3474,8 +3483,11 @@ mod tests {
             topic: None,
             avatar_url: None,
             canonical_alias: None,
+            room_type: None,
             last_activity_ts: 0,
             last_event_id: None,
+            tags: Vec::new(),
+            is_direct: false,
         };
         let media = MediaKey::new(Uuid::nil(), "mxc://example.com/photo".to_owned());
         app.rooms.rooms = vec![room.clone()];
@@ -3816,8 +3828,11 @@ mod tests {
             topic: None,
             avatar_url: None,
             canonical_alias: None,
+            room_type: None,
             last_activity_ts: 0,
             last_event_id: None,
+            tags: Vec::new(),
+            is_direct: false,
         }];
         app.rooms.selected = Some(0);
         app.seed_own_senders_from_rooms();
@@ -4051,8 +4066,11 @@ mod tests {
             topic: Some("Daily operations".to_owned()),
             avatar_url: Some("mxc://example/avatar".to_owned()),
             canonical_alias: Some("#ops:example.com".to_owned()),
+            room_type: None,
             last_activity_ts: 0,
             last_event_id: Some("$last:example.com".to_owned()),
+            tags: Vec::new(),
+            is_direct: false,
         };
         app.rooms.rooms = vec![room.clone()];
         app.rooms.selected = Some(0);

@@ -105,6 +105,13 @@ impl App {
                 self.handle_ephemeral_frame(account_id, payload, std::time::Instant::now());
                 LiveFrameAction::None
             }
+            LiveFrame::AccountData {
+                account_id,
+                payload,
+            } => {
+                self.apply_account_data_changed(account_id, payload);
+                LiveFrameAction::None
+            }
         }
     }
 

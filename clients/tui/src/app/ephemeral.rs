@@ -244,8 +244,11 @@ mod tests {
             topic: None,
             avatar_url: None,
             canonical_alias: None,
+            room_type: None,
             last_activity_ts: 0,
             last_event_id: None,
+            tags: Vec::new(),
+            is_direct: false,
         }];
         app.rooms.selected = Some(0);
         app.seed_own_senders_from_rooms();

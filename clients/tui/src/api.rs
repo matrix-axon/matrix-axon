@@ -466,6 +466,44 @@ impl AxonClient {
             .await
     }
 
+    /// Add or update a room tag (`PUT …/rooms/{room_id}/tags/{tag}`).
+    pub async fn set_room_tag(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        tag: &str,
+        order: Option<f64>,
+    ) -> Result<(), ApiError> {
+        let request = self
+            .http
+            .put(format!(
+                "{}/v1/accounts/{}/rooms/{}/tags/{}",
+                self.base_url,
+                account_id,
+                path_segment(room_id),
+                path_segment(tag)
+            ))
+            .json(&serde_json::json!({ "order": order }));
+        self.send_no_body(message_mutation(request)).await
+    }
+
+    /// Remove a room tag (`DELETE …/rooms/{room_id}/tags/{tag}`).
+    pub async fn remove_room_tag(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        tag: &str,
+    ) -> Result<(), ApiError> {
+        let request = self.http.delete(format!(
+            "{}/v1/accounts/{}/rooms/{}/tags/{}",
+            self.base_url,
+            account_id,
+            path_segment(room_id),
+            path_segment(tag)
+        ));
+        self.send_no_body(message_mutation(request)).await
+    }
+
     async fn room_membership_no_body(
         &self,
         account_id: Uuid,
@@ -978,6 +1016,16 @@ fn decode_ws_frame(text: &str) -> Option<LiveFrame> {
                 payload,
             })
         }
+        "account_data.changed" => {
+            let payload: AccountDataChangedDto = match serde_json::from_value(envelope.payload) {
+                Ok(payload) => payload,
+                Err(err) => return Some(LiveFrame::ProtocolError(err.to_string())),
+            };
+            Some(LiveFrame::AccountData {
+                account_id: envelope.account_id,
+                payload,
+            })
+        }
         _ => None,
     }
 }
@@ -1018,6 +1066,12 @@ pub enum LiveFrame {
     Ephemeral {
         account_id: Uuid,
         payload: EphemeralPassthroughDto,
+    },
+    /// An `account_data.changed` frame (ADR 0103): persisted `m.tag` /
+    /// `m.direct`. Clients patch `RoomDto.tags` / `is_direct`.
+    AccountData {
+        account_id: Uuid,
+        payload: AccountDataChangedDto,
     },
 }
 
@@ -1338,6 +1392,28 @@ pub struct MemberDto {
     pub display_name: Option<String>,
 }
 
+/// Matrix `m.favourite` — the durable meaning of a TUI pin (ADR 0103).
+pub const FAVOURITE_TAG: &str = "m.favourite";
+
+/// One tag on a room (`GET /v1/rooms`, ADR 0103). Empty `tags` is omitted on
+/// the wire, so this defaults to `[]`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RoomTag {
+    pub name: String,
+    #[serde(default)]
+    pub order: Option<f64>,
+}
+
+/// Wire payload for `account_data.changed`. `room_id` is omitted for global
+/// account data (`m.direct`).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AccountDataChangedDto {
+    #[serde(default)]
+    pub room_id: Option<String>,
+    pub event_type: String,
+    pub content: Value,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoomDto {
     pub account_id: Uuid,
@@ -1348,8 +1424,26 @@ pub struct RoomDto {
     pub topic: Option<String>,
     pub avatar_url: Option<String>,
     pub canonical_alias: Option<String>,
+    /// `m.room.create` `type`, if any (for example `m.space`). Deserialized
+    /// so the TUI spaces PR can use it; this PR still treats spaces as
+    /// ordinary rooms (issue #369 / #370).
+    #[serde(default)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "stored for the TUI spaces PR (#370); unused until then"
+        )
+    )]
+    pub room_type: Option<String>,
     pub last_activity_ts: i64,
     pub last_event_id: Option<String>,
+    /// This account's `m.tag` entries. Omitted when empty on the wire.
+    #[serde(default)]
+    pub tags: Vec<RoomTag>,
+    /// Whether this room appears in the account's global `m.direct` map.
+    #[serde(default)]
+    pub is_direct: bool,
 }
 
 impl RoomDto {
@@ -1359,6 +1453,42 @@ impl RoomDto {
             .or(self.canonical_alias.as_deref())
             .unwrap_or(&self.room_id)
     }
+
+    pub fn is_favourite(&self) -> bool {
+        self.tags.iter().any(|tag| tag.name == FAVOURITE_TAG)
+    }
+
+    pub fn favourite_order(&self) -> Option<f64> {
+        self.tags
+            .iter()
+            .find(|tag| tag.name == FAVOURITE_TAG)
+            .and_then(|tag| tag.order)
+    }
+}
+
+/// Parse `m.tag` account-data `content` into `Vec<RoomTag>`. Malformed or
+/// missing content is untagged — a bad frame must not drop the room.
+pub fn parse_room_tags(content: &Value) -> Vec<RoomTag> {
+    let Some(tags) = content.get("tags").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    tags.iter()
+        .map(|(name, info)| RoomTag {
+            name: name.clone(),
+            order: info.get("order").and_then(Value::as_f64),
+        })
+        .collect()
+}
+
+/// Room ids listed in any array of an `m.direct` content object.
+pub fn room_ids_in_direct_map(content: &Value) -> impl Iterator<Item = &str> {
+    content
+        .as_object()
+        .into_iter()
+        .flat_map(|map| map.values())
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(Value::as_str)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1794,6 +1924,9 @@ mod tests {
             response.data[0].account_user_id.as_deref(),
             Some("@alice:localhost")
         );
+        assert!(response.data[0].tags.is_empty());
+        assert!(!response.data[0].is_direct);
+        assert_eq!(response.data[0].room_type, None);
     }
 
     #[test]
@@ -1813,6 +1946,40 @@ mod tests {
         let response: ApiResponse<Vec<RoomDto>> = serde_json::from_str(body).unwrap();
         assert_eq!(response.data[0].title(), "Ops");
         assert_eq!(response.data[0].account_user_id, None);
+        assert!(response.data[0].tags.is_empty());
+        assert!(!response.data[0].is_direct);
+        assert_eq!(response.data[0].room_type, None);
+    }
+
+    #[test]
+    fn deserializes_room_tags_is_direct_and_room_type() {
+        let body = r##"{
+            "data": [{
+                "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "account_user_id": "@alice:localhost",
+                "room_id": "!room:localhost",
+                "name": "Ops",
+                "topic": null,
+                "avatar_url": null,
+                "canonical_alias": null,
+                "room_type": "m.space",
+                "last_activity_ts": 1234,
+                "last_event_id": "$event:localhost",
+                "tags": [
+                    { "name": "m.favourite", "order": 0.25 },
+                    { "name": "u.work" }
+                ],
+                "is_direct": true
+            }]
+        }"##;
+        let response: ApiResponse<Vec<RoomDto>> = serde_json::from_str(body).unwrap();
+        let room = &response.data[0];
+        assert_eq!(room.room_type.as_deref(), Some("m.space"));
+        assert!(room.is_direct);
+        assert!(room.is_favourite());
+        assert_eq!(room.favourite_order(), Some(0.25));
+        assert_eq!(room.tags[1].name, "u.work");
+        assert_eq!(room.tags[1].order, None);
     }
 
     #[test]
@@ -2169,6 +2336,33 @@ mod tests {
                 );
             }
             other => panic!("expected ephemeral frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demux_routes_account_data_changed_frame() {
+        let body = r#"{
+            "type": "account_data.changed",
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "payload": {
+                "room_id": "!r:localhost",
+                "event_type": "m.tag",
+                "content": { "tags": { "m.favourite": { "order": 0.25 } } }
+            }
+        }"#;
+        match decode_ws_frame(body) {
+            Some(LiveFrame::AccountData { payload, .. }) => {
+                assert_eq!(payload.room_id.as_deref(), Some("!r:localhost"));
+                assert_eq!(payload.event_type, "m.tag");
+                assert_eq!(
+                    parse_room_tags(&payload.content)
+                        .iter()
+                        .map(|tag| tag.name.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["m.favourite"]
+                );
+            }
+            other => panic!("expected account_data frame, got {other:?}"),
         }
     }
 
