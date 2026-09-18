@@ -2,9 +2,20 @@ import { effect } from '@preact/signals'
 import type { RoomsStore } from './stores/rooms'
 import type { SettingsStore } from './stores/settings'
 
-/** Whether this browser supports the Badging API (ADR 0080). */
+/**
+ * Whether this browser supports the Badging API (ADR 0080).
+ *
+ * Tests the properties with `typeof` rather than `in`: at least one WebKit
+ * runtime declares `setAppBadge` on `Navigator` while leaving the accessor
+ * `undefined`, so `in` answers `true` and the call then throws (#435). Both
+ * halves are checked independently — a declaration that lies about one is no
+ * evidence about the other, and `applyAppBadge` needs to call both.
+ */
 export function appBadgeAvailable(): boolean {
-  return 'setAppBadge' in navigator
+  return (
+    typeof navigator.setAppBadge === 'function' &&
+    typeof navigator.clearAppBadge === 'function'
+  )
 }
 
 /**
@@ -68,7 +79,8 @@ export function applyAppBadge(
     // silently doing nothing" — indistinguishable from the outside otherwise,
     // and the difference matters most on iOS, where WebKit only exposes
     // `setAppBadge` on `navigator` once the page is running as an installed,
-    // standalone home-screen web app.
+    // standalone home-screen web app. "Unavailable" here also covers the
+    // declared-but-`undefined` case that `appBadgeAvailable` now screens for.
     console.info(
       'app-badge: navigator.setAppBadge is unavailable in this context',
     )
@@ -76,16 +88,24 @@ export function applyAppBadge(
   }
   return effect(() => {
     const count = rooms.unreadTotal.value
-    const call =
-      settings.appBadgeEnabled.value && count > 0
+    const wanted = settings.appBadgeEnabled.value && count > 0
+    try {
+      const call = wanted
         ? navigator.setAppBadge(count)
         : navigator.clearAppBadge()
-    // A rejection here is not the Notification-permission gate (Safari
-    // resolves either way per ADR 0080) but something environmental — worth a
-    // console trace instead of disappearing silently, since there is no UI
-    // surface for it.
-    call.catch((cause: unknown) => {
-      console.error('app-badge: navigator badge call failed', cause)
-    })
+      // A rejection here is not the Notification-permission gate (Safari
+      // resolves either way per ADR 0080) but something environmental — worth
+      // a console trace instead of disappearing silently, since there is no UI
+      // surface for it. Routed through `Promise.resolve` because an
+      // implementation that returns nothing would make a bare `.catch` throw.
+      void Promise.resolve(call).catch((cause: unknown) => {
+        console.error('app-badge: navigator badge call failed', cause)
+      })
+    } catch (cause) {
+      // Nothing thrown by a decorative badge is worth propagating. This effect
+      // re-runs on every unread-count change, so a throw escapes into whatever
+      // wrote `unreadTotal` — the sync path (#435).
+      console.error('app-badge: navigator badge call threw', cause)
+    }
   })
 }
