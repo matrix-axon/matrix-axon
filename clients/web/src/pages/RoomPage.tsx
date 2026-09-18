@@ -58,14 +58,10 @@ import { viewMayClaimReadState } from '../timeline/arrival-order'
 import { hiddenByRedaction } from '../timeline/visibility'
 import { computeRoomReceipt } from '../timeline/room-receipt'
 import {
-  NATIVE_BACK_EDGE_PX,
-  SWIPE_AXIS_RATIO,
-  SWIPE_DECISION_THRESHOLD,
-  SWIPE_MAX_Y,
-  SWIPE_MIN_X,
-} from '../gestures'
+  roomListBackPresentation,
+  useMobileSwipeBack,
+} from '../components/use-mobile-swipe-back'
 import { resolveEmojiShortcode, type EmojiEntry } from '../emoji'
-import { SINGLE_PANE_QUERY } from '../layout'
 import { perfMark, perfMarkFrames } from '../perf'
 import { withSearchParam, withoutQueryParam } from '../search-tokens'
 import { useServices } from '../services'
@@ -88,6 +84,7 @@ import {
   type RoomSort,
   type SettingsStore,
 } from '../stores/settings'
+import type { MessageGesturePreferences } from '../stores/message-gestures'
 import type { EphemeralStore } from '../stores/ephemeral'
 import {
   createThreadsStore,
@@ -124,12 +121,6 @@ const LAST_JOINED_MEMBER_LEAVE_CONFIRM =
 // timeout code here if the `/rooms/{join,knock}` error envelope grows one.
 const ROOM_ENTRY_TIMEOUT = /^(join|knock) timed out after \d+s$/i
 
-// Swipe thresholds live in `src/gestures.ts` so the room and the media
-// viewer's swipe paging (ADR 0081) cannot drift apart. Kept as local aliases
-// so the call sites below read unchanged.
-const SWIPE_RIGHT_MIN_X = SWIPE_MIN_X
-const SWIPE_RIGHT_MAX_Y = SWIPE_MAX_Y
-const SWIPE_RIGHT_AXIS_RATIO = SWIPE_AXIS_RATIO
 // How far above the scroller a page starts loading, so it arrives during the
 // scroll rather than after the reader has stopped at the top edge.
 const SCROLL_BACK_PREFETCH_PX = 400
@@ -146,11 +137,6 @@ const AUTO_SCROLL_BACK_PAGES = 5
 // correction, so not too eagerly either.
 const ANCHOR_REACH = 1.5
 
-type SwipeStart = {
-  x: number
-  y: number
-}
-
 function isUnableToDecrypt(event: EventDto): boolean {
   return event.type === 'm.room.encrypted' && event.content === null
 }
@@ -160,37 +146,6 @@ function timelineContainsEvent(
   eventId: string | null,
 ): boolean {
   return events.some((event) => event.event_id === eventId)
-}
-
-function isGestureControl(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    target.closest(
-      'a, button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="textbox"], emoji-picker',
-    ) !== null
-  )
-}
-
-/**
- * True if `target` sits inside an element that scrolls horizontally on its
- * own (a wide code block or table, ADR 0046's message rendering) — those
- * need real touch panning, so the swipe-to-room-list gesture must not claim
- * touches that start inside them. Stops walking at `.room-body`, the swipe
- * region's own boundary.
- */
-function isHorizontallyScrollable(target: EventTarget | null): boolean {
-  let el = target instanceof Element ? target : null
-  while (el !== null && !el.classList.contains('room-body')) {
-    if (
-      el instanceof HTMLElement &&
-      el.scrollWidth > el.clientWidth &&
-      /(auto|scroll)/.test(getComputedStyle(el).overflowX)
-    ) {
-      return true
-    }
-    el = el.parentElement
-  }
-  return false
 }
 
 function roomEntryPendingMessage(
@@ -248,6 +203,7 @@ export function RoomPage() {
     threadUnread,
     composerFocus,
     settings,
+    messageGestures,
     search,
     timelines,
     attachments: staging,
@@ -287,10 +243,9 @@ export function RoomPage() {
   const [roomEntryStatus, setRoomEntryStatus] = useState<string | null>(null)
   const { openUnreadThreads, setJumpAction, setRoomChrome } = useShellActions()
   const heading = useRef<HTMLHeadingElement>(null)
+  const roomBody = useRef<HTMLDivElement>(null)
   /** Scopes the media viewer's focus-restore lookup to this room's rows. */
   const roomStream = useRef<HTMLDivElement>(null)
-  const swipeStart = useRef<SwipeStart | null>(null)
-  const swipeLocked = useRef(false)
   const highlighted = typeof query.event === 'string' ? query.event : null
   // Whether this view may claim read state at all — the invariant the three
   // effects below share (see `clients/web/AGENTS.md`). Derived once rather than
@@ -1848,87 +1803,21 @@ export function RoomPage() {
     }
   }
 
-  const handleTouchStart = (event: JSX.TargetedTouchEvent<HTMLDivElement>) => {
-    swipeLocked.current = false
-    const touch = event.touches[0]
-    if (
-      !window.matchMedia(SINGLE_PANE_QUERY).matches ||
-      event.touches.length !== 1 ||
-      // Guarded by the length check above, so `touch` is present here.
-      touch.clientX < NATIVE_BACK_EDGE_PX ||
-      isGestureControl(event.target) ||
-      isHorizontallyScrollable(event.target)
-    ) {
-      swipeStart.current = null
-      return
-    }
-    swipeStart.current = { x: touch.clientX, y: touch.clientY }
-  }
-
-  /**
-   * Claims the gesture as soon as it looks like a rightward swipe, well
-   * before the touch travels far enough to satisfy the touchend thresholds.
-   * `preventDefault` here suppresses the scrolling and text selection that
-   * would otherwise fight our pan; CSS `touch-action` can't do that without
-   * also disabling touch-scrolling for the code blocks/tables nested inside
-   * the timeline (both need real horizontal panning), so this has to be a
-   * targeted, per-gesture opt-out instead.
-   *
-   * What it does *not* do is stop the browser's native edge-swipe-back —
-   * that recognizer ignores cancelled touch events, which is why
-   * `handleTouchStart` declines the edge band outright (ADR 0075).
-   */
-  const handleTouchMove = (event: JSX.TargetedTouchEvent<HTMLDivElement>) => {
-    const start = swipeStart.current
-    if (start === null || event.touches.length !== 1) {
-      return
-    }
-    if (swipeLocked.current) {
-      event.preventDefault()
-      return
-    }
-    const touch = event.touches[0]
-    const dx = touch.clientX - start.x
-    const dy = touch.clientY - start.y
-    const absX = Math.abs(dx)
-    const absY = Math.abs(dy)
-    if (absX < SWIPE_DECISION_THRESHOLD && absY < SWIPE_DECISION_THRESHOLD) {
-      return
-    }
-    if (dx > 0 && absX > absY * SWIPE_RIGHT_AXIS_RATIO) {
-      swipeLocked.current = true
-      event.preventDefault()
-    } else {
-      // Vertical scroll or a leftward drag: not ours, leave it to the browser.
-      swipeStart.current = null
-    }
-  }
-
-  const handleTouchEnd = (event: JSX.TargetedTouchEvent<HTMLDivElement>) => {
-    const start = swipeStart.current
-    swipeStart.current = null
-    swipeLocked.current = false
-    if (
-      start === null ||
-      !window.matchMedia(SINGLE_PANE_QUERY).matches ||
-      event.changedTouches.length === 0
-    ) {
-      return
-    }
-    const touch = event.changedTouches[0]
-    const dx = touch.clientX - start.x
-    const dy = touch.clientY - start.y
-    const absY = Math.abs(dy)
-    if (
-      dx < SWIPE_RIGHT_MIN_X ||
-      absY > SWIPE_RIGHT_MAX_Y ||
-      dx < absY * SWIPE_RIGHT_AXIS_RATIO
-    ) {
-      return
-    }
-    perfMark('room-page:swipe-right-accepted', { dx, dy })
-    navigateBackOneMobilePane()
-  }
+  const mobileSwipeBack = useMobileSwipeBack<HTMLDivElement>({
+    getPresentation: (surface) => {
+      if (openThread === null) {
+        return roomListBackPresentation(surface, roomStream.current)
+      }
+      const foreground = surface.querySelector<HTMLElement>('.thread-panel')
+      return foreground === null || roomStream.current === null
+        ? null
+        : { foreground, destination: roomStream.current }
+    },
+    onAccepted: (dx, dy) => {
+      perfMark('room-page:swipe-right-accepted', { dx, dy })
+    },
+    onBack: navigateBackOneMobilePane,
+  })
 
   const roomCompletions = (query: string): ComposerAutocompleteOption[] => {
     const visibleRooms = rooms.rooms.value.filter(
@@ -2027,14 +1916,9 @@ export function RoomPage() {
           rather than covering it (ADR 0062). Below the three-pane breakpoint
           CSS reverts the panel to an overlay drawer. */}
       <div
-        class="room-body"
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-        onTouchCancel={() => {
-          swipeStart.current = null
-          swipeLocked.current = false
-        }}
+        ref={roomBody}
+        class="room-body mobile-back-surface"
+        {...mobileSwipeBack}
       >
         {/* Drop scoped to this pane, not the page: a file dropped on the thread
             panel beside it must stage there, not here (ADR 0065). */}
@@ -2084,6 +1968,7 @@ export function RoomPage() {
                 dateJumpStart={dateJumpStart}
                 onDateJumpAnchored={() => setDateJumpStart(null)}
                 settings={settings}
+                messageGesturePreferences={messageGestures.preferences.value}
                 reactionPickerEventId={reactionPickerEventId}
                 onSetReactionPicker={setReactionPickerEventId}
                 onReply={(event) => setAction({ kind: 'reply', event })}
@@ -2225,6 +2110,7 @@ function Timeline({
   dateJumpStart,
   onDateJumpAnchored,
   settings,
+  messageGesturePreferences,
   reactionPickerEventId,
   onSetReactionPicker,
   onReply,
@@ -2247,6 +2133,7 @@ function Timeline({
   dateJumpStart: number | null
   onDateJumpAnchored: () => void
   settings: SettingsStore
+  messageGesturePreferences: MessageGesturePreferences | null
   reactionPickerEventId: string | null
   onSetReactionPicker: (eventId: string | null) => void
   onReply: (event: EventDto) => void
@@ -2993,6 +2880,7 @@ function Timeline({
       }
       highlighted={event.event_id === highlighted}
       settings={settings}
+      messageGestures={messageGesturePreferences}
       reactionPickerOpen={reactionPickerEventId === event.event_id}
       onSetReactionPicker={onSetReactionPicker}
       actionsOpen={actionsOpenEventId === event.event_id}
@@ -3066,6 +2954,13 @@ function Timeline({
                   readReceipts={galleryReceipts(row.events)}
                   highlighted={highlighted}
                   renderEvent={renderRow}
+                  timeline={timeline}
+                  ownUserId={ownUserId}
+                  messageGestures={messageGesturePreferences}
+                  onReply={onReply}
+                  onEdit={onEdit}
+                  onOpenThread={onOpenThread}
+                  onMutation={onMutation}
                 />
               ) : (
                 renderRow(row.event)

@@ -35,6 +35,7 @@ import { createEphemeralStore } from '../stores/ephemeral'
 import { createEphemeralSender } from '../stores/ephemeral-sender'
 import { createMediaService } from '../media/media-service'
 import { createLiveConnection } from '../stores/live-connection'
+import { createMessageGestureStore } from '../stores/message-gestures'
 import { cacheNamespace, createMemoryCacheStore } from '../stores/cache-store'
 import { createTelemetryStore } from '../stores/telemetry'
 import { createRoomListCache } from '../stores/room-list-cache'
@@ -181,6 +182,14 @@ export function testServices(
   const activeThread = signal<ActiveThread | null>(null)
   const composerFocus = signal(0)
   const deviceState = createDeviceStateStore(api, live, storage)
+  const messageGestures = createMessageGestureStore(
+    api,
+    live,
+    deviceState.deviceId,
+  )
+  // Component tests opt in by calling `hydrate` (Settings does this itself).
+  // Auto-hydrating every shared harness would add an unrelated preference GET
+  // to hundreds of MSW tests that are deliberately scoped to another route.
   const spaces = createSpacesStore(api, rooms, live)
   const updates = createUpdateChecker({
     currentVersion: options.currentVersion ?? 'test-build',
@@ -237,6 +246,7 @@ export function testServices(
     threadUnread,
     live,
     deviceState,
+    messageGestures,
     ephemeral,
     ephemeralSender,
     activeRoom,

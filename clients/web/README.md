@@ -70,6 +70,28 @@ that paints before `/v1/rooms` answers and reconciles in place, marked
 default and switchable off under Settings → Room list, which also erases what
 was stored).
 
+On touch devices, Settings → Messages configures double tap, touch and hold,
+and swipe left as unique bindings for reply, thread, reaction, edit, or delete.
+The default preset reacts with 👍 on double tap, opens a thread on hold, and
+replies on swipe left; swipe right always keeps its mobile back-navigation
+behavior.
+Individual images and loaded tiles in collapsed galleries use the same
+configured actions while retaining a single tap to open the full-size viewer.
+Each gallery gesture targets the tile where it begins; gallery whitespace and
+tiles that are loading, failed, or still uploading remain gesture-free.
+During swipe-right navigation, the current pane follows the finger while the
+room list or timeline underneath is revealed and settles fully into view.
+Choosing an action already assigned to another gesture swaps the two
+assignments, keeping mappings unique without requiring an intermediate Off.
+Holding a timestamp copies the message body while touch and hold is enabled,
+and tapping it continues to copy the Matrix.to event link.
+On desktop, double-clicking a timestamp copies the message body while a single
+click copies the link; message text always remains selectable with a mouse.
+Double-clicking a message body runs the action assigned to Double tap and
+replaces the browser's native word selection; setting Double tap to Off
+restores that selection behavior.
+Turning touch and hold off restores native text selection and link previews.
+
 Note for deployment: history routing means the host must rewrite unknown
 paths to `index.html` (the Vite dev server already does). ADR 0030's
 `sync_state` is rendered when present, but the server does not emit it yet —
