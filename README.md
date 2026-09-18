@@ -134,7 +134,7 @@ Two kinds of `AXON_`-prefixed environment variables exist:
 
 | Variable        | Used by                                    | Meaning                                                                                                                         |
 | --------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| `AXON_CONFIG`   | server, all CLI subcommands                | Path to `axon.toml`, when not passed via `--config`. Falls back to `./axon.toml`, then the platform config dir.                 |
+| `AXON_CONFIG`   | server, all CLI subcommands                | Path to the server config, when not passed via `--config`. Falls back to `./axon.toml`, then `~/.config/axon-server/config.toml` (with a read-only fallback to `~/.config/axon/axon.toml`). |
 | `DATABASE_URL`  | server, all CLI subcommands                | Postgres connection string. Also settable as `AXON_DATABASE__URL` or `[database].url`.                                          |
 | `AXON_BASE_URL` | `axon utd redecrypt` (HTTP CLI calls), TUI | Base URL of the running axon-server to call. **Defaults to `http://127.0.0.1:8080` — set explicitly for any non-local server.** |
 | `AXON_TOKEN`    | `axon utd redecrypt`, TUI                  | Bearer token sent with the request, in place of `--token` (web does not consume token from env)                                 |

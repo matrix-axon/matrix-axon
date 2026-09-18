@@ -19,7 +19,8 @@ primitive types shared across crates.
   - `Config::load(Option<&Path>)` — explicit file path + env overrides.
   - `Config::load_from(Option<&Path>)` — `--config`/explicit path, else discovery.
   - `Config::load_default()` — resolves `AXON_CONFIG`, else `./axon.toml`, else
-    `<platform config dir>/axon.toml`, else env-only.
+    `<platform config dir>/config.toml`, else the pre-rename
+    `<legacy platform config dir>/axon.toml`, else env-only.
   - `Config::socket_addr()` — `SocketAddr` from `server.host`/`server.port`.
 - `Error` (top-level), `ConfigError`, `Result<T>`.
 

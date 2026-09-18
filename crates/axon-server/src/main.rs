@@ -111,6 +111,17 @@ async fn main() -> anyhow::Result<()> {
 
     init_tracing(&config.log.level);
 
+    if let Some(legacy) = &config.legacy_config_path {
+        let current = Config::platform_config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<platform config dir>/axon-server/config.toml".to_string());
+        tracing::warn!(
+            legacy = %legacy.display(),
+            current = %current,
+            "loaded configuration from a legacy path; axon-server init now writes the current path. Move the file (and the matching data/cache directories) when convenient — this location remains readable and is never overwritten"
+        );
+    }
+
     match cli.command {
         #[cfg(feature = "dev-tools")]
         Some(Command::Db { action }) => db::run(action, &config).await,

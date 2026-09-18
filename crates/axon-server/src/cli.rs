@@ -36,8 +36,9 @@ const VERSION: &str = concat!(
 #[command(name = "axon-server", version = VERSION, about = "A personal Matrix state layer")]
 pub struct Cli {
     /// Path to the TOML config file. Overrides the `AXON_CONFIG` env var and the
-    /// `./axon.toml` / platform-config-dir discovery. Applies to the server and
-    /// every subcommand.
+    /// `./axon.toml` / platform-config-dir discovery (`config.toml` under the
+    /// `axon-server` project dir, with a read-only fallback to the pre-rename
+    /// `axon/axon.toml`). Applies to the server and every subcommand.
     #[arg(long, value_name = "PATH", global = true)]
     pub config: Option<PathBuf>,
 
