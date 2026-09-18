@@ -97,6 +97,10 @@ This rename does not repeat that.
 - **Legacy config keeps legacy data/cache defaults** when those keys are omitted,
   so a file that never set `sync.data_dir` continues to point at
   `~/.local/share/axon/sync` rather than an empty `axon-server` tree.
+- **Env-only boots do the same per key, from disk.** A process with no config
+  file (or a non-legacy file that omitted the dir keys) uses the pre-rename
+  path when that path exists and the new `axon-server` path does not. That is
+  the systemd / bare-`AXON_*` case this rename would otherwise empty-store.
 - **No automatic move.** `store_key` plus encrypted SDK state make a botched copy
   unrecoverable. The server logs a warning every boot naming both paths.
 - **`./axon.toml` is unchanged** — it is the CWD override for a git checkout, not
