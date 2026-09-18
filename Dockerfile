@@ -55,11 +55,13 @@ RUN useradd --system --uid 10001 --user-group --home-dir /var/lib/axon \
 #   axon.toml     — generated config (store_key + db url), CRITICAL, back this up
 #   data/         — matrix-rust-sdk state + crypto store, CRITICAL
 #   search/       — Tantivy index, rebuildable from Postgres
+#   uploads/      — durable staged client uploads, CRITICAL until sent
 #   media/        — disposable LRU cache
 ENV AXON_CONFIG=/var/lib/axon/axon.toml \
     AXON_SYNC__DATA_DIR=/var/lib/axon/data \
     AXON_SEARCH__INDEX_PATH=/var/lib/axon/search \
     AXON_MEDIA__CACHE_DIR=/var/lib/axon/media \
+    AXON_MEDIA__UPLOADS_DIR=/var/lib/axon/uploads \
     AXON_SERVER__HOST=0.0.0.0 \
     AXON_SERVER__ALLOW_INSECURE_BIND=true
 

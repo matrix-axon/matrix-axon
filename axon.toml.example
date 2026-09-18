@@ -55,8 +55,8 @@ level = "info,matrix_sdk_crypto=error,matrix_sdk::encryption::backups=error"
 # historical Megolm decryption keys.
 #
 # Defaults to the platform data directory when unset (Linux:
-# ~/.local/share/axon/sync; macOS: ~/Library/Application Support/axon/sync;
-# Windows: %APPDATA%\axon\data\sync). Uncomment to override, or set
+# ~/.local/share/axon-server/sync; macOS: ~/Library/Application Support/axon-server/sync;
+# Windows: %APPDATA%\axon-server\data\sync). Uncomment to override, or set
 # AXON_SYNC__DATA_DIR. If you are upgrading from a build that defaulted to
 # ./axon-data, either move that tree here or pin the old path below.
 # data_dir = "axon-data/sync"
@@ -128,21 +128,23 @@ request_timeout_secs = 15
 # [search]
 # Directory for the Tantivy full-text index. MUST be durable (rebuildable from
 # Postgres, but expensive to reseed). Defaults to the platform data directory
-# when unset (Linux: ~/.local/share/axon/search; macOS:
-# ~/Library/Application Support/axon/search; Windows: %APPDATA%\axon\data\search).
+# when unset (Linux: ~/.local/share/axon-server/search; macOS:
+# ~/Library/Application Support/axon-server/search; Windows: %APPDATA%\axon-server\data\search).
 # Override here or via AXON_SEARCH__INDEX_PATH.
 # index_path = "axon-data/search"
 
 # [media]
 # Directory for the bounded media LRU cache (one subdir per account). Disposable
 # — a lost cache simply re-fetches from the homeserver — so it defaults under the
-# platform CACHE directory, not the data dir (Linux: ~/.cache/axon/media; macOS:
-# ~/Library/Caches/axon/media; Windows: %LOCALAPPDATA%\axon\cache\media). Override
+# platform CACHE directory, not the data dir (Linux: ~/.cache/axon-server/media; macOS:
+# ~/Library/Caches/axon-server/media; Windows: %LOCALAPPDATA%\axon-server\cache\media). Override
 # here or via AXON_MEDIA__CACHE_DIR.
 # cache_dir = "axon-data/media"
 # Durable staging directory for client-originated media uploads (M15). Pending
 # uploads are in-flight local mutations, so this defaults under the platform DATA
-# directory, not the disposable cache. Override here or via
+# directory, not the disposable cache (Linux: ~/.local/share/axon-server/uploads;
+# macOS: ~/Library/Application Support/axon-server/uploads; Windows:
+# %APPDATA%\axon-server\data\uploads). Override here or via
 # AXON_MEDIA__UPLOADS_DIR.
 # uploads_dir = "axon-data/uploads"
 # max_upload_bytes = 104857600

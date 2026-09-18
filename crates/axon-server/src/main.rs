@@ -118,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(
             legacy = %legacy.display(),
             current = %current,
-            "loaded configuration from a legacy path; axon-server init now writes the current path. Move the file (and the matching data/cache directories) when convenient — this location remains readable and is never overwritten"
+            "loaded configuration from a legacy path; axon-server init writes the current path and will not overwrite this file. Move the file (and the matching data/cache directories) when convenient"
         );
     }
 

@@ -795,7 +795,7 @@ fn cwd_relative_fallback(child: &str) -> PathBuf {
 }
 
 /// True when `path` is the pre-rename platform config file.
-fn is_legacy_platform_config(path: &Path) -> bool {
+fn path_is_legacy_platform_config(path: &Path) -> bool {
     let Some(legacy) = Config::legacy_platform_config_path() else {
         return false;
     };
@@ -980,7 +980,7 @@ impl Config {
             .extract()
             .map_err(|err| ConfigError::Figment(Box::new(err)))?;
 
-        if let Some(path) = path.filter(|p| is_legacy_platform_config(p)) {
+        if let Some(path) = path.filter(|p| path_is_legacy_platform_config(p)) {
             apply_legacy_dir_defaults(&figment, &mut config);
             config.legacy_config_path = Some(path.to_path_buf());
         }
@@ -1054,6 +1054,14 @@ impl Config {
     /// never writes here.
     pub fn legacy_platform_config_path() -> Option<PathBuf> {
         legacy_project_dirs().map(|d| d.config_dir().join(LEGACY_CONFIG_FILE))
+    }
+
+    /// True when `path` is the pre-rename platform config file.
+    ///
+    /// Used by `axon-server init` so `--force` cannot treat that file as a write
+    /// target (ADR 0050 amendment: init writes only the current path).
+    pub fn is_legacy_platform_config(path: &Path) -> bool {
+        path_is_legacy_platform_config(path)
     }
 
     /// The socket address to bind, derived from `server.host` and `server.port`.
@@ -1268,7 +1276,10 @@ mod tests {
                     PathBuf::from("/xdg/data/axon-server/search")
                 );
             } else {
-                assert!(config.search.index_path.ends_with("search"));
+                assert!(config
+                    .search
+                    .index_path
+                    .ends_with("axon-server/data/search"));
             }
             assert_eq!(config.search.index_batch_size, 1000);
             assert_eq!(config.search.build_throttle_ms, 0);
@@ -1317,8 +1328,11 @@ mod tests {
                 );
                 assert!(config.media.uploads_dir.ends_with("axon-server/uploads"));
             } else {
-                assert!(config.media.cache_dir.ends_with("media"));
-                assert!(config.media.uploads_dir.ends_with("uploads"));
+                assert!(config.media.cache_dir.ends_with("axon-server/cache/media"));
+                assert!(config
+                    .media
+                    .uploads_dir
+                    .ends_with("axon-server/data/uploads"));
             }
             assert_eq!(config.media.max_bytes, 5 * 1024 * 1024 * 1024);
             assert_eq!(config.media.max_object_bytes, 100 * 1024 * 1024);
@@ -1372,7 +1386,7 @@ mod tests {
                     PathBuf::from("/xdg/data/axon-server/sync")
                 );
             } else {
-                assert!(config.sync.data_dir.ends_with("sync"));
+                assert!(config.sync.data_dir.ends_with("axon-server/data/sync"));
             }
             assert!(config.sync.store_key.is_none());
             assert_eq!(config.sync.matrix_oauth.request_timeout_secs, 15);
