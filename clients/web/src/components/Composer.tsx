@@ -802,7 +802,17 @@ export function Composer({
               )
             }
             onClick={(event) => setCaret(event.currentTarget.selectionStart)}
+            onPointerDown={(event) => {
+              if (event.pointerType === 'touch') {
+                event.currentTarget.dataset.touchFocus = ''
+              } else {
+                delete event.currentTarget.dataset.touchFocus
+              }
+            }}
             onFocus={onFocus}
+            onBlur={(event) => {
+              delete event.currentTarget.dataset.touchFocus
+            }}
             onKeyUp={(event) => setCaret(event.currentTarget.selectionStart)}
             onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
             onPaste={(event) => {

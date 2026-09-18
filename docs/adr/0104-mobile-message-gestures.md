@@ -1,7 +1,7 @@
 # ADR 0104 — Mobile message gestures
 
 **Status:** Accepted.
-Server preference support is implemented here; the web client follows in a separate PR.
+Server preference support and the web client are implemented in separate PRs.
 
 ## Context
 
@@ -25,6 +25,7 @@ A single tap continues to open the message action bar.
 
 Each gesture maps to one of `reply`, `thread`, `react`, `edit`, or `delete`, or to JSON `null` for Off.
 One action cannot be assigned to more than one gesture.
+When a user assigns an action that another gesture already uses, the web client swaps the two assignments rather than requiring an intermediate Off selection.
 Delete opens the existing confirmation UI and never deletes immediately from a gesture.
 
 The default preset is:
@@ -65,23 +66,26 @@ A client does not write merely because GET returned 404.
 
 ### Gesture arbitration
 
-Message gestures apply only to confirmed, unredacted, non-state message rows.
-Pending and failed local echoes, redacted events, media tiles, and collapsed gallery groups are excluded initially.
-Existing buttons, reaction chips, media controls, horizontally scrollable content, and multi-touch interactions keep their own behavior.
+Message gestures apply only to confirmed, unredacted, non-state message events.
+Text messages, individual images, and loaded image-gallery tiles are eligible.
+A gesture on a gallery tile targets that tile's event; gallery whitespace, captions, and the outer grouped row are not gesture surfaces.
+Pending and failed local echoes, redacted events, non-image media, and gallery tiles that are loading, failed, deferred, or still uploading are excluded.
+Existing buttons, reaction chips, non-image media controls, horizontally scrollable content, and multi-touch interactions keep their own behavior.
 
 A leftward row swipe reuses the application's shared horizontal-swipe thresholds.
 A rightward drag is never claimed by a row, so the room-level recognizer retains navigation.
 Vertical movement cancels row recognition and remains timeline scrolling.
 
-When double tap is configured, a touch single tap waits through the double-tap window before opening the action bar.
-If double tap is Off, the action bar may open immediately.
-Mouse behavior is unchanged.
+When double tap is configured, a touch single tap waits through the double-tap window before opening the action bar or image viewer.
+If double tap is Off, the single-tap behavior may run immediately.
+On desktop, double-clicking a message body runs the configured Double tap action and suppresses native word selection.
+Setting Double tap to Off restores native double-click word selection.
 
 When touch and hold is configured, the client suppresses native text selection and link preview on eligible message content.
 When it is Off, those native behaviors return.
 
-Tapping a confirmed event timestamp continues to copy its Matrix.to event link.
-Touching and holding the timestamp copies the message body instead of invoking the row binding.
+Tapping or clicking a confirmed event timestamp continues to copy its Matrix.to event link.
+Touching and holding the timestamp, or double-clicking it on desktop, copies the message body instead of invoking the row binding.
 Turning touch and hold Off also disables timestamp hold-to-copy so native behavior returns consistently.
 
 ### Availability feedback
@@ -97,7 +101,6 @@ The web implementation follows as a separate client-silo commit and PR after the
 The web work includes the preference consumer, Settings UI, shared gesture recognizer, timestamp hold behavior, action dispatch, and mobile real-browser coverage.
 
 Discoverability beyond the Settings surface is deferred to the application's broader discoverability work.
-Media-tile and gallery-group gestures are also deferred until an interaction can be added without competing with media controls, lightbox opening, or gallery paging.
 
 ## Consequences
 

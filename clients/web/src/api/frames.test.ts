@@ -8,6 +8,8 @@ import {
   INVITE_ADDED,
   inviteRemoved,
   INVITE_REMOVED,
+  preferenceChange,
+  PREFERENCES_CHANGED,
   timelineEvent,
   TIMELINE_EVENT,
   unreadCountsChange,
@@ -115,6 +117,44 @@ describe('deviceStateChange', () => {
     expect(
       deviceStateChange(
         changeFrame({ device_id: 'd', namespace: 'drafts', entries: null }),
+      ),
+    ).toBeNull()
+  })
+})
+
+describe('preferenceChange', () => {
+  const preferenceFrame = (payload: unknown) =>
+    decodeFrame(
+      envelope(
+        PREFERENCES_CHANGED,
+        '00000000-0000-0000-0000-000000000000',
+        payload,
+      ),
+    )!
+
+  it('extracts an instance-scoped preference payload', () => {
+    expect(
+      preferenceChange(
+        preferenceFrame({
+          key: 'message_gestures',
+          value: { schema_version: 1 },
+          device_id: 'device-2',
+        }),
+      ),
+    ).toEqual({
+      key: 'message_gestures',
+      value: { schema_version: 1 },
+      deviceId: 'device-2',
+    })
+  })
+
+  it('rejects another tag or malformed required fields', () => {
+    expect(
+      preferenceChange(decodeFrame(envelope(TIMELINE_EVENT, 'a', {}))!),
+    ).toBeNull()
+    expect(
+      preferenceChange(
+        preferenceFrame({ key: 'message_gestures', value: {}, device_id: 2 }),
       ),
     ).toBeNull()
   })

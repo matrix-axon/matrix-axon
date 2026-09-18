@@ -11,7 +11,8 @@ export type EventDto = components['schemas']['EventDto']
  * server frame type reaches no handler until one is added, rather than
  * breaking decode. Known tags today: `timeline.event`, `verification.*`,
  * `sender_trust.violation`, `device_state.changed`, `ephemeral.passthrough`,
- * `unread_counts.changed`, `invite.added`, `invite.removed`, `heartbeat`.
+ * `unread_counts.changed`, `invite.added`, `invite.removed`,
+ * `preferences.changed`, `heartbeat`.
  */
 export interface LiveFrame {
   /** Namespaced tag, e.g. `timeline.event`. */
@@ -40,6 +41,9 @@ export const INVITE_ADDED = 'invite.added'
 /** The `type` tag for a pending invite that is no longer pending (ADR 0091). */
 export const INVITE_REMOVED = 'invite.removed'
 
+/** The `type` tag for an Axon instance preference write (ADRs 0103/0104). */
+export const PREFERENCES_CHANGED = 'preferences.changed'
+
 /**
  * The `type` tag for the server's liveness beat (`ws.rs` `HEARTBEAT`).
  *
@@ -61,6 +65,13 @@ export interface DeviceStateChange {
   deviceId: string
   namespace: string
   entries: Record<string, unknown>
+}
+
+/** The payload of a `preferences.changed` frame (ADRs 0103 and 0104). */
+export interface PreferenceChange {
+  key: string
+  value: unknown
+  deviceId: string
 }
 
 /**
@@ -151,6 +162,29 @@ export function deviceStateChange(frame: LiveFrame): DeviceStateChange | null {
     return null
   }
   return { deviceId, namespace, entries: entries as Record<string, unknown> }
+}
+
+/**
+ * One instance-preference write, or `null` for another tag or malformed body.
+ * The frame is instance-scoped: callers deliberately do not filter its nil
+ * envelope `accountId` against the Matrix accounts they know.
+ */
+export function preferenceChange(frame: LiveFrame): PreferenceChange | null {
+  if (frame.type !== PREFERENCES_CHANGED) {
+    return null
+  }
+  if (typeof frame.payload !== 'object' || frame.payload === null) {
+    return null
+  }
+  const {
+    key,
+    value,
+    device_id: deviceId,
+  } = frame.payload as Record<string, unknown>
+  if (typeof key !== 'string' || typeof deviceId !== 'string') {
+    return null
+  }
+  return { key, value, deviceId }
 }
 
 /**
