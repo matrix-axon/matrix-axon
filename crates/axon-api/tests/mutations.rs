@@ -301,6 +301,33 @@ async fn send_media_formatted_caption_reaches_the_sender() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn send_media_empty_caption_reaches_the_sender_as_none() {
+    let store = store().await;
+    let sender = Arc::new(StubSender::ok("$media:localhost"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store, sender.clone(), uploads.clone());
+
+    let account_id = Uuid::new_v4();
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/rooms/!room:localhost/send-media"),
+        Some(json!({ "upload_id": Uuid::new_v4(), "caption": "" })),
+    )
+    .await;
+
+    // Matching the edit path: an empty caption is no caption, so the staged
+    // filename stays the event body instead of an empty one.
+    assert_eq!(status, StatusCode::OK);
+    let calls = sender.calls();
+    let [Call::SendMedia { caption, .. }] = calls.as_slice() else {
+        panic!("expected one media send, got {calls:?}");
+    };
+    assert_eq!(caption.as_deref(), None);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn send_media_invalid_formatting_is_400_and_keeps_the_upload() {
     let store = store().await;
     let sender = Arc::new(StubSender::ok("$media:localhost"));
@@ -313,6 +340,13 @@ async fn send_media_invalid_formatting_is_400_and_keeps_the_upload() {
         // Formatting with no caption: Matrix formats only a caption.
         json!({
             "upload_id": Uuid::new_v4(),
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<strong>hi</strong>",
+        }),
+        // An empty caption is no caption, so this is the same request.
+        json!({
+            "upload_id": Uuid::new_v4(),
+            "caption": "",
             "format": "org.matrix.custom.html",
             "formatted_body": "<strong>hi</strong>",
         }),

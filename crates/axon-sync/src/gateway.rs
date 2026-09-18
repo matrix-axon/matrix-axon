@@ -765,6 +765,11 @@ fn replacement_content(
         }
     };
 
+    // The original's mentions are handed to `make_replacement` for parity with
+    // matrix-sdk's own edit path, but they are inert here: Ruma only consults
+    // them to filter *new* mentions out of the fallback, and this replacement
+    // sets none (Axon's edit API carries no mentions). So neither the fallback
+    // nor `m.new_content` gets an `m.mentions`, exactly as before this change.
     let mut content = RoomMessageEventContentWithoutRelation::new(msgtype)
         .make_replacement(ReplacementMetadata::new(target_id, original.mentions));
 

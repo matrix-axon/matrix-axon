@@ -68,7 +68,8 @@ A survey of the three production instances on 2026-09-16 (event shapes only, no 
 
 **Formatted captions on send.**
 `SendMediaRequest` gains optional `format` / `formatted_body`, validated by the same `formatted()` helper as text sends.
-Formatting without a `caption` is a `400`, and all validation happens before the staged upload is claimed, so a malformed request does not consume it.
+An empty caption is no caption, as on the edit path, so the filename stays the event body; formatting without a caption is a `400`.
+All validation happens before the staged upload is claimed, so a malformed request does not consume it.
 `MessageSender::send_media` takes `formatted: Option<Formatted>`.
 The gateway builds the caption with `TextMessageEventContent::html` when formatting is present, and `media_message_type` carries it, which also covers the thread-member path that bypasses `send_attachment`.
 

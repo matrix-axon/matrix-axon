@@ -645,8 +645,8 @@ pub struct SendMessageRequest {
 pub struct SendMediaRequest {
     /// Server-issued staged upload id returned by `POST …/media/uploads`.
     pub upload_id: Uuid,
-    /// Optional media caption. When absent, Axon uses the staged filename as the
-    /// Matrix event body.
+    /// Optional media caption. When absent — or empty — Axon uses the staged
+    /// filename as the Matrix event body.
     #[serde(default)]
     pub caption: Option<String>,
     /// Markup name for `formatted_body` — only `org.matrix.custom.html`. Must be

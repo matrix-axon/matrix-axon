@@ -11654,7 +11654,7 @@
               "string",
               "null"
             ],
-            "description": "Optional media caption. When absent, Axon uses the staged filename as the\nMatrix event body."
+            "description": "Optional media caption. When absent — or empty — Axon uses the staged\nfilename as the Matrix event body."
           },
           "format": {
             "type": [

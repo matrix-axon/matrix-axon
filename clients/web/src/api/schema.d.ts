@@ -3682,8 +3682,8 @@ export interface components {
          */
         SendMediaRequest: {
             /**
-             * @description Optional media caption. When absent, Axon uses the staged filename as the
-             *     Matrix event body.
+             * @description Optional media caption. When absent — or empty — Axon uses the staged
+             *     filename as the Matrix event body.
              */
             caption?: string | null;
             /**
