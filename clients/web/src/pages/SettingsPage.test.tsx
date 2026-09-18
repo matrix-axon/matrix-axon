@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
+import {
+  cleanup,
+  fireEvent,
+  render,
+  waitFor,
+  within,
+} from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import {
@@ -26,6 +32,12 @@ const ROOM = '!ops:hs'
 let cleanupPromptCapture: (() => void) | null = null
 
 const server = setupServer(
+  http.get(`${TEST_BASE_URL}/v1/preferences/message_gestures`, () =>
+    HttpResponse.json(
+      { error: { code: 'not_found', message: 'preference not found' } },
+      { status: 404 },
+    ),
+  ),
   http.get(`${TEST_BASE_URL}/v1/invites`, () =>
     HttpResponse.json({ data: [] }),
   ),
@@ -103,6 +115,118 @@ describe('SettingsPage', () => {
 
     expect(services.settings.hideRedactedEvents.value).toBe(true)
     expect(box.checked).toBe(true)
+  })
+
+  it('restores and saves synchronized message gesture bindings', async () => {
+    let body: unknown
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/preferences/message_gestures`, () =>
+        HttpResponse.json({
+          data: {
+            key: 'message_gestures',
+            updated_at: 'now',
+            value: {
+              schema_version: 1,
+              bindings: {
+                double_tap: 'edit',
+                touch_and_hold: null,
+                swipe_left: 'delete',
+              },
+              reaction_emoji: '🚀',
+            },
+          },
+        }),
+      ),
+      http.put(
+        `${TEST_BASE_URL}/v1/preferences/message_gestures`,
+        async ({ request }) => {
+          body = await request.json()
+          return HttpResponse.json({ data: { updated_at: 'now' } })
+        },
+      ),
+    )
+    const services = testServices()
+    const { getByLabelText, getByRole, getByText, queryByRole } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    await waitFor(() =>
+      expect((getByLabelText('Double tap') as HTMLSelectElement).value).toBe(
+        'edit',
+      ),
+    )
+    expect(
+      getByText(/Native text selection and link previews are available/),
+    ).toBeTruthy()
+    const mobileGesturesHeading = getByRole('heading', {
+      name: 'Gestures',
+    })
+    const stateEventsHeading = getByRole('heading', { name: 'State events' })
+    expect(
+      mobileGesturesHeading.compareDocumentPosition(stateEventsHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0)
+    expect(queryByRole('button', { name: 'Choose emoji' })).toBeNull()
+    expect(
+      getByText(/Choosing an action already used by another gesture/),
+    ).toBeTruthy()
+    const help = getByRole('button', { name: 'About gestures' })
+    expect(help.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(help)
+    expect(help.getAttribute('aria-expanded')).toBe('true')
+    expect(getByRole('note', { name: 'Gesture help' })).toBeTruthy()
+    fireEvent.keyDown(help, { key: 'Escape' })
+    expect(help.getAttribute('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(help)
+
+    fireEvent.click(
+      getByRole('button', {
+        name: 'Choose reaction emoji, currently 🚀',
+      }),
+    )
+    fireEvent.click(
+      within(getByRole('group', { name: 'Choose gesture reaction' })).getByRole(
+        'button',
+        { name: '🎉' },
+      ),
+    )
+    expect(
+      getByRole('button', {
+        name: 'Choose reaction emoji, currently 🎉',
+      }),
+    ).toBeTruthy()
+    expect(queryByRole('button', { name: 'Save gestures' })).toBeNull()
+    await waitFor(() =>
+      expect(body).toEqual({
+        device_id: services.deviceState.deviceId,
+        value: {
+          schema_version: 1,
+          bindings: {
+            double_tap: 'edit',
+            touch_and_hold: null,
+            swipe_left: 'delete',
+          },
+          reaction_emoji: '🎉',
+        },
+      }),
+    )
+
+    fireEvent.click(getByRole('button', { name: 'Restore defaults' }))
+    await waitFor(() => getByText('Defaults restored'))
+
+    expect(body).toEqual({
+      device_id: services.deviceState.deviceId,
+      value: {
+        schema_version: 1,
+        bindings: {
+          double_tap: 'react',
+          touch_and_hold: 'thread',
+          swipe_left: 'reply',
+        },
+        reaction_emoji: '👍',
+      },
+    })
   })
 
   it('hides debug settings until Debug is selected', () => {

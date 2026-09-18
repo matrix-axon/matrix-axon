@@ -2,6 +2,13 @@ import { useEffect, useState } from 'preact/hooks'
 import type { EventMedia } from '../media/event-media'
 import { useMediaBlob } from '../media/use-media-blob'
 import { useThumbnailFallback } from '../media/use-thumbnail-fallback'
+import type {
+  MessageGestureAction,
+  MessageGesturePreferences,
+} from '../stores/message-gestures'
+import { EventActionIcon } from './EventActionIcon'
+import { messageGestureActionLabel } from './message-gesture-actions'
+import { useTouchMessageGestures } from './use-touch-message-gestures'
 
 /** The square a gallery cell requests, in CSS px. */
 const CELL_SIZE = 320
@@ -50,6 +57,7 @@ export function MediaGalleryCell({
   withinBudget,
   onOpen,
   onCellKeyDown,
+  gestures = null,
 }: {
   accountId: string
   /** The image's own event, so a jump link can find and highlight this cell. */
@@ -68,6 +76,15 @@ export function MediaGalleryCell({
   withinBudget: boolean
   onOpen: () => void
   onCellKeyDown: (event: KeyboardEvent) => void
+  gestures?: {
+    preferences: MessageGesturePreferences
+    onAction: (action: MessageGestureAction) => void
+    feedback: string | null
+    reactionBurst: string | null
+    confirmingDelete: boolean
+    onConfirmDelete: () => void
+    onCancelDelete: () => void
+  } | null
 }) {
   const { media, previewUrl, pending } = resolved
   const [loadRequested, setLoadRequested] = useState(false)
@@ -98,8 +115,43 @@ export function MediaGalleryCell({
 
   const alt = media.caption ?? media.filename
   const label = `Image ${position} of ${total}, ${media.filename}`
-
-  const cellClass = `gallery-cell${highlighted ? ' highlighted' : ''}`
+  const gestureEligible =
+    gestures !== null &&
+    previewUrl === null &&
+    !pending &&
+    !deferred &&
+    state.status === 'ready'
+  const touchGestures = useTouchMessageGestures<HTMLLIElement>({
+    eligible: gestureEligible,
+    preferences: gestures?.preferences ?? null,
+    openControlSelector: '.gallery-cell-open',
+    onAction: (action) => gestures?.onAction(action),
+    onSingleTap: onOpen,
+  })
+  const {
+    surfaceRef,
+    touchHoldEnabled,
+    swipeReveal,
+    swipeArmed,
+    swipeSettling,
+    onPointerDown,
+    onPointerMove,
+    onPointerCancel,
+    onPointerUp,
+    onContextMenu,
+    onClickCapture,
+  } = touchGestures
+  const cellClass = `gallery-cell${highlighted ? ' highlighted' : ''}${touchHoldEnabled ? ' touch-hold-enabled' : ''}${swipeReveal !== null ? ' gesture-swipe-reveal' : ''}${swipeArmed ? ' gesture-swipe-armed' : ''}${swipeSettling ? ' gesture-swipe-settling' : ''}`
+  const gestureAttributes = gestureEligible
+    ? {
+        onPointerDown,
+        onPointerMove,
+        onPointerCancel,
+        onPointerUp,
+        onContextMenu,
+        onClickCapture,
+      }
+    : {}
 
   if (deferred) {
     const size = media.size
@@ -125,7 +177,12 @@ export function MediaGalleryCell({
   }
 
   return (
-    <li class={cellClass} data-event-id={eventId}>
+    <li
+      ref={surfaceRef}
+      class={cellClass}
+      data-event-id={eventId}
+      {...gestureAttributes}
+    >
       <div ref={ref} class="gallery-cell-box">
         {previewUrl !== null ? (
           // Still uploading: the local file, and not a button — there is
@@ -170,6 +227,45 @@ export function MediaGalleryCell({
         )}
       </div>
       {pending && <span class="gallery-cell-pending" aria-hidden="true" />}
+      {swipeReveal !== null && (
+        <span class="gesture-swipe-affordance" aria-hidden="true">
+          <EventActionIcon name={swipeReveal} />
+          {messageGestureActionLabel(swipeReveal)}
+        </span>
+      )}
+      {gestures?.reactionBurst !== null &&
+        gestures?.reactionBurst !== undefined && (
+          <span class="message-reaction-burst" aria-hidden="true">
+            {gestures.reactionBurst}
+          </span>
+        )}
+      {gestures?.feedback !== null && gestures?.feedback !== undefined && (
+        <span
+          class="message-gesture-feedback gallery-gesture-feedback"
+          role="status"
+          aria-label={`Image ${position} of ${total}: ${gestures.feedback}`}
+        >
+          {gestures.feedback}
+        </span>
+      )}
+      {gestures?.confirmingDelete && (
+        <span
+          class="gallery-gesture-confirm"
+          role="group"
+          aria-label={`Delete image ${position} of ${total}`}
+        >
+          <button
+            type="button"
+            class="danger"
+            onClick={gestures.onConfirmDelete}
+          >
+            Delete
+          </button>
+          <button type="button" onClick={gestures.onCancelDelete}>
+            Cancel
+          </button>
+        </span>
+      )}
     </li>
   )
 }

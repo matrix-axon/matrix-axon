@@ -4,6 +4,8 @@ import { matrixToEventLink } from '../matrix-to'
 import type { TimeFormat } from '../stores/settings'
 import type { TimelineEvent, TimelineStore } from '../stores/timeline'
 
+const DESKTOP_DOUBLE_CLICK_MS = 300
+
 /**
  * The per-row send-state fragments shared by the main timeline and the
  * thread panel (WCR-16) — they were copy-pasted and had already started
@@ -34,19 +36,35 @@ export function formatEventTime(
 export function EventTime({
   event,
   format,
+  touchHoldEnabled = false,
 }: {
   event: TimelineEvent
   format?: TimeFormat
+  touchHoldEnabled?: boolean
 }) {
-  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>(
-    'idle',
-  )
+  const [copyStatus, setCopyStatus] = useState<
+    'idle' | 'link-copied' | 'text-copied' | 'no-text' | 'failed'
+  >('idle')
   const clearCopyStatus = useRef<number | null>(null)
+  const linkClickTimer = useRef<number | null>(null)
+  const holdTimer = useRef<number | null>(null)
+  const holdPointer = useRef<{
+    id: number
+    x: number
+    y: number
+    completed: boolean
+  } | null>(null)
+  const suppressNextClick = useRef(false)
+  const lastPointerType = useRef<string | null>(null)
   useEffect(() => {
     return () => {
       if (clearCopyStatus.current !== null) {
         window.clearTimeout(clearCopyStatus.current)
       }
+      if (linkClickTimer.current !== null) {
+        window.clearTimeout(linkClickTimer.current)
+      }
+      if (holdTimer.current !== null) window.clearTimeout(holdTimer.current)
     }
   }, [])
   if (event.localEcho?.status === 'pending') {
@@ -60,32 +78,138 @@ export function EventTime({
       </time>
     )
   }
-  const copyLink = async () => {
+  const reportCopy = (
+    status: 'link-copied' | 'text-copied' | 'no-text' | 'failed',
+  ) => {
     if (clearCopyStatus.current !== null) {
       window.clearTimeout(clearCopyStatus.current)
       clearCopyStatus.current = null
     }
-    const ok = await copyText(matrixToEventLink(event.room_id, event.event_id))
-    setCopyStatus(ok ? 'copied' : 'failed')
+    setCopyStatus(status)
     clearCopyStatus.current = window.setTimeout(() => {
       setCopyStatus('idle')
       clearCopyStatus.current = null
     }, 1800)
   }
+  const copyLink = async () => {
+    const ok = await copyText(matrixToEventLink(event.room_id, event.event_id))
+    reportCopy(ok ? 'link-copied' : 'failed')
+  }
+  const copyBody = async () => {
+    if (event.body === null || event.body === undefined) {
+      reportCopy('no-text')
+      return
+    }
+    const ok = await copyText(event.body)
+    reportCopy(ok ? 'text-copied' : 'failed')
+  }
+  const clearLinkClick = () => {
+    if (linkClickTimer.current !== null) {
+      window.clearTimeout(linkClickTimer.current)
+      linkClickTimer.current = null
+    }
+  }
+  const clearHold = () => {
+    if (holdTimer.current !== null) {
+      window.clearTimeout(holdTimer.current)
+      holdTimer.current = null
+    }
+  }
   const title =
-    copyStatus === 'copied'
+    copyStatus === 'link-copied'
       ? 'Event link copied'
-      : copyStatus === 'failed'
-        ? 'Could not copy event link'
-        : 'Copy Matrix.to link to event'
+      : copyStatus === 'text-copied'
+        ? 'Message text copied'
+        : copyStatus === 'no-text'
+          ? 'No message text to copy'
+          : copyStatus === 'failed'
+            ? 'Could not copy'
+            : 'Click to copy link; double-click to copy message text'
   return (
     <>
       <button
         type="button"
         class={`event-time-copy muted${copyStatus === 'failed' ? ' failed' : ''}`}
         title={title}
-        aria-label="Copy Matrix.to link to event"
-        onClick={() => void copyLink()}
+        aria-label="Copy link"
+        onPointerDown={(pointerEvent) => {
+          if (pointerEvent.isPrimary === false) return
+          lastPointerType.current = pointerEvent.pointerType
+          suppressNextClick.current = false
+          if (!touchHoldEnabled || pointerEvent.pointerType === 'mouse') {
+            clearHold()
+            holdPointer.current = null
+            return
+          }
+          clearHold()
+          suppressNextClick.current = false
+          holdPointer.current = {
+            id: pointerEvent.pointerId,
+            x: pointerEvent.clientX,
+            y: pointerEvent.clientY,
+            completed: false,
+          }
+          holdTimer.current = window.setTimeout(() => {
+            if (holdPointer.current === null) return
+            holdPointer.current.completed = true
+            suppressNextClick.current = true
+            void copyBody()
+          }, 550)
+        }}
+        onPointerMove={(pointerEvent) => {
+          const pointer = holdPointer.current
+          if (
+            pointer !== null &&
+            pointer.id === pointerEvent.pointerId &&
+            Math.hypot(
+              pointerEvent.clientX - pointer.x,
+              pointerEvent.clientY - pointer.y,
+            ) > 10
+          ) {
+            clearHold()
+            holdPointer.current = null
+          }
+        }}
+        onPointerUp={(pointerEvent) => {
+          const pointer = holdPointer.current
+          if (pointer === null || pointer.id !== pointerEvent.pointerId) return
+          const completed = pointer.completed
+          clearHold()
+          holdPointer.current = null
+          if (completed) pointerEvent.preventDefault()
+        }}
+        onPointerCancel={(pointerEvent) => {
+          if (holdPointer.current?.id !== pointerEvent.pointerId) return
+          clearHold()
+          holdPointer.current = null
+        }}
+        onContextMenu={(contextMenu) => {
+          if (touchHoldEnabled && holdPointer.current !== null)
+            contextMenu.preventDefault()
+        }}
+        onClick={(click) => {
+          if (suppressNextClick.current) {
+            suppressNextClick.current = false
+            click.preventDefault()
+            return
+          }
+          if (lastPointerType.current === 'mouse' && click.detail === 1) {
+            clearLinkClick()
+            linkClickTimer.current = window.setTimeout(() => {
+              linkClickTimer.current = null
+              void copyLink()
+            }, DESKTOP_DOUBLE_CLICK_MS)
+            return
+          }
+          if (lastPointerType.current === 'mouse' && click.detail > 1) return
+          void copyLink()
+        }}
+        onDblClick={(click) => {
+          if (lastPointerType.current !== 'mouse') return
+          clearLinkClick()
+          click.preventDefault()
+          void copyBody()
+        }}
       >
         <time dateTime={new Date(event.origin_ts).toISOString()}>
           {formatted}
@@ -96,7 +220,13 @@ export function EventTime({
           class={`event-copy-status${copyStatus === 'failed' ? ' error' : ''}`}
           role="status"
         >
-          {copyStatus === 'copied' ? 'Copied' : 'Copy failed'}
+          {copyStatus === 'link-copied'
+            ? 'Copied'
+            : copyStatus === 'text-copied'
+              ? 'Text copied'
+              : copyStatus === 'no-text'
+                ? 'No message text'
+                : 'Copy failed'}
         </span>
       )}
     </>

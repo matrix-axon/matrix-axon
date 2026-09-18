@@ -222,9 +222,12 @@ function mockSinglePane() {
 
 // The defaults start clear of the left edge band that the browser's own
 // swipe-back owns (`NATIVE_BACK_EDGE_PX`), which the handler declines.
-function swipeRight(target: Element, startX = 90, endX = 198) {
+function swipeRight(target: Element, startX = 90, endX = 140) {
   fireEvent.touchStart(target, {
     touches: [{ clientX: startX, clientY: 220 }],
+  })
+  fireEvent.touchMove(target, {
+    touches: [{ clientX: (startX + endX) / 2, clientY: 223 }],
   })
   fireEvent.touchEnd(target, {
     changedTouches: [{ clientX: endX, clientY: 226 }],
@@ -1286,11 +1289,32 @@ describe('threads', () => {
         `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
       )
       const panel = await findByLabelText('Thread')
+      const timeline = panel.parentElement?.querySelector(
+        '.room-stream',
+      ) as HTMLElement
 
-      swipeRight(panel)
+      fireEvent.touchStart(panel, {
+        touches: [{ clientX: 90, clientY: 220 }],
+      })
+      fireEvent.touchMove(panel, {
+        touches: [{ clientX: 150, clientY: 223 }],
+      })
+      expect(panel.classList.contains('mobile-back-dragging')).toBe(true)
+      expect(panel.style.getPropertyValue('--mobile-back-offset')).toBe('60px')
+      expect(
+        timeline.classList.contains('mobile-back-destination-active'),
+      ).toBe(true)
+      expect(timeline.inert).toBe(true)
+      fireEvent.touchEnd(panel, {
+        changedTouches: [{ clientX: 198, clientY: 226 }],
+      })
 
       await waitFor(() => expect(queryByLabelText('Thread')).toBeNull())
       expect(window.location.search).toBe('')
+      expect(
+        timeline.classList.contains('mobile-back-destination-active'),
+      ).toBe(false)
+      expect(timeline.inert).toBe(false)
     } finally {
       media.mockRestore()
     }
@@ -1444,6 +1468,16 @@ describe('threads', () => {
       })
 
       expect(notPrevented).toBe(false)
+      const pane = container.querySelector('.room-stream') as HTMLElement
+      expect(pane.classList.contains('mobile-back-dragging')).toBe(true)
+      expect(pane.style.getPropertyValue('--mobile-back-offset')).toBe('36px')
+
+      fireEvent.touchEnd(body, {
+        changedTouches: [{ clientX: 126, clientY: 222 }],
+      })
+      expect(window.location.pathname).toContain('/rooms/')
+      expect(pane.classList.contains('mobile-back-settling')).toBe(true)
+      expect(pane.style.getPropertyValue('--mobile-back-offset')).toBe('0px')
     } finally {
       media.mockRestore()
     }

@@ -16,6 +16,7 @@ const DIST = fileURLToPath(new URL('../dist', import.meta.url))
 const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111'
 const USER_ID = '@me:hs'
 const ROOM_ID = '!room:hs'
+const INSTANCE_ACCOUNT_ID = '00000000-0000-0000-0000-000000000000'
 
 /**
  * A second account, and rooms that stress the sidebar rather than the socket:
@@ -408,6 +409,9 @@ let ownPowerLevel = 100
  *  toggled via `/__e2e/search-503` and reset by the spec that sets it. */
 let searchDisabled = false
 
+/** Axon-instance preference persisted by the mock across browser tabs. */
+let messageGesturePreference = null
+
 /** In-memory SAS flows, keyed by `${accountId}\0${flowId}`. Isolated via
  *  `/__e2e/verify-reset` so other specs keep an empty list. */
 const verifyFlows = new Map()
@@ -569,6 +573,46 @@ async function handleApi(req, res, url) {
     return json(res, {
       data: [account(ACCOUNT_ID, USER_ID), account(ACCOUNT_ID_2, USER_ID_2)],
     })
+  }
+
+  if (method === 'GET' && pathname === '/v1/preferences/message_gestures') {
+    return messageGesturePreference === null
+      ? json(
+          res,
+          {
+            error: {
+              code: 'not_found',
+              message: 'preference not found',
+            },
+          },
+          404,
+        )
+      : json(res, {
+          data: {
+            key: 'message_gestures',
+            value: messageGesturePreference,
+            updated_at: new Date().toISOString(),
+          },
+        })
+  }
+  if (method === 'PUT' && pathname === '/v1/preferences/message_gestures') {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      const request = JSON.parse(raw || '{}')
+      messageGesturePreference = request.value
+      broadcast({
+        type: 'preferences.changed',
+        account_id: INSTANCE_ACCOUNT_ID,
+        payload: {
+          key: 'message_gestures',
+          value: request.value,
+          device_id: request.device_id,
+        },
+      })
+      json(res, { data: { updated_at: new Date().toISOString() } })
+    })
+    return
   }
   if (method === 'GET' && /\/users\/[^/]+\/profile$/.test(pathname)) {
     const userId = decodeURIComponent(pathname.split('/').at(-2))
@@ -912,6 +956,33 @@ async function handleApi(req, res, url) {
     })
     return
   }
+  if (
+    method === 'POST' &&
+    /\/rooms\/[^/]+\/events\/[^/]+\/reactions$/.test(pathname)
+  ) {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      const key = JSON.parse(raw || '{}').key
+      const eventId = decodeURIComponent(pathname.split('/').at(-2))
+      const event = events.get(eventId)
+      if (event === undefined || typeof key !== 'string') {
+        return json(res, { error: 'not_found' }, 404)
+      }
+      const reactionId = `$reaction-${randomUUID()}:hs`
+      event.reactions = {
+        ...(event.reactions ?? {}),
+        [key]: {
+          count: 1,
+          me: true,
+          senders: [USER_ID],
+          my_event_ids: [reactionId],
+        },
+      }
+      json(res, { data: { event_id: reactionId } })
+    })
+    return
+  }
   if (method === 'GET' && /\/events\/[^/]+$/.test(pathname)) {
     const id = decodeURIComponent(pathname.split('/').pop())
     const event = events.get(id)
@@ -1137,6 +1208,13 @@ const server = createServer((req, res) => {
   if (req.method === 'POST' && url.pathname === '/__e2e/bulk-rooms') {
     bulkRooms = Number(url.searchParams.get('count') ?? 0)
     return json(res, { data: { bulk_rooms: bulkRooms } })
+  }
+  if (
+    req.method === 'POST' &&
+    url.pathname === '/__e2e/reset-message-gestures'
+  ) {
+    messageGesturePreference = null
+    return json(res, { data: { reset: true } })
   }
   // Drop everything tests have sent, keeping the seeded fixture. A spec whose
   // assertions depend on how much history sits after its own sends calls this
