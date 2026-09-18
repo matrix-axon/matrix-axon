@@ -48,6 +48,11 @@ So pre-commit decides only *whether* to run this (the `files:` filter), and the
 range comes from `PRE_COMMIT_FROM_REF`/`PRE_COMMIT_TO_REF`, which it sets for
 pre-push hooks. Arguments still work for running it by hand.
 
+That also means this is a *local* gate only: it is not in the CI whitelist in
+`.github/workflows/lint-and-clippy.yml`, so `--no-verify` and GitHub's merge
+button both bypass it. Wiring it into CI needs a range that a `--all-files` run
+does not have; tracked in #424.
+
 Usage: scripts/check-icons-regenerated.py [<changed file>...]
 """
 
@@ -59,6 +64,15 @@ import sys
 
 SOURCE = "clients/web/public/favicon.svg"
 
+# Named exactly, not matched by shape. "any .png under public/" was the first
+# attempt and it is a false negative waiting to happen: an unrelated static
+# asset added in the same commit as a favicon change satisfies the check while
+# the generator was never run — the precise drift this exists to catch.
+BROWSER_ICONS = frozenset(
+    f"clients/web/public/{name}"
+    for name in ("favicon.png", "icon-152.png", "icon-167.png", "icon-180.png")
+)
+
 # Each entry is (what to call it, how to recognise it, how to rebuild it).
 DERIVED = (
     (
@@ -68,8 +82,7 @@ DERIVED = (
     ),
     (
         "the browser set",
-        lambda name: name.startswith("clients/web/public/")
-        and name.endswith(".png"),
+        lambda name: name in BROWSER_ICONS,
         "scripts/build-brand-assets.py",
     ),
     (

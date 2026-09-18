@@ -137,6 +137,15 @@ fn allow_camera_capture<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
             // too -- a permission nothing in this app asks for. `browser-qr.ts`
             // requests `audio: false`, so a request naming audio is not this
             // app's QR scanner and is refused rather than left to a default.
+            //
+            // A request for *both* is therefore denied whole, and cannot be
+            // otherwise: `PermissionRequest` offers `allow()` and `deny()` and
+            // nothing between them, so there is no way to grant the video half
+            // and withhold the audio. A future feature wanting both on Linux
+            // has to ask twice — once per device — rather than expecting this
+            // to split a combined request. Windows and macOS do not share the
+            // limitation, so it would present as Linux-only; hence this note
+            // rather than leaving it to be rediscovered.
             if media.is_for_video_device() && !media.is_for_audio_device() {
                 media.allow();
             } else {

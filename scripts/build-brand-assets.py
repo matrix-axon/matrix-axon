@@ -35,6 +35,7 @@ Usage: scripts/build-brand-assets.py
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -56,10 +57,18 @@ def rasterise(source: Path, size: int, out: Path, background: str | None) -> Non
 
 
 def on_background(svg: str, background: str, glyph: str) -> str:
-    """The master with an opaque backdrop, and the glyph recoloured to suit."""
+    """The master with an opaque backdrop, and the glyph recoloured to suit.
+
+    Anchored on the `<svg>` tag rather than the first `>` in the file. An XML
+    declaration, a leading comment and a DOCTYPE are all legal before it, and
+    any of them would put the backdrop outside the document — malformed markup
+    that nothing would notice until somebody opened the result.
+    """
     rect = f'<rect width="100%" height="100%" fill="{background}"/>'
-    marker = ">"
-    head = svg.index(marker) + 1
+    opening = re.search(r"<svg\b[^>]*>", svg)
+    if opening is None:
+        raise ValueError(f"no <svg> element in {MASTER}")
+    head = opening.end()
     return svg[:head] + "\n  " + rect + svg[head:].replace(BRAND, glyph)
 
 

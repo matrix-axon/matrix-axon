@@ -32,9 +32,6 @@
         "desktopTemplate": "bundle/axon.desktop",
         "conflicts": ["axon"],
         "replaces": ["axon"]
-      },
-      "rpm": {
-        "desktopTemplate": "bundle/axon.desktop"
       }
     }
   },

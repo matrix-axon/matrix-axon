@@ -12,7 +12,12 @@ vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }))
 vi.mock('@tauri-apps/plugin-websocket', () => ({
   default: { connect: vi.fn() },
 }))
+vi.mock('@tauri-apps/plugin-deep-link', () => ({
+  getCurrent: vi.fn(() => Promise.resolve(null)),
+  onOpenUrl: vi.fn(() => Promise.resolve(() => {})),
+}))
 
+import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { adapt, boundedSignal, tauriPlatform } from './tauri'
@@ -301,3 +306,52 @@ function aborted(signal: AbortSignal): Promise<string> {
     })
   })
 }
+
+describe('deep-link delivery', () => {
+  it('delivers a cold-launch URL once, not once per channel', async () => {
+    // The two channels are not exclusive. On a cold launch the plugin sets
+    // what `getCurrent` returns *and* emits the event `onOpenUrl` listens for
+    // — `handle_cli_arguments` does both on Windows and Linux,
+    // `RunEvent::Opened` does both on macOS. Whether the emit beats the
+    // webview's subscription is timing, not design.
+    //
+    // A repeat is not harmless: `completeRedirect` consumes the pending PKCE
+    // entry, so re-delivering a callback that just worked fails its state
+    // check and paints an error over a sign-in that succeeded.
+    const url = 'org.matrixaxon.axon:/oauth/callback?code=c&state=s'
+    let emit: ((urls: string[]) => void) | null = null
+    vi.mocked(getCurrent).mockResolvedValue([url])
+    vi.mocked(onOpenUrl).mockImplementation((handler) => {
+      emit = handler
+      return Promise.resolve(() => {})
+    })
+
+    const seen: string[] = []
+    tauriPlatform().onDeepLink?.((u) => seen.push(u.toString()))
+    await vi.waitFor(() => expect(seen).toHaveLength(1))
+
+    // The same URL arriving again through the other channel is the repeat.
+    emit!([url])
+    expect(seen).toHaveLength(1)
+  })
+
+  it('still delivers a genuinely different link', async () => {
+    // De-duplication must not swallow a second, real callback — a user who
+    // cancels and signs in again gets two distinct URLs.
+    let emit: ((urls: string[]) => void) | null = null
+    vi.mocked(getCurrent).mockResolvedValue(null)
+    vi.mocked(onOpenUrl).mockImplementation((handler) => {
+      emit = handler
+      return Promise.resolve(() => {})
+    })
+
+    const seen: string[] = []
+    tauriPlatform().onDeepLink?.((u) => seen.push(u.toString()))
+    await vi.waitFor(() => expect(emit).not.toBeNull())
+
+    emit!(['org.matrixaxon.axon:/oauth/callback?code=one&state=a'])
+    emit!(['org.matrixaxon.axon:/oauth/callback?code=two&state=b'])
+
+    expect(seen).toHaveLength(2)
+  })
+})

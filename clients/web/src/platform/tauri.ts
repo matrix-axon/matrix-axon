@@ -334,7 +334,28 @@ export function tauriPlatform(): Platform {
       }),
     oauthClient: OAUTH_CLIENT,
     onDeepLink: (handler) => {
+      // Delivered once per URL, however many channels report it.
+      //
+      // The two below are not exclusive: on a cold launch the plugin sets the
+      // value `getCurrent` returns *and* emits the event `onOpenUrl` listens
+      // for — `handle_cli_arguments` does both on Windows and Linux, and
+      // `RunEvent::Opened` does both on macOS. Today the emit happens during
+      // plugin setup, before the webview has subscribed, so only `getCurrent`
+      // reaches us; that is a matter of timing rather than of design, and
+      // `tauri-plugin-single-instance` forwarding a URL into a running process
+      // puts a second delivery on the same footing.
+      //
+      // A repeat is not harmless. `completeRedirect` consumes the pending PKCE
+      // entry on success, so re-delivering a callback that just worked fails
+      // its state check and paints "OAuth sign-in state did not match" over a
+      // sign-in that succeeded a moment earlier — a bug the user cannot act on
+      // and we would struggle to reproduce.
+      const delivered = new Set<string>()
       const deliver = (raw: string) => {
+        if (delivered.has(raw)) {
+          return
+        }
+        delivered.add(raw)
         try {
           handler(new URL(raw))
         } catch {

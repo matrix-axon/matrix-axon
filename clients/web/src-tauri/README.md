@@ -91,7 +91,7 @@ geometry is where renderers start to disagree.
 
 Both generated sets are committed, and the `icons-regenerated` pre-push hook
 refuses a master change that does not regenerate both — `tauri icon` for this
-directory and `scripts/build-web-icons.sh` for the browser's PNGs. Nothing in
+directory and `scripts/build-brand-assets.py` for the browser's PNGs. Nothing in
 either build reads the master except as a static asset, so a forgotten
 regeneration is silent.
 
