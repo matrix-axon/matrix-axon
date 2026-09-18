@@ -7,6 +7,7 @@ import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import WebSocketClient from '@tauri-apps/plugin-websocket'
 import { fileFromPath } from '../media/dropped-file'
+import { MAX_UPLOAD_BYTES } from '../media/media-service'
 import { basename } from '../media/filename'
 import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 
@@ -287,12 +288,20 @@ const OAUTH_CLIENT = {
  * A path that cannot be read is skipped rather than failing the whole drop.
  * Dropping five images should not be lost to one of them being a broken
  * symlink, and the caller reports an empty result honestly.
+ *
+ * `MAX_UPLOAD_BYTES` goes over the bridge so the shell can refuse an oversized
+ * file from its metadata instead of reading it. Staging applies the same limit
+ * again on this side, which is the one that reports it to the user; this only
+ * avoids spending a multi-gigabyte read to reach that verdict.
  */
 async function readDroppedFiles(paths: readonly string[]): Promise<File[]> {
   const files: File[] = []
   for (const path of paths) {
     try {
-      const bytes = await invoke<ArrayBuffer>('read_dropped_file', { path })
+      const bytes = await invoke<ArrayBuffer>('read_dropped_file', {
+        path,
+        maxBytes: MAX_UPLOAD_BYTES,
+      })
       files.push(fileFromPath(path, bytes))
     } catch (error) {
       console.error('could not read a dropped file', path, error)
