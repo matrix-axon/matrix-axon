@@ -1919,8 +1919,9 @@ fn media_preview_layout(
             .unwrap_or_else(|| Size::new(max_inner.width, max_inner.height)),
         _ => Size::new(max_inner.width, max_inner.height),
     };
-    let text_w = display_width(&preview_title(filename, usize::MAX))
-        .max(display_width(&preview_close_hint(app)));
+    let text_w = display_width(&preview_title(filename, usize::MAX)).max(display_width(
+        &preview_close_hint(app, usize::MAX).to_string(),
+    ));
     let content_w = target_size
         .width
         .max(u16::try_from(text_w).unwrap_or(u16::MAX))
@@ -1954,9 +1955,13 @@ fn preview_title(filename: Option<&str>, max_width: usize) -> String {
     format!(" {} ", elide_middle(name, max_width.saturating_sub(2)))
 }
 
-/// The media preview's bottom border hint, naming the configured close key.
-fn preview_close_hint(app: &App) -> String {
-    format!(" {} to close ", app.shortcuts.clear_input.label())
+/// The media preview's bottom border hint, naming the configured close key,
+/// shortened to `max_width` columns the same way the title is. The modal is
+/// sized to fit this text, so it only shortens when the screen itself is the
+/// binding constraint — a narrow terminal, or a long custom key label.
+fn preview_close_hint(app: &App, max_width: usize) -> Line<'static> {
+    let hint = format!(" {} to close ", app.shortcuts.clear_input.label());
+    Line::from(elide_middle(&hint, max_width)).centered()
 }
 
 /// Shorten `text` to at most `max_width` columns by replacing its middle with
@@ -2015,14 +2020,16 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) -> O
 
     let max_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, screen);
 
-    let close_hint = Line::from(preview_close_hint(app)).centered();
     let Some((media, encrypted, filename, caption)) = selected else {
         let block = Block::default()
             .title(preview_title(
                 None,
                 max_area.width.saturating_sub(2) as usize,
             ))
-            .title_bottom(close_hint)
+            .title_bottom(preview_close_hint(
+                app,
+                max_area.width.saturating_sub(2) as usize,
+            ))
             .borders(Borders::ALL)
             .border_style(border_style);
         let inner = block.inner(max_area);
@@ -2043,7 +2050,10 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) -> O
             filename.as_deref(),
             area.width.saturating_sub(2) as usize,
         ))
-        .title_bottom(close_hint)
+        .title_bottom(preview_close_hint(
+            app,
+            area.width.saturating_sub(2) as usize,
+        ))
         .borders(Borders::ALL)
         .border_style(border_style);
     let inner = block.inner(area);
@@ -4022,10 +4032,30 @@ mod tests {
         let inner_w = area.width as usize - 2;
         assert!(target.width < 5, "the image itself stays tiny: {target:?}");
         assert!(inner_w >= display_width(&preview_title(Some(filename), usize::MAX)));
-        assert!(inner_w >= display_width(&preview_close_hint(&app)));
+        assert!(inner_w >= display_width(&preview_close_hint(&app, usize::MAX).to_string()));
         // Still a small modal, not the 88% max.
         let max_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, screen);
         assert!(area.width < max_area.width && area.height < max_area.height);
+    }
+
+    #[test]
+    fn preview_close_hint_is_shortened_rather_than_clipped_by_a_narrow_modal() {
+        let (app, media) = preview_test_app((20, 20));
+        // Narrow enough that the 88% max cannot hold the hint: the modal is
+        // sized to fit it everywhere else, so only the screen binds here.
+        let screen = Rect::new(0, 0, 14, 20);
+        let (area, _, _) = media_preview_layout(&app, screen, Some("a.jpg"), None, &media);
+
+        let inner_w = area.width as usize - 2;
+        let hint = preview_close_hint(&app, inner_w).to_string();
+        assert!(
+            display_width(&hint) <= inner_w,
+            "hint {hint:?} wider than {inner_w}"
+        );
+        assert!(
+            hint.contains("..."),
+            "shortened, not hard-clipped: {hint:?}"
+        );
     }
 
     #[test]

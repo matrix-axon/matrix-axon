@@ -617,11 +617,11 @@ fn message_body_lines(
         }
     }
 
-    rich_lines_to_spans(wrap_rich_lines(
-        plain_rich_lines(&display_body_with_sender(event, sender_label)),
+    plain_lines(
+        &display_body_with_sender(event, sender_label),
         first_width,
         continuation_width,
-    ))
+    )
 }
 
 fn plain_lines(
