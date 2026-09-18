@@ -104,7 +104,7 @@ export function testServices(
     /**
      * Overrides on the platform seam, for the surfaces that behave differently
      * in the packaged shell. Defaults to the browser platform, so every
-     * existing test keeps the behaviour it was written against.
+     * existing test keeps the behavior it was written against.
      */
     platform?: Partial<Platform>
   } = {},
