@@ -18,9 +18,11 @@ export function UpdateBanner() {
   const { updates, platform } = useServices()
   const [dismissed, setDismissed] = useState(false)
 
-  // Stated here as well as at the poller, rather than relying on `available`
-  // never latching because nothing starts the checker. That is true today and
-  // is an accident of wiring; this is the reason.
+  // Stated here as well as at the checker, which no-ops entirely when updates
+  // do not come from the origin. Not redundant: `available` latches, so a
+  // single check that ever saw a different build id would light this banner
+  // for the rest of the session — in a build where reloading cannot change
+  // what is running, and where the banner's own "Reload" would be a lie.
   if (!platform.updatesFromOrigin) {
     return null
   }
