@@ -212,3 +212,49 @@ attacker-reachable input path.
 
 Tracked in #413; recheck when Tauri bumps its GTK bindings. Note the root
 workspace has no glib at all, so this is the desktop shell alone.
+
+## macOS signing and notarization
+
+Unsigned macOS builds are refused by Gatekeeper with a malware warning, so the
+lane is written to sign and notarize the moment the credentials exist — see
+`.github/workflows/desktop-build.yml`, which reads them from repository secrets
+and skips signing when they are absent. No workflow change is needed to turn
+this on; only the secrets.
+
+What does need to exist first, and is why this section is here rather than in a
+future PR, is `Entitlements.plist`. Notarization requires the hardened runtime,
+`bundle.macOS.hardenedRuntime` defaults to `true`, and the hardened runtime
+denies the camera to an app that has not declared it. Adding the certificate
+without the entitlement would therefore _lose QR sign-in on macOS_ — silently,
+on a signed artifact, with the same wording that `NSCameraUsageDescription`
+exists to fix.
+
+`NSCameraUsageDescription` (in `Info.plist`) and the entitlement are not
+alternatives. The description is what the system shows the user when it asks;
+the entitlement is what permits the app to ask. Both are required, and they
+live in different files.
+
+The six secrets the macOS job reads:
+
+| Secret                       | What it is                                                                     |
+| ---------------------------- | ------------------------------------------------------------------------------ |
+| `APPLE_CERTIFICATE`          | the **Developer ID Application** `.p12`, base64-encoded                        |
+| `APPLE_CERTIFICATE_PASSWORD` | the password set when exporting that `.p12`                                    |
+| `APPLE_SIGNING_IDENTITY`     | `Developer ID Application: NAME (TEAMID)`, exactly as the certificate names it |
+| `APPLE_ID`                   | the Apple ID the Developer Program membership is under                         |
+| `APPLE_PASSWORD`             | an **app-specific password**, not the Apple ID password                        |
+| `APPLE_TEAM_ID`              | the 10-character Team ID                                                       |
+
+The first three sign; the last three notarize. Notarization is a separate step
+that uploads the signed bundle to Apple and staples the result, so all six are
+needed for an artifact that opens without a warning.
+
+**Developer ID Application, not Mac App Store.** Those are different
+certificate types: Developer ID is for distributing outside the store, which is
+what this lane builds. A store build (M-W13) is sandboxed, and the sandbox is a
+different mechanism from the hardened runtime — `Entitlements.plist` says which
+keys are deliberately absent for that reason, and would need revisiting rather
+than extending.
+
+Windows Authenticode is **not** wired yet, so SmartScreen warnings are a
+separate piece of work.

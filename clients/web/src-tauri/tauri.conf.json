@@ -24,9 +24,15 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "../../../build/THIRDPARTY-desktop": "THIRDPARTY.txt"
+    },
     "category": "SocialNetworking",
     "shortDescription": "Axon Matrix client",
     "longDescription": "Native shell for the Axon web client: a Matrix client that talks to your own self-hosted Axon server.",
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    },
     "linux": {
       "deb": {
         "desktopTemplate": "bundle/axon.desktop",

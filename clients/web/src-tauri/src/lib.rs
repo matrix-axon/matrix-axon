@@ -668,6 +668,58 @@ mod tests {
             .is_none());
     }
 
+    /// Every file `tauri.conf.json` points at must actually be there.
+    ///
+    /// Nothing else checks. `generate_context!` embeds the config at compile
+    /// time but does not resolve these paths, so a typo builds cleanly and
+    /// fails later — for `entitlements`, that is during macOS signing, on a
+    /// runner, in the one job hardest to iterate on. Worse, the *consequence*
+    /// of a missing entitlements file is not a signing error but a silently
+    /// camera-less app, because the hardened runtime denies what was never
+    /// declared.
+    #[test]
+    fn the_config_does_not_name_files_that_do_not_exist() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tauri.conf.json")).unwrap())
+                .expect("tauri.conf.json parses");
+
+        // Required, not merely well-formed if present. The first version of
+        // this test skipped an absent key, and that is the more dangerous
+        // half: a missing `entitlements` is silent through signing,
+        // notarization and `spctl` — every check passes and the app simply
+        // has no camera. Observed exactly once, on a build made from a tree
+        // that predated the entitlements file.
+        assert_eq!(
+            config["bundle"]["macOS"]["entitlements"].as_str(),
+            Some("Entitlements.plist"),
+            "bundle.macOS.entitlements must name the entitlements file; without \
+             it the hardened runtime denies the camera and nothing reports it"
+        );
+
+        // (what it is, where it is named)
+        let referenced = [
+            (
+                "macOS entitlements",
+                &config["bundle"]["macOS"]["entitlements"],
+            ),
+            (
+                "the Linux desktop template",
+                &config["bundle"]["linux"]["deb"]["desktopTemplate"],
+            ),
+        ];
+        for (what, value) in referenced {
+            let Some(path) = value.as_str() else {
+                continue;
+            };
+            assert!(
+                dir.join(path).is_file(),
+                "{what} names {path}, which is not in {}",
+                dir.display()
+            );
+        }
+    }
+
     fn url(raw: &str) -> tauri::Url {
         raw.parse().expect("test url")
     }

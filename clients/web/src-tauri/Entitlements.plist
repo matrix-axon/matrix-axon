@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Entitlements for the hardened runtime, which notarization requires and
+    which `bundle.macOS.hardenedRuntime` already defaults to `true`. That
+    default is why this file has to exist *before* the signing credentials
+    do: the hardened runtime denies the camera to an app that has not asked
+    for it, so the first notarized build would lose QR sign-in — and lose it
+    with the same "camera is unavailable in this browser" wording that
+    `NSCameraUsageDescription` was added to fix, on a signed artifact that is
+    far more awkward to debug than a local one.
+
+    NSCameraUsageDescription (see Info.plist) and this entitlement are not
+    alternatives. The usage description is what macOS shows the user when it
+    asks; the entitlement is what permits the app to ask at all. Without the
+    description there is no prompt; without the entitlement, under hardened
+    runtime, there is no camera.
+
+    Deliberately one entitlement, not a set:
+
+    - No `com.apple.security.device.audio-input`. Nothing here asks for a
+      microphone — `browser-qr.ts` requests `audio: false`, and the Linux
+      permission handler refuses any request naming audio. Declaring it would
+      be claiming a capability the app does not use.
+    - No App Sandbox entitlements (`com.apple.security.network.client`,
+      `files.user-selected.*`). Those govern the sandbox, which Developer ID
+      distribution does not use; the hardened runtime is a different
+      mechanism. They would be inert here and misleading to a reader.
+      A Mac App Store build (M-W13) would need them, and would need this file
+      revisited rather than extended blindly.
+    - No `com.apple.security.cs.allow-jit` or the other `cs.*` relaxations.
+      WKWebView runs JavaScript in its own system-provided process, which
+      carries its own entitlements; the app does not JIT. Each `cs.*` key
+      weakens the hardened runtime, so none is added on suspicion.
+  -->
+  <key>com.apple.security.device.camera</key>
+  <true/>
+</dict>
+</plist>

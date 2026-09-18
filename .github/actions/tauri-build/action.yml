@@ -1,0 +1,44 @@
+name: Build the Tauri bundles
+description: >-
+  Runs `pnpm tauri build` in clients/web with every empty signing credential
+  unset, so a secret that does not exist yields an unsigned bundle rather than
+  a failed signing step.
+
+inputs:
+  args:
+    description: "Extra arguments for `tauri build`, e.g. `--target universal-apple-darwin`"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # One copy of this for all three platforms, because the rule is the same on
+    # each and the list of variables has to be edited in one place.
+    #
+    # **Signing is by presence, not by branching** (desktop-build.yml's header).
+    # GitHub materializes a *missing* secret as an empty string, not as an
+    # absent variable — and Tauri tests whether these are set, not whether they
+    # hold anything. Left as empty strings they select the signing path, which
+    # then fails partway through: on macOS in `security import` with no
+    # certificate to import, for the updater in parsing an empty key. Unsetting
+    # them here is what makes "unsigned when there is nothing to sign with"
+    # actually true; a step's `env:` cannot express "omit this key".
+    #
+    # The list is every credential any platform's build reads, not only the
+    # ones a given job sets: the loop is harmless for a variable that was never
+    # there, and a per-platform list is what let the earlier copies drift.
+    - name: Build bundles
+      shell: bash
+      working-directory: clients/web
+      env:
+        TAURI_BUILD_ARGS: ${{ inputs.args }}
+      run: |
+        for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
+                   APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD \
+                   APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY \
+                   TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+          if [ -z "${!var:-}" ]; then unset "$var"; fi
+        done
+        read -r -a args <<< "$TAURI_BUILD_ARGS"
+        pnpm tauri build "${args[@]}"

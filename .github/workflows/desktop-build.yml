@@ -1,12 +1,516 @@
-name: Empty
+# The Tauri desktop shell (ADR 0102, M-W12).
+#
+# Deliberately its own workflow rather than a job in `cross-build.yml`. That
+# one builds the server, TUI and CLI from the root cargo workspace;
+# `clients/web/src-tauri` is a separate workspace on purpose, and putting it in
+# the same file would put a webview toolchain on the critical path of lanes
+# that have no business building a desktop app.
+#
+# **Signing is by presence, not by branching.** The signing credentials are
+# passed as environment variables sourced from repository secrets. When those
+# secrets do not exist the variables are empty, Tauri skips signing, and the
+# lane produces working unsigned artifacts. The day the secrets are added the
+# same jobs start signing with no edit here. That is what keeps this lane from
+# being blocked on credentials that only a person with an Apple Developer
+# account can obtain.
+#
+# Unsigned artifacts are installable but hostile: Gatekeeper and SmartScreen
+# both interpose. They are for testers, not for users.
+
+name: Desktop build
+
 on:
-  workflow_dispatch: 
   push:
-    branches: [ "main" ]
+    tags:
+      - 'v*'
+      - 'beta-*'
+      - 'alpha-*'
+  # The shell crate is excluded from the root workspace, so no other lane
+  # compiles it. Without this, `checks` below would only ever run on a tag —
+  # which is to say, after review rather than during it. The build jobs stay
+  # off pull requests; three full bundle builds is not a per-PR cost.
+  pull_request:
+    paths:
+      - 'clients/web/src-tauri/**'
+      - '.github/workflows/desktop-build.yml'
+      - '.github/actions/tauri-build/**'
+      # `checks` compiles the frontend the crate embeds, so the JS half of the
+      # shell (`@tauri-apps/*`) is an input to it.
+      - 'clients/web/package.json'
+      - 'clients/web/pnpm-lock.yaml'
+      # Everything `thirdparty` reads. Without these a change to the accepted
+      # licenses, the notice templates or the generator ran no gate until a
+      # tag was pushed — which is exactly when the release job would fail.
+      - 'build/about-desktop.toml'
+      - 'build/about-desktop-*.hbs'
+      - 'build/THIRDPARTY-desktop'
+      - 'scripts/generate-thirdparty.sh'
+  workflow_dispatch:
+    inputs:
+      linux:
+        description: "Build the Linux .deb and AppImage"
+        type: boolean
+        default: true
+      windows:
+        description: "Build the Windows installer"
+        type: boolean
+        default: true
+      macos:
+        description: "Build the macOS universal .dmg"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
 
 jobs:
-  empty-job:
+  # `src-tauri` is excluded from the root workspace, so the repo-wide clippy and
+  # test lanes never see it. Until this job existed, its only gate was the
+  # pre-push hook on a developer's machine — nothing checked it on a pull
+  # request at all.
+  checks:
+    name: Check the shell crate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Minimal Step
-        run: echo "Workflow initialized successfully"
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      - name: Install Linux webview dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            file
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: clients/web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      - name: Cache the shell's cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            clients/web/src-tauri/target
+          key: desktop-checks-cargo-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
+          restore-keys: desktop-checks-cargo-
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: clients/web
+
+      # `generate_context!()` embeds `../dist` at compile time, so the frontend
+      # has to exist before the crate will compile at all — including for
+      # clippy. A fresh checkout has no `dist/`; it is generated and gitignored.
+      - name: Build the frontend the crate embeds
+        run: pnpm build
+        working-directory: clients/web
+
+      - name: rustfmt
+        run: cargo fmt --check
+        working-directory: clients/web/src-tauri
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: clients/web/src-tauri
+
+      - name: test
+        run: cargo test
+        working-directory: clients/web/src-tauri
+
+  # The shell's 486 crates are in neither the root workspace's disclosure nor
+  # the web bundle's npm one, because `cargo-about` walks a single dependency
+  # graph and `src-tauri` is a separate workspace. The committed notice is what
+  # the installers ship (`bundle.resources` in tauri.conf.json puts it inside
+  # the .deb, .dmg and .exe), so this job regenerates it from the graph this
+  # build actually has and fails if the two differ — a release cannot ship a
+  # notice that has drifted from what it built, and a pull request that adds a
+  # dependency without regenerating cannot merge.
+  thirdparty:
+    name: Check the desktop license disclosure
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Built from source rather than fetched by a prebuilt-binary action:
+      # adding a new third-party action to a *release* pipeline is a
+      # supply-chain decision worth making deliberately rather than for a few
+      # minutes of build time. The cache makes it a one-off.
+      #
+      # The version is pinned in the script, not here, and the cache is keyed
+      # on the script: bumping the pin is a cache miss, and a key that named a
+      # version the install did not enforce would describe nothing.
+      - name: Cache cargo-about
+        id: cache-about
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-about
+          key: cargo-about-${{ runner.os }}-${{ hashFiles('scripts/generate-thirdparty.sh') }}
+
+      # The script installs the pinned cargo-about when the one on PATH is not
+      # it, and writes both desktop notices where the repo commits them. Only
+      # the desktop notices: the root workspace's disclosure belongs to
+      # `cross-build.yml`, and regenerating it here would put a second copy of
+      # it in every desktop release.
+      - name: Regenerate the desktop notices
+        run: scripts/generate-thirdparty.sh --desktop-only
+
+      - name: Assert the committed notices match the dependency graph
+        run: |
+          if ! git diff --exit-code --stat -- build/THIRDPARTY-desktop clients/web/src-tauri/THIRDPARTY.md; then
+            echo "::error::the committed desktop license notice is stale. Run scripts/generate-thirdparty.sh --desktop-only and commit the result." >&2
+            exit 1
+          fi
+
+      # Also published on its own beside the installers, as cross-build.yml
+      # does for the server and TUI, for whoever wants the notice without
+      # installing anything.
+      - name: Collect
+        run: cp build/THIRDPARTY-desktop THIRDPARTY-axon-desktop.txt
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: axon-desktop-thirdparty
+          path: THIRDPARTY-axon-desktop.txt
+          if-no-files-found: error
+
+  linux:
+    name: Build for Linux
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: >-
+      ${{ github.event_name != 'pull_request'
+      && github.event.inputs.linux != 'false' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      - name: Install Linux webview dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            file \
+            patchelf \
+            desktop-file-utils
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: clients/web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            clients/web/src-tauri/target
+          key: desktop-linux-cargo-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
+          restore-keys: desktop-linux-cargo-
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: clients/web
+
+      # `pnpm tauri build` runs `pnpm build` itself via `beforeBuildCommand`,
+      # which is why pnpm has to be on PATH rather than merely available: the
+      # `axon-thirdparty-licenses` plugin in vite.config.ts shells out to
+      # `pnpm licenses list` during that build.
+      #
+      # AppImage bundling downloads linuxdeploy and its GTK plugin at build
+      # time; that needs network egress, which the runner has.
+      # Empty credentials are unset inside the action, which is what keeps
+      # "signing by presence" true — see `.github/actions/tauri-build`.
+      - name: Build bundles
+        uses: ./.github/actions/tauri-build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist-desktop
+          cp clients/web/src-tauri/target/release/bundle/deb/*.deb dist-desktop/
+          cp clients/web/src-tauri/target/release/bundle/appimage/*.AppImage dist-desktop/
+          ls -l dist-desktop
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: axon-desktop-linux
+          path: dist-desktop/*
+          if-no-files-found: error
+
+  windows:
+    name: Build for Windows
+    needs: checks
+    runs-on: windows-latest
+    timeout-minutes: 45
+    if: >-
+      ${{ github.event_name != 'pull_request'
+      && github.event.inputs.windows != 'false' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: clients/web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            clients/web/src-tauri/target
+          key: desktop-windows-cargo-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
+          restore-keys: desktop-windows-cargo-
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: clients/web
+
+      # Authenticode signing is NOT wired here yet, and pretending otherwise
+      # would be worse than saying so. Tauri signs the Windows bundles from
+      # `bundle.windows.certificateThumbprint` in tauri.conf.json, which wants a
+      # certificate already installed in the runner's store — so switching it on
+      # needs an import step plus a config field, not just a secret. The
+      # reserved names are WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD.
+      # Empty credentials are unset inside the action, which is what keeps
+      # "signing by presence" true — see `.github/actions/tauri-build`.
+      - name: Build bundles
+        uses: ./.github/actions/tauri-build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p dist-desktop
+          cp clients/web/src-tauri/target/release/bundle/nsis/*.exe dist-desktop/
+          ls -l dist-desktop
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: axon-desktop-windows
+          path: dist-desktop/*
+          if-no-files-found: error
+
+  macos:
+    name: Build for macOS (universal)
+    needs: checks
+    runs-on: macos-latest
+    timeout-minutes: 60
+    if: >-
+      ${{ github.event_name != 'pull_request'
+      && github.event.inputs.macos != 'false' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      # One universal bundle rather than two per-arch ones — ADR 0102 § 9, which
+      # reverses for the desktop app the per-arch policy cross-build.yml states
+      # for the server and TUI. A `.dmg` is chosen by a person who often does
+      # not know which Mac they own, and choosing wrong yields an app that will
+      # not open.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      # `dtolnay/rust-toolchain`'s `targets:` input above did construct the
+      # right command — `rustup toolchain install stable --target
+      # aarch64-apple-darwin --target x86_64-apple-darwin` — and still left only
+      # aarch64 installed, on a run where it was also updating the toolchain
+      # (1.97.1 to 1.98.0). The universal build then failed three steps later
+      # with Tauri reporting the missing target.
+      #
+      # `rustup target add` is idempotent, so this costs nothing on a run where
+      # the action worked. The listing is the point: when this breaks again it
+      # says so here, next to the cause, rather than as a build error further
+      # down.
+      - name: Ensure both macOS targets are present
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          echo "installed targets:"
+          rustup target list --installed
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: clients/web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            clients/web/src-tauri/target
+          key: desktop-macos-cargo-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
+          restore-keys: desktop-macos-cargo-
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: clients/web
+
+      # Signing and notarization switch on with the secrets and not before. Left
+      # unset, Tauri produces an unsigned bundle rather than failing, which is
+      # what makes this lane useful today.
+      - name: Build the universal bundle
+        uses: ./.github/actions/tauri-build
+        with:
+          args: --target universal-apple-darwin
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # ADR 0102 § 9's concern is a broken architecture disappearing into a fat
+      # binary. `--target universal-apple-darwin` fails the build if either
+      # slice fails to compile, so the remaining risk is an artifact that is
+      # quietly single-architecture. This asserts it is not, which costs seconds
+      # rather than the second full build a per-slice lane would.
+      - name: Assert the binary really is universal
+        run: |
+          set -euo pipefail
+          app=$(find clients/web/src-tauri/target/universal-apple-darwin/release/bundle/macos \
+            -name '*.app' -maxdepth 1 | head -1)
+          if [ -z "$app" ]; then
+            echo "no .app bundle was produced" >&2
+            exit 1
+          fi
+          bin=$(find "$app/Contents/MacOS" -type f -perm -111 | head -1)
+          if [ -z "$bin" ]; then
+            echo "no executable inside $app" >&2
+            exit 1
+          fi
+          echo "binary: $bin"
+          archs=$(lipo -archs "$bin")
+          echo "architectures: $archs"
+          case "$archs" in
+            *arm64*) ;;
+            *) echo "missing arm64 slice" >&2; exit 1 ;;
+          esac
+          case "$archs" in
+            *x86_64*) ;;
+            *) echo "missing x86_64 slice" >&2; exit 1 ;;
+          esac
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist-desktop
+          cp clients/web/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg dist-desktop/
+          ls -l dist-desktop
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: axon-desktop-macos
+          path: dist-desktop/*
+          if-no-files-found: error
+
+  release:
+    name: Attach desktop artifacts to the release
+    runs-on: ubuntu-latest
+    needs: [linux, windows, macos, thirdparty]
+    if: ${{ !failure() && !cancelled() && github.ref_type == 'tag' }}
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download the desktop artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: axon-desktop-*
+          path: desktop-artifacts
+          merge-multiple: true
+
+      - name: Publish
+        uses: softprops/action-gh-release@v3
+        with:
+          files: desktop-artifacts/*

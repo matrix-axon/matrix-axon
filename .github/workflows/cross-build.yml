@@ -77,8 +77,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # --root-only: this job feeds the server and TUI release archives, which
+      # ship none of the desktop shell. Without the flag it would also resolve
+      # and license-check `src-tauri`'s dependency graph and then discard both
+      # desktop notices, so a crate in the shell could fail a release that does
+      # not contain it. `desktop-build.yml` owns those notices.
       - name: Generate license disclosure file
-        run: scripts/generate-thirdparty.sh
+        run: scripts/generate-thirdparty.sh --root-only
 
       - name: Upload license disclosure artifact
         uses: actions/upload-artifact@v7
