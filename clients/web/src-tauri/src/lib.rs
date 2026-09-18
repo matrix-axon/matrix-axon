@@ -445,7 +445,7 @@ const DMABUF_RENDERER_VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 /// entirely **blank** page. pdf.js was not at fault: it fetched the document,
 /// reported the right page count, and its render task resolved successfully
 /// with no error. The pixels simply never arrived on screen. Confirmed against
-/// the real file — decrypted out of the room and rasterised with poppler, which
+/// the real file — decrypted out of the room and rasterized with poppler, which
 /// draws it — and against the same `dist` in Chromium, which also draws it.
 ///
 /// The cause is WebKitGTK's DMA-BUF renderer, the path it uses to hand painted

@@ -90,6 +90,15 @@ export function PdfViewer({ url, label }: { url: string; label: string }) {
               void page
                 .render({ canvas, canvasContext: context, viewport })
                 .promise.catch((error: unknown) => {
+                  // Closing the viewer mid-draw destroys the document under
+                  // this task, and pdf.js reports that as a rejection too.
+                  // That is the viewer's own doing, not a page that will not
+                  // draw, and logging it would make every close on a slow
+                  // device look exactly like the failure this exists to
+                  // catch.
+                  if (cancelled) {
+                    return
+                  }
                   console.error('could not render PDF page', number, error)
                 })
             })
