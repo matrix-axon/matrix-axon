@@ -97,8 +97,27 @@ describe('useFileDrop (ADR 0065)', () => {
   })
 })
 
-/** WebKitGTK advertises this for a file-manager drag; `Files` may be absent. */
-const withUriList = { dataTransfer: { types: ['text/uri-list'], files: [] } }
+/**
+ * WebKitGTK advertises this for a file-manager drag; `Files` may be absent, and
+ * the list is `file:` URIs.
+ */
+const withUriList = {
+  dataTransfer: {
+    types: ['text/uri-list'],
+    files: [],
+    getData: (type: string) =>
+      type === 'text/uri-list' ? 'file:///home/adam/cat.png\r\n' : '',
+  },
+}
+/** A hyperlink dragged out of another tab: the same `text/uri-list`, no file. */
+const withLink = {
+  dataTransfer: {
+    types: ['text/uri-list', 'text/plain'],
+    files: [],
+    getData: (type: string) =>
+      type === 'text/uri-list' ? 'https://example.org/thread\r\n' : '',
+  },
+}
 
 describe('a drag WebKitGTK reports as text/uri-list', () => {
   it('is intercepted, so the composer does not receive a pasted path', () => {
@@ -123,6 +142,42 @@ describe('a drag WebKitGTK reports as text/uri-list', () => {
   })
 })
 
+describe('a dragged hyperlink', () => {
+  function WithComposer({ onFile }: { onFile: () => void }) {
+    const { dragging, problem, handlers } = useFileDrop(onFile)
+    return (
+      <div data-testid="pane" {...handlers}>
+        {problem !== null && !dragging && <p role="alert">{problem}</p>}
+        {dragging && <span data-testid="overlay">Drop to attach</span>}
+        <textarea data-testid="composer" />
+      </div>
+    )
+  }
+
+  it('is left to the composer, which inserts the URL', () => {
+    // A link advertises `text/uri-list` exactly as a WebKitGTK file drag does.
+    // Claiming it prevented the textarea's default, so dragging a URL into
+    // the message box did nothing — in a browser too, not only the shell.
+    const onFile = vi.fn()
+    const { getByTestId, queryByRole, queryByTestId } = render(
+      <WithComposer onFile={onFile} />,
+    )
+    // Before the drop nothing distinguishes the two, so the overlay arms; the
+    // drop is where the answer is known.
+    fireEvent.dragEnter(getByTestId('composer'), withLink)
+    expect(queryByTestId('overlay')).not.toBeNull()
+
+    const prevented = !fireEvent.drop(getByTestId('composer'), withLink)
+
+    expect(prevented).toBe(false)
+    expect(onFile).not.toHaveBeenCalled()
+    // Not a failed file drop, so no message about one — and the overlay is
+    // down.
+    expect(queryByRole('alert')).toBeNull()
+    expect(queryByTestId('overlay')).toBeNull()
+  })
+})
+
 describe('preventStrayFileDrops', () => {
   it('refuses a file dropped outside any drop target', () => {
     // Otherwise the browser navigates to the file and the app is replaced by
@@ -135,11 +190,35 @@ describe('preventStrayFileDrops', () => {
   })
 
   it('leaves a drag carrying no file alone', () => {
-    // Dragging selected text, or a link, is not ours to interfere with.
+    // Dragging selected text is not ours to interfere with.
     const stop = preventStrayFileDrops(document)
 
     expect(!fireEvent.drop(document.body, withText)).toBe(false)
 
+    stop()
+  })
+
+  it('refuses a WebKitGTK file drag, which advertises only text/uri-list', () => {
+    // Same replaced-app failure as `Files`; the URIs say it is a file.
+    const stop = preventStrayFileDrops(document)
+
+    expect(!fireEvent.drop(document.body, withUriList)).toBe(true)
+
+    stop()
+  })
+
+  it('lets a link through to a textarea, and nowhere else', () => {
+    const stop = preventStrayFileDrops(document)
+    const composer = document.createElement('textarea')
+    document.body.appendChild(composer)
+
+    // The textarea inserting the URL is what the user dragged it there for.
+    expect(!fireEvent.drop(composer, withLink)).toBe(false)
+    // On the sidebar or empty chrome the browser would navigate to it, and the
+    // app is gone exactly as it was for a dropped file.
+    expect(!fireEvent.drop(document.body, withLink)).toBe(true)
+
+    composer.remove()
     stop()
   })
 
@@ -302,48 +381,64 @@ describe('a drag the OS reports to the window (Linux)', () => {
     restore()
   })
 
-  it('stages into the pane under the cursor and no other', () => {
+  it('stages into the pane under the cursor and no other', async () => {
     const channel = nativeChannel()
     const staged = vi.fn()
     const { getByTestId } = render(
       <TwoPanes subscribe={channel.subscribe} onFile={staged} />,
     )
     const restore = elementsAt({ 90: () => getByTestId('thread') })
+    const files = vi.fn(() => Promise.resolve([png()]))
 
-    channel.deliver({ kind: 'drop', x: 90, y: 5, files: [png()] })
+    channel.deliver({ kind: 'drop', x: 90, y: 5, files })
 
     // One call, not two: a file dropped on the thread panel must not also
     // stage into the room's composer (ADR 0065).
-    expect(staged).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => expect(staged).toHaveBeenCalledTimes(1))
     expect(staged.mock.calls[0]?.[0]).toHaveLength(1)
+    // And one read, by the pane that wanted it. Both panes see the event;
+    // reading in each would pull every file over IPC twice and discard half.
+    expect(files).toHaveBeenCalledTimes(1)
 
     restore()
   })
 
-  it('ignores a drop that landed on neither pane', () => {
+  it('ignores a drop that landed on neither pane, and does not read it', async () => {
     const channel = nativeChannel()
     const staged = vi.fn()
     render(<TwoPanes subscribe={channel.subscribe} onFile={staged} />)
     // The sidebar, the topbar, empty space: `elementFromPoint` finds nothing
     // tagged as a drop target.
     const restore = elementsAt({})
+    const files = vi.fn(() => Promise.resolve([png()]))
 
-    channel.deliver({ kind: 'drop', x: 5, y: 5, files: [png()] })
+    channel.deliver({ kind: 'drop', x: 5, y: 5, files })
 
+    // Settle anything that was going to happen.
+    await act(() => Promise.resolve())
     expect(staged).not.toHaveBeenCalled()
+    // Nobody wanted the bytes, so nobody paid for them.
+    expect(files).not.toHaveBeenCalled()
     restore()
   })
 
-  it('says so when every dropped path failed to read', () => {
+  it('says so when every dropped path failed to read', async () => {
     const channel = nativeChannel()
     const { getByTestId, queryByRole } = render(
       <TwoPanes subscribe={channel.subscribe} onFile={() => {}} />,
     )
     const restore = elementsAt({ 10: () => getByTestId('room-child') })
 
-    channel.deliver({ kind: 'drop', x: 10, y: 5, files: [] })
+    channel.deliver({
+      kind: 'drop',
+      x: 10,
+      y: 5,
+      files: () => Promise.resolve([]),
+    })
 
-    expect(queryByRole('alert')?.textContent).toMatch(/carried no file/i)
+    await vi.waitFor(() =>
+      expect(queryByRole('alert')?.textContent).toMatch(/carried no file/i),
+    )
     restore()
   })
 

@@ -8,6 +8,8 @@
  * have to be recovered here.
  */
 
+import { basename } from './filename'
+
 /**
  * Media types by extension.
  *
@@ -63,19 +65,6 @@ const MEDIA_TYPES: Readonly<Record<string, string>> = {
   pdf: 'application/pdf',
   txt: 'text/plain',
   zip: 'application/zip',
-}
-
-/**
- * The last path segment, for either separator.
- *
- * Both are checked on every platform rather than branching on the host: a
- * Windows path can reach a Linux build through a shared volume or a test, and
- * a name that still had `C:\Users\…` in it would be shown to the user and sent
- * to the room as the filename.
- */
-export function basename(path: string): string {
-  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
-  return cut === -1 ? path : path.slice(cut + 1)
 }
 
 /** The guessed media type for a path, or `''` when there is no good guess. */

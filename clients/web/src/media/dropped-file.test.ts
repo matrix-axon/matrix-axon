@@ -1,22 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { basename, fileFromPath, mediaTypeForPath } from './dropped-file'
-
-describe('basename', () => {
-  it('takes the last segment of a posix path', () => {
-    expect(basename('/home/adam/holiday.jpg')).toBe('holiday.jpg')
-  })
-
-  it('takes the last segment of a windows path', () => {
-    // Checked on every platform, not just Windows: a name that still carried
-    // `C:\Users\...` would be shown to the user and sent to the room as the
-    // filename.
-    expect(basename('C:\\Users\\adam\\holiday.jpg')).toBe('holiday.jpg')
-  })
-
-  it('leaves a bare name alone', () => {
-    expect(basename('holiday.jpg')).toBe('holiday.jpg')
-  })
-})
+import { fileFromPath, mediaTypeForPath } from './dropped-file'
 
 describe('mediaTypeForPath', () => {
   it('types an image, case-insensitively', () => {

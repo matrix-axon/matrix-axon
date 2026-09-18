@@ -43,6 +43,71 @@ function isOverTarget(id: string, x: number, y: number): boolean {
   )
 }
 
+/**
+ * Whether a drag in progress *might* carry a file.
+ *
+ * `Files` is what a browser reports for a drag out of a file manager. But
+ * WebKitGTK also advertises `text/uri-list` for the same gesture and does not
+ * always include `Files` in `types` — and when only `Files` was checked, the
+ * handlers bailed and the *browser's* default ran instead: a drop on the
+ * composer inserted the file's path as text, which is what a Linux user
+ * reported.
+ *
+ * A dragged hyperlink advertises `text/uri-list` too, and before the drop the
+ * two cannot be told apart: `types` is all a drag reveals while it is in
+ * flight, its data is unreadable until it lands. So this is the question for
+ * `dragenter`/`dragover`/`dragleave`, where erring towards "yes" costs an
+ * overlay that lights for a link, and `carriedFile` is the question for
+ * `drop`, where the answer decides who acts.
+ */
+function mightCarryFile(event: DragEvent): boolean {
+  const types = Array.from(event.dataTransfer?.types ?? [])
+  return types.includes('Files') || types.includes('text/uri-list')
+}
+
+/**
+ * Whether a drop actually carried a file, now that its data can be read.
+ *
+ * A file-manager drag and a dragged hyperlink both advertise `text/uri-list`.
+ * A file drag's list is `file:` URIs; a link's is whatever the link was. The
+ * distinction matters because treating every `text/uri-list` as a file made
+ * dragging a URL into the message box do nothing at all — in the plain
+ * browser build too, not just the shell — where it used to insert the URL,
+ * because the handlers claimed the drop and prevented the textarea's default.
+ *
+ * `Files` alone settles it; the URI check is only for the drag that has no
+ * `Files` to offer.
+ */
+function carriedFile(event: DragEvent): boolean {
+  const transfer = event.dataTransfer
+  if (transfer === null || transfer === undefined) {
+    return false
+  }
+  const types = Array.from(transfer.types)
+  if (types.includes('Files')) {
+    return true
+  }
+  if (!types.includes('text/uri-list')) {
+    return false
+  }
+  // RFC 2483: one URI per line, `#` lines are comments.
+  return transfer
+    .getData('text/uri-list')
+    .split(/\r?\n/)
+    .some((line) => /^file:/i.test(line.trim()))
+}
+
+/**
+ * Whether a drop landed somewhere text can be typed, where the browser's own
+ * default — inserting the dragged text — is the behavior the user is after.
+ */
+function isEditable(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    target.closest('textarea, input, [contenteditable]') !== null
+  )
+}
+
 export function useFileDrop(
   onFiles: (files: FileList | readonly File[]) => void,
   options: {
@@ -94,22 +159,6 @@ export function useFileDrop(
   const latestOnFiles = useRef(onFiles)
   latestOnFiles.current = onFiles
 
-  /**
-   * Whether this drag looks like it carries a file.
-   *
-   * `Files` is what a browser reports for a drag out of a file manager. But WebKitGTK also advertises `text/uri-list`
-   * for the same gesture and does not always include `Files` in `types` — and
-   * when this returned false, the handlers below bailed and the *browser's*
-   * default ran instead: a drop on the composer inserted the file's path as
-   * text, which is what a Linux user reported. Anything file-shaped is
-   * therefore intercepted, even if nothing can be staged from it; doing
-   * nothing is a much better outcome than pasting a path nobody typed.
-   */
-  const looksLikeFile = (event: DragEvent) => {
-    const types = Array.from(event.dataTransfer?.types ?? [])
-    return types.includes('Files') || types.includes('text/uri-list')
-  }
-
   const reset = useCallback(() => {
     depth.current = 0
     setDragging(false)
@@ -124,7 +173,9 @@ export function useFileDrop(
     if (nativeDrops === undefined || nativeDrops === null) {
       return
     }
-    return nativeDrops((drag) => {
+    // The read is asynchronous, so the pane can be gone by the time it lands.
+    let disposed = false
+    const unsubscribe = nativeDrops((drag) => {
       if (drag.kind === 'leave') {
         reset()
         return
@@ -145,12 +196,25 @@ export function useFileDrop(
       if (!over) {
         return
       }
-      if (drag.files.length > 0) {
-        latestOnFiles.current(drag.files)
-        return
-      }
-      setProblem(NOTHING_TO_STAGE)
+      // Only the pane the drop landed on asks for the bytes — this is the
+      // point of `files` being a function — and it asks after the overlay is
+      // down, so a slow read is not spent under a "Drop to attach" that has
+      // already happened.
+      void drag.files().then((files) => {
+        if (disposed) {
+          return
+        }
+        if (files.length > 0) {
+          latestOnFiles.current(files)
+          return
+        }
+        setProblem(NOTHING_TO_STAGE)
+      })
     })
+    return () => {
+      disposed = true
+      unsubscribe()
+    }
   }, [nativeDrops, reset, targetId])
 
   return {
@@ -159,7 +223,7 @@ export function useFileDrop(
     handlers: {
       'data-drop-target': targetId,
       onDragEnter(event) {
-        if (!looksLikeFile(event)) {
+        if (!mightCarryFile(event)) {
           return
         }
         depth.current += 1
@@ -167,7 +231,7 @@ export function useFileDrop(
         setProblem(null)
       },
       onDragOver(event) {
-        if (!looksLikeFile(event)) {
+        if (!mightCarryFile(event)) {
           return
         }
         // Without this the browser navigates to the dropped file, and the drop
@@ -175,7 +239,7 @@ export function useFileDrop(
         event.preventDefault()
       },
       onDragLeave(event) {
-        if (!looksLikeFile(event)) {
+        if (!mightCarryFile(event)) {
           return
         }
         depth.current -= 1
@@ -184,13 +248,21 @@ export function useFileDrop(
         }
       },
       onDrop(event) {
-        if (!looksLikeFile(event)) {
+        if (!mightCarryFile(event)) {
+          return
+        }
+        reset()
+        if (!carriedFile(event)) {
+          // A link, not a file. It armed the overlay — nothing distinguishes
+          // the two until now — but it is the browser's to handle: dropped on
+          // the composer it inserts the URL, which is what the user wanted
+          // and what claiming it here would prevent. Anywhere else,
+          // `preventStrayFileDrops` decides.
           return
         }
         // Prevented before the staging decision, not after: even a drag we
         // cannot stage from must not reach the browser's default handling.
         event.preventDefault()
-        reset()
         // The whole list goes through (ADR 0081). Only the staging hook knows
         // the caps, so deciding here what to drop would put that rule in two
         // places and let them disagree.
@@ -220,14 +292,24 @@ export function useFileDrop(
  * document.
  */
 export function preventStrayFileDrops(target: Document = document): () => void {
-  const looksLikeFile = (event: DragEvent) => {
-    const types = Array.from(event.dataTransfer?.types ?? [])
-    return types.includes('Files') || types.includes('text/uri-list')
-  }
   const swallow = (event: DragEvent) => {
-    if (looksLikeFile(event)) {
-      event.preventDefault()
+    if (!mightCarryFile(event)) {
+      return
     }
+    // Allowing the drop on `dragover` is harmless whatever it turns out to be;
+    // refusing it on `drop` is the decision. A file is refused everywhere
+    // (see above). A link is left alone where text can be typed — the
+    // textarea inserting the URL is the behavior being preserved — and
+    // refused everywhere else, where the browser would otherwise navigate the
+    // app away to it, which is the same replaced-app failure as the file case.
+    if (
+      event.type === 'drop' &&
+      !carriedFile(event) &&
+      isEditable(event.target)
+    ) {
+      return
+    }
+    event.preventDefault()
   }
   target.addEventListener('dragover', swallow)
   target.addEventListener('drop', swallow)

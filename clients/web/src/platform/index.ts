@@ -57,9 +57,10 @@ export type SaveOutcome = 'saved' | 'shared' | 'cancelled' | 'failed'
  * One stage of a drag the OS reported to the window rather than to the page.
  *
  * `x`/`y` are CSS pixels in the webview's own viewport coordinates, so they can
- * be handed straight to `document.elementFromPoint`. The platform converts;
- * the OS reports physical pixels, which are wrong by the display scale factor
- * on any HiDPI screen.
+ * be handed straight to `document.elementFromPoint`. Whatever unit the OS
+ * reports in, the platform is responsible for delivering this one; on Linux,
+ * the only platform with this channel, GTK already reports logical pixels and
+ * the platform passes them through (`platform/tauri.ts`).
  */
 export type NativeDrag =
   /** The cursor is over the window with a drag in progress. */
@@ -67,10 +68,19 @@ export type NativeDrag =
   /** The drag left the window, or was cancelled. It has no position. */
   | { kind: 'leave' }
   /**
-   * `files` is empty when every path failed to read, which is a real outcome
-   * worth reporting rather than a reason to stay silent.
+   * `files` reads the dropped files, once, and hands back the same promise
+   * to every caller. It is a function rather than a value so that only the
+   * pane the drop actually landed on pays for the read: every composer
+   * subscribes to this channel, and a drop on the sidebar is wanted by none of
+   * them. The result is empty when every path failed to read, which is a real
+   * outcome worth reporting rather than a reason to stay silent.
    */
-  | { kind: 'drop'; x: number; y: number; files: readonly File[] }
+  | {
+      kind: 'drop'
+      x: number
+      y: number
+      files: () => Promise<readonly File[]>
+    }
 
 export interface Platform {
   /**

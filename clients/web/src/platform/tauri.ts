@@ -7,6 +7,7 @@ import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import WebSocketClient from '@tauri-apps/plugin-websocket'
 import { fileFromPath } from '../media/dropped-file'
+import { basename } from '../media/filename'
 import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 
 /**
@@ -193,29 +194,6 @@ async function saveViaDialog(file: SaveRequest): Promise<SaveOutcome> {
   } catch {
     return 'failed'
   }
-}
-
-/**
- * A filename with any path in it removed.
- *
- * The name comes from `content.filename` or `content.body` on the event, which
- * is to say from whoever sent the media — `../../.config/autostart/evil.desktop`
- * is a filename as far as the room is concerned. It reaches an OS save dialog
- * here, and while that dialog still requires the user to confirm a destination,
- * what a traversal-shaped `defaultPath` does to it before then is a per-backend
- * question (GTK, Cocoa and Win32 each answer differently) and not one worth
- * depending on. `<a download>`, which this replaced, dropped the directory
- * itself; do the same rather than lose that property in the port.
- *
- * Separators for both worlds, since a Windows name can reach a Linux client and
- * the reverse. An empty result falls back rather than handing the dialog `''`.
- */
-function basename(filename: string): string {
-  const last = filename.split(/[/\\]/).pop() ?? ''
-  const trimmed = last.trim()
-  return trimmed === '' || trimmed === '.' || trimmed === '..'
-    ? 'download'
-    : trimmed
 }
 
 /** `https://host:port` for logging, or a placeholder if it will not parse. */
@@ -438,19 +416,34 @@ export function tauriPlatform(): Platform {
           handler({ kind: 'leave' })
           return
         }
-        // The OS reports physical pixels. Everything on the page — layout,
-        // `elementFromPoint` — is in CSS pixels, so on any scaled display an
-        // unconverted point lands somewhere else entirely, and on a 2x screen
-        // it lands off the bottom-right of the window.
-        const { x, y } = drag.position.toLogical(window.devicePixelRatio || 1)
+        // Used as-is, *not* run through `toLogical(devicePixelRatio)`, though
+        // the payload types it as a physical position. On Linux — the only
+        // platform this fires on — the number is what GTK handed wry from its
+        // `drag-motion`/`drag-drop` signals (`wry/src/webkitgtk/drag_drop.rs`),
+        // and GTK3 widget coordinates are already logical pixels; the runtime
+        // wraps them in `PhysicalPosition` without multiplying by the scale
+        // factor (`tauri-runtime-wry/src/lib.rs`). Dividing again would land a
+        // drop at logical (800, 600) on a 2x display at (400, 300), in a
+        // different pane or none, and the first version of this did exactly
+        // that — unnoticed because it was only ever exercised at scale 1.
+        const { x, y } = drag.position
         if (drag.type !== 'drop') {
           // `enter` and `over` are the same thing to a drop target: the cursor
           // is here, with a file.
           handler({ kind: 'over', x, y })
           return
         }
-        void readDroppedFiles(drag.paths).then((files) => {
-          handler({ kind: 'drop', x, y, files })
+        // Read on demand and at most once, not eagerly. Every pane with a
+        // composer subscribes here — the room and the thread panel at least —
+        // and only the one under the cursor wants the bytes; a drop on the
+        // sidebar is wanted by none of them. Reading up front would pull every
+        // file over IPC once per subscriber and throw most of it away.
+        let read: Promise<readonly File[]> | undefined
+        handler({
+          kind: 'drop',
+          x,
+          y,
+          files: () => (read ??= readDroppedFiles(drag.paths)),
         })
       })
       // The subscription is established asynchronously, so unsubscribing has
