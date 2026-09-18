@@ -1,4 +1,4 @@
-import { onOpenUrl } from '@tauri-apps/plugin-deep-link'
+import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
@@ -334,17 +334,57 @@ export function tauriPlatform(): Platform {
       }),
     oauthClient: OAUTH_CLIENT,
     onDeepLink: (handler) => {
+      // Delivered once per URL, however many channels report it.
+      //
+      // The two below are not exclusive: on a cold launch the plugin sets the
+      // value `getCurrent` returns *and* emits the event `onOpenUrl` listens
+      // for — `handle_cli_arguments` does both on Windows and Linux, and
+      // `RunEvent::Opened` does both on macOS. Today the emit happens during
+      // plugin setup, before the webview has subscribed, so only `getCurrent`
+      // reaches us; that is a matter of timing rather than of design, and
+      // `tauri-plugin-single-instance` forwarding a URL into a running process
+      // puts a second delivery on the same footing.
+      //
+      // A repeat is not harmless. `completeRedirect` consumes the pending PKCE
+      // entry on success, so re-delivering a callback that just worked fails
+      // its state check and paints "OAuth sign-in state did not match" over a
+      // sign-in that succeeded a moment earlier — a bug the user cannot act on
+      // and we would struggle to reproduce.
+      const delivered = new Set<string>()
+      const deliver = (raw: string) => {
+        if (delivered.has(raw)) {
+          return
+        }
+        delivered.add(raw)
+        try {
+          handler(new URL(raw))
+        } catch {
+          // The OS can hand us anything registered to the scheme; a URL we
+          // cannot parse is not ours to act on.
+        }
+      }
+
+      // The URL that *launched* this process, if any. `onOpenUrl` below only
+      // reports links that arrive while the app is already up — on Windows and
+      // Linux a cold launch carries the URL in argv instead, and the plugin
+      // exposes it here rather than replaying it as an event. Without this, a
+      // callback that starts the app (rather than returning to a running one)
+      // is silently dropped: the app opens on the sign-in screen as if nothing
+      // had happened.
+      void getCurrent()
+        .then((urls) => {
+          for (const raw of urls ?? []) {
+            deliver(raw)
+          }
+        })
+        .catch(() => {})
+
       // `onOpenUrl` resolves to its own unlisten function; the subscription is
       // established asynchronously, so unsubscribing has to wait for it rather
       // than race it.
       const ready = onOpenUrl((urls) => {
         for (const raw of urls) {
-          try {
-            handler(new URL(raw))
-          } catch {
-            // The OS can hand us anything registered to the scheme; a URL we
-            // cannot parse is not ours to act on.
-          }
+          deliver(raw)
         }
       })
       return () => {

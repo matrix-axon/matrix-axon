@@ -70,7 +70,8 @@ pub fn run() {
             serve(ctx.app_handle(), request.uri().path())
         })
         .setup(|app| {
-            main_window(app.handle())?;
+            let window = main_window(app.handle())?;
+            allow_camera_capture(&window);
             claim_deep_link_schemes(app.handle());
             Ok(())
         })
@@ -89,6 +90,87 @@ pub fn run() {
 /// Not to be confused with [`APP_SCHEME`], which is also spelled `axon` and is
 /// a different thing entirely: an in-webview protocol handler that serves the
 /// bundle, never registered with the OS, taking no part in OAuth.
+/// Answer WebKitGTK's camera permission request, on Linux only.
+///
+/// Every desktop webview gates `getUserMedia`, and they disagree on the
+/// default. WebView2 *prompts the user*, which is why Windows works with no
+/// code. WKWebView asks its UI delegate, and wry answers `Grant`, so macOS
+/// needs nothing here either. WebKitGTK emits `permission-request` and
+/// **denies** when nothing handles the signal — and wry's GTK backend handles
+/// no permissions at all, so the request was refused before any prompt could
+/// exist. What the user saw was the browser's own wording for a denial they
+/// were never asked about, after granting camera access at the OS level and
+/// even adding themselves to the `video` group, neither of which WebKit
+/// consults.
+///
+/// Granting without prompting is the right answer *here* specifically. The
+/// webview loads one thing — this app's own bundle, from its own scheme — so
+/// there is no third-party page to protect the camera from. And the request
+/// only ever follows the user pressing "Start camera", which is the consent; a
+/// second dialog asking whether they meant it would be noise.
+///
+/// That premise is enforced by `main_window`'s navigation guard, not by the
+/// CSP. `default-src 'self'` says where resources may be *fetched* from and
+/// says nothing about where the top-level document may *navigate* — so a CSP
+/// alone would leave this grant resting on the client never following an
+/// off-origin link, which is a property of today's code rather than of the
+/// window. See `main_window`.
+///
+/// Narrow twice over. Only user-media requests are answered, so geolocation,
+/// notifications and the rest keep WebKit's deny-by-default; and within those,
+/// only video.
+#[cfg(target_os = "linux")]
+fn allow_camera_capture<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    use webkit2gtk::glib::Cast as _;
+    use webkit2gtk::{
+        PermissionRequestExt, UserMediaPermissionRequest, UserMediaPermissionRequestExt, WebViewExt,
+    };
+
+    let result = window.with_webview(|webview| {
+        webview.inner().connect_permission_request(|_, request| {
+            let Some(media) = request.downcast_ref::<UserMediaPermissionRequest>() else {
+                // Not ours to answer; WebKit's default (deny) stands.
+                return false;
+            };
+            // The camera, and only the camera. One request type covers both
+            // devices, so answering it wholesale handed over the microphone
+            // too -- a permission nothing in this app asks for. `browser-qr.ts`
+            // requests `audio: false`, so a request naming audio is not this
+            // app's QR scanner and is refused rather than left to a default.
+            //
+            // A request for *both* is therefore denied whole, and cannot be
+            // otherwise: `PermissionRequest` offers `allow()` and `deny()` and
+            // nothing between them, so there is no way to grant the video half
+            // and withhold the audio. A future feature wanting both on Linux
+            // has to ask twice — once per device — rather than expecting this
+            // to split a combined request. Windows and macOS do not share the
+            // limitation, so it would present as Linux-only; hence this note
+            // rather than leaving it to be rediscovered.
+            if media.is_for_video_device() && !media.is_for_audio_device() {
+                media.allow();
+            } else {
+                media.deny();
+            }
+            true
+        });
+    });
+    if let Err(error) = result {
+        eprintln!(
+            "could not install the camera permission handler ({error}); QR scanning will not work"
+        );
+    }
+}
+
+/// Everywhere else the webview already resolves this for itself: WebView2
+/// prompts, and WKWebView asks a delegate wry answers.
+#[cfg(not(target_os = "linux"))]
+fn allow_camera_capture<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
+
+/// Claim the OAuth callback scheme with the OS — in development builds only.
+///
+/// `org.matrixaxon.axon`, per RFC 8252 § 7.1 and ADR 0102 § 4. Note this is
+/// *not* `APP_SCHEME`: that one stays `axon`, is served in-webview, and is
+/// never registered with the OS.
 ///
 /// A release build must not do this. The installers already register the
 /// scheme (`plugins.deep-link.desktop.schemes` is compiled into them, and the
@@ -167,7 +249,40 @@ fn main_window<R: tauri::Runtime>(
         // Tauri swallows OS file drops by default, which would silently break
         // `media/use-file-drop.ts` — dropping a file on a room would do nothing.
         .disable_drag_drop_handler()
+        // The window stays on the app's own origin, and this is the only thing
+        // that says so. The CSP does not: `default-src 'self'` constrains where
+        // resources are *fetched* from, not where the top-level document may
+        // *navigate* — there is no CSP directive for that at all, `navigate-to`
+        // having never shipped. Without this the shell would be one stray
+        // `location =` away from rendering somebody else's page in a window
+        // holding this app's camera grant, its capability set and its tokens,
+        // with no address bar to show it had happened.
+        //
+        // In-app routing is untouched: the client routes with `pushState`,
+        // which is not a navigation, and the one real load it performs
+        // (`disconnectFromServer`'s reload to `/`) is same-origin.
+        //
+        // External links never arrive here — `openExternal` hands them to the
+        // real browser (`app.tsx`) — so anything that does reach this point is
+        // something no code path intends, which is exactly what to refuse.
+        .on_navigation(|target| navigation_allowed(target, cfg!(dev)))
         .build()
+}
+
+/// Whether the window may navigate to `target`.
+///
+/// A pure function over `(url, is this a dev build?)` so the rule can be
+/// asserted without a webview — it is a security boundary, and the alternative
+/// is finding out from a packaged build.
+fn navigation_allowed(target: &tauri::Url, dev: bool) -> bool {
+    if target.scheme() == APP_SCHEME {
+        return true;
+    }
+    // A dev build loads `devUrl`, the Vite server, instead. Release admits
+    // nothing but the app's own scheme — not http, not localhost, not the
+    // configured Axon server, which is reached by `fetch` and never navigated
+    // to.
+    dev && matches!(target.host_str(), Some("localhost" | "127.0.0.1"))
 }
 
 /// The scheme the production build is served from.
@@ -309,7 +424,7 @@ fn route<A>(path: &str, resolve: impl Fn(&str) -> Option<A>) -> Route<A> {
 
 #[cfg(test)]
 mod tests {
-    use super::{asset_response, route, Route};
+    use super::{asset_response, navigation_allowed, route, Route};
 
     /// The bug this covers shipped: `serve` answered with the bytes and the
     /// content type and dropped the policy, so the release build enforced no
@@ -349,6 +464,45 @@ mod tests {
             .headers()
             .get(tauri::http::header::CONTENT_SECURITY_POLICY)
             .is_none());
+    }
+
+    fn url(raw: &str) -> tauri::Url {
+        raw.parse().expect("test url")
+    }
+
+    /// The window is the app's origin and nothing else. It holds the camera
+    /// grant, the capability set and the session, and has no address bar to
+    /// show that it is somewhere unexpected.
+    #[test]
+    fn a_release_window_navigates_only_to_the_app_scheme() {
+        assert!(navigation_allowed(&url("axon://localhost/"), false));
+        assert!(navigation_allowed(
+            &url("axon://localhost/@a:b/rooms/!c:d"),
+            false
+        ));
+
+        assert!(!navigation_allowed(&url("https://evil.example/"), false));
+        assert!(!navigation_allowed(&url("http://localhost:5173/"), false));
+        // The configured Axon server is reached by fetch, never navigated to.
+        assert!(!navigation_allowed(
+            &url("https://axon.example/v1/rooms"),
+            false
+        ));
+        assert!(!navigation_allowed(&url("file:///etc/passwd"), false));
+        assert!(!navigation_allowed(
+            &url("data:text/html,<script>1</script>"),
+            false
+        ));
+    }
+
+    /// `tauri dev` serves from Vite, so the same rule would lock the dev loop
+    /// out of its own window.
+    #[test]
+    fn a_dev_window_also_admits_the_vite_server() {
+        assert!(navigation_allowed(&url("http://localhost:5173/"), true));
+        assert!(navigation_allowed(&url("http://127.0.0.1:5173/"), true));
+        // Still nothing else, even in dev.
+        assert!(!navigation_allowed(&url("https://evil.example/"), true));
     }
 
     /// Stands in for the embedded bundle, resolving a name to itself.
