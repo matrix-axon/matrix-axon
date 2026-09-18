@@ -1,0 +1,12 @@
+name: Empty
+on:
+  workflow_dispatch: 
+  push:
+    branches: [ "main" ]
+
+jobs:
+  empty-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Minimal Step
+        run: echo "Workflow initialized successfully"
