@@ -117,6 +117,7 @@ describe('AppRoot wiring the transport into the app', () => {
       openExternal: vi.fn(),
       oauthClient: null,
       onDeepLink: null,
+      onNativeFileDrop: null,
       defaultApiBaseUrl: null,
     }
 

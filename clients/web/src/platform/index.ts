@@ -53,6 +53,35 @@ export interface SaveRequest {
  */
 export type SaveOutcome = 'saved' | 'shared' | 'cancelled' | 'failed'
 
+/**
+ * One stage of a drag the OS reported to the window rather than to the page.
+ *
+ * `x`/`y` are CSS pixels in the webview's own viewport coordinates, so they can
+ * be handed straight to `document.elementFromPoint`. Whatever unit the OS
+ * reports in, the platform is responsible for delivering this one; on Linux,
+ * the only platform with this channel, GTK already reports logical pixels and
+ * the platform passes them through (`platform/tauri.ts`).
+ */
+export type NativeDrag =
+  /** The cursor is over the window with a drag in progress. */
+  | { kind: 'over'; x: number; y: number }
+  /** The drag left the window, or was cancelled. It has no position. */
+  | { kind: 'leave' }
+  /**
+   * `files` reads the dropped files, once, and hands back the same promise
+   * to every caller. It is a function rather than a value so that only the
+   * pane the drop actually landed on pays for the read: every composer
+   * subscribes to this channel, and a drop on the sidebar is wanted by none of
+   * them. The result is empty when every path failed to read, which is a real
+   * outcome worth reporting rather than a reason to stay silent.
+   */
+  | {
+      kind: 'drop'
+      x: number
+      y: number
+      files: () => Promise<readonly File[]>
+    }
+
 export interface Platform {
   /**
    * The HTTP transport. Signature-compatible with the global, because
@@ -138,6 +167,25 @@ export interface Platform {
   onDeepLink: ((handler: (url: URL) => void) => () => void) | null
 
   /**
+   * Subscribe to file drags the *OS* delivers to this window, or `null` where
+   * the webview's own HTML5 drag-and-drop already works.
+   *
+   * Not a nicety: on Linux there is no other channel. WebKitGTK hands the page
+   * a `text/uri-list` and no `File` for a file-manager drag, so
+   * `dataTransfer.files` is empty and there is nothing to stage — the symptom
+   * reported was a drop that was accepted and then did nothing. The shell takes
+   * the drag at the window instead and reports the *paths*, which it can read.
+   *
+   * The event carries a viewport point rather than a target element, because
+   * it never went through the DOM. `media/use-file-drop.ts` hit-tests it, which
+   * is what keeps a drop on the thread panel out of the room's composer
+   * (ADR 0065) now that the event no longer knows what it landed on.
+   *
+   * Returns an unsubscribe.
+   */
+  onNativeFileDrop: ((handler: (drag: NativeDrag) => void) => () => void) | null
+
+  /**
    * The API base to fall back on when the user has configured none and no
    * `VITE_AXON_SERVER_URL` was baked in (ADR 0102 § 3).
    *
@@ -190,6 +238,9 @@ export function browserPlatform(): Platform {
     // A browser has no OS-level URL channel; the callback arrives as a
     // navigation to `/oauth/callback` instead.
     onDeepLink: null,
+    // The page's own drag-and-drop events are the channel here, and they carry
+    // the files. Nothing to add.
+    onNativeFileDrop: null,
     // Same-origin: the deployment that serves this bundle also proxies /v1.
     defaultApiBaseUrl: '/',
   }

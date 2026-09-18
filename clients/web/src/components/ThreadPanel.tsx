@@ -153,6 +153,7 @@ export function ThreadPanel({
     settings,
     messageGestures,
     attachments: staging,
+    platform,
   } = useServices()
   const location = useLocation()
   const hideRedacted = settings.hideRedactedEvents.value
@@ -240,6 +241,7 @@ export function ThreadPanel({
     removeAttachment,
     dragging,
     dropHandlers,
+    dropProblem,
     formatComposerBody,
     mentionCompletions,
     roomReferenceCompletions,
@@ -256,6 +258,7 @@ export function ThreadPanel({
     attachmentScope: `${accountId}\0${roomId}\0${rootId}`,
     onMutation: search.clear,
     staging,
+    nativeDrops: platform.onNativeFileDrop,
   })
 
   /**
@@ -554,6 +557,11 @@ export function ThreadPanel({
       aria-label="Thread"
       {...(attachable ? dropHandlers : {})}
     >
+      {dropProblem !== null && !dragging && (
+        <p class="drop-problem" role="alert">
+          {dropProblem}
+        </p>
+      )}
       {dragging && (
         <div class="drop-overlay" aria-hidden="true">
           <p>Drop to attach</p>

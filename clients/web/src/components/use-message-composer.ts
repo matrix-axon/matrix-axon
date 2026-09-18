@@ -15,6 +15,7 @@ import {
   userMentionSuggestions,
   type FormattedMessageParts,
 } from '../mentions'
+import type { Platform } from '../platform'
 import type { MembersStore } from '../stores/members'
 import type { RoomDto } from '../stores/room-list'
 import type { EventDto, TimelineStore } from '../stores/timeline'
@@ -46,6 +47,12 @@ export interface MessageComposerOptions {
    * files have to outlive that.
    */
   staging: AttachmentStaging
+  /**
+   * The shell's window-level drag-drop channel, where there is one
+   * (`Platform.onNativeFileDrop`). Passed in rather than read from the service
+   * graph so this hook keeps taking everything it needs explicitly.
+   */
+  nativeDrops?: Platform['onNativeFileDrop']
 }
 
 /**
@@ -68,6 +75,8 @@ export function useMessageComposer(options: MessageComposerOptions): {
   clearAttachment: () => void
   dragging: boolean
   dropHandlers: ReturnType<typeof useFileDrop>['handlers']
+  /** Why a drop staged nothing, if it did not. */
+  dropProblem: string | null
   emojiEntries: readonly EmojiEntry[]
   formatComposerBody: (body: string) => Promise<FormattedMessageParts>
   mentionCompletions: (query: string) => ComposerAutocompleteOption[]
@@ -94,7 +103,14 @@ export function useMessageComposer(options: MessageComposerOptions): {
     remove: removeAttachment,
     clear: clearAttachment,
   } = useAttachments(options.attachmentScope, options.staging)
-  const { dragging, handlers: dropHandlers } = useFileDrop(stage)
+  const {
+    dragging,
+    problem: dropProblem,
+    handlers: dropHandlers,
+  } = useFileDrop(stage, {
+    nativeDrops: options.nativeDrops,
+    scope: options.attachmentScope,
+  })
 
   useEffect(() => {
     let cancelled = false
@@ -197,6 +213,7 @@ export function useMessageComposer(options: MessageComposerOptions): {
     removeAttachment,
     clearAttachment,
     dragging,
+    dropProblem,
     dropHandlers,
     emojiEntries,
     formatComposerBody,

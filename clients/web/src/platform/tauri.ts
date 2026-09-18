@@ -1,9 +1,14 @@
+import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import WebSocketClient from '@tauri-apps/plugin-websocket'
+import { fileFromPath } from '../media/dropped-file'
+import { MAX_UPLOAD_BYTES } from '../media/media-service'
+import { basename } from '../media/filename'
 import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 
 /**
@@ -192,29 +197,6 @@ async function saveViaDialog(file: SaveRequest): Promise<SaveOutcome> {
   }
 }
 
-/**
- * A filename with any path in it removed.
- *
- * The name comes from `content.filename` or `content.body` on the event, which
- * is to say from whoever sent the media — `../../.config/autostart/evil.desktop`
- * is a filename as far as the room is concerned. It reaches an OS save dialog
- * here, and while that dialog still requires the user to confirm a destination,
- * what a traversal-shaped `defaultPath` does to it before then is a per-backend
- * question (GTK, Cocoa and Win32 each answer differently) and not one worth
- * depending on. `<a download>`, which this replaced, dropped the directory
- * itself; do the same rather than lose that property in the port.
- *
- * Separators for both worlds, since a Windows name can reach a Linux client and
- * the reverse. An empty result falls back rather than handing the dialog `''`.
- */
-function basename(filename: string): string {
-  const last = filename.split(/[/\\]/).pop() ?? ''
-  const trimmed = last.trim()
-  return trimmed === '' || trimmed === '.' || trimmed === '..'
-    ? 'download'
-    : trimmed
-}
-
 /** `https://host:port` for logging, or a placeholder if it will not parse. */
 function originOf(url: string): string {
   try {
@@ -286,6 +268,46 @@ export function boundedSignal(
 const OAUTH_CLIENT = {
   clientId: 'axon-desktop',
   redirectUri: 'org.matrixaxon.axon:/oauth/callback',
+}
+
+/**
+ * Read the files behind a set of dropped paths.
+ *
+ * `read_dropped_file` is this app's own command rather than the fs plugin's
+ * `readFile`, and that is a deliberate narrowing. A dropped file can be
+ * anywhere, so an fs-plugin route would need a scope wide enough to cover the
+ * whole filesystem — a standing grant to read any file, held by the webview,
+ * for the sake of a gesture. The command instead reads only paths the shell
+ * has just seen the user drop on this window, so the grant lasts exactly as
+ * long as the drag and covers exactly what was dragged.
+ *
+ * Sequential, not `Promise.all`: the batch is at most a handful of files
+ * (`MAX_BATCH_FILES`), and staging order is the order they are sent in
+ * (ADR 0081), so it should be the order the OS listed them.
+ *
+ * A path that cannot be read is skipped rather than failing the whole drop.
+ * Dropping five images should not be lost to one of them being a broken
+ * symlink, and the caller reports an empty result honestly.
+ *
+ * `MAX_UPLOAD_BYTES` goes over the bridge so the shell can refuse an oversized
+ * file from its metadata instead of reading it. Staging applies the same limit
+ * again on this side, which is the one that reports it to the user; this only
+ * avoids spending a multi-gigabyte read to reach that verdict.
+ */
+async function readDroppedFiles(paths: readonly string[]): Promise<File[]> {
+  const files: File[] = []
+  for (const path of paths) {
+    try {
+      const bytes = await invoke<ArrayBuffer>('read_dropped_file', {
+        path,
+        maxBytes: MAX_UPLOAD_BYTES,
+      })
+      files.push(fileFromPath(path, bytes))
+    } catch (error) {
+      console.error('could not read a dropped file', path, error)
+    }
+  }
+  return files
 }
 
 export function tauriPlatform(): Platform {
@@ -387,6 +409,54 @@ export function tauriPlatform(): Platform {
           deliver(raw)
         }
       })
+      return () => {
+        void ready.then((unlisten) => unlisten()).catch(() => {})
+      }
+    },
+    onNativeFileDrop: (handler) => {
+      // Only ever fires where the shell left its drag-drop handler enabled,
+      // which is Linux alone (`src-tauri/src/lib.rs`). Windows and macOS keep
+      // the handler disabled so the page's own HTML5 events work — Tauri's own
+      // docs require that on Windows — and there this subscription is simply
+      // never called, which is why no platform check is needed here.
+      const ready = getCurrentWebview().onDragDropEvent((event) => {
+        const drag = event.payload
+        if (drag.type === 'leave') {
+          handler({ kind: 'leave' })
+          return
+        }
+        // Used as-is, *not* run through `toLogical(devicePixelRatio)`, though
+        // the payload types it as a physical position. On Linux — the only
+        // platform this fires on — the number is what GTK handed wry from its
+        // `drag-motion`/`drag-drop` signals (`wry/src/webkitgtk/drag_drop.rs`),
+        // and GTK3 widget coordinates are already logical pixels; the runtime
+        // wraps them in `PhysicalPosition` without multiplying by the scale
+        // factor (`tauri-runtime-wry/src/lib.rs`). Dividing again would land a
+        // drop at logical (800, 600) on a 2x display at (400, 300), in a
+        // different pane or none, and the first version of this did exactly
+        // that — unnoticed because it was only ever exercised at scale 1.
+        const { x, y } = drag.position
+        if (drag.type !== 'drop') {
+          // `enter` and `over` are the same thing to a drop target: the cursor
+          // is here, with a file.
+          handler({ kind: 'over', x, y })
+          return
+        }
+        // Read on demand and at most once, not eagerly. Every pane with a
+        // composer subscribes here — the room and the thread panel at least —
+        // and only the one under the cursor wants the bytes; a drop on the
+        // sidebar is wanted by none of them. Reading up front would pull every
+        // file over IPC once per subscriber and throw most of it away.
+        let read: Promise<readonly File[]> | undefined
+        handler({
+          kind: 'drop',
+          x,
+          y,
+          files: () => (read ??= readDroppedFiles(drag.paths)),
+        })
+      })
+      // The subscription is established asynchronously, so unsubscribing has
+      // to wait for it rather than race it.
       return () => {
         void ready.then((unlisten) => unlisten()).catch(() => {})
       }

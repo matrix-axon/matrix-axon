@@ -17,6 +17,11 @@
 //! path and writes the bytes itself. Opening an external link: left alone it
 //! navigates the *app window* to that page, and there is no back button to
 //! return with, so links are handed to the user's real browser.
+//!
+//! **Reading a dropped file, on Linux.** WebKitGTK hands the page a
+//! `text/uri-list` and no `File`, so HTML5 drag-and-drop there gives the app a
+//! path it cannot open. This process takes the drag at the window instead and
+//! reads the bytes — see `read_dropped_file`.
 
 /// Wire up and run the shell.
 ///
@@ -50,6 +55,8 @@ pub fn run() {
     }));
 
     builder
+        .manage(DroppedPaths::default())
+        .invoke_handler(tauri::generate_handler![read_dropped_file])
         // Transport. Both are configured by capability files under
         // `capabilities/`, not here — the allow-list of reachable origins is
         // security-relevant and belongs somewhere reviewable.
@@ -72,6 +79,7 @@ pub fn run() {
         .setup(|app| {
             let window = main_window(app.handle())?;
             allow_camera_capture(&window);
+            watch_dropped_paths(&window);
             claim_deep_link_schemes(app.handle());
             Ok(())
         })
@@ -166,6 +174,129 @@ fn allow_camera_capture<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
 #[cfg(not(target_os = "linux"))]
 fn allow_camera_capture<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
 
+/// The paths the user has actually dropped on this window.
+///
+/// This is the whole authorization story for `read_dropped_file`, and the
+/// reason the command exists at all rather than the page using the fs plugin's
+/// `readFile`. A dropped file can be anywhere on disk, so an fs-plugin route
+/// would need a scope covering the entire filesystem — a standing, permanent
+/// grant to read any file, held by the webview, to support a gesture. Here the
+/// only readable paths are ones the user physically dragged onto this window.
+///
+/// Bounded rather than cleared per drag. Clearing on each new drop would be
+/// tighter, but the page reads the bytes *after* the event, one file at a
+/// time, so a second drop landing mid-read would revoke the first drop's paths
+/// and lose files the user did drop. The cap keeps the set from growing for
+/// the life of the process instead.
+#[derive(Default)]
+struct DroppedPaths(std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>);
+
+/// How many dropped paths stay readable. Comfortably above `MAX_BATCH_FILES`
+/// (10, in `media/attachment-staging.ts`), so a drag is never truncated.
+///
+/// Gated like the listener that is its only reader. Everywhere else the page
+/// handles the drag itself and nothing is ever recorded, so an ungated
+/// constant is dead code on Windows and macOS — which is how it was reported.
+#[cfg(target_os = "linux")]
+const DROPPED_PATHS_REMEMBERED: usize = 64;
+
+/// Record what the user drops, so the page can ask for its bytes.
+///
+/// Listening for Tauri's own `tauri://drag-drop` rather than reading the drag
+/// twice: the page receives the same event and asks for each path over IPC,
+/// which is necessarily a later round trip, so the paths are always recorded
+/// before the first request for them arrives.
+#[cfg(target_os = "linux")]
+fn watch_dropped_paths<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    use tauri::{Listener as _, Manager as _};
+
+    let app = window.app_handle().clone();
+    window.listen("tauri://drag-drop", move |event| {
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) else {
+            return;
+        };
+        let Some(paths) = payload.get("paths").and_then(serde_json::Value::as_array) else {
+            return;
+        };
+        let state = app.state::<DroppedPaths>();
+        let mut allowed = state
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if allowed.len() >= DROPPED_PATHS_REMEMBERED {
+            allowed.clear();
+        }
+        allowed.extend(
+            paths
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(std::path::PathBuf::from),
+        );
+    });
+}
+
+/// Everywhere else the page handles the drag itself and already has the bytes;
+/// see `main_window` for why the two channels are exclusive.
+#[cfg(not(target_os = "linux"))]
+fn watch_dropped_paths<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
+
+/// Read one file the user dropped on this window.
+///
+/// Refuses any path that was not dropped, which is what keeps this from being
+/// a general "read any file" capability — see `DroppedPaths`. The bytes come
+/// back raw (`ipc::Response`) rather than as JSON, so a 20 MB photo crosses the
+/// bridge as 20 MB and not as a base64 string half again its size.
+///
+/// `async` so this does not run on the UI thread. A sync Tauri command runs on
+/// the main thread, so reading a multi-gigabyte video — or anything on a slow
+/// network mount — would freeze the window for as long as the read took.
+///
+/// `max_bytes` is checked against the file's *metadata*, before any of it is
+/// read. Staging enforces the same limit on the far side, but it only sees a
+/// `File` after the whole thing has been read into memory and pushed across
+/// the bridge, so an oversized drop would be paid for in full and then
+/// rejected. The limit is passed in rather than defined here so that
+/// `MAX_UPLOAD_BYTES` stays its single definition: a copy on this side is a
+/// copy that drifts.
+/// Whether a dropped file is small enough to be worth reading into memory.
+///
+/// Its own function so the boundary can be tested without standing up a
+/// webview, and so it is stated once. The comparison has to agree with the
+/// page's: `attachment-staging.ts` refuses a batch only when it goes *over*
+/// `MAX_UPLOAD_BYTES`, so a single file of exactly that size is accepted
+/// there. Refusing it here would reject a drop the page would have taken.
+fn within_upload_limit(size: u64, max_bytes: u64) -> bool {
+    size <= max_bytes
+}
+
+#[tauri::command(async)]
+fn read_dropped_file(
+    dropped: tauri::State<'_, DroppedPaths>,
+    path: std::path::PathBuf,
+    max_bytes: u64,
+) -> Result<tauri::ipc::Response, String> {
+    let dropped_by_user = dropped
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&path);
+    if !dropped_by_user {
+        return Err(format!("{} was not dropped on this window", path.display()));
+    }
+    let size = std::fs::metadata(&path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?
+        .len();
+    if !within_upload_limit(size, max_bytes) {
+        return Err(format!(
+            "{} is {size} bytes, over the {max_bytes} this build will upload",
+            path.display()
+        ));
+    }
+    std::fs::read(&path)
+        .map(tauri::ipc::Response::new)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))
+}
+
 /// Claim the OAuth callback scheme with the OS — in development builds only.
 ///
 /// `org.matrixaxon.axon`, per RFC 8252 § 7.1 and ADR 0102 § 4. Note this is
@@ -242,13 +373,10 @@ fn main_window<R: tauri::Runtime>(
                 .expect("app scheme URL"),
         )
     };
-    tauri::WebviewWindowBuilder::new(app, "main", url)
+    let builder = tauri::WebviewWindowBuilder::new(app, "main", url)
         .title("Axon")
         .inner_size(1100.0, 760.0)
         .min_inner_size(380.0, 480.0)
-        // Tauri swallows OS file drops by default, which would silently break
-        // `media/use-file-drop.ts` — dropping a file on a room would do nothing.
-        .disable_drag_drop_handler()
         // The window stays on the app's own origin, and this is the only thing
         // that says so. The CSP does not: `default-src 'self'` constrains where
         // resources are *fetched* from, not where the top-level document may
@@ -265,8 +393,24 @@ fn main_window<R: tauri::Runtime>(
         // External links never arrive here — `openExternal` hands them to the
         // real browser (`app.tsx`) — so anything that does reach this point is
         // something no code path intends, which is exactly what to refuse.
-        .on_navigation(|target| navigation_allowed(target, cfg!(dev)))
-        .build()
+        .on_navigation(|target| navigation_allowed(target, cfg!(dev)));
+    // Which process handles a file drag, and it cannot be both.
+    //
+    // Left enabled, Tauri swallows the drop and the page's own HTML5
+    // drag-and-drop never fires. Windows *requires* it disabled for HTML5
+    // drag-and-drop to work at all — the plugin's own documentation says so of
+    // `dragDropEnabled`, and it claims no such requirement elsewhere — and
+    // macOS works with it disabled too, so both keep the page's channel.
+    //
+    // Linux cannot use that channel at all. WebKitGTK advertises
+    // `text/uri-list` for a file-manager drag and puts no `File` behind it, so
+    // `dataTransfer.files` is empty and there is nothing for the page to stage:
+    // the drop was accepted and then did nothing, which is what was reported.
+    // Handling the drag here is the only way to get at the file, and
+    // `read_dropped_file` is how the page then reads it.
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.disable_drag_drop_handler();
+    builder.build()
 }
 
 /// Whether the window may navigate to `target`.
@@ -424,7 +568,7 @@ fn route<A>(path: &str, resolve: impl Fn(&str) -> Option<A>) -> Route<A> {
 
 #[cfg(test)]
 mod tests {
-    use super::{asset_response, navigation_allowed, route, Route};
+    use super::{asset_response, navigation_allowed, route, within_upload_limit, Route};
 
     /// The bug this covers shipped: `serve` answered with the bytes and the
     /// content type and dropped the policy, so the release build enforced no
@@ -451,6 +595,17 @@ mod tests {
                 .map(|v| v.to_str().expect("ascii header")),
             Some("text/html"),
         );
+    }
+
+    /// The page accepts a single file of exactly `MAX_UPLOAD_BYTES`, so the
+    /// shell has to as well: an off-by-one here would refuse a drop that the
+    /// very next check would have allowed, and the user would see a file
+    /// silently skipped with no cap having actually been exceeded.
+    #[test]
+    fn a_file_at_the_limit_is_read_and_one_byte_more_is_not() {
+        assert!(within_upload_limit(0, 100));
+        assert!(within_upload_limit(100, 100));
+        assert!(!within_upload_limit(101, 100));
     }
 
     /// Not every asset has one — the resolver returns `None` for anything that
