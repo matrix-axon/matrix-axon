@@ -76,6 +76,25 @@ The flags are the quickest path;
 `axon-tui` also reads `AXON_BASE_URL` / `AXON_TOKEN`, or a `~/.config/axon-tui/config.toml` with a `[server]` block (`base_url` / `bearer_token`).
 Note: minting a token creates a credential, which consumes the one-time web bootstrap if you haven't used it yet — so do the browser sign-in first if you want both the web client and the TUI.
 
+### Desktop app
+
+The same web client packaged as a native app — no browser tab, an OS-level window, and it remembers which server you use.
+Download the current build for your platform from the [releases page](https://github.com/matrix-axon/matrix-axon/releases):
+
+| Platform                      | File                            |
+| ----------------------------- | ------------------------------- |
+| macOS (Intel + Apple Silicon) | `Axon_<version>_universal.dmg`  |
+| Windows                       | `Axon_<version>_x64-setup.exe`  |
+| Debian / Ubuntu               | `Axon_<version>_amd64.deb`      |
+| Other Linux                   | `Axon_<version>_amd64.AppImage` |
+
+On first launch it asks for your Axon server's address — `http://<host>:8080` for the Compose stack above, or your Tailscale or TLS hostname — and then signs in exactly as the browser client does.
+Each release also carries `THIRDPARTY-axon-desktop.txt`, the full license disclosure for everything the app bundles.
+
+The macOS build is signed with a Developer ID certificate and notarized by Apple, so it opens without a Gatekeeper warning.
+The Windows and Linux builds are not signed yet, so SmartScreen and some Linux desktops will warn the first time you run them.
+Building the shell yourself is documented in [`clients/web/src-tauri/README.md`](clients/web/src-tauri/README.md).
+
 ## Architecture overview
 
 ```
@@ -89,12 +108,12 @@ See the [architecture diagram](docs/mvp/tech-spec.md#architecture-overview) for 
 
 ## Clients
 
-| Client                              | Platform                                              | Status                        |
-| ----------------------------------- | ----------------------------------------------------- | ----------------------------- |
-| [`axon-tui`](clients/tui/README.md) | Terminal                                              | Active (MVP reference client) |
-| [`axon-web`](clients/web/README.md) | Web browser + Windows/Linux/Mac desktop (Tauri)       | Active (nearing MVP)          |
-| `axon-desktop`                      | Linux, macOS, Windows (Tauri shell around `axon-web`) | In progress (ADR 0102)        |
-| `axon-mobile`                       | iOS + Android (the same shell)                        | Planned (ADR 0102)            |
+| Client                                            | Platform                                              | Status                                                                   |
+| ------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| [`axon-tui`](clients/tui/README.md)               | Terminal                                              | Active (MVP reference client)                                            |
+| [`axon-web`](clients/web/README.md)               | Web browser (desktop + mobile)                        | Active (nearing MVP)                                                     |
+| [`axon-desktop`](clients/web/src-tauri/README.md) | Linux, macOS, Windows (Tauri shell around `axon-web`) | Active ([download](https://github.com/matrix-axon/matrix-axon/releases)) |
+| `axon-mobile`                                     | iOS + Android (the same shell)                        | Planned (ADR 0102)                                                       |
 
 See [ADR 0031](docs/adr/0031-client-strategy.md) for the client strategy and sequencing.
 
