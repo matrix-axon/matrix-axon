@@ -25,8 +25,9 @@ name: Dependency advisories
 on:
   pull_request:
   schedule:
-    # Mondays, 07:00 UTC.
-    - cron: "0 7 * * 1"
+    # Mondays, 07:23 UTC — off the hour, so this does not queue behind
+    # everything else scheduled at :00. Same reasoning as `smoke.yml`.
+    - cron: "23 7 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -61,6 +62,17 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.20.2
+
+      # Deliberately uncached, and not for want of an `actions/cache` step.
+      # Nothing here compiles — cargo-deny reads lockfiles, and the tool
+      # arrives as a prebuilt binary — so the only thing worth caching is the
+      # advisory database, and that is the one thing that must not be.
+      #
+      # A stale database is a gate that has quietly stopped knowing about new
+      # advisories, which is precisely what the weekly run exists to catch:
+      # advisories published against code that has not changed. Caching it
+      # would trade the check's whole purpose for the ~10s it costs. These
+      # jobs finish in under 30 seconds as they are.
 
       - name: Check advisories
         run: cargo deny --manifest-path ${{ matrix.manifest }} --config deny.toml check advisories
