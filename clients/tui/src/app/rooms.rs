@@ -130,14 +130,11 @@ impl App {
         }
     }
 
-    /// Whether `key` is currently a favourite (`m.favourite`) or a not-yet
+    /// Whether `room` is currently a favourite (`m.favourite`) or a not-yet
     /// migrated local pin. Used by the renderer to draw the separator.
-    pub(crate) fn is_room_pinned(&self, key: &RoomKey) -> bool {
-        self.rooms
-            .rooms
-            .iter()
-            .any(|room| RoomKey::from(room) == *key && room.is_favourite())
-            || self.pinned_rooms.contains(key)
+    /// Callers already hold the `RoomDto`; do not look it up again (issue #189).
+    pub(crate) fn is_room_pinned(&self, room: &RoomDto) -> bool {
+        room.is_favourite() || self.pinned_rooms.contains(&RoomKey::from(room))
     }
 
     /// Re-sort the loaded rooms in place after a pin/unpin or sort-mode change,

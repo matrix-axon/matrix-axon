@@ -271,7 +271,7 @@ fn prepare_rooms(app: &mut App, areas: &PaneAreas) {
     // rooms that are pinned marks the boundary for the separator (ADR 0038).
     let pinned_visible_count = visible_indices
         .iter()
-        .take_while(|&&i| app.is_room_pinned(&RoomKey::from(&app.rooms.rooms[i])))
+        .take_while(|&&i| app.is_room_pinned(&app.rooms.rooms[i]))
         .count();
     app.rooms.page_size = rooms_page_size;
     app.rooms.scroll = divider_aware_room_scroll(

@@ -628,7 +628,7 @@ fn pin_room_sets_m_favourite_at_mid_range_order() {
     let room = &app.rooms.rooms[0];
     assert!(room.is_favourite());
     assert_eq!(room.favourite_order(), Some(0.5));
-    assert!(app.is_room_pinned(&RoomKey::from(room)));
+    assert!(app.is_room_pinned(room));
 }
 
 #[test]
@@ -644,7 +644,7 @@ fn unpin_room_clears_m_favourite() {
     app.unpin_room(None);
 
     assert!(!app.rooms.rooms[0].is_favourite());
-    assert!(!app.is_room_pinned(&RoomKey::from(&app.rooms.rooms[0])));
+    assert!(!app.is_room_pinned(&app.rooms.rooms[0]));
 }
 
 #[test]

@@ -1706,7 +1706,7 @@ impl App {
                     .unwrap_or(0)
                     > 0
             }
-            RoomFilter::Favorites => self.is_room_pinned(&RoomKey::from(room)),
+            RoomFilter::Favorites => self.is_room_pinned(room),
             RoomFilter::Name(q) => {
                 timeline::room_matches_search(room, q)
                     || timeline::contains_ascii_case_insensitive(&self.room_list_title(room), q)
