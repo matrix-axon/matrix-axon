@@ -684,6 +684,19 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(dir.join("tauri.conf.json")).unwrap())
                 .expect("tauri.conf.json parses");
 
+        // Required, not merely well-formed if present. The first version of
+        // this test skipped an absent key, and that is the more dangerous
+        // half: a missing `entitlements` is silent through signing,
+        // notarization and `spctl` — every check passes and the app simply
+        // has no camera. Observed exactly once, on a build made from a tree
+        // that predated the entitlements file.
+        assert_eq!(
+            config["bundle"]["macOS"]["entitlements"].as_str(),
+            Some("Entitlements.plist"),
+            "bundle.macOS.entitlements must name the entitlements file; without \
+             it the hardened runtime denies the camera and nothing reports it"
+        );
+
         // (what it is, where it is named)
         let referenced = [
             (
