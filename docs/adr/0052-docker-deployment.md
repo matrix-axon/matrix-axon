@@ -34,7 +34,8 @@ Several properties of the server make this tractable (established by reading the
 - **Config is env-friendly.** `AXON_`-prefixed vars (nested with `__`) override the TOML
   file; bare `DATABASE_URL` is honored. Relevant keys: `AXON_SERVER__HOST` / `__PORT`
   (default `127.0.0.1:8080`), `AXON_SERVER__ALLOW_INSECURE_BIND`, `AXON_SYNC__STORE_KEY`,
-  `AXON_SYNC__DATA_DIR`, `AXON_SEARCH__INDEX_PATH`, `AXON_MEDIA__CACHE_DIR`. Accounts
+  `AXON_SYNC__DATA_DIR`, `AXON_SEARCH__INDEX_PATH`, `AXON_MEDIA__CACHE_DIR`,
+  `AXON_MEDIA__UPLOADS_DIR`. Accounts
   are added at runtime via the API, not env/config (ADR 0024).
 - **A deliberate bind gate.** The server refuses a non-loopback bind over plain HTTP unless
   `AXON_SERVER__ALLOW_INSECURE_BIND=true` — it serves plain HTTP by design and expects TLS
@@ -193,7 +194,8 @@ Assets (all new; the dev `docker-compose.yml` is untouched):
   cargo-chef / cache mounts, `cargo build --release -p axon-server --bin axon`, `ARG
   GIT_HASH=unknown`. Runtime `debian:bookworm-slim` + `ca-certificates curl`, non-root user
   (uid 10001), `/var/lib/axon` data dir, `ENV AXON_CONFIG` + `AXON_SYNC__DATA_DIR` /
-  `AXON_SEARCH__INDEX_PATH` / `AXON_MEDIA__CACHE_DIR` under it, `VOLUME /var/lib/axon`,
+  `AXON_SEARCH__INDEX_PATH` / `AXON_MEDIA__CACHE_DIR` / `AXON_MEDIA__UPLOADS_DIR`
+  under it, `VOLUME /var/lib/axon`,
   `EXPOSE 8080`, `HEALTHCHECK curl -fsS localhost:8080/healthz`, entrypoint script.
 - **`deploy/entrypoint.sh`** — the thin idempotent `axon init` wrapper described in Decision 3.
 - **`deploy/run-docker.sh`** — one-shot operator bootstrap: brings the stack up (`--wait`),
