@@ -7,8 +7,8 @@
 #
 # `accepted` is deliberately identical to the root's rather than a superset. The
 # shell's whole graph was checked against that list before this file was
-# written: zero crates whose licence no accepted term satisfies, and zero with
-# no licence field. Folding the shell in therefore needed no policy change, and
+# written: zero crates whose license no accepted term satisfies, and zero with
+# no license field. Folding the shell in therefore needed no policy change, and
 # if that ever stops being true the generation should fail rather than quietly
 # widen the list here.
 #
@@ -26,7 +26,7 @@
 #
 # Accepting it is a smaller step than it looks: the LLVM exception only *grants*
 # permission on top of Apache-2.0, which is already accepted — it waives the
-# requirement to reproduce the licence when redistributing binaries and settles
+# requirement to reproduce the license when redistributing binaries and settles
 # GPLv2 compatibility. There is no additional obligation to comply with. The
 # root workspace has no crate carrying it, which is why the root list does not.
 

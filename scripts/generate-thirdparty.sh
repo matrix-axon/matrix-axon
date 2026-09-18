@@ -1,34 +1,60 @@
 #!/usr/bin/env bash
 #
-# Generates third-party license notice files THIRDPARTY
+# Generates the third-party license notices.
 #
 # Usage:
-#   scripts/generate-thirdparty.sh
+#   scripts/generate-thirdparty.sh                 # root workspace and desktop shell
+#   scripts/generate-thirdparty.sh --desktop-only  # the shell's two notices only
+#
+# One pinned cargo-about, here and in CI — `.github/workflows/desktop-build.yml`
+# runs this script and keys its cache on this file, so bumping the pin here is
+# the whole procedure. The output format changes between versions (regenerating
+# the root notice on a newer one came back 1,150 lines different with no crate
+# added or removed), so with a floating version "is the committed notice
+# stale?" has no answer, and the desktop job asks exactly that.
 set -euo pipefail
-if command -v cargo-about > /dev/null 2>&1;
-then
-  echo "cargo-about already installed."
+CARGO_ABOUT_VERSION=0.9.2
+
+desktop_only=false
+for arg in "$@"; do
+  case "$arg" in
+    --desktop-only) desktop_only=true ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+
+if [ "$(cargo-about --version 2> /dev/null || true)" = "cargo-about $CARGO_ABOUT_VERSION" ]; then
+  echo "cargo-about $CARGO_ABOUT_VERSION already installed."
 else
-  echo "Installing cargo-about..."
-  cargo install cargo-about --features="cli"
+  echo "Installing cargo-about $CARGO_ABOUT_VERSION..."
+  cargo install "cargo-about@$CARGO_ABOUT_VERSION" --locked --features=cli
   echo "Success."
 fi
-echo "Generating plaintext build/THIRDPARTY notice..."
-cargo-about generate --config ./build/about.toml ./build/about-plain.hbs > build/THIRDPARTY
-echo "Success."
-echo "Generating markdown THIRDPARTY.md notice..."
-cargo-about generate --config ./build/about.toml ./build/about-markdown.hbs > ./THIRDPARTY.md
-echo "Success."
+
+if [ "$desktop_only" = false ]; then
+  echo "Generating plaintext build/THIRDPARTY notice..."
+  cargo-about generate --config ./build/about.toml ./build/about-plain.hbs > build/THIRDPARTY
+  echo "Success."
+  echo "Generating markdown THIRDPARTY.md notice..."
+  cargo-about generate --config ./build/about.toml ./build/about-markdown.hbs > ./THIRDPARTY.md
+  echo "Success."
+fi
 
 # The desktop shell is a separate cargo workspace (ADR 0102), so the runs above
 # cannot see it: `cargo-about` walks one dependency graph, and `src-tauri` is
 # not in the root one. Until this existed, every crate compiled into the desktop
 # binary was absent from both notices above.
 #
-# `--manifest-path` rather than a second config wholesale: the accepted-licence
+# `--manifest-path` rather than a second config wholesale: the accepted-license
 # list is deliberately the same, and duplicating policy is how two lists drift.
 # `build/about-desktop.toml` differs only in the targets it names and in saying
 # why it exists.
+#
+# The plaintext notice is what the installers ship: `bundle.resources` in
+# `clients/web/src-tauri/tauri.conf.json` puts it inside the .deb, .dmg and
+# .exe as `THIRDPARTY.txt`. It is committed for that reason, and CI regenerates
+# it and fails on any difference, so a dependency change that forgets this
+# script cannot merge.
 DESKTOP_MANIFEST=clients/web/src-tauri/Cargo.toml
 echo "Generating plaintext build/THIRDPARTY-desktop notice..."
 cargo-about generate \

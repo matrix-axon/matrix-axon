@@ -162,6 +162,11 @@ CASES: list[tuple[str, set[str]]] = [
     ("docs/mvp/prd.md", {"prettier"}),
     # Generated wholesale by scripts/generate-thirdparty.sh; not ours to format.
     ("THIRDPARTY.md", set()),
+    ("clients/web/src-tauri/THIRDPARTY.md", set()),
+    # Also generated, and shipped inside the desktop installers via
+    # `bundle.resources` -- desktop-build.yml regenerates and diffs it, so no
+    # local hook needs to.
+    ("build/THIRDPARTY-desktop", set()),
     ("LICENSE.md", set()),
     ("scripts/check-hook-filters.py", {"hook-filters"}),
     # The notification escaping: the module, its test, and every caller that

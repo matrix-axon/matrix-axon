@@ -33,6 +33,18 @@ on:
     paths:
       - 'clients/web/src-tauri/**'
       - '.github/workflows/desktop-build.yml'
+      - '.github/actions/tauri-build/**'
+      # `checks` compiles the frontend the crate embeds, so the JS half of the
+      # shell (`@tauri-apps/*`) is an input to it.
+      - 'clients/web/package.json'
+      - 'clients/web/pnpm-lock.yaml'
+      # Everything `thirdparty` reads. Without these a change to the accepted
+      # licenses, the notice templates or the generator ran no gate until a
+      # tag was pushed — which is exactly when the release job would fail.
+      - 'build/about-desktop.toml'
+      - 'build/about-desktop-*.hbs'
+      - 'build/THIRDPARTY-desktop'
+      - 'scripts/generate-thirdparty.sh'
   workflow_dispatch:
     inputs:
       linux:
@@ -138,11 +150,14 @@ jobs:
 
   # The shell's 486 crates are in neither the root workspace's disclosure nor
   # the web bundle's npm one, because `cargo-about` walks a single dependency
-  # graph and `src-tauri` is a separate workspace. Generated here rather than
-  # trusting the copy committed to the repo, so a release cannot ship a notice
-  # that has drifted from what it actually built.
+  # graph and `src-tauri` is a separate workspace. The committed notice is what
+  # the installers ship (`bundle.resources` in tauri.conf.json puts it inside
+  # the .deb, .dmg and .exe), so this job regenerates it from the graph this
+  # build actually has and fails if the two differ — a release cannot ship a
+  # notice that has drifted from what it built, and a pull request that adds a
+  # dependency without regenerating cannot merge.
   thirdparty:
-    name: Generate the desktop license disclosure
+    name: Check the desktop license disclosure
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -155,31 +170,41 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Built from source rather than fetched by a prebuilt-binary action.
-      # `scripts/generate-thirdparty.sh` already installs it this way, and
+      # Built from source rather than fetched by a prebuilt-binary action:
       # adding a new third-party action to a *release* pipeline is a
       # supply-chain decision worth making deliberately rather than for a few
       # minutes of build time. The cache makes it a one-off.
+      #
+      # The version is pinned in the script, not here, and the cache is keyed
+      # on the script: bumping the pin is a cache miss, and a key that named a
+      # version the install did not enforce would describe nothing.
       - name: Cache cargo-about
         id: cache-about
         uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cargo-about
-          key: cargo-about-0.9.2-${{ runner.os }}
+          key: cargo-about-${{ runner.os }}-${{ hashFiles('scripts/generate-thirdparty.sh') }}
 
-      - name: Install cargo-about
-        if: steps.cache-about.outputs.cache-hit != 'true'
-        run: cargo install cargo-about --locked --features=cli
-
-      # Only the desktop notice. The root workspace's own disclosure belongs to
+      # The script installs the pinned cargo-about when the one on PATH is not
+      # it, and writes both desktop notices where the repo commits them. Only
+      # the desktop notices: the root workspace's disclosure belongs to
       # `cross-build.yml`, and regenerating it here would put a second copy of
       # it in every desktop release.
-      - name: Generate
+      - name: Regenerate the desktop notices
+        run: scripts/generate-thirdparty.sh --desktop-only
+
+      - name: Assert the committed notices match the dependency graph
         run: |
-          cargo-about generate \
-            --manifest-path clients/web/src-tauri/Cargo.toml \
-            --config ./build/about-desktop.toml \
-            ./build/about-desktop-plain.hbs > THIRDPARTY-axon-desktop.txt
+          if ! git diff --exit-code --stat -- build/THIRDPARTY-desktop clients/web/src-tauri/THIRDPARTY.md; then
+            echo "::error::the committed desktop license notice is stale. Run scripts/generate-thirdparty.sh --desktop-only and commit the result." >&2
+            exit 1
+          fi
+
+      # Also published on its own beside the installers, as cross-build.yml
+      # does for the server and TUI, for whoever wants the notice without
+      # installing anything.
+      - name: Collect
+        run: cp build/THIRDPARTY-desktop THIRDPARTY-axon-desktop.txt
 
       - name: Upload
         uses: actions/upload-artifact@v7
@@ -252,23 +277,10 @@ jobs:
       #
       # AppImage bundling downloads linuxdeploy and its GTK plugin at build
       # time; that needs network egress, which the runner has.
+      # Empty credentials are unset inside the action, which is what keeps
+      # "signing by presence" true — see `.github/actions/tauri-build`.
       - name: Build bundles
-        shell: bash
-        working-directory: clients/web
-        run: |
-          # GitHub materialises a *missing* secret as an empty string, not as an
-          # absent variable — and Tauri tests whether these are set, not whether
-          # they hold anything. Left as empty strings they select the signing
-          # path, which then fails in `security import` with no certificate to
-          # import. Unsetting them here is what actually makes "unsigned when
-          # there is nothing to sign with" true; `env:` above cannot express it.
-          for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
-                     APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD \
-                     APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY \
-                     TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
-            if [ -z "${!var:-}" ]; then unset "$var"; fi
-          done
-          pnpm tauri build
+        uses: ./.github/actions/tauri-build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -332,23 +344,10 @@ jobs:
       # certificate already installed in the runner's store — so switching it on
       # needs an import step plus a config field, not just a secret. The
       # reserved names are WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD.
+      # Empty credentials are unset inside the action, which is what keeps
+      # "signing by presence" true — see `.github/actions/tauri-build`.
       - name: Build bundles
-        shell: bash
-        working-directory: clients/web
-        run: |
-          # GitHub materialises a *missing* secret as an empty string, not as an
-          # absent variable — and Tauri tests whether these are set, not whether
-          # they hold anything. Left as empty strings they select the signing
-          # path, which then fails in `security import` with no certificate to
-          # import. Unsetting them here is what actually makes "unsigned when
-          # there is nothing to sign with" true; `env:` above cannot express it.
-          for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
-                     APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD \
-                     APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY \
-                     TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
-            if [ -z "${!var:-}" ]; then unset "$var"; fi
-          done
-          pnpm tauri build
+        uses: ./.github/actions/tauri-build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -437,22 +436,9 @@ jobs:
       # unset, Tauri produces an unsigned bundle rather than failing, which is
       # what makes this lane useful today.
       - name: Build the universal bundle
-        shell: bash
-        working-directory: clients/web
-        run: |
-          # GitHub materialises a *missing* secret as an empty string, not as an
-          # absent variable — and Tauri tests whether these are set, not whether
-          # they hold anything. Left as empty strings they select the signing
-          # path, which then fails in `security import` with no certificate to
-          # import. Unsetting them here is what actually makes "unsigned when
-          # there is nothing to sign with" true; `env:` above cannot express it.
-          for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
-                     APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD \
-                     APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY \
-                     TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
-            if [ -z "${!var:-}" ]; then unset "$var"; fi
-          done
-          pnpm tauri build --target universal-apple-darwin
+        uses: ./.github/actions/tauri-build
+        with:
+          args: --target universal-apple-darwin
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
