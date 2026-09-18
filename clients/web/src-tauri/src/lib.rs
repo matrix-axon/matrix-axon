@@ -28,6 +28,7 @@
 /// `pub` and in the library rather than `main.rs` because the mobile targets
 /// (M-W13) link this crate and call in through their own generated entry
 /// point; the desktop binary is a one-line caller of the same function.
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Before anything touches the webview: WebKitGTK has to be told not to use
     // its DMA-BUF renderer, or it draws nothing where a `<canvas>` should be.
@@ -380,8 +381,6 @@ fn main_window<R: tauri::Runtime>(
     };
     let builder = tauri::WebviewWindowBuilder::new(app, "main", url)
         .title("Axon")
-        .inner_size(1100.0, 760.0)
-        .min_inner_size(380.0, 480.0)
         // The window stays on the app's own origin, and this is the only thing
         // that says so. The CSP does not: `default-src 'self'` constrains where
         // resources are *fetched* from, not where the top-level document may
@@ -399,6 +398,17 @@ fn main_window<R: tauri::Runtime>(
         // real browser (`app.tsx`) — so anything that does reach this point is
         // something no code path intends, which is exactly what to refuse.
         .on_navigation(|target| navigation_allowed(target, cfg!(dev)));
+    // Desktop only, and not a tidiness cfg: on mobile the window *is* the
+    // screen, and iOS takes these literally rather than clamping them. Applied
+    // there, the webview is laid out 1100pt wide inside a 393pt screen — the
+    // page centres itself in a viewport three times the display, so the app
+    // renders its left edge somewhere off to the right — and 760pt tall inside
+    // 852, leaving a black band below it. It looks like the CSS lost the
+    // viewport, which is the wrong place to go looking.
+    #[cfg(desktop)]
+    let builder = builder
+        .inner_size(1100.0, 760.0)
+        .min_inner_size(380.0, 480.0);
     // Which process handles a file drag, and it cannot be both.
     //
     // Left enabled, Tauri swallows the drop and the page's own HTML5
