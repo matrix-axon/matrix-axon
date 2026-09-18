@@ -1642,9 +1642,20 @@ impl EventDto {
     }
 
     /// A human-readable label for media message types (`m.image`, `m.file`,
-    /// `m.audio`, `m.video`, `m.sticker`). Returns `None` for text messages
-    /// and non-message events.
+    /// `m.audio`, `m.video`, `m.sticker`), with the caption on the line after
+    /// it. Returns `None` for text messages and non-message events.
     fn media_label(&self) -> Option<String> {
+        let label = self.media_kind_label()?;
+        let suffix = self
+            .media_caption()
+            .map(|caption| format!("\n{caption}"))
+            .unwrap_or_default();
+        Some(format!("{label}{suffix}"))
+    }
+
+    /// The `[kind: filename]` label alone, without the caption. Returns `None`
+    /// for anything that is not a media message.
+    pub fn media_kind_label(&self) -> Option<String> {
         let media = self.parsed_media()?;
         let kind = match media.kind {
             MediaKind::Image => "image",
@@ -1653,11 +1664,21 @@ impl EventDto {
             MediaKind::Video => "video",
             MediaKind::Sticker => "sticker",
         };
-        let suffix = media
-            .caption
-            .map(|caption| format!("\n{caption}"))
-            .unwrap_or_default();
-        Some(format!("[{kind}: {}]{suffix}", media.filename))
+        Some(format!("[{kind}: {}]", media.filename))
+    }
+
+    /// The user-authored caption of any media message (MSC2530): `body`, but
+    /// only when an explicit `filename` is set and differs from it.
+    pub fn media_caption(&self) -> Option<&str> {
+        self.parsed_media()?.caption
+    }
+
+    /// A media message's caption as HTML. The spec uses `format` /
+    /// `formatted_body` on media *only* for a caption, so an uncaptioned media
+    /// event has none even if the fields are present.
+    pub fn media_formatted_caption(&self) -> Option<&str> {
+        self.media_caption()?;
+        self.formatted_body()
     }
 
     /// Returns `true` when this image/sticker event uses encrypted media

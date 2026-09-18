@@ -1899,9 +1899,15 @@ fn preview_target_size(
 /// loading or larger than the cap. Shared by the renderer and
 /// [`media_preview_modal_area`] so thumbnail suppression matches exactly where the
 /// modal is drawn (using the 88% max would hide thumbnails the modal never covers).
+///
+/// The modal is never narrower than its border text — the filename title and
+/// the close hint — so a small image does not truncate them; the image is then
+/// centered in the wider box. Both are still capped at the 88% max, where an
+/// over-long filename is shortened by [`preview_title`] instead.
 fn media_preview_layout(
     app: &App,
     screen: Rect,
+    filename: Option<&str>,
     caption: Option<&str>,
     media: &MediaKey,
 ) -> (Rect, Size, u16) {
@@ -1913,10 +1919,18 @@ fn media_preview_layout(
             .unwrap_or_else(|| Size::new(max_inner.width, max_inner.height)),
         _ => Size::new(max_inner.width, max_inner.height),
     };
-    // Reserve lines below the image for the caption text.
+    let text_w = display_width(&preview_title(filename, usize::MAX)).max(display_width(
+        &preview_close_hint(app, usize::MAX).to_string(),
+    ));
+    let content_w = target_size
+        .width
+        .max(u16::try_from(text_w).unwrap_or(u16::MAX))
+        .min(max_inner.width);
+    // Reserve lines below the image for the caption text, wrapped to the
+    // width it is actually drawn at.
     let caption_h = caption
         .map(|c| {
-            let w = (target_size.width as usize).max(1);
+            let w = (content_w as usize).max(1);
             wrap_rich_lines(plain_rich_lines(c), w, w).len() as u16
         })
         .unwrap_or(0);
@@ -1924,14 +1938,51 @@ fn media_preview_layout(
     // Compute the popup area from target_size now — before we know whether the
     // protocol is ready — so the border never jumps when encoding finishes.
     let content_h = target_size.height.saturating_add(caption_h);
-    let area = if target_size.width < max_inner.width || content_h < max_inner.height {
+    let area = if content_w < max_inner.width || content_h < max_inner.height {
         // Add 1-cell border on each side and center with the same helper used
         // everywhere else, avoiding independent centering arithmetic here.
-        centered_size(target_size.width + 2, content_h + 2, screen)
+        centered_size(content_w + 2, content_h + 2, screen)
     } else {
         max_area
     };
     (area, target_size, caption_h)
+}
+
+/// The media preview's top border title: the filename, padded off the corner,
+/// shortened to `max_width` columns by [`elide_middle`].
+fn preview_title(filename: Option<&str>, max_width: usize) -> String {
+    let name = filename.unwrap_or("Image Preview");
+    format!(" {} ", elide_middle(name, max_width.saturating_sub(2)))
+}
+
+/// The media preview's bottom border hint, naming the configured close key,
+/// shortened to `max_width` columns the same way the title is. The modal is
+/// sized to fit this text, so it only shortens when the screen itself is the
+/// binding constraint — a narrow terminal, or a long custom key label.
+fn preview_close_hint(app: &App, max_width: usize) -> Line<'static> {
+    let hint = format!(" {} to close ", app.shortcuts.clear_input.label());
+    Line::from(elide_middle(&hint, max_width)).centered()
+}
+
+/// Shorten `text` to at most `max_width` columns by replacing its middle with
+/// `...`, so both the start and the end — for a filename, its extension —
+/// stay visible.
+fn elide_middle(text: &str, max_width: usize) -> String {
+    if display_width(text) <= max_width {
+        return text.to_owned();
+    }
+    if max_width <= 3 {
+        return take_display_width(text, max_width);
+    }
+    let keep = max_width - 3;
+    let tail_w = keep / 2;
+    let head = take_display_width(text, keep - tail_w);
+    let reversed: String = text.chars().rev().collect();
+    let tail: String = take_display_width(&reversed, tail_w)
+        .chars()
+        .rev()
+        .collect();
+    format!("{head}...{tail}")
 }
 
 /// The screen rect the media-preview modal occupies, for thumbnail-suppression.
@@ -1939,14 +1990,18 @@ fn media_preview_layout(
 /// "no image" placeholder, which fills `max_area`).
 fn media_preview_modal_area(app: &App, screen: Rect) -> Rect {
     let max_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, screen);
-    let Some((media, caption)) = app.selected_message_event().and_then(|event| {
+    let Some((media, filename, caption)) = app.selected_message_event().and_then(|event| {
         event.image_mxc().map(|(account_id, mxc_url)| {
-            (MediaKey::new(account_id, mxc_url), event.image_caption())
+            (
+                MediaKey::new(account_id, mxc_url),
+                event.image_filename(),
+                event.image_caption(),
+            )
         })
     }) else {
         return max_area;
     };
-    media_preview_layout(app, screen, caption.as_deref(), &media).0
+    media_preview_layout(app, screen, filename.as_deref(), caption.as_deref(), &media).0
 }
 
 fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) -> Option<Rect> {
@@ -1967,7 +2022,14 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) -> O
 
     let Some((media, encrypted, filename, caption)) = selected else {
         let block = Block::default()
-            .title("Image Preview  (Esc to close)")
+            .title(preview_title(
+                None,
+                max_area.width.saturating_sub(2) as usize,
+            ))
+            .title_bottom(preview_close_hint(
+                app,
+                max_area.width.saturating_sub(2) as usize,
+            ))
             .borders(Borders::ALL)
             .border_style(border_style);
         let inner = block.inner(max_area);
@@ -1977,30 +2039,35 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) -> O
         return None;
     };
 
-    let title = filename
-        .as_deref()
-        .map(|n| format!("{n}  (Esc to close)"))
-        .unwrap_or_else(|| "Image Preview  (Esc to close)".to_owned());
-
     app.request_image(media.account_id, media.mxc_url.clone(), encrypted);
 
     // Size the modal to the image (shared with blocking_popup_area so thumbnail
     // suppression matches exactly where the modal is drawn).
     let (area, target_size, caption_h) =
-        media_preview_layout(app, screen, caption.as_deref(), &media);
+        media_preview_layout(app, screen, filename.as_deref(), caption.as_deref(), &media);
     let block = Block::default()
-        .title(title.as_str())
+        .title(preview_title(
+            filename.as_deref(),
+            area.width.saturating_sub(2) as usize,
+        ))
+        .title_bottom(preview_close_hint(
+            app,
+            area.width.saturating_sub(2) as usize,
+        ))
         .borders(Borders::ALL)
         .border_style(border_style);
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
 
-    // Split inner into image area (top) and caption area (bottom).
+    // Split inner into image area (top) and caption area (bottom). The modal
+    // can be wider than the image (see `media_preview_layout`), so the image
+    // area is centered rather than anchored at the left edge.
+    let image_w = target_size.width.min(inner.width);
     let image_area = Rect::new(
-        inner.x,
+        inner.x + (inner.width - image_w) / 2,
         inner.y,
-        inner.width,
+        image_w,
         target_size.height.min(inner.height),
     );
     let caption_area = (caption_h > 0 && inner.height > target_size.height).then(|| {
@@ -3921,6 +3988,91 @@ mod tests {
     }
 
     #[test]
+    fn elide_middle_keeps_the_start_and_the_extension() {
+        assert_eq!(elide_middle("photo.jpg", 20), "photo.jpg");
+        assert_eq!(
+            elide_middle("IMG_20260916_123456.jpg", 15),
+            "IMG_20...56.jpg"
+        );
+        assert_eq!(
+            display_width(&elide_middle("IMG_20260916_123456.jpg", 15)),
+            15
+        );
+        // Wide characters are measured by display width, not chars; an odd
+        // budget cannot always be filled exactly, but is never exceeded.
+        assert!(display_width(&elide_middle("漢字漢字漢字.png", 9)) <= 9);
+        assert_eq!(elide_middle("abcdef", 3), "abc");
+    }
+
+    fn preview_test_app(image_px: (u32, u32)) -> (App, crate::app::MediaKey) {
+        use crate::app::MediaKey;
+        use std::sync::Arc;
+
+        let mut app = App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(), // font size 10x20
+        );
+        let media = MediaKey::new(Uuid::from_u128(1), "mxc://example.com/tiny".to_owned());
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(image_px.0, image_px.1));
+        app.image_cache
+            .insert(media.clone(), ImageState::Ready(Arc::new(img)));
+        (app, media)
+    }
+
+    #[test]
+    fn preview_modal_is_wide_enough_for_its_border_text_around_a_tiny_image() {
+        // 20x20 px -> 2x1 cells, far narrower than either border text.
+        let (app, media) = preview_test_app((20, 20));
+        let screen = Rect::new(0, 0, 200, 60);
+        let filename = "IMG_20260916_123456.jpg";
+        let (area, target, _) = media_preview_layout(&app, screen, Some(filename), None, &media);
+
+        let inner_w = area.width as usize - 2;
+        assert!(target.width < 5, "the image itself stays tiny: {target:?}");
+        assert!(inner_w >= display_width(&preview_title(Some(filename), usize::MAX)));
+        assert!(inner_w >= display_width(&preview_close_hint(&app, usize::MAX).to_string()));
+        // Still a small modal, not the 88% max.
+        let max_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, screen);
+        assert!(area.width < max_area.width && area.height < max_area.height);
+    }
+
+    #[test]
+    fn preview_close_hint_is_shortened_rather_than_clipped_by_a_narrow_modal() {
+        let (app, media) = preview_test_app((20, 20));
+        // Narrow enough that the 88% max cannot hold the hint: the modal is
+        // sized to fit it everywhere else, so only the screen binds here.
+        let screen = Rect::new(0, 0, 14, 20);
+        let (area, _, _) = media_preview_layout(&app, screen, Some("a.jpg"), None, &media);
+
+        let inner_w = area.width as usize - 2;
+        let hint = preview_close_hint(&app, inner_w).to_string();
+        assert!(
+            display_width(&hint) <= inner_w,
+            "hint {hint:?} wider than {inner_w}"
+        );
+        assert!(
+            hint.contains("..."),
+            "shortened, not hard-clipped: {hint:?}"
+        );
+    }
+
+    #[test]
+    fn preview_modal_caps_an_overlong_filename_at_the_max_width() {
+        let (app, media) = preview_test_app((20, 20));
+        let screen = Rect::new(0, 0, 60, 30);
+        let filename = format!("{}.jpg", "x".repeat(200));
+        let (area, _, _) = media_preview_layout(&app, screen, Some(&filename), None, &media);
+
+        let max_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, screen);
+        assert!(area.width <= max_area.width, "{area:?} vs {max_area:?}");
+        let title = preview_title(Some(&filename), area.width as usize - 2);
+        assert!(display_width(&title) <= area.width as usize - 2);
+        assert!(title.ends_with(".jpg "), "extension kept: {title}");
+    }
+
+    #[test]
     fn preview_modal_area_shrinks_to_image_so_outside_thumbnails_survive() {
         use crate::app::MediaKey;
         use std::sync::Arc;
@@ -3939,7 +4091,7 @@ mod tests {
 
         let screen = Rect::new(0, 0, 200, 60);
         let max_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, screen);
-        let (area, _, _) = media_preview_layout(&app, screen, None, &media);
+        let (area, _, _) = media_preview_layout(&app, screen, None, None, &media);
 
         // The modal hugs the image rather than filling the 88% max.
         assert!(

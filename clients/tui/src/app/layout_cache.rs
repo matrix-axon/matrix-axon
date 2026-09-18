@@ -141,6 +141,10 @@ fn layout_digest(inputs: &LayoutInputs<'_>) -> u64 {
         event.display_body().hash(&mut hasher);
         event.formatted_body().hash(&mut hasher);
         event.image_mxc().hash(&mut hasher);
+        event.image_filename().hash(&mut hasher);
+        event.media_kind_label().hash(&mut hasher);
+        event.media_caption().hash(&mut hasher);
+        event.media_formatted_caption().hash(&mut hasher);
         event.membership_change().hash(&mut hasher);
     }
     sender_labels.hash(&mut hasher);
