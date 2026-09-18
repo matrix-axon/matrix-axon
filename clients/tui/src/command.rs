@@ -238,7 +238,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/pin [room], /unpin [room]",
         insert_text: "/pin ",
-        description: "pin (or unpin) a room to the top of list; default current room",
+        description: "pin (or unpin) a room as a Matrix favourite; default current room",
     },
     HelpCommand {
         label: "/filter [all|dms|groups|unread|fav|<text>]",

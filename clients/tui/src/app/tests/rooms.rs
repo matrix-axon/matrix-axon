@@ -6,10 +6,12 @@ use crate::app::*;
 
 #[test]
 fn visible_room_indices_filters_dms_groups_unread_and_favorites() {
-    // index 0: a DM (no name/alias); 1: a named group; 2: another DM.
-    let dm1 = room("!dm1:example.com", None, None);
+    // index 0: a DM; 1: a named group; 2: another DM.
+    let mut dm1 = room("!dm1:example.com", None, None);
+    dm1.is_direct = true;
     let group = room("!g:example.com", None, Some("Team"));
-    let dm2 = room("!dm2:example.com", None, None);
+    let mut dm2 = room("!dm2:example.com", None, None);
+    dm2.is_direct = true;
     let mut app = app_with_rooms(vec![dm1.clone(), group.clone(), dm2.clone()]);
     // No selection, so the "keep selected visible" rule never interferes.
     app.rooms.selected = None;
@@ -28,8 +30,12 @@ fn visible_room_indices_filters_dms_groups_unread_and_favorites() {
     app.room_filter = RoomFilter::Unread;
     assert_eq!(app.visible_room_indices(), vec![1]);
 
-    // Pin dm2; favorites shows only pinned rooms.
-    app.pinned_rooms = vec![RoomKey::from(&dm2)];
+    // Favourite dm2; favorites shows only favourite rooms.
+    dm2.tags.push(crate::api::RoomTag {
+        name: crate::api::FAVOURITE_TAG.to_owned(),
+        order: Some(0.5),
+    });
+    app.rooms.rooms[2] = dm2.clone();
     app.room_filter = RoomFilter::Favorites;
     assert_eq!(app.visible_room_indices(), vec![2]);
 
@@ -93,7 +99,8 @@ async fn date_jump_prompt_ignores_message_navigation_shortcuts() {
 
 #[test]
 fn visible_room_indices_always_keeps_selected_room_visible() {
-    let dm = room("!dm:example.com", None, None);
+    let mut dm = room("!dm:example.com", None, None);
+    dm.is_direct = true;
     let group = room("!g:example.com", None, Some("Team"));
     let mut app = app_with_rooms(vec![dm, group]);
     // Select the DM, then apply a Groups filter that would hide it.
@@ -605,4 +612,219 @@ fn own_message_color_applies_without_send_echo() {
     .lines;
 
     assert_eq!(lines[1].spans[2].style.fg, Some(colors.own_message_sender));
+}
+
+#[test]
+fn pin_room_sets_m_favourite_at_mid_range_order() {
+    let mut app = app_with_rooms(vec![room(
+        "!room:example.com",
+        Some("#room:example.com"),
+        Some("Ops"),
+    )]);
+    app.rooms.selected = Some(0);
+
+    app.pin_room(None);
+
+    let room = &app.rooms.rooms[0];
+    assert!(room.is_favourite());
+    assert_eq!(room.favourite_order(), Some(0.5));
+    assert!(app.is_room_pinned(room));
+}
+
+#[test]
+fn unpin_room_clears_m_favourite() {
+    let mut favourite = room("!room:example.com", None, Some("Ops"));
+    favourite.tags.push(crate::api::RoomTag {
+        name: crate::api::FAVOURITE_TAG.to_owned(),
+        order: Some(0.5),
+    });
+    let mut app = app_with_rooms(vec![favourite]);
+    app.rooms.selected = Some(0);
+
+    app.unpin_room(None);
+
+    assert!(!app.rooms.rooms[0].is_favourite());
+    assert!(!app.is_room_pinned(&app.rooms.rooms[0]));
+}
+
+#[test]
+fn pin_migration_discards_local_pins_when_homeserver_has_favourites() {
+    let mut favourite = room("!fav:example.com", None, Some("Fav"));
+    favourite.tags.push(crate::api::RoomTag {
+        name: crate::api::FAVOURITE_TAG.to_owned(),
+        order: Some(0.25),
+    });
+    let local = room("!local:example.com", None, Some("Local"));
+    let mut app = app_with_rooms(vec![favourite.clone(), local.clone()]);
+    app.pinned_rooms = vec![RoomKey::from(&local)];
+    app.set_accounts(vec![account_with_id(
+        Uuid::nil(),
+        "@alice:example.com",
+        AccountState::Active,
+    )]);
+
+    app.maybe_start_pin_migration();
+
+    assert!(app.pinned_rooms.is_empty());
+    assert_eq!(app.pin_migration, PinMigration::Done);
+}
+
+#[test]
+fn a_pin_this_session_does_not_count_as_homeserver_favourites() {
+    let first = room("!a:example.com", None, Some("A"));
+    let second = room("!b:example.com", None, Some("B"));
+    let mut app = app_with_rooms(vec![first.clone(), second.clone()]);
+    app.pinned_rooms = vec![RoomKey::from(&first), RoomKey::from(&second)];
+    app.server_favourite_accounts = Some(std::collections::HashSet::new());
+    app.set_accounts(vec![account_with_id(
+        Uuid::nil(),
+        "@alice:example.com",
+        AccountState::Active,
+    )]);
+    app.rooms.selected = Some(0);
+    app.pin_room(None);
+
+    app.maybe_start_pin_migration();
+
+    assert!(app.rooms.rooms[0].is_favourite());
+    assert!(
+        app.rooms.rooms[1].is_favourite() || app.pin_migration != PinMigration::Pending,
+        "the leftover local pin must be uploaded, not discarded as a homeserver win"
+    );
+}
+
+#[test]
+fn pin_migration_drops_pins_for_rooms_no_longer_in_the_list() {
+    let here = room("!here:example.com", None, Some("Here"));
+    let mut app = app_with_rooms(vec![here.clone()]);
+    app.pinned_rooms = vec![
+        RoomKey::from(&here),
+        RoomKey {
+            account_id: Uuid::nil(),
+            room_id: "!gone:example.com".to_owned(),
+        },
+    ];
+    app.set_accounts(vec![account_with_id(
+        Uuid::nil(),
+        "@alice:example.com",
+        AccountState::Active,
+    )]);
+
+    app.maybe_start_pin_migration();
+
+    assert!(app.rooms.rooms[0].is_favourite());
+    assert!(!app
+        .pinned_rooms
+        .iter()
+        .any(|key| key.room_id == "!gone:example.com"));
+}
+
+#[test]
+fn pin_migration_uploads_known_accounts_without_waiting_on_others() {
+    let mine = Uuid::from_u128(1);
+    let other = Uuid::from_u128(2);
+    let mut visible = room("!mine:example.com", None, Some("Mine"));
+    visible.account_id = mine;
+    let mut app = app_with_rooms(vec![visible.clone()]);
+    app.pinned_rooms = vec![
+        RoomKey::from(&visible),
+        RoomKey {
+            account_id: other,
+            room_id: "!other:example.com".to_owned(),
+        },
+    ];
+    app.set_accounts(vec![
+        account_with_id(mine, "@me:example.com", AccountState::Active),
+        account_with_id(other, "@other:example.com", AccountState::Active),
+    ]);
+
+    app.maybe_start_pin_migration();
+
+    assert!(app.rooms.rooms[0].is_favourite());
+    assert_eq!(app.pinned_rooms.len(), 1);
+    assert_eq!(app.pinned_rooms[0].account_id, other);
+}
+
+#[test]
+fn pin_migration_does_not_start_while_a_tag_write_is_in_flight() {
+    let room = room("!room:example.com", None, Some("Ops"));
+    let mut app = app_with_rooms(vec![room.clone()]);
+    app.pinned_rooms = vec![RoomKey::from(&room)];
+    app.tag_write_busy = true;
+    app.set_accounts(vec![account_with_id(
+        Uuid::nil(),
+        "@alice:example.com",
+        AccountState::Active,
+    )]);
+
+    app.maybe_start_pin_migration();
+
+    assert_eq!(app.pin_migration, PinMigration::Pending);
+    assert_eq!(app.pinned_rooms.len(), 1);
+    assert!(!app.rooms.rooms[0].is_favourite());
+}
+
+#[tokio::test]
+async fn a_failed_pin_keeps_the_local_pin() {
+    let room = room("!room:example.com", None, Some("Ops"));
+    let key = RoomKey::from(&room);
+    let mut app = app_with_rooms(vec![room]);
+    app.client = AxonClient::new("http://127.0.0.1:1".to_owned(), None);
+    app.pinned_rooms = vec![key.clone()];
+    app.rooms.selected = Some(0);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.set_tag_write_sender(tx);
+
+    app.pin_room(None);
+
+    assert!(
+        app.pinned_rooms.contains(&key),
+        "must not drop the local pin before the PUT"
+    );
+    let outcome = rx.recv().await.expect("pin write outcome");
+    assert!(outcome.result.is_err());
+    app.handle_tag_write_outcome(outcome).await;
+
+    assert!(app.pinned_rooms.contains(&key));
+    assert!(!app.rooms.rooms[0].is_favourite());
+}
+
+#[test]
+fn account_data_changed_patches_tags_and_resorts() {
+    let older = room("!a:example.com", None, Some("A"));
+    let newer = room("!b:example.com", None, Some("B"));
+    let mut app = app_with_rooms(vec![newer.clone(), older.clone()]);
+    app.rooms.rooms[0].last_activity_ts = 9;
+    app.rooms.rooms[1].last_activity_ts = 1;
+
+    app.apply_account_data_changed(
+        Uuid::nil(),
+        crate::api::AccountDataChangedDto {
+            room_id: Some("!a:example.com".to_owned()),
+            event_type: "m.tag".to_owned(),
+            content: serde_json::json!({ "tags": { "m.favourite": { "order": 0.1 } } }),
+        },
+    );
+
+    assert!(app.rooms.rooms[0].is_favourite());
+    assert_eq!(app.rooms.rooms[0].room_id, "!a:example.com");
+}
+
+#[test]
+fn account_data_changed_patches_is_direct() {
+    let mut room = room("!dm:example.com", None, Some("Alice"));
+    room.is_direct = false;
+    let mut app = app_with_rooms(vec![room]);
+
+    app.apply_account_data_changed(
+        Uuid::nil(),
+        crate::api::AccountDataChangedDto {
+            room_id: None,
+            event_type: "m.direct".to_owned(),
+            content: serde_json::json!({ "@alice:example.com": ["!dm:example.com"] }),
+        },
+    );
+
+    assert!(app.rooms.rooms[0].is_direct);
+    assert!(is_likely_dm(&app.rooms.rooms[0]));
 }

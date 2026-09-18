@@ -45,6 +45,7 @@ mod render;
 mod room_actions;
 mod rooms;
 mod search_flow;
+pub(crate) mod tags;
 mod timeline;
 mod typing;
 
@@ -55,7 +56,12 @@ pub(crate) use render::{
     ThreadBadge, IMAGE_THUMB_ROWS,
 };
 pub(crate) use room_actions::{PendingRoomAction, RoomActionOutcome};
+#[cfg(test)]
+pub(crate) use rooms::is_likely_dm;
 pub(crate) use rooms::{account_localpart, apply_edits, dm_title_from_members};
+#[cfg(test)]
+pub(crate) use tags::PinMigration;
+pub(crate) use tags::TagWriteOutcome;
 #[cfg(test)]
 use timeline::should_show_event;
 use timeline::MEMBERS_WORKERS;
@@ -436,13 +442,13 @@ pub(crate) enum SearchKind {
 pub(crate) enum RoomFilter {
     #[default]
     All,
-    /// Direct messages only (interim heuristic — see [`is_likely_dm`]).
+    /// Direct messages only (`RoomDto.is_direct`).
     Dms,
     /// Group (non-DM) rooms only.
     Groups,
     /// Rooms with unread messages only.
     Unread,
-    /// Pinned rooms only.
+    /// Favourite rooms only (`m.favourite`).
     Favorites,
     /// Rooms whose name/alias/topic/id contains the (lowercased) query.
     Name(String),
@@ -699,7 +705,7 @@ impl RoomKey {
     }
 
     /// Serialize to the `"account_id:room_id"` form stored in the config file.
-    fn to_config_entry(&self) -> String {
+    pub(crate) fn to_config_entry(&self) -> String {
         format!("{}:{}", self.account_id, self.room_id)
     }
 }
@@ -805,6 +811,10 @@ pub(crate) struct App {
     /// Sender for results of in-flight M19 room actions spawned off the event
     /// loop. `None` until the main loop wires up the channel (and in unit tests).
     pub(crate) room_action_tx: Option<mpsc::UnboundedSender<RoomActionOutcome>>,
+    /// Sender for `m.favourite` pin/unpin/migration writes. `None` in unit tests.
+    pub(crate) tag_write_tx: Option<mpsc::UnboundedSender<TagWriteOutcome>>,
+    /// True while a favourite tag write is in flight.
+    pub(crate) tag_write_busy: bool,
     /// User-toggled hide for the accounts panel (independent of account count).
     pub(crate) accounts_panel_hidden: bool,
     /// User-toggled hide for the rooms panel.
@@ -821,10 +831,16 @@ pub(crate) struct App {
     /// Filter active before a live name-filter input began, restored if the user
     /// presses Esc to abandon it (ADR 0042). `None` outside name-filter input.
     pub(crate) room_filter_before_input: Option<RoomFilter>,
-    /// Pinned rooms, ordered most recently pinned first (index 0 = top of the
-    /// pinned section). Persisted to `[display] pinned_rooms` in the config file
-    /// on every pin/unpin. See ADR 0038.
+    /// Legacy `[display] pinned_rooms` awaiting one-shot migration to
+    /// `m.favourite` (ADR 0103). Empty once migrated or when the homeserver
+    /// already had favourites. Overlay-sorted until the PUTs land.
     pub(crate) pinned_rooms: Vec<RoomKey>,
+    /// Local-pin migration state for this session.
+    pub(crate) pin_migration: tags::PinMigration,
+    /// Accounts that already had `m.favourite` on the first room list, captured
+    /// once so a pin we write this session is not mistaken for "homeserver
+    /// wins" (ADR 0103). `None` until the first non-empty list lands.
+    pub(crate) server_favourite_accounts: Option<HashSet<Uuid>>,
     /// Display titles derived from members for rooms with no `m.room.name`/alias
     /// (e.g. DMs), so the room list shows the other participant's name instead of
     /// the raw room id. Filled lazily by background `/members` fetches.
@@ -1193,6 +1209,8 @@ impl App {
             media_send_busy: false,
             room_action_busy: false,
             room_action_tx: None,
+            tag_write_tx: None,
+            tag_write_busy: false,
             image_cache: HashMap::new(),
             image_cache_order: VecDeque::new(),
             media_tx: None,
@@ -1244,6 +1262,8 @@ impl App {
             room_sort,
             room_filter_before_input: None,
             pinned_rooms,
+            pin_migration: tags::PinMigration::Pending,
+            server_favourite_accounts: None,
             room_titles: HashMap::new(),
             device_id: Uuid::nil(),
             drafts: HashMap::new(),
@@ -1265,6 +1285,10 @@ impl App {
 
     pub(crate) fn set_room_action_sender(&mut self, tx: mpsc::UnboundedSender<RoomActionOutcome>) {
         self.room_action_tx = Some(tx);
+    }
+
+    pub(crate) fn set_tag_write_sender(&mut self, tx: mpsc::UnboundedSender<TagWriteOutcome>) {
+        self.tag_write_tx = Some(tx);
     }
 
     /// Wire up the channel the main loop drains for completed startup stages
@@ -1478,6 +1502,7 @@ impl App {
         self.lifecycle_busy
             || self.media_send_busy
             || self.room_action_busy
+            || self.tag_write_busy
             || matches!(
                 self.mode,
                 Mode::LoginUsername
@@ -1681,7 +1706,7 @@ impl App {
                     .unwrap_or(0)
                     > 0
             }
-            RoomFilter::Favorites => self.is_room_pinned(&RoomKey::from(room)),
+            RoomFilter::Favorites => self.is_room_pinned(room),
             RoomFilter::Name(q) => {
                 timeline::room_matches_search(room, q)
                     || timeline::contains_ascii_case_insensitive(&self.room_list_title(room), q)
