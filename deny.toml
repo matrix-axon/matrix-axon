@@ -1,0 +1,60 @@
+# cargo-deny: advisories only.
+#
+# Licences are already gated, by `cargo-about` against the `accepted` list in
+# `build/about.toml`, enforced through `scripts/generate-thirdparty.sh` and
+# shipped as THIRDPARTY.md. Turning on cargo-deny's own `[licenses]` would put
+# two allowlists in the repo that must agree and would disagree silently, which
+# is the failure ADR 0092 exists to end. One list, in the tool that already
+# produces the disclosure users receive.
+#
+# `[bans]` is off for the same reason in reverse: nothing enforces a duplicate
+# policy today, so switching it on would fail the build on pre-existing
+# duplicates that nobody has decided about. Worth doing deliberately, not as a
+# side effect of wanting advisories.
+
+[advisories]
+# Fail on anything the database knows about, including unmaintained crates.
+# `unmaintained = "workspace"` limits that last one to crates this repo names
+# directly, since an unmaintained transitive dependency is not something a
+# lockfile edit here can fix.
+version = 2
+# Every unmaintained crate, transitive ones included. The narrower
+# `"workspace"` setting was tried first and rejected on review: it would have
+# hidden the ten below, but it would equally have hidden the eleventh, and the
+# point of a gate is to say something when the situation changes. The cost is
+# an ignore list that has to be revisited rather than accumulated -- see #427.
+unmaintained = "all"
+yanked = "deny"
+
+# The database here is RustSec's, which is **not** a superset of GitHub's.
+# GHSA-wrw7-89jp-8q8g — unsoundness in `glib::VariantStrIter`, which Dependabot
+# reports against the desktop shell — carries no CVE and no RUSTSEC id, and
+# cargo-deny does not see it at all (verified: it is not reported by either
+# workspace, with or without an ignore entry). So this lane *complements*
+# Dependabot rather than replacing it, and an empty `ignore` list is not
+# evidence that nothing is outstanding. See #413.
+#
+# Every entry below needs a reason and a way out, or the list becomes a place
+# advisories go to be forgotten. That is a standing risk rather than a solved
+# one: nothing expires these, and an unmaintained crate that later gains a
+# *vulnerability* would still be reported, but one that is simply fixed
+# upstream would sit here unnoticed. #427 is the scheduled re-read.
+# One config per cargo workspace, not one shared. cargo-deny warns
+# `advisory-not-detected` for an ignore entry that matched nothing — which is
+# precisely how a stale entry announces itself, and the only thing that makes
+# this list revisitable rather than accumulative. Shared across two workspaces
+# every entry is unmatched in one of them, and the signal is destroyed by
+# noise. The three lines of policy above are duplicated in
+# `clients/web/src-tauri/deny.toml`; that is the cheaper half to keep in step,
+# since it is the half that does not change.
+ignore = [
+  # --- Root workspace -------------------------------------------------------
+  # Each of these is unmaintained rather than vulnerable, and each arrives
+  # through a dependency this repo does not choose. None can be resolved by a
+  # lockfile edit here; all clear from above when the crate naming them moves.
+  { id = "RUSTSEC-2026-0247", reason = "bitmaps, via imbl <- eyeball-im <- matrix-sdk-ui" },
+  { id = "RUSTSEC-2024-0436", reason = "paste, via sqlx-core" },
+  { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2, via aquamarine" },
+  # RustSec's own entry says "No safe upgrade is available".
+  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile, via sqlx-core; no upgrade exists" },
+]

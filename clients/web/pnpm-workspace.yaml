@@ -5,6 +5,12 @@ allowBuilds:
 # Workspace level graph overrides
 overrides:
   'openapi-typescript@7.13.0>typescript': '~6.0.3'
+  # GHSA-2883-xcg3-v3hh: js-yaml's `maxTotalMergeKeys` did not bound CPU use on
+  # a merge-key bomb. Our own dependency is already 4.3.2; this reaches the copy
+  # `@redocly/openapi-core` pins, which is a dev-only path (it builds the
+  # generated API client) but still runs on developer machines and in CI. A
+  # patch bump within the same major, so nothing else moves.
+  'js-yaml@<4.3.2': '^4.3.2'
 
 # Peer dependency suppression rules
 peerDependencyRules:

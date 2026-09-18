@@ -1,0 +1,30 @@
+# cargo-deny for the desktop shell, whose workspace is separate from the root
+# one (ADR 0102) and whose dependency graph is almost entirely Tauri's.
+#
+# Policy is deliberately identical to the root `deny.toml`; see its header for
+# why licences and `[bans]` are left to other tools. What differs, and the
+# reason this is a second file rather than a shared one, is the ignore list:
+# cargo-deny warns when an ignore entry matches nothing, which is how a stale
+# entry announces itself. One shared list would make every entry unmatched in
+# one workspace or the other and bury that signal.
+
+[advisories]
+version = 2
+unmaintained = "all"
+yanked = "deny"
+
+# Every entry needs a reason and a way out. #427 is the scheduled re-read.
+ignore = [
+
+  # `proc-macro-error` arrives through glib, which Tauri's GTK stack pins at
+  # ^0.18 -- the same pin that makes GHSA-wrw7-89jp-8q8g unfixable there (#413).
+  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error, via glib 0.18 (see #413)" },
+  # The five `unic-*` crates are one family, reached only through `urlpattern`,
+  # which is Tauri's own (tauri-plugin-http and tauri-utils). They move
+  # together or not at all.
+  { id = "RUSTSEC-2025-0081", reason = "unic-char-property, via urlpattern <- tauri" },
+  { id = "RUSTSEC-2025-0075", reason = "unic-char-range, via urlpattern <- tauri" },
+  { id = "RUSTSEC-2025-0080", reason = "unic-common, via urlpattern <- tauri" },
+  { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident, via urlpattern <- tauri" },
+  { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version, via urlpattern <- tauri" },
+]
