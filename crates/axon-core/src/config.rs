@@ -76,6 +76,13 @@ pub struct Config {
     /// not the legacy path, or env-only loads.
     #[serde(skip)]
     pub legacy_config_path: Option<PathBuf>,
+    /// True when at least one omitted dir key was remapped because the
+    /// pre-rename path exists on disk and the current `axon-server` path does
+    /// not. Independent of [`Self::legacy_config_path`]: an env-only boot has
+    /// no config file but can still have leftover `~/.local/share/axon/…`
+    /// state. Not serialized; the server logs a warning once tracing is up.
+    #[serde(skip)]
+    pub used_legacy_data_dirs: bool,
 }
 
 /// HTTP server bind settings.
@@ -812,22 +819,68 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// When a legacy config omitted the on-disk dir keys, keep the old `axon`
-/// project-dir defaults rather than the new `axon-server` ones. Explicit file
-/// or env values are left alone.
-fn apply_legacy_dir_defaults(figment: &Figment, config: &mut Config) {
-    if figment.find_value("sync.data_dir").is_err() {
-        config.sync.data_dir = legacy_sync_data_dir();
+/// Remap omitted dir keys onto the pre-rename `axon` layout.
+///
+/// When `force` is true (the loaded file *is* the legacy platform config),
+/// every omitted key uses the old default. Otherwise each omitted key uses
+/// the old default only if that path exists on disk and the current
+/// `axon-server` path does not — so an env-only upgrade keeps finding its
+/// SDK store, and a first install with neither tree still gets the new dirs.
+/// Explicit file or env values are left alone.
+fn apply_legacy_dir_defaults(figment: &Figment, config: &mut Config, force: bool) -> bool {
+    let mut used = false;
+    used |= remap_omitted_dir(
+        figment,
+        "sync.data_dir",
+        &mut config.sync.data_dir,
+        legacy_sync_data_dir,
+        default_sync_data_dir,
+        force,
+    );
+    used |= remap_omitted_dir(
+        figment,
+        "search.index_path",
+        &mut config.search.index_path,
+        legacy_search_index_path,
+        default_search_index_path,
+        force,
+    );
+    used |= remap_omitted_dir(
+        figment,
+        "media.cache_dir",
+        &mut config.media.cache_dir,
+        legacy_media_cache_dir,
+        default_media_cache_dir,
+        force,
+    );
+    used |= remap_omitted_dir(
+        figment,
+        "media.uploads_dir",
+        &mut config.media.uploads_dir,
+        legacy_media_uploads_dir,
+        default_media_uploads_dir,
+        force,
+    );
+    used
+}
+
+fn remap_omitted_dir(
+    figment: &Figment,
+    key: &str,
+    slot: &mut PathBuf,
+    legacy: fn() -> PathBuf,
+    current: fn() -> PathBuf,
+    force: bool,
+) -> bool {
+    if figment.find_value(key).is_ok() {
+        return false;
     }
-    if figment.find_value("search.index_path").is_err() {
-        config.search.index_path = legacy_search_index_path();
+    let legacy_path = legacy();
+    if force || (legacy_path.exists() && !current().exists()) {
+        *slot = legacy_path;
+        return true;
     }
-    if figment.find_value("media.cache_dir").is_err() {
-        config.media.cache_dir = legacy_media_cache_dir();
-    }
-    if figment.find_value("media.uploads_dir").is_err() {
-        config.media.uploads_dir = legacy_media_uploads_dir();
-    }
+    false
 }
 
 fn default_media_max_bytes() -> u64 {
@@ -981,8 +1034,10 @@ impl Config {
             .map_err(|err| ConfigError::Figment(Box::new(err)))?;
 
         if let Some(path) = path.filter(|p| path_is_legacy_platform_config(p)) {
-            apply_legacy_dir_defaults(&figment, &mut config);
+            apply_legacy_dir_defaults(&figment, &mut config, true);
             config.legacy_config_path = Some(path.to_path_buf());
+        } else {
+            config.used_legacy_data_dirs = apply_legacy_dir_defaults(&figment, &mut config, false);
         }
 
         Ok(config)
@@ -1244,6 +1299,7 @@ mod tests {
             media: MediaConfig::default(),
             oauth: OauthConfig::default(),
             legacy_config_path: None,
+            used_legacy_data_dirs: false,
         };
         assert_eq!(config.socket_addr().to_string(), "0.0.0.0:1234");
     }
@@ -1625,6 +1681,98 @@ mod tests {
                     PathBuf::from("/xdg/data/axon-server/sync")
                 );
             }
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn env_only_uses_legacy_data_dir_when_it_exists_and_new_does_not() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
+            let data_home = jail.directory().join("xdg-data");
+            jail.set_env("XDG_DATA_HOME", data_home.to_str().expect("utf8"));
+            jail.set_env(
+                "XDG_CACHE_HOME",
+                jail.directory().join("xdg-cache").to_str().expect("utf8"),
+            );
+
+            let (legacy_sync, new_search) = if cfg!(target_os = "macos") {
+                (
+                    home.join("Library/Application Support/axon/sync"),
+                    home.join("Library/Application Support/axon-server/search"),
+                )
+            } else {
+                (
+                    data_home.join("axon").join("sync"),
+                    data_home.join("axon-server").join("search"),
+                )
+            };
+            std::fs::create_dir_all(&legacy_sync).expect("legacy sync dir");
+            let config = Config::load(None).expect("load");
+            assert_eq!(config.sync.data_dir, legacy_sync);
+            assert!(config.used_legacy_data_dirs);
+            assert!(config.legacy_config_path.is_none());
+            assert_eq!(config.search.index_path, new_search);
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn env_only_prefers_new_data_dir_when_both_exist() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
+            let data_home = jail.directory().join("xdg-data");
+            jail.set_env("XDG_DATA_HOME", data_home.to_str().expect("utf8"));
+
+            let (legacy_sync, new_sync) = if cfg!(target_os = "macos") {
+                (
+                    home.join("Library/Application Support/axon/sync"),
+                    home.join("Library/Application Support/axon-server/sync"),
+                )
+            } else {
+                (
+                    data_home.join("axon").join("sync"),
+                    data_home.join("axon-server").join("sync"),
+                )
+            };
+            std::fs::create_dir_all(&legacy_sync).expect("legacy sync dir");
+            std::fs::create_dir_all(&new_sync).expect("new sync dir");
+            let config = Config::load(None).expect("load");
+            assert_eq!(config.sync.data_dir, new_sync);
+            assert!(!config.used_legacy_data_dirs);
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn env_only_explicit_data_dir_beats_legacy_on_disk() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
+            let data_home = jail.directory().join("xdg-data");
+            jail.set_env("XDG_DATA_HOME", data_home.to_str().expect("utf8"));
+            jail.set_env("AXON_SYNC__DATA_DIR", "/custom/sync");
+
+            let legacy_sync = if cfg!(target_os = "macos") {
+                home.join("Library/Application Support/axon/sync")
+            } else {
+                data_home.join("axon").join("sync")
+            };
+            std::fs::create_dir_all(&legacy_sync).expect("legacy sync dir");
+            let config = Config::load(None).expect("load");
+            assert_eq!(config.sync.data_dir, PathBuf::from("/custom/sync"));
+            assert!(!config.used_legacy_data_dirs);
             Ok(())
         });
     }
