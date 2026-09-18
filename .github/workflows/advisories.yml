@@ -43,8 +43,10 @@ jobs:
         include:
           - name: server and clients
             manifest: Cargo.toml
+            config: deny.toml
           - name: desktop shell
             manifest: clients/web/src-tauri/Cargo.toml
+            config: clients/web/src-tauri/deny.toml
     name: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v7
@@ -74,8 +76,12 @@ jobs:
       # would trade the check's whole purpose for the ~10s it costs. These
       # jobs finish in under 30 seconds as they are.
 
+      # A config per workspace, not one shared: cargo-deny warns when an ignore
+      # entry matches nothing, which is how a stale entry announces itself, and
+      # one shared list would leave every entry unmatched in one workspace or
+      # the other and bury that signal under noise.
       - name: Check advisories
-        run: cargo deny --manifest-path ${{ matrix.manifest }} --config deny.toml check advisories
+        run: cargo deny --manifest-path ${{ matrix.manifest }} --config ${{ matrix.config }} check advisories
 
   web:
     runs-on: ubuntu-latest

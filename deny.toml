@@ -18,13 +18,12 @@
 # directly, since an unmaintained transitive dependency is not something a
 # lockfile edit here can fix.
 version = 2
-# Unmaintained crates, limited to ones this repo names directly. The default
-# (`all`) reports transitive ones too, which sounds stricter and is not
-# actionable: it currently names `bitmaps`, `paste`, `proc-macro-error2` and
-# `rustls-pemfile`, none of them ours, and RustSec's own entry for the last
-# says "No safe upgrade is available". A gate whose only available response is
-# a permanent ignore entry teaches people to add permanent ignore entries.
-unmaintained = "workspace"
+# Every unmaintained crate, transitive ones included. The narrower
+# `"workspace"` setting was tried first and rejected on review: it would have
+# hidden the ten below, but it would equally have hidden the eleventh, and the
+# point of a gate is to say something when the situation changes. The cost is
+# an ignore list that has to be revisited rather than accumulated -- see #427.
+unmaintained = "all"
 yanked = "deny"
 
 # The database here is RustSec's, which is **not** a superset of GitHub's.
@@ -36,5 +35,26 @@ yanked = "deny"
 # evidence that nothing is outstanding. See #413.
 #
 # Every entry below needs a reason and a way out, or the list becomes a place
-# advisories go to be forgotten.
-ignore = []
+# advisories go to be forgotten. That is a standing risk rather than a solved
+# one: nothing expires these, and an unmaintained crate that later gains a
+# *vulnerability* would still be reported, but one that is simply fixed
+# upstream would sit here unnoticed. #427 is the scheduled re-read.
+# One config per cargo workspace, not one shared. cargo-deny warns
+# `advisory-not-detected` for an ignore entry that matched nothing — which is
+# precisely how a stale entry announces itself, and the only thing that makes
+# this list revisitable rather than accumulative. Shared across two workspaces
+# every entry is unmatched in one of them, and the signal is destroyed by
+# noise. The three lines of policy above are duplicated in
+# `clients/web/src-tauri/deny.toml`; that is the cheaper half to keep in step,
+# since it is the half that does not change.
+ignore = [
+  # --- Root workspace -------------------------------------------------------
+  # Each of these is unmaintained rather than vulnerable, and each arrives
+  # through a dependency this repo does not choose. None can be resolved by a
+  # lockfile edit here; all clear from above when the crate naming them moves.
+  { id = "RUSTSEC-2026-0247", reason = "bitmaps, via imbl <- eyeball-im <- matrix-sdk-ui" },
+  { id = "RUSTSEC-2024-0436", reason = "paste, via sqlx-core" },
+  { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2, via aquamarine" },
+  # RustSec's own entry says "No safe upgrade is available".
+  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile, via sqlx-core; no upgrade exists" },
+]
