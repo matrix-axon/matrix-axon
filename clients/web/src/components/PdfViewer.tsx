@@ -80,7 +80,27 @@ export function PdfViewer({ url, label }: { url: string; label: string }) {
                 return
               }
               holder.replaceChildren(canvas)
-              void page.render({ canvas, canvasContext: context, viewport })
+              // `render()` returns a task, and the failure arrives on its
+              // `promise` — discarding the task discards the only channel a
+              // failed page has. That is why a blank page went unnoticed until
+              // someone opened a PDF on Linux: pdf.js reported success, drew
+              // nothing, and there was nowhere for a real error to surface
+              // either. Reported rather than rendered into the page, because a
+              // page that fails to draw is a bug to fix, not a state to design.
+              void page
+                .render({ canvas, canvasContext: context, viewport })
+                .promise.catch((error: unknown) => {
+                  // Closing the viewer mid-draw destroys the document under
+                  // this task, and pdf.js reports that as a rejection too.
+                  // That is the viewer's own doing, not a page that will not
+                  // draw, and logging it would make every close on a slow
+                  // device look exactly like the failure this exists to
+                  // catch.
+                  if (cancelled) {
+                    return
+                  }
+                  console.error('could not render PDF page', number, error)
+                })
             })
           }
 

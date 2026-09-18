@@ -29,6 +29,11 @@
 /// (M-W13) link this crate and call in through their own generated entry
 /// point; the desktop binary is a one-line caller of the same function.
 pub fn run() {
+    // Before anything touches the webview: WebKitGTK has to be told not to use
+    // its DMA-BUF renderer, or it draws nothing where a `<canvas>` should be.
+    #[cfg(target_os = "linux")]
+    keep_canvas_content();
+
     let builder = tauri::Builder::default();
 
     // Must be the *first* plugin registered, per its own documentation: it
@@ -429,6 +434,48 @@ fn navigation_allowed(target: &tauri::Url, dev: bool) -> bool {
     dev && matches!(target.host_str(), Some("localhost" | "127.0.0.1"))
 }
 
+/// The environment variable that decides whether WebKitGTK uses its DMA-BUF
+/// renderer. Named once so the code and its test cannot drift apart.
+#[cfg(target_os = "linux")]
+const DMABUF_RENDERER_VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+
+/// Stop WebKitGTK losing `<canvas>` content on Linux.
+///
+/// A PDF opened in the app showed a correctly sized, correctly paginated,
+/// entirely **blank** page. pdf.js was not at fault: it fetched the document,
+/// reported the right page count, and its render task resolved successfully
+/// with no error. The pixels simply never arrived on screen. Confirmed against
+/// the real file — decrypted out of the room and rasterized with poppler, which
+/// draws it — and against the same `dist` in Chromium, which also draws it.
+///
+/// The cause is WebKitGTK's DMA-BUF renderer, the path it uses to hand painted
+/// buffers from the web process to the UI process. Where that path misbehaves,
+/// what arrives is empty rather than wrong, and nothing anywhere reports an
+/// error — which is why this was invisible until someone opened a PDF.
+///
+/// Confirmed on a real GPU-backed desktop as well as a VNC session, so this is
+/// not an artifact of software rendering and cannot be left to the display
+/// setup. Windows and macOS are unaffected: their engines never take this path,
+/// and both render the same file correctly today.
+///
+/// Deliberately the narrow flag. `WEBKIT_DISABLE_COMPOSITING_MODE` also fixes
+/// it, by turning off hardware-accelerated compositing for the entire webview —
+/// which would tax scrolling and animation everywhere to fix one buffer
+/// handoff. This disables only the handoff that is broken.
+///
+/// Set rather than forced, so anyone whose system does not need it can put the
+/// renderer back with `WEBKIT_DISABLE_DMABUF_RENDERER=0` in the environment.
+///
+/// Safe to mutate the environment here: this runs at the top of `run()`, before
+/// Tauri starts anything, so the process is still single-threaded and nothing
+/// else can be reading it.
+#[cfg(target_os = "linux")]
+fn keep_canvas_content() {
+    if std::env::var_os(DMABUF_RENDERER_VAR).is_none() {
+        std::env::set_var(DMABUF_RENDERER_VAR, "1");
+    }
+}
+
 /// The scheme the production build is served from.
 ///
 /// Tauri's built-in asset protocol has no SPA fallback and cannot be
@@ -658,6 +705,35 @@ mod tests {
         assert!(navigation_allowed(&url("http://127.0.0.1:5173/"), true));
         // Still nothing else, even in dev.
         assert!(!navigation_allowed(&url("https://evil.example/"), true));
+    }
+
+    /// One test, not two: the environment is process-wide and `cargo test`
+    /// runs tests on parallel threads, so splitting these would let them race
+    /// each other over the same variable.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dmabuf_renderer_is_disabled_unless_the_user_chose_otherwise() {
+        use super::{keep_canvas_content, DMABUF_RENDERER_VAR};
+
+        // SAFETY-adjacent: this is the only test that touches the environment,
+        // so nothing else can observe it mid-change.
+        std::env::remove_var(DMABUF_RENDERER_VAR);
+        keep_canvas_content();
+        assert_eq!(
+            std::env::var(DMABUF_RENDERER_VAR).as_deref(),
+            Ok("1"),
+            "an unset variable must be filled in, or WebKitGTK loses canvas content"
+        );
+
+        // Someone who does not need this must be able to put the renderer back.
+        std::env::set_var(DMABUF_RENDERER_VAR, "0");
+        keep_canvas_content();
+        assert_eq!(
+            std::env::var(DMABUF_RENDERER_VAR).as_deref(),
+            Ok("0"),
+            "an explicit choice must survive"
+        );
+        std::env::remove_var(DMABUF_RENDERER_VAR);
     }
 
     /// Stands in for the embedded bundle, resolving a name to itself.
