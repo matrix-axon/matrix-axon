@@ -37,6 +37,27 @@ const allowedHosts = (process.env.AXON_DEV_ALLOWED_HOSTS ?? '')
   .split(',')
   .map((host) => host.trim())
   .filter((host) => host !== '')
+
+/**
+ * The address a *device* must reach this dev server on, set by the Tauri CLI
+ * for `tauri ios dev` and `tauri android dev`.
+ *
+ * On a phone, `localhost` is the phone. Vite binds loopback by default, so
+ * without this the CLI sits repeating "Waiting for your frontend dev server to
+ * start on http://<lan-ip>:5173/" until it is killed — nothing is listening
+ * there and nothing ever will be.
+ *
+ * Absent for browser and desktop development, which keeps the dev server on
+ * loopback: one reachable across the LAN is one every device on the LAN can
+ * read, including whatever session it is signed into.
+ *
+ * An empty value is treated as absent, and that is load-bearing rather than
+ * tidiness. `'' ?? false` is `''`, which Vite reads as "bind every interface"
+ * — so exporting `TAURI_DEV_HOST=` with no value, the ordinary way to clear a
+ * variable in a shell, would silently publish the dev server to the whole
+ * network. Measured: it listened on `*:5205`.
+ */
+const tauriDevHost = process.env.TAURI_DEV_HOST?.trim() || undefined
 const webClientDir = fileURLToPath(new URL('.', import.meta.url))
 
 function git(args: string[]): string | null {
@@ -241,7 +262,24 @@ export default defineConfig({
     __AXON_WEB_BUILT_AT__: JSON.stringify(BUILT_AT),
   },
   server: {
-    allowedHosts,
+    // `false` rather than undefined: that is Vite's "loopback only", and it is
+    // what every non-mobile run should get.
+    host: tauriDevHost ?? false,
+    // `tauri.conf.json`'s `devUrl` names port 5173, so Vite quietly moving to
+    // 5174 because something already holds 5173 produces a dev server Tauri
+    // never finds — the same indefinite wait, from a different cause. Fail
+    // loudly instead.
+    port: 5173,
+    strictPort: true,
+    // The HMR socket has to point back at this machine. Left to infer, it
+    // resolves against the page's own origin, which on a device is the device.
+    hmr: tauriDevHost
+      ? { protocol: 'ws', host: tauriDevHost, port: 1421 }
+      : undefined,
+    // Vite rejects requests whose Host header it does not recognise. It admits
+    // bare IP addresses, so this is belt and braces for the case where the CLI
+    // hands over a hostname instead.
+    allowedHosts: tauriDevHost ? [...allowedHosts, tauriDevHost] : allowedHosts,
     proxy: axonProxy,
     watch: {
       // `src-tauri/` is a Rust crate (ADR 0102, M-W12) that lives inside this
