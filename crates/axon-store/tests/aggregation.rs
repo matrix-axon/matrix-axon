@@ -406,6 +406,99 @@ async fn edit_resolution_rules() {
     common::cleanup_account(&pool, account_id).await;
 }
 
+/// A media caption edit applies only when it keeps the media `msgtype` (#401).
+///
+/// The `m.text` replacement is the shape Axon used to send for every edit, and
+/// the store rightly ignores it for an image; the `m.image` replacement is the
+/// shape the gateway now builds (and matrix-rust-sdk / Element X send): the
+/// media kept, the filename moved out of `body`, and the caption replaced.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn media_caption_edit_applies_only_as_media() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "agg-caption").await;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+    let base = 1_700_000_000_000;
+
+    // An uncaptioned image: no `filename`, so `body` is the filename.
+    let image = format!("$evt-{}:localhost", Uuid::new_v4());
+    let content = json!({
+        "msgtype": "m.image",
+        "body": "IMG_1234.jpg",
+        "url": "mxc://localhost/abc",
+        "info": { "mimetype": "image/jpeg", "w": 479, "h": 640 },
+    });
+    store
+        .upsert_event(&NewEvent {
+            event_id: &image,
+            room_id: &room_id,
+            account_id,
+            sender: SENDER,
+            origin_ts: base,
+            event_type: "m.room.message",
+            content: Some(content.clone()),
+            raw_event: json!({ "type": "m.room.message", "content": content }),
+            megolm_session_id: None,
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: Some("IMG_1234.jpg"),
+        })
+        .await
+        .expect("insert image");
+
+    // The old gateway shape: an `m.text` replacement of an image is ignored.
+    insert_edit(
+        &store,
+        account_id,
+        &room_id,
+        SENDER,
+        base + 1,
+        &image,
+        "text caption",
+    )
+    .await;
+    let before = store.get_event(account_id, &image).await.unwrap().unwrap();
+    assert!(
+        !before.edited,
+        "an m.text replacement of an image must be dropped"
+    );
+    assert_eq!(before.decrypted_body_text.as_deref(), Some("IMG_1234.jpg"));
+
+    // The new gateway shape applies, and the projected content is still the image.
+    let new_content = json!({
+        "msgtype": "m.image",
+        "body": "my dog",
+        "filename": "IMG_1234.jpg",
+        "url": "mxc://localhost/abc",
+        "info": { "mimetype": "image/jpeg", "w": 479, "h": 640 },
+    });
+    let mut fallback = new_content.clone();
+    fallback["body"] = json!("* my dog");
+    fallback["m.new_content"] = new_content;
+    insert_relation(
+        &store,
+        account_id,
+        &room_id,
+        SENDER,
+        base + 2,
+        "m.room.message",
+        fallback,
+        json!({ "rel_type": "m.replace", "event_id": image }),
+    )
+    .await;
+    let after = store.get_event(account_id, &image).await.unwrap().unwrap();
+    assert!(after.edited, "an m.image caption edit must apply");
+    assert_eq!(after.decrypted_body_text.as_deref(), Some("my dog"));
+    let projected = after.content.expect("content");
+    assert_eq!(projected["msgtype"], json!("m.image"));
+    assert_eq!(projected["url"], json!("mxc://localhost/abc"));
+    assert_eq!(projected["filename"], json!("IMG_1234.jpg"));
+    assert_eq!(projected["body"], json!("my dog"));
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
 /// Reaction rules: `(sender, key)` deduplicates, a redacted reaction drops from
 /// the tally, distinct emoji tally separately, and `me` reflects the account's
 /// own user.

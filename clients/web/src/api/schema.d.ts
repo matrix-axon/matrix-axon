@@ -2858,9 +2858,18 @@ export interface components {
          *
          *     Like [`SendMessageRequest`], `format` + `formatted_body` are optional and must
          *     be supplied together to set rich text on the replacement.
+         *
+         *     The replacement keeps the target's `msgtype`. For a text, notice, or emote,
+         *     `body` is the new text. For an image, file, audio, or video message, `body`
+         *     is the new *caption*: the media and its filename are kept, and an empty
+         *     `body` (or one equal to the filename) removes the caption. Editing any other
+         *     kind of message is a `400`.
          */
         EditRequest: {
-            /** @description The new plain-text message body (and formatting fallback). */
+            /**
+             * @description The new plain-text message body, or a media message's new caption (and
+             *     formatting fallback).
+             */
             body: string;
             /**
              * @description Markup name for `formatted_body` — only `org.matrix.custom.html`. Must be
@@ -3673,10 +3682,21 @@ export interface components {
          */
         SendMediaRequest: {
             /**
-             * @description Optional media caption. When absent, Axon uses the staged filename as the
-             *     Matrix event body.
+             * @description Optional media caption. When absent — or empty — Axon uses the staged
+             *     filename as the Matrix event body.
              */
             caption?: string | null;
+            /**
+             * @description Markup name for `formatted_body` — only `org.matrix.custom.html`. Must be
+             *     paired with `formatted_body`, and requires `caption`: Matrix defines
+             *     formatting only for a media caption (MSC2530).
+             */
+            format?: string | null;
+            /**
+             * @description The caption rendered as HTML. Must be paired with `format`; `caption` is
+             *     its plain-text fallback.
+             */
+            formatted_body?: string | null;
             /** @description Send as a reply to this event id (`m.in_reply_to`). Optional. */
             reply_to?: string | null;
             /**

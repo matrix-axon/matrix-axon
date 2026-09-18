@@ -159,6 +159,7 @@ pub enum Call {
         room_id: String,
         attachment: MediaAttachment,
         caption: Option<String>,
+        formatted: Option<(String, String)>,
         reply_to: Option<String>,
         thread_root: Option<String>,
     },
@@ -2179,6 +2180,7 @@ impl MessageSender for StubSender {
         room_id: &str,
         attachment: MediaAttachment,
         caption: Option<&str>,
+        formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
     ) -> Result<String, SendError> {
         self.calls.lock().unwrap().push(Call::SendMedia {
@@ -2186,6 +2188,7 @@ impl MessageSender for StubSender {
             room_id: room_id.to_owned(),
             attachment,
             caption: caption.map(str::to_owned),
+            formatted: formatted.map(|f| (f.format.to_owned(), f.body.to_owned())),
             reply_to: relation.reply_to.map(str::to_owned),
             thread_root: relation.thread_root.map(str::to_owned),
         });

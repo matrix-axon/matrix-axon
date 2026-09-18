@@ -36,14 +36,19 @@ use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::relation::{Annotation, Thread};
 use matrix_sdk::ruma::events::room::encryption::RoomEncryptionEventContent;
 use matrix_sdk::ruma::events::room::message::{
-    AddMentions, FileInfo, FileMessageEventContent, ImageMessageEventContent, MessageType,
-    Relation as MessageRelation, ReplyWithinThread, RoomMessageEventContent,
-    TextMessageEventContent,
+    AddMentions, EmoteMessageEventContent, FileInfo, FileMessageEventContent, FormattedBody,
+    ImageMessageEventContent, MessageType, NoticeMessageEventContent, Relation as MessageRelation,
+    ReplacementMetadata, ReplyWithinThread, RoomMessageEventContent,
+    RoomMessageEventContentWithoutRelation, TextMessageEventContent,
 };
 use matrix_sdk::ruma::events::room::power_levels::{RoomPowerLevels, RoomPowerLevelsEventContent};
 use matrix_sdk::ruma::events::room::{ImageInfo, MediaSource};
 use matrix_sdk::ruma::events::tag::{TagInfo, TagName, UserTagName};
-use matrix_sdk::ruma::events::{InitialStateEvent, StateEventType};
+use matrix_sdk::ruma::events::{
+    AnySyncMessageLikeEvent, AnySyncTimelineEvent, InitialStateEvent, StateEventType,
+    SyncMessageLikeEvent,
+};
+use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{
     EventId, Int, OwnedEventId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId,
     RoomOrAliasId, ServerName, UInt, UserId,
@@ -591,20 +596,22 @@ async fn upload_media_source(
 /// Build the `m.image`/`m.file` [`MessageType`] for an already-uploaded
 /// `source`, mirroring matrix-sdk's private `make_media_type!` for the two
 /// kinds [`MediaSendKind`] supports. A caption becomes the event body (with
-/// the original filename kept in `filename`); otherwise the filename is the
-/// body and `filename` is left unset, matching `Room::send_attachment`'s
-/// convention (MSC2530).
+/// the original filename kept in `filename`, and its HTML, if any, in
+/// `formatted_body`); otherwise the filename is the body and `filename` is left
+/// unset, matching `Room::send_attachment`'s convention (MSC2530).
 fn media_message_type(
     kind: MediaSendKind,
     filename: String,
     content_type: &mime::Mime,
     source: MediaSource,
     info: AttachmentInfo,
-    caption: Option<&str>,
+    caption: Option<TextMessageEventContent>,
 ) -> MessageType {
-    let (body, filename) = match caption {
-        Some(caption) => (caption.to_owned(), Some(filename)),
-        None => (filename, None),
+    let (body, formatted, filename) = match caption {
+        Some(TextMessageEventContent {
+            body, formatted, ..
+        }) => (body, formatted, Some(filename)),
+        None => (filename, None, None),
     };
     let mimetype = Some(content_type.as_ref().to_owned());
 
@@ -613,6 +620,7 @@ fn media_message_type(
             let mut info: ImageInfo = info.into();
             info.mimetype = mimetype;
             let mut content = ImageMessageEventContent::new(body, source);
+            content.formatted = formatted;
             content.filename = filename;
             content.info = Some(Box::new(info));
             MessageType::Image(content)
@@ -621,6 +629,7 @@ fn media_message_type(
             let mut info: FileInfo = info.into();
             info.mimetype = mimetype;
             let mut content = FileMessageEventContent::new(body, source);
+            content.formatted = formatted;
             content.filename = filename;
             content.info = Some(Box::new(info));
             MessageType::File(content)
@@ -638,7 +647,7 @@ async fn send_thread_member_attachment(
     attachment: MediaAttachment,
     content_type: &mime::Mime,
     info: AttachmentInfo,
-    caption: Option<&str>,
+    caption: Option<TextMessageEventContent>,
     thread_root: OwnedEventId,
 ) -> Result<String, GatewayError> {
     let source = upload_media_source(room, content_type, attachment.bytes).await?;
@@ -656,6 +665,155 @@ async fn send_thread_member_attachment(
     )));
     let resp = room.send(content).await.map_err(map_sdk_err)?;
     Ok(resp.response.event_id.to_string())
+}
+
+/// The content of the `m.room.message` an edit replaces, from the fetched
+/// (and, where possible, decrypted) original. Anything that is not an original
+/// room message is refused as a `400`: sending a replacement for it would
+/// either be ignored or change what the original *is*.
+fn editable_message_content(
+    raw: &Raw<AnySyncTimelineEvent>,
+) -> Result<RoomMessageEventContent, GatewayError> {
+    let event = raw
+        .deserialize()
+        .map_err(|e| GatewayError::Invalid(format!("original event is malformed: {e}")))?;
+    match event {
+        AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+            SyncMessageLikeEvent::Original(original),
+        )) => Ok(original.content),
+        AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+            SyncMessageLikeEvent::Redacted(_),
+        )) => Err(GatewayError::Invalid(
+            "cannot edit a redacted message".to_owned(),
+        )),
+        // Still `m.room.encrypted` after the fetch: this device has no key for
+        // it, so its msgtype and media are unknown and no faithful replacement
+        // can be built.
+        AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(_)) => Err(
+            GatewayError::Invalid("cannot edit a message that could not be decrypted".to_owned()),
+        ),
+        other => Err(GatewayError::Invalid(format!(
+            "cannot edit a {} event",
+            other.event_type()
+        ))),
+    }
+}
+
+/// Build the `m.replace` content for an edit of `original` (issue #401).
+///
+/// The replacement keeps the original's `msgtype`. The spec allows a
+/// replacement to change it, but Axon's store deliberately applies only
+/// same-type edits (`TIMELINE_SELECT` in `axon-store`), and a text replacement
+/// of an image would discard the image for every client that does apply it.
+///
+/// * `m.text` / `m.notice` / `m.emote`: `body` (and `formatted`) become the new
+///   text.
+/// * `m.image` / `m.file` / `m.audio` / `m.video`: the media, `info`, and
+///   filename are kept and only the caption changes, following matrix-sdk's
+///   `update_media_caption` (crate-private in 0.18, so mirrored here) and the
+///   MSC2530 rules in [`set_media_caption`].
+/// * Anything else (locations, verification requests, custom msgtypes) is
+///   refused rather than replaced with a lossy approximation.
+///
+/// Ruma's `make_replacement` then wraps it: `m.new_content` gets the content
+/// as-is, and the top-level fallback is the same content with a `* ` body
+/// prefix — the shape matrix-rust-sdk (Element X) sends.
+fn replacement_content(
+    original: RoomMessageEventContent,
+    target_id: OwnedEventId,
+    body: &str,
+    formatted: Option<Formatted<'_>>,
+) -> Result<RoomMessageEventContent, GatewayError> {
+    let msgtype = match original.msgtype {
+        MessageType::Text(_) => MessageType::Text(match formatted {
+            Some(f) => TextMessageEventContent::html(body, f.body),
+            None => TextMessageEventContent::plain(body),
+        }),
+        MessageType::Notice(_) => MessageType::Notice(match formatted {
+            Some(f) => NoticeMessageEventContent::html(body, f.body),
+            None => NoticeMessageEventContent::plain(body),
+        }),
+        MessageType::Emote(_) => MessageType::Emote(match formatted {
+            Some(f) => EmoteMessageEventContent::html(body, f.body),
+            None => EmoteMessageEventContent::plain(body),
+        }),
+        MessageType::Image(mut media) => {
+            media.formatted =
+                set_media_caption(&mut media.body, &mut media.filename, body, formatted);
+            MessageType::Image(media)
+        }
+        MessageType::File(mut media) => {
+            media.formatted =
+                set_media_caption(&mut media.body, &mut media.filename, body, formatted);
+            MessageType::File(media)
+        }
+        MessageType::Audio(mut media) => {
+            media.formatted =
+                set_media_caption(&mut media.body, &mut media.filename, body, formatted);
+            MessageType::Audio(media)
+        }
+        MessageType::Video(mut media) => {
+            media.formatted =
+                set_media_caption(&mut media.body, &mut media.filename, body, formatted);
+            MessageType::Video(media)
+        }
+        other => {
+            return Err(GatewayError::Invalid(format!(
+                "editing {} messages is not supported",
+                other.msgtype()
+            )))
+        }
+    };
+
+    // The original's mentions are handed to `make_replacement` for parity with
+    // matrix-sdk's own edit path, but they are inert here: Ruma only consults
+    // them to filter *new* mentions out of the fallback, and this replacement
+    // sets none (Axon's edit API carries no mentions). So neither the fallback
+    // nor `m.new_content` gets an `m.mentions`, exactly as before this change.
+    let mut content = RoomMessageEventContentWithoutRelation::new(msgtype)
+        .make_replacement(ReplacementMetadata::new(target_id, original.mentions));
+
+    // `make_replacement` gives a text-like fallback an HTML body even when the
+    // edit has none, so a plain edit's fallback would carry `formatted_body:
+    // "* "` — which a client that prefers HTML and does not understand edits
+    // renders as a bare asterisk. Drop it; `m.new_content` is unaffected.
+    if formatted.is_none() {
+        match &mut content.msgtype {
+            MessageType::Text(text) => text.formatted = None,
+            MessageType::Notice(notice) => notice.formatted = None,
+            MessageType::Emote(emote) => emote.formatted = None,
+            _ => {}
+        }
+    }
+    Ok(content)
+}
+
+/// Replace a media message's caption in place (MSC2530) and return its new
+/// formatted caption.
+///
+/// The filename is pinned first — `filename` if set, else `body`, which is
+/// where an uncaptioned message keeps it. Then an empty caption, or one equal
+/// to the filename, *removes* the caption: `body` goes back to the filename and
+/// `filename` is unset, since `filename == body` already means "no caption".
+/// Otherwise the caption becomes `body` and the filename moves to `filename`;
+/// skipping that move on an uncaptioned message is what would make its new
+/// caption read as the file's name.
+fn set_media_caption(
+    body_field: &mut String,
+    filename_field: &mut Option<String>,
+    caption: &str,
+    formatted: Option<Formatted<'_>>,
+) -> Option<FormattedBody> {
+    let filename = filename_field
+        .take()
+        .unwrap_or_else(|| std::mem::take(body_field));
+    if caption.is_empty() || caption == filename {
+        *body_field = filename;
+        return None;
+    }
+    *body_field = caption.to_owned();
+    *filename_field = Some(filename);
+    formatted.map(|f| FormattedBody::html(f.body))
 }
 
 fn message_relates_to(relation: Relation<'_>) -> Result<Option<Value>, GatewayError> {
@@ -852,17 +1010,27 @@ impl SdkGateway {
     /// shape (no relation, a plain reply, or an explicit in-thread reply)
     /// keeps going through the SDK helper below, which already gets those
     /// right.
+    ///
+    /// `formatted`, when present, is the caption's rich-text rendering and is
+    /// carried as the event's `format` + `formatted_body` (MSC2530). The API
+    /// boundary rejects it without a `caption`; it is ignored if one slips
+    /// through, since Matrix only defines formatting for a caption.
     pub async fn send_media(
         &self,
         account_id: Uuid,
         room_id: &str,
         attachment: MediaAttachment,
         caption: Option<&str>,
+        formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
     ) -> Result<String, GatewayError> {
         let room = self.room(account_id, room_id).await?;
         let content_type = effective_mime(attachment.kind, attachment.content_type.as_deref())?;
         let info = attachment_info(attachment.kind, attachment.size_bytes)?;
+        let caption = caption.map(|caption| match formatted {
+            Some(f) => TextMessageEventContent::html(caption, f.body),
+            None => TextMessageEventContent::plain(caption),
+        });
 
         if let Some(thread_root) = thread_member_root(relation)? {
             return send_thread_member_attachment(
@@ -877,7 +1045,6 @@ impl SdkGateway {
         }
 
         let reply = attachment_reply(relation)?;
-        let caption = caption.map(TextMessageEventContent::plain);
         let config = AttachmentConfig::new()
             .info(info)
             .caption(caption)
@@ -890,8 +1057,13 @@ impl SdkGateway {
     }
 
     /// Edit a message by sending an `m.replace` replacement of `event_id`.
-    /// Built as a raw envelope (`m.new_content` + `m.relates_to`) so we don't
-    /// need the original event in hand. Returns the replacement event's id.
+    /// Returns the replacement event's id.
+    ///
+    /// The original is fetched (and decrypted) first, both to enforce
+    /// authorship and because a replacement's `m.new_content` stands in for the
+    /// *whole* original content: it keeps the original `msgtype`, and for media
+    /// it carries the media itself with only the caption changed. See
+    /// [`replacement_content`] for the rules.
     pub async fn edit(
         &self,
         account_id: Uuid,
@@ -916,26 +1088,9 @@ impl SdkGateway {
             ));
         }
 
-        let mut new_content = json!({ "msgtype": "m.text", "body": body });
-        let mut content = json!({
-            "msgtype": "m.text",
-            // The fallback body convention for clients that don't understand edits.
-            "body": format!("* {body}"),
-            "m.relates_to": { "rel_type": "m.replace", "event_id": event_id },
-        });
-        if let Some(f) = formatted {
-            // The replacement carries the formatting verbatim; the top-level
-            // fallback mirrors it with the same `* ` edit prefix as `body`.
-            new_content["format"] = json!(f.format);
-            new_content["formatted_body"] = json!(f.body);
-            content["format"] = json!(f.format);
-            content["formatted_body"] = json!(format!("* {}", f.body));
-        }
-        content["m.new_content"] = new_content;
-        let resp = room
-            .send_raw("m.room.message", content)
-            .await
-            .map_err(map_sdk_err)?;
+        let original = editable_message_content(target.raw())?;
+        let content = replacement_content(original, target_id, body, formatted)?;
+        let resp = room.send(content).await.map_err(map_sdk_err)?;
         Ok(resp.response.event_id.to_string())
     }
 
@@ -1745,29 +1900,36 @@ impl SdkGateway {
 
 #[cfg(test)]
 mod tests {
-    use axon_core::{CreateRoomRequest, MediaSendKind, PowerLevelChanges, Relation, RoomPreset};
+    use axon_core::{
+        CreateRoomRequest, Formatted, MediaSendKind, PowerLevelChanges, Relation, RoomPreset,
+    };
     use matrix_sdk::attachment::{AttachmentInfo, BaseFileInfo, BaseImageInfo};
     use matrix_sdk::room::reply::EnforceThread;
     use matrix_sdk::ruma::api::client::room::Visibility;
     use matrix_sdk::ruma::api::error::{
         Error as MatrixApiError, ErrorBody, ErrorKind, FromHttpResponseError, StandardErrorBody,
     };
-    use matrix_sdk::ruma::events::room::message::{AddMentions, MessageType, ReplyWithinThread};
+    use matrix_sdk::ruma::events::room::message::{
+        AddMentions, MessageType, ReplyWithinThread, RoomMessageEventContent,
+        TextMessageEventContent,
+    };
     use matrix_sdk::ruma::events::room::power_levels::{RoomPowerLevels, RoomPowerLevelsSource};
     use matrix_sdk::ruma::events::room::MediaSource;
     use matrix_sdk::ruma::events::tag::TagName;
+    use matrix_sdk::ruma::events::AnySyncTimelineEvent;
     use matrix_sdk::ruma::exports::http::StatusCode as HttpStatus;
+    use matrix_sdk::ruma::serde::Raw;
     use matrix_sdk::ruma::{Int, OwnedMxcUri, RoomVersionId, UserId};
     use matrix_sdk::{HttpError, RumaApiError};
     use serde_json::json;
 
     use super::{
         attachment_info, attachment_reply, build_create_room_request,
-        check_self_demotion_guardrail, denies_knowing_room, effective_mime, is_room_gone_answer,
-        leave_fallback_is_unconfirmed, media_message_type, merge_power_level_changes,
-        message_relates_to, parse_room_id_or_alias, parse_server_name, parse_server_names,
-        parse_tag_name, parse_user_id, persist_local_m_tag, thread_member_root, validate_tag_order,
-        TagWrite, MAX_TAG_NAME_BYTES,
+        check_self_demotion_guardrail, denies_knowing_room, editable_message_content,
+        effective_mime, is_room_gone_answer, leave_fallback_is_unconfirmed, media_message_type,
+        merge_power_level_changes, message_relates_to, parse_room_id_or_alias, parse_server_name,
+        parse_server_names, parse_tag_name, parse_user_id, persist_local_m_tag,
+        replacement_content, thread_member_root, validate_tag_order, TagWrite, MAX_TAG_NAME_BYTES,
     };
     use crate::error::GatewayError;
 
@@ -2230,7 +2392,7 @@ mod tests {
             &content_type,
             plain_media_source(),
             info,
-            Some("quarterly report"),
+            Some(TextMessageEventContent::plain("quarterly report")),
         );
         let MessageType::File(content) = msg_type else {
             panic!("expected a file message type");
@@ -2242,6 +2404,325 @@ mod tests {
         let info = content.info.expect("file info");
         assert_eq!(info.mimetype.as_deref(), Some("application/pdf"));
         assert_eq!(u64::from(info.size.expect("file size")), 456);
+        // A plain caption carries no formatting.
+        assert!(content.formatted.is_none());
+    }
+
+    #[test]
+    fn media_message_type_carries_formatted_caption() {
+        let content_type: mime::Mime = "image/png".parse().expect("valid mime");
+        let msg_type = media_message_type(
+            MediaSendKind::Image,
+            "cat.png".to_owned(),
+            &content_type,
+            plain_media_source(),
+            AttachmentInfo::Image(BaseImageInfo::default()),
+            Some(TextMessageEventContent::html(
+                "a **cat**",
+                "a <strong>cat</strong>",
+            )),
+        );
+        // Issue #237: the caption's HTML rides on the media event itself.
+        let json = serde_json::to_value(&msg_type).expect("serialize");
+        assert_eq!(json["msgtype"], "m.image");
+        assert_eq!(json["body"], "a **cat**");
+        assert_eq!(json["filename"], "cat.png");
+        assert_eq!(json["format"], "org.matrix.custom.html");
+        assert_eq!(json["formatted_body"], "a <strong>cat</strong>");
+    }
+
+    const EDIT_TARGET: &str = "$target:example.org";
+    const HTML: &str = "org.matrix.custom.html";
+
+    fn original(content: serde_json::Value) -> RoomMessageEventContent {
+        serde_json::from_value(content).expect("valid room message content")
+    }
+
+    /// Run [`replacement_content`] and return the event content as JSON — the
+    /// shape the homeserver and every other client receives.
+    fn edit_json(
+        content: serde_json::Value,
+        body: &str,
+        formatted: Option<Formatted<'_>>,
+    ) -> serde_json::Value {
+        let content = replacement_content(
+            original(content),
+            EDIT_TARGET.try_into().expect("valid event id"),
+            body,
+            formatted,
+        )
+        .expect("editable");
+        serde_json::to_value(&content).expect("serialize")
+    }
+
+    /// An encrypted attachment descriptor, with `key_ops` in the order Ruma
+    /// re-serializes it (JWK treats the list as a set) so the round trip can be
+    /// compared whole.
+    fn encrypted_file() -> serde_json::Value {
+        json!({
+            "url": "mxc://example.org/cipher",
+            "key": {
+                "kty": "oct",
+                "key_ops": ["decrypt", "encrypt"],
+                "alg": "A256CTR",
+                "k": "qcHVMSgYg-71CauWBezXI5qkaRb0LuIy-Wx5kIaHMIA",
+                "ext": true
+            },
+            "iv": "X85+XgHN+HEAAAAAAAAAAA",
+            "hashes": { "sha256": "7uPH6gQjWjk8i7uD6PbyGL2B1bJwaTL1Sr1YQuT8KPY" },
+            "v": "v2"
+        })
+    }
+
+    #[test]
+    fn replacement_content_edits_plain_text() {
+        let json = edit_json(
+            json!({ "msgtype": "m.text", "body": "helo" }),
+            "hello",
+            None,
+        );
+        assert_eq!(
+            json,
+            json!({
+                "msgtype": "m.text",
+                "body": "* hello",
+                "m.new_content": { "msgtype": "m.text", "body": "hello" },
+                "m.relates_to": { "rel_type": "m.replace", "event_id": EDIT_TARGET },
+            })
+        );
+    }
+
+    #[test]
+    fn replacement_content_edits_formatted_text() {
+        let json = edit_json(
+            json!({ "msgtype": "m.text", "body": "helo" }),
+            "**hello**",
+            Some(Formatted {
+                format: HTML,
+                body: "<strong>hello</strong>",
+            }),
+        );
+        assert_eq!(json["m.new_content"]["format"], HTML);
+        assert_eq!(
+            json["m.new_content"]["formatted_body"],
+            "<strong>hello</strong>"
+        );
+        // The fallback mirrors the formatting with the same `* ` edit prefix.
+        assert_eq!(json["body"], "* **hello**");
+        assert_eq!(json["formatted_body"], "* <strong>hello</strong>");
+    }
+
+    #[test]
+    fn replacement_content_keeps_notice_and_emote_msgtypes() {
+        for msgtype in ["m.notice", "m.emote"] {
+            let json = edit_json(json!({ "msgtype": msgtype, "body": "old" }), "new", None);
+            // Axon's store applies only same-msgtype edits; an `m.text`
+            // replacement of a notice or emote would be ignored.
+            assert_eq!(json["msgtype"], msgtype);
+            assert_eq!(json["m.new_content"]["msgtype"], msgtype);
+            assert_eq!(json["m.new_content"]["body"], "new");
+            assert!(json.get("formatted_body").is_none(), "{json}");
+        }
+    }
+
+    #[test]
+    fn replacement_content_captions_an_uncaptioned_image() {
+        // Uncaptioned per MSC2530: no `filename`, so `body` *is* the filename.
+        let json = edit_json(
+            json!({
+                "msgtype": "m.image",
+                "body": "IMG_1234.jpg",
+                "url": "mxc://example.org/abc",
+                "info": { "mimetype": "image/jpeg", "size": 27253, "w": 479, "h": 640 },
+            }),
+            "my dog",
+            None,
+        );
+        let new = &json["m.new_content"];
+        // Issue #401: the replacement stays an image, with the media and info.
+        assert_eq!(new["msgtype"], "m.image");
+        assert_eq!(new["url"], "mxc://example.org/abc");
+        assert_eq!(new["info"]["w"], 479);
+        assert_eq!(new["body"], "my dog");
+        // The filename moves out of `body`; without this, `my dog` would read
+        // as the file's name and no caption would show.
+        assert_eq!(new["filename"], "IMG_1234.jpg");
+        assert!(new.get("formatted_body").is_none(), "{new}");
+        // The fallback is the same image with the `* ` prefix (the
+        // matrix-rust-sdk / Element X shape).
+        assert_eq!(json["msgtype"], "m.image");
+        assert_eq!(json["url"], "mxc://example.org/abc");
+        assert_eq!(json["body"], "* my dog");
+        assert_eq!(json["m.relates_to"]["rel_type"], "m.replace");
+    }
+
+    #[test]
+    fn replacement_content_keeps_encrypted_media_and_drops_stale_html() {
+        let json = edit_json(
+            json!({
+                "msgtype": "m.image",
+                "body": "old **caption**",
+                "format": HTML,
+                "formatted_body": "old <strong>caption</strong>",
+                "filename": "IMG_1234.jpg",
+                "file": encrypted_file(),
+                "info": { "mimetype": "image/jpeg" },
+            }),
+            "plain caption",
+            None,
+        );
+        let new = &json["m.new_content"];
+        assert_eq!(new["file"], encrypted_file());
+        assert!(new.get("url").is_none(), "{new}");
+        assert_eq!(new["filename"], "IMG_1234.jpg");
+        assert_eq!(new["body"], "plain caption");
+        // A replacement stands in for the whole content: the old caption's
+        // HTML must not survive a plain edit, or it would still be rendered.
+        assert!(new.get("format").is_none(), "{new}");
+        assert!(new.get("formatted_body").is_none(), "{new}");
+    }
+
+    #[test]
+    fn replacement_content_sets_a_formatted_caption() {
+        let json = edit_json(
+            json!({
+                "msgtype": "m.file",
+                "body": "report.pdf",
+                "url": "mxc://example.org/pdf",
+            }),
+            "the **final** report",
+            Some(Formatted {
+                format: HTML,
+                body: "the <strong>final</strong> report",
+            }),
+        );
+        let new = &json["m.new_content"];
+        assert_eq!(new["msgtype"], "m.file");
+        assert_eq!(new["filename"], "report.pdf");
+        assert_eq!(new["format"], HTML);
+        assert_eq!(new["formatted_body"], "the <strong>final</strong> report");
+    }
+
+    #[test]
+    fn replacement_content_removes_a_caption() {
+        let captioned = json!({
+            "msgtype": "m.video",
+            "body": "a caption",
+            "format": HTML,
+            "formatted_body": "a <em>caption</em>",
+            "filename": "clip.mp4",
+            "url": "mxc://example.org/clip",
+        });
+        for removal in ["", "clip.mp4"] {
+            let json = edit_json(
+                captioned.clone(),
+                removal,
+                Some(Formatted {
+                    format: HTML,
+                    body: "<em>ignored</em>",
+                }),
+            );
+            let new = &json["m.new_content"];
+            // No caption: `body` is the filename again and `filename` is unset.
+            assert_eq!(new["body"], "clip.mp4", "removal {removal:?}");
+            assert!(new.get("filename").is_none(), "{new}");
+            assert!(new.get("formatted_body").is_none(), "{new}");
+            assert_eq!(new["url"], "mxc://example.org/clip");
+        }
+    }
+
+    #[test]
+    fn replacement_content_refuses_unsupported_msgtypes() {
+        let err = replacement_content(
+            original(json!({
+                "msgtype": "m.location",
+                "body": "Big Ben",
+                "geo_uri": "geo:51.5008,0.1247",
+            })),
+            EDIT_TARGET.try_into().expect("valid event id"),
+            "somewhere else",
+            None,
+        )
+        .expect_err("a location is not editable");
+        assert!(
+            matches!(&err, GatewayError::Invalid(message) if message.contains("m.location")),
+            "{err:?}"
+        );
+    }
+
+    fn raw_event(event: serde_json::Value) -> Raw<AnySyncTimelineEvent> {
+        serde_json::from_value(event).expect("raw event")
+    }
+
+    #[test]
+    fn editable_message_content_accepts_a_room_message() {
+        let content = editable_message_content(&raw_event(json!({
+            "type": "m.room.message",
+            "event_id": EDIT_TARGET,
+            "sender": "@me:example.org",
+            "origin_server_ts": 1,
+            "content": { "msgtype": "m.image", "body": "a.png", "url": "mxc://example.org/a" },
+        })))
+        .expect("editable");
+        assert_eq!(content.msgtype.msgtype(), "m.image");
+    }
+
+    #[test]
+    fn editable_message_content_refuses_undecryptable_redacted_and_other_events() {
+        let undecryptable = raw_event(json!({
+            "type": "m.room.encrypted",
+            "event_id": EDIT_TARGET,
+            "sender": "@me:example.org",
+            "origin_server_ts": 1,
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": "AwgAEnAC",
+                "device_id": "DEVICE",
+                "sender_key": "sender+key",
+                "session_id": "session",
+            },
+        }));
+        let redacted = raw_event(json!({
+            "type": "m.room.message",
+            "event_id": EDIT_TARGET,
+            "sender": "@me:example.org",
+            "origin_server_ts": 1,
+            "content": {},
+            "unsigned": {
+                "redacted_because": {
+                    "type": "m.room.redaction",
+                    "event_id": "$redaction:example.org",
+                    "sender": "@me:example.org",
+                    "origin_server_ts": 2,
+                    "redacts": EDIT_TARGET,
+                    "content": { "redacts": EDIT_TARGET },
+                },
+            },
+        }));
+        let reaction = raw_event(json!({
+            "type": "m.reaction",
+            "event_id": EDIT_TARGET,
+            "sender": "@me:example.org",
+            "origin_server_ts": 1,
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$other:example.org",
+                    "key": "👍",
+                },
+            },
+        }));
+        for (raw, expected) in [
+            (undecryptable, "could not be decrypted"),
+            (redacted, "redacted"),
+            (reaction, "m.reaction"),
+        ] {
+            let err = editable_message_content(&raw).expect_err("not editable");
+            assert!(
+                matches!(&err, GatewayError::Invalid(message) if message.contains(expected)),
+                "expected {expected:?}, got {err:?}"
+            );
+        }
     }
 
     #[test]

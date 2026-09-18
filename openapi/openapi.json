@@ -10217,14 +10217,14 @@
       },
       "EditRequest": {
         "type": "object",
-        "description": "Request body for editing a message (`PUT …/events/{event_id}`). Replaces the\ntarget event's text via an `m.replace` relation.\n\nLike [`SendMessageRequest`], `format` + `formatted_body` are optional and must\nbe supplied together to set rich text on the replacement.",
+        "description": "Request body for editing a message (`PUT …/events/{event_id}`). Replaces the\ntarget event's text via an `m.replace` relation.\n\nLike [`SendMessageRequest`], `format` + `formatted_body` are optional and must\nbe supplied together to set rich text on the replacement.\n\nThe replacement keeps the target's `msgtype`. For a text, notice, or emote,\n`body` is the new text. For an image, file, audio, or video message, `body`\nis the new *caption*: the media and its filename are kept, and an empty\n`body` (or one equal to the filename) removes the caption. Editing any other\nkind of message is a `400`.",
         "required": [
           "body"
         ],
         "properties": {
           "body": {
             "type": "string",
-            "description": "The new plain-text message body (and formatting fallback)."
+            "description": "The new plain-text message body, or a media message's new caption (and\nformatting fallback)."
           },
           "format": {
             "type": [
@@ -11654,7 +11654,21 @@
               "string",
               "null"
             ],
-            "description": "Optional media caption. When absent, Axon uses the staged filename as the\nMatrix event body."
+            "description": "Optional media caption. When absent — or empty — Axon uses the staged\nfilename as the Matrix event body."
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Markup name for `formatted_body` — only `org.matrix.custom.html`. Must be\npaired with `formatted_body`, and requires `caption`: Matrix defines\nformatting only for a media caption (MSC2530)."
+          },
+          "formatted_body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The caption rendered as HTML. Must be paired with `format`; `caption` is\nits plain-text fallback."
           },
           "reply_to": {
             "type": [

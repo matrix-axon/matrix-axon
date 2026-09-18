@@ -106,6 +106,18 @@ pub async fn send_media(
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Json(req): Json<SendMediaRequest>,
 ) -> Result<ApiResponse<SendResultDto>, ApiError> {
+    // Validate before claiming: a malformed request must not consume the upload.
+    let fmt = formatted(&req.format, &req.formatted_body)?;
+    // An empty caption is no caption, as on the edit path (`set_media_caption`
+    // in `axon-sync`): the filename stays the event body. Formatting without a
+    // caption has nothing to format, so it is rejected rather than sent as an
+    // empty-but-formatted body.
+    let caption = req.caption.as_deref().filter(|caption| !caption.is_empty());
+    if fmt.is_some() && caption.is_none() {
+        return Err(ApiError::bad_request(
+            "format and formatted_body require a caption",
+        ));
+    }
     let relation = Relation {
         reply_to: req.reply_to.as_deref(),
         thread_root: req.thread_root.as_deref(),
@@ -129,13 +141,7 @@ pub async fn send_media(
 
     let send_started_at = std::time::Instant::now();
     let send_result = sender
-        .send_media(
-            account_id,
-            &room_id,
-            attachment,
-            req.caption.as_deref(),
-            relation,
-        )
+        .send_media(account_id, &room_id, attachment, caption, fmt, relation)
         .await;
     match send_result {
         Ok(event_id) => {
