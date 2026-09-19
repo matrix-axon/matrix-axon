@@ -1,0 +1,6 @@
+on: push
+jobs:
+  minimal-job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo
