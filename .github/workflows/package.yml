@@ -10,6 +10,12 @@ on:
       - ".github/workflows/package.yml"
       - "crates/axon-server/**"
       - "crates/axon-core/**"
+      - "crates/axon-store/**"
+      - "crates/axon-api/**"
+      - "crates/axon-sync/**"
+      - "crates/axon-crypto/**"
+      - "crates/axon-search/**"
+      - "crates/axon-media/**"
       - "Cargo.lock"
   workflow_dispatch:
 
@@ -59,7 +65,7 @@ jobs:
           rpm -qp --info "$rpm"
           rpm -qp --list "$rpm"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: axon-server-linux-amd64-packages
           path: target/nfpm/*

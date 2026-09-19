@@ -76,6 +76,11 @@ local_postgres_ready() {
 	su -s /bin/sh postgres -c "psql -Atqc 'SELECT 1'" >/dev/null 2>&1
 }
 
+# True when OS user `axon` can connect to database `axon` via peer.
+peer_connects() {
+	su -s /bin/sh axon -c "psql -d axon -Atqc 'SELECT 1'" >/dev/null 2>&1
+}
+
 pg_scalar() {
 	su -s /bin/sh postgres -c "psql -Atqc \"$1\""
 }
@@ -92,21 +97,46 @@ provision_local_postgres() {
 	su -s /bin/sh postgres -c "psql -v ON_ERROR_STOP=1 -d axon -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto'"
 }
 
-pg_axon_scalar() {
-	su -s /bin/sh postgres -c "psql -d axon -Atqc \"$1\"" 2>/dev/null || true
+# Run a query against the axon database. Prints stdout. Returns psql's exit
+# status (not masked) so callers can tell failure from "no rows".
+pg_axon_query() {
+	su -s /bin/sh postgres -c "psql -d axon -v ON_ERROR_STOP=1 -Atqc \"$1\""
 }
 
 # True when the local `axon` database already holds pgcrypto'd account secrets
-# from a previous install.
+# from a previous install. Query failure is treated as "yes" so a transient
+# error cannot mint a new store_key over existing ciphertext.
 has_encrypted_account_secrets() {
 	[ "$(pg_scalar "SELECT 1 FROM pg_database WHERE datname = 'axon'")" = "1" ] || return 1
-	[ "$(pg_axon_scalar "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'accounts'")" = "1" ] || return 1
-	[ "$(pg_axon_scalar "SELECT 1 FROM accounts WHERE access_token_encrypted IS NOT NULL OR oauth_refresh_token_encrypted IS NOT NULL LIMIT 1")" = "1" ]
+	if ! tables=$(pg_axon_query "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'accounts'"); then
+		return 0
+	fi
+	[ "$tables" = "1" ] || return 1
+	if ! rows=$(pg_axon_query "SELECT 1 FROM accounts WHERE access_token_encrypted IS NOT NULL OR oauth_refresh_token_encrypted IS NOT NULL LIMIT 1"); then
+		return 0
+	fi
+	[ "$rows" = "1" ]
+}
+
+config_url() {
+	[ -f "$CONFIG" ] || return 1
+	awk -F ' = ' '/^url = / { gsub(/^"|"$/, "", $2); print $2; exit }' "$CONFIG"
 }
 
 config_store_key() {
 	[ -f "$CONFIG" ] || return 1
 	awk -F ' = ' '/^store_key = / { gsub(/^"|"$/, "", $2); print $2; exit }' "$CONFIG"
+}
+
+# True when database.url is the packaged Unix-socket URL (percent-encoded host).
+config_uses_local_socket() {
+	url=$(config_url) || return 1
+	case $url in
+	postgres://axon@%2Fvar%2Frun%2Fpostgresql/axon | postgres://axon@%2Frun%2Fpostgresql/axon | postgres://axon@%2Fvar%2Frun%2Fpostgresql/axon?* | postgres://axon@%2Frun%2Fpostgresql/axon?*)
+		return 0
+		;;
+	esac
+	return 1
 }
 
 # True when there is nothing to decrypt, or the config store_key decrypts a row.
@@ -130,6 +160,7 @@ To keep the data, restore the old /etc/axon-server/config.toml (the
 [sync] store_key must match) and run:
 
   sudo dpkg-reconfigure axon-server
+  sudo systemctl enable --now axon-server
 
 To start over, drop the leftover database (and optional SDK state) and
 configure again:
@@ -137,6 +168,21 @@ configure again:
   sudo -u postgres dropdb axon
   sudo rm -f /etc/axon-server/config.toml
   sudo rm -rf /var/lib/axon-server
+  sudo dpkg-reconfigure axon-server
+
+The package is installed; the service has not been started.
+EOF
+}
+
+print_peer_failed() {
+	cat >&2 <<'EOF'
+
+The postgres OS user can reach the cluster, but role `axon` cannot
+connect over the Unix socket (peer auth). Typical cause: pg_hba.conf
+`local` lines use scram-sha-256 or md5 instead of `peer`.
+
+Fix pg_hba.conf, reload Postgres, then:
+
   sudo dpkg-reconfigure axon-server
 
 The package is installed; the service has not been started.
@@ -178,30 +224,42 @@ EOF
 	mv "$tmp" "$cfg"
 }
 
-# Wait for the unit to print the one-time bootstrap URL to the journal.
+journal_cursor() {
+	journalctl -u axon-server -n 0 --show-cursor --no-pager 2>/dev/null |
+		sed -n 's/^-- cursor: //p'
+}
+
+# Wait for the unit to print the one-time bootstrap URL *after* $1 (a journal
+# cursor captured before start). Sleep first so Type=simple has time to log.
 wait_for_bootstrap_url() {
+	cursor=$1
 	n=0
 	while [ "$n" -lt 10 ]; do
-		url=$(journalctl -u axon-server -n 200 --no-pager -o cat 2>/dev/null |
-			sed -n 's/.*open \(http:\/\/[^ ]*\).*/\1/p' | tail -n 1)
+		sleep 1
+		if [ -n "$cursor" ]; then
+			log=$(journalctl -u axon-server --after-cursor "$cursor" --no-pager -o cat 2>/dev/null || true)
+		else
+			log=$(journalctl -u axon-server --since "20 seconds ago" --no-pager -o cat 2>/dev/null || true)
+		fi
+		url=$(printf '%s\n' "$log" | sed -n 's/.*open \(http:\/\/[^ ]*\).*/\1/p' | tail -n 1)
 		if [ -n "$url" ]; then
 			printf '%s\n' "$url"
 			return 0
 		fi
 		n=$((n + 1))
-		sleep 1
 	done
 	return 1
 }
 
 print_first_run_help() {
+	cursor=$1
 	echo
 	echo "axon-server is installed and the service is enabled."
 	echo "It listens on http://127.0.0.1:8080 (loopback only)."
 	echo
 	url=
 	if is_systemd; then
-		url=$(wait_for_bootstrap_url || true)
+		url=$(wait_for_bootstrap_url "$cursor" || true)
 	fi
 	if [ -n "$url" ]; then
 		echo "Create the first client credential by opening this one-time URL"
@@ -248,27 +306,33 @@ stop_unit() {
 	fi
 }
 
+# $1=1 enable+start (fresh config written by this script). $1=0 restart only
+# if the admin already enabled the unit — do not re-enable on upgrade.
 start_unit() {
-	if is_systemd; then
-		systemctl daemon-reload >/dev/null 2>&1 || true
-		systemctl enable axon-server.service >/dev/null 2>&1 || true
-		systemctl restart axon-server.service >/dev/null 2>&1 || true
+	enable=$1
+	is_systemd || return 0
+	systemctl daemon-reload
+	if [ "$enable" = 1 ]; then
+		systemctl enable axon-server.service
+		systemctl start axon-server.service
+	elif systemctl is-enabled --quiet axon-server.service 2>/dev/null; then
+		systemctl restart axon-server.service
 	fi
 }
 
-# Shared by first install (`configure` with empty $2) and upgrade / dpkg-reconfigure.
+# Shared by first install, upgrade, and dpkg-reconfigure.
 configure() {
 	ensure_user
 	ensure_dirs
 	fix_empty_host_url
 
 	if [ -f "$CONFIG" ]; then
-		if local_postgres_ready && ! store_key_unlocks_db; then
+		if config_uses_local_socket && local_postgres_ready && ! store_key_unlocks_db; then
 			stop_unit
 			print_leftover_database
 			return 0
 		fi
-		start_unit
+		start_unit 0
 		return 0
 	fi
 
@@ -284,6 +348,10 @@ configure() {
 	fi
 
 	provision_local_postgres
+	if ! peer_connects; then
+		print_peer_failed
+		return 0
+	fi
 	# Peer auth requires the connecting OS user to match the role, so init
 	# runs as `axon`, not root. --no-token: first credential is the unit's
 	# web bootstrap (AXON_SERVER__BOOTSTRAP_WEB_AUTO).
@@ -294,11 +362,16 @@ configure() {
 		return 1
 	}
 	echo "$init_out" | grep -E 'Wrote configuration|connected|not reachable' || true
+	if echo "$init_out" | grep -q 'not reachable'; then
+		print_peer_failed
+		return 0
+	fi
 	chmod 0600 "$CONFIG"
 	chown axon:axon "$CONFIG"
 	rewrite_packaged_comments "$CONFIG"
-	start_unit
-	print_first_run_help
+	cursor=$(journal_cursor || true)
+	start_unit 1
+	print_first_run_help "$cursor"
 }
 
 # Debian first install, upgrade, and dpkg-reconfigure; RPM install and upgrade.
