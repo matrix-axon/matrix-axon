@@ -92,13 +92,36 @@ fi
 
 cd "$web_dir"
 
-# Generate the Xcode project if this is a fresh checkout. Idempotent, and it
-# leaves an existing project's icons alone — which is exactly the problem the
-# next step exists to fix.
-if [ ! -d "$tauri_dir/gen/apple" ]; then
-  echo "==> generating the iOS project"
-  pnpm tauri ios init --ci
+# Regenerate the Xcode project every time, from scratch.
+#
+# `tauri ios init` writes `project.yml` when it first creates `gen/apple` and
+# never revisits it, so anything under `bundle.iOS` in tauri.conf.json that
+# lands there is applied once and then frozen. Changing
+# `minimumSystemVersion` to 15.0 and rebuilding produced a bundle still
+# declaring 14.0 — and re-running `init` over the existing project changed
+# nothing, because it too leaves what is already there alone. The same
+# stickiness is why the app icon stayed Tauri's and why the signing team
+# vanished when the directory was once removed by hand.
+#
+# `gen/` is generated and gitignored, so there is nothing in it to preserve.
+# Deleting it costs a few seconds and makes the config the single source of
+# truth for what gets built.
+# The build number rides in as a config override rather than through
+# `tauri ios build --build-number`. That flag writes the number into the
+# generated project, so it lands on the *following* build — passing 1 produced
+# a bundle still saying 0.1.0, and the next build, with no flag at all, said
+# 0.1.0.1. Regenerating the project each run then clears it entirely. As an
+# override it is merged into the config that both steps read, which is the same
+# path `minimumSystemVersion` takes, and it has to reach both: the project
+# carries it, and the build reads it back.
+config_args=()
+if [ -n "$build_number" ]; then
+  config_args=(--config "{\"bundle\":{\"iOS\":{\"bundleVersion\":\"$build_number\"}}}")
 fi
+
+echo "==> regenerating the iOS project"
+rm -rf "$tauri_dir/gen/apple"
+pnpm tauri ios init --ci "${config_args[@]}"
 
 echo "==> syncing the app icon from icons/ios"
 if [ ! -d "$appiconset" ]; then
@@ -114,10 +137,7 @@ fi
 xcrun swift "$repo_root/scripts/lib/flatten-icons.swift" "$appiconset" "$icon_src"/*.png
 echo "    $(ls "$icon_src"/*.png | wc -l | tr -d ' ') icons, flattened"
 
-build_args=(tauri ios build --export-method "$export_method")
-if [ -n "$build_number" ]; then
-  build_args+=(--build-number "$build_number")
-fi
+build_args=(tauri ios build --export-method "$export_method" "${config_args[@]}")
 
 echo "==> building (export method: $export_method)"
 pnpm "${build_args[@]}"
