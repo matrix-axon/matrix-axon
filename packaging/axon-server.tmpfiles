@@ -1,0 +1,4 @@
+# Type Path Mode User Group Age Argument
+d /etc/axon-server 0750 axon axon -
+d /var/lib/axon-server 0750 axon axon -
+d /var/cache/axon-server 0750 axon axon -

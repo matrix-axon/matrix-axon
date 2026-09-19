@@ -1,0 +1,37 @@
+Packaged axon-server
+====================
+
+The systemd unit runs as Unix user `axon` with
+`--config /etc/axon-server/config.toml`.
+
+Local Postgres (default)
+------------------------
+If a cluster answers on the Unix socket, the first `configure` creates
+role `axon`, database `axon`, and `pgcrypto` as the `postgres` superuser,
+then runs `axon-server init` as user `axon` with a peer-auth URL
+(no password). The service is enabled and started.
+
+The generated config.toml comments explain how to point `database.url`
+at a remote or passworded server.
+
+Bring your own Postgres
+-----------------------
+If no local cluster is reachable, the package still installs. After the
+database exists (role can use pgcrypto in that database):
+
+  axon-server init --non-interactive \
+    --config /etc/axon-server/config.toml \
+    --database-url 'postgres://USER:PASSWORD@HOST:5432/DB' \
+    --no-token
+  chown axon:axon /etc/axon-server/config.toml
+  chmod 0600 /etc/axon-server/config.toml
+  systemctl enable --now axon-server
+
+First credential
+----------------
+The unit sets AXON_SERVER__BOOTSTRAP_WEB_AUTO=true. After start, the
+bootstrap URL is in the journal (loopback only):
+
+  journalctl -u axon-server -e
+
+Alternatively: `axon-server --config /etc/axon-server/config.toml token issue --label admin`
