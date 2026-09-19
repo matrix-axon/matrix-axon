@@ -97,7 +97,7 @@ export function SettingsPage() {
 }
 
 function SettingsPageContents() {
-  const { auth, settings, rooms, deviceState } = useServices()
+  const { auth, settings, rooms, deviceState, platform } = useServices()
   const [markingRead, setMarkingRead] = useState(false)
   const [protocolMessage, setProtocolMessage] = useState<string | null>(null)
 
@@ -261,32 +261,34 @@ function SettingsPageContents() {
           {markingRead ? 'Marking…' : 'Mark all as read'}
         </button>
       </section>
-      <InstallAppSettings />
-      <section class="panel">
-        <h2>Matrix links</h2>
-        <label class="setting-row">
-          <input
-            type="checkbox"
-            checked={settings.matrixProtocolHandler.value}
-            disabled={!matrixProtocolHandlerAvailable()}
-            onChange={(event) =>
-              setMatrixProtocolHandler(event.currentTarget.checked)
-            }
-          />
-          Handle <code>matrix:</code> links
-        </label>
-        <p class="muted">
-          Registers this web origin as a browser handler for{' '}
-          <code>matrix:</code> links. Axon also handles{' '}
-          <code>https://matrix.to/</code> links clicked inside the app.
-        </p>
-        {!matrixProtocolHandlerAvailable() && (
+      {platform.browserCanAdoptApp && <InstallAppSettings />}
+      {platform.browserCanAdoptApp && (
+        <section class="panel">
+          <h2>Matrix links</h2>
+          <label class="setting-row">
+            <input
+              type="checkbox"
+              checked={settings.matrixProtocolHandler.value}
+              disabled={!matrixProtocolHandlerAvailable()}
+              onChange={(event) =>
+                setMatrixProtocolHandler(event.currentTarget.checked)
+              }
+            />
+            Handle <code>matrix:</code> links
+          </label>
           <p class="muted">
-            This browser does not support protocol-handler registration.
+            Registers this web origin as a browser handler for{' '}
+            <code>matrix:</code> links. Axon also handles{' '}
+            <code>https://matrix.to/</code> links clicked inside the app.
           </p>
-        )}
-        {protocolMessage !== null && <p class="muted">{protocolMessage}</p>}
-      </section>
+          {!matrixProtocolHandlerAvailable() && (
+            <p class="muted">
+              This browser does not support protocol-handler registration.
+            </p>
+          )}
+          {protocolMessage !== null && <p class="muted">{protocolMessage}</p>}
+        </section>
+      )}
       <section class="panel">
         <h2>Accounts</h2>
         <p>

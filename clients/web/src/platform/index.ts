@@ -208,6 +208,23 @@ export interface Platform {
   updatesFromOrigin: boolean
 
   /**
+   * Whether the browser can adopt this page as an app of its own: add it to a
+   * home screen, or register it as the handler for a URL scheme.
+   *
+   * `true` in a browser, where both are things the user may want and only the
+   * browser can grant. `false` in a packaged shell, where the OS has already
+   * installed the app — there is no page for a browser to adopt, `matrix:` is
+   * claimed by the bundle rather than at runtime, and the APIs behind both
+   * (`beforeinstallprompt`, `navigator.registerProtocolHandler`) do not exist
+   * in a webview at all.
+   *
+   * Without this the settings for them still render, disabled, explaining that
+   * "this browser" does not support something — in an application that is not
+   * a browser and would not use the answer.
+   */
+  browserCanAdoptApp: boolean
+
+  /**
    * The API base to fall back on when the user has configured none and no
    * `VITE_AXON_SERVER_URL` was baked in (ADR 0102 § 3).
    *
@@ -268,6 +285,9 @@ export function browserPlatform(): Platform {
     // A deploy replaces what this origin serves, which is what makes the
     // version manifest, the banner and the auto-reload meaningful.
     updatesFromOrigin: true,
+    // A page in a browser: installable to a home screen, and able to offer
+    // itself as a `matrix:` handler.
+    browserCanAdoptApp: true,
   }
 }
 

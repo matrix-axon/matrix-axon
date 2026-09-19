@@ -466,5 +466,8 @@ export function tauriPlatform(): Platform {
     // `dist` is compiled into this binary, so there is nothing for a reload to
     // fetch that is not already running. See the field's own note.
     updatesFromOrigin: false,
+    // This *is* the installed app. Nothing to add to a home screen, and the
+    // scheme it handles is declared in the bundle, not asked for at runtime.
+    browserCanAdoptApp: false,
   }
 }

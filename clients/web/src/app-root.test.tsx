@@ -121,6 +121,7 @@ describe('AppRoot wiring the transport into the app', () => {
       defaultApiBaseUrl: null,
       // A packaged build, like the one this simulates.
       updatesFromOrigin: false,
+      browserCanAdoptApp: false,
     }
 
     // A token, so the shell mounts signed-in and actually issues requests.
