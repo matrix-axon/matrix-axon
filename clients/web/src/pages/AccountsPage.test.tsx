@@ -985,6 +985,11 @@ describe('AccountsPage', () => {
     // A phone: a coarse pointer, and cameras the platform describes by which
     // way they face. Both are required to suppress the picker, so this also
     // pins that a desktop webcam reporting a facing would not be enough.
+    // Restored below: `vi.unstubAllGlobals()` in this file's `afterEach` does
+    // not undo a `defineProperty`, and `src/test/setup.ts` only installs its
+    // shim when `matchMedia` is missing — so leaving this in place would have
+    // every later test in the environment see a coarse pointer.
+    const original = Object.getOwnPropertyDescriptor(window, 'matchMedia')
     const matchMedia = vi.fn((query: string) => ({
       matches: query === '(pointer: coarse)',
       media: query,
@@ -996,6 +1001,13 @@ describe('AccountsPage', () => {
       writable: true,
       value: matchMedia,
     })
+    const restoreMatchMedia = () => {
+      if (original === undefined) {
+        delete (window as unknown as Record<string, unknown>).matchMedia
+      } else {
+        Object.defineProperty(window, 'matchMedia', original)
+      }
+    }
     const qr: BrowserQrAdapter = {
       decodeBase64: vi.fn(),
       encodeBase64: vi.fn(),
@@ -1046,7 +1058,16 @@ describe('AccountsPage', () => {
     await findByText('Stop camera')
     expect(queryByLabelText('Camera')).toBeNull()
 
+    // And it stays gone once the camera stops. The facing that identifies this
+    // as a phone is only readable from a running track, so clearing it on stop
+    // brought the picker back — offering the rear ultra-wide and telephoto
+    // that cannot focus on a QR code at arm's length.
+    fireEvent.click(getByRole('button', { name: 'Stop camera' }))
+    await findByText('Start camera')
+    expect(queryByLabelText('Camera')).toBeNull()
+
     unmount()
+    restoreMatchMedia()
   })
 
   it('accepts exactly two check-code digits and exposes only a safe approval link', async () => {

@@ -716,6 +716,11 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 1.5rem;
+  /* The scroll container for Settings, Accounts, Invites and Licenses, and it
+     reaches the bottom of the display. Without this the last control of a page
+     sits under the home indicator with no way to scroll it clear — the same
+     dead band `.room-list-pane` carries the inset for. */
+  padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
   box-sizing: border-box;
 }
 
@@ -900,7 +905,11 @@ body {
 
 .signin {
   max-width: 28rem;
-  margin: 4rem auto;
+  /* Rendered *instead of* `.shell`, so none of its insets apply and this has
+     to carry its own. The first screen a TestFlight user sees. 4rem clears a
+     59px status bar by five pixels, which is not clearance, it is luck. */
+  margin: calc(4rem + env(safe-area-inset-top, 0px)) auto
+    calc(4rem + env(safe-area-inset-bottom, 0px));
   padding: 0 1rem;
 }
 
@@ -3492,6 +3501,15 @@ span.composer-attachment-thumb {
   box-shadow: -4px 0 16px rgba(0, 0, 0, 0.15);
 }
 
+/* The bottom inset goes to the side panel alone. The thread panel ends in
+   `.composer`, which already carries it, and applying it to both would inset
+   that one twice. Room info has no composer, so its last row would otherwise
+   end under the home indicator — and the panel is `overflow: hidden`, so there
+   is no scrolling it clear. */
+.side-panel {
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+}
+
 @media (max-width: 47.99rem) {
   .mobile-back-surface {
     position: relative;
@@ -3549,11 +3567,12 @@ span.composer-attachment-thumb {
     min-height: 0;
     box-shadow: none;
     /* No longer against the top edge: a column inside the shell, below a
-       topbar that has already taken the inset. Keeping it here would indent
-       the column's contents by the status bar height on an iPad held in
-       portrait, which is wide enough to reach this breakpoint and still has a
-       non-zero inset. */
+       topbar that has already taken the inset, and above a shell that has
+       taken the bottom one. Keeping these here would indent the column by the
+       status bar height on an iPad held in portrait, which is wide enough to
+       reach this breakpoint and still has a non-zero inset. */
     padding-top: 1rem;
+    padding-bottom: 1rem;
   }
 
   .room-stream {
@@ -5129,8 +5148,12 @@ audio.media-player {
 
 .lightbox-toolbar {
   position: absolute;
-  top: 1rem;
-  right: 1rem;
+  /* `.overlay`'s padding does not reach this: an absolutely positioned child
+     resolves its offsets against the containing block's padding box, so the
+     inset has to be in the offsets themselves. Otherwise Close and Save land
+     behind the clock and inside the Dynamic Island cutout. */
+  top: calc(1rem + env(safe-area-inset-top, 0px));
+  right: calc(1rem + env(safe-area-inset-right, 0px));
   z-index: 1;
   display: flex;
   align-items: center;

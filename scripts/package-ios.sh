@@ -64,6 +64,36 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# Checked here rather than at the upload, which is after the build and after
+# `--install`: a forgotten environment variable should not cost a full iOS
+# build before it is mentioned.
+if [ "$upload" -eq 1 ]; then
+  if [ "$export_method" != "app-store-connect" ]; then
+    echo "error: --upload needs --export-method app-store-connect; got $export_method" >&2
+    exit 2
+  fi
+  : "${ASC_KEY_ID:?set ASC_KEY_ID (the A1B2C3D4E5 in ~/.appstoreconnect/private_keys/AuthKey_*.p8)}"
+  : "${ASC_ISSUER_ID:?set ASC_ISSUER_ID (App Store Connect > Users and Access > Integrations)}"
+fi
+
+# 12: `devicectl device install app` lists --device in its usage as an option it
+# requires; there is no "the only connected one" default. Resolve it now so
+# `--install` with no `--device` does not fail with a missing-argument error
+# after the build.
+if [ "$install_app" -eq 1 ] && [ -z "$device" ]; then
+  devices_json=$(mktemp)
+  xcrun devicectl list devices --json-output "$devices_json" >/dev/null 2>&1 || true
+  device=$(python3 "$(dirname "${BASH_SOURCE[0]}")/lib/pick-ios-device.py" "$devices_json" || true)
+  rm -f "$devices_json"
+  if [ -z "$device" ]; then
+    echo "error: --install needs a device, and none was resolved." >&2
+    echo "       Either nothing is connected, or several are (listed above)." >&2
+    echo "       Name one with --device <udid>." >&2
+    exit 2
+  fi
+  echo "==> resolved device $device"
+fi
+
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 web_dir="$repo_root/clients/web"
 tauri_dir="$web_dir/src-tauri"
@@ -114,6 +144,11 @@ cd "$web_dir"
 # override it is merged into the config that both steps read, which is the same
 # path `minimumSystemVersion` takes, and it has to reach both: the project
 # carries it, and the build reads it back.
+# Seeded rather than left empty: macOS ships bash 3.2, where `"${a[@]}"` on an
+# empty array is an unbound variable under `set -u`, and `#!/usr/bin/env bash`
+# finds that one whenever Homebrew's is not installed. Every use below expands
+# it after the subcommand, so a leading `--ci`-style no-op is not available —
+# carrying the flag and its value as one unit is.
 config_args=()
 if [ -n "$build_number" ]; then
   config_args=(--config "{\"bundle\":{\"iOS\":{\"bundleVersion\":\"$build_number\"}}}")
@@ -121,7 +156,7 @@ fi
 
 echo "==> regenerating the iOS project"
 rm -rf "$tauri_dir/gen/apple"
-pnpm tauri ios init --ci "${config_args[@]}"
+pnpm tauri ios init --ci ${config_args[@]+"${config_args[@]}"}
 
 echo "==> syncing the app icon from icons/ios"
 if [ ! -d "$appiconset" ]; then
@@ -137,12 +172,17 @@ fi
 xcrun swift "$repo_root/scripts/lib/flatten-icons.swift" "$appiconset" "$icon_src"/*.png
 echo "    $(ls "$icon_src"/*.png | wc -l | tr -d ' ') icons, flattened"
 
-build_args=(tauri ios build --export-method "$export_method" "${config_args[@]}")
+build_args=(tauri ios build --export-method "$export_method"
+  ${config_args[@]+"${config_args[@]}"})
 
 echo "==> building (export method: $export_method)"
 pnpm "${build_args[@]}"
 
-ipa=$(ls -t "$tauri_dir"/gen/apple/build/*/*.ipa 2>/dev/null | head -1)
+# `|| true` is load-bearing, not defensive noise. Under `set -euo pipefail` a
+# command substitution whose pipeline fails aborts the script *at this line*,
+# and the redirect swallows the only clue — so a missing .ipa would exit
+# silently instead of reaching the diagnostic written for exactly that case.
+ipa=$(ls -t "$tauri_dir"/gen/apple/build/*/*.ipa 2>/dev/null | head -1 || true)
 if [ -z "$ipa" ]; then
   echo "error: the build reported success but produced no .ipa" >&2
   exit 1
@@ -151,7 +191,11 @@ echo "==> built $ipa"
 
 # Say what actually shipped rather than what was meant to. Both of these have
 # been wrong in a bundle that built and signed cleanly.
-app=$(ls -dt ~/Library/Developer/Xcode/DerivedData/axon-*/Build/Products/*-iphoneos/Axon.app 2>/dev/null | head -1)
+# Same, and it matters more here: this block is informational, but without
+# `|| true` a DerivedData path that does not match — a custom location, a
+# renamed product — would abort the script after a successful build and before
+# `--install` and `--upload` ever ran.
+app=$(ls -dt ~/Library/Developer/Xcode/DerivedData/axon-*/Build/Products/*-iphoneos/Axon.app 2>/dev/null | head -1 || true)
 if [ -n "$app" ] && [ -f "$app/Info.plist" ]; then
   scheme=$(plutil -extract CFBundleURLTypes.0.CFBundleURLSchemes.0 raw -o - "$app/Info.plist" 2>/dev/null || echo "(none)")
   echo "    url scheme:   $scheme"
@@ -164,26 +208,13 @@ fi
 
 if [ "$install_app" -eq 1 ]; then
   echo "==> installing to device"
-  if [ -n "$device" ]; then
-    xcrun devicectl device install app --device "$device" "$ipa"
-  else
-    xcrun devicectl device install app "$ipa"
-  fi
+  xcrun devicectl device install app --device "$device" "$ipa"
 fi
 
 if [ "$upload" -eq 1 ]; then
-  # App Store Connect API key. The .p8 stays in ~/.appstoreconnect/private_keys
-  # where altool looks for it; this script never reads it and it is never
-  # committed. The issuer is an account identifier rather than a secret, but it
-  # is per-account, so it comes from the environment too.
-  : "${ASC_KEY_ID:?set ASC_KEY_ID (the A1B2C3D4E5 in ~/.appstoreconnect/private_keys/AuthKey_*.p8)}"
-  : "${ASC_ISSUER_ID:?set ASC_ISSUER_ID (App Store Connect > Users and Access > Integrations)}"
-
-  if [ "$export_method" != "app-store-connect" ]; then
-    echo "error: --upload needs --export-method app-store-connect; got $export_method" >&2
-    exit 1
-  fi
-
+  # The .p8 stays in ~/.appstoreconnect/private_keys where altool looks for it;
+  # this script never reads it and it is never committed. Both variables were
+  # checked before the build.
   echo "==> uploading to App Store Connect"
   xcrun altool --upload-app --type ios --file "$ipa" \
     --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"

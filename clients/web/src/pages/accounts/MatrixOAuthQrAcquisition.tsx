@@ -132,7 +132,10 @@ function QrScanner({
     session.current = null
     setCameraStarting(false)
     setCameraActive(false)
-    setCameraFacing(null)
+    // `cameraFacing` deliberately survives a stop. It says what kind of device
+    // this is, not what the stopped session was doing, and clearing it brought
+    // the picker back the moment the camera stopped — offering the rear
+    // ultra-wide and telephoto that the suppression exists to keep away from.
   }, [])
 
   const refreshCameras = useCallback(
@@ -228,7 +231,10 @@ function QrScanner({
         return
       }
       session.current = started
-      setCameraFacing(started.facingMode ?? null)
+      // Never back to null: a platform that described its cameras by facing
+      // once still does, and a later session that reports nothing does not
+      // make this a desktop.
+      setCameraFacing((known) => started.facingMode ?? known)
       selectCamera(started.deviceId ?? deviceId)
       setCameraActive(true)
       await refreshCameras(owner)

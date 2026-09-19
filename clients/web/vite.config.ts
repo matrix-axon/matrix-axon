@@ -275,8 +275,16 @@ function thirdPartyLicenses(): Plugin {
  * our own `process.ppid` pointing at it, unchanged. So record every ancestor
  * at startup and watch for any of them disappearing.
  *
- * A server started detached has no parent to lose and is left alone — that one
- * is orphaned on purpose.
+ * A server started detached is left alone, and "detached" has to mean more
+ * than having no parent at startup. `nohup pnpm dev &` from a script leaves
+ * that script an ancestor for as long as it runs, so watching for any ancestor
+ * to disappear is exactly how such a server gets killed a second after its
+ * launcher exits — the one case the exemption is supposed to cover.
+ *
+ * So the test is whether anything is reading our output. A `beforeDevCommand`
+ * child writes to a pipe the CLI holds; a server run from a terminal writes to
+ * a tty, and one deliberately detached writes to a file or /dev/null. Only the
+ * first has a supervisor whose exit should end it.
  */
 function exitWhenOrphaned(): Plugin {
   return {
@@ -314,6 +322,11 @@ function exitWhenOrphaned(): Plugin {
  */
 function ancestorPids(): number[] {
   if (process.platform === 'win32') {
+    return []
+  }
+  // A tty means a person started this in a terminal, not a supervisor that
+  // will hand the ports back when it dies.
+  if (process.stdout.isTTY === true) {
     return []
   }
   const pids: number[] = []
@@ -367,10 +380,15 @@ export default defineConfig({
     host: tauriDevHost ?? false,
     // `tauri.conf.json`'s `devUrl` names port 5173, so Vite quietly moving to
     // 5174 because something already holds 5173 produces a dev server Tauri
-    // never finds — the same indefinite wait, from a different cause. Fail
-    // loudly instead.
+    // never finds — an indefinite wait from a cause that looks nothing like
+    // it. That is what `beforeDevCommand`'s `pnpm dev --strictPort` is for, and
+    // it already covered the Tauri path before this file mentioned ports.
+    //
+    // Deliberately not `strictPort` here. This block is shared with ordinary
+    // browser development, where the port-bump fallback is the right
+    // behaviour: a second `pnpm dev` from a jj workspace should take 5174, not
+    // refuse to start because the main checkout holds 5173.
     port: 5173,
-    strictPort: true,
     // The HMR socket has to point back at this machine. Left to infer, it
     // resolves against the page's own origin, which on a device is the device.
     hmr: tauriDevHost
