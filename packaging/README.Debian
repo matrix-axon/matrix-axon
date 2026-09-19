@@ -1,6 +1,9 @@
 Packaged axon-server
 ====================
 
+Upstream project description: /usr/share/doc/axon-server/README.md
+(markdown, same file as the git repository).
+
 The systemd unit runs as Unix user `axon` with
 `--config /etc/axon-server/config.toml`.
 
