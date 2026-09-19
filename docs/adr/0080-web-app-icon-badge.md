@@ -75,8 +75,10 @@ volume is what a badge conventionally means.
   mirroring the `install-prompt.ts` shape (a capability-check function plus a
   setup function returning a disposer, no signals needed here since it has no
   independent browser-driven state to observe):
-  - `appBadgeAvailable(): boolean` — `'setAppBadge' in navigator`. On iOS this
-    is only `true` once the page is already running as an installed,
+  - `appBadgeAvailable(): boolean` — `typeof` checks that both
+    `navigator.setAppBadge` and `navigator.clearAppBadge` are functions (a bare
+    `in` test accepts a runtime that declares the key but leaves it
+    `undefined`; see #435). On iOS this is only `true` once the page is already running as an installed,
     standalone home-screen web app — WebKit does not expose the method at all
     in an ordinary Safari tab.
   - `applyAppBadge(settings: SettingsStore, rooms: RoomsStore): () => void` —

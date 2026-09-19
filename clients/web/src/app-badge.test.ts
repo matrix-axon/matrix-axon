@@ -22,14 +22,43 @@ function fakeRooms(unreadTotal: number): RoomsStore {
 
 describe('appBadgeAvailable', () => {
   afterEach(() => {
-    // @ts-expect-error test-only cleanup of a property this suite defines
+    // @ts-expect-error test-only cleanup of properties this suite defines
     delete navigator.setAppBadge
+    // @ts-expect-error test-only cleanup of properties this suite defines
+    delete navigator.clearAppBadge
   })
 
   it('reflects whether the Badging API exists on navigator', () => {
     expect(appBadgeAvailable()).toBe(false)
-    Object.assign(navigator, { setAppBadge: async () => {} })
+    Object.assign(navigator, {
+      setAppBadge: async () => {},
+      clearAppBadge: async () => {},
+    })
     expect(appBadgeAvailable()).toBe(true)
+  })
+
+  it('rejects a declared-but-undefined setAppBadge (#435)', () => {
+    // At least one WebKit runtime declares `setAppBadge` on `Navigator`
+    // without an implementation behind it, so the key is present while the
+    // value is `undefined` and the call throws. Detection has to look at the
+    // value.
+    Object.assign(navigator, {
+      setAppBadge: undefined,
+      clearAppBadge: async () => {},
+    })
+    expect('setAppBadge' in navigator).toBe(true)
+    expect(appBadgeAvailable()).toBe(false)
+  })
+
+  it('rejects a declared-but-undefined clearAppBadge', () => {
+    // Checked independently of `setAppBadge`: a runtime that lies about one
+    // says nothing about the other, and the effect calls both.
+    Object.assign(navigator, {
+      setAppBadge: async () => {},
+      clearAppBadge: undefined,
+    })
+    expect('clearAppBadge' in navigator).toBe(true)
+    expect(appBadgeAvailable()).toBe(false)
   })
 })
 
@@ -86,6 +115,58 @@ describe('applyAppBadge (ADR 0080)', () => {
 
     ;(rooms.unreadTotal as unknown as { value: number }).value = 0
     expect(clearAppBadge).toHaveBeenCalled()
+    dispose()
+  })
+
+  it('stays inert when setAppBadge is declared but undefined (#435)', () => {
+    // The regression this guards: `in`-based detection accepted this runtime,
+    // then `setAppBadge(3)` threw synchronously — past the `.catch`, which
+    // only ever handled a rejected promise — and out of the effect into
+    // whichever write to `unreadTotal` had triggered the re-run.
+    const clearAppBadge = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { setAppBadge: undefined, clearAppBadge })
+
+    const rooms = fakeRooms(0)
+    const dispose = applyAppBadge(fakeSettings(true), rooms)
+    expect(() => {
+      ;(rooms.unreadTotal as unknown as { value: number }).value = 3
+    }).not.toThrow()
+    expect(clearAppBadge).not.toHaveBeenCalled()
+    dispose()
+  })
+
+  it('contains a synchronous throw from a badge call', () => {
+    // Belt to the detection's braces: whatever a runtime does at call time,
+    // nothing decorative should escape into the signal write.
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const setAppBadge = vi.fn(() => {
+      throw new Error('badge unavailable')
+    })
+    const clearAppBadge = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { setAppBadge, clearAppBadge })
+
+    const rooms = fakeRooms(0)
+    const dispose = applyAppBadge(fakeSettings(true), rooms)
+    expect(() => {
+      ;(rooms.unreadTotal as unknown as { value: number }).value = 2
+    }).not.toThrow()
+    expect(setAppBadge).toHaveBeenCalledWith(2)
+    expect(consoleError).toHaveBeenCalled()
+    consoleError.mockRestore()
+    dispose()
+  })
+
+  it('tolerates an implementation that returns no promise', () => {
+    // `.catch` on a bare `undefined` return would itself throw.
+    const setAppBadge = vi.fn(() => undefined)
+    const clearAppBadge = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { setAppBadge, clearAppBadge })
+
+    let dispose = (): void => {}
+    expect(() => {
+      dispose = applyAppBadge(fakeSettings(true), fakeRooms(4))
+    }).not.toThrow()
+    expect(setAppBadge).toHaveBeenCalledWith(4)
     dispose()
   })
 
