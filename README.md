@@ -179,7 +179,9 @@ axon-server oauth identities unbind <id>       # revokes every token/refresh tok
 ```
 
 `bind` prints a URL — open it in any browser, on this machine or elsewhere, since it only needs to reach Axon's already-running `/v1/` surface — and polls until that browser leg completes or the 10-minute handshake expires.
-Sign-in with Apple is not yet supported (deferred to the iOS client work).
+Sign in with Apple is not yet available to operators.
+The provider foundation is implemented, but enabling Apple still fails at startup until POST callbacks and owner binding are integrated.
+See [ADR 0054's implementation addendum](docs/adr/0054-oauth-authorization-server.md#implementation-addendum-apple-rollout) for the remaining server and mobile work.
 
 The Matrix OAuth session foundation for Axon's own homeserver sessions is configured separately under `sync.matrix_oauth` (ADR 0097).
 It dynamically registers a public client when the discovered authorization server permits it; operators can configure a static public client ID for issuers that disable dynamic registration.

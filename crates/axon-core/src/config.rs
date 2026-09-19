@@ -511,8 +511,8 @@ pub struct OauthClientConfig {
 /// Per-provider OIDC settings.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct OauthProvidersConfig {
-    /// Sign in with Apple. `AppleProvider` itself ships in M14c; these
-    /// fields exist now so the config shape is stable ahead of it.
+    /// Sign in with Apple. Provider foundation exists; runtime integration
+    /// remains gated on Apple POST callbacks and owner binding.
     #[serde(default)]
     pub apple: AppleOauthConfig,
     /// Google sign-in via `GenericOidcProvider`.
@@ -547,14 +547,13 @@ pub struct GenericOauthProviderConfig {
     pub client_secret: Option<String>,
 }
 
-/// Sign-in-with-Apple settings. `AppleProvider`'s construction (ES256
-/// client-secret signing, native-audience handling) is M14c; these fields are
-/// declared now so the config shape doesn't change shape again then.
+/// Sign-in-with-Apple settings. Provider construction is implemented;
+/// operator enablement awaits POST callbacks and owner binding.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AppleOauthConfig {
     /// Whether Apple sign-in is wired up. Defaults to `false`. **Not yet
-    /// implemented** — the binary refuses to start with this `true` until
-    /// M14c ships `AppleProvider`.
+    /// available** — the binary refuses to start with this `true` until
+    /// Apple callbacks and owner binding are integrated.
     #[serde(default)]
     pub enabled: bool,
     /// The web Services ID Apple issues, used as the OIDC `client_id` for the

@@ -61,7 +61,8 @@ pub use member_profiles::{
 };
 pub use oauth::{
     http_client as oauth_http_client, rate_limit::spawn_sweeper as spawn_oauth_rate_limit_sweeper,
-    GenericOidcProvider, OAuthRuntime, OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity,
+    AppleProvider, GenericOidcProvider, OAuthRuntime, OidcError, OidcProvider, UpstreamTokens,
+    VerifiedIdentity,
 };
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};

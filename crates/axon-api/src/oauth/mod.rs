@@ -8,14 +8,20 @@
 //! - [`provider`]: the [`OidcProvider`](provider::OidcProvider) port.
 //! - [`jwks`]: cached, refresh-rate-limited JWKS lookup.
 //! - [`generic`]: the discovery-doc-driven provider impl (Google, Microsoft).
+//! - [`apple`]: Apple provider foundation, pending callback/runtime integration.
+//! - [`verification`]: shared JWT signature and claim validation.
+//! - [`exchange`]: bounded, redacted authorization-code exchange.
 //! - [`tokens`]: mint/verify/rotate orchestration atop `axon-store`.
 //! - [`rate_limit`]: the per-IP/per-`state` token-bucket layer.
 
+pub mod apple;
+mod exchange;
 pub mod generic;
 pub mod jwks;
 pub mod provider;
 pub mod rate_limit;
 pub mod tokens;
+mod verification;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,6 +29,7 @@ use std::time::Duration;
 
 use axon_core::OauthConfig;
 
+pub use apple::AppleProvider;
 pub use generic::GenericOidcProvider;
 pub use provider::{OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity};
 

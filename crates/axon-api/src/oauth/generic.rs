@@ -8,20 +8,13 @@
 //! checks are done by hand here rather than through that crate's built-in
 //! validator, so the one genuinely provider-specific wrinkle — Microsoft's
 //! multi-tenant `{tenantid}`-templated issuer — has a clear, testable seam
-//! ([`issuer_matches`]) instead of fighting a generic library's assumptions.
+//! ([`super::verification::issuer_matches`]) instead of fighting a generic library's assumptions.
 
-use chrono::Utc;
-use jsonwebtoken::{decode, decode_header, Validation};
 use serde::Deserialize;
-use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::oauth::jwks::JwksCache;
 use crate::oauth::provider::{OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity};
 use crate::oauth::{read_json_capped, MAX_HTTP_RESPONSE_BYTES};
-
-/// Clock-skew tolerance applied to `exp`/`nbf`/`iat` checks.
-const CLOCK_SKEW_SECS: i64 = 60;
 
 /// A discovery-doc-driven OIDC provider (Google, Microsoft).
 pub struct GenericOidcProvider {
@@ -48,33 +41,6 @@ struct DiscoveryDocument {
     authorization_endpoint: String,
     token_endpoint: String,
     jwks_uri: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenResponse {
-    id_token: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct Claims {
-    iss: String,
-    #[serde(default)]
-    aud: Value,
-    sub: String,
-    exp: i64,
-    iat: i64,
-    #[serde(default)]
-    nbf: Option<i64>,
-    #[serde(default)]
-    email: Option<String>,
-    #[serde(default)]
-    nonce: Option<String>,
-    #[serde(default)]
-    jti: Option<String>,
-    /// Microsoft's tenant id claim — substituted into a `{tenantid}`-templated
-    /// issuer to validate multi-tenant tokens. Absent for Google.
-    #[serde(default)]
-    tid: Option<String>,
 }
 
 impl GenericOidcProvider {
@@ -169,30 +135,15 @@ impl OidcProvider for GenericOidcProvider {
         code: &str,
         redirect_uri: &str,
     ) -> Result<UpstreamTokens, OidcError> {
-        let params = [
-            ("grant_type", "authorization_code"),
-            ("code", code),
-            ("redirect_uri", redirect_uri),
-            ("client_id", self.client_id.as_str()),
-            ("client_secret", self.client_secret.as_str()),
-        ];
-        let response = self
-            .http
-            .post(&self.discovery.token_endpoint)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|err| OidcError::Http(err.to_string()))?;
-        if !response.status().is_success() {
-            return Err(OidcError::Http(format!(
-                "token exchange returned {}",
-                response.status()
-            )));
-        }
-        let body: TokenResponse = read_json_capped(response, MAX_HTTP_RESPONSE_BYTES).await?;
-        Ok(UpstreamTokens {
-            id_token: body.id_token,
-        })
+        super::exchange::authorization_code(
+            &self.http,
+            &self.discovery.token_endpoint,
+            &self.client_id,
+            &self.client_secret,
+            code,
+            redirect_uri,
+        )
+        .await
     }
 
     async fn verify_identity_token(
@@ -200,110 +151,91 @@ impl OidcProvider for GenericOidcProvider {
         token: &str,
         nonce: Option<&str>,
     ) -> Result<VerifiedIdentity, OidcError> {
-        let header = decode_header(token).map_err(|err| OidcError::Malformed(err.to_string()))?;
-        let kid = header
-            .kid
-            .ok_or_else(|| OidcError::BadSignature("token header has no kid".to_owned()))?;
-        let (algorithm, decoding_key) = self.jwks.resolve(&kid).await?;
-        if header.alg != algorithm {
-            return Err(OidcError::DisallowedAlgorithm(format!(
-                "token header alg {:?} does not match JWKS key {kid:?}'s algorithm {algorithm:?}",
-                header.alg
-            )));
-        }
-
-        // Signature/structure verification is jsonwebtoken's job; iss/aud/
-        // nonce/exp/nbf/iat are checked by hand below so the Microsoft
-        // template case has an explicit, testable seam.
-        let mut validation = Validation::new(algorithm);
-        validation.validate_exp = false;
-        validation.validate_nbf = false;
-        validation.validate_aud = false;
-        let data = decode::<Claims>(token, &decoding_key, &validation)
-            .map_err(|err| OidcError::BadSignature(err.to_string()))?;
-        let claims = data.claims;
-
-        if !issuer_matches(&self.discovery.issuer, &claims.iss, claims.tid.as_deref()) {
-            return Err(OidcError::InvalidIssuer(claims.iss));
-        }
-        if !audience_contains(&claims.aud, &self.client_id) {
-            return Err(OidcError::InvalidAudience(claims.aud.to_string()));
-        }
-        if let Some(expected_nonce) = nonce {
-            if claims.nonce.as_deref() != Some(expected_nonce) {
-                return Err(OidcError::InvalidNonce);
-            }
-        }
-
-        let now = Utc::now().timestamp();
-        if claims.exp + CLOCK_SKEW_SECS < now {
-            return Err(OidcError::Expired(format!(
-                "token expired at {}",
-                claims.exp
-            )));
-        }
-        if let Some(nbf) = claims.nbf {
-            if nbf - CLOCK_SKEW_SECS > now {
-                return Err(OidcError::Expired("token not yet valid".to_owned()));
-            }
-        }
-        if claims.iat - CLOCK_SKEW_SECS > now {
-            return Err(OidcError::Expired("token issued in the future".to_owned()));
-        }
-
-        let replay_key = claims.jti.unwrap_or_else(|| hash_token(token));
-
-        Ok(VerifiedIdentity {
-            subject: claims.sub,
-            email: claims.email,
-            replay_key,
-        })
+        super::verification::verify(
+            &self.jwks,
+            token,
+            &self.discovery.issuer,
+            &[&self.client_id],
+            nonce,
+        )
+        .await
     }
-}
-
-/// True if `token_iss` satisfies `configured_issuer`. Handles Microsoft's
-/// multi-tenant discovery issuer, which is a **template** containing the
-/// literal string `{tenantid}` rather than a concrete value: the token's own
-/// `tid` claim is substituted in before comparing. Any other provider's
-/// issuer (no `{tenantid}` placeholder) is compared for exact equality, as
-/// normal.
-pub(crate) fn issuer_matches(
-    configured_issuer: &str,
-    token_iss: &str,
-    token_tid: Option<&str>,
-) -> bool {
-    if configured_issuer.contains("{tenantid}") {
-        return match token_tid {
-            Some(tid) => configured_issuer.replace("{tenantid}", tid) == token_iss,
-            None => false,
-        };
-    }
-    configured_issuer == token_iss
-}
-
-/// True if `aud` (a JWT `aud` claim: either a bare string or an array of
-/// strings) contains `expected`.
-fn audience_contains(aud: &Value, expected: &str) -> bool {
-    match aud {
-        Value::String(s) => s == expected,
-        Value::Array(values) => values.iter().any(|v| v.as_str() == Some(expected)),
-        _ => false,
-    }
-}
-
-/// Fallback replay key when a provider omits `jti`: a hash of the raw token.
-fn hash_token(raw: &str) -> String {
-    let digest = Sha256::digest(raw.as_bytes());
-    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, digest)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oauth::verification::{audience_contains, issuer_matches};
     use axum::routing::get;
     use axum::{Json, Router};
-    use serde_json::json;
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use serde_json::{json, Value};
 
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/common/signing_key.rs"
+    ));
+
+    #[tokio::test]
+    async fn real_signed_google_and_microsoft_tokens_use_the_shared_verifier() {
+        for (name, issuer, token_issuer, tid) in [
+            (
+                "google",
+                "https://accounts.google.com",
+                "https://accounts.google.com",
+                None,
+            ),
+            (
+                "microsoft",
+                "https://login.microsoftonline.com/{tenantid}/v2.0",
+                "https://login.microsoftonline.com/test-tenant/v2.0",
+                Some("test-tenant"),
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let document = json!({"issuer":issuer, "authorization_endpoint":format!("{base}/authorize"), "token_endpoint":format!("{base}/token"), "jwks_uri":format!("{base}/keys")});
+            let router = Router::new()
+                .route("/.well-known/openid-configuration", get(move || { let document = document.clone(); async move { Json(document) } }))
+                .route("/keys", get(|| async { Json(json!({"keys":[{"kty":"EC", "crv":"P-256", "kid":TEST_KID, "x":TEST_EC_X, "y":TEST_EC_Y}]})) }));
+            let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let provider = GenericOidcProvider::discover(
+                name,
+                crate::oauth::http_client(),
+                &base,
+                "client".into(),
+                "secret".into(),
+            )
+            .await
+            .unwrap();
+            let now = chrono::Utc::now().timestamp();
+            let mut claims = json!({"iss":token_issuer, "aud":["other", "client"], "sub":"owner", "iat":now, "exp":now+300, "tid":tid, "nonce":"n", "jti":"replay"});
+            let mut header = Header::new(Algorithm::ES256);
+            header.kid = Some(TEST_KID.into());
+            let key = EncodingKey::from_ec_pem(TEST_EC_PRIVATE_KEY_PEM.as_bytes()).unwrap();
+            let token = encode(&header, &claims, &key).unwrap();
+            assert_eq!(
+                provider
+                    .verify_identity_token(&token, Some("n"))
+                    .await
+                    .unwrap()
+                    .replay_key,
+                "replay"
+            );
+            assert!(provider.verify_identity_token(&token, None).await.is_ok());
+            assert!(matches!(
+                provider.verify_identity_token(&token, Some("wrong")).await,
+                Err(OidcError::InvalidNonce)
+            ));
+            claims["iss"] = json!("https://wrong.example");
+            let invalid = encode(&header, &claims, &key).unwrap();
+            assert!(matches!(
+                provider.verify_identity_token(&invalid, None).await,
+                Err(OidcError::InvalidIssuer(_))
+            ));
+            task.abort();
+        }
+    }
     async fn serve(router: Router) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

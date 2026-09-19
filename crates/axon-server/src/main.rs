@@ -496,16 +496,15 @@ fn indexer_options(search: &axon_core::SearchConfig) -> axon_search::IndexerOpti
 
 /// Build the OAuth runtime from `[oauth]` config: construct a
 /// `GenericOidcProvider` (discovery-doc fetch) for each of Google/Microsoft
-/// that has `enabled = true`, and refuse to boot if Apple is enabled (its
-/// provider ships in M14c — silently ignoring the setting would be a worse
-/// surprise than a clear boot-time error).
+/// that has `enabled = true`, and refuse to boot if Apple is enabled until
+/// its POST callbacks and owner binding are integrated.
 async fn build_oauth_runtime(
     oauth_config: &axon_core::OauthConfig,
 ) -> anyhow::Result<Arc<axon_api::OAuthRuntime>> {
     anyhow::ensure!(
         !oauth_config.providers.apple.enabled,
-        "oauth.providers.apple.enabled = true, but Sign in with Apple support ships in M14c \
-         (ADR 0054) — disable it or wait for that milestone"
+        "oauth.providers.apple.enabled = true, but Sign in with Apple callbacks and owner \
+         binding are not integrated yet (ADR 0054) — disable it until that work lands"
     );
     anyhow::ensure!(
         oauth_config

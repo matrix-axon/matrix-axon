@@ -3,8 +3,8 @@
 //! Axon is an OIDC Relying Party to Apple/Google/Microsoft purely to answer
 //! "is this the bound owner?" — upstream tokens are consumed internally and
 //! never handed to a client. [`GenericOidcProvider`](crate::oauth::generic::GenericOidcProvider)
-//! covers Google and Microsoft (discovery-doc driven); Apple's provider ships
-//! in M14c.
+//! covers Google and Microsoft (discovery-doc driven); Apple's provider
+//! foundation is implemented but not registered until POST callbacks land.
 
 use async_trait::async_trait;
 
@@ -97,7 +97,8 @@ pub trait OidcProvider: Send + Sync {
     /// Verify a signed identity token (an id_token from either path) and
     /// return the identity it asserts. `nonce`, when `Some`, must match the
     /// token's `nonce` claim exactly (Path A); `None` means no nonce check is
-    /// expected (Path B, which has no redirect leg to bind a nonce to).
+    /// expected for the existing Google/Microsoft Path B. Apple rejects
+    /// `None`; its native verifier requires a server-issued challenge nonce.
     async fn verify_identity_token(
         &self,
         token: &str,
