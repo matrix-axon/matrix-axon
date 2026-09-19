@@ -410,6 +410,21 @@ backend does not. macOS additionally hides the API entirely without
 rather than as a denial. M-W13 meets the same class of problem on iOS and
 Android and should budget for it rather than discover it.
 
+**iOS takes the window geometry literally, and its generated project is
+frozen.** Two more of the same kind, found on device in M-W13. The desktop
+`inner_size`/`min_inner_size` calls have to be `#[cfg(desktop)]`: on a phone
+the window *is* the screen, and iOS applies 1100x760 rather than clamping it,
+so the page centres itself in a viewport three times the display and renders
+its left edge off-screen — which looks like the CSS lost the viewport, not
+like a window hint. And `tauri ios init` writes `gen/apple` once and never
+revisits it, so everything under `bundle.iOS` in `tauri.conf.json` applies to
+the run that created the project and to no other: raising
+`minimumSystemVersion` produced a bundle still declaring the old value, and
+re-running `init` changed nothing. `scripts/package-ios.sh` therefore
+regenerates the project every run and passes per-build settings as `--config`
+overrides. Android will inherit the second of these; it generates its project
+the same way.
+
 ## What this does not decide
 
 **Push notifications stay out of scope**, as ADR 0031 § push and ADR 0053 have

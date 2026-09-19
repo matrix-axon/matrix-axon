@@ -19,6 +19,13 @@
       bottom, below the home indicator, that the app appears to stop short of.
       The insets are then given back deliberately in `index.css`; covering
       without them puts content under the status bar and the home indicator.
+
+      Measured in the packaged shell on a phone, and this file is shared with
+      the plain web deploy, so the tag reaches an ordinary Safari tab and the
+      iOS home-screen PWA too. Both are unmeasured; #459 tracks reading them on
+      a notched device. Note the insets are inert without this tag —
+      `env(safe-area-inset-*)` is `0px` unless it is set — so the exposure is
+      notched iOS in standalone and landscape, not every browser.
     -->
     <meta
       name="viewport"

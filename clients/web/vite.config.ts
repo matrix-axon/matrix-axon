@@ -281,16 +281,34 @@ function thirdPartyLicenses(): Plugin {
  * to disappear is exactly how such a server gets killed a second after its
  * launcher exits — the one case the exemption is supposed to cover.
  *
- * So the test is whether anything is reading our output. A `beforeDevCommand`
- * child writes to a pipe the CLI holds; a server run from a terminal writes to
- * a tty, and one deliberately detached writes to a file or /dev/null. Only the
- * first has a supervisor whose exit should end it.
+ * So the supervision has to be armed, not inferred. `TAURI_ENV_PLATFORM` is
+ * set by the Tauri CLI for its `before*Command` hooks and by nothing else —
+ * it is named in the CLI's own config schema for `beforeDevCommand`, next to
+ * `TAURI_ENV_ARCH`, `TAURI_ENV_FAMILY`, `TAURI_ENV_PLATFORM_VERSION`,
+ * `TAURI_ENV_PLATFORM_TYPE` and `TAURI_ENV_DEBUG` (read out of
+ * `@tauri-apps/cli` 2.11.4's binary). A plain `pnpm dev`, a `nohup pnpm dev >
+ * log &`, and every vitest run never see it, so they are outside this
+ * entirely.
+ *
+ * An earlier version tested `process.stdout.isTTY` instead, reasoning that a
+ * `beforeDevCommand` child writes to a pipe while a detached one writes to a
+ * file or /dev/null. That is wrong in both directions. A file and /dev/null
+ * are not ttys either, so `nohup pnpm dev > log &` — and an interactive shell
+ * that later closes — was supervised and shut itself down about a second
+ * after its launcher exited, which is the one case the exemption exists for.
+ * And it assumed the CLI never hands its child a terminal, which this config
+ * has no way to know; if it does, the test disarms the plugin exactly where
+ * it is needed. A variable the CLI documents is a fact. The shape of fd 1 is
+ * a guess.
  */
 function exitWhenOrphaned(): Plugin {
   return {
     name: 'axon-exit-when-orphaned',
     apply: 'serve',
     configureServer(server) {
+      if (process.env.TAURI_ENV_PLATFORM === undefined) {
+        return
+      }
       const ancestors = ancestorPids()
       if (ancestors.length === 0) {
         return
@@ -318,15 +336,13 @@ function exitWhenOrphaned(): Plugin {
  * by definition.
  *
  * Empty when there is nothing to watch: on Windows, which has no `ps` and no
- * reparenting to observe, and for a server already started detached.
+ * reparenting to observe, and for a server whose parent is already pid 1.
+ *
+ * Whether to watch at all is the caller's decision, not this one's — see
+ * `exitWhenOrphaned`.
  */
 function ancestorPids(): number[] {
   if (process.platform === 'win32') {
-    return []
-  }
-  // A tty means a person started this in a terminal, not a supervisor that
-  // will hand the ports back when it dies.
-  if (process.stdout.isTTY === true) {
     return []
   }
   const pids: number[] = []

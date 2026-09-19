@@ -39,9 +39,16 @@
     Recorded because the "no encryption at all" reading would be wrong, and
     someone will check: the shell routes `fetch` through
     `@tauri-apps/plugin-http` (`src/platform/tauri.ts`), so it links rustls
-    rather than using Apple's TLS. That is standard TLS with standard
-    algorithms, which is the exemption claimed here rather than an absence of
-    encryption.
+    rather than using Apple's TLS.
+
+    That last part is why this basis is not settled. In Apple's questionnaire,
+    "standard algorithms instead of, or in addition to, the OS's" is a
+    different answer from "only the OS's", and it is the branch that can carry
+    a self-classification obligation rather than a clean exemption. Nobody who
+    owns export compliance has confirmed the answer yet, and this key is a
+    legal representation to Apple and the US BIS, not a build setting.
+    #457 tracks getting it confirmed before a public App Store release;
+    TestFlight is far less exposed, which is what this value unblocks today.
 
     Revisit if the client ever does its own crypto — if E2EE moves client-side,
     this key is wrong and has to change with it.

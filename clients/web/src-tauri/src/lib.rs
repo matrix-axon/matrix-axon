@@ -409,13 +409,20 @@ fn main_window<R: tauri::Runtime>(
         // real browser (`app.tsx`) — so anything that does reach this point is
         // something no code path intends, which is exactly what to refuse.
         .on_navigation(move |target| {
-            let allowed = navigation_allowed(target, cfg!(dev), dev_host.as_deref());
+            let allowed = navigation_allowed(
+                target,
+                cfg!(dev),
+                dev_host.as_deref(),
+                cfg!(any(windows, target_os = "android")),
+            );
             if !allowed {
                 // Refusing is right for a hostile URL and a disaster for the
                 // app's own, and from outside the two look identical: the
                 // window stays blank. Name the URL, so the next person to hit
-                // this has a thread to pull instead of an empty box.
-                eprintln!("refused navigation to {target}");
+                // this has a thread to pull instead of an empty box — but
+                // only the part that identifies it, never the query or the
+                // fragment. See `loggable_target`.
+                eprintln!("refused navigation to {}", loggable_target(target));
             }
             allowed
         });
@@ -454,7 +461,12 @@ fn main_window<R: tauri::Runtime>(
 /// A pure function over `(url, is this a dev build?)` so the rule can be
 /// asserted without a webview — it is a security boundary, and the alternative
 /// is finding out from a packaged build.
-fn navigation_allowed(target: &tauri::Url, dev: bool, dev_host: Option<&str>) -> bool {
+fn navigation_allowed(
+    target: &tauri::Url,
+    dev: bool,
+    dev_host: Option<&str>,
+    scheme_folded_into_host: bool,
+) -> bool {
     if target.scheme() == APP_SCHEME {
         return true;
     }
@@ -465,9 +477,18 @@ fn navigation_allowed(target: &tauri::Url, dev: bool, dev_host: Option<&str>) ->
     // below. Refusing it refuses the initial load, and the app opens as an
     // empty window: shipped that way, and reported from Windows.
     //
+    // Only where wry actually spells it that way. `.localhost` resolves to
+    // loopback on many resolvers, so admitting this form on macOS, iOS and
+    // Linux — where the app's own origin is `axon://` and never this — would
+    // widen the boundary to whatever answers on local port 80 or 443, for no
+    // origin the app ever loads. `scheme_folded_into_host` is
+    // `cfg!(any(windows, target_os = "android"))` at the call site, and a
+    // parameter here so both spellings stay testable on one host.
+    //
     // No port, because wry's host is bare; a port would mean a real server on
     // loopback rather than wry's interception.
-    if matches!(target.scheme(), "http" | "https")
+    if scheme_folded_into_host
+        && matches!(target.scheme(), "http" | "https")
         && target.port().is_none()
         && target
             .host_str()
@@ -493,6 +514,35 @@ fn navigation_allowed(target: &tauri::Url, dev: bool, dev_host: Option<&str>) ->
         Some(host) => dev_host == Some(host),
         None => false,
     }
+}
+
+/// A refused URL, reduced to what names it without carrying a secret.
+///
+/// AGENTS.md: "No log line, error message, or file may contain a password,
+/// access token, recovery key, or bearer token." A refused target can be an
+/// OAuth callback, whose query holds a `code`, or any URL whose fragment holds
+/// one — both are dropped here. Scheme, host, port and path are what the
+/// blank-window diagnosis actually needs, and the port in particular is the
+/// difference between wry's own origin and a real server on loopback.
+///
+/// A scheme that cannot be a base — `data:`, `javascript:`, `mailto:` — has no
+/// host, and its "path" is the entire payload, so those are named by scheme
+/// alone. Everything else keeps its own spelling with the query, fragment and
+/// any userinfo removed, rather than being reassembled, so the line shows the
+/// URL the webview actually asked for.
+fn loggable_target(target: &tauri::Url) -> String {
+    if target.cannot_be_a_base() {
+        return format!("{}: (opaque)", target.scheme());
+    }
+    let mut cleaned = target.clone();
+    cleaned.set_query(None);
+    cleaned.set_fragment(None);
+    // `https://user:pass@host/` is a password in a log line. Both setters
+    // refuse on a URL with no authority, which is the case where there is
+    // nothing to clear.
+    let _ = cleaned.set_username("");
+    let _ = cleaned.set_password(None);
+    cleaned.to_string()
 }
 
 /// The environment variable that decides whether WebKitGTK uses its DMA-BUF
@@ -676,7 +726,9 @@ fn route<A>(path: &str, resolve: impl Fn(&str) -> Option<A>) -> Route<A> {
 
 #[cfg(test)]
 mod tests {
-    use super::{asset_response, navigation_allowed, route, within_upload_limit, Route};
+    use super::{
+        asset_response, loggable_target, navigation_allowed, route, within_upload_limit, Route,
+    };
 
     /// The bug this covers shipped: `serve` answered with the bytes and the
     /// content type and dropped the policy, so the release build enforced no
@@ -790,34 +842,49 @@ mod tests {
     /// show that it is somewhere unexpected.
     #[test]
     fn a_release_window_navigates_only_to_the_app_scheme() {
-        assert!(navigation_allowed(&url("axon://localhost/"), false, None));
+        assert!(navigation_allowed(
+            &url("axon://localhost/"),
+            false,
+            None,
+            false
+        ));
         assert!(navigation_allowed(
             &url("axon://localhost/@a:b/rooms/!c:d"),
             false,
-            None
+            None,
+            false
         ));
 
         assert!(!navigation_allowed(
             &url("https://evil.example/"),
             false,
-            None
+            None,
+            false
         ));
         assert!(!navigation_allowed(
             &url("http://localhost:5173/"),
             false,
-            None
+            None,
+            false
         ));
         // The configured Axon server is reached by fetch, never navigated to.
         assert!(!navigation_allowed(
             &url("https://axon.example/v1/rooms"),
             false,
-            None
+            None,
+            false
         ));
-        assert!(!navigation_allowed(&url("file:///etc/passwd"), false, None));
+        assert!(!navigation_allowed(
+            &url("file:///etc/passwd"),
+            false,
+            None,
+            false
+        ));
         assert!(!navigation_allowed(
             &url("data:text/html,<script>1</script>"),
             false,
-            None
+            None,
+            false
         ));
     }
 
@@ -831,31 +898,36 @@ mod tests {
         assert!(navigation_allowed(
             &url("http://192.168.4.3:5173/"),
             true,
-            host
+            host,
+            false
         ));
         // Loopback still works alongside it.
         assert!(navigation_allowed(
             &url("http://localhost:5173/"),
             true,
-            host
+            host,
+            false
         ));
         // Another LAN host is not the one the CLI chose.
         assert!(!navigation_allowed(
             &url("http://192.168.4.9:5173/"),
             true,
-            host
+            host,
+            false
         ));
         // And a dev build with no dev host configured admits only loopback.
         assert!(!navigation_allowed(
             &url("http://192.168.4.3:5173/"),
             true,
-            None
+            None,
+            false
         ));
         // Release ignores the dev host entirely.
         assert!(!navigation_allowed(
             &url("http://192.168.4.3:5173/"),
             false,
-            host
+            host,
+            false
         ));
     }
 
@@ -869,12 +941,14 @@ mod tests {
         assert!(navigation_allowed(
             &url("http://axon.localhost/"),
             false,
-            None
+            None,
+            true
         ));
         assert!(navigation_allowed(
             &url("https://axon.localhost/@a:b/rooms/!c:d"),
             false,
-            None
+            None,
+            true
         ));
 
         // Not a licence for `.localhost` at large: another app's scheme, bare
@@ -883,19 +957,101 @@ mod tests {
         assert!(!navigation_allowed(
             &url("http://evil.localhost/"),
             false,
-            None
+            None,
+            true
         ));
-        assert!(!navigation_allowed(&url("http://localhost/"), false, None));
+        assert!(!navigation_allowed(
+            &url("http://localhost/"),
+            false,
+            None,
+            true
+        ));
         assert!(!navigation_allowed(
             &url("http://axon.localhost:8080/"),
             false,
-            None
+            None,
+            true
         ));
         assert!(!navigation_allowed(
             &url("http://axon.localhost.evil.example/"),
             false,
-            None
+            None,
+            true
         ));
+    }
+
+    /// The folded spelling is admitted only where wry produces it. On macOS,
+    /// iOS and Linux the app's own origin is `axon://`, `.localhost` resolves
+    /// to loopback on many resolvers, and admitting it there would hand the
+    /// window whatever answers on local port 80 or 443 for no origin the app
+    /// ever loads.
+    #[test]
+    fn the_folded_spelling_is_refused_where_the_platform_does_not_use_it() {
+        assert!(!navigation_allowed(
+            &url("http://axon.localhost/"),
+            false,
+            None,
+            false
+        ));
+        assert!(!navigation_allowed(
+            &url("https://axon.localhost/@a:b/rooms/!c:d"),
+            false,
+            None,
+            false
+        ));
+        // Still true in dev, where the arm above is not what admits the Vite
+        // server.
+        assert!(!navigation_allowed(
+            &url("http://axon.localhost/"),
+            true,
+            None,
+            false
+        ));
+        // The app's real scheme is unaffected on every platform.
+        assert!(navigation_allowed(
+            &url("axon://localhost/"),
+            false,
+            None,
+            false
+        ));
+    }
+
+    /// AGENTS.md: no log line may carry a token. A refused navigation is
+    /// logged so a blank window has a thread to pull, and an OAuth callback is
+    /// exactly the kind of URL that gets refused.
+    #[test]
+    fn a_refused_url_is_logged_without_its_query_or_fragment() {
+        assert_eq!(
+            loggable_target(&url(
+                "https://evil.example/cb?code=s3cret&state=x#access_token=t"
+            )),
+            "https://evil.example/cb"
+        );
+        // The port is kept: it is the difference between wry's own origin and
+        // a real server on loopback.
+        assert_eq!(
+            loggable_target(&url("http://axon.localhost:8080/rooms")),
+            "http://axon.localhost:8080/rooms"
+        );
+        assert_eq!(
+            loggable_target(&url("file:///etc/passwd")),
+            "file:///etc/passwd"
+        );
+        // An opaque scheme's "path" is its whole payload, so only the scheme
+        // is named.
+        assert_eq!(
+            loggable_target(&url("data:text/html,<script>fetch(tok)</script>")),
+            "data: (opaque)"
+        );
+        assert_eq!(
+            loggable_target(&url("org.matrixaxon.axon:/oauth/callback?code=s3cret")),
+            "org.matrixaxon.axon:/oauth/callback"
+        );
+        // Userinfo is a password in a log line.
+        assert_eq!(
+            loggable_target(&url("https://user:pa55@evil.example/x")),
+            "https://evil.example/x"
+        );
     }
 
     /// `tauri dev` serves from Vite, so the same rule would lock the dev loop
@@ -905,18 +1061,21 @@ mod tests {
         assert!(navigation_allowed(
             &url("http://localhost:5173/"),
             true,
-            None
+            None,
+            false
         ));
         assert!(navigation_allowed(
             &url("http://127.0.0.1:5173/"),
             true,
-            None
+            None,
+            false
         ));
         // Still nothing else, even in dev.
         assert!(!navigation_allowed(
             &url("https://evil.example/"),
             true,
-            None
+            None,
+            false
         ));
     }
 

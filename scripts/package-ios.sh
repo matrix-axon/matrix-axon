@@ -3,8 +3,15 @@
 # Build, and optionally install or upload, the iOS app (ADR 0102, M-W13).
 #
 # `tauri ios build` alone does not produce a shippable app from a clean
-# checkout. This wraps it with the two things it gets wrong, both of which cost
-# a debugging session to find and neither of which announces itself:
+# checkout. This wraps it with the things it gets wrong, each of which cost a
+# debugging session to find and none of which announces itself:
+#
+#   * The generated project is sticky. `gen/apple` is written once and then
+#     left alone, so anything under `bundle.iOS` in tauri.conf.json applies to
+#     the run that created it and to no other. This regenerates it every time
+#     — see the block above `tauri ios init` below — which is also why the
+#     build number arrives as a `--config` override rather than through
+#     `tauri ios build --build-number`.
 #
 #   * The app icon. `tauri ios init` writes Tauri's own default artwork into
 #     `gen/apple` when it generates the project and then never revisits it, so
@@ -74,6 +81,18 @@ if [ "$upload" -eq 1 ]; then
   fi
   : "${ASC_KEY_ID:?set ASC_KEY_ID (the A1B2C3D4E5 in ~/.appstoreconnect/private_keys/AuthKey_*.p8)}"
   : "${ASC_ISSUER_ID:?set ASC_ISSUER_ID (App Store Connect > Users and Access > Integrations)}"
+fi
+
+# Checked here for the same reason, and because this value is spliced into a
+# JSON `--config` override below. `--build-number '1"}'` closes the object
+# early and `--build-number '1 2'` splits into two arguments, and both reach
+# `tauri` as a config it reports obscurely — after `rm -rf gen/apple` has
+# already thrown the Xcode project away. `CFBundleVersion` is one to three
+# period-separated non-negative integers, so anything else is a typo, not a
+# version.
+if [ -n "$build_number" ] && ! [[ $build_number =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+  echo "error: --build-number must be one to three dot-separated numbers (CFBundleVersion); got '$build_number'" >&2
+  exit 2
 fi
 
 # 12: `devicectl device install app` lists --device in its usage as an option it
