@@ -4,7 +4,31 @@
 set -e
 
 CONFIG=/etc/axon-server/config.toml
-SOCKET_URL='postgres://axon@/axon?host=/var/run/postgresql'
+
+# sqlx rejects `postgres://user@/db` ("empty host"). A host that starts with `/`
+# is a Unix-socket directory and must be percent-encoded in the URL
+# (`postgres://axon@%2Fvar%2Frun%2Fpostgresql/axon`). Peer auth still applies.
+sqlx_socket_url() {
+	dir=/var/run/postgresql
+	if [ ! -S "$dir/.s.PGSQL.5432" ] && [ -S /run/postgresql/.s.PGSQL.5432 ]; then
+		dir=/run/postgresql
+	fi
+	encoded=$(printf '%s' "$dir" | sed 's|/|%2F|g')
+	printf 'postgres://axon@%s/axon' "$encoded"
+}
+
+# Rewrite the URL we shipped in 0.1.0-1 before sqlx-empty-host was known.
+fix_empty_host_url() {
+	[ -f "$CONFIG" ] || return 0
+	if grep -q 'url = "postgres://axon@/axon' "$CONFIG"; then
+		url=$(sqlx_socket_url)
+		tmp=$(mktemp)
+		sed "s|^url = \"postgres://axon@/axon[^\"]*\"|url = \"$url\"|" "$CONFIG" >"$tmp"
+		chown axon:axon "$tmp"
+		chmod 0600 "$tmp"
+		mv "$tmp" "$CONFIG"
+	fi
+}
 
 is_systemd() {
 	[ -d /run/systemd/system ]
@@ -80,7 +104,8 @@ rewrite_packaged_comments() {
 # Everything not set here uses built-in defaults; see axon.toml.example.
 
 # Local packaged default: peer auth over the Unix socket. OS user \`axon\`
-# is database role \`axon\`; there is no password.
+# is database role \`axon\`; there is no password. sqlx needs the socket
+# directory percent-encoded as the URL host (a blank host is rejected).
 # For a remote or passworded server, replace this url with
 #   postgres://USER:PASSWORD@HOST:5432/DBNAME
 # Create pgcrypto in that database once as a superuser, then:
@@ -119,6 +144,12 @@ first_configure() {
 	ensure_user
 	ensure_dirs
 	if [ -f "$CONFIG" ]; then
+		fix_empty_host_url
+		if is_systemd; then
+			systemctl daemon-reload >/dev/null 2>&1 || true
+			systemctl enable axon-server.service >/dev/null 2>&1 || true
+			systemctl restart axon-server.service >/dev/null 2>&1 || true
+		fi
 		return 0
 	fi
 	if ! local_postgres_ready; then
@@ -129,7 +160,8 @@ first_configure() {
 	# Peer auth requires the connecting OS user to match the role, so init
 	# runs as `axon`, not root. --no-token: first credential is the unit's
 	# web bootstrap (AXON_SERVER__BOOTSTRAP_WEB_AUTO).
-	su -s /bin/sh axon -c "axon-server init --non-interactive --config '$CONFIG' --database-url '$SOCKET_URL' --no-token"
+	socket_url=$(sqlx_socket_url)
+	su -s /bin/sh axon -c "axon-server init --non-interactive --config '$CONFIG' --database-url '$socket_url' --no-token"
 	chmod 0600 "$CONFIG"
 	chown axon:axon "$CONFIG"
 	rewrite_packaged_comments "$CONFIG"
@@ -143,6 +175,7 @@ first_configure() {
 upgrade() {
 	ensure_user
 	ensure_dirs
+	fix_empty_host_url
 	if is_systemd; then
 		systemctl daemon-reload >/dev/null 2>&1 || true
 		if systemctl is-active --quiet axon-server.service 2>/dev/null; then

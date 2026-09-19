@@ -20,7 +20,8 @@ CI (`.github/workflows/package.yml`) does the same on `ubuntu-22.04` so Bookworm
 
 1. Creates Unix user `axon`.
 2. Creates role `axon`, database `axon`, and `pgcrypto` as the `postgres` superuser.
-3. Runs `axon-server init` as `axon` with a Unix-socket peer URL (no password).
+3. Runs `axon-server init` as `axon` with a sqlx Unix-socket URL
+   (`postgres://axon@%2Fvar%2Frun%2Fpostgresql/axon`, peer, no password).
 4. Enables and starts `axon-server.service`.
 5. Arms web bootstrap (`AXON_SERVER__BOOTSTRAP_WEB_AUTO`). URL is in `journalctl -u axon-server`.
 
