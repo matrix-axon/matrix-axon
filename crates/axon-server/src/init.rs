@@ -82,6 +82,19 @@ pub async fn run(args: &InitArgs, cli_config: Option<&Path>) -> anyhow::Result<(
             None
         };
         if let Some(path) = existing {
+            if Config::is_legacy_platform_config(&path) {
+                let current = Config::platform_config_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<platform config dir>/config.toml".to_string());
+                bail!(
+                    "a configuration already exists at {}. --force writes a new \
+                     file at {current} with a new store_key (which cannot read \
+                     data encrypted under the old key) and leaves this file in \
+                     place, shadowed. Copy this file to the new path if you \
+                     want to keep the existing key.",
+                    path.display()
+                );
+            }
             bail!(
                 "a configuration already exists at {}. Use --force to overwrite \
                  (this regenerates store_key, which orphans any existing encrypted data).",

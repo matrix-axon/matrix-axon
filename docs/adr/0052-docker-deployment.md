@@ -195,7 +195,9 @@ Assets (all new; the dev `docker-compose.yml` is untouched):
   GIT_HASH=unknown`. Runtime `debian:bookworm-slim` + `ca-certificates curl`, non-root user
   (uid 10001), `/var/lib/axon` data dir, `ENV AXON_CONFIG` + `AXON_SYNC__DATA_DIR` /
   `AXON_SEARCH__INDEX_PATH` / `AXON_MEDIA__CACHE_DIR` / `AXON_MEDIA__UPLOADS_DIR`
-  under it, `VOLUME /var/lib/axon`,
+  under it (`uploads` was previously the XDG default
+  `/var/lib/axon/.local/share/axon/uploads` via `HOME=/var/lib/axon`; existing
+  rows keep working because they store an absolute path), `VOLUME /var/lib/axon`,
   `EXPOSE 8080`, `HEALTHCHECK curl -fsS localhost:8080/healthz`, entrypoint script.
 - **`deploy/entrypoint.sh`** — the thin idempotent `axon init` wrapper described in Decision 3.
 - **`deploy/run-docker.sh`** — one-shot operator bootstrap: brings the stack up (`--wait`),

@@ -876,7 +876,17 @@ fn remap_omitted_dir(
         return false;
     }
     let legacy_path = legacy();
-    if force || (legacy_path.exists() && !current().exists()) {
+    let current_path = current();
+    // A leftover legacy *config* must not undo a completed data-dir move:
+    // if the old tree is gone and the new one exists, keep the new default.
+    if force {
+        if !legacy_path.exists() && current_path.exists() {
+            return false;
+        }
+        *slot = legacy_path;
+        return true;
+    }
+    if legacy_path.exists() && !current_path.exists() {
         *slot = legacy_path;
         return true;
     }
@@ -1816,6 +1826,45 @@ mod tests {
                     PathBuf::from("/xdg/data/axon/search")
                 );
             }
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn legacy_config_does_not_undo_moved_data_dir() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
+            let cfg_home = jail.directory().join("cfg");
+            jail.set_env("XDG_CONFIG_HOME", cfg_home.to_str().expect("utf8"));
+            let data_home = jail.directory().join("xdg-data");
+            jail.set_env("XDG_DATA_HOME", data_home.to_str().expect("utf8"));
+
+            let (config_dir, new_sync) = if cfg!(target_os = "macos") {
+                (
+                    home.join("Library/Application Support/axon"),
+                    home.join("Library/Application Support/axon-server/sync"),
+                )
+            } else {
+                (
+                    cfg_home.join("axon"),
+                    data_home.join("axon-server").join("sync"),
+                )
+            };
+            jail.create_dir(&config_dir)?;
+            jail.create_file(
+                config_dir.join("axon.toml"),
+                r#"
+                    [database]
+                    url = "postgres://legacy@localhost/db"
+                "#,
+            )?;
+            std::fs::create_dir_all(&new_sync).expect("new sync dir");
+            let config = Config::load_default().expect("load");
+            assert_eq!(config.sync.data_dir, new_sync);
+            assert!(config.legacy_config_path.is_some());
             Ok(())
         });
     }

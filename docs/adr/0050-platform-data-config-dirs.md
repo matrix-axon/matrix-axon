@@ -97,6 +97,8 @@ This rename does not repeat that.
 - **Legacy config keeps legacy data/cache defaults** when those keys are omitted,
   so a file that never set `sync.data_dir` continues to point at
   `~/.local/share/axon/sync` rather than an empty `axon-server` tree.
+  Exception: if that legacy dir is already gone and the new `axon-server` dir
+  exists, keep the new default (a completed data-dir move must not be undone).
 - **Env-only boots do the same per key, from disk.** A process with no config
   file (or a non-legacy file that omitted the dir keys) uses the pre-rename
   path when that path exists and the new `axon-server` path does not. That is
