@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Merged into the generated iOS Info.plist by Tauri, which picks up both
+    Info.plist and Info.ios.plist from beside tauri.conf.json.
+
+    iOS-only, and that is the point of the separate file: on macOS the bundle
+    already declares this scheme from `plugins.deep-link.desktop.schemes`, so
+    putting it in the shared Info.plist would declare it twice there.
+
+    Nothing else claims the OAuth callback scheme on iOS. The config key is
+    `desktop.schemes` and means it; the plugin's `mobile` key is for universal
+    links, which are https and need a domain serving an apple-app-site-
+    association file. And `claim_deep_link_schemes` in lib.rs — which does
+    register the scheme at runtime for desktop development — calls
+    `register_all`, which is desktop-only and answers `UnsupportedPlatform`
+    here, exactly as it does on macOS.
+
+    So without this key the authorization server redirects to
+    `org.matrixaxon.axon:/oauth/callback`, iOS finds no handler, and the sign-in
+    ends in Safari on a page that will not open. A release build fails the same
+    way: this is not the development loop missing something an installer would
+    have done.
+
+    The scheme is the one in `src/platform/tauri.ts`'s `OAUTH_CLIENT` and in
+    `plugins.deep-link.desktop.schemes`. All three have to agree, and the
+    operator's server needs the matching `redirect_uris` entry.
+  -->
+  <!--
+    Export compliance, so TestFlight stops asking on every upload.
+
+    Declared false on the basis that this client implements no encryption of
+    its own. Matrix E2EE (Olm/Megolm) lives entirely in the axon server, which
+    holds the matrix-rust-sdk crypto stores; the client is a `/v1` consumer
+    that talks to it over TLS and nothing else.
+
+    Recorded because the "no encryption at all" reading would be wrong, and
+    someone will check: the shell routes `fetch` through
+    `@tauri-apps/plugin-http` (`src/platform/tauri.ts`), so it links rustls
+    rather than using Apple's TLS. That is standard TLS with standard
+    algorithms, which is the exemption claimed here rather than an absence of
+    encryption.
+
+    Revisit if the client ever does its own crypto — if E2EE moves client-side,
+    this key is wrong and has to change with it.
+  -->
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <false/>
+
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>org.matrixaxon.axon</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>org.matrixaxon.axon</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

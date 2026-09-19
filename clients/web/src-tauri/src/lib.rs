@@ -28,6 +28,7 @@
 /// `pub` and in the library rather than `main.rs` because the mobile targets
 /// (M-W13) link this crate and call in through their own generated entry
 /// point; the desktop binary is a one-line caller of the same function.
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Before anything touches the webview: WebKitGTK has to be told not to use
     // its DMA-BUF renderer, or it draws nothing where a `<canvas>` should be.
@@ -378,10 +379,19 @@ fn main_window<R: tauri::Runtime>(
                 .expect("app scheme URL"),
         )
     };
+    // The host the dev server is actually on. `tauri ios dev` serves the app to
+    // a device over the LAN and rewrites `devUrl` to that address, so in a
+    // mobile dev build the app's own origin is neither of the loopback names
+    // the guard below would otherwise admit.
+    let dev_host = app
+        .config()
+        .build
+        .dev_url
+        .as_ref()
+        .and_then(|url| url.host_str())
+        .map(str::to_owned);
     let builder = tauri::WebviewWindowBuilder::new(app, "main", url)
         .title("Axon")
-        .inner_size(1100.0, 760.0)
-        .min_inner_size(380.0, 480.0)
         // The window stays on the app's own origin, and this is the only thing
         // that says so. The CSP does not: `default-src 'self'` constrains where
         // resources are *fetched* from, not where the top-level document may
@@ -398,7 +408,28 @@ fn main_window<R: tauri::Runtime>(
         // External links never arrive here — `openExternal` hands them to the
         // real browser (`app.tsx`) — so anything that does reach this point is
         // something no code path intends, which is exactly what to refuse.
-        .on_navigation(|target| navigation_allowed(target, cfg!(dev)));
+        .on_navigation(move |target| {
+            let allowed = navigation_allowed(target, cfg!(dev), dev_host.as_deref());
+            if !allowed {
+                // Refusing is right for a hostile URL and a disaster for the
+                // app's own, and from outside the two look identical: the
+                // window stays blank. Name the URL, so the next person to hit
+                // this has a thread to pull instead of an empty box.
+                eprintln!("refused navigation to {target}");
+            }
+            allowed
+        });
+    // Desktop only, and not a tidiness cfg: on mobile the window *is* the
+    // screen, and iOS takes these literally rather than clamping them. Applied
+    // there, the webview is laid out 1100pt wide inside a 430pt screen — the
+    // page centres itself in a viewport three times the display, so the app
+    // renders its left edge somewhere off to the right — and 760pt tall inside
+    // 852, leaving a black band below it. It looks like the CSS lost the
+    // viewport, which is the wrong place to go looking.
+    #[cfg(desktop)]
+    let builder = builder
+        .inner_size(1100.0, 760.0)
+        .min_inner_size(380.0, 480.0);
     // Which process handles a file drag, and it cannot be both.
     //
     // Left enabled, Tauri swallows the drop and the page's own HTML5
@@ -423,15 +454,45 @@ fn main_window<R: tauri::Runtime>(
 /// A pure function over `(url, is this a dev build?)` so the rule can be
 /// asserted without a webview — it is a security boundary, and the alternative
 /// is finding out from a packaged build.
-fn navigation_allowed(target: &tauri::Url, dev: bool) -> bool {
+fn navigation_allowed(target: &tauri::Url, dev: bool, dev_host: Option<&str>) -> bool {
     if target.scheme() == APP_SCHEME {
         return true;
     }
-    // A dev build loads `devUrl`, the Vite server, instead. Release admits
-    // nothing but the app's own scheme — not http, not localhost, not the
-    // configured Axon server, which is reached by `fetch` and never navigated
-    // to.
-    dev && matches!(target.host_str(), Some("localhost" | "127.0.0.1"))
+    // The same origin, spelled the way Windows and Android spell it. Wry serves
+    // the custom scheme there as `http://axon.localhost` — `APP_SCHEME`'s own
+    // doc comment says so — so the window's *own* URL arrives with the scheme
+    // folded into the host, matching neither the arm above nor the dev arms
+    // below. Refusing it refuses the initial load, and the app opens as an
+    // empty window: shipped that way, and reported from Windows.
+    //
+    // No port, because wry's host is bare; a port would mean a real server on
+    // loopback rather than wry's interception.
+    if matches!(target.scheme(), "http" | "https")
+        && target.port().is_none()
+        && target
+            .host_str()
+            .and_then(|host| host.strip_suffix(".localhost"))
+            == Some(APP_SCHEME)
+    {
+        return true;
+    }
+    if !dev {
+        // Release admits nothing but the app's own scheme — not http, not
+        // localhost, not the configured Axon server, which is reached by
+        // `fetch` and never navigated to.
+        return false;
+    }
+    // A dev build loads `devUrl`, the Vite server, instead. Loopback covers
+    // desktop; `dev_host` covers mobile, where the CLI puts the dev server on a
+    // LAN address because on a phone `localhost` is the phone. Without it the
+    // app's *own* origin is refused, which costs the full reloads Vite falls
+    // back to when an edit cannot be hot-applied, and
+    // `disconnectFromServer`'s `location = '/'`.
+    match target.host_str() {
+        Some("localhost" | "127.0.0.1") => true,
+        Some(host) => dev_host == Some(host),
+        None => false,
+    }
 }
 
 /// The environment variable that decides whether WebKitGTK uses its DMA-BUF
@@ -729,23 +790,111 @@ mod tests {
     /// show that it is somewhere unexpected.
     #[test]
     fn a_release_window_navigates_only_to_the_app_scheme() {
-        assert!(navigation_allowed(&url("axon://localhost/"), false));
+        assert!(navigation_allowed(&url("axon://localhost/"), false, None));
         assert!(navigation_allowed(
             &url("axon://localhost/@a:b/rooms/!c:d"),
-            false
+            false,
+            None
         ));
 
-        assert!(!navigation_allowed(&url("https://evil.example/"), false));
-        assert!(!navigation_allowed(&url("http://localhost:5173/"), false));
+        assert!(!navigation_allowed(
+            &url("https://evil.example/"),
+            false,
+            None
+        ));
+        assert!(!navigation_allowed(
+            &url("http://localhost:5173/"),
+            false,
+            None
+        ));
         // The configured Axon server is reached by fetch, never navigated to.
         assert!(!navigation_allowed(
             &url("https://axon.example/v1/rooms"),
-            false
+            false,
+            None
         ));
-        assert!(!navigation_allowed(&url("file:///etc/passwd"), false));
+        assert!(!navigation_allowed(&url("file:///etc/passwd"), false, None));
         assert!(!navigation_allowed(
             &url("data:text/html,<script>1</script>"),
-            false
+            false,
+            None
+        ));
+    }
+
+    /// The mobile dev loop serves the app from a LAN address, because on a
+    /// phone `localhost` is the phone. That address is the app's own origin
+    /// there, so refusing it costs the full reloads Vite falls back to and
+    /// `disconnectFromServer`'s `location = '/'`.
+    #[test]
+    fn a_mobile_dev_window_admits_the_host_the_cli_chose() {
+        let host = Some("192.168.4.3");
+        assert!(navigation_allowed(
+            &url("http://192.168.4.3:5173/"),
+            true,
+            host
+        ));
+        // Loopback still works alongside it.
+        assert!(navigation_allowed(
+            &url("http://localhost:5173/"),
+            true,
+            host
+        ));
+        // Another LAN host is not the one the CLI chose.
+        assert!(!navigation_allowed(
+            &url("http://192.168.4.9:5173/"),
+            true,
+            host
+        ));
+        // And a dev build with no dev host configured admits only loopback.
+        assert!(!navigation_allowed(
+            &url("http://192.168.4.3:5173/"),
+            true,
+            None
+        ));
+        // Release ignores the dev host entirely.
+        assert!(!navigation_allowed(
+            &url("http://192.168.4.3:5173/"),
+            false,
+            host
+        ));
+    }
+
+    /// Windows and Android serve the app's own scheme as
+    /// `http://axon.localhost`, so the window's own URL reaches this function
+    /// spelled differently from the one it was asked to load. Refusing it
+    /// refuses the first load, and the app comes up blank.
+    #[test]
+    fn the_app_origin_is_admitted_however_the_platform_spells_it() {
+        // Windows and Android respectively.
+        assert!(navigation_allowed(
+            &url("http://axon.localhost/"),
+            false,
+            None
+        ));
+        assert!(navigation_allowed(
+            &url("https://axon.localhost/@a:b/rooms/!c:d"),
+            false,
+            None
+        ));
+
+        // Not a licence for `.localhost` at large: another app's scheme, bare
+        // localhost, a real server on a port, and a lookalike registrable
+        // domain are all still refused.
+        assert!(!navigation_allowed(
+            &url("http://evil.localhost/"),
+            false,
+            None
+        ));
+        assert!(!navigation_allowed(&url("http://localhost/"), false, None));
+        assert!(!navigation_allowed(
+            &url("http://axon.localhost:8080/"),
+            false,
+            None
+        ));
+        assert!(!navigation_allowed(
+            &url("http://axon.localhost.evil.example/"),
+            false,
+            None
         ));
     }
 
@@ -753,10 +902,22 @@ mod tests {
     /// out of its own window.
     #[test]
     fn a_dev_window_also_admits_the_vite_server() {
-        assert!(navigation_allowed(&url("http://localhost:5173/"), true));
-        assert!(navigation_allowed(&url("http://127.0.0.1:5173/"), true));
+        assert!(navigation_allowed(
+            &url("http://localhost:5173/"),
+            true,
+            None
+        ));
+        assert!(navigation_allowed(
+            &url("http://127.0.0.1:5173/"),
+            true,
+            None
+        ));
         // Still nothing else, even in dev.
-        assert!(!navigation_allowed(&url("https://evil.example/"), true));
+        assert!(!navigation_allowed(
+            &url("https://evil.example/"),
+            true,
+            None
+        ));
     }
 
     /// One test, not two: the environment is process-wide and `cargo test`

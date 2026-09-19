@@ -60,3 +60,10 @@ smoke-artifacts/
 # tracked; the asset it produces lives on a GitHub release, not in git (ADR 0086).
 demo-artifacts/
 
+
+# Tauri's generated mobile platform projects (`tauri ios init` / `android init`).
+# An Xcode project and a Gradle project, regenerated from tauri.conf.json and
+# the icons; `gen/apple/build/` additionally holds an unpacked .ipa. Tracking
+# them would check in a build product that rewrites itself on every init, and
+# `project.pbxproj` carries this machine's signing team.
+clients/web/src-tauri/gen/

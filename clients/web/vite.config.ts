@@ -37,6 +37,27 @@ const allowedHosts = (process.env.AXON_DEV_ALLOWED_HOSTS ?? '')
   .split(',')
   .map((host) => host.trim())
   .filter((host) => host !== '')
+
+/**
+ * The address a *device* must reach this dev server on, set by the Tauri CLI
+ * for `tauri ios dev` and `tauri android dev`.
+ *
+ * On a phone, `localhost` is the phone. Vite binds loopback by default, so
+ * without this the CLI sits repeating "Waiting for your frontend dev server to
+ * start on http://<lan-ip>:5173/" until it is killed — nothing is listening
+ * there and nothing ever will be.
+ *
+ * Absent for browser and desktop development, which keeps the dev server on
+ * loopback: one reachable across the LAN is one every device on the LAN can
+ * read, including whatever session it is signed into.
+ *
+ * An empty value is treated as absent, and that is load-bearing rather than
+ * tidiness. `'' ?? false` is `''`, which Vite reads as "bind every interface"
+ * — so exporting `TAURI_DEV_HOST=` with no value, the ordinary way to clear a
+ * variable in a shell, would silently publish the dev server to the whole
+ * network. Measured: it listened on `*:5205`.
+ */
+const tauriDevHost = process.env.TAURI_DEV_HOST?.trim() || undefined
 const webClientDir = fileURLToPath(new URL('.', import.meta.url))
 
 function git(args: string[]): string | null {
@@ -233,15 +254,150 @@ function thirdPartyLicenses(): Plugin {
   }
 }
 
+/**
+ * Exit when whatever started this dev server goes away.
+ *
+ * `tauri ios dev` runs the dev server as its `beforeDevCommand` child and
+ * reaps it on a clean exit — but not when it dies abnormally, and an
+ * interrupted mobile build dies abnormally often. The dev server survives,
+ * keeps 5173 and 1421, and `strictPort` below then fails the *next* run.
+ *
+ * That failure is close to unreadable. The CLI has already started xcodebuild
+ * by the time the dev server gives up, and xcodebuild's Rust phase calls back
+ * to the now-dead CLI over a WebSocket, so the honest "Port 5173 is already in
+ * use" scrolls past six hundred lines of build settings and the run ends in
+ * `panicked at mobile/mod.rs:403 ... ConnectionRefused` instead. Measured: it
+ * cost three consecutive runs to three separate orphans.
+ *
+ * Watching our own parent is not enough, and this is the whole subtlety: the
+ * chain is `tauri ios dev` -> `pnpm dev` -> `vite`, and it is the *middle* one
+ * that gets orphaned. Killing the CLI leaves `pnpm` reparented to pid 1 with
+ * our own `process.ppid` pointing at it, unchanged. So record every ancestor
+ * at startup and watch for any of them disappearing.
+ *
+ * A server started detached is left alone, and "detached" has to mean more
+ * than having no parent at startup. `nohup pnpm dev &` from a script leaves
+ * that script an ancestor for as long as it runs, so watching for any ancestor
+ * to disappear is exactly how such a server gets killed a second after its
+ * launcher exits — the one case the exemption is supposed to cover.
+ *
+ * So the test is whether anything is reading our output. A `beforeDevCommand`
+ * child writes to a pipe the CLI holds; a server run from a terminal writes to
+ * a tty, and one deliberately detached writes to a file or /dev/null. Only the
+ * first has a supervisor whose exit should end it.
+ */
+function exitWhenOrphaned(): Plugin {
+  return {
+    name: 'axon-exit-when-orphaned',
+    apply: 'serve',
+    configureServer(server) {
+      const ancestors = ancestorPids()
+      if (ancestors.length === 0) {
+        return
+      }
+      const poll = setInterval(() => {
+        const gone = ancestors.find((pid) => !isAlive(pid))
+        if (gone === undefined) {
+          return
+        }
+        clearInterval(poll)
+        server.config.logger.warn(
+          `[axon] pid ${gone}, which this dev server was started under, has ` +
+            'exited; shutting down rather than holding its ports.',
+        )
+        void server.close().then(() => process.exit(0))
+      }, 1000)
+      // Never a reason to keep the process alive on its own account.
+      poll.unref()
+    },
+  }
+}
+
+/**
+ * Our parent, its parent, and so on — pid 1 excluded, since init outlives us
+ * by definition.
+ *
+ * Empty when there is nothing to watch: on Windows, which has no `ps` and no
+ * reparenting to observe, and for a server already started detached.
+ */
+function ancestorPids(): number[] {
+  if (process.platform === 'win32') {
+    return []
+  }
+  // A tty means a person started this in a terminal, not a supervisor that
+  // will hand the ports back when it dies.
+  if (process.stdout.isTTY === true) {
+    return []
+  }
+  const pids: number[] = []
+  let pid = process.ppid
+  // `ps` walking is bounded by the depth of the process tree; the cap is only
+  // here so a cycle from a recycled pid cannot spin forever.
+  while (pid > 1 && pids.length < 32) {
+    pids.push(pid)
+    try {
+      const parent = execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], {
+        encoding: 'utf8',
+      }).trim()
+      pid = Number.parseInt(parent, 10)
+    } catch {
+      // The process exited while we walked, or `ps` is not where we expect.
+      break
+    }
+    if (!Number.isInteger(pid)) {
+      break
+    }
+  }
+  return pids
+}
+
+/** Signal 0 tests for existence without delivering anything. */
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // EPERM means it exists and is not ours to signal, which is still alive.
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
 export default defineConfig({
-  plugins: [preact(), thirdPartyLicenses(), versionManifestPlugin()],
+  plugins: [
+    preact(),
+    thirdPartyLicenses(),
+    versionManifestPlugin(),
+    exitWhenOrphaned(),
+  ],
   define: {
     __AXON_WEB_RELEASE__: JSON.stringify(RELEASE),
     __AXON_WEB_VERSION__: JSON.stringify(VERSION),
     __AXON_WEB_BUILT_AT__: JSON.stringify(BUILT_AT),
   },
   server: {
-    allowedHosts,
+    // `false` rather than undefined: that is Vite's "loopback only", and it is
+    // what every non-mobile run should get.
+    host: tauriDevHost ?? false,
+    // `tauri.conf.json`'s `devUrl` names port 5173, so Vite quietly moving to
+    // 5174 because something already holds 5173 produces a dev server Tauri
+    // never finds — an indefinite wait from a cause that looks nothing like
+    // it. That is what `beforeDevCommand`'s `pnpm dev --strictPort` is for, and
+    // it already covered the Tauri path before this file mentioned ports.
+    //
+    // Deliberately not `strictPort` here. This block is shared with ordinary
+    // browser development, where the port-bump fallback is the right
+    // behaviour: a second `pnpm dev` from a jj workspace should take 5174, not
+    // refuse to start because the main checkout holds 5173.
+    port: 5173,
+    // The HMR socket has to point back at this machine. Left to infer, it
+    // resolves against the page's own origin, which on a device is the device.
+    hmr: tauriDevHost
+      ? { protocol: 'ws', host: tauriDevHost, port: 1421 }
+      : undefined,
+    // Vite rejects requests whose Host header it does not recognise. It admits
+    // bare IP addresses, so this is belt and braces for the case where the CLI
+    // hands over a hostname instead.
+    allowedHosts: tauriDevHost ? [...allowedHosts, tauriDevHost] : allowedHosts,
     proxy: axonProxy,
     watch: {
       // `src-tauri/` is a Rust crate (ADR 0102, M-W12) that lives inside this

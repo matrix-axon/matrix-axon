@@ -981,6 +981,95 @@ describe('AccountsPage', () => {
     expect(stopUsb).toHaveBeenCalledOnce()
   })
 
+  it('offers no camera picker on a handheld device', async () => {
+    // A phone: a coarse pointer, and cameras the platform describes by which
+    // way they face. Both are required to suppress the picker, so this also
+    // pins that a desktop webcam reporting a facing would not be enough.
+    // Restored below: `vi.unstubAllGlobals()` in this file's `afterEach` does
+    // not undo a `defineProperty`, and `src/test/setup.ts` only installs its
+    // shim when `matchMedia` is missing — so leaving this in place would have
+    // every later test in the environment see a coarse pointer.
+    const original = Object.getOwnPropertyDescriptor(window, 'matchMedia')
+    const matchMedia = vi.fn((query: string) => ({
+      matches: query === '(pointer: coarse)',
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }))
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: matchMedia,
+    })
+    const restoreMatchMedia = () => {
+      if (original === undefined) {
+        delete (window as unknown as Record<string, unknown>).matchMedia
+      } else {
+        Object.defineProperty(window, 'matchMedia', original)
+      }
+    }
+    const qr: BrowserQrAdapter = {
+      decodeBase64: vi.fn(),
+      encodeBase64: vi.fn(),
+      render: vi.fn(),
+      scanImage: vi.fn(),
+      // What iOS enumerates for a single rear-facing choice.
+      listCameras: vi.fn().mockResolvedValue([
+        { deviceId: 'front', label: 'Front Camera' },
+        { deviceId: 'back', label: 'Back Camera' },
+        { deviceId: 'back-ultra', label: 'Back Ultra Wide Camera' },
+      ]),
+      watchCameras: vi.fn(() => () => {}),
+      startCamera: vi.fn().mockResolvedValue({
+        deviceId: 'back',
+        facingMode: 'environment',
+        stop: vi.fn(),
+      }),
+    }
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/login/qr`, () =>
+        HttpResponse.json(
+          {
+            data: {
+              flow_id: '10000000-0000-4000-8000-000000000001',
+              expected_user_id: '@alice:example.org',
+              presentation: 'scan',
+              stage: 'starting',
+            },
+          },
+          { status: 201 },
+        ),
+      ),
+    )
+    const { findByText, getByLabelText, getByRole, queryByLabelText, unmount } =
+      renderPage([], qr)
+
+    await findByText('No accounts yet — add one below.')
+    fireEvent.click(getByRole('tab', { name: 'Sign in with QR code' }))
+    fireEvent.input(getByLabelText('Expected Matrix user ID'), {
+      target: { value: '@alice:example.org' },
+    })
+    fireEvent.click(getByLabelText('Scan a QR code with this device'))
+    fireEvent.click(getByRole('button', { name: 'Start QR sign-in' }))
+    fireEvent.click(await findByText('Start camera'))
+
+    // The camera is running — "Stop camera" only appears once it is — so the
+    // list has been fetched and the picker's absence is a decision, not a race.
+    await findByText('Stop camera')
+    expect(queryByLabelText('Camera')).toBeNull()
+
+    // And it stays gone once the camera stops. The facing that identifies this
+    // as a phone is only readable from a running track, so clearing it on stop
+    // brought the picker back — offering the rear ultra-wide and telephoto
+    // that cannot focus on a QR code at arm's length.
+    fireEvent.click(getByRole('button', { name: 'Stop camera' }))
+    await findByText('Start camera')
+    expect(queryByLabelText('Camera')).toBeNull()
+
+    unmount()
+    restoreMatchMedia()
+  })
+
   it('accepts exactly two check-code digits and exposes only a safe approval link', async () => {
     let checkBody: unknown
     server.use(
