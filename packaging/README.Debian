@@ -17,7 +17,11 @@ at a remote or passworded server.
 
 `apt purge axon-server` deletes /etc/axon-server (including store_key).
 /var/lib/axon-server is left in place; remove it by hand if you want a
-clean slate.
+clean slate. The Postgres `axon` database is also left in place.
+
+If you install again without that store_key, postinst will refuse to mint
+a new key over encrypted account data and print how to restore the old
+config or `dropdb axon` and reconfigure.
 
 Bring your own Postgres
 -----------------------
