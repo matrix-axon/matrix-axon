@@ -22,10 +22,19 @@ runs:
     # being built: tag v0.0.12 shipped `Axon_0.1.0_universal.dmg`, an artifact
     # that misreports which release it belongs to, in three places at once.
     #
-    # Only `v<semver>` tags are taken. `alpha-*` and `beta-*` are not semver,
-    # and both Tauri's config schema and CFBundleShortVersionString require
-    # one, so those keep the committed version rather than failing the build.
+    # `v<semver>` tags are taken. `alpha-*` and `beta-*` are not semver, and
+    # both Tauri's config schema and CFBundleShortVersionString require one, so
+    # those keep the committed version rather than failing the build.
     # Pull-request runs keep it too — nothing there is released.
+    #
+    # A `v`-prefixed tag that is not semver — `v1.2`, `v2`, `v1.2.3.4`,
+    # `v01.2.3` — fails the build instead. `desktop-build.yml` triggers on
+    # `v*`, so those tags reach this action, and keeping the committed version
+    # for them would ship exactly the misreporting this step exists to remove.
+    # The check is the semver.org grammar rather than a loose one: leading
+    # zeros are rejected here, where the message names the tag, instead of by
+    # Tauri's own parser three steps later. Failing before the compile is the
+    # cheapest place to say so.
     #
     # Written into the runner's checkout and never committed. This runs after
     # `pnpm install`, so no lockfile check sees the edit.
@@ -37,12 +46,22 @@ runs:
           echo "Not a tag build; keeping the committed version."
           exit 0
         fi
+        case "$GITHUB_REF_NAME" in
+          v*) ;;
+          *)
+            echo "::notice::$GITHUB_REF_NAME is not a v<semver> tag; keeping the committed version."
+            exit 0
+            ;;
+        esac
         version="${GITHUB_REF_NAME#v}"
-        if [ "$version" = "$GITHUB_REF_NAME" ] ||
-           ! printf '%s' "$version" |
-             grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
-          echo "::notice::$GITHUB_REF_NAME is not a v<semver> tag; keeping the committed version."
-          exit 0
+        # https://semver.org — the published grammar, in POSIX ERE.
+        core='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+        ident='(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)'
+        pre="(-${ident}(\.${ident})*)?"
+        build='(\+[0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*)?'
+        if ! printf '%s' "$version" | grep -Eq "^${core}${pre}${build}\$"; then
+          echo "::error::$GITHUB_REF_NAME is a v-prefixed tag but '$version' is not semver, so the bundles would ship the committed version and misreport the release. Tag a v<major>.<minor>.<patch> release, or use an alpha-/beta- tag for a build that is not one."
+          exit 1
         fi
         node -e '
           const fs = require("node:fs")

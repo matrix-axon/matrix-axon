@@ -91,6 +91,11 @@ from `clients/web/package.json` and is the human-readable number; `builtAt` is
 display-only. The values are stamped once at module scope in `vite.config.ts` so
 the `define` block and the emitted file cannot disagree.
 
+*(Amended by the desktop release lane.)*
+For a `v<semver>` tag build, `clients/web/package.json` is no longer the source of `release`.
+`.github/actions/tauri-build` rewrites that field from the tag in the runner's checkout before the build, so the tag is authoritative and the committed value only sets `release` for local builds, untagged CI, and `alpha-*`/`beta-*` tags.
+The mechanism is unchanged — `release` still comes from that field, read the same way — only what writes it does.
+
 **The manifest is emitted by `generateBundle` — only by a real build.** In
 preview it is served out of `dist/` like any other asset. Synthesizing it at
 preview time would stamp a fresh `builtAt` that disagrees with the value baked
