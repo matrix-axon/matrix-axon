@@ -8,8 +8,9 @@ Local Postgres (default)
 ------------------------
 If a cluster answers on the Unix socket, the first `configure` creates
 role `axon`, database `axon`, and `pgcrypto` as the `postgres` superuser,
-then runs `axon-server init` as user `axon` with a peer-auth URL
-(no password). The service is enabled and started.
+then runs `axon-server init` as user `axon` with a peer-auth Unix-socket
+URL (sqlx form: postgres://axon@%2Fvar%2Frun%2Fpostgresql/axon, no
+password). The service is enabled and started.
 
 The generated config.toml comments explain how to point `database.url`
 at a remote or passworded server.
