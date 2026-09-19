@@ -59,7 +59,7 @@ async fn bind(store: &Store, config: &Config, provider: &str) -> anyhow::Result<
         "google" => &config.oauth.providers.google,
         "microsoft" => &config.oauth.providers.microsoft,
         "apple" => {
-            anyhow::bail!("Sign in with Apple isn't implemented yet (ADR 0054) — it can't be bound")
+            anyhow::bail!("Sign in with Apple callbacks are not integrated yet (ADR 0054) — it can't be bound")
         }
         other => anyhow::bail!("unknown provider {other:?} (expected \"google\" or \"microsoft\")"),
     };

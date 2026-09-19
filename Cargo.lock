@@ -360,6 +360,7 @@ name = "axon-api"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "aws-lc-rs",
  "axon-core",
  "axon-store",
  "axum",

@@ -57,6 +57,8 @@ mime          = { workspace = true }
 emojis        = "0.8"
 
 [dev-dependencies]
+# Generate ephemeral OAuth test keys with jsonwebtoken's existing crypto backend.
+aws-lc-rs = "1.18"
 # DB-gated HTTP integration test: drive the real router with tower's oneshot,
 # seed/clean up directly through the pool. The WS test additionally binds a real
 # listener and connects a tungstenite client over a TCP socket.
