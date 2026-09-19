@@ -84,13 +84,16 @@ Download the current build for your platform from the [releases page](https://gi
 | Platform                      | File                            |
 | ----------------------------- | ------------------------------- |
 | macOS (Intel + Apple Silicon) | `Axon_<version>_universal.dmg`  |
-| Windows                       | `Axon_<version>_x64-setup.exe`  |
-| Debian / Ubuntu               | `Axon_<version>_amd64.deb`      |
-| Other Linux                   | `Axon_<version>_amd64.AppImage` |
+| Windows (x64)                 | `Axon_<version>_x64-setup.exe`  |
+| Debian / Ubuntu (x64)         | `Axon_<version>_amd64.deb`      |
+| Other Linux (x64)             | `Axon_<version>_amd64.AppImage` |
 
-On first launch it asks for your Axon server's address — `http://<host>:8080` for the Compose stack above, or your Tailscale or TLS hostname — and then signs in exactly as the browser client does.
+On first launch it asks for your Axon server's address — `http://<host>:8080` for the Compose stack above, or your Tailscale or TLS hostname.
+Then sign in with a token — `docker compose exec axon-server axon-server token issue --label desktop` — or through SSO, if your server has registered the desktop client (see [SSO sign-in](clients/web/README.md#sso-sign-in) for the `[[oauth.clients]]` entry it needs; the Compose stack does not create one for you).
+The one-time `/bootstrap/<code>` URL from the Compose section above signs in the browser client, not the app, and minting a token consumes it — so do the browser sign-in first if you want both.
 Each release also carries `THIRDPARTY-axon-desktop.txt`, the full license disclosure for everything the app bundles.
 
+The macOS build is a universal binary, so Apple Silicon and Intel both run natively; the Windows and Linux builds are x64 only, so on ARM use the browser client or build the shell yourself ([#455](https://github.com/matrix-axon/matrix-axon/issues/455)).
 The macOS build is signed with a Developer ID certificate and notarized by Apple, so it opens without a Gatekeeper warning.
 The Windows and Linux builds are not signed yet, so SmartScreen and some Linux desktops will warn the first time you run them.
 Building the shell yourself is documented in [`clients/web/src-tauri/README.md`](clients/web/src-tauri/README.md).
