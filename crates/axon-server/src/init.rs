@@ -147,6 +147,10 @@ fn explicit_write_target(cli_config: Option<&Path>) -> Option<PathBuf> {
 /// writes the platform config path; `--force` overwrites the config that would
 /// actually govern boot when one already exists (e.g. `./axon.toml`), otherwise
 /// it also uses the platform path.
+///
+/// A discovered *legacy* platform file (`~/.config/axon/axon.toml`) is never a
+/// write target: it stays readable, and `--force` falls through to the current
+/// platform path so init cannot clobber it (ADR 0050 amendment).
 fn choose_write_target(
     explicit: Option<PathBuf>,
     discovered: Option<PathBuf>,
@@ -158,7 +162,9 @@ fn choose_write_target(
     }
     if force {
         if let Some(path) = discovered {
-            return Ok(path);
+            if !Config::is_legacy_platform_config(&path) {
+                return Ok(path);
+            }
         }
     }
     platform.context(
@@ -919,6 +925,20 @@ mod tests {
         )
         .expect("target");
         assert_eq!(target, PathBuf::from("/platform/axon.toml"));
+    }
+
+    #[test]
+    fn force_does_not_overwrite_legacy_platform_config() {
+        let Some(legacy) = Config::legacy_platform_config_path() else {
+            return;
+        };
+        let Some(platform) = Config::platform_config_path() else {
+            return;
+        };
+        let target = choose_write_target(None, Some(legacy.clone()), Some(platform.clone()), true)
+            .expect("target");
+        assert_eq!(target, platform);
+        assert_ne!(target, legacy);
     }
 
     #[test]

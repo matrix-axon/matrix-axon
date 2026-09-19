@@ -111,6 +111,20 @@ async fn main() -> anyhow::Result<()> {
 
     init_tracing(&config.log.level);
 
+    if let Some(legacy) = &config.legacy_config_path {
+        let current = Config::platform_config_path()
+            .expect("a legacy platform config path implies ProjectDirs resolved");
+        tracing::warn!(
+            legacy = %legacy.display(),
+            current = %current.display(),
+            "loaded configuration from a legacy path; axon-server init writes the current path and will not overwrite this file. Move the file (and the matching data/cache directories) when convenient"
+        );
+    } else if config.used_legacy_data_dirs {
+        tracing::warn!(
+            "using pre-rename data/cache directories because they exist on disk and the current axon-server paths do not; move the trees (or pin the paths) when convenient"
+        );
+    }
+
     match cli.command {
         #[cfg(feature = "dev-tools")]
         Some(Command::Db { action }) => db::run(action, &config).await,

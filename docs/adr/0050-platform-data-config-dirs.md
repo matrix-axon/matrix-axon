@@ -20,9 +20,14 @@ directory, and the config file is only discoverable from an env var or the CWD (
 ## Decision
 
 Default each location to the **OS-standard base directory**, resolved via the
-`directories` crate (`ProjectDirs::from("", "", "axon")`), while keeping every location
+`directories` crate (`ProjectDirs::from("", "", "axon-server")`), while keeping every location
 overridable by its existing config key / `AXON_*` env var. The base dirs follow XDG on
 Linux, `~/Library` on macOS, and the Known Folders API on Windows.
+
+The project directory is the **binary name** (`axon-server`), matching
+`axon-tui`'s `~/.config/axon-tui/config.toml`. An earlier revision of this ADR
+used `axon` / `axon.toml`; that layout remains a read-only fallback (see
+Amendment below).
 
 ### Split data vs. cache vs. config
 
@@ -37,16 +42,17 @@ durability contract matches it:
   under the platform **cache** directory — the correct home for content the OS may
   reclaim.
 - **Config → config dir.** Config-file discovery gains a third tier: after `$AXON_CONFIG`
-  and `./axon.toml`, it looks for `axon.toml` in the platform **config** directory.
+  and `./axon.toml`, it looks for `config.toml` in the platform **config** directory,
+  then the pre-rename `axon.toml` in the `axon` project directory.
 
 Resolved defaults:
 
 | | Linux (XDG) | macOS | Windows |
 |---|---|---|---|
-| sync | `~/.local/share/axon/sync` | `~/Library/Application Support/axon/sync` | `%APPDATA%\axon\data\sync` |
-| search | `~/.local/share/axon/search` | `…/axon/search` | `%APPDATA%\axon\data\search` |
-| media | `~/.cache/axon/media` | `~/Library/Caches/axon/media` | `%LOCALAPPDATA%\axon\cache\media` |
-| config | `~/.config/axon/axon.toml` | `~/Library/Application Support/axon/axon.toml` | `%APPDATA%\axon\config\axon.toml` |
+| sync | `~/.local/share/axon-server/sync` | `~/Library/Application Support/axon-server/sync` | `%APPDATA%\axon-server\data\sync` |
+| search | `~/.local/share/axon-server/search` | `…/axon-server/search` | `%APPDATA%\axon-server\data\search` |
+| media | `~/.cache/axon-server/media` | `~/Library/Caches/axon-server/media` | `%LOCALAPPDATA%\axon-server\cache\media` |
+| config | `~/.config/axon-server/config.toml` | `~/Library/Application Support/axon-server/config.toml` | `%APPDATA%\axon-server\config\config.toml` |
 
 ### `--config` CLI flag
 
@@ -65,6 +71,10 @@ environment (`ProjectDirs::from` returns `None` — no `$HOME` and no passwd ent
 stripped-environment container): each default falls back to the old CWD-relative
 `axon-data/…` path so the binary still boots.
 
+That hard cut applied to `./axon-data` only. The later `axon` → `axon-server` rename
+*does* keep a read-only fallback (see Amendment) because repeating the silent empty-store
+failure was not acceptable.
+
 ### `directories` over `etcetera`
 
 `etcetera` is already in the tree transitively and can return data/config/cache roots, but
@@ -73,6 +83,28 @@ require choosing a different strategy than its CLI default. `directories::Projec
 matches the exact platform-native table above with one call, including macOS `~/Library`
 and Windows Known Folders. The added direct dependency is small and keeps the code aligned
 with the ADR's stated conventions.
+
+## Amendment — `axon` → `axon-server` (native packaging)
+
+The original cut from `./axon-data` to platform dirs was a hard switch with no
+fallback, and operators who had not pinned paths appeared to have no accounts.
+This rename does not repeat that.
+
+- **`axon init` writes only the new path.** `~/.config/axon-server/config.toml`
+  (and the macOS/Windows equivalents).
+- **Discovery still reads the old path.** After `$AXON_CONFIG` and `./axon.toml`,
+  look for the new file, then `~/.config/axon/axon.toml`.
+- **Legacy config keeps legacy data/cache defaults** when those keys are omitted,
+  so a file that never set `sync.data_dir` continues to point at
+  `~/.local/share/axon/sync` rather than an empty `axon-server` tree.
+- **Env-only boots do the same per key, from disk.** A process with no config
+  file (or a non-legacy file that omitted the dir keys) uses the pre-rename
+  path when that path exists and the new `axon-server` path does not. That is
+  the systemd / bare-`AXON_*` case this rename would otherwise empty-store.
+- **No automatic move.** `store_key` plus encrypted SDK state make a botched copy
+  unrecoverable. The server logs a warning every boot naming both paths.
+- **`./axon.toml` is unchanged** — it is the CWD override for a git checkout, not
+  a legacy XDG path.
 
 ## Consequences
 
