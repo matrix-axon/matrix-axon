@@ -16,6 +16,10 @@
   },
   "bundle": {
     "active": true,
+    "iOS": {
+      "infoPlist": "Info.ios.plist",
+      "developmentTeam": "4GT4UKXZ4V"
+    },
     "targets": ["deb", "appimage", "nsis", "app", "dmg"],
     "icon": [
       "icons/32x32.png",
