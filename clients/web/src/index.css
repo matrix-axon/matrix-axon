@@ -3478,7 +3478,14 @@ span.composer-attachment-thumb {
   box-sizing: border-box;
   background: var(--bg);
   border-left: 1px solid var(--border);
-  padding: 1rem 1.25rem;
+  /* Fixed to the top edge, which since `viewport-fit=cover` is the top of the
+     display rather than the top of the safe area — so these carry the status
+     bar inset themselves, the way `.topbar` does. Without it `.overlay-head`
+     sits under the clock and the Dynamic Island, and its Close button is
+     awkward to hit. They are siblings of `.shell` rather than children, so the
+     topbar's inset does nothing for them. Dropped again at the breakpoint
+     below where these become a static third column. */
+  padding: calc(1rem + env(safe-area-inset-top, 0px)) 1.25rem 1rem;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -3541,6 +3548,12 @@ span.composer-attachment-thumb {
     height: auto;
     min-height: 0;
     box-shadow: none;
+    /* No longer against the top edge: a column inside the shell, below a
+       topbar that has already taken the inset. Keeping it here would indent
+       the column's contents by the status bar height on an iPad held in
+       portrait, which is wide enough to reach this breakpoint and still has a
+       non-zero inset. */
+    padding-top: 1rem;
   }
 
   .room-stream {
@@ -3961,7 +3974,12 @@ span.composer-attachment-thumb {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 2rem;
+  /* `inset: 0` on a viewport that covers the display, so the padding that
+     keeps a panel off the edges has to clear the status bar and the home
+     indicator too. Centred panels never noticed; one that pins to the top
+     does. */
+  padding: calc(2rem + env(safe-area-inset-top, 0px)) 2rem
+    calc(2rem + env(safe-area-inset-bottom, 0px));
 }
 
 .overlay-panel {
@@ -3996,7 +4014,8 @@ span.composer-attachment-thumb {
 .unread-threads-overlay {
   align-items: flex-start;
   justify-content: flex-end;
-  padding-top: 4.25rem;
+  /* Applied below, after the breakpoint that re-declares `padding`. */
+  --unread-overlay-pad-top: 4.25rem;
 }
 
 .unread-threads-panel {
@@ -4093,12 +4112,25 @@ span.composer-attachment-thumb {
   .unread-threads-overlay {
     justify-content: center;
     padding: 0.75rem;
+    --unread-overlay-pad-top: 0.75rem;
   }
 
   .unread-threads-panel {
     max-width: none;
     max-height: calc(var(--app-viewport-height, 100dvh) - 1.5rem);
   }
+}
+
+/* The one overlay that pins its panel to the top edge, so the one that needs
+   the status-bar inset — declared after the breakpoint above, which replaces
+   `padding` wholesale and would otherwise drop it. On a phone that left the
+   panel 0.75rem from the top of the display: its heading behind the clock and
+   the Dynamic Island, and Close awkward to hit. Same shape as the bug the
+   `.topbar` inset is declared late to avoid. */
+.unread-threads-overlay {
+  padding-top: calc(
+    var(--unread-overlay-pad-top, 4.25rem) + env(safe-area-inset-top, 0px)
+  );
 }
 
 /* Block-level, not `inline-flex`: shrink-to-fit would let the label's bare text
