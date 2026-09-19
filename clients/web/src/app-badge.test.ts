@@ -131,6 +131,7 @@ describe('applyAppBadge (ADR 0080)', () => {
     expect(() => {
       ;(rooms.unreadTotal as unknown as { value: number }).value = 3
     }).not.toThrow()
+    expect(clearAppBadge).not.toHaveBeenCalled()
     dispose()
   })
 

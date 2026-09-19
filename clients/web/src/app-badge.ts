@@ -82,7 +82,7 @@ export function applyAppBadge(
     // standalone home-screen web app. "Unavailable" here also covers the
     // declared-but-`undefined` case that `appBadgeAvailable` now screens for.
     console.info(
-      'app-badge: navigator.setAppBadge is unavailable in this context',
+      'app-badge: navigator.setAppBadge/clearAppBadge is unavailable in this context',
     )
     return () => {}
   }
