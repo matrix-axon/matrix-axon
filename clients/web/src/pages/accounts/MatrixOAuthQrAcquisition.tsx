@@ -141,7 +141,16 @@ function QrScanner({
           return
         }
         setCameraListError(null)
-        setCameras(available)
+        // Only when it actually changed. `listCameras` builds fresh objects
+        // every call, so passing the result straight to `setCameras` re-renders
+        // on every `devicechange` even when the list is identical — and the
+        // browser fires `devicechange` around capture-state changes, i.e. while
+        // the user has the picker open. Preact keys the options by device id
+        // and would reuse the nodes, but the `<select>` itself is rebuilt, and
+        // an open native picker does not survive that on iOS.
+        setCameras((current) =>
+          sameCameras(current, available) ? current : available,
+        )
         const activeDeviceId =
           session.current?.deviceId ?? selectedCameraRef.current
         const activeStillAvailable = available.some(
@@ -323,6 +332,18 @@ function QrScanner({
       )}
       {imageError !== null && <p class="field-hint error">{imageError}</p>}
     </div>
+  )
+}
+
+/** Whether two camera lists name the same devices, in the same order. */
+function sameCameras(a: QrCameraDevice[], b: QrCameraDevice[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every(
+      (camera, index) =>
+        camera.deviceId === b[index]?.deviceId &&
+        camera.label === b[index]?.label,
+    )
   )
 }
 
