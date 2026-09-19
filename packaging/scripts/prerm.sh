@@ -1,6 +1,7 @@
 #!/bin/sh
 # nFPM preremove: Debian `$1=remove` / RPM `$1=0` (uninstall).
-# Leave config and /var/lib/axon-server in place (store_key + crypto store).
+# Config stays until Debian purge (see postrm.sh). /var/lib/axon-server is
+# never removed automatically.
 set -e
 
 stop_unit() {
