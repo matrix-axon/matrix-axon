@@ -82,6 +82,19 @@ pub async fn run(args: &InitArgs, cli_config: Option<&Path>) -> anyhow::Result<(
             None
         };
         if let Some(path) = existing {
+            if Config::is_legacy_platform_config(&path) {
+                let current = Config::platform_config_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<platform config dir>/config.toml".to_string());
+                bail!(
+                    "a configuration already exists at {}. --force writes a new \
+                     file at {current} with a new store_key (which cannot read \
+                     data encrypted under the old key) and leaves this file in \
+                     place, shadowed. Copy this file to the new path if you \
+                     want to keep the existing key.",
+                    path.display()
+                );
+            }
             bail!(
                 "a configuration already exists at {}. Use --force to overwrite \
                  (this regenerates store_key, which orphans any existing encrypted data).",
@@ -147,6 +160,10 @@ fn explicit_write_target(cli_config: Option<&Path>) -> Option<PathBuf> {
 /// writes the platform config path; `--force` overwrites the config that would
 /// actually govern boot when one already exists (e.g. `./axon.toml`), otherwise
 /// it also uses the platform path.
+///
+/// A discovered *legacy* platform file (`~/.config/axon/axon.toml`) is never a
+/// write target: it stays readable, and `--force` falls through to the current
+/// platform path so init cannot clobber it (ADR 0050 amendment).
 fn choose_write_target(
     explicit: Option<PathBuf>,
     discovered: Option<PathBuf>,
@@ -158,7 +175,9 @@ fn choose_write_target(
     }
     if force {
         if let Some(path) = discovered {
-            return Ok(path);
+            if !Config::is_legacy_platform_config(&path) {
+                return Ok(path);
+            }
         }
     }
     platform.context(
@@ -919,6 +938,20 @@ mod tests {
         )
         .expect("target");
         assert_eq!(target, PathBuf::from("/platform/axon.toml"));
+    }
+
+    #[test]
+    fn force_does_not_overwrite_legacy_platform_config() {
+        let Some(legacy) = Config::legacy_platform_config_path() else {
+            return;
+        };
+        let Some(platform) = Config::platform_config_path() else {
+            return;
+        };
+        let target = choose_write_target(None, Some(legacy.clone()), Some(platform.clone()), true)
+            .expect("target");
+        assert_eq!(target, platform);
+        assert_ne!(target, legacy);
     }
 
     #[test]

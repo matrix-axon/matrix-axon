@@ -21,10 +21,12 @@
 //! config file is discovered from the platform
 //! **config** directory (see [`Config::discover_config_path`]). These follow OS
 //! conventions — XDG on Linux, `~/Library` on macOS, Known Folders on Windows —
-//! via the `directories` crate (ADR 0050). Any of them can be overridden by its
-//! config key or the matching `AXON_*` env var. When no home directory is
-//! discoverable (e.g. a stripped-environment container), each falls back to a
-//! CWD-relative `axon-data/…` path.
+//! via the `directories` crate (ADR 0050). The project directory is `axon-server`
+//! (the binary name), matching `axon-tui`. A pre-rename `axon` layout is still
+//! *read* so an upgrade does not look at an empty new data dir. Any location can
+//! be overridden by its config key or the matching `AXON_*` env var. When no
+//! home directory is discoverable (e.g. a stripped-environment container), each
+//! falls back to a CWD-relative `axon-data/…` path.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -67,6 +69,20 @@ pub struct Config {
     /// bearer tokens via Apple/Google/Microsoft sign-in (M14, ADR 0054).
     #[serde(default)]
     pub oauth: OauthConfig,
+    /// Set when the loaded file was the pre-rename platform path
+    /// (`~/.config/axon/axon.toml` and the macOS/Windows equivalents). Not
+    /// serialized; the server logs a warning once tracing is up. `None` for a
+    /// current-path file, a CWD `./axon.toml`, an explicit `--config` that is
+    /// not the legacy path, or env-only loads.
+    #[serde(skip)]
+    pub legacy_config_path: Option<PathBuf>,
+    /// True when at least one omitted dir key was remapped because the
+    /// pre-rename path exists on disk and the current `axon-server` path does
+    /// not. Independent of [`Self::legacy_config_path`]: an env-only boot has
+    /// no config file but can still have leftover `~/.local/share/axon/…`
+    /// state. Not serialized; the server logs a warning once tracing is up.
+    #[serde(skip)]
+    pub used_legacy_data_dirs: bool,
 }
 
 /// HTTP server bind settings.
@@ -349,7 +365,7 @@ pub struct SearchConfig {
     /// Directory holding the Tantivy index. Must be durable; lives on the same
     /// disk as Postgres and inherits the operator's filesystem-level encryption
     /// (the index holds decrypted message text — see the tech spec). Defaults to
-    /// the platform data directory's `axon/search`.
+    /// the platform data directory's `axon-server/search`.
     #[serde(default = "default_search_index_path")]
     pub index_path: PathBuf,
     /// Rows streamed per batch by the indexer — both the corpus seed and the
@@ -397,13 +413,13 @@ pub struct MediaConfig {
     /// Directory holding the media cache, one subdirectory per account
     /// (`<cache_dir>/<account_id>/`). Need not be durable — a lost cache simply
     /// re-fetches from the homeserver. Defaults to the platform cache
-    /// directory's `axon/media`.
+    /// directory's `axon-server/media`.
     #[serde(default = "default_media_cache_dir")]
     pub cache_dir: PathBuf,
     /// Durable staging directory for client-originated media uploads. Pending
     /// uploads are in-flight local mutations, so they live under the platform
     /// data directory rather than the disposable cache. Defaults to the platform
-    /// data directory's `axon/uploads`.
+    /// data directory's `axon-server/uploads`.
     #[serde(default = "default_media_uploads_dir")]
     pub uploads_dir: PathBuf,
     /// Total cache size cap, in bytes. When a fetch would push the cache over
@@ -627,19 +643,49 @@ fn default_log_level() -> String {
     "info,matrix_sdk_crypto=error,matrix_sdk::encryption::backups=error".to_string()
 }
 
+/// Current project directory name — the `axon-server` binary, matching `axon-tui`.
+const PROJECT_APPLICATION: &str = "axon-server";
+/// Pre-rename project directory (`ProjectDirs::from("", "", "axon")`). Read as a
+/// fallback so an upgrade does not look at an empty new data dir.
+const LEGACY_PROJECT_APPLICATION: &str = "axon";
+/// Filename inside the current platform config directory.
+const PLATFORM_CONFIG_FILE: &str = "config.toml";
+/// Filename inside the pre-rename platform config directory, and the CWD override.
+const LEGACY_CONFIG_FILE: &str = "axon.toml";
+
 /// The platform's Axon directory set — data / config / cache roots following OS
 /// conventions (XDG on Linux, `~/Library` on macOS, Known Folders on Windows).
 ///
 /// `None` when no home directory is discoverable (e.g. a stripped-environment
 /// container); callers fall back to a CWD-relative path in that case.
 fn project_dirs() -> Option<directories::ProjectDirs> {
-    directories::ProjectDirs::from("", "", "axon")
+    project_dirs_named(PROJECT_APPLICATION)
+}
+
+fn legacy_project_dirs() -> Option<directories::ProjectDirs> {
+    project_dirs_named(LEGACY_PROJECT_APPLICATION)
+}
+
+fn project_dirs_named(application: &str) -> Option<directories::ProjectDirs> {
+    directories::ProjectDirs::from("", "", application)
 }
 
 fn default_sync_data_dir() -> PathBuf {
-    project_dirs()
-        .map(|d| d.data_dir().join("sync"))
-        .unwrap_or_else(|| cwd_relative_fallback("sync"))
+    data_join(project_dirs(), "sync")
+}
+
+fn legacy_sync_data_dir() -> PathBuf {
+    data_join(legacy_project_dirs(), "sync")
+}
+
+fn data_join(dirs: Option<directories::ProjectDirs>, child: &str) -> PathBuf {
+    dirs.map(|d| d.data_dir().join(child))
+        .unwrap_or_else(|| cwd_relative_fallback(child))
+}
+
+fn cache_join(dirs: Option<directories::ProjectDirs>, child: &str) -> PathBuf {
+    dirs.map(|d| d.cache_dir().join(child))
+        .unwrap_or_else(|| cwd_relative_fallback(child))
 }
 
 fn default_timeline_limit() -> u32 {
@@ -703,9 +749,11 @@ fn default_search_enabled() -> bool {
 }
 
 fn default_search_index_path() -> PathBuf {
-    project_dirs()
-        .map(|d| d.data_dir().join("search"))
-        .unwrap_or_else(|| cwd_relative_fallback("search"))
+    data_join(project_dirs(), "search")
+}
+
+fn legacy_search_index_path() -> PathBuf {
+    data_join(legacy_project_dirs(), "search")
 }
 
 fn default_search_index_batch_size() -> i64 {
@@ -729,15 +777,19 @@ fn default_media_enabled() -> bool {
 }
 
 fn default_media_cache_dir() -> PathBuf {
-    project_dirs()
-        .map(|d| d.cache_dir().join("media"))
-        .unwrap_or_else(|| cwd_relative_fallback("media"))
+    cache_join(project_dirs(), "media")
+}
+
+fn legacy_media_cache_dir() -> PathBuf {
+    cache_join(legacy_project_dirs(), "media")
 }
 
 fn default_media_uploads_dir() -> PathBuf {
-    project_dirs()
-        .map(|d| d.data_dir().join("uploads"))
-        .unwrap_or_else(|| cwd_relative_fallback("uploads"))
+    data_join(project_dirs(), "uploads")
+}
+
+fn legacy_media_uploads_dir() -> PathBuf {
+    data_join(legacy_project_dirs(), "uploads")
 }
 
 fn cwd_relative_fallback(child: &str) -> PathBuf {
@@ -747,6 +799,98 @@ fn cwd_relative_fallback(child: &str) -> PathBuf {
         "could not resolve platform Axon directories; falling back to CWD-relative storage"
     );
     path
+}
+
+/// True when `path` is the pre-rename platform config file.
+fn path_is_legacy_platform_config(path: &Path) -> bool {
+    let Some(legacy) = Config::legacy_platform_config_path() else {
+        return false;
+    };
+    same_path(path, &legacy)
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Remap omitted dir keys onto the pre-rename `axon` layout.
+///
+/// When `force` is true (the loaded file *is* the legacy platform config),
+/// every omitted key uses the old default. Otherwise each omitted key uses
+/// the old default only if that path exists on disk and the current
+/// `axon-server` path does not — so an env-only upgrade keeps finding its
+/// SDK store, and a first install with neither tree still gets the new dirs.
+/// Explicit file or env values are left alone.
+fn apply_legacy_dir_defaults(figment: &Figment, config: &mut Config, force: bool) -> bool {
+    let mut used = false;
+    used |= remap_omitted_dir(
+        figment,
+        "sync.data_dir",
+        &mut config.sync.data_dir,
+        legacy_sync_data_dir,
+        default_sync_data_dir,
+        force,
+    );
+    used |= remap_omitted_dir(
+        figment,
+        "search.index_path",
+        &mut config.search.index_path,
+        legacy_search_index_path,
+        default_search_index_path,
+        force,
+    );
+    used |= remap_omitted_dir(
+        figment,
+        "media.cache_dir",
+        &mut config.media.cache_dir,
+        legacy_media_cache_dir,
+        default_media_cache_dir,
+        force,
+    );
+    used |= remap_omitted_dir(
+        figment,
+        "media.uploads_dir",
+        &mut config.media.uploads_dir,
+        legacy_media_uploads_dir,
+        default_media_uploads_dir,
+        force,
+    );
+    used
+}
+
+fn remap_omitted_dir(
+    figment: &Figment,
+    key: &str,
+    slot: &mut PathBuf,
+    legacy: fn() -> PathBuf,
+    current: fn() -> PathBuf,
+    force: bool,
+) -> bool {
+    if figment.find_value(key).is_ok() {
+        return false;
+    }
+    let legacy_path = legacy();
+    let current_path = current();
+    // A leftover legacy *config* must not undo a completed data-dir move:
+    // if the old tree is gone and the new one exists, keep the new default.
+    if force {
+        if !legacy_path.exists() && current_path.exists() {
+            return false;
+        }
+        *slot = legacy_path;
+        return true;
+    }
+    if legacy_path.exists() && !current_path.exists() {
+        *slot = legacy_path;
+        return true;
+    }
+    false
 }
 
 fn default_media_max_bytes() -> u64 {
@@ -879,7 +1023,7 @@ impl Config {
             figment = figment.merge(Toml::file(path));
         }
 
-        figment
+        figment = figment
             // Map the bare `DATABASE_URL` onto `database.url`.
             .merge(
                 Env::raw()
@@ -893,16 +1037,28 @@ impl Config {
                     .only(&["database.url"]),
             )
             // `AXON_`-prefixed vars take precedence; `__` denotes nesting.
-            .merge(Env::prefixed("AXON_").split("__"))
+            .merge(Env::prefixed("AXON_").split("__"));
+
+        let mut config: Config = figment
             .extract()
-            .map_err(|err| ConfigError::Figment(Box::new(err)))
+            .map_err(|err| ConfigError::Figment(Box::new(err)))?;
+
+        if let Some(path) = path.filter(|p| path_is_legacy_platform_config(p)) {
+            apply_legacy_dir_defaults(&figment, &mut config, true);
+            config.legacy_config_path = Some(path.to_path_buf());
+        } else {
+            config.used_legacy_data_dirs = apply_legacy_dir_defaults(&figment, &mut config, false);
+        }
+
+        Ok(config)
     }
 
     /// Resolve a config file path, then [`load`](Config::load).
     ///
     /// The file is discovered from (see [`Config::discover_config_path`]): the `AXON_CONFIG`
     /// environment variable, else `./axon.toml`, else
-    /// `<platform config dir>/axon.toml`, else no file layer.
+    /// `<platform config dir>/config.toml`, else the pre-rename
+    /// `<legacy platform config dir>/axon.toml`, else no file layer.
     pub fn load_default() -> Result<Config, ConfigError> {
         Self::load_from(None)
     }
@@ -927,7 +1083,8 @@ impl Config {
 
     /// Discover the config file path when none is passed explicitly:
     /// `AXON_CONFIG` if set, else `./axon.toml` if it exists, else
-    /// `<platform config dir>/axon.toml` if it exists, else `None`.
+    /// `<platform config dir>/config.toml` if it exists, else the pre-rename
+    /// `<legacy platform config dir>/axon.toml` if it exists, else `None`.
     ///
     /// A `None` here is what tells the binary "no configuration is in place" — the
     /// signal `axon init` (ADR 0051) keys its first-run offer on.
@@ -939,19 +1096,37 @@ impl Config {
             }
             return Ok(Some(path));
         }
-        let cwd = PathBuf::from("axon.toml");
+        let cwd = PathBuf::from(LEGACY_CONFIG_FILE);
         if cwd.exists() {
             return Ok(Some(cwd));
         }
-        Ok(Self::platform_config_path().filter(|p| p.exists()))
+        if let Some(path) = Self::platform_config_path().filter(|p| p.exists()) {
+            return Ok(Some(path));
+        }
+        Ok(Self::legacy_platform_config_path().filter(|p| p.exists()))
     }
 
     /// The platform config-dir target for a generated config
-    /// (`<platform config dir>/axon.toml`), regardless of whether it exists yet —
+    /// (`<platform config dir>/config.toml`), regardless of whether it exists yet —
     /// the default write location for `axon init` (ADR 0051). `None` when no home
     /// directory is discoverable.
     pub fn platform_config_path() -> Option<PathBuf> {
-        project_dirs().map(|d| d.config_dir().join("axon.toml"))
+        project_dirs().map(|d| d.config_dir().join(PLATFORM_CONFIG_FILE))
+    }
+
+    /// Pre-rename platform config path (`<legacy platform config dir>/axon.toml`).
+    /// Still readable so an upgrade keeps using the existing file; `axon init`
+    /// never writes here.
+    pub fn legacy_platform_config_path() -> Option<PathBuf> {
+        legacy_project_dirs().map(|d| d.config_dir().join(LEGACY_CONFIG_FILE))
+    }
+
+    /// True when `path` is the pre-rename platform config file.
+    ///
+    /// Used by `axon-server init` so `--force` cannot treat that file as a write
+    /// target (ADR 0050 amendment: init writes only the current path).
+    pub fn is_legacy_platform_config(path: &Path) -> bool {
+        path_is_legacy_platform_config(path)
     }
 
     /// The socket address to bind, derived from `server.host` and `server.port`.
@@ -1133,6 +1308,8 @@ mod tests {
             search: SearchConfig::default(),
             media: MediaConfig::default(),
             oauth: OauthConfig::default(),
+            legacy_config_path: None,
+            used_legacy_data_dirs: false,
         };
         assert_eq!(config.socket_addr().to_string(), "0.0.0.0:1234");
     }
@@ -1157,15 +1334,18 @@ mod tests {
             if cfg!(target_os = "macos") {
                 assert_eq!(
                     config.search.index_path,
-                    home.join("Library/Application Support/axon/search")
+                    home.join("Library/Application Support/axon-server/search")
                 );
             } else if cfg!(target_os = "linux") {
                 assert_eq!(
                     config.search.index_path,
-                    PathBuf::from("/xdg/data/axon/search")
+                    PathBuf::from("/xdg/data/axon-server/search")
                 );
             } else {
-                assert!(config.search.index_path.ends_with("axon/search"));
+                assert!(config
+                    .search
+                    .index_path
+                    .ends_with("axon-server/data/search"));
             }
             assert_eq!(config.search.index_batch_size, 1000);
             assert_eq!(config.search.build_throttle_ms, 0);
@@ -1201,21 +1381,24 @@ mod tests {
             if cfg!(target_os = "macos") {
                 assert_eq!(
                     config.media.cache_dir,
-                    home.join("Library/Caches/axon/media")
+                    home.join("Library/Caches/axon-server/media")
                 );
                 assert_eq!(
                     config.media.uploads_dir,
-                    home.join("Library/Application Support/axon/uploads")
+                    home.join("Library/Application Support/axon-server/uploads")
                 );
             } else if cfg!(target_os = "linux") {
                 assert_eq!(
                     config.media.cache_dir,
-                    PathBuf::from("/xdg/cache/axon/media")
+                    PathBuf::from("/xdg/cache/axon-server/media")
                 );
-                assert!(config.media.uploads_dir.ends_with("axon/uploads"));
+                assert!(config.media.uploads_dir.ends_with("axon-server/uploads"));
             } else {
-                assert!(config.media.cache_dir.ends_with("axon/media"));
-                assert!(config.media.uploads_dir.ends_with("axon/uploads"));
+                assert!(config.media.cache_dir.ends_with("axon-server/cache/media"));
+                assert!(config
+                    .media
+                    .uploads_dir
+                    .ends_with("axon-server/data/uploads"));
             }
             assert_eq!(config.media.max_bytes, 5 * 1024 * 1024 * 1024);
             assert_eq!(config.media.max_object_bytes, 100 * 1024 * 1024);
@@ -1261,12 +1444,15 @@ mod tests {
             if cfg!(target_os = "macos") {
                 assert_eq!(
                     config.sync.data_dir,
-                    home.join("Library/Application Support/axon/sync")
+                    home.join("Library/Application Support/axon-server/sync")
                 );
             } else if cfg!(target_os = "linux") {
-                assert_eq!(config.sync.data_dir, PathBuf::from("/xdg/data/axon/sync"));
+                assert_eq!(
+                    config.sync.data_dir,
+                    PathBuf::from("/xdg/data/axon-server/sync")
+                );
             } else {
-                assert!(config.sync.data_dir.ends_with("axon/sync"));
+                assert!(config.sync.data_dir.ends_with("axon-server/data/sync"));
             }
             assert!(config.sync.store_key.is_none());
             assert_eq!(config.sync.matrix_oauth.request_timeout_secs, 15);
@@ -1356,10 +1542,10 @@ mod tests {
         figment::Jail::expect_with(|jail| {
             jail.clear_env();
             // Point the XDG config root inside the jail so we can seed a file at
-            // <config dir>/axon/axon.toml and prove `discover_config_path` finds it when
-            // neither AXON_CONFIG nor ./axon.toml is present. Pinned via HOME/
-            // XDG_CONFIG_HOME the same way as the `_defaults_when_absent` tests
-            // (Linux honors XDG_CONFIG_HOME; macOS's `directories` backend
+            // <config dir>/axon-server/config.toml and prove `discover_config_path`
+            // finds it when neither AXON_CONFIG nor ./axon.toml is present. Pinned
+            // via HOME/XDG_CONFIG_HOME the same way as the `_defaults_when_absent`
+            // tests (Linux honors XDG_CONFIG_HOME; macOS's `directories` backend
             // honors $HOME). Windows' SHGetKnownFolderPath can't be redirected
             // via env vars at all, so this test is gated off there — running it
             // un-mocked would mean seeding (and asserting on) the real user's
@@ -1368,6 +1554,38 @@ mod tests {
             jail.set_env("HOME", home.to_str().expect("utf8"));
             let cfg_home = jail.directory().join("cfg");
             jail.set_env("XDG_CONFIG_HOME", cfg_home.to_str().expect("utf8"));
+
+            let config_dir = if cfg!(target_os = "macos") {
+                home.join("Library/Application Support/axon-server")
+            } else {
+                cfg_home.join("axon-server")
+            };
+            jail.create_dir(&config_dir)?;
+            jail.create_file(
+                config_dir.join("config.toml"),
+                r#"
+                    [database]
+                    url = "postgres://cfgdir@localhost/db"
+                "#,
+            )?;
+            let config = Config::load_default().expect("load");
+            assert_eq!(config.database.url, "postgres://cfgdir@localhost/db");
+            assert!(config.legacy_config_path.is_none());
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn legacy_config_file_discovered_when_new_path_absent() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
+            let cfg_home = jail.directory().join("cfg");
+            jail.set_env("XDG_CONFIG_HOME", cfg_home.to_str().expect("utf8"));
+            jail.set_env("XDG_DATA_HOME", "/xdg/data");
+            jail.set_env("XDG_CACHE_HOME", "/xdg/cache");
 
             let config_dir = if cfg!(target_os = "macos") {
                 home.join("Library/Application Support/axon")
@@ -1379,11 +1597,274 @@ mod tests {
                 config_dir.join("axon.toml"),
                 r#"
                     [database]
-                    url = "postgres://cfgdir@localhost/db"
+                    url = "postgres://legacy@localhost/db"
                 "#,
             )?;
             let config = Config::load_default().expect("load");
-            assert_eq!(config.database.url, "postgres://cfgdir@localhost/db");
+            assert_eq!(config.database.url, "postgres://legacy@localhost/db");
+            assert_eq!(
+                config.legacy_config_path.as_deref(),
+                Some(config_dir.join("axon.toml").as_path())
+            );
+            if cfg!(target_os = "macos") {
+                assert_eq!(
+                    config.sync.data_dir,
+                    home.join("Library/Application Support/axon/sync")
+                );
+                assert_eq!(
+                    config.search.index_path,
+                    home.join("Library/Application Support/axon/search")
+                );
+                assert_eq!(
+                    config.media.cache_dir,
+                    home.join("Library/Caches/axon/media")
+                );
+                assert_eq!(
+                    config.media.uploads_dir,
+                    home.join("Library/Application Support/axon/uploads")
+                );
+            } else {
+                assert_eq!(config.sync.data_dir, PathBuf::from("/xdg/data/axon/sync"));
+                assert_eq!(
+                    config.search.index_path,
+                    PathBuf::from("/xdg/data/axon/search")
+                );
+                assert_eq!(
+                    config.media.cache_dir,
+                    PathBuf::from("/xdg/cache/axon/media")
+                );
+                assert_eq!(
+                    config.media.uploads_dir,
+                    PathBuf::from("/xdg/data/axon/uploads")
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn new_config_path_beats_legacy() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
+            let cfg_home = jail.directory().join("cfg");
+            jail.set_env("XDG_CONFIG_HOME", cfg_home.to_str().expect("utf8"));
+            jail.set_env("XDG_DATA_HOME", "/xdg/data");
+
+            let (new_dir, old_dir) = if cfg!(target_os = "macos") {
+                (
+                    home.join("Library/Application Support/axon-server"),
+                    home.join("Library/Application Support/axon"),
+                )
+            } else {
+                (cfg_home.join("axon-server"), cfg_home.join("axon"))
+            };
+            jail.create_dir(&new_dir)?;
+            jail.create_dir(&old_dir)?;
+            jail.create_file(
+                new_dir.join("config.toml"),
+                r#"
+                    [database]
+                    url = "postgres://new@localhost/db"
+                "#,
+            )?;
+            jail.create_file(
+                old_dir.join("axon.toml"),
+                r#"
+                    [database]
+                    url = "postgres://legacy@localhost/db"
+                "#,
+            )?;
+            let config = Config::load_default().expect("load");
+            assert_eq!(config.database.url, "postgres://new@localhost/db");
+            assert!(config.legacy_config_path.is_none());
+            if cfg!(target_os = "macos") {
+                assert_eq!(
+                    config.sync.data_dir,
+                    home.join("Library/Application Support/axon-server/sync")
+                );
+            } else {
+                assert_eq!(
+                    config.sync.data_dir,
+                    PathBuf::from("/xdg/data/axon-server/sync")
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn env_only_uses_legacy_data_dir_when_it_exists_and_new_does_not() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
+            let data_home = jail.directory().join("xdg-data");
+            jail.set_env("XDG_DATA_HOME", data_home.to_str().expect("utf8"));
+            jail.set_env(
+                "XDG_CACHE_HOME",
+                jail.directory().join("xdg-cache").to_str().expect("utf8"),
+            );
+
+            let (legacy_sync, new_search) = if cfg!(target_os = "macos") {
+                (
+                    home.join("Library/Application Support/axon/sync"),
+                    home.join("Library/Application Support/axon-server/search"),
+                )
+            } else {
+                (
+                    data_home.join("axon").join("sync"),
+                    data_home.join("axon-server").join("search"),
+                )
+            };
+            std::fs::create_dir_all(&legacy_sync).expect("legacy sync dir");
+            let config = Config::load(None).expect("load");
+            assert_eq!(config.sync.data_dir, legacy_sync);
+            assert!(config.used_legacy_data_dirs);
+            assert!(config.legacy_config_path.is_none());
+            assert_eq!(config.search.index_path, new_search);
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn env_only_prefers_new_data_dir_when_both_exist() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
+            let data_home = jail.directory().join("xdg-data");
+            jail.set_env("XDG_DATA_HOME", data_home.to_str().expect("utf8"));
+
+            let (legacy_sync, new_sync) = if cfg!(target_os = "macos") {
+                (
+                    home.join("Library/Application Support/axon/sync"),
+                    home.join("Library/Application Support/axon-server/sync"),
+                )
+            } else {
+                (
+                    data_home.join("axon").join("sync"),
+                    data_home.join("axon-server").join("sync"),
+                )
+            };
+            std::fs::create_dir_all(&legacy_sync).expect("legacy sync dir");
+            std::fs::create_dir_all(&new_sync).expect("new sync dir");
+            let config = Config::load(None).expect("load");
+            assert_eq!(config.sync.data_dir, new_sync);
+            assert!(!config.used_legacy_data_dirs);
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn env_only_explicit_data_dir_beats_legacy_on_disk() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
+            let data_home = jail.directory().join("xdg-data");
+            jail.set_env("XDG_DATA_HOME", data_home.to_str().expect("utf8"));
+            jail.set_env("AXON_SYNC__DATA_DIR", "/custom/sync");
+
+            let legacy_sync = if cfg!(target_os = "macos") {
+                home.join("Library/Application Support/axon/sync")
+            } else {
+                data_home.join("axon").join("sync")
+            };
+            std::fs::create_dir_all(&legacy_sync).expect("legacy sync dir");
+            let config = Config::load(None).expect("load");
+            assert_eq!(config.sync.data_dir, PathBuf::from("/custom/sync"));
+            assert!(!config.used_legacy_data_dirs);
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn legacy_config_keeps_explicit_data_dir() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
+            let cfg_home = jail.directory().join("cfg");
+            jail.set_env("XDG_CONFIG_HOME", cfg_home.to_str().expect("utf8"));
+            jail.set_env("XDG_DATA_HOME", "/xdg/data");
+
+            let config_dir = if cfg!(target_os = "macos") {
+                home.join("Library/Application Support/axon")
+            } else {
+                cfg_home.join("axon")
+            };
+            jail.create_dir(&config_dir)?;
+            jail.create_file(
+                config_dir.join("axon.toml"),
+                r#"
+                    [database]
+                    url = "postgres://legacy@localhost/db"
+                    [sync]
+                    data_dir = "/custom/sync"
+                "#,
+            )?;
+            let config = Config::load_default().expect("load");
+            assert_eq!(config.sync.data_dir, PathBuf::from("/custom/sync"));
+            if cfg!(target_os = "macos") {
+                assert_eq!(
+                    config.search.index_path,
+                    home.join("Library/Application Support/axon/search")
+                );
+            } else {
+                assert_eq!(
+                    config.search.index_path,
+                    PathBuf::from("/xdg/data/axon/search")
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn legacy_config_does_not_undo_moved_data_dir() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
+            let cfg_home = jail.directory().join("cfg");
+            jail.set_env("XDG_CONFIG_HOME", cfg_home.to_str().expect("utf8"));
+            let data_home = jail.directory().join("xdg-data");
+            jail.set_env("XDG_DATA_HOME", data_home.to_str().expect("utf8"));
+
+            let (config_dir, new_sync) = if cfg!(target_os = "macos") {
+                (
+                    home.join("Library/Application Support/axon"),
+                    home.join("Library/Application Support/axon-server/sync"),
+                )
+            } else {
+                (
+                    cfg_home.join("axon"),
+                    data_home.join("axon-server").join("sync"),
+                )
+            };
+            jail.create_dir(&config_dir)?;
+            jail.create_file(
+                config_dir.join("axon.toml"),
+                r#"
+                    [database]
+                    url = "postgres://legacy@localhost/db"
+                "#,
+            )?;
+            std::fs::create_dir_all(&new_sync).expect("new sync dir");
+            let config = Config::load_default().expect("load");
+            assert_eq!(config.sync.data_dir, new_sync);
+            assert!(config.legacy_config_path.is_some());
             Ok(())
         });
     }
