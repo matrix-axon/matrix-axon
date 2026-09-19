@@ -36,7 +36,7 @@ pub struct GenericOidcProvider {
 struct DiscoveryDocument {
     /// The provider's own asserted issuer. For Microsoft's multi-tenant
     /// endpoints (`common`/`organizations`/`consumers`) this is a template
-    /// containing the literal string `{tenantid}` — see [`issuer_matches`].
+    /// containing the literal string `{tenantid}` — see [`super::verification::issuer_matches`].
     issuer: String,
     authorization_endpoint: String,
     token_endpoint: String,
