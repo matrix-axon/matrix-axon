@@ -1,0 +1,29 @@
+.TH AXON-SERVER 1 "2026" "axon-server" "Axon"
+.SH NAME
+axon-server \- personal Matrix state layer
+.SH SYNOPSIS
+.B axon-server
+[\fB--config\fR \fIPATH\fR] [\fICOMMAND\fR]
+.SH DESCRIPTION
+Axon sits between a Matrix homeserver and clients.
+It owns sync, E2EE decryption, search, and a media proxy,
+and exposes a versioned HTTP + WebSocket API at /v1/.
+.PP
+With no command it runs the server.
+.B axon-server init
+writes a starter config.
+.SH FILES
+.TP
+.I /etc/axon-server/config.toml
+Packaged-install config (generated on first configure when a local
+Postgres cluster is reachable).
+.TP
+.I /var/lib/axon-server
+Durable state (SDK store, search index, staged uploads).
+.TP
+.I /var/cache/axon-server
+Disposable media cache.
+.SH SEE ALSO
+The source-tree
+.I axon.toml.example
+is the full config reference.

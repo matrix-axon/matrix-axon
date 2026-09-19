@@ -56,6 +56,7 @@ matrix-axon/
     adr/                     # architecture decision records
     self-hosting.md          # produced in Milestone 13 (deployment docs; still pending)
   docker-compose.yml         # Postgres 16 for dev; Synapse under `integration` profile
+  packaging/                 # nFPM .deb/.rpm for axon-server (native Linux; not Docker)
   scripts/
     integration-test.sh      # end-to-end E2EE re-decryption test vs local Synapse
   .github/workflows/         # public repo: GitHub-hosted runners have free minutes, so most workflows trigger on push or release (via new tag); a few stay manual-dispatch only for other reasons (expensive/manual runs)
@@ -64,6 +65,7 @@ matrix-axon/
     cross-build.yml          # fmt, clippy, test, and build for MacOS, Linux, and Windows (can manually select subset if desired)
     lint-and-clippy.yml      # required PR/main Rust gate: cargo fmt + clippy + test
     lint-and-test.yml        # cargo fmt + clippy + test
+    package.yml              # nFPM .deb/.rpm from an ubuntu-22.04 axon-server build
     integration.yml          # selectable E2EE re-decryption and Matrix OAuth QR real-service suites
     matrix-oauth.yml         # reusable Matrix OAuth QR real-service workflow used by integration and smoke
     smoke.yml                # S1 black-box smoke (PR 1: TUI PTY suite; PR 2 added the server gate)
