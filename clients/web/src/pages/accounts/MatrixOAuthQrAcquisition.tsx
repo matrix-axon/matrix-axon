@@ -115,6 +115,7 @@ function QrScanner({
   const [cameraActive, setCameraActive] = useState(false)
   const [cameras, setCameras] = useState<QrCameraDevice[]>([])
   const [selectedCamera, setSelectedCamera] = useState<string | null>(null)
+  const [cameraFacing, setCameraFacing] = useState<string | null>(null)
   const [cameraError, setCameraError] = useState<string | null>(null)
   const [cameraListError, setCameraListError] = useState<string | null>(null)
   const [imageError, setImageError] = useState<string | null>(null)
@@ -131,6 +132,7 @@ function QrScanner({
     session.current = null
     setCameraStarting(false)
     setCameraActive(false)
+    setCameraFacing(null)
   }, [])
 
   const refreshCameras = useCallback(
@@ -226,6 +228,7 @@ function QrScanner({
         return
       }
       session.current = started
+      setCameraFacing(started.facingMode ?? null)
       selectCamera(started.deviceId ?? deviceId)
       setCameraActive(true)
       await refreshCameras(owner)
@@ -256,7 +259,7 @@ function QrScanner({
         playsInline
         muted
       />
-      {cameras.length > 1 && (
+      {cameras.length > 1 && !camerasAreHandheld(cameraFacing) && (
         <label class="qr-camera-picker">
           Camera
           <select
@@ -332,6 +335,38 @@ function QrScanner({
       )}
       {imageError !== null && <p class="field-hint error">{imageError}</p>}
     </div>
+  )
+}
+
+/**
+ * Whether the camera choices are a handheld device's own, and so not worth
+ * offering.
+ *
+ * A phone enumerates every physical rear camera separately — wide, ultra-wide,
+ * telephoto — and for reading a sign-in QR code the answer is always the rear
+ * one. Worse than noise: the ultra-wide and telephoto cannot focus at the range
+ * a QR code is held at, so two of the choices are ways to fail. The first
+ * `startCamera` already asks for `facingMode: environment` and gets the right
+ * one, which is the whole of what a phone needs.
+ *
+ * Both conditions are required, and neither would do on its own. A coarse
+ * pointer says the device is held rather than sat in front of, but a
+ * touchscreen laptop with two webcams is also coarse-pointered when driven by
+ * touch, and there the picker is a real question. A reported facing says the
+ * platform models its cameras by which way they point, but a built-in webcam
+ * may report `user` on a desktop too — unverified here, and the reason this
+ * does not rest on it alone.
+ *
+ * On a desktop the picker stays, which is where "which of my two webcams" is
+ * worth asking.
+ */
+function camerasAreHandheld(facingMode: string | null): boolean {
+  if (facingMode === null) {
+    return false
+  }
+  return (
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(pointer: coarse)').matches
   )
 }
 
