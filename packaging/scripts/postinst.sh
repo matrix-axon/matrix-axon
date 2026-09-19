@@ -92,6 +92,57 @@ provision_local_postgres() {
 	su -s /bin/sh postgres -c "psql -v ON_ERROR_STOP=1 -d axon -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto'"
 }
 
+pg_axon_scalar() {
+	su -s /bin/sh postgres -c "psql -d axon -Atqc \"$1\"" 2>/dev/null || true
+}
+
+# True when the local `axon` database already holds pgcrypto'd account secrets
+# from a previous install.
+has_encrypted_account_secrets() {
+	[ "$(pg_scalar "SELECT 1 FROM pg_database WHERE datname = 'axon'")" = "1" ] || return 1
+	[ "$(pg_axon_scalar "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'accounts'")" = "1" ] || return 1
+	[ "$(pg_axon_scalar "SELECT 1 FROM accounts WHERE access_token_encrypted IS NOT NULL OR oauth_refresh_token_encrypted IS NOT NULL LIMIT 1")" = "1" ]
+}
+
+config_store_key() {
+	[ -f "$CONFIG" ] || return 1
+	awk -F ' = ' '/^store_key = / { gsub(/^"|"$/, "", $2); print $2; exit }' "$CONFIG"
+}
+
+# True when there is nothing to decrypt, or the config store_key decrypts a row.
+store_key_unlocks_db() {
+	has_encrypted_account_secrets || return 0
+	key=$(config_store_key) || return 1
+	[ -n "$key" ] || return 1
+	su -s /bin/sh postgres -c "psql -d axon -v ON_ERROR_STOP=1 -Atqc \"SELECT pgp_sym_decrypt(COALESCE(access_token_encrypted, oauth_refresh_token_encrypted), '$key') FROM accounts WHERE access_token_encrypted IS NOT NULL OR oauth_refresh_token_encrypted IS NOT NULL LIMIT 1\"" >/dev/null 2>&1
+}
+
+print_leftover_database() {
+	cat >&2 <<'EOF'
+
+axon-server found an existing 'axon' Postgres database with encrypted
+account data, but this install does not have a store_key that can read it.
+
+That database is from a previous Axon install. A newly generated encryption
+key cannot decrypt those tokens; starting the service would fail.
+
+To keep the data, restore the old /etc/axon-server/config.toml (the
+[sync] store_key must match) and run:
+
+  sudo dpkg-reconfigure axon-server
+
+To start over, drop the leftover database (and optional SDK state) and
+configure again:
+
+  sudo -u postgres dropdb axon
+  sudo rm -f /etc/axon-server/config.toml
+  sudo rm -rf /var/lib/axon-server
+  sudo dpkg-reconfigure axon-server
+
+The package is installed; the service has not been started.
+EOF
+}
+
 # Replace init's generic URL comment with packaged peer-auth / remote-DB notes.
 # Values are copied through; the socket URL has no characters that need quoting.
 rewrite_packaged_comments() {
@@ -191,22 +242,47 @@ See /usr/share/doc/axon-server/README.Debian.
 EOF
 }
 
-first_configure() {
+stop_unit() {
+	if is_systemd; then
+		systemctl stop axon-server.service >/dev/null 2>&1 || true
+	fi
+}
+
+start_unit() {
+	if is_systemd; then
+		systemctl daemon-reload >/dev/null 2>&1 || true
+		systemctl enable axon-server.service >/dev/null 2>&1 || true
+		systemctl restart axon-server.service >/dev/null 2>&1 || true
+	fi
+}
+
+# Shared by first install (`configure` with empty $2) and upgrade / dpkg-reconfigure.
+configure() {
 	ensure_user
 	ensure_dirs
+	fix_empty_host_url
+
 	if [ -f "$CONFIG" ]; then
-		fix_empty_host_url
-		if is_systemd; then
-			systemctl daemon-reload >/dev/null 2>&1 || true
-			systemctl enable axon-server.service >/dev/null 2>&1 || true
-			systemctl restart axon-server.service >/dev/null 2>&1 || true
+		if local_postgres_ready && ! store_key_unlocks_db; then
+			stop_unit
+			print_leftover_database
+			return 0
 		fi
+		start_unit
 		return 0
 	fi
+
 	if ! local_postgres_ready; then
 		print_byo_postgres
 		return 0
 	fi
+
+	if has_encrypted_account_secrets; then
+		stop_unit
+		print_leftover_database
+		return 0
+	fi
+
 	provision_local_postgres
 	# Peer auth requires the connecting OS user to match the role, so init
 	# runs as `axon`, not root. --no-token: first credential is the unit's
@@ -221,42 +297,12 @@ first_configure() {
 	chmod 0600 "$CONFIG"
 	chown axon:axon "$CONFIG"
 	rewrite_packaged_comments "$CONFIG"
-	if is_systemd; then
-		systemctl daemon-reload >/dev/null 2>&1 || true
-		systemctl enable axon-server.service >/dev/null 2>&1 || true
-		systemctl start axon-server.service >/dev/null 2>&1 || true
-	fi
+	start_unit
 	print_first_run_help
 }
 
-upgrade() {
-	ensure_user
-	ensure_dirs
-	fix_empty_host_url
-	if is_systemd; then
-		systemctl daemon-reload >/dev/null 2>&1 || true
-		if systemctl is-active --quiet axon-server.service 2>/dev/null; then
-			systemctl restart axon-server.service >/dev/null 2>&1 || true
-		fi
-	fi
-}
-
-# Debian
-if [ "$1" = "configure" ]; then
-	if [ -z "$2" ]; then
-		first_configure
-	else
-		upgrade
-	fi
-	exit 0
-fi
-
-# RPM
-if [ "$1" = "1" ]; then
-	first_configure
-	exit 0
-fi
-if [ "$1" -ge 2 ] 2>/dev/null; then
-	upgrade
+# Debian first install, upgrade, and dpkg-reconfigure; RPM install and upgrade.
+if [ "$1" = "configure" ] || [ "$1" = "1" ] || [ "$1" -ge 2 ] 2>/dev/null; then
+	configure
 	exit 0
 fi
