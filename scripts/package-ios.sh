@@ -105,12 +105,14 @@ if [ ! -d "$appiconset" ]; then
   echo "error: no appiconset at $appiconset" >&2
   exit 1
 fi
-copied=0
-for png in "$icon_src"/*.png; do
-  cp "$png" "$appiconset/$(basename "$png")"
-  copied=$((copied + 1))
-done
-echo "    $copied icons"
+# Flattened onto white rather than copied. `tauri icon` writes the iOS set with
+# an alpha channel, and App Store Connect rejects the upload for it — error
+# 90717, "Invalid large app icon ... can't be transparent or contain an alpha
+# channel" — after the build, the signing and the upload have all succeeded.
+# White is the background the set is already drawn against, so nothing changes
+# visually; see scripts/lib/flatten-icons.swift.
+xcrun swift "$repo_root/scripts/lib/flatten-icons.swift" "$appiconset" "$icon_src"/*.png
+echo "    $(ls "$icon_src"/*.png | wc -l | tr -d ' ') icons, flattened"
 
 build_args=(tauri ios build --export-method "$export_method")
 if [ -n "$build_number" ]; then

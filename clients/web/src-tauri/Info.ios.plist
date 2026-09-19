@@ -28,6 +28,27 @@
     `plugins.deep-link.desktop.schemes`. All three have to agree, and the
     operator's server needs the matching `redirect_uris` entry.
   -->
+  <!--
+    Export compliance, so TestFlight stops asking on every upload.
+
+    Declared false on the basis that this client implements no encryption of
+    its own. Matrix E2EE (Olm/Megolm) lives entirely in the axon server, which
+    holds the matrix-rust-sdk crypto stores; the client is a `/v1` consumer
+    that talks to it over TLS and nothing else.
+
+    Recorded because the "no encryption at all" reading would be wrong, and
+    someone will check: the shell routes `fetch` through
+    `@tauri-apps/plugin-http` (`src/platform/tauri.ts`), so it links rustls
+    rather than using Apple's TLS. That is standard TLS with standard
+    algorithms, which is the exemption claimed here rather than an absence of
+    encryption.
+
+    Revisit if the client ever does its own crypto — if E2EE moves client-side,
+    this key is wrong and has to change with it.
+  -->
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <false/>
+
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
