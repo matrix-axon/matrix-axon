@@ -69,3 +69,4 @@ overrides:
   rpm:
     recommends:
       - postgresql-server
+      - postgresql-contrib

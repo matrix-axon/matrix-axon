@@ -16,12 +16,9 @@ ConfigurationDirectory=axon-server
 ConfigurationDirectoryMode=0750
 StateDirectory=axon-server
 CacheDirectory=axon-server
-# Pin paths so User=axon (home /nonexistent) does not fall back to CWD-relative
-# axon-data/ or a missing XDG tree. Matches ADR 0050's axon-server project dir.
-Environment=AXON_SYNC__DATA_DIR=/var/lib/axon-server/sync
-Environment=AXON_SEARCH__INDEX_PATH=/var/lib/axon-server/search
-Environment=AXON_MEDIA__CACHE_DIR=/var/cache/axon-server/media
-Environment=AXON_MEDIA__UPLOADS_DIR=/var/lib/axon-server/uploads
+# Data/cache/upload paths are in /etc/axon-server/config.toml (written by
+# postinst) so the unit and CLI subcommands share them. Do not set AXON_*
+# path env vars here: they would silently override the file.
 # systemd has no TTY, so arm the one-time first-credential web bootstrap the
 # same way the Docker entrypoint does. Still loopback-only unless the operator
 # sets server.bootstrap_web_allow_remote.
