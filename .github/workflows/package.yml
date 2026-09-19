@@ -1,6 +1,71 @@
-on: push
+name: Native Linux packages
+
+# Builds .deb and .rpm from a glibc-2.35 binary (ubuntu-22.04) so Debian
+# bookworm and Ubuntu 22.04+ can run them. Tag-to-Release upload is a later PR.
+
+on:
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/package.yml"
+      - "crates/axon-server/**"
+      - "crates/axon-core/**"
+      - "crates/axon-store/**"
+      - "crates/axon-api/**"
+      - "crates/axon-sync/**"
+      - "crates/axon-crypto/**"
+      - "crates/axon-search/**"
+      - "crates/axon-media/**"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
 jobs:
-  minimal-job:
-    runs-on: ubuntu-latest
+  deb-rpm:
+    name: .deb and .rpm
+    runs-on: ubuntu-22.04
     steps:
-      - run: echo
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev rpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nFPM
+        env:
+          NFPM_VERSION: 2.47.0
+        run: |
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xz -C /tmp nfpm
+          sudo mv /tmp/nfpm /usr/local/bin/nfpm
+          nfpm --version
+
+      - name: Shellcheck maintainer scripts
+        run: |
+          sudo apt-get install -y --no-install-recommends shellcheck
+          shellcheck -s sh packaging/scripts/postinst.sh packaging/scripts/prerm.sh packaging/scripts/postrm.sh
+          shellcheck packaging/package.sh
+
+      - name: Build axon-server
+        run: cargo build --release -p axon-server --bin axon-server
+
+      - name: Package
+        run: packaging/package.sh all
+
+      - name: Inspect artifacts
+        run: |
+          deb=$(ls target/nfpm/*.deb)
+          rpm=$(ls target/nfpm/*.rpm)
+          dpkg --info "$deb"
+          dpkg --contents "$deb"
+          rpm -qp --info "$rpm"
+          rpm -qp --list "$rpm"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: axon-server-linux-amd64-packages
+          path: target/nfpm/*

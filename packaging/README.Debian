@@ -1,0 +1,53 @@
+Packaged axon-server
+====================
+
+Upstream project description: /usr/share/doc/axon-server/README.md
+(markdown, same file as the git repository).
+
+The systemd unit runs as Unix user `axon` with
+`--config /etc/axon-server/config.toml`.
+
+Local Postgres (default)
+------------------------
+If a cluster answers on the Unix socket, the first `configure` creates
+role `axon`, database `axon`, and `pgcrypto` as the `postgres` superuser,
+then runs `axon-server init` as user `axon` with a peer-auth Unix-socket
+URL (sqlx form: postgres://axon@%2Fvar%2Frun%2Fpostgresql/axon, no
+password). The service is enabled and started.
+
+The generated config.toml comments explain how to point `database.url`
+at a remote or passworded server.
+
+`apt purge axon-server` deletes /etc/axon-server (including store_key).
+/var/lib/axon-server is left in place; remove it by hand if you want a
+clean slate. The Postgres `axon` database is also left in place.
+
+If you install again without that store_key, postinst will refuse to mint
+a new key over encrypted account data and print how to restore the old
+config or `dropdb axon` and reconfigure.
+
+Bring your own Postgres
+-----------------------
+If no local cluster is reachable, the package still installs. After the
+database exists (role can use pgcrypto in that database):
+
+  axon-server init --non-interactive \
+    --config /etc/axon-server/config.toml \
+    --database-url 'postgres://USER:PASSWORD@HOST:5432/DB' \
+    --no-token
+  chown axon:axon /etc/axon-server/config.toml
+  chmod 0600 /etc/axon-server/config.toml
+  systemctl enable --now axon-server
+
+First credential
+----------------
+The unit sets AXON_SERVER__BOOTSTRAP_WEB_AUTO=true. After a successful
+first install, dpkg prints the one-time bootstrap URL (loopback only).
+If you missed it:
+
+  journalctl -u axon-server -e --no-pager | grep -i bootstrap
+
+Alternatively:
+
+  sudo -u axon axon-server --config /etc/axon-server/config.toml \
+    token issue --label first
