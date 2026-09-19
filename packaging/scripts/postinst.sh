@@ -123,6 +123,53 @@ EOF
 	mv "$tmp" "$cfg"
 }
 
+# Wait for the unit to print the one-time bootstrap URL to the journal.
+wait_for_bootstrap_url() {
+	n=0
+	while [ "$n" -lt 10 ]; do
+		url=$(journalctl -u axon-server -n 200 --no-pager -o cat 2>/dev/null |
+			sed -n 's/.*open \(http:\/\/[^ ]*\).*/\1/p' | tail -n 1)
+		if [ -n "$url" ]; then
+			printf '%s\n' "$url"
+			return 0
+		fi
+		n=$((n + 1))
+		sleep 1
+	done
+	return 1
+}
+
+print_first_run_help() {
+	echo
+	echo "axon-server is installed and the service is enabled."
+	echo "It listens on http://127.0.0.1:8080 (loopback only)."
+	echo
+	url=
+	if is_systemd; then
+		url=$(wait_for_bootstrap_url || true)
+	fi
+	if [ -n "$url" ]; then
+		echo "Create the first client credential by opening this one-time URL"
+		echo "in a browser on this machine:"
+		echo
+		echo "  $url"
+		echo
+	else
+		echo "Create the first client credential from the one-time bootstrap URL"
+		echo "in the journal (loopback only):"
+		echo
+		echo "  journalctl -u axon-server -e --no-pager | grep -i bootstrap"
+		echo
+	fi
+	echo "Or mint a token from the CLI:"
+	echo
+	echo "  sudo -u axon axon-server --config /etc/axon-server/config.toml \\"
+	echo "    token issue --label first"
+	echo
+	echo "Point axon-tui or another client at http://127.0.0.1:8080 with that token."
+	echo "See /usr/share/doc/axon-server/README.Debian."
+}
+
 print_byo_postgres() {
 	cat >&2 <<'EOF'
 axon-server is installed but no local Postgres cluster was reachable.
@@ -161,7 +208,12 @@ first_configure() {
 	# runs as `axon`, not root. --no-token: first credential is the unit's
 	# web bootstrap (AXON_SERVER__BOOTSTRAP_WEB_AUTO).
 	socket_url=$(sqlx_socket_url)
-	su -s /bin/sh axon -c "axon-server init --non-interactive --config '$CONFIG' --database-url '$socket_url' --no-token"
+	# init prints Docker-oriented next-steps; keep write/connect lines only.
+	init_out=$(su -s /bin/sh axon -c "axon-server init --non-interactive --config '$CONFIG' --database-url '$socket_url' --no-token" 2>&1) || {
+		echo "$init_out" >&2
+		return 1
+	}
+	echo "$init_out" | grep -E 'Wrote configuration|connected|not reachable' || true
 	chmod 0600 "$CONFIG"
 	chown axon:axon "$CONFIG"
 	rewrite_packaged_comments "$CONFIG"
@@ -170,6 +222,7 @@ first_configure() {
 		systemctl enable axon-server.service >/dev/null 2>&1 || true
 		systemctl start axon-server.service >/dev/null 2>&1 || true
 	fi
+	print_first_run_help
 }
 
 upgrade() {

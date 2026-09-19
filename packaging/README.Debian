@@ -30,9 +30,13 @@ database exists (role can use pgcrypto in that database):
 
 First credential
 ----------------
-The unit sets AXON_SERVER__BOOTSTRAP_WEB_AUTO=true. After start, the
-bootstrap URL is in the journal (loopback only):
+The unit sets AXON_SERVER__BOOTSTRAP_WEB_AUTO=true. After a successful
+first install, dpkg prints the one-time bootstrap URL (loopback only).
+If you missed it:
 
-  journalctl -u axon-server -e
+  journalctl -u axon-server -e --no-pager | grep -i bootstrap
 
-Alternatively: `axon-server --config /etc/axon-server/config.toml token issue --label admin`
+Alternatively:
+
+  sudo -u axon axon-server --config /etc/axon-server/config.toml \
+    token issue --label first
