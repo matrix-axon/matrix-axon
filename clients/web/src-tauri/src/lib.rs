@@ -408,10 +408,20 @@ fn main_window<R: tauri::Runtime>(
         // External links never arrive here — `openExternal` hands them to the
         // real browser (`app.tsx`) — so anything that does reach this point is
         // something no code path intends, which is exactly what to refuse.
-        .on_navigation(move |target| navigation_allowed(target, cfg!(dev), dev_host.as_deref()));
+        .on_navigation(move |target| {
+            let allowed = navigation_allowed(target, cfg!(dev), dev_host.as_deref());
+            if !allowed {
+                // Refusing is right for a hostile URL and a disaster for the
+                // app's own, and from outside the two look identical: the
+                // window stays blank. Name the URL, so the next person to hit
+                // this has a thread to pull instead of an empty box.
+                eprintln!("refused navigation to {target}");
+            }
+            allowed
+        });
     // Desktop only, and not a tidiness cfg: on mobile the window *is* the
     // screen, and iOS takes these literally rather than clamping them. Applied
-    // there, the webview is laid out 1100pt wide inside a 393pt screen — the
+    // there, the webview is laid out 1100pt wide inside a 430pt screen — the
     // page centres itself in a viewport three times the display, so the app
     // renders its left edge somewhere off to the right — and 760pt tall inside
     // 852, leaving a black band below it. It looks like the CSS lost the
@@ -446,6 +456,24 @@ fn main_window<R: tauri::Runtime>(
 /// is finding out from a packaged build.
 fn navigation_allowed(target: &tauri::Url, dev: bool, dev_host: Option<&str>) -> bool {
     if target.scheme() == APP_SCHEME {
+        return true;
+    }
+    // The same origin, spelled the way Windows and Android spell it. Wry serves
+    // the custom scheme there as `http://axon.localhost` — `APP_SCHEME`'s own
+    // doc comment says so — so the window's *own* URL arrives with the scheme
+    // folded into the host, matching neither the arm above nor the dev arms
+    // below. Refusing it refuses the initial load, and the app opens as an
+    // empty window: shipped that way, and reported from Windows.
+    //
+    // No port, because wry's host is bare; a port would mean a real server on
+    // loopback rather than wry's interception.
+    if matches!(target.scheme(), "http" | "https")
+        && target.port().is_none()
+        && target
+            .host_str()
+            .and_then(|host| host.strip_suffix(".localhost"))
+            == Some(APP_SCHEME)
+    {
         return true;
     }
     if !dev {
@@ -828,6 +856,45 @@ mod tests {
             &url("http://192.168.4.3:5173/"),
             false,
             host
+        ));
+    }
+
+    /// Windows and Android serve the app's own scheme as
+    /// `http://axon.localhost`, so the window's own URL reaches this function
+    /// spelled differently from the one it was asked to load. Refusing it
+    /// refuses the first load, and the app comes up blank.
+    #[test]
+    fn the_app_origin_is_admitted_however_the_platform_spells_it() {
+        // Windows and Android respectively.
+        assert!(navigation_allowed(
+            &url("http://axon.localhost/"),
+            false,
+            None
+        ));
+        assert!(navigation_allowed(
+            &url("https://axon.localhost/@a:b/rooms/!c:d"),
+            false,
+            None
+        ));
+
+        // Not a licence for `.localhost` at large: another app's scheme, bare
+        // localhost, a real server on a port, and a lookalike registrable
+        // domain are all still refused.
+        assert!(!navigation_allowed(
+            &url("http://evil.localhost/"),
+            false,
+            None
+        ));
+        assert!(!navigation_allowed(&url("http://localhost/"), false, None));
+        assert!(!navigation_allowed(
+            &url("http://axon.localhost:8080/"),
+            false,
+            None
+        ));
+        assert!(!navigation_allowed(
+            &url("http://axon.localhost.evil.example/"),
+            false,
+            None
         ));
     }
 
