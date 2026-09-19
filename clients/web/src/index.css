@@ -134,6 +134,20 @@ body {
   );
   min-height: 0;
   overflow: hidden;
+  /* The viewport covers the safe areas (`viewport-fit=cover` in index.html),
+     so hand them back — but only the side ones, and only here.
+
+     Not the top: `.topbar` takes that itself, so its background runs up behind
+     the status bar rather than leaving a strip of `--bg` above it. Not the
+     bottom either, and that one was tried: a `padding-bottom` here stops the
+     shell's *content* 34px short of a shell that does reach the bottom edge
+     (measured on device: `shellBottom` 932 of a 932pt screen), which is the
+     same dead band it was meant to remove, in `--bg` instead of the webview's
+     backdrop. The scrolling panes carry the bottom inset instead, so rows run
+     under the home indicator and can still be scrolled clear of it. */
+  box-sizing: border-box;
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
 }
 
 .topbar {
@@ -144,7 +158,8 @@ body {
   display: flex;
   align-items: center;
   gap: 1.5rem;
-  padding: 0.6rem 1.25rem;
+  --topbar-pad-block: 0.6rem;
+  padding: var(--topbar-pad-block) 1.25rem;
   border-bottom: 1px solid var(--border);
   background: var(--bg-raised);
   /* Brand, nav, indicator and two buttons do not fit a phone on one line. */
@@ -223,7 +238,8 @@ body {
   .topbar {
     flex-wrap: nowrap;
     gap: 0.45rem;
-    padding: 0.45rem 0.55rem;
+    --topbar-pad-block: 0.45rem;
+    padding: var(--topbar-pad-block) 0.55rem;
   }
 
   .mobile-room-shell .topbar-rooms-button {
@@ -290,6 +306,20 @@ body {
     min-height: 2rem;
     padding: 0.35rem;
   }
+}
+
+/* The status-bar inset, after every breakpoint that sets `.topbar`'s padding.
+
+   Deliberately its own `padding-top` rather than a term inside those `padding`
+   shorthands: the first attempt put it in the base rule, and the narrow-screen
+   media query above re-declared `padding` and dropped it again — on exactly the
+   widths that have a status bar to clear. `axon` then sat on top of the clock.
+   A shorthand in a later breakpoint cannot undo a longhand declared after it,
+   so a new breakpoint cannot reintroduce that. */
+.topbar {
+  padding-top: calc(
+    var(--topbar-pad-block, 0.6rem) + env(safe-area-inset-top, 0px)
+  );
 }
 
 .brand {
@@ -477,6 +507,9 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 1rem;
+  /* So the last row can be scrolled clear of the home indicator, rather
+     than the pane stopping short of it. */
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
   box-sizing: border-box;
   /* Preserve the scrollbar gutter so rows do not jump, but draw the thumb
      only while the pointer is over the scrollable pane. */
@@ -2809,7 +2842,10 @@ a.utd-recover:hover {
   z-index: 60;
   background: var(--bg);
   border-top: 1px solid var(--border);
-  padding: 0.6rem 0;
+  /* The composer is what sits against the bottom edge in a room, so it carries
+     the inset: its background fills the home-indicator strip and the textarea
+     stays above it. Collapses to `0.6rem` wherever the inset is zero. */
+  padding: 0.6rem 0 calc(0.6rem + env(safe-area-inset-bottom, 0px));
   margin-top: 1rem;
 }
 
