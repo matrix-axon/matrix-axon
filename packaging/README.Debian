@@ -15,6 +15,10 @@ password). The service is enabled and started.
 The generated config.toml comments explain how to point `database.url`
 at a remote or passworded server.
 
+`apt purge axon-server` deletes /etc/axon-server (including store_key).
+/var/lib/axon-server is left in place; remove it by hand if you want a
+clean slate.
+
 Bring your own Postgres
 -----------------------
 If no local cluster is reachable, the package still installs. After the

@@ -41,7 +41,7 @@ jobs:
       - name: Shellcheck maintainer scripts
         run: |
           sudo apt-get install -y --no-install-recommends shellcheck
-          shellcheck -s sh packaging/scripts/postinst.sh packaging/scripts/prerm.sh
+          shellcheck -s sh packaging/scripts/postinst.sh packaging/scripts/prerm.sh packaging/scripts/postrm.sh
           shellcheck packaging/package.sh
 
       - name: Build axon-server

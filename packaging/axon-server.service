@@ -25,6 +25,9 @@ Environment=AXON_MEDIA__UPLOADS_DIR=/var/lib/axon-server/uploads
 # same way the Docker entrypoint does. Still loopback-only unless the operator
 # sets server.bootstrap_web_allow_remote.
 Environment=AXON_SERVER__BOOTSTRAP_WEB_AUTO=true
+# sqlx always opens $HOME/.pgpass. ProtectHome=yes hides /home, so a passwd
+# home of /home/axon yields PermissionDenied. StateDirectory is visible.
+Environment=HOME=/var/lib/axon-server
 
 NoNewPrivileges=yes
 ProtectSystem=strict

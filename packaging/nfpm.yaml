@@ -56,6 +56,7 @@ contents:
 scripts:
   postinstall: packaging/scripts/postinst.sh
   preremove: packaging/scripts/prerm.sh
+  postremove: packaging/scripts/postrm.sh
 
 overrides:
   deb:

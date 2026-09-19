@@ -38,17 +38,21 @@ ensure_user() {
 	if command -v systemd-sysusers >/dev/null 2>&1; then
 		systemd-sysusers /usr/lib/sysusers.d/axon-server.conf >/dev/null 2>&1 || true
 	fi
-	if getent passwd axon >/dev/null 2>&1; then
-		return 0
+	if ! getent passwd axon >/dev/null 2>&1; then
+		if command -v adduser >/dev/null 2>&1; then
+			adduser --system --group --quiet --no-create-home \
+				--home /nonexistent --shell /usr/sbin/nologin \
+				--gecos "Axon Matrix state layer" axon
+		else
+			useradd --system --no-create-home --home-dir /nonexistent \
+				--shell /usr/sbin/nologin --user-group \
+				--comment "Axon Matrix state layer" axon
+		fi
 	fi
-	if command -v adduser >/dev/null 2>&1; then
-		adduser --system --group --quiet --no-create-home \
-			--home /nonexistent --shell /usr/sbin/nologin \
-			--gecos "Axon Matrix state layer" axon
-	else
-		useradd --system --no-create-home --home-dir /nonexistent \
-			--shell /usr/sbin/nologin --user-group \
-			--comment "Axon Matrix state layer" axon
+	# systemd-sysusers may still set HOME to /home/axon. Keep the passwd
+	# home off /home so ProtectHome=yes is not fighting sqlx's .pgpass open.
+	if command -v usermod >/dev/null 2>&1; then
+		usermod --home /nonexistent axon >/dev/null 2>&1 || true
 	fi
 }
 
