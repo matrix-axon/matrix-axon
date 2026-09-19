@@ -27,6 +27,16 @@ export interface QrCameraDevice {
 
 export interface QrCameraSession {
   deviceId: string | null
+  /**
+   * `'user'` or `'environment'` where the platform describes its cameras by
+   * which way they point, and `null` where it does not.
+   *
+   * Devices with built-in facing cameras report this; desktop webcams
+   * generally do not. It is only readable from a running track — iOS puts
+   * nothing on `MediaDeviceInfo` — which is why it belongs to the session
+   * rather than to `QrCameraDevice`.
+   */
+  facingMode: string | null
   stop(): void
 }
 
@@ -194,8 +204,9 @@ export function createBrowserQrAdapter(): BrowserQrAdapter {
             : { deviceId: { exact: deviceId } },
         audio: false,
       })
-      const activeDeviceId =
-        stream.getVideoTracks()[0]?.getSettings().deviceId ?? deviceId ?? null
+      const activeSettings = stream.getVideoTracks()[0]?.getSettings()
+      const activeDeviceId = activeSettings?.deviceId ?? deviceId ?? null
+      const activeFacingMode = activeSettings?.facingMode ?? null
       const canvas = document.createElement('canvas')
       let timer: ReturnType<typeof setInterval> | null = null
       let stopped = false
@@ -267,7 +278,7 @@ export function createBrowserQrAdapter(): BrowserQrAdapter {
             }
           })()
         }, CAMERA_SCAN_INTERVAL_MS)
-        return { deviceId: activeDeviceId, stop }
+        return { deviceId: activeDeviceId, facingMode: activeFacingMode, stop }
       } catch (cause) {
         stop()
         throw cause instanceof Error
