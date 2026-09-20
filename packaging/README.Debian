@@ -45,6 +45,20 @@ database exists (role can use pgcrypto in that database):
     --no-token
   chown axon:axon /etc/axon-server/config.toml
   chmod 0600 /etc/axon-server/config.toml
+
+init writes only url and store_key. Add these under the existing
+[sync] section (do not add a second [sync] table), then [search] and
+[media]:
+
+  data_dir = "/var/lib/axon-server/sync"
+
+  [search]
+  index_path = "/var/lib/axon-server/search"
+
+  [media]
+  cache_dir = "/var/cache/axon-server/media"
+  uploads_dir = "/var/lib/axon-server/uploads"
+
   systemctl enable --now axon-server
 
 First credential
