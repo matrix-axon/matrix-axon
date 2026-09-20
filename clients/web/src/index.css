@@ -89,6 +89,31 @@
 
   /* Layout (ADR 0062). */
   --sidebar-width: 26.25rem;
+
+  /* The display's safe areas, as tokens (ADR 0105).
+   *
+   * `index.html` sets `viewport-fit=cover`, so the page is laid out over the
+   * status bar, the Dynamic Island and the home indicator, and every rule that
+   * hands one of those strips back reads it from here rather than calling
+   * `env()` itself. Two reasons, both learned the hard way:
+   *
+   *   - It makes the list of owners greppable. The bottom inset was being
+   *     applied twice below the message composer on a tablet — once by `main`,
+   *     once by `.composer` — because each rule was written on its own and
+   *     neither could see the other (#460).
+   *   - It makes the insets *testable*. `env()` is always `0px` in a headless
+   *     browser, so no Playwright run could ever see this class of bug;
+   *     `e2e/safe-area.spec.ts` sets these four properties on `:root` to the
+   *     values measured on real devices and gets the same layout Chromium
+   *     could otherwise never produce.
+   *
+   * They are always defined and always resolve to a length, so a rule may use
+   * them bare: `calc(1rem + var(--safe-bottom))`, no fallback needed.
+   */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
 }
 
 :root[data-theme='light'] {
@@ -143,11 +168,13 @@ body {
      shell's *content* 34px short of a shell that does reach the bottom edge
      (measured on device: `shellBottom` 932 of a 932pt screen), which is the
      same dead band it was meant to remove, in `--bg` instead of the webview's
-     backdrop. The scrolling panes carry the bottom inset instead, so rows run
-     under the home indicator and can still be scrolled clear of it. */
+     backdrop. Whatever reaches the bottom edge carries that inset instead: a
+     scrolling pane, so rows run under the home indicator and can still be
+     scrolled clear of it, or `.composer` in a room. One of them, never two —
+     see ADR 0105. */
   box-sizing: border-box;
-  padding-right: env(safe-area-inset-right, 0px);
-  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: var(--safe-right);
+  padding-left: var(--safe-left);
 }
 
 .topbar {
@@ -317,9 +344,7 @@ body {
    A shorthand in a later breakpoint cannot undo a longhand declared after it,
    so a new breakpoint cannot reintroduce that. */
 .topbar {
-  padding-top: calc(
-    var(--topbar-pad-block, 0.6rem) + env(safe-area-inset-top, 0px)
-  );
+  padding-top: calc(var(--topbar-pad-block, 0.6rem) + var(--safe-top));
 }
 
 .brand {
@@ -509,7 +534,7 @@ body {
   padding: 1rem;
   /* So the last row can be scrolled clear of the home indicator, rather
      than the pane stopping short of it. */
-  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(1rem + var(--safe-bottom));
   box-sizing: border-box;
   /* Preserve the scrollbar gutter so rows do not jump, but draw the thumb
      only while the pointer is over the scrollable pane. */
@@ -719,8 +744,11 @@ body {
   /* The scroll container for Settings, Accounts, Invites and Licenses, and it
      reaches the bottom of the display. Without this the last control of a page
      sits under the home indicator with no way to scroll it clear — the same
-     dead band `.room-list-pane` carries the inset for. */
-  padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+     dead band `.room-list-pane` carries the inset for.
+
+     A *room* is the exception and takes it back below — see `.mode-room main`
+     after the breakpoints. */
+  padding-bottom: calc(1.5rem + var(--safe-bottom));
   box-sizing: border-box;
 }
 
@@ -852,7 +880,8 @@ body {
 
   .shell.mobile-room-shell main {
     padding-top: 0.4rem;
-    padding-bottom: 0.35rem;
+    /* No `padding-bottom` here any more: `.mode-room main` below zeroes it at
+       every width, and this one used to be the only place that did. */
   }
 
   .mobile-room-shell .timeline {
@@ -903,13 +932,36 @@ body {
   }
 }
 
+/* A room owns its own bottom edge (ADR 0105).
+
+   `main` pads its bottom for the utility pages, which scroll and end in
+   whatever control came last. A room does not: it ends in `.composer`, which
+   is the element against the bottom of the display and carries the safe-area
+   inset itself. `main`'s copy landed *below* that one, so the inset was paid
+   twice and the composer never reached the edge it was written for.
+
+   Measured in the packaged shell on an iPad Pro 11" (M4), iPadOS 26.5,
+   portrait: `env(safe-area-inset-bottom)` 20px, `main` padding-bottom 44px,
+   `.composer` padding-bottom 29.6px, and 73.6px of nothing between the bottom
+   of the message entry box and the bottom of the app (#460). A phone in
+   *landscape* is 874pt wide, so it reached this branch too and measured the
+   same 73.6px — of a 402pt-tall display. Only a phone in portrait escaped,
+   because the narrow breakpoint above was the one place that zeroed this.
+
+   Declared after every breakpoint rather than inside them, for the reason
+   `.topbar` does the same — a later shorthand cannot undo a longhand declared
+   after it, so a new breakpoint that re-declares `main`'s `padding` cannot
+   quietly bring the second inset back. */
+.shell-body.mode-room main {
+  padding-bottom: 0;
+}
+
 .signin {
   max-width: 28rem;
   /* Rendered *instead of* `.shell`, so none of its insets apply and this has
      to carry its own. The first screen a TestFlight user sees. 4rem clears a
      59px status bar by five pixels, which is not clearance, it is luck. */
-  margin: calc(4rem + env(safe-area-inset-top, 0px)) auto
-    calc(4rem + env(safe-area-inset-bottom, 0px));
+  margin: calc(4rem + var(--safe-top)) auto calc(4rem + var(--safe-bottom));
   padding: 0 1rem;
 }
 
@@ -2853,8 +2905,17 @@ a.utd-recover:hover {
   border-top: 1px solid var(--border);
   /* The composer is what sits against the bottom edge in a room, so it carries
      the inset: its background fills the home-indicator strip and the textarea
-     stays above it. Collapses to `0.6rem` wherever the inset is zero. */
-  padding: 0.6rem 0 calc(0.6rem + env(safe-area-inset-bottom, 0px));
+     stays above it. Collapses to `--composer-pad-bottom` wherever the inset is
+     zero. The bottom is a longhand declared after the breakpoints — see below. */
+  --composer-pad-bottom: 0.6rem;
+  /* The iOS home-screen PWA's extra 4px, which has only ever applied below the
+     breakpoint. It is indirected through a second property rather than read
+     from `--app-standalone-composer-bottom-padding` directly so that the
+     longhand below, which is unconditional, does not silently start applying it
+     at two-pane widths — `app.tsx` sets that one for any Apple standalone
+     display, iPads included, and nobody has measured a wide PWA. */
+  --composer-standalone-pad: 0px;
+  padding: 0.6rem 0;
   margin-top: 1rem;
 }
 
@@ -2894,9 +2955,13 @@ a.utd-recover:hover {
 
 @media (max-width: 47.99rem) {
   .composer {
+    --composer-pad-bottom: 0.15rem;
+    --composer-standalone-pad: var(
+      --app-standalone-composer-bottom-padding,
+      0px
+    );
     margin-top: 0.5rem;
-    padding: 0.45rem 0
-      calc(0.15rem + var(--app-standalone-composer-bottom-padding, 0px));
+    padding: 0.45rem 0;
   }
 
   .composer form {
@@ -2906,6 +2971,32 @@ a.utd-recover:hover {
   .composer-resize {
     display: none;
   }
+}
+
+/* The home-indicator inset, after every breakpoint that sets `.composer`'s
+   padding — the same shape, and for the same reason, as `.topbar`'s
+   `padding-top` (ADR 0105).
+
+   It began inside the base rule's `padding` shorthand, and the narrow
+   breakpoint above re-declared `padding` and dropped it again on exactly the
+   devices that have a home indicator to clear. Measured in the packaged shell
+   on an iPhone 17, iOS 26.5, portrait: inset 34px, and the message entry box
+   ended 8px above the bottom of the display — 26px of it inside the strip the
+   indicator is drawn on (#460). A shorthand in a later breakpoint cannot undo
+   a longhand declared after it, so a new breakpoint cannot reintroduce that.
+
+   Both of the terms beside the inset are per-breakpoint properties, set above,
+   rather than values read here. That is what keeps an unconditional longhand
+   from quietly widening a conditional rule: `--composer-standalone-pad` is the
+   iOS home-screen PWA's extra 4px, which has only ever applied below the
+   breakpoint, and it stays `0px` everywhere else. The packaged shell reports
+   `display-mode: browser`, so that term is `0px` there in any case and this
+   collapses to the breakpoint's own padding plus the inset. */
+.composer {
+  padding-bottom: calc(
+    var(--composer-pad-bottom, 0.6rem) + var(--safe-bottom) +
+      var(--composer-standalone-pad, 0px)
+  );
 }
 
 .composer-input-shell {
@@ -3493,8 +3584,19 @@ span.composer-attachment-thumb {
      sits under the clock and the Dynamic Island, and its Close button is
      awkward to hit. They are siblings of `.shell` rather than children, so the
      topbar's inset does nothing for them. Dropped again at the breakpoint
-     below where these become a static third column. */
-  padding: calc(1rem + env(safe-area-inset-top, 0px)) 1.25rem 1rem;
+     below where these become a static third column.
+
+     The bottom is `0`, not `1rem`: these reach the bottom of the display too,
+     and a thread ends in a `.composer` that owns that edge (ADR 0105). Measured
+     in the packaged shell on an iPhone 17, iOS 26.5, portrait, inset 34px: with
+     `1rem` the thread composer stopped 16px above the bottom of the display and
+     its entry box 18.4px above — inside the home-indicator strip, with the
+     composer floating off the edge as well. With `0` it is 0px and 36.4px. Not
+     the #460 double-count, since the inset was still paid once; the same "the
+     composer is against the bottom edge" claim failing where nobody looked.
+     `.side-panel` takes its own below, because room info has no composer to own
+     it. */
+  padding: calc(1rem + var(--safe-top)) 1.25rem 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -3511,7 +3613,7 @@ span.composer-attachment-thumb {
    only within the panel's content box, which is what this padding sizes, so
    there is still no scrolling the last row clear without it. */
 .side-panel {
-  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(1rem + var(--safe-bottom));
 }
 
 @media (max-width: 47.99rem) {
@@ -3570,20 +3672,20 @@ span.composer-attachment-thumb {
     height: auto;
     min-height: 0;
     box-shadow: none;
-    /* Neither edge is the display's any more: this is a column inside `main`,
-       below a topbar that has already taken the top inset and above `main`'s
-       own bottom padding, which is `calc(1.5rem + env(safe-area-inset-bottom))`
-       and is what keeps the column's last row clear of the home indicator here.
-       Keeping the top inset would indent the column by the status bar height on
-       an iPad held in portrait, which is wide enough to reach this breakpoint
-       and still has a non-zero inset; keeping the bottom one would pay it twice,
-       once here and once in `main`.
+    /* No longer against the *top* edge: a column inside `main`, below a topbar
+       that has already taken that inset. Keeping it here would indent the
+       column by the status bar height on an iPad held in portrait, which is
+       wide enough to reach this breakpoint and still has a non-zero inset.
 
-       `main` is the load-bearing word — an earlier draft of this comment said
-       "the shell", which does not take the bottom inset and says so. If `main`
-       ever stops taking it in a room, `.side-panel` needs it back here. */
+       The bottom is deliberately not re-declared. `.mode-room main` has no
+       padding there (ADR 0105), so these columns still reach the bottom of the
+       display exactly as the drawers above do, and the base rules are already
+       right for that: `0` for the thread, whose `.composer` owns the edge, and
+       the inset for room info, which has nothing else to own it. This block
+       used to set `padding-bottom: 1rem` for both, which was two bugs in one
+       line — room info lost its inset, and the thread composer floated a
+       rem off the edge. */
     padding-top: 1rem;
-    padding-bottom: 1rem;
   }
 
   .room-stream {
@@ -4008,8 +4110,7 @@ span.composer-attachment-thumb {
      keeps a panel off the edges has to clear the status bar and the home
      indicator too. Centred panels never noticed; one that pins to the top
      does. */
-  padding: calc(2rem + env(safe-area-inset-top, 0px)) 2rem
-    calc(2rem + env(safe-area-inset-bottom, 0px));
+  padding: calc(2rem + var(--safe-top)) 2rem calc(2rem + var(--safe-bottom));
 }
 
 .overlay-panel {
@@ -4158,9 +4259,7 @@ span.composer-attachment-thumb {
    the Dynamic Island, and Close awkward to hit. Same shape as the bug the
    `.topbar` inset is declared late to avoid. */
 .unread-threads-overlay {
-  padding-top: calc(
-    var(--unread-overlay-pad-top, 4.25rem) + env(safe-area-inset-top, 0px)
-  );
+  padding-top: calc(var(--unread-overlay-pad-top, 4.25rem) + var(--safe-top));
 }
 
 /* Block-level, not `inline-flex`: shrink-to-fit would let the label's bare text
@@ -5163,8 +5262,8 @@ audio.media-player {
      resolves its offsets against the containing block's padding box, so the
      inset has to be in the offsets themselves. Otherwise Close and Save land
      behind the clock and inside the Dynamic Island cutout. */
-  top: calc(1rem + env(safe-area-inset-top, 0px));
-  right: calc(1rem + env(safe-area-inset-right, 0px));
+  top: calc(1rem + var(--safe-top));
+  right: calc(1rem + var(--safe-right));
   z-index: 1;
   display: flex;
   align-items: center;
