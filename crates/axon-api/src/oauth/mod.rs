@@ -8,14 +8,20 @@
 //! - [`provider`]: the [`OidcProvider`](provider::OidcProvider) port.
 //! - [`jwks`]: cached, refresh-rate-limited JWKS lookup.
 //! - [`generic`]: the discovery-doc-driven provider impl (Google, Microsoft).
+//! - [`apple`]: Apple provider foundation, pending callback/runtime integration.
+//! - [`verification`]: shared JWT signature and claim validation.
+//! - [`exchange`]: bounded, redacted authorization-code exchange.
 //! - [`tokens`]: mint/verify/rotate orchestration atop `axon-store`.
 //! - [`rate_limit`]: the per-IP/per-`state` token-bucket layer.
 
+pub mod apple;
+mod exchange;
 pub mod generic;
 pub mod jwks;
 pub mod provider;
 pub mod rate_limit;
 pub mod tokens;
+mod verification;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,6 +29,7 @@ use std::time::Duration;
 
 use axon_core::OauthConfig;
 
+pub use apple::AppleProvider;
 pub use generic::GenericOidcProvider;
 pub use provider::{OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity};
 
@@ -35,6 +42,19 @@ pub const OUTBOUND_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// or token-exchange), so a compromised or misbehaving upstream endpoint
 /// can't hand axon an unbounded body to buffer in memory.
 pub(crate) const MAX_HTTP_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// Keep useful transport categories without retaining URLs, source errors,
+/// or response bodies. Reqwest groups DNS and TLS failures under connect.
+pub(super) fn transport_error(operation: &'static str, error: reqwest::Error) -> OidcError {
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect (including DNS/TLS)"
+    } else {
+        "transport"
+    };
+    OidcError::Http(format!("{operation}: {category}"))
+}
 
 /// Read `response`'s body, rejecting it outright if it exceeds `max_bytes`,
 /// then parse it as JSON. Every outbound oauth HTTP call reads its body
@@ -51,7 +71,7 @@ pub(crate) async fn read_json_capped<T: serde::de::DeserializeOwned>(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|err| OidcError::Http(err.to_string()))?
+        .map_err(|err| transport_error("OIDC response body", err))?
     {
         buf.extend_from_slice(&chunk);
         if buf.len() > max_bytes {

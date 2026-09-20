@@ -504,3 +504,118 @@ M14c to decide.
   endpoint or the ADR 0030 `sync_state` implementation are worked in
   parallel, they should claim `M15`/`M16` rather than interleave with this
   milestone's lettered sub-PRs (M14a–M14e).
+
+## Implementation addendum: Apple rollout
+
+This addendum records the Apple implementation sequence as of September 2026 and supersedes conflicting Apple-specific details above.
+Google and Microsoft sign-in, Axon access/refresh tokens, provider discovery, owner binding, browser clients, and the Tauri shell now exist.
+Apple remains unavailable to operators until the callback and binding integration below lands.
+This authenticates the owner of an Axon instance; it is separate from Matrix homeserver OAuth in ADR 0097.
+
+### Deployment and trust
+
+Axon remains a single-owner service.
+Ordinary sign-in accepts only an explicitly bound `(provider, subject)` identity.
+An email address, including an Apple private relay address, never establishes ownership or links identities across providers.
+Binding requires either existing-owner authorization or the existing explicit bootstrap capability; no trust-on-first-use is introduced.
+
+Apple's browser flow needs a Services ID associated with a primary App ID, registered domains/return URLs, and a developer-controlled signing key.
+Apple limits registered website URLs and instructs developers not to share signing keys outside their team.
+Therefore, the distributed Axon application must not give its developer-team signing key to self-hosters or embed it in the client.
+Browser Apple OAuth is for deployments with their own appropriately registered credentials.
+The distributed iOS app will instead use native Sign in with Apple and forward its identity token to the selected Axon instance for public-key verification.
+The native-only verifier must be constructible without a Services ID or private key when that runtime integration lands; this first provider constructor is for the credentialed browser flow.
+No central authentication broker is introduced by this decision.
+See Apple's [web registration guide](https://developer.apple.com/help/account/capabilities/configure-sign-in-with-apple-for-the-web) and [environment/key guidance](https://developer.apple.com/documentation/signinwithapple/configuring-your-environment-for-sign-in-with-apple).
+
+Guideline 4.8 currently requires an equivalent login option with specified privacy properties, rather than mandating Apple by name in every case.
+Sign in with Apple is the chosen way to meet that requirement for Axon's mobile social-login experience.
+Shipping a provider library alone does not establish App Store readiness.
+See [App Review Guidelines, section 4.8](https://developer.apple.com/app-store/review/guidelines/#login-services).
+
+### PR 1: provider foundation and this addendum
+
+The server library now implements `AppleProvider` alongside `GenericOidcProvider`.
+Both use shared signature/claims verification and authorization-code exchange with the existing bounded HTTP/JWKS infrastructure.
+The extraction preserves Google's issuer and Microsoft's tenant-template handling, with explicit bounds on JWT size, overflow-safe timestamp comparisons, nonempty subjects, and sanitized errors that do not echo token claims.
+
+Apple's authorization request uses `response_type=code`, `response_mode=form_post`, `scope=email`, state, and nonce.
+Axon does not request names or depend on the unsigned, first-login-only `user` object.
+Apple's token response is bounded and only its identity token leaves the provider adapter; upstream access and refresh tokens are discarded.
+Errors include fixed categories and HTTP status, never response bodies, authorization codes, generated client secrets, or key material.
+The existing error boundary can log those categories; no secret-bearing developer mode is added.
+
+Client authentication uses an ES256 JWT with the configured key ID, team ID as issuer, Services ID as subject, and `https://appleid.apple.com` as audience.
+Generate a fresh five-minute JWT for each token exchange instead of maintaining a renewal timer or secret cache.
+Backdate `iat` by the verifier's 60-second clock-skew allowance while keeping `exp` at signing time plus five minutes.
+This tolerates a slightly fast host clock; real Apple acceptance remains part of callback integration verification.
+This automatically renews credentials after idle periods and restarts, stays well within Apple's six-month ceiling, and needs no background-task ownership or lock.
+Construction validates required fields and proves the PEM key can sign ES256 before accepting login attempts.
+Underlying key revocation still needs operator action.
+
+Web verification accepts only the configured Services ID and requires the stored upstream nonce.
+The explicit native verification method accepts only configured bundle IDs and requires a nonce supplied by the future server challenge handler.
+Unlike the original union-of-audiences proposal, one path cannot substitute the other's audience.
+The Apple implementation rejects the existing nonce-free identity-token grant; enabling the browser provider later must not silently enable an unbound native flow.
+
+The binary startup and CLI binding gates remain in place in this PR.
+Removing them before POST callbacks land would advertise a provider whose login cannot finish.
+No HTTP API, migration, or client-rendering change is introduced here, so no OpenAPI regeneration or demo scene is needed.
+
+Verification needs Rust and the repository's normal build dependencies, but no Apple account, database, or external service for these focused tests:
+
+```bash
+cargo test -p axon-api --lib oauth::
+```
+
+Apple tests generate ephemeral keys in memory using a test-only dependency on the existing AWS-LC backend, with real ES256 signing and RS256 verification and local HTTP endpoints.
+No private signing material is committed or persisted.
+They exercise authorization encoding, client-secret renewal, code exchange, separate web/native audiences, issuer/nonce/time/signature rejection, relay email, absent repeat-login profile data, deterministic replay keys, body limits, transport timeouts, and secret-safe errors.
+The shared Google/Microsoft verifier also needs signed-token regression coverage, not only issuer predicate tests.
+
+### PR 2: browser callbacks, runtime configuration, and owner binding
+
+Add bounded form POST handling beside GET on `/v1/oauth/{provider}/callback`, with one shared completion implementation for login, CLI binding, and first-run bootstrap.
+Decode success and cancellation/error responses explicitly.
+Validate state, provider, expiry, and flow purpose before dispatch, and preserve atomic single-use completion.
+Do not require a browser cookie to survive Apple's cross-site POST.
+Errors must lead to a retryable UI without reflecting upstream descriptions or leaving the client waiting indefinitely.
+See Apple's [callback contract](https://developer.apple.com/documentation/signinwithapple/configuring-your-webpage-for-sign-in-with-apple).
+
+Load the signing key from protected configuration or a bounded private-key file, redact config diagnostics, and use one validated callback resolver across authorize, exchange, binding, and bootstrap.
+Require the exact registered HTTPS callback for Apple; reject conflicting configured and derived callback URLs.
+Wire the provider into startup and discovery, then remove both enablement gates together.
+Update configuration examples, README, OpenAPI where applicable, and the implementation tracker in the same server PR.
+Validate real Apple browser login and CLI/bootstrap binding on a registered test deployment before calling browser support complete.
+
+### PR 3: native server contract and owner binding
+
+Add a short-lived, server-issued challenge for Apple native login, bound to an explicit flow purpose and selected Axon instance.
+Specify precisely whether the native SDK receives the raw nonce or its digest and verify the corresponding signed claim.
+The expected nonce comes from server state, never from an untrusted token or request field.
+Keep the public API additive for existing Google/Microsoft clients.
+Construct native verification independently of browser credentials and expose its availability accurately in provider discovery.
+
+Consume the challenge and replay key in the transaction that mints Axon tokens.
+The existing Path B implementation consumes the replay record before a separate mint operation; close that crash/failure window here.
+Concurrent redemption may mint at most once, and an interrupted attempt must be recoverable by starting a fresh challenge.
+Authorize native binding through an existing owner session or the explicit bootstrap capability, so self-hosters need no Apple browser credentials to establish ownership.
+Verify App ID/Services ID grouping and subject behavior with real Apple credentials rather than linking by matching emails.
+
+### Subsequent client, lifecycle, and smoke PRs
+
+After server stabilization, integrate native Sign in with Apple into the Tauri iOS shell, with the Apple entitlement and compliant button, secure Axon-token persistence, cancellation/retry, restart recovery, and refresh/reconnect.
+Keep client behavior in its own PR and update client parity and demo coverage there.
+Retain the existing browser PKCE flow for registered browser deployments.
+
+Resolve Apple authorization revocation and applicable account-deletion requirements before App Store submission.
+Local Axon logout/unbinding does not revoke Apple's authorization.
+The current provider discards upstream tokens, so it cannot promise unattended Apple revocation; a follow-up decision must specify a fresh-authorization revocation flow or explicitly revisit credential retention and key custody.
+Do not persist upstream credentials or introduce a credential broker as an incidental implementation detail.
+Deletion must define its Axon-data scope, local token invalidation, retries after partial failure, and recovery after restart.
+See Apple's [account-deletion guidance](https://developer.apple.com/support/offering-account-deletion-in-your-app) and [TN3194](https://developer.apple.com/documentation/technotes/tn3194-handling-account-deletions-and-revoking-tokens-for-sign-in-with-apple).
+
+Keep black-box smoke additions in their own smoke-silo PR.
+The release gate includes real-device first and repeat sign-in, Hide My Email, binding, cancellation/retry, restart, refresh, logout, and deletion/revocation, plus Google/Microsoft regression checks.
+Logs and persisted test artifacts must contain no real tokens, authorization codes, private keys, or client-secret JWTs.
+App Review needs a working review deployment and instructions that exercise the actual supported flow.
