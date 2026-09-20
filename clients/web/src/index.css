@@ -134,6 +134,20 @@ body {
   );
   min-height: 0;
   overflow: hidden;
+  /* The viewport covers the safe areas (`viewport-fit=cover` in index.html),
+     so hand them back — but only the side ones, and only here.
+
+     Not the top: `.topbar` takes that itself, so its background runs up behind
+     the status bar rather than leaving a strip of `--bg` above it. Not the
+     bottom either, and that one was tried: a `padding-bottom` here stops the
+     shell's *content* 34px short of a shell that does reach the bottom edge
+     (measured on device: `shellBottom` 932 of a 932pt screen), which is the
+     same dead band it was meant to remove, in `--bg` instead of the webview's
+     backdrop. The scrolling panes carry the bottom inset instead, so rows run
+     under the home indicator and can still be scrolled clear of it. */
+  box-sizing: border-box;
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
 }
 
 .topbar {
@@ -144,7 +158,8 @@ body {
   display: flex;
   align-items: center;
   gap: 1.5rem;
-  padding: 0.6rem 1.25rem;
+  --topbar-pad-block: 0.6rem;
+  padding: var(--topbar-pad-block) 1.25rem;
   border-bottom: 1px solid var(--border);
   background: var(--bg-raised);
   /* Brand, nav, indicator and two buttons do not fit a phone on one line. */
@@ -223,7 +238,8 @@ body {
   .topbar {
     flex-wrap: nowrap;
     gap: 0.45rem;
-    padding: 0.45rem 0.55rem;
+    --topbar-pad-block: 0.45rem;
+    padding: var(--topbar-pad-block) 0.55rem;
   }
 
   .mobile-room-shell .topbar-rooms-button {
@@ -290,6 +306,20 @@ body {
     min-height: 2rem;
     padding: 0.35rem;
   }
+}
+
+/* The status-bar inset, after every breakpoint that sets `.topbar`'s padding.
+
+   Deliberately its own `padding-top` rather than a term inside those `padding`
+   shorthands: the first attempt put it in the base rule, and the narrow-screen
+   media query above re-declared `padding` and dropped it again — on exactly the
+   widths that have a status bar to clear. `axon` then sat on top of the clock.
+   A shorthand in a later breakpoint cannot undo a longhand declared after it,
+   so a new breakpoint cannot reintroduce that. */
+.topbar {
+  padding-top: calc(
+    var(--topbar-pad-block, 0.6rem) + env(safe-area-inset-top, 0px)
+  );
 }
 
 .brand {
@@ -477,6 +507,9 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 1rem;
+  /* So the last row can be scrolled clear of the home indicator, rather
+     than the pane stopping short of it. */
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
   box-sizing: border-box;
   /* Preserve the scrollbar gutter so rows do not jump, but draw the thumb
      only while the pointer is over the scrollable pane. */
@@ -683,6 +716,11 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 1.5rem;
+  /* The scroll container for Settings, Accounts, Invites and Licenses, and it
+     reaches the bottom of the display. Without this the last control of a page
+     sits under the home indicator with no way to scroll it clear — the same
+     dead band `.room-list-pane` carries the inset for. */
+  padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
   box-sizing: border-box;
 }
 
@@ -867,7 +905,11 @@ body {
 
 .signin {
   max-width: 28rem;
-  margin: 4rem auto;
+  /* Rendered *instead of* `.shell`, so none of its insets apply and this has
+     to carry its own. The first screen a TestFlight user sees. 4rem clears a
+     59px status bar by five pixels, which is not clearance, it is luck. */
+  margin: calc(4rem + env(safe-area-inset-top, 0px)) auto
+    calc(4rem + env(safe-area-inset-bottom, 0px));
   padding: 0 1rem;
 }
 
@@ -2809,7 +2851,10 @@ a.utd-recover:hover {
   z-index: 60;
   background: var(--bg);
   border-top: 1px solid var(--border);
-  padding: 0.6rem 0;
+  /* The composer is what sits against the bottom edge in a room, so it carries
+     the inset: its background fills the home-indicator strip and the textarea
+     stays above it. Collapses to `0.6rem` wherever the inset is zero. */
+  padding: 0.6rem 0 calc(0.6rem + env(safe-area-inset-bottom, 0px));
   margin-top: 1rem;
 }
 
@@ -3442,11 +3487,31 @@ span.composer-attachment-thumb {
   box-sizing: border-box;
   background: var(--bg);
   border-left: 1px solid var(--border);
-  padding: 1rem 1.25rem;
+  /* Fixed to the top edge, which since `viewport-fit=cover` is the top of the
+     display rather than the top of the safe area — so these carry the status
+     bar inset themselves, the way `.topbar` does. Without it `.overlay-head`
+     sits under the clock and the Dynamic Island, and its Close button is
+     awkward to hit. They are siblings of `.shell` rather than children, so the
+     topbar's inset does nothing for them. Dropped again at the breakpoint
+     below where these become a static third column. */
+  padding: calc(1rem + env(safe-area-inset-top, 0px)) 1.25rem 1rem;
   overflow: hidden;
   display: flex;
   flex-direction: column;
   box-shadow: -4px 0 16px rgba(0, 0, 0, 0.15);
+}
+
+/* The bottom inset goes to the side panel alone. The thread panel ends in
+   `.composer`, which already carries it, and applying it to both would inset
+   that one twice. Room info has no composer, so without this its last row ends
+   under the home indicator.
+
+   It is the panel that is `overflow: hidden`, not its content: `.room-info-panel`
+   inside it overrides that to `overflow-y: auto`. So the list does scroll — but
+   only within the panel's content box, which is what this padding sizes, so
+   there is still no scrolling the last row clear without it. */
+.side-panel {
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
 }
 
 @media (max-width: 47.99rem) {
@@ -3505,6 +3570,20 @@ span.composer-attachment-thumb {
     height: auto;
     min-height: 0;
     box-shadow: none;
+    /* Neither edge is the display's any more: this is a column inside `main`,
+       below a topbar that has already taken the top inset and above `main`'s
+       own bottom padding, which is `calc(1.5rem + env(safe-area-inset-bottom))`
+       and is what keeps the column's last row clear of the home indicator here.
+       Keeping the top inset would indent the column by the status bar height on
+       an iPad held in portrait, which is wide enough to reach this breakpoint
+       and still has a non-zero inset; keeping the bottom one would pay it twice,
+       once here and once in `main`.
+
+       `main` is the load-bearing word — an earlier draft of this comment said
+       "the shell", which does not take the bottom inset and says so. If `main`
+       ever stops taking it in a room, `.side-panel` needs it back here. */
+    padding-top: 1rem;
+    padding-bottom: 1rem;
   }
 
   .room-stream {
@@ -3925,7 +4004,12 @@ span.composer-attachment-thumb {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 2rem;
+  /* `inset: 0` on a viewport that covers the display, so the padding that
+     keeps a panel off the edges has to clear the status bar and the home
+     indicator too. Centred panels never noticed; one that pins to the top
+     does. */
+  padding: calc(2rem + env(safe-area-inset-top, 0px)) 2rem
+    calc(2rem + env(safe-area-inset-bottom, 0px));
 }
 
 .overlay-panel {
@@ -3960,7 +4044,8 @@ span.composer-attachment-thumb {
 .unread-threads-overlay {
   align-items: flex-start;
   justify-content: flex-end;
-  padding-top: 4.25rem;
+  /* Applied below, after the breakpoint that re-declares `padding`. */
+  --unread-overlay-pad-top: 4.25rem;
 }
 
 .unread-threads-panel {
@@ -4057,12 +4142,25 @@ span.composer-attachment-thumb {
   .unread-threads-overlay {
     justify-content: center;
     padding: 0.75rem;
+    --unread-overlay-pad-top: 0.75rem;
   }
 
   .unread-threads-panel {
     max-width: none;
     max-height: calc(var(--app-viewport-height, 100dvh) - 1.5rem);
   }
+}
+
+/* The one overlay that pins its panel to the top edge, so the one that needs
+   the status-bar inset — declared after the breakpoint above, which replaces
+   `padding` wholesale and would otherwise drop it. On a phone that left the
+   panel 0.75rem from the top of the display: its heading behind the clock and
+   the Dynamic Island, and Close awkward to hit. Same shape as the bug the
+   `.topbar` inset is declared late to avoid. */
+.unread-threads-overlay {
+  padding-top: calc(
+    var(--unread-overlay-pad-top, 4.25rem) + env(safe-area-inset-top, 0px)
+  );
 }
 
 /* Block-level, not `inline-flex`: shrink-to-fit would let the label's bare text
@@ -5061,8 +5159,12 @@ audio.media-player {
 
 .lightbox-toolbar {
   position: absolute;
-  top: 1rem;
-  right: 1rem;
+  /* `.overlay`'s padding does not reach this: an absolutely positioned child
+     resolves its offsets against the containing block's padding box, so the
+     inset has to be in the offsets themselves. Otherwise Close and Save land
+     behind the clock and inside the Dynamic Island cutout. */
+  top: calc(1rem + env(safe-area-inset-top, 0px));
+  right: calc(1rem + env(safe-area-inset-right, 0px));
   z-index: 1;
   display: flex;
   align-items: center;

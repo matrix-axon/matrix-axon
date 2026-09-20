@@ -675,3 +675,34 @@ describe('the update control', () => {
     expect(getByText(BUILD_INFO.displayVersion)).toBeTruthy()
   })
 })
+
+describe('the settings a browser grants', () => {
+  function renderWith(platform?: { browserCanAdoptApp: boolean }) {
+    const services = testServices(platform === undefined ? {} : { platform })
+    return render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+  }
+
+  it('offers the home screen and matrix: link settings in a browser', () => {
+    const { getByText, getByLabelText } = renderWith()
+    expect(getByText('Matrix links')).toBeTruthy()
+    expect(getByLabelText('Handle matrix: links')).toBeTruthy()
+  })
+
+  it('offers neither in a packaged shell, rather than offering them dead', () => {
+    // Both ask the *browser* for something: adopt this page onto a home
+    // screen, register this origin as a scheme handler. In an installed app
+    // there is no page to adopt and `matrix:` is claimed by the bundle, so the
+    // controls would render disabled under an explanation about "this
+    // browser" — in something that is not one.
+    const { queryByText, queryByLabelText } = renderWith({
+      browserCanAdoptApp: false,
+    })
+
+    expect(queryByText('Matrix links')).toBeNull()
+    expect(queryByLabelText('Handle matrix: links')).toBeNull()
+  })
+})

@@ -115,6 +115,7 @@ function QrScanner({
   const [cameraActive, setCameraActive] = useState(false)
   const [cameras, setCameras] = useState<QrCameraDevice[]>([])
   const [selectedCamera, setSelectedCamera] = useState<string | null>(null)
+  const [cameraFacing, setCameraFacing] = useState<string | null>(null)
   const [cameraError, setCameraError] = useState<string | null>(null)
   const [cameraListError, setCameraListError] = useState<string | null>(null)
   const [imageError, setImageError] = useState<string | null>(null)
@@ -131,6 +132,10 @@ function QrScanner({
     session.current = null
     setCameraStarting(false)
     setCameraActive(false)
+    // `cameraFacing` deliberately survives a stop. It says what kind of device
+    // this is, not what the stopped session was doing, and clearing it brought
+    // the picker back the moment the camera stopped — offering the rear
+    // ultra-wide and telephoto that the suppression exists to keep away from.
   }, [])
 
   const refreshCameras = useCallback(
@@ -141,7 +146,16 @@ function QrScanner({
           return
         }
         setCameraListError(null)
-        setCameras(available)
+        // Only when it actually changed. `listCameras` builds fresh objects
+        // every call, so passing the result straight to `setCameras` re-renders
+        // on every `devicechange` even when the list is identical — and the
+        // browser fires `devicechange` around capture-state changes, i.e. while
+        // the user has the picker open. Preact keys the options by device id
+        // and would reuse the nodes, but the `<select>` itself is rebuilt, and
+        // an open native picker does not survive that on iOS.
+        setCameras((current) =>
+          sameCameras(current, available) ? current : available,
+        )
         const activeDeviceId =
           session.current?.deviceId ?? selectedCameraRef.current
         const activeStillAvailable = available.some(
@@ -217,6 +231,10 @@ function QrScanner({
         return
       }
       session.current = started
+      // Never back to null: a platform that described its cameras by facing
+      // once still does, and a later session that reports nothing does not
+      // make this a desktop.
+      setCameraFacing((known) => started.facingMode ?? known)
       selectCamera(started.deviceId ?? deviceId)
       setCameraActive(true)
       await refreshCameras(owner)
@@ -247,7 +265,7 @@ function QrScanner({
         playsInline
         muted
       />
-      {cameras.length > 1 && (
+      {cameras.length > 1 && !camerasAreHandheld(cameraFacing) && (
         <label class="qr-camera-picker">
           Camera
           <select
@@ -323,6 +341,50 @@ function QrScanner({
       )}
       {imageError !== null && <p class="field-hint error">{imageError}</p>}
     </div>
+  )
+}
+
+/**
+ * Whether the camera choices are a handheld device's own, and so not worth
+ * offering.
+ *
+ * A phone enumerates every physical rear camera separately — wide, ultra-wide,
+ * telephoto — and for reading a sign-in QR code the answer is always the rear
+ * one. Worse than noise: the ultra-wide and telephoto cannot focus at the range
+ * a QR code is held at, so two of the choices are ways to fail. The first
+ * `startCamera` already asks for `facingMode: environment` and gets the right
+ * one, which is the whole of what a phone needs.
+ *
+ * Both conditions are required, and neither would do on its own. A coarse
+ * pointer says the device is held rather than sat in front of, but a
+ * touchscreen laptop with two webcams is also coarse-pointered when driven by
+ * touch, and there the picker is a real question. A reported facing says the
+ * platform models its cameras by which way they point, but a built-in webcam
+ * may report `user` on a desktop too — unverified here, and the reason this
+ * does not rest on it alone.
+ *
+ * On a desktop the picker stays, which is where "which of my two webcams" is
+ * worth asking.
+ */
+function camerasAreHandheld(facingMode: string | null): boolean {
+  if (facingMode === null) {
+    return false
+  }
+  return (
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(pointer: coarse)').matches
+  )
+}
+
+/** Whether two camera lists name the same devices, in the same order. */
+function sameCameras(a: QrCameraDevice[], b: QrCameraDevice[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every(
+      (camera, index) =>
+        camera.deviceId === b[index]?.deviceId &&
+        camera.label === b[index]?.label,
+    )
   )
 }
 

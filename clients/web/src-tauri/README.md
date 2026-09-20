@@ -1,7 +1,7 @@
 # Axon desktop shell
 
-The native shell around the `clients/web` bundle (ADR 0102, M-W12). Desktop
-today; iOS and Android are M-W13.
+The native shell around the `clients/web` bundle (ADR 0102). Desktop is M-W12,
+iOS is M-W13 (see [iOS](#ios) below); Android is not built yet.
 
 ## Build it through the Tauri CLI, not cargo
 
@@ -135,17 +135,105 @@ Note the iOS files still carry an _alpha channel_ even though nothing in them
 is transparent. App Store Connect rejects an app icon with one at all
 (`ITMS-90717`), so they need flattening to RGB before submission. No
 `tauri icon` flag does it — `--ios-color` changes the colour and still writes
-RGBA — so it needs a post-processing step. Tracked as #410 for M-W13 rather
-than built here, where nothing consumes `icons/ios/` yet.
+RGBA — so it needs a post-processing step. `scripts/package-ios.sh` is that
+step: it flattens the set onto white as it copies it into the generated Xcode
+project, via `scripts/lib/flatten-icons.swift`. The committed files under
+`icons/ios/` keep their alpha channel, because they are what `tauri icon`
+produces and regenerating must not show a diff.
 
 **32px is the ceiling on detail**, not 1024. A Linux launcher and a Windows
 taskbar draw it at 32, and every further branch costs separation there first.
 Look at `icons/32x32.png` before adding one.
 
 Note `icons/icon.png` and `icons/64x64.png` are emitted by the generator but
-referenced by nothing here; `icons/android/` and `icons/ios/` are for M-W13.
-Editing any of them has no effect on a desktop build, and the next regeneration
-overwrites them.
+referenced by nothing here, and `icons/android/` is unused until Android is
+built. `icons/ios/` is the artwork of record for the iOS app — read by
+`scripts/package-ios.sh`, not by the desktop build. Editing any of them by hand
+has no effect and the next regeneration overwrites them; change
+`icons/icon.svg` and re-run the generator instead.
+
+## iOS
+
+Needs macOS with Xcode. Everything below is `clients/web` unless it says
+otherwise.
+
+### The dev loop runs on the phone, not on localhost
+
+```sh
+cd clients/web
+pnpm tauri ios dev
+```
+
+On a phone, `localhost` is the phone. The CLI picks a LAN address for the dev
+server and exports it as `TAURI_DEV_HOST`; `vite.config.ts` reads that to bind
+the right interface, to point the HMR socket back at this machine, and to
+allow that Host header. Without it the CLI waits forever on
+`http://<lan-ip>:5173/` with nothing listening there.
+
+What `TAURI_DEV_HOST` switches is exactly those three things — `host`, `hmr`
+and `allowedHosts` in `vite.config.ts` — and nothing else. So **do not export
+it by hand for desktop work**, and never export it empty: `''` is Vite's "bind
+every interface", which publishes the dev server — and whatever session it is
+signed into — to the whole network. `vite.config.ts` treats an empty value as
+absent for exactly that reason.
+
+Two neighbouring pieces of the mobile loop are switched by something else, and
+looking for them here is how an afternoon goes missing:
+
+- **The dev server shuts itself down when its launcher exits.** The
+  `axon-exit-when-orphaned` Vite plugin records every ancestor pid at startup
+  and exits once any of them is gone, so 5173 and 1421 are released instead of
+  being held by a server whose CLI has died — which otherwise makes the next
+  `tauri ios dev` fail on a port that looks busy for no reason. It is armed by
+  `TAURI_ENV_PLATFORM`, which the Tauri CLI sets, so it runs under desktop
+  `pnpm tauri dev` as well as `tauri ios dev`, and never under a plain
+  `pnpm dev`, a `nohup pnpm dev > log &`, or vitest.
+- **The navigation guard** in `src-tauri/src/lib.rs` reads the dev host from
+  `app.config().build.dev_url`, which the CLI compiles into the config it
+  builds, not from the environment variable.
+
+Being on a LAN address also means the axon server has to be reachable from the
+phone. `localhost:8080` is not; use the machine's LAN name or a Tailscale
+address in the app's server setting.
+
+### Build, install and upload with `scripts/package-ios.sh`
+
+```sh
+scripts/package-ios.sh --install                    # to a connected device
+scripts/package-ios.sh --export-method app-store-connect \
+  --build-number 2 --upload                         # to TestFlight
+```
+
+`pnpm tauri ios build` on its own does not produce a shippable app from a
+clean checkout, and none of the ways it falls short announce themselves. The
+script's own header lists them; the short version is that `gen/apple` is
+generated once and then frozen, so it regenerates it every run and passes
+`bundle.iOS` settings as `--config` overrides; that `tauri icon`'s iOS set
+carries an alpha channel App Store Connect rejects, so it flattens it on the
+way in; and that a Homebrew `rust` on `PATH` shadows rustup and has no iOS
+`std`, so it puts `~/.cargo/bin` first and then checks.
+
+`--upload` needs `ASC_KEY_ID` and `ASC_ISSUER_ID`, and an
+`~/.appstoreconnect/private_keys/AuthKey_*.p8`. Both are checked before the
+build rather than after it.
+
+There is no CI lane — [#445](https://github.com/matrix-axon/matrix-axon/issues/445)
+tracks one, and this script is what it should be built from.
+
+### The signing team is not yours
+
+`bundle.iOS.developmentTeam` in `tauri.conf.json` is one developer's Apple
+team. Export your own before building:
+
+```sh
+export APPLE_DEVELOPMENT_TEAM=<Apple Developer > Membership > Team ID>
+```
+
+The CLI reads that variable and it overrides the config value. Since the
+script regenerates `gen/apple` on every run, patching the generated Xcode
+project instead does not survive.
+[#456](https://github.com/matrix-axon/matrix-axon/issues/456) tracks taking
+the committed default out.
 
 ## The bundle identifier is settled
 
