@@ -117,11 +117,10 @@ impl JwksCache {
             .get(&self.jwks_uri)
             .send()
             .await
-            .map_err(|err| OidcError::Http(err.to_string()))?;
+            .map_err(|err| super::transport_error("JWKS request", err))?;
         if !response.status().is_success() {
             return Err(OidcError::Http(format!(
-                "JWKS fetch from {} returned {}",
-                self.jwks_uri,
+                "JWKS request returned {}",
                 response.status()
             )));
         }

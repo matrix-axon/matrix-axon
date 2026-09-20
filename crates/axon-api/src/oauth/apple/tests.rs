@@ -325,3 +325,85 @@ async fn exchange_failures_are_bounded_and_redacted() {
     }
     task.abort();
 }
+
+#[tokio::test]
+async fn transport_categories_survive_exchange_and_jwks_verification() {
+    use axum::{body::Body, http::StatusCode, response::Response};
+    use futures_util::{stream, StreamExt};
+    use std::{convert::Infallible, time::Duration};
+
+    let (base, task) = serve(
+        Router::new()
+            .route(
+                "/denied",
+                get(|| async { (StatusCode::SERVICE_UNAVAILABLE, "PRIVATE_SENTINEL") })
+                    .post(|| async { (StatusCode::SERVICE_UNAVAILABLE, "PRIVATE_SENTINEL") }),
+            )
+            .route(
+                "/slow",
+                get(|| async { std::future::pending::<String>().await })
+                    .post(|| async { std::future::pending::<String>().await }),
+            )
+            .route(
+                "/slow-body",
+                get(|| async {
+                    Response::new(Body::from_stream(
+                        stream::iter([Ok::<_, Infallible>("{")]).chain(stream::pending()),
+                    ))
+                })
+                .post(|| async {
+                    Response::new(Body::from_stream(
+                        stream::iter([Ok::<_, Infallible>("{")]).chain(stream::pending()),
+                    ))
+                }),
+            ),
+    )
+    .await;
+    // A bound, non-listening socket deterministically refuses connections
+    // without racing another test for a freshly released port.
+    let closed = tokio::net::TcpSocket::new_v4().unwrap();
+    closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let refused = format!("http://{}/PRIVATE_SENTINEL", closed.local_addr().unwrap());
+    let mut provider = provider();
+    provider.http = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_millis(250))
+        .build()
+        .unwrap();
+    let token = sign(&claims("com.example.web"));
+    for (url, category) in [
+        (format!("{base}/denied?secret=PRIVATE_SENTINEL"), "503"),
+        (format!("{base}/slow?secret=PRIVATE_SENTINEL"), "timeout"),
+        (
+            format!("{base}/slow-body?secret=PRIVATE_SENTINEL"),
+            "timeout",
+        ),
+        (refused, "connect (including DNS/TLS)"),
+        ("invalid-url-PRIVATE_SENTINEL".into(), "transport"),
+    ] {
+        provider.token_url = url.clone();
+        provider.jwks = JwksCache::new(provider.http.clone(), url);
+        let exchange = provider
+            .exchange_code("SECRET_CODE", "https://axon.example/callback")
+            .await
+            .unwrap_err();
+        let verification = provider
+            .verify_identity_token(&token, Some("expected"))
+            .await
+            .unwrap_err();
+        for error in [exchange, verification] {
+            assert!(matches!(error, OidcError::Http(_)));
+            let message = error.to_string();
+            assert!(message.contains(category), "{message}");
+            for secret in [
+                "PRIVATE_SENTINEL",
+                "SECRET_CODE",
+                token.as_str(),
+                base.as_str(),
+            ] {
+                assert!(!message.contains(secret));
+            }
+        }
+    }
+    task.abort();
+}

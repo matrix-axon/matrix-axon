@@ -28,7 +28,7 @@ pub(super) async fn authorization_code(
         ])
         .send()
         .await
-        .map_err(|_| OidcError::Http("OIDC token request failed".into()))?;
+        .map_err(|err| super::transport_error("OIDC token request", err))?;
     if !response.status().is_success() {
         // Provider error bodies and request payloads can carry credentials.
         return Err(OidcError::Http(format!(
@@ -38,7 +38,10 @@ pub(super) async fn authorization_code(
     }
     let body: TokenResponse = read_json_capped(response, MAX_HTTP_RESPONSE_BYTES)
         .await
-        .map_err(|_| OidcError::Malformed("invalid OIDC token response".into()))?;
+        .map_err(|error| match error {
+            error @ OidcError::Http(_) => error,
+            _ => OidcError::Malformed("invalid OIDC token response".into()),
+        })?;
     if body.id_token.is_empty() {
         return Err(OidcError::Malformed("missing identity token".into()));
     }

@@ -50,7 +50,9 @@ pub(super) async fn verify(
         .kid
         .ok_or_else(|| OidcError::BadSignature("token header has no kid".to_owned()))?;
     let (algorithm, decoding_key) = jwks.resolve(&kid).await.map_err(|error| match error {
-        OidcError::Http(_) => OidcError::Http("JWKS request failed".into()),
+        // JWKS transport errors are sanitized at their source and retain only
+        // fixed categories or an HTTP status, never a URL or response body.
+        error @ OidcError::Http(_) => error,
         OidcError::DisallowedAlgorithm(_) => {
             OidcError::DisallowedAlgorithm("unsupported signing key".into())
         }

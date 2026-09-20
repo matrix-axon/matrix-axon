@@ -43,6 +43,19 @@ pub const OUTBOUND_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// can't hand axon an unbounded body to buffer in memory.
 pub(crate) const MAX_HTTP_RESPONSE_BYTES: usize = 1024 * 1024;
 
+/// Keep useful transport categories without retaining URLs, source errors,
+/// or response bodies. Reqwest groups DNS and TLS failures under connect.
+pub(super) fn transport_error(operation: &'static str, error: reqwest::Error) -> OidcError {
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect (including DNS/TLS)"
+    } else {
+        "transport"
+    };
+    OidcError::Http(format!("{operation}: {category}"))
+}
+
 /// Read `response`'s body, rejecting it outright if it exceeds `max_bytes`,
 /// then parse it as JSON. Every outbound oauth HTTP call reads its body
 /// through this rather than `Response::json()` directly, which imposes no
@@ -58,7 +71,7 @@ pub(crate) async fn read_json_capped<T: serde::de::DeserializeOwned>(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|err| OidcError::Http(err.to_string()))?
+        .map_err(|err| transport_error("OIDC response body", err))?
     {
         buf.extend_from_slice(&chunk);
         if buf.len() > max_bytes {
