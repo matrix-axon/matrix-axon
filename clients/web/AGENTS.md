@@ -619,6 +619,60 @@ the overlay, which is the only readable instrumentation on iOS.
   hang or a wedged device and is neither. Check `system_profiler
 SPDisplaysDataType` before debugging the simulator itself.
 
+## Measuring the packaged shell
+
+Safari in the simulator is not the shell. It has its own chrome, so its viewport
+is shorter and its safe-area insets are different numbers — an iPad Pro 11" (M4)
+reports `innerHeight` 1124 and a top inset of 0 in a Safari tab, and 1210 and 32
+in the packaged app. Anything about safe areas, `viewport-fit=cover`, or what the
+app does with the bottom edge has to be read out of the shell itself (ADR 0105).
+The recipe, which needs no device and no signing:
+
+```bash
+pnpm build
+pnpm tauri ios build --target x86_64        # or aarch64-sim on Apple silicon
+xcrun simctl create "iPad Pro 11-inch (M4)" \
+  com.apple.CoreSimulator.SimDeviceType.iPad-Pro-11-inch-M4-8GB \
+  com.apple.CoreSimulator.SimRuntime.iOS-26-5
+xcrun simctl boot   "iPad Pro 11-inch (M4)"
+xcrun simctl install "iPad Pro 11-inch (M4)" \
+  ~/Library/Developer/Xcode/DerivedData/axon-*/Build/Products/debug-iphonesimulator/Axon.app
+xcrun simctl launch "iPad Pro 11-inch (M4)" org.matrixaxon.axon
+```
+
+- **`tauri ios dev` builds the app and then fails.** `** BUILD SUCCEEDED **`,
+  then `Archiving app...`, then `ARCHIVE FAILED` on `ARCHS: parameter null or
+not set` — it archives for `iphoneos` while you asked for a simulator. The
+  `.app` under `DerivedData/axon-*/Build/Products/debug-iphonesimulator/` is
+  finished and correct; install it with `simctl` and ignore the failure.
+- **The shell is not `display-mode: standalone`.** It reports `browser`, and
+  `navigator.standalone` is undefined. So `--app-standalone-composer-bottom-padding`
+  and `--app-keyboard-accessory-inset` (`app.tsx`) are **never set in the
+  packaged app** — they are the iOS home-screen PWA's, and only its. Do not
+  reason about the shell's bottom edge from a rule that depends on them.
+- **`gen/apple` is sticky, so regenerate it.** `tauri ios init` writes the Xcode
+  project once and then leaves it alone, so a `tauri.conf.json` change reaches
+  only the run that created it. `scripts/package-ios.sh` `rm -rf`s it every time
+  for this reason; do the same by hand.
+- **There is no way to rotate a simulator from the command line.** `simctl` has
+  no orientation verb, and the menu item lives in `Simulator.app`, which needs a
+  GUI session — an SSH session cannot even launch it. To measure landscape,
+  copy the `.app`, rewrite `UISupportedInterfaceOrientations` and
+  `UISupportedInterfaceOrientations~ipad` to the two landscape values,
+  `codesign --force --sign -`, and install that: iOS presents an app rotated
+  when it declares no portrait orientation, and the safe area follows the app
+  window rather than the device. Note what this does not prove — a physically
+  rotated device has not been compared against it.
+- **The insets are not one number, and they are not symmetric.** Measured on
+  iOS 26.5: an iPhone 17 is top 62 / bottom 34 in portrait and top 0 / bottom 20
+  / sides 62 in landscape; an iPad Pro 11" (M4) is bottom 20 in portrait and 25
+  in landscape; an iPhone SE has none at all. `e2e/safe-area.spec.ts` carries the
+  full table, and is where a fresh measurement goes.
+- **A phone in landscape is on the tablet branch.** 874pt wide clears the 48rem
+  breakpoint, and an iPad mini in portrait (744pt) does not. Neither is an edge
+  case worth skipping: they are the two form factors where a fix applied to one
+  branch and not the other shows up.
+
 ## Test environment gotchas (all discovered the hard way)
 
 - jsdom under Node 25 exposes `window.localStorage` as a bare object —
@@ -743,6 +797,13 @@ stores behind them. Playwright is deliberately **not** in the pre-push hook (ADR
   run that project on a pull request — only after the change merges to `main` —
   so a mobile regression that a PR introduces is found by whoever notices it on a
   phone.
+- **A rule that reaches a screen edge names its owner, and only one of them
+  does** (ADR 0105). Read the bottom inset from `--safe-bottom`, never from a
+  second `env()` call, and check nothing above you on the path already pays it —
+  that is exactly how #460 shipped. `e2e/safe-area.spec.ts` replays nine measured
+  form factors and fails on a second owner; run it, and if you have changed what
+  the shell does with an edge, re-measure on a simulator (§ Measuring the
+  packaged shell) and update its table with the date.
 - **A change that only touches stores, api, or types** does not need any of this;
   `pnpm test` covers it.
 
