@@ -52,6 +52,10 @@ async function openReactionFixture(page: Page) {
   await expect(page.getByText('newest message')).toBeVisible()
 }
 
+type AnchorWindow = typeof window & {
+  __pickerAnchor?: { top: number; right: number }
+}
+
 async function pickerAnchorOffset(
   page: Page,
   anchor: { top: number; right: number },
@@ -115,14 +119,43 @@ test('the full reaction emoji picker anchors to the more button when space allow
   await row.locator('.event-body').click()
   await row.getByRole('button', { name: 'React' }).click()
   const moreButton = page.getByRole('button', { name: 'More reactions' })
-  const anchorBox = await moreButton.evaluate((button) => {
-    const box = button.getBoundingClientRect()
-    return {
-      top: box.top,
-      right: box.right,
-    }
+  // Record the anchor from inside the click that opens the picker, rather than
+  // from a read before it.
+  //
+  // `openFullPicker` snapshots `getBoundingClientRect()` when the click fires
+  // and positions against that snapshot forever after (`MessageEventRow.tsx`).
+  // A separate read beforehand is a *different* snapshot: `evaluate` does not
+  // wait for the element to stop moving, while `click` does, so a layout still
+  // settling — this spec opens at 390px and resizes to 1400px — is read at one
+  // position and clicked at another. The dialog then lands correctly on the
+  // app's anchor while the assertion below compares it to the stale one, and
+  // the poll cannot converge: it spends its timeout and reports the gap. That
+  // is the 25px seen on CI, and injecting a 25px scroll between the two
+  // reproduces it exactly.
+  //
+  // A capture-phase listener runs in the same dispatch as the app's handler,
+  // so no layout change can come between them, and the click stays a real one.
+  await moreButton.evaluate((button) => {
+    button.addEventListener(
+      'click',
+      () => {
+        const box = button.getBoundingClientRect()
+        ;(window as AnchorWindow).__pickerAnchor = {
+          top: box.top,
+          right: box.right,
+        }
+      },
+      { capture: true, once: true },
+    )
   })
   await moreButton.click()
+  const anchorBox = await page.evaluate(() => {
+    const anchor = (window as AnchorWindow).__pickerAnchor
+    if (anchor === undefined) {
+      throw new Error('the picker anchor was not recorded on click')
+    }
+    return anchor
+  })
 
   const dialog = page.getByRole('dialog', { name: 'Emoji picker' })
   await expect(dialog).toBeVisible()
