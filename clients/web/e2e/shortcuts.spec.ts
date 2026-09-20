@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import {
   active,
+  expectSendsSettled,
   LAST_ROOM_URL,
   openRoom,
   ROOM_URL,
@@ -330,6 +331,10 @@ test('ArrowUp on an empty composer edits your last message', async ({
     page.locator('.event-row .body-text', { hasText: 'my last words' }).last(),
   ).toBeVisible()
   await expect(composer).toHaveValue('')
+  // Both waits above are satisfied by the *pending* echo, which `editLast`
+  // skips — so without this the chord edits whatever was sent before this
+  // test, which in a full run is another spec's message entirely.
+  await expectSendsSettled(page)
 
   await composer.press('ArrowUp')
 

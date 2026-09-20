@@ -4,7 +4,12 @@ import {
   test,
   type Page,
 } from '@playwright/test'
-import { openRoom, ROOM_URL, shortcutForProject } from './helpers'
+import {
+  expectSendsSettled,
+  openRoom,
+  ROOM_URL,
+  shortcutForProject,
+} from './helpers'
 
 /**
  * Message search (ADR 0066, M-W10). A real browser earns its keep here: the
@@ -53,13 +58,13 @@ test('open with /, search, jump to the hit, and Back reopens the search', async 
   await composer.press('Enter')
   // Let the echo reconcile before the next send: a fill racing the
   // confirmation re-render can lose the keystrokes.
-  await expect(page.locator('.event-row.pending')).toHaveCount(0)
+  await expectSendsSettled(page)
   await composer.fill('unrelated chatter')
   await composer.press('Enter')
   await expect(page.locator('[data-event-id]').last()).toContainText(
     'unrelated chatter',
   )
-  await expect(page.locator('.event-row.pending')).toHaveCount(0)
+  await expectSendsSettled(page)
 
   // `/` never fires from the composer (it must type a slash); park focus on
   // the page first.

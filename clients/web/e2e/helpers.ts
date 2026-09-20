@@ -87,12 +87,71 @@ export async function waitForRoomListCache(page: Page): Promise<void> {
     .toBeGreaterThan(0)
 }
 
-/** A signed-in tab at the room, wide enough for two panes, socket up. */
+/** A signed-in tab at the room, wide enough for two panes, and settled. */
 export async function openRoom(page: Page): Promise<void> {
   await signIn(page)
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.goto(ROOM_URL)
+  await expectRoomReady(page)
+  await expectRoomListReady(page)
+}
+
+/**
+ * Wait until the room's own first page has painted — not merely until the
+ * socket came up.
+ *
+ * `expectLive` proves one thing: the WebSocket handshake completed. The REST
+ * bootstrap is independent of it and still in flight, and `RoomPage` renders
+ * "Loading messages…" **instead of** the timeline until its first page settles.
+ * Until that clears there is no `.event-row` in the DOM at all — not even for a
+ * local echo the spec just sent, so a send made in this window is
+ * indistinguishable from a send that never happened. That was the firefox
+ * `layout.spec.ts` flake, and #177 is the same race worked around per-spec in
+ * `lightbox-paging.spec.ts`.
+ *
+ * Layout-independent on purpose, so the narrow specs can use it too: the room
+ * pane is the one that renders in both modes.
+ */
+export async function expectRoomReady(page: Page): Promise<void> {
   await expectLive(page)
+  await expect(page.getByText('Loading messages…')).toHaveCount(0)
+  await expect(page.locator('.event-row').first()).toBeAttached()
+}
+
+/**
+ * Wait until the sidebar's room list has landed.
+ *
+ * The room list drives more than the sidebar: `joinedSpaces` comes from it, and
+ * with it whether the spaces rail is auto-hidden *and* whether the space chords
+ * do anything at all — `mod+alt+s` returns early on `!hasSpaces` (`app.tsx`),
+ * so a chord pressed before the list arrives is dropped, and the rail then
+ * appears on its own a moment later, which reads exactly like the chord having
+ * done the opposite of what was asked. That was the chromium `shortcuts.spec.ts`
+ * flake.
+ *
+ * Only meaningful at two-pane widths. The room list is windowed, so the hidden
+ * sidebar of a narrow layout renders zero rows however loaded it is — which is
+ * why this is separate from `expectRoomReady` rather than folded into it.
+ */
+export async function expectRoomListReady(page: Page): Promise<void> {
+  await expect(page.getByText('Loading rooms…')).toHaveCount(0)
+  await expect(page.locator('li.room-row').first()).toBeAttached()
+}
+
+/**
+ * Wait until every send this tab has made is server-confirmed.
+ *
+ * A pending local echo renders a `.event-row` with its body text, so the
+ * obvious "wait for my message to appear" assertion is satisfied *before* the
+ * send lands — but a pending echo is not an actionable message:
+ * `isMessageActionable` excludes it, so it carries no action bar, and
+ * `editLast` (the ArrowUp chord) walks straight past it to the previous
+ * confirmed message. Acting on a row without this wait silently targets
+ * whatever was sent before it — including, since one mock backend serves every
+ * spec, another spec's traffic.
+ */
+export async function expectSendsSettled(page: Page): Promise<void> {
+  await expect(page.locator('.event-row.pending')).toHaveCount(0)
 }
 
 /**

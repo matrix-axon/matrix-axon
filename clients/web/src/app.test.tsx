@@ -1325,6 +1325,72 @@ describe('shell layout (ADR 0062)', () => {
     )
   })
 
+  it('ignores the spaces chord until the room list says how many spaces there are', async () => {
+    // Characterizing existing behaviour, because a web-e2e flake turned on it
+    // and the e2e gate now relies on it holding. While `/v1/rooms` is in
+    // flight `hasSpaces` is false, so `mod+alt+s` returns without touching
+    // anything — there is no rail to toggle yet. The chord is not queued and
+    // not replayed: a spec that presses it before the list lands gets nothing,
+    // and then watches the rail appear on its own when the list arrives, which
+    // reads exactly like the chord having done the opposite of what was asked.
+    let releaseRooms: () => void = () => {}
+    const roomsLanded = new Promise<void>((resolve) => {
+      releaseRooms = resolve
+    })
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, async () => {
+        await roomsLanded
+        return HttpResponse.json({
+          data: [
+            {
+              account_id: ACCOUNT,
+              account_user_id: ACCOUNT_DTO.user_id,
+              room_id: '!first-space:example.org',
+              name: 'First space',
+              room_type: 'm.space',
+              last_activity_ts: 0,
+            },
+            {
+              account_id: ACCOUNT,
+              account_user_id: ACCOUNT_DTO.user_id,
+              room_id: '!second-space:example.org',
+              name: 'Second space',
+              room_type: 'm.space',
+              last_activity_ts: 0,
+            },
+          ],
+        })
+      }),
+    )
+    const services = testServices()
+    const { container, getByRole } = render(<App services={services} />)
+
+    fireEvent.keyDown(document.body, {
+      key: 'S',
+      ctrlKey: true,
+      altKey: true,
+    })
+    expect(services.settings.spacesPaneAutoHide.value).toBe(true)
+    expect(services.settings.spacesPaneCollapsed.value).toBe(false)
+
+    releaseRooms()
+    await waitFor(() =>
+      expect(getByRole('button', { name: 'Hide spaces' })).toBeTruthy(),
+    )
+    expect(shellBody(container).className).not.toContain(
+      'spaces-pane-collapsed',
+    )
+
+    // With the count known, the chord does exactly what it says.
+    fireEvent.keyDown(document.body, {
+      key: 'S',
+      ctrlKey: true,
+      altKey: true,
+    })
+    expect(services.settings.spacesPaneCollapsed.value).toBe(true)
+    expect(shellBody(container).className).toContain('spaces-pane-collapsed')
+  })
+
   it('does not render or toggle the sidebar control in single-pane layout', async () => {
     vi.spyOn(window, 'matchMedia').mockImplementation(
       (query: string) =>
