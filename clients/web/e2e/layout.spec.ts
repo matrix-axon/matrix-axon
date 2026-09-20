@@ -1,5 +1,4 @@
 import { expect, test, type Locator } from '@playwright/test'
-import { SEED_IMAGE_ROOT_OFFSET_MS } from './fixture-times.mjs'
 import {
   ACCOUNT_ID,
   active,
@@ -1351,24 +1350,28 @@ test('narrow: sparse room messages remain visible when composing', async ({
 
 test('narrow: sparse thread messages remain visible when composing', async ({
   page,
+  request,
 }) => {
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
+  // Read the root's *real* timestamp rather than recomputing it. Issue #272
+  // anchored this reply to `Date.now() - SEED_IMAGE_ROOT_OFFSET_MS`, but that
+  // is a second `Date.now()`, in a second process, at a second moment: the
+  // mock seeds the root at its own boot, and this runs whenever the page asks
+  // for the thread. The two are minutes apart in a cross-browser invocation
+  // (webkit runs last, so its gap is the widest — which is why both webkit
+  // projects, and only they, failed together), and when those minutes straddle
+  // local midnight the root and the reply land on different calendar days and
+  // `ThreadPanel` draws a day separator between them. That separator is
+  // 23.05px tall, which is the whole of the 9.59px → 32.64px gap this test
+  // then measures. One clock, one instant, no window.
+  const rootTs = await seedImageRootTs(request)
   await page.route(/\/threads\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
     route.fulfill({
       json: {
         data: {
-          // `$seed-image:hs` (this thread's root, seeded in mock-server.mjs)
-          // is timestamped `Date.now() - SEED_IMAGE_ROOT_OFFSET_MS`. Anchor
-          // this reply to the same moment rather than a bare `Date.now()`,
-          // which can land on the next UTC calendar day and insert an
-          // unexpected day separator between root and reply (issue #272).
           events: [
-            sparseEvent(
-              '$sparse-thread',
-              'short thread',
-              Date.now() - SEED_IMAGE_ROOT_OFFSET_MS + 1_000,
-            ),
+            sparseEvent('$sparse-thread', 'short thread', besideRoot(rootTs)),
           ],
           next_cursor: null,
         },
@@ -1380,6 +1383,12 @@ test('narrow: sparse thread messages remain visible when composing', async ({
   await expect(
     page.getByRole('complementary', { name: 'Thread' }),
   ).toBeVisible()
+  // The root arrives with the room timeline, separately from the thread page,
+  // and `ThreadPanel` suppresses the separator while it is pending. Without
+  // this wait the measurement below lands on whichever side of that race the
+  // engine happened to be on — and passed, for years, mostly by measuring the
+  // root-pending layout instead of the one it means to describe.
+  await expect(page.locator('.thread-root-event')).toBeVisible()
   await expect(page.locator('.thread-list .event-row')).toBeVisible()
 
   const grouped = await page.evaluate(() => {
@@ -1499,6 +1508,47 @@ async function mobileActionGeometry(actions: Locator) {
       visibleLabelCount: visibleLabels.length,
     }
   })
+}
+
+/**
+ * The seeded thread root's real `origin_ts`, straight from the mock.
+ *
+ * `$seed-image:hs` is stamped at the mock server's boot and served only in the
+ * room timeline (`/v1/events/:id` does not know it), so this is the only way to
+ * anchor a fixture to the same instant the root actually carries.
+ */
+async function seedImageRootTs(
+  request: import('@playwright/test').APIRequestContext,
+): Promise<number> {
+  const response = await request.get(
+    `/v1/rooms/${encodeURIComponent(ROOM_ID)}/timeline`,
+    { params: { account_id: ACCOUNT_ID } },
+  )
+  expect(response.ok()).toBe(true)
+  const body = (await response.json()) as {
+    data: { events: { event_id: string; origin_ts: number }[] }
+  }
+  const root = body.data.events.find(
+    (event) => event.event_id === '$seed-image:hs',
+  )
+  expect(
+    root,
+    'the seeded thread root should be in the room timeline',
+  ).toBeDefined()
+  return root!.origin_ts
+}
+
+/**
+ * A timestamp one second from `rootTs` that is guaranteed to share its local
+ * calendar day, so no day separator can come between them. Normally one second
+ * later; one second earlier in the single second per day where later would tip
+ * over midnight.
+ */
+function besideRoot(rootTs: number): number {
+  const later = rootTs + 1_000
+  return new Date(later).getDate() === new Date(rootTs).getDate()
+    ? later
+    : rootTs - 1_000
 }
 
 function sparseEvent(eventId: string, body: string, originTs = Date.now()) {
