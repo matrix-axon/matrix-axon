@@ -65,7 +65,7 @@ matrix-axon/
     cross-build.yml          # fmt, clippy, test, and build for MacOS, Linux, and Windows (can manually select subset if desired)
     lint-and-clippy.yml      # required PR/main Rust gate: cargo fmt + clippy + test
     lint-and-test.yml        # cargo fmt + clippy + test
-    package.yml              # nFPM .deb/.rpm from an ubuntu-22.04 axon-server build
+    package.yml              # nFPM .deb/.rpm (amd64 + arm64, ubuntu-22.04); tag uploads to GitHub Releases
     integration.yml          # selectable E2EE re-decryption and Matrix OAuth QR real-service suites
     matrix-oauth.yml         # reusable Matrix OAuth QR real-service workflow used by integration and smoke
     smoke.yml                # S1 black-box smoke (PR 1: TUI PTY suite; PR 2 added the server gate)
