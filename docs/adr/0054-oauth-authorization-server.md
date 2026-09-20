@@ -547,6 +547,8 @@ The existing error boundary can log those categories; no secret-bearing develope
 
 Client authentication uses an ES256 JWT with the configured key ID, team ID as issuer, Services ID as subject, and `https://appleid.apple.com` as audience.
 Generate a fresh five-minute JWT for each token exchange instead of maintaining a renewal timer or secret cache.
+Backdate `iat` by the verifier's 60-second clock-skew allowance while keeping `exp` at signing time plus five minutes.
+This tolerates a slightly fast host clock; real Apple acceptance remains part of callback integration verification.
 This automatically renews credentials after idle periods and restarts, stays well within Apple's six-month ceiling, and needs no background-task ownership or lock.
 Construction validates required fields and proves the PEM key can sign ES256 before accepting login attempts.
 Underlying key revocation still needs operator action.

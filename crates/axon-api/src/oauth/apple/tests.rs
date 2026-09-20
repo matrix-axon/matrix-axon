@@ -110,8 +110,14 @@ fn client_secret_is_signed_for_apple_and_renews_without_a_timer() {
         assert_eq!(header.kid.as_deref(), Some(TEST_KID));
         let claims = verify_secret(&secret);
         assert_eq!(claims["sub"], "com.example.web");
-        assert_eq!(claims["iat"], issued);
+        assert_eq!(claims["iat"], issued - 60);
         assert_eq!(claims["exp"], issued + 300);
+        // Simulate Apple's clock lagging this host by up to one minute.
+        for ahead_by in [0, 1, 30, 60] {
+            let apple_now = issued - ahead_by;
+            assert!(claims["iat"].as_i64().unwrap() <= apple_now);
+            assert!(claims["exp"].as_i64().unwrap() > apple_now);
+        }
     }
 }
 

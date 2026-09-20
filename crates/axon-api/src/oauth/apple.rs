@@ -90,7 +90,8 @@ impl AppleProvider {
                 iss: &self.team_id,
                 sub: &self.client_id,
                 aud: ISSUER,
-                iat: now,
+                // Allow a slightly fast host clock without extending expiry.
+                iat: now.saturating_sub(super::verification::CLOCK_SKEW_SECS),
                 exp: now.saturating_add(CLIENT_SECRET_TTL_SECS),
             },
             &self.signing_key,

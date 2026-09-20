@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-const CLOCK_SKEW_SECS: i64 = 60;
+pub(super) const CLOCK_SKEW_SECS: i64 = 60;
 
 #[derive(Debug, Deserialize)]
 struct Claims {
