@@ -8,7 +8,7 @@
 //! - [`provider`]: the [`OidcProvider`](provider::OidcProvider) port.
 //! - [`jwks`]: cached, refresh-rate-limited JWKS lookup.
 //! - [`generic`]: the discovery-doc-driven provider impl (Google, Microsoft).
-//! - [`apple`]: Apple provider foundation, pending callback/runtime integration.
+//! - [`apple`]: credentialed Apple browser provider; native challenges are pending.
 //! - [`verification`]: shared JWT signature and claim validation.
 //! - [`exchange`]: bounded, redacted authorization-code exchange.
 //! - [`tokens`]: mint/verify/rotate orchestration atop `axon-store`.
@@ -42,6 +42,8 @@ pub const OUTBOUND_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// or token-exchange), so a compromised or misbehaving upstream endpoint
 /// can't hand axon an unbounded body to buffer in memory.
 pub(crate) const MAX_HTTP_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Bound upstream browser callback forms and legacy GET queries equally.
+pub(crate) const MAX_CALLBACK_BYTES: usize = 16 * 1024;
 
 /// Keep useful transport categories without retaining URLs, source errors,
 /// or response bodies. Reqwest groups DNS and TLS failures under connect.
@@ -107,6 +109,12 @@ pub struct OAuthRuntime {
 }
 
 impl OAuthRuntime {
+    /// Single callback resolver for authorize, exchange, CLI bind, and bootstrap.
+    /// Startup validates Apple's explicit callback against this derived value.
+    pub fn callback_url(&self, provider: &str) -> String {
+        format!("{}/v1/oauth/{provider}/callback", self.external_base_url)
+    }
+
     /// Build the runtime from config and an already-constructed provider set
     /// (constructing providers is async — discovery fetch — so it happens in
     /// the binary's composition root, not here).

@@ -292,10 +292,9 @@ impl Store {
     /// available. The identity and both tokens are written in one transaction.
     pub async fn issue_first_oauth_token_pair(
         &self,
-        provider: &str,
+        request: &crate::AuthorizationRequest,
         subject: &str,
         email: Option<&str>,
-        client_id: &str,
         access_expires_at: DateTime<Utc>,
         refresh_expires_at: DateTime<Utc>,
     ) -> Result<Option<IssuedOAuthTokenPair>, StoreError> {
@@ -305,6 +304,27 @@ impl Store {
             tx.rollback().await?;
             return Ok(None);
         }
+
+        // The flow claim, identity, and token pair commit together. Cancellation,
+        // expiry, or a concurrent callback cannot leave a bootstrap credential.
+        let claimed = sqlx_core::query::query(
+            "UPDATE oauth_authorization_requests SET status = 'redeemed' \
+             WHERE id = $1 AND provider = $2 AND client_id = $3 AND redirect_uri = $4 \
+               AND upstream_nonce = $5 AND status = 'pending' AND expires_at > clock_timestamp()",
+        )
+        .bind(request.id)
+        .bind(&request.provider)
+        .bind(&request.client_id)
+        .bind(&request.redirect_uri)
+        .bind(&request.upstream_nonce)
+        .execute(&mut *tx)
+        .await?;
+        if claimed.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let provider = request.provider.as_str();
+        let client_id = request.client_id.as_str();
 
         let identity_id: Uuid = sqlx_core::query::query(
             "INSERT INTO oauth_identities (provider, subject, email) \

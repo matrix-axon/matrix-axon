@@ -13,9 +13,8 @@ use chrono::{Duration as ChronoDuration, Utc};
 use serde::Deserialize;
 
 use crate::extract::Path;
-use crate::oauth::provider::OidcError;
 use crate::oauth::tokens::{self, TokenPair};
-use crate::oauth::{OAuthRuntime, OidcProvider};
+use crate::oauth::OAuthRuntime;
 use crate::response::ApiError;
 use crate::state::BootstrapConfig;
 
@@ -105,7 +104,7 @@ pub async fn start_oauth(
     );
     let upstream_nonce = tokens::generate_opaque_value();
     let expires_at = Utc::now() + AUTHORIZATION_REQUEST_TTL;
-    let callback_uri = oauth_callback_url(&runtime, &provider_name);
+    let callback_uri = runtime.callback_url(&provider_name);
     store
         .create_authorization_request(&NewAuthorizationRequest {
             client_id: BOOTSTRAP_CLIENT_ID,
@@ -124,61 +123,42 @@ pub async fn start_oauth(
     Ok(Redirect::to(&redirect_url).into_response())
 }
 
-pub struct BootstrapOauthCallback<'a> {
-    pub store: &'a Store,
-    pub bootstrap: Option<BootstrapConfig>,
-    pub runtime: &'a OAuthRuntime,
-    pub provider_name: &'a str,
-    pub provider: &'a Arc<dyn OidcProvider>,
-    pub code: &'a str,
-    pub state: &'a str,
-    pub peer: SocketAddr,
-}
-
-pub async fn complete_oauth_callback(
-    ctx: BootstrapOauthCallback<'_>,
-) -> Result<Response, ApiError> {
-    let bootstrap = ensure_bootstrap_allowed_from(ctx.bootstrap, ctx.peer)?;
-    ensure_bootstrap_unlocked(&bootstrap)?;
-
-    let request = ctx
-        .store
-        .find_authorization_request_by_upstream_state(ctx.provider_name, ctx.state)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("unknown or expired bootstrap flow"))?;
+pub(crate) fn validate_oauth_callback(
+    config: Option<BootstrapConfig>,
+    peer: SocketAddr,
+    request: &axon_store::AuthorizationRequest,
+) -> Result<BootstrapConfig, ApiError> {
+    let config = ensure_bootstrap_allowed_from(config, peer)?;
+    ensure_bootstrap_unlocked(&config)?;
     if request.client_id != BOOTSTRAP_CLIENT_ID || request.redirect_uri != BOOTSTRAP_REDIRECT_URI {
         return Err(ApiError::bad_request("unknown or expired bootstrap flow"));
     }
+    Ok(config)
+}
 
-    let callback_uri = oauth_callback_url(ctx.runtime, ctx.provider_name);
-    let upstream = ctx
-        .provider
-        .exchange_code(ctx.code, &callback_uri)
-        .await
-        .map_err(oidc_error_to_api_error)?;
-    let verified = ctx
-        .provider
-        .verify_identity_token(&upstream.id_token, Some(&request.upstream_nonce))
-        .await
-        .map_err(oidc_error_to_api_error)?;
-
+/// Identity verification is shared with ordinary login and CLI binding.
+pub(crate) async fn complete_oauth_callback(
+    store: &Store,
+    runtime: &OAuthRuntime,
+    bootstrap: BootstrapConfig,
+    request: &axon_store::AuthorizationRequest,
+    verified: crate::oauth::VerifiedIdentity,
+) -> Result<Response, ApiError> {
     let now = Utc::now();
-    let access_expires_at = now + chrono_duration(ctx.runtime.access_token_ttl)?;
-    let refresh_expires_at = now + chrono_duration(ctx.runtime.refresh_token_ttl)?;
-    let issued = ctx
-        .store
+    let access_expires_at = now + chrono_duration(runtime.access_token_ttl)?;
+    let refresh_expires_at = now + chrono_duration(runtime.refresh_token_ttl)?;
+    let issued = store
         .issue_first_oauth_token_pair(
-            ctx.provider_name,
+            request,
             &verified.subject,
             verified.email.as_deref(),
-            BOOTSTRAP_CLIENT_ID,
             access_expires_at,
             refresh_expires_at,
         )
         .await?
         .ok_or_else(|| ApiError::conflict("first credential bootstrap is no longer available"))?;
     tracing::info!(
-        provider = ctx.provider_name,
+        provider = %request.provider,
         "first bootstrap SSO credential issued"
     );
 
@@ -186,7 +166,7 @@ pub async fn complete_oauth_callback(
         TokenPair {
             access_token: issued.access_token,
             refresh_token: issued.refresh_token,
-            expires_in: ctx.runtime.access_token_ttl.as_secs(),
+            expires_in: runtime.access_token_ttl.as_secs(),
         },
         &bootstrap,
     ))
@@ -290,20 +270,8 @@ fn ensure_access_code(bootstrap: &BootstrapConfig, submitted: &str) -> Result<()
     }
 }
 
-fn oauth_callback_url(runtime: &OAuthRuntime, provider_name: &str) -> String {
-    format!(
-        "{}/v1/oauth/{provider_name}/callback",
-        runtime.external_base_url
-    )
-}
-
 fn chrono_duration(duration: std::time::Duration) -> Result<ChronoDuration, ApiError> {
     ChronoDuration::from_std(duration).map_err(|_| ApiError::internal())
-}
-
-fn oidc_error_to_api_error(err: OidcError) -> ApiError {
-    tracing::warn!(error = %err, "oidc verification failed during bootstrap");
-    ApiError::bad_gateway("upstream identity verification failed")
 }
 
 fn setup_page(bootstrap: &BootstrapConfig, runtime: Option<&OAuthRuntime>) -> String {

@@ -428,6 +428,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "aws-lc-rs",
  "axon-api",
  "axon-core",
  "axon-crypto",
@@ -436,6 +437,7 @@ dependencies = [
  "axon-store",
  "axon-sync",
  "axum",
+ "base64",
  "chrono",
  "clap",
  "crc",
@@ -450,6 +452,7 @@ dependencies = [
  "serde_json",
  "sqlx-core",
  "sqlx-postgres",
+ "tempfile",
  "tokio",
  "tokio-util",
  "toml_edit 0.22.27",

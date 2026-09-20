@@ -163,9 +163,11 @@ pub async fn rate_limit(
         return Err(too_many_requests());
     }
 
-    let (key, req) = match keyed_param(req.uri().query()) {
-        Some(key) => (Some(key), req),
-        None => keyed_param_from_form_body(req).await?,
+    let (key, req) = if req.method() == Method::POST {
+        // Query strings must not override the secret carried in a POST body.
+        keyed_param_from_form_body(req).await?
+    } else {
+        (keyed_param(req.uri().query()), req)
     };
     if let Some(key) = key {
         if !runtime.rate_limiter.check_key(&key) {
@@ -185,7 +187,7 @@ fn keyed_param(query: Option<&str>) -> Option<String> {
     None
 }
 
-/// As [`keyed_param`], but for `POST /v1/oauth/token`'s form-encoded body
+/// As [`keyed_param`], but for token and callback form-encoded bodies
 /// (only inspected for a `POST` carrying `application/x-www-form-urlencoded`,
 /// so a GET or a differently-typed body never pays a buffering cost). The
 /// body is buffered, checked, and handed back whole in a fresh `Request` so
@@ -203,12 +205,28 @@ async fn keyed_param_from_form_body(
         return Ok((None, req));
     }
 
+    let is_callback = req.uri().path().ends_with("/callback");
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, MAX_KEY_PEEK_BYTES)
-        .await
-        .map_err(|_| ApiError::payload_too_large("request body too large"))?;
+    let limit = if is_callback {
+        super::MAX_CALLBACK_BYTES
+    } else {
+        MAX_KEY_PEEK_BYTES
+    };
+    let bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        axum::body::to_bytes(body, limit),
+    )
+    .await
+    .map_err(|_| ApiError::bad_request("request body timed out"))?
+    .map_err(|_| ApiError::payload_too_large("request body too large"))?;
     let key = url::form_urlencoded::parse(&bytes)
-        .find(|(name, _)| KEYED_BODY_PARAMS.contains(&name.as_ref()))
+        .find(|(name, _)| {
+            if is_callback {
+                name == "state"
+            } else {
+                KEYED_BODY_PARAMS.contains(&name.as_ref())
+            }
+        })
         .map(|(_, value)| value.into_owned());
     Ok((key, Request::from_parts(parts, Body::from(bytes))))
 }

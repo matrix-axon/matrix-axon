@@ -7415,6 +7415,63 @@
         "security": []
       }
     },
+    "/v1/oauth/{provider}/callback": {
+      "post": {
+        "tags": [
+          "oauth"
+        ],
+        "summary": "Complete either GET or bounded form POST through the same validated flow.",
+        "operationId": "callback",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "description": "Enabled upstream identity provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Binding/bootstrap result or native-app handoff page",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "303": {
+            "description": "Return to the validated client with a code or sanitized OAuth error"
+          },
+          "400": {
+            "description": "Invalid, stale, or malformed callback"
+          },
+          "403": {
+            "description": "Bootstrap peer is not permitted"
+          },
+          "404": {
+            "description": "OAuth or provider disabled"
+          },
+          "413": {
+            "description": "Callback exceeds 16 KiB"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "security": []
+      }
+    },
     "/v1/preferences/{key}": {
       "get": {
         "tags": [
@@ -9956,6 +10013,32 @@
           },
           "version": {
             "type": "string"
+          }
+        }
+      },
+      "CallbackQuery": {
+        "type": "object",
+        "description": "Upstream callback fields, carried in a GET query or URL-encoded POST form.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Exactly one of code or error is required."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "description": "Opaque state from an unexpired, pending server-side flow."
           }
         }
       },

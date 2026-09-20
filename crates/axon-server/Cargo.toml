@@ -60,6 +60,10 @@ chrono = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+# Reuse the API's in-memory signing fixture for startup integration tests.
+aws-lc-rs = "1.18"
+base64 = { workspace = true }
+tempfile = "3"
 # Non-optional here (unlike the `dev-tools`-gated dep above) so `uploads.rs`'s
 # tests can drive raw state transitions the store API doesn't expose, without
 # requiring `--features dev-tools` just to run `cargo test`.

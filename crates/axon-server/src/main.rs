@@ -510,16 +510,10 @@ fn indexer_options(search: &axon_core::SearchConfig) -> axon_search::IndexerOpti
 
 /// Build the OAuth runtime from `[oauth]` config: construct a
 /// `GenericOidcProvider` (discovery-doc fetch) for each of Google/Microsoft
-/// that has `enabled = true`, and refuse to boot if Apple is enabled until
-/// its POST callbacks and owner binding are integrated.
+/// that has `enabled = true`, plus the credentialed Apple browser provider.
 async fn build_oauth_runtime(
     oauth_config: &axon_core::OauthConfig,
 ) -> anyhow::Result<Arc<axon_api::OAuthRuntime>> {
-    anyhow::ensure!(
-        !oauth_config.providers.apple.enabled,
-        "oauth.providers.apple.enabled = true, but Sign in with Apple callbacks and owner \
-         binding are not integrated yet (ADR 0054) — disable it until that work lands"
-    );
     anyhow::ensure!(
         oauth_config
             .external_base_url
@@ -532,6 +526,11 @@ async fn build_oauth_runtime(
     let http = axon_api::oauth_http_client();
     let mut providers: std::collections::HashMap<&'static str, Arc<dyn axon_api::OidcProvider>> =
         std::collections::HashMap::new();
+
+    if oauth_config.providers.apple.enabled {
+        let provider = oauth::apple_provider(oauth_config).await?;
+        providers.insert("apple", Arc::new(provider));
+    }
 
     if let Some(provider) =
         discover_generic_provider("google", &oauth_config.providers.google, &http).await?

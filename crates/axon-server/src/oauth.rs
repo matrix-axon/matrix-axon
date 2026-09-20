@@ -55,23 +55,28 @@ async fn bind(store: &Store, config: &Config, provider: &str) -> anyhow::Result<
         config.oauth.enabled,
         "oauth.enabled = false; enable oauth before binding an identity"
     );
-    let provider_config = match provider {
-        "google" => &config.oauth.providers.google,
-        "microsoft" => &config.oauth.providers.microsoft,
+    match provider {
         "apple" => {
-            anyhow::bail!("Sign in with Apple callbacks are not integrated yet (ADR 0054) — it can't be bound")
+            anyhow::ensure!(
+                config.oauth.providers.apple.enabled,
+                "Apple OAuth is disabled"
+            );
+            apple_provider(&config.oauth).await?;
         }
-        other => anyhow::bail!("unknown provider {other:?} (expected \"google\" or \"microsoft\")"),
-    };
-    anyhow::ensure!(
-        provider_config.enabled,
-        "oauth.providers.{provider}.enabled = false; enable it before binding"
-    );
-    // Same presence check `main.rs`'s boot-time `discover_generic_provider`
-    // runs before constructing the real provider — reused here (rather than
-    // just checking `enabled`) so this can't pass for a config the running
-    // server would actually refuse to serve.
-    crate::require_generic_provider_configured(provider, provider_config)?;
+        "google" | "microsoft" => {
+            let cfg = if provider == "google" {
+                &config.oauth.providers.google
+            } else {
+                &config.oauth.providers.microsoft
+            };
+            anyhow::ensure!(
+                cfg.enabled,
+                "oauth.providers.{provider}.enabled = false; enable it before binding"
+            );
+            crate::require_generic_provider_configured(provider, cfg)?;
+        }
+        _ => anyhow::bail!("unknown provider (expected apple, google, or microsoft)"),
+    }
     let external_base_url = config
         .oauth
         .external_base_url
@@ -110,6 +115,91 @@ async fn bind(store: &Store, config: &Config, provider: &str) -> anyhow::Result<
             ),
         }
     }
+}
+
+/// Shared startup/CLI validation. Never attach an IO error or path to these
+/// diagnostics: operator-supplied configuration may itself contain secrets.
+pub(crate) async fn apple_provider(
+    config: &axon_core::OauthConfig,
+) -> anyhow::Result<axon_api::AppleProvider> {
+    use tokio::io::AsyncReadExt;
+    const MAX_KEY_BYTES: usize = 16 * 1024;
+    let apple = &config.providers.apple;
+    let runtime = axon_api::OAuthRuntime::new(config, Default::default());
+    let callback = runtime.callback_url("apple");
+    let url =
+        url::Url::parse(&callback).map_err(|_| anyhow::anyhow!("invalid Apple callback URL"))?;
+    anyhow::ensure!(
+        url.scheme() == "https"
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.as_str() == callback,
+        "Apple callback requires a canonical HTTPS URL without userinfo, query, or fragment"
+    );
+    anyhow::ensure!(
+        apple
+            .redirect_uri
+            .as_ref()
+            .is_none_or(|explicit| explicit == &callback),
+        "Apple redirect_uri must exactly match external_base_url plus /v1/oauth/apple/callback"
+    );
+    let pem = match (&apple.private_key, &apple.private_key_path) {
+        (Some(pem), None) if !pem.is_empty() && pem.len() <= MAX_KEY_BYTES => {
+            pem.as_bytes().to_vec()
+        }
+        (None, Some(path)) => tokio::time::timeout(Duration::from_secs(5), async {
+            let metadata = tokio::fs::metadata(path)
+                .await
+                .map_err(|_| anyhow::anyhow!("cannot inspect Apple key file"))?;
+            anyhow::ensure!(
+                metadata.is_file() && metadata.len() <= MAX_KEY_BYTES as u64,
+                "Apple key must be a regular file of at most 16 KiB"
+            );
+            let mut options = tokio::fs::OpenOptions::new();
+            options.read(true);
+            // A path swapped to a FIFO after inspection must not strand a
+            // blocking filesystem worker even after the async timeout fires.
+            #[cfg(unix)]
+            options.custom_flags(libc::O_NONBLOCK);
+            let file = options
+                .open(path)
+                .await
+                .map_err(|_| anyhow::anyhow!("cannot read Apple key file"))?;
+            let metadata = file
+                .metadata()
+                .await
+                .map_err(|_| anyhow::anyhow!("cannot inspect Apple key file"))?;
+            anyhow::ensure!(metadata.is_file(), "Apple key must be a regular file");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                anyhow::ensure!(
+                    metadata.permissions().mode() & 0o077 == 0,
+                    "Apple key file must have owner-only permissions (chmod 600)"
+                );
+            }
+            let mut bytes = Vec::new();
+            file.take((MAX_KEY_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|_| anyhow::anyhow!("cannot read Apple key file"))?;
+            anyhow::ensure!(
+                !bytes.is_empty() && bytes.len() <= MAX_KEY_BYTES,
+                "Apple key file must contain at most 16 KiB of PEM"
+            );
+            Ok::<_, anyhow::Error>(bytes)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("Apple key file read timed out"))??,
+        _ => anyhow::bail!(
+            "set exactly one of Apple private_key (at most 16 KiB) or private_key_path"
+        ),
+    };
+    axon_api::AppleProvider::new(axon_api::oauth_http_client(), apple, &pem)
+        .map_err(|_| anyhow::anyhow!("invalid Apple provider credentials"))
 }
 
 /// List or unbind already-bound identities.
@@ -180,6 +270,141 @@ fn generate_user_code() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../axon-api/tests/common/signing_key.rs"
+    ));
+
+    #[tokio::test]
+    async fn apple_startup_registers_browser_provider_with_a_valid_callback() {
+        let mut config = axon_core::OauthConfig {
+            enabled: true,
+            external_base_url: Some("https://axon.example/prefix/".into()),
+            ..Default::default()
+        };
+        config.providers.apple = axon_core::AppleOauthConfig {
+            enabled: true,
+            client_id: Some("com.example.web".into()),
+            team_id: Some("TEAM".into()),
+            key_id: Some(TEST_KID.into()),
+            private_key: Some(ec_key().pem.clone()),
+            redirect_uri: Some("https://axon.example/prefix/v1/oauth/apple/callback".into()),
+            ..Default::default()
+        };
+        assert!(!ec_key().x.is_empty() && !ec_key().y.is_empty());
+        let runtime = crate::build_oauth_runtime(&config).await.unwrap();
+        let provider = runtime.provider("apple").unwrap();
+        let callback = runtime.callback_url("apple");
+        let state = uuid::Uuid::new_v4().to_string();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let url = url::Url::parse(&provider.authorize_url(&state, &nonce, &callback)).unwrap();
+        assert!(url
+            .query_pairs()
+            .any(|(key, value)| key == "redirect_uri" && value == callback));
+        assert!(url
+            .query_pairs()
+            .any(|(key, value)| key == "response_mode" && value == "form_post"));
+        assert!(provider
+            .verify_identity_token("unused", None)
+            .await
+            .is_err());
+        config.providers.apple.enabled = false;
+        assert!(crate::build_oauth_runtime(&config)
+            .await
+            .unwrap()
+            .provider("apple")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn apple_key_file_checks_size_permissions_and_redacts_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("PRIVATE_SENTINEL");
+        // Not a key: no private signing material is ever persisted by tests.
+        std::fs::write(&path, "NOT_A_KEY_SENTINEL").unwrap();
+        let mut config = axon_core::OauthConfig {
+            external_base_url: Some("https://axon.example".into()),
+            ..Default::default()
+        };
+        config.providers.apple.private_key_path = Some(path.clone());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(apple_provider(&config)
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("owner-only"));
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert_eq!(
+            apple_provider(&config).await.err().unwrap().to_string(),
+            "invalid Apple provider credentials"
+        );
+        std::fs::write(&path, vec![b'x'; 16385]).unwrap();
+        assert!(apple_provider(&config)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("at most 16 KiB"));
+    }
+
+    #[tokio::test]
+    async fn apple_callback_and_key_sources_fail_closed_without_disclosing_inputs() {
+        let mut config = axon_core::OauthConfig {
+            external_base_url: Some("https://axon.example".into()),
+            ..Default::default()
+        };
+        config.providers.apple.private_key = Some("PRIVATE_SENTINEL".into());
+        for base in [
+            "http://axon.example",
+            "https://user:PRIVATE_SENTINEL@axon.example",
+            "https://axon.example?PRIVATE_SENTINEL",
+            "https://axon.example#PRIVATE_SENTINEL",
+        ] {
+            config.external_base_url = Some(base.into());
+            let error = apple_provider(&config).await.err().unwrap().to_string();
+            assert!(error.contains("callback"));
+            assert!(!error.contains("PRIVATE_SENTINEL"));
+        }
+        config.external_base_url = Some("https://axon.example".into());
+        config.providers.apple.redirect_uri = Some("https://other.example/PRIVATE_SENTINEL".into());
+        assert!(apple_provider(&config)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("exactly match"));
+        config.providers.apple.redirect_uri = None;
+        config.providers.apple.private_key_path = Some("PRIVATE_SENTINEL".into());
+        assert!(apple_provider(&config)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("exactly one"));
+        config.providers.apple.private_key = None;
+        let error = apple_provider(&config).await.err().unwrap().to_string();
+        assert_eq!(error, "cannot inspect Apple key file");
+        config.providers.apple.private_key_path = Some(std::env::temp_dir());
+        assert!(apple_provider(&config)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("regular file"));
+        config.providers.apple.private_key_path = None;
+        config.providers.apple.private_key = Some("x".repeat(16385));
+        assert!(apple_provider(&config)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("16 KiB"));
+    }
 
     #[test]
     fn user_code_is_eight_unambiguous_chars_grouped() {

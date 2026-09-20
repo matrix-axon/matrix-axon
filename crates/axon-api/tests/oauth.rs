@@ -70,14 +70,18 @@ fn app_with_oauth_bootstrap(
     store: Store,
     bootstrap: Option<BootstrapConfig>,
 ) -> (axum::Router, Arc<TestOidcProvider>) {
-    let provider = Arc::new(TestOidcProvider::new(
-        TEST_PROVIDER,
-        TEST_ISSUER,
-        TEST_AUDIENCE,
-    ));
+    app_with_named_provider(store, bootstrap, TEST_PROVIDER)
+}
+
+fn app_with_named_provider(
+    store: Store,
+    bootstrap: Option<BootstrapConfig>,
+    name: &'static str,
+) -> (axum::Router, Arc<TestOidcProvider>) {
+    let provider = Arc::new(TestOidcProvider::new(name, TEST_ISSUER, TEST_AUDIENCE));
     let mut providers: std::collections::HashMap<&'static str, Arc<dyn OidcProvider>> =
         std::collections::HashMap::new();
-    providers.insert(TEST_PROVIDER, provider.clone() as Arc<dyn OidcProvider>);
+    providers.insert(name, provider.clone() as Arc<dyn OidcProvider>);
 
     let oauth_config = OauthConfig {
         enabled: true,
@@ -119,6 +123,387 @@ fn pkce_pair() -> (String, String) {
     let digest = Sha256::digest(verifier.as_bytes());
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
     (verifier.to_owned(), challenge)
+}
+
+async fn post_callback(
+    app: &axum::Router,
+    provider: &str,
+    fields: &[(&str, &str)],
+) -> axum::response::Response {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(fields.iter().copied())
+        .finish();
+    app.clone()
+        .oneshot(with_fake_connect_info(
+            Request::post(format!("/v1/oauth/{provider}/callback"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        ))
+        .await
+        .unwrap()
+}
+
+async fn start_login(app: &axum::Router, provider: &str) -> (String, String) {
+    let (_, challenge) = pkce_pair();
+    let response = get_no_body(app, &format!("/v1/oauth/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&provider={provider}&state=client-state", urlencoding_encode(REDIRECT_URI))).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let url = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
+    (query_param(&url, "state"), query_param(&url, "nonce"))
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn form_post_login_is_cookie_free_single_use_and_preserves_other_providers() {
+    let store = store().await;
+    for name in ["apple", "google", "microsoft"] {
+        let (app, provider) = app_with_named_provider(store.clone(), None, name);
+        let subject = Uuid::new_v4().to_string();
+        store.bind_identity(name, &subject, None).await.unwrap();
+        let (state, nonce) = start_login(&app, name).await;
+        let code = provider.issue_code(&subject, None, &nonce);
+        // No Cookie header. Unsigned first-login profile is ignored.
+        let response = post_callback(
+            &app,
+            name,
+            &[
+                ("state", &state),
+                ("code", &code),
+                ("user", "PRIVATE_SENTINEL"),
+            ],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let url = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
+        assert_eq!(query_param(&url, "state"), "client-state");
+        let code = query_param(&url, "code");
+        let (verifier, _) = pkce_pair();
+        let (status, _) = post_form(
+            &app,
+            "/v1/oauth/token",
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("code_verifier", &verifier),
+                ("client_id", CLIENT_ID),
+                ("redirect_uri", REDIRECT_URI),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let replay = provider.issue_code(&subject, None, &nonce);
+        assert_eq!(
+            post_callback(&app, name, &[("state", &state), ("code", &replay)])
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn callback_cancellation_and_failures_are_sanitized_and_retryable() {
+    let store = store().await;
+    let (app, provider) = app_with_named_provider(store.clone(), None, "apple");
+    for error in ["access_denied", "PRIVATE_SENTINEL"] {
+        let (state, _) = start_login(&app, "apple").await;
+        let response = post_callback(
+            &app,
+            "apple",
+            &[
+                ("state", &state),
+                ("error", error),
+                ("error_description", "PRIVATE_SENTINEL"),
+            ],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response.headers()["location"].to_str().unwrap();
+        assert!(!location.contains("PRIVATE_SENTINEL"));
+        let url = url::Url::parse(location).unwrap();
+        assert_eq!(
+            query_param(&url, "error"),
+            if error == "access_denied" {
+                "access_denied"
+            } else {
+                "temporarily_unavailable"
+            }
+        );
+        assert!(store
+            .find_authorization_request_by_upstream_state("apple", &state)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            post_callback(&app, "apple", &[("state", &state), ("error", error)])
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let (state, _) = start_login(&app, "apple").await;
+    let code = provider.issue_code("not-bound", None, "wrong-nonce");
+    let response = post_callback(&app, "apple", &[("state", &state), ("code", &code)]).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(response.headers()["location"]
+        .to_str()
+        .unwrap()
+        .contains("error="));
+    // A correctly verified but unbound identity still cannot become the owner.
+    let (state, nonce) = start_login(&app, "apple").await;
+    let subject = Uuid::new_v4().to_string();
+    let code = provider.issue_code(&subject, Some("relay@privaterelay.appleid.com"), &nonce);
+    let response = post_callback(&app, "apple", &[("state", &state), ("code", &code)]).await;
+    let url = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
+    assert_eq!(query_param(&url, "error"), "access_denied");
+    assert!(store
+        .find_identity("apple", &subject)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn form_post_binding_cancels_promptly_or_binds_once() {
+    let store = store().await;
+    let (app, provider) = app_with_named_provider(store.clone(), None, "apple");
+    for cancel in [true, false] {
+        let user_code = Uuid::new_v4().to_string();
+        let request = store
+            .create_bind_request("apple", &user_code, Utc::now() + Duration::minutes(10))
+            .await
+            .unwrap();
+        let response = get_no_body(&app, &format!("/v1/oauth/bind?user_code={user_code}")).await;
+        let url = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
+        let state = query_param(&url, "state");
+        let nonce = query_param(&url, "nonce");
+        // Reloading cannot change the nonce during callback verification.
+        assert!(!store
+            .set_bind_request_upstream_nonce(request.device_code, "replacement")
+            .await
+            .unwrap());
+        let subject = Uuid::new_v4().to_string();
+        let code = provider.issue_code(&subject, None, &nonce);
+        let field = if cancel {
+            ("error", "access_denied")
+        } else {
+            ("code", code.as_str())
+        };
+        assert_eq!(
+            post_callback(&app, "apple", &[("state", &state), field])
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let current = store
+            .find_bind_request(request.device_code)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.status, if cancel { "expired" } else { "completed" });
+        assert_eq!(
+            store
+                .find_identity("apple", &subject)
+                .await
+                .unwrap()
+                .is_some(),
+            !cancel
+        );
+        assert_eq!(
+            post_callback(&app, "apple", &[("state", &state), ("code", &code)])
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires empty Postgres"]
+async fn form_post_bootstrap_cancellation_then_success_consumes_flow() {
+    let store = store().await;
+    reset_bootstrap_tables(&store).await;
+    let (app, provider) = app_with_named_provider(store.clone(), Some(bootstrap_config()), "apple");
+    for cancel in [true, false] {
+        let response = get_no_body(&app, "/bootstrap/ABC234/oauth/apple").await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let url = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
+        let state = query_param(&url, "state");
+        let code = provider.issue_code("bootstrap-apple", None, &query_param(&url, "nonce"));
+        let field = if cancel {
+            ("error", "access_denied")
+        } else {
+            ("code", code.as_str())
+        };
+        let response = post_callback(&app, "apple", &[("state", &state), field]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(store
+            .find_authorization_request_by_upstream_state("apple", &state)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store.first_credential_bootstrap_available().await.unwrap(),
+            cancel
+        );
+        assert_eq!(
+            post_callback(&app, "apple", &[("state", &state), ("code", &code)])
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    reset_bootstrap_tables(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn form_callback_rejects_invalid_shapes_states_and_provider_substitution() {
+    let store = store().await;
+    let (app, _) = app_with_named_provider(store.clone(), None, "apple");
+    for fields in [
+        vec![("state", "unknown"), ("code", "code")],
+        vec![("code", "code")],
+        vec![("state", "s"), ("code", "code"), ("error", "access_denied")],
+        vec![("state", "s"), ("state", "other"), ("code", "code")],
+        vec![("state", "bind:bad-uuid"), ("code", "code")],
+    ] {
+        assert_eq!(
+            post_callback(&app, "apple", &fields).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let (state, _) = start_login(&app, "apple").await;
+    let (other, _) = app_with_named_provider(store.clone(), None, "google");
+    assert_eq!(
+        post_callback(&other, "google", &[("state", &state), ("code", "code")])
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let oversized = "x".repeat(17 * 1024);
+    assert_eq!(
+        post_callback(&app, "apple", &[("state", &state), ("code", &oversized)])
+            .await
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert!(store
+        .find_authorization_request_by_upstream_state("apple", &state)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn callback_post_state_is_rate_limited_even_with_a_different_query_state() {
+    let (app, _) = app_with_named_provider(store().await, None, "apple");
+    for index in 0..11 {
+        let request = Request::post(format!("/v1/oauth/apple/callback?state=decoy-{index}"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("state=same-flow&error=access_denied"))
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(with_fake_connect_info(request))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if index < 10 {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn concurrent_callback_completion_and_cancellation_have_one_winner() {
+    let store = store().await;
+    let (app, provider) = app_with_named_provider(store.clone(), None, "apple");
+    let subject = Uuid::new_v4().to_string();
+    store.bind_identity("apple", &subject, None).await.unwrap();
+    let (state, nonce) = start_login(&app, "apple").await;
+    let code1 = provider.issue_code(&subject, None, &nonce);
+    let code2 = provider.issue_code(&subject, None, &nonce);
+    let fields1 = [("state", state.as_str()), ("code", code1.as_str())];
+    let fields2 = [("state", state.as_str()), ("code", code2.as_str())];
+    let (one, two) = tokio::join!(
+        post_callback(&app, "apple", &fields1),
+        post_callback(&app, "apple", &fields2)
+    );
+    assert_eq!(
+        [one.status(), two.status()]
+            .into_iter()
+            .filter(|s| *s == StatusCode::SEE_OTHER)
+            .count(),
+        1
+    );
+    let (state, nonce) = start_login(&app, "apple").await;
+    let code = provider.issue_code(&subject, None, &nonce);
+    let success = [("state", state.as_str()), ("code", code.as_str())];
+    let cancel = [("state", state.as_str()), ("error", "access_denied")];
+    let (one, two) = tokio::join!(
+        post_callback(&app, "apple", &success),
+        post_callback(&app, "apple", &cancel)
+    );
+    assert_eq!(
+        [one.status(), two.status()]
+            .into_iter()
+            .filter(|s| *s == StatusCode::SEE_OTHER)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn expired_and_wrong_purpose_callbacks_never_dispatch() {
+    let store = store().await;
+    let (app, _) = app_with_named_provider(store.clone(), Some(bootstrap_config()), "apple");
+    for (state, expires_at) in [
+        (
+            Uuid::new_v4().to_string(),
+            Utc::now() - Duration::seconds(1),
+        ),
+        (
+            format!("bootstrap:{}", Uuid::new_v4()),
+            Utc::now() + Duration::minutes(10),
+        ),
+    ] {
+        store
+            .create_authorization_request(&axon_store::NewAuthorizationRequest {
+                client_id: CLIENT_ID,
+                redirect_uri: REDIRECT_URI,
+                code_challenge: "challenge",
+                code_challenge_method: "S256",
+                client_state: None,
+                provider: "apple",
+                upstream_state: &state,
+                upstream_nonce: "nonce",
+                expires_at,
+            })
+            .await
+            .unwrap();
+        let response = post_callback(
+            &app,
+            "apple",
+            &[("state", &state), ("code", "PRIVATE_SENTINEL")],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("PRIVATE_SENTINEL"));
+    }
 }
 
 fn query_param(url: &url::Url, name: &str) -> String {

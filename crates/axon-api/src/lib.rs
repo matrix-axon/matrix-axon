@@ -468,7 +468,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/oauth/authorize", get(routes::oauth::authorize))
         .route(
             "/v1/oauth/{provider}/callback",
-            get(routes::oauth::callback),
+            get(routes::oauth::callback)
+                .post(routes::oauth::callback)
+                .layer(DefaultBodyLimit::max(oauth::MAX_CALLBACK_BYTES))
+                .layer(axum::middleware::map_response(
+                    routes::oauth::callback_response,
+                )),
         )
         .route("/v1/oauth/token", post(routes::oauth::token))
         .route("/v1/oauth/bind", get(routes::oauth::bind))

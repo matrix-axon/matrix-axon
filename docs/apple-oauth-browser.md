@@ -1,0 +1,77 @@
+# Apple browser OAuth: implementation review and verification
+
+This is the second server step of ADR 0054.
+It enables credentialed browser login, CLI owner binding, and first-run bootstrap; it does not enable native Apple identity-token grants or distribute a signing key to self-hosters.
+Real Apple acceptance is pending a registered test deployment, so automated verification alone is not an App Store readiness claim.
+
+## Configuration
+
+Use an Apple Services ID associated with the appropriate primary App ID and register the deployment's exact HTTPS return URL with Apple.
+The return URL is `oauth.external_base_url`, with trailing slashes removed, plus `/v1/oauth/apple/callback`.
+An optional `oauth.providers.apple.redirect_uri` must equal that URL exactly.
+Userinfo, query strings, fragments, noncanonical URLs, and non-HTTPS callbacks are rejected at startup and by the binding CLI.
+
+Set `client_id`, `team_id`, and `key_id` under `[oauth.providers.apple]`.
+Supply exactly one of `private_key` (PEM in protected configuration) or `private_key_path` (a regular PEM file, at most 16 KiB).
+On Unix the file must have owner-only permissions, for example `chmod 600`.
+Relative paths are resolved from the process working directory; use an absolute path when the service and CLI run from different directories.
+Then set both `oauth.enabled` and `oauth.providers.apple.enabled` to true.
+Keep keys and real callback payloads out of shell transcripts, logs, screenshots, and test artifacts.
+
+## Verification guide
+
+Run these from the repository root:
+
+```sh
+cargo test -p axon-core apple_config_debug
+cargo test -p axon-server oauth::tests::apple_
+cargo test -p axon-api --lib oauth::
+cargo test -p axon-api --test openapi
+cargo fmt --all -- --check
+cargo clippy --all-features --all-targets -- -D warnings
+cargo test --all
+```
+
+For transaction and handler coverage, set `DATABASE_URL` to a disposable, isolated Postgres database, then run serially:
+
+```sh
+cargo test -p axon-api --test oauth -- --ignored --test-threads=1
+cargo test -p axon-store --test tokens -- --ignored --test-threads=1
+TMPDIR=/opt/adam/tmp scripts/smoke-gate.sh server
+```
+
+The database tests delete bootstrap-related rows and must never target a live Axon database.
+Tests cover GET regression behavior, cookie-free form POST, signed mock-provider exchanges, cancellation/retry, malformed and oversized input, provider/state/purpose checks, expiry, concurrent completion, per-state POST rate limiting, and transactional bootstrap token issuance.
+The smoke command needs Docker and creates its own local stack.
+The generated web schema changes mechanically; no client behavior or demo scene changes are included.
+Server-rendered callback failure pages are covered by the HTTP tests, not a live-provider demo recording.
+
+### Registered Apple deployment acceptance (still required)
+
+1. Start a throwaway Axon deployment with explicit database, sync, search, and media paths and the protected Apple configuration above.
+2. Confirm `/v1/oauth/providers` lists Apple only when enabled.
+3. Run `axon-server oauth bind --provider apple` using the same configuration as the running service.
+   Open the one-time URL privately and complete Apple sign-in, including Hide My Email.
+   Confirm binding completes and ordinary browser PKCE login can now mint Axon tokens.
+4. Repeat sign-in without a first-login profile object; verify an unbound Apple subject is rejected rather than linked by email.
+5. Cancel login and binding; confirm the client can retry and the binding CLI stops waiting.
+6. On a separate empty deployment with explicit bootstrap capability, verify Apple bootstrap, cancellation/retry, and rejection of repeated callbacks.
+   Bootstrap peer restrictions still apply; enable remote bootstrap explicitly when testing a remote browser.
+7. Exercise Google/Microsoft login and refresh again, then remove the throwaway deployment and locally issued tokens.
+
+Do not enable unattended Apple authorization revocation or persist upstream access/refresh tokens as part of this check.
+Those lifecycle decisions remain follow-up work in ADR 0054.
+
+## Code review guide
+
+1. `crates/axon-core/src/config.rs`: additive key-file configuration and redacted Debug output, including nested config.
+2. `crates/axon-server/src/oauth.rs` and `main.rs`: shared startup/CLI construction, exact callback validation, bounded key reads, and provider registration.
+3. `crates/axon-store/src/oauth_authorization_requests.rs`, `oauth_bind_requests.rs`, and `tokens.rs`: conditional cancellation, write-once bind nonce, and atomic bootstrap flow/token transaction.
+4. `crates/axon-api/src/oauth/mod.rs` and `rate_limit.rs`: shared callback resolver and bounded POST-state throttling.
+5. `crates/axon-api/src/routes/oauth.rs`, `bootstrap.rs`, and router wiring: one exchange/verification path, flow-purpose validation before dispatch, sanitized failure delivery, and no-cache/no-referrer callback responses.
+6. OAuth HTTP/store tests, startup/config tests, OpenAPI, generated schema, and operator docs.
+
+Keep a close eye on the boundaries between server-stored state and browser-supplied fields, the single-use transaction guards, the absence of secrets in diagnostics, and the continued refusal of Apple's nonce-free native grant.
+No migration is needed: canceled flows use the existing terminal `expired` status.
+If the process stops before completion, no credential is committed; start a new flow after restart.
+If completion committed but the response was lost, the old flow remains single-use and the owner must start a fresh attempt.

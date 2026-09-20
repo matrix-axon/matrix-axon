@@ -3,8 +3,8 @@
 //! Axon is an OIDC Relying Party to Apple/Google/Microsoft purely to answer
 //! "is this the bound owner?" — upstream tokens are consumed internally and
 //! never handed to a client. [`GenericOidcProvider`](crate::oauth::generic::GenericOidcProvider)
-//! covers Google and Microsoft (discovery-doc driven); Apple's provider
-//! foundation is implemented but not registered until POST callbacks land.
+//! covers Google and Microsoft (discovery-doc driven); Apple's browser provider
+//! is registered when configured; native challenges are pending.
 
 use async_trait::async_trait;
 

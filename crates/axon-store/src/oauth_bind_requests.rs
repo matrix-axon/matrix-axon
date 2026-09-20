@@ -48,6 +48,12 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for BindRequest {
 }
 
 impl Store {
+    /// Cancel a pending bind so the polling CLI exits and a fresh attempt can start.
+    pub async fn cancel_bind_request(&self, id: Uuid) -> Result<bool, StoreError> {
+        let result = sqlx_core::query::query("UPDATE oauth_bind_requests SET status = 'expired' WHERE device_code = $1 AND status = 'pending' AND expires_at > now()")
+            .bind(id).execute(&self.pool).await?;
+        Ok(result.rows_affected() == 1)
+    }
     /// Create the `pending` row for a freshly-started bind handshake.
     ///
     /// Opportunistically sweeps expired rows first, same reasoning as
@@ -113,8 +119,8 @@ impl Store {
 
     /// Stash the nonce `GET /v1/oauth/bind` generated just before redirecting
     /// upstream, so the callback can later verify the returned id_token's
-    /// nonce claim. Idempotent — safe to call again if the admin reloads the
-    /// bind-landing page before completing the flow.
+    /// nonce claim. A request starts once: a reload cannot replace the nonce
+    /// while a verified callback is racing to complete. Retry with a new bind.
     pub async fn set_bind_request_upstream_nonce(
         &self,
         device_code: Uuid,
@@ -122,7 +128,7 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let result = sqlx_core::query::query(
             "UPDATE oauth_bind_requests SET upstream_nonce = $2 \
-              WHERE device_code = $1 AND status = 'pending' AND expires_at > now()",
+              WHERE device_code = $1 AND status = 'pending' AND expires_at > now() AND upstream_nonce IS NULL",
         )
         .bind(device_code)
         .bind(nonce)

@@ -527,8 +527,7 @@ pub struct OauthClientConfig {
 /// Per-provider OIDC settings.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct OauthProvidersConfig {
-    /// Sign in with Apple. Provider foundation exists; runtime integration
-    /// remains gated on Apple POST callbacks and owner binding.
+    /// Sign in with Apple browser login using deployment-owned credentials.
     #[serde(default)]
     pub apple: AppleOauthConfig,
     /// Google sign-in via `GenericOidcProvider`.
@@ -563,13 +562,10 @@ pub struct GenericOauthProviderConfig {
     pub client_secret: Option<String>,
 }
 
-/// Sign-in-with-Apple settings. Provider construction is implemented;
-/// operator enablement awaits POST callbacks and owner binding.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Credentialed Sign in with Apple browser settings.
+#[derive(Clone, Default, Deserialize)]
 pub struct AppleOauthConfig {
-    /// Whether Apple sign-in is wired up. Defaults to `false`. **Not yet
-    /// available** — the binary refuses to start with this `true` until
-    /// Apple callbacks and owner binding are integrated.
+    /// Whether Apple browser sign-in is enabled. Defaults to `false`.
     #[serde(default)]
     pub enabled: bool,
     /// The web Services ID Apple issues, used as the OIDC `client_id` for the
@@ -589,10 +585,34 @@ pub struct AppleOauthConfig {
     /// The PEM-encoded ES256 private key backing `key_id`.
     #[serde(default)]
     pub private_key: Option<String>,
+    /// Alternative to inline PEM: a bounded, private regular file.
+    #[serde(default)]
+    pub private_key_path: Option<std::path::PathBuf>,
     /// This provider's callback URL, e.g.
     /// `https://myaxon.example.com/v1/oauth/apple/callback`.
     #[serde(default)]
     pub redirect_uri: Option<String>,
+}
+
+impl std::fmt::Debug for AppleOauthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppleOauthConfig")
+            .field("enabled", &self.enabled)
+            .field("client_id", &self.client_id)
+            .field("native_audiences", &self.native_audiences)
+            .field("team_id", &self.team_id)
+            .field("key_id", &self.key_id)
+            .field(
+                "private_key",
+                &self.private_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "private_key_path",
+                &self.private_key_path.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("redirect_uri", &self.redirect_uri)
+            .finish()
+    }
 }
 
 fn default_oauth_access_token_ttl_secs() -> u64 {
@@ -1139,6 +1159,25 @@ impl Config {
 // which is large; we cannot box it here.
 #[allow(clippy::result_large_err)]
 mod tests {
+    #[test]
+    fn apple_config_debug_redacts_inline_key_and_key_path_even_when_nested() {
+        let mut config: super::Config = figment::Figment::from(Toml::string(
+            "[database]\nurl = 'postgres://test@localhost/test'",
+        ))
+        .extract()
+        .unwrap();
+        config.oauth.providers.apple.private_key = Some("PRIVATE_SENTINEL".into());
+        config.oauth.providers.apple.private_key_path = Some("PATH_SENTINEL".into());
+        for output in [
+            format!("{:?}", config.oauth.providers.apple),
+            format!("{:#?}", config),
+        ] {
+            assert!(!output.contains("PRIVATE_SENTINEL"));
+            assert!(!output.contains("PATH_SENTINEL"));
+            assert!(output.contains("[REDACTED]"));
+        }
+    }
+
     use super::*;
 
     #[test]
