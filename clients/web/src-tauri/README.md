@@ -170,11 +170,27 @@ the right interface, to point the HMR socket back at this machine, and to
 allow that Host header. Without it the CLI waits forever on
 `http://<lan-ip>:5173/` with nothing listening there.
 
-`TAURI_DEV_HOST` is also the switch for the rest of the mobile dev behaviour,
-so **do not export it by hand for desktop work**, and never export it empty:
-`''` is Vite's "bind every interface", which publishes the dev server — and
-whatever session it is signed into — to the whole network. `vite.config.ts`
-treats an empty value as absent for exactly that reason.
+What `TAURI_DEV_HOST` switches is exactly those three things — `host`, `hmr`
+and `allowedHosts` in `vite.config.ts` — and nothing else. So **do not export
+it by hand for desktop work**, and never export it empty: `''` is Vite's "bind
+every interface", which publishes the dev server — and whatever session it is
+signed into — to the whole network. `vite.config.ts` treats an empty value as
+absent for exactly that reason.
+
+Two neighbouring pieces of the mobile loop are switched by something else, and
+looking for them here is how an afternoon goes missing:
+
+- **The dev server shuts itself down when its launcher exits.** The
+  `axon-exit-when-orphaned` Vite plugin records every ancestor pid at startup
+  and exits once any of them is gone, so 5173 and 1421 are released instead of
+  being held by a server whose CLI has died — which otherwise makes the next
+  `tauri ios dev` fail on a port that looks busy for no reason. It is armed by
+  `TAURI_ENV_PLATFORM`, which the Tauri CLI sets, so it runs under desktop
+  `pnpm tauri dev` as well as `tauri ios dev`, and never under a plain
+  `pnpm dev`, a `nohup pnpm dev > log &`, or vitest.
+- **The navigation guard** in `src-tauri/src/lib.rs` reads the dev host from
+  `app.config().build.dev_url`, which the CLI compiles into the config it
+  builds, not from the environment variable.
 
 Being on a LAN address also means the axon server has to be reachable from the
 phone. `localhost:8080` is not; use the machine's LAN name or a Tailscale

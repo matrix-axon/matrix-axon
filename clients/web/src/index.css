@@ -3503,9 +3503,13 @@ span.composer-attachment-thumb {
 
 /* The bottom inset goes to the side panel alone. The thread panel ends in
    `.composer`, which already carries it, and applying it to both would inset
-   that one twice. Room info has no composer, so its last row would otherwise
-   end under the home indicator — and the panel is `overflow: hidden`, so there
-   is no scrolling it clear. */
+   that one twice. Room info has no composer, so without this its last row ends
+   under the home indicator.
+
+   It is the panel that is `overflow: hidden`, not its content: `.room-info-panel`
+   inside it overrides that to `overflow-y: auto`. So the list does scroll — but
+   only within the panel's content box, which is what this padding sizes, so
+   there is still no scrolling the last row clear without it. */
 .side-panel {
   padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
 }
@@ -3566,11 +3570,18 @@ span.composer-attachment-thumb {
     height: auto;
     min-height: 0;
     box-shadow: none;
-    /* No longer against the top edge: a column inside the shell, below a
-       topbar that has already taken the inset, and above a shell that has
-       taken the bottom one. Keeping these here would indent the column by the
-       status bar height on an iPad held in portrait, which is wide enough to
-       reach this breakpoint and still has a non-zero inset. */
+    /* Neither edge is the display's any more: this is a column inside `main`,
+       below a topbar that has already taken the top inset and above `main`'s
+       own bottom padding, which is `calc(1.5rem + env(safe-area-inset-bottom))`
+       and is what keeps the column's last row clear of the home indicator here.
+       Keeping the top inset would indent the column by the status bar height on
+       an iPad held in portrait, which is wide enough to reach this breakpoint
+       and still has a non-zero inset; keeping the bottom one would pay it twice,
+       once here and once in `main`.
+
+       `main` is the load-bearing word — an earlier draft of this comment said
+       "the shell", which does not take the bottom inset and says so. If `main`
+       ever stops taking it in a room, `.side-panel` needs it back here. */
     padding-top: 1rem;
     padding-bottom: 1rem;
   }
