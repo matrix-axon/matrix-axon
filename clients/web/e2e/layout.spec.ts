@@ -11,6 +11,7 @@ import {
   ROOM_URL,
   shown,
   signIn,
+  skipWithoutScrollbarColor,
   width,
 } from './helpers'
 
@@ -123,6 +124,7 @@ test('wide: space scrollbar appears only while the pane is active', async ({
   await signIn(page)
   await page.setViewportSize({ width: 1536, height: 864 })
   await page.goto('/')
+  await skipWithoutScrollbarColor(page)
   const rail = page.locator('.space-picker')
 
   await expect(rail).toHaveCSS(
@@ -142,6 +144,7 @@ test('wide: room-list scrollbar appears only while the pane is active', async ({
   await signIn(page)
   await page.setViewportSize({ width: 1536, height: 864 })
   await page.goto('/')
+  await skipWithoutScrollbarColor(page)
   const list = page.locator('.room-list-pane')
 
   await expect(list).toHaveCSS(
@@ -167,6 +170,7 @@ test('space avatars retain an accessible button without button chrome', async ({
   await expect(space).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
   await space.focus()
   await expect(space).toHaveCSS('outline-style', 'solid')
+  await skipWithoutScrollbarColor(page)
   await expect(page.locator('.space-picker')).toHaveCSS(
     'scrollbar-color',
     'rgba(0, 0, 0, 0) rgba(0, 0, 0, 0)',

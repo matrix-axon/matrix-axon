@@ -1,4 +1,4 @@
-import { expect, type Page } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
 export const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111'
 export const ROOM_ID = '!room:hs'
@@ -85,6 +85,31 @@ export async function waitForRoomListCache(page: Page): Promise<void> {
       { timeout: 5000 },
     )
     .toBeGreaterThan(0)
+}
+
+/**
+ * Skip when the engine does not implement `scrollbar-color`.
+ *
+ * `getComputedStyle` answers `""` — not a value, the empty string — for a
+ * property the engine does not know, so an assertion on it cannot pass and
+ * cannot be waited out. Playwright's WebKit on macOS and Windows is such an
+ * engine; WebKitGTK on Linux is not, which is why CI (ubuntu-latest only)
+ * never sees this and a developer's Mac or Windows run fails every time.
+ *
+ * The rule these specs cover is cosmetic and doubly implemented: the same
+ * stylesheet also carries `::-webkit-scrollbar-thumb` rules, which is what
+ * those engines actually paint. Skipping costs the standard property's
+ * coverage on engines that have no standard property, and keeps it everywhere
+ * else — chromium, firefox and the WebKit the gate actually runs.
+ */
+export async function skipWithoutScrollbarColor(page: Page): Promise<void> {
+  const supported = await page.evaluate(() =>
+    CSS.supports('scrollbar-color', 'transparent transparent'),
+  )
+  test.skip(
+    !supported,
+    'engine does not implement scrollbar-color (Playwright WebKit on macOS/Windows)',
+  )
 }
 
 /** A signed-in tab at the room, wide enough for two panes, and settled. */
