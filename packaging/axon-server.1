@@ -1,0 +1,125 @@
+.TH AXON-SERVER 1 "2026" "axon-server" "Axon"
+.SH NAME
+axon-server \- personal Matrix state layer
+.SH SYNOPSIS
+.B axon-server
+[\fB--config\fR \fIPATH\fR]
+.PP
+.B axon-server
+[\fB--config\fR \fIPATH\fR]
+.I COMMAND
+.SH DESCRIPTION
+Axon sits between a Matrix homeserver and clients.
+It owns sync, E2EE decryption, search, and a media proxy,
+and exposes a versioned HTTP + WebSocket API at /v1/.
+.PP
+With no command it runs the server.
+Every command honors
+.B --config
+(and otherwise
+.IR AXON_CONFIG ,
+then
+.IR ./axon.toml ,
+then the platform config path).
+.SH OPTIONS
+.TP
+.BI --config " PATH"
+Config file.
+Overrides
+.I AXON_CONFIG
+and convention-based discovery.
+.TP
+.BR \-V ", " \-\-version
+Print version and build metadata.
+.SH COMMANDS
+.TP
+.B init
+Write a starter config (generated
+.I store_key
+plus the Postgres URL) to the platform config directory,
+or to
+.B --config
+when given.
+Refuses to overwrite an existing file unless
+.B --force
+is passed.
+.RS
+.TP
+.BI --database-url " URL"
+Postgres URL to write.
+.TP
+.B --force
+Overwrite an existing config (regenerates
+.IR store_key ,
+which orphans encrypted data).
+.TP
+.B --non-interactive
+No prompts; flags and defaults only.
+.TP
+.B --no-token
+Do not mint a first bearer token.
+.TP
+.B --print-token
+Mint and print a first bearer token (database must be reachable).
+.TP
+.B --start-postgres
+If the database is down, start a loopback Postgres in Docker.
+.TP
+.B --tui-config
+After minting a token, write it into
+.IR ~/.config/axon-tui/config.toml .
+.RE
+.TP
+.B token issue --label \fILABEL\fR
+Mint a client bearer token and print the secret once.
+.TP
+.B token list
+List tokens and their status (never prints secrets).
+.TP
+.B token revoke \fIID\fR | \fB--label\fR \fILABEL\fR
+Revoke a token by id or by unique label.
+.TP
+.B search reindex
+Clear the search seed marker so the next server start reseeds the
+index from Postgres.
+.TP
+.B utd redecrypt --account-id \fIID\fR
+Retry pending Unable-To-Decrypt back-fill for one account.
+Optional
+.B --base-url
+and
+.B --token
+(defaults
+.I AXON_BASE_URL
+/
+.IR AXON_TOKEN ,
+then
+.IR http://127.0.0.1:8080 ).
+.TP
+.B oauth bind --provider \fINAME\fR
+Start binding an upstream OIDC identity (prints a URL to open).
+.TP
+.B oauth identities list
+List bound identities.
+.TP
+.B oauth identities unbind \fIID\fR
+Unbind an identity and revoke tokens it minted.
+.SH FILES
+.TP
+.I /etc/axon-server/config.toml
+Packaged-install config (generated on first configure when a local
+Postgres cluster is reachable).
+.TP
+.I /var/lib/axon-server
+Durable state (SDK store, search index, staged uploads).
+.TP
+.I /var/cache/axon-server
+Disposable media cache.
+.SH SEE ALSO
+.B axon-server --help
+and
+.B axon-server \fICOMMAND\fR --help
+for flag-level detail.
+The source-tree
+.I axon.toml.example
+is the full config reference.

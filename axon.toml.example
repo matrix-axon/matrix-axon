@@ -36,6 +36,10 @@ bootstrap_web_allow_remote = false
 
 [database]
 # Required. Also accepted via the bare DATABASE_URL env var.
+# TCP + password (below) is the usual remote/dev form. The distro package uses
+# a Unix-socket URL with peer auth and no password instead. sqlx requires the
+# socket directory percent-encoded as the host (a blank host is rejected):
+# postgres://axon@%2Fvar%2Frun%2Fpostgresql/axon
 url = "postgres://axon:axon@127.0.0.1:5432/axon"
 max_connections = 5
 

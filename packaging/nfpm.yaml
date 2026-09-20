@@ -1,0 +1,72 @@
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/schema.json
+#
+# Build with packaging/package.sh (sets VERSION / ARCH / AXON_SERVER_BIN).
+name: axon-server
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+release: "1"
+section: net
+priority: optional
+maintainer: Axon contributors <https://github.com/matrix-axon/matrix-axon>
+description: |-
+  Personal Matrix state layer (HTTP + WebSocket API).
+  Sits between a homeserver and clients: sync, E2EE decryption, search,
+  and media proxy. One human per process; Postgres is recommended locally
+  and required somewhere.
+vendor: matrix-axon
+homepage: https://github.com/matrix-axon/matrix-axon
+license: Apache-2.0
+
+contents:
+  - src: ${AXON_SERVER_BIN}
+    dst: /usr/bin/axon-server
+    expand: true
+    file_info:
+      mode: 0755
+  - src: packaging/axon-server.service
+    dst: /usr/lib/systemd/system/axon-server.service
+    file_info:
+      mode: 0644
+  - src: packaging/axon-server.sysusers
+    dst: /usr/lib/sysusers.d/axon-server.conf
+    file_info:
+      mode: 0644
+  - src: packaging/axon-server.tmpfiles
+    dst: /usr/lib/tmpfiles.d/axon-server.conf
+    file_info:
+      mode: 0644
+  - src: packaging/axon-server.1
+    dst: /usr/share/man/man1/axon-server.1
+    file_info:
+      mode: 0644
+  - src: packaging/README.Debian
+    dst: /usr/share/doc/axon-server/README.Debian
+    file_info:
+      mode: 0644
+  - src: README.md
+    dst: /usr/share/doc/axon-server/README.md
+    file_info:
+      mode: 0644
+  - src: LICENSE.md
+    dst: /usr/share/doc/axon-server/LICENSE.md
+    file_info:
+      mode: 0644
+  - dst: /etc/axon-server
+    type: dir
+    file_info:
+      mode: 0750
+
+scripts:
+  postinstall: packaging/scripts/postinst.sh
+  preremove: packaging/scripts/prerm.sh
+  postremove: packaging/scripts/postrm.sh
+
+overrides:
+  deb:
+    recommends:
+      - postgresql
+  rpm:
+    recommends:
+      - postgresql-server
+      - postgresql-contrib
