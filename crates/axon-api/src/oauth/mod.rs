@@ -108,11 +108,19 @@ pub struct OAuthRuntime {
     pub rate_limiter: rate_limit::OAuthRateLimiter,
 }
 
+/// Shared callback URL derivation, without constructing provider or limiter state.
+pub fn callback_url(external_base_url: &str, provider: &str) -> String {
+    format!(
+        "{}/v1/oauth/{provider}/callback",
+        external_base_url.trim_end_matches('/')
+    )
+}
+
 impl OAuthRuntime {
     /// Single callback resolver for authorize, exchange, CLI bind, and bootstrap.
     /// Startup validates Apple's explicit callback against this derived value.
     pub fn callback_url(&self, provider: &str) -> String {
-        format!("{}/v1/oauth/{provider}/callback", self.external_base_url)
+        callback_url(&self.external_base_url, provider)
     }
 
     /// Build the runtime from config and an already-constructed provider set

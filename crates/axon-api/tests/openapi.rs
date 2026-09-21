@@ -22,6 +22,26 @@ fn golden_path() -> PathBuf {
 }
 
 #[test]
+fn callbacks_document_query_get_form_post_and_html_failures() {
+    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let path = &spec["paths"]["/v1/oauth/{provider}/callback"];
+    assert!(path["get"]["requestBody"].is_null());
+    assert!(path["get"]["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["name"] == "state" && p["in"] == "query"));
+    assert!(
+        path["post"]["requestBody"]["content"]["application/x-www-form-urlencoded"].is_object()
+    );
+    for method in ["get", "post"] {
+        for status in ["400", "403", "404", "413", "429"] {
+            assert!(path[method]["responses"][status]["content"]["text/html"].is_object());
+        }
+    }
+}
+
+#[test]
 fn openapi_spec_is_current() {
     let spec = ApiDoc::openapi()
         .to_pretty_json()

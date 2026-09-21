@@ -124,6 +124,7 @@ impl Store {
                 .fetch_optional(&mut *tx)
                 .await?;
         if identity.is_none() {
+            tx.rollback().await?;
             return Ok(false);
         }
         for sql in [

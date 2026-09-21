@@ -22,7 +22,7 @@ use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-include!("signing_key.rs");
+use axon_test_support::{ec_key, TEST_KID};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TestClaims {

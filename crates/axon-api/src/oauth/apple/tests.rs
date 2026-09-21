@@ -7,10 +7,7 @@ use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/common/signing_key.rs"
-));
+use axon_test_support::{ec_key, TEST_KID};
 include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/common/apple_rsa_key.rs"

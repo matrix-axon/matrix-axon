@@ -1498,7 +1498,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** Query callback adapter; both methods share the same validation and completion. */
+        get: operations["callback_get"];
         put?: never;
         /** Complete either GET or bounded form POST through the same validated flow. */
         post: operations["callback"];
@@ -9272,6 +9273,88 @@ export interface operations {
             };
         };
     };
+    callback_get: {
+        parameters: {
+            query: {
+                /** @description Server-issued upstream state */
+                state: string;
+                /** @description Authorization code; mutually exclusive with error */
+                code?: string;
+                /** @description Provider error; mutually exclusive with code */
+                error?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Enabled upstream identity provider */
+                provider: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Binding/bootstrap result or native-app handoff page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Return to the validated client with a code or sanitized OAuth error */
+            303: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid, stale, or malformed callback */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Bootstrap peer is not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description OAuth or provider disabled */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Callback exceeds 16 KiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+        };
+    };
     callback: {
         parameters: {
             query?: never;
@@ -9294,7 +9377,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "text/html": unknown;
+                    "text/html": string;
                 };
             };
             /** @description Return to the validated client with a code or sanitized OAuth error */
@@ -9309,35 +9392,45 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "text/html": string;
+                };
             };
             /** @description Bootstrap peer is not permitted */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "text/html": string;
+                };
             };
             /** @description OAuth or provider disabled */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "text/html": string;
+                };
             };
             /** @description Callback exceeds 16 KiB */
             413: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "text/html": string;
+                };
             };
             /** @description Rate limit exceeded */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "text/html": string;
+                };
             };
         };
     };

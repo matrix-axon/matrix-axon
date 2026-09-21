@@ -23,7 +23,7 @@ const BOOTSTRAP_TOKEN_LABEL: &str = "bootstrap-web";
 /// HTML-only and does nothing against a raw POST — this is the server-side
 /// backstop.
 const BOOTSTRAP_TOKEN_LABEL_MAX_LEN: usize = 80;
-const BOOTSTRAP_CLIENT_ID: &str = "bootstrap-web";
+pub(crate) const BOOTSTRAP_CLIENT_ID: &str = "bootstrap-web";
 const BOOTSTRAP_REDIRECT_URI: &str = "urn:axon:bootstrap";
 const BOOTSTRAP_CODE_CHALLENGE: &str = "bootstrap-web";
 const AUTHORIZATION_REQUEST_TTL: ChronoDuration = ChronoDuration::minutes(10);

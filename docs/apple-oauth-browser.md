@@ -2,7 +2,8 @@
 
 This is the second server step of ADR 0054.
 It enables credentialed browser login, CLI owner binding, and first-run bootstrap; it does not enable native Apple identity-token grants or distribute a signing key to self-hosters.
-Real Apple acceptance is pending a registered test deployment, so automated verification alone is not an App Store readiness claim.
+The operator has verified live Apple binding, web login, repeat login, and Google/Microsoft SSO regression checks.
+Cancellation, bootstrap, and the remaining registered-deployment cases below still need live verification; this is not an App Store readiness claim.
 
 ## Configuration
 
@@ -15,6 +16,7 @@ Set `client_id`, `team_id`, and `key_id` under `[oauth.providers.apple]`.
 Supply exactly one of `private_key` (PEM in protected configuration) or `private_key_path` (a regular PEM file, at most 16 KiB).
 On Unix the file must have owner-only permissions, for example `chmod 600`.
 Relative paths are resolved from the process working directory; use an absolute path when the service and CLI run from different directories.
+Key-file I/O errors report the error category and whether relative-path resolution applies, without printing the configured path or key.
 Then set both `oauth.enabled` and `oauth.providers.apple.enabled` to true.
 Keep keys and real callback payloads out of shell transcripts, logs, screenshots, and test artifacts.
 
@@ -84,7 +86,7 @@ The manual token-paste web form currently discards a rejected token without disp
 
 At the normal warning log level, OAuth failures report controlled reasons and, for validated callback flows, the provider and flow type.
 Verification diagnostics distinguish signature, issuer, audience, nonce, and token-time failures without printing attached upstream values.
-Bearer rejections are logged for HTTP and WebSocket authentication; repeated rejected requests may produce repeated warnings.
+Bearer rejections share a process-wide warning budget across HTTP and WebSocket authentication: at most one warning per 30 seconds, with further rejections available at debug level.
 No credentials, callback state, authorization codes, email addresses, or subjects are included in these diagnostic events.
 To verify, attempt ordinary login after unbinding, cancel a fresh sign-in, and submit an invalid test bearer token; check both the user-facing response and the server warning.
 Do not capture real tokens or full callback URLs in test transcripts.
@@ -93,7 +95,7 @@ Do not capture real tokens or full callback URLs in test transcripts.
 
 1. `crates/axon-core/src/config.rs`: additive key-file configuration and redacted Debug output, including nested config.
 2. `crates/axon-server/src/oauth.rs` and `main.rs`: shared startup/CLI construction, exact callback validation, bounded key reads, and provider registration.
-3. `crates/axon-store/src/oauth_authorization_requests.rs`, `oauth_bind_requests.rs`, and `tokens.rs`: conditional cancellation, write-once bind nonce, and atomic bootstrap flow/token transaction.
+3. `crates/axon-store/src/oauth_authorization_requests.rs`, `oauth_bind_requests.rs`, and `tokens.rs`: conditional cancellation, CLI-created immutable bind nonce, and atomic bootstrap flow/token transaction.
 4. `crates/axon-api/src/oauth/mod.rs` and `rate_limit.rs`: shared callback resolver and bounded POST-state throttling.
 5. `crates/axon-api/src/routes/oauth.rs`, `bootstrap.rs`, and router wiring: one exchange/verification path, flow-purpose validation before dispatch, sanitized failure delivery, and no-cache/no-referrer callback responses.
 6. OAuth HTTP/store tests, startup/config tests, OpenAPI, generated schema, and operator docs.
@@ -103,5 +105,8 @@ Check transaction rollback, the identity row lock against concurrent credential 
 
 Keep a close eye on the boundaries between server-stored state and browser-supplied fields, the single-use transaction guards, the absence of secrets in diagnostics, and the continued refusal of Apple's nonce-free native grant.
 No migration is needed: canceled flows use the existing terminal `expired` status.
+Pending bind URLs can be reloaded or prefetched without changing their nonce; successful completion or cancellation remains single-use.
+Apple's `user_cancelled_authorize` error is treated as cancellation, while unknown provider errors receive neutral retry guidance.
+An exchange failure terminates the current flow because its upstream code may already have been consumed; rerun `oauth bind` to obtain a new URL.
 If the process stops before completion, no credential is committed; start a new flow after restart.
 If completion committed but the response was lost, the old flow remains single-use and the owner must start a fresh attempt.

@@ -58,6 +58,7 @@ emojis        = "0.8"
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true, features = ["fmt"] }
+axon-test-support = { workspace = true }
 # Generate ephemeral OAuth test keys with jsonwebtoken's existing crypto backend.
 aws-lc-rs = "1.18"
 # DB-gated HTTP integration test: drive the real router with tower's oneshot,

@@ -49,6 +49,49 @@ const TEST_PROVIDER: &str = "test";
 const TEST_ISSUER: &str = "https://fake-idp.test/";
 const TEST_AUDIENCE: &str = "test-upstream-client-id";
 
+fn assert_callback_headers(response: &axum::response::Response) {
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    if response.status().is_client_error() {
+        assert!(response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html"));
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn callback_ip_limit_and_body_timeout_are_hardened() {
+    let (app, _) = app_with_named_provider(store().await, None, "apple");
+    for index in 0..31 {
+        let response = get_no_body(
+            &app,
+            &format!("/v1/oauth/apple/callback?state=unique-{index}&code=unused"),
+        )
+        .await;
+        assert_callback_headers(&response);
+        assert_eq!(
+            response.status(),
+            if index < 30 {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+    }
+    let (app, _) = app_with_named_provider(store().await, None, "apple");
+    let request = Request::post("/v1/oauth/apple/callback")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from_stream(futures_util::stream::pending::<
+            Result<axum::body::Bytes, std::io::Error>,
+        >()))
+        .unwrap();
+    let response = app.oneshot(with_fake_connect_info(request)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_callback_headers(&response);
+}
+
 /// A real [`TokenVerifier`](axon_api::TokenVerifier) backed by `store` — unlike
 /// most HTTP tests (which stub it out), this test needs the genuine DB-backed
 /// verifier so a token minted through `/v1/oauth/token` actually round-trips
@@ -78,6 +121,23 @@ fn app_with_named_provider(
     bootstrap: Option<BootstrapConfig>,
     name: &'static str,
 ) -> (axum::Router, Arc<TestOidcProvider>) {
+    app_with_clients(
+        store,
+        bootstrap,
+        name,
+        vec![OauthClientConfig {
+            client_id: CLIENT_ID.to_owned(),
+            redirect_uris: vec![REDIRECT_URI.to_owned(), NATIVE_REDIRECT_URI.to_owned()],
+        }],
+    )
+}
+
+fn app_with_clients(
+    store: Store,
+    bootstrap: Option<BootstrapConfig>,
+    name: &'static str,
+    clients: Vec<OauthClientConfig>,
+) -> (axum::Router, Arc<TestOidcProvider>) {
     let provider = Arc::new(TestOidcProvider::new(name, TEST_ISSUER, TEST_AUDIENCE));
     let mut providers: std::collections::HashMap<&'static str, Arc<dyn OidcProvider>> =
         std::collections::HashMap::new();
@@ -88,10 +148,7 @@ fn app_with_named_provider(
         external_base_url: Some("http://axon.test".to_owned()),
         access_token_ttl_secs: 3600,
         refresh_token_ttl_secs: 2_592_000,
-        clients: vec![OauthClientConfig {
-            client_id: CLIENT_ID.to_owned(),
-            redirect_uris: vec![REDIRECT_URI.to_owned(), NATIVE_REDIRECT_URI.to_owned()],
-        }],
+        clients,
         providers: axon_core::OauthProvidersConfig::default(),
     };
     let runtime = Arc::new(OAuthRuntime::new(&oauth_config, providers));
@@ -206,7 +263,12 @@ async fn form_post_login_is_cookie_free_single_use_and_preserves_other_providers
 async fn callback_cancellation_and_failures_are_sanitized_and_retryable() {
     let store = store().await;
     let (app, provider) = app_with_named_provider(store.clone(), None, "apple");
-    for error in ["access_denied", "PRIVATE_SENTINEL"] {
+    for error in [
+        "access_denied",
+        "user_cancelled_authorize",
+        "server_error",
+        "PRIVATE_SENTINEL",
+    ] {
         let (state, _) = start_login(&app, "apple").await;
         let response = post_callback(
             &app,
@@ -223,14 +285,14 @@ async fn callback_cancellation_and_failures_are_sanitized_and_retryable() {
         assert!(!location.contains("PRIVATE_SENTINEL"));
         let url = url::Url::parse(location).unwrap();
         let description = query_param(&url, "error_description");
-        assert!(description.contains(if error == "access_denied" {
-            "canceled or denied"
-        } else {
-            "try again later"
+        assert!(description.contains(match error {
+            "access_denied" | "user_cancelled_authorize" => "canceled or denied",
+            "server_error" => "new sign-in attempt later",
+            _ => "new sign-in attempt",
         }));
         assert_eq!(
             query_param(&url, "error"),
-            if error == "access_denied" {
+            if matches!(error, "access_denied" | "user_cancelled_authorize") {
                 "access_denied"
             } else {
                 "temporarily_unavailable"
@@ -288,15 +350,27 @@ async fn form_post_binding_cancels_promptly_or_binds_once() {
         let url = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
         let state = query_param(&url, "state");
         let nonce = query_param(&url, "nonce");
-        // Reloading cannot change the nonce during callback verification.
-        assert!(!store
-            .set_bind_request_upstream_nonce(request.device_code, "replacement")
-            .await
-            .unwrap());
+        assert_eq!(request.upstream_nonce.as_deref(), Some(nonce.as_str()));
+        // Link previews (including HEAD) and reloads must preserve the redirect.
+        for method in ["HEAD", "GET", "GET"] {
+            let response = app
+                .clone()
+                .oneshot(with_fake_connect_info(
+                    Request::builder()
+                        .method(method)
+                        .uri(format!("/v1/oauth/bind?user_code={user_code}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            assert_eq!(response.headers()["location"], url.as_str());
+        }
         let subject = Uuid::new_v4().to_string();
         let code = provider.issue_code(&subject, None, &nonce);
         let field = if cancel {
-            ("error", "access_denied")
+            ("error", "user_cancelled_authorize")
         } else {
             ("code", code.as_str())
         };
@@ -393,12 +467,9 @@ async fn form_callback_rejects_invalid_shapes_states_and_provider_substitution()
         StatusCode::BAD_REQUEST
     );
     let oversized = "x".repeat(17 * 1024);
-    assert_eq!(
-        post_callback(&app, "apple", &[("state", &state), ("code", &oversized)])
-            .await
-            .status(),
-        StatusCode::PAYLOAD_TOO_LARGE
-    );
+    let response = post_callback(&app, "apple", &[("state", &state), ("code", &oversized)]).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_callback_headers(&response);
     assert!(store
         .find_authorization_request_by_upstream_state("apple", &state)
         .await
@@ -420,6 +491,7 @@ async fn callback_post_state_is_rate_limited_even_with_a_different_query_state()
             .oneshot(with_fake_connect_info(request))
             .await
             .unwrap();
+        assert_callback_headers(&response);
         assert_eq!(
             response.status(),
             if index < 10 {
@@ -513,6 +585,44 @@ async fn expired_and_wrong_purpose_callbacks_never_dispatch() {
             .unwrap();
         assert!(!String::from_utf8_lossy(&body).contains("PRIVATE_SENTINEL"));
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn reserved_bootstrap_client_cannot_be_used_for_login_even_if_configured() {
+    let store = store().await;
+    let (app, _) = app_with_clients(
+        store.clone(),
+        None,
+        "apple",
+        vec![OauthClientConfig {
+            client_id: "bootstrap-web".into(),
+            redirect_uris: vec![REDIRECT_URI.into()],
+        }],
+    );
+    let state = Uuid::new_v4().to_string();
+    store
+        .create_authorization_request(&axon_store::NewAuthorizationRequest {
+            client_id: "bootstrap-web",
+            redirect_uri: REDIRECT_URI,
+            code_challenge: "challenge",
+            code_challenge_method: "S256",
+            client_state: None,
+            provider: "apple",
+            upstream_state: &state,
+            upstream_nonce: "nonce",
+            expires_at: Utc::now() + Duration::minutes(10),
+        })
+        .await
+        .unwrap();
+    let response = post_callback(
+        &app,
+        "apple",
+        &[("state", &state), ("error", "access_denied")],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_callback_headers(&response);
 }
 
 fn query_param(url: &url::Url, name: &str) -> String {

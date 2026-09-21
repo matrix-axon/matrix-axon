@@ -7416,6 +7416,117 @@
       }
     },
     "/v1/oauth/{provider}/callback": {
+      "get": {
+        "tags": [
+          "oauth"
+        ],
+        "summary": "Query callback adapter; both methods share the same validation and completion.",
+        "operationId": "callback_get",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "description": "Enabled upstream identity provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Server-issued upstream state",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "description": "Authorization code; mutually exclusive with error",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "description": "Provider error; mutually exclusive with code",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Binding/bootstrap result or native-app handoff page",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "303": {
+            "description": "Return to the validated client with a code or sanitized OAuth error"
+          },
+          "400": {
+            "description": "Invalid, stale, or malformed callback",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Bootstrap peer is not permitted",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "OAuth or provider disabled",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Callback exceeds 16 KiB",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      },
       "post": {
         "tags": [
           "oauth"
@@ -7447,26 +7558,65 @@
           "200": {
             "description": "Binding/bootstrap result or native-app handoff page",
             "content": {
-              "text/html": {}
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           },
           "303": {
             "description": "Return to the validated client with a code or sanitized OAuth error"
           },
           "400": {
-            "description": "Invalid, stale, or malformed callback"
+            "description": "Invalid, stale, or malformed callback",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "403": {
-            "description": "Bootstrap peer is not permitted"
+            "description": "Bootstrap peer is not permitted",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "404": {
-            "description": "OAuth or provider disabled"
+            "description": "OAuth or provider disabled",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "413": {
-            "description": "Callback exceeds 16 KiB"
+            "description": "Callback exceeds 16 KiB",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "429": {
-            "description": "Rate limit exceeded"
+            "description": "Rate limit exceeded",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "security": []

@@ -1,0 +1,12 @@
+[package]
+name = "axon-test-support"
+description = "Dev-only in-memory signing fixtures shared by Axon server tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+aws-lc-rs = "1.18"
+base64 = { workspace = true }

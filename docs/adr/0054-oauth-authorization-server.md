@@ -580,7 +580,10 @@ Callbacks accept at most 16 KiB, do not depend on cookies, ignore unsigned profi
 Login failures return fixed OAuth errors only to the stored, currently registered client destination; CLI binding and bootstrap use retry instructions instead.
 Unknown or invalid flows get a static failure page, never a caller-supplied redirect.
 Callback responses disable caching and referrer disclosure.
-Binding nonces are write-once per CLI request, and bootstrap flow consumption is transactional with first-identity/token creation.
+This includes rate-limit, oversized-body, and body-timeout rejections.
+Both GET and POST callbacks use browser-facing HTML for error responses; GET previously returned the JSON API error envelope.
+Binding nonces are created with the CLI request before printing its URL, so repeated GET/HEAD redirects reuse the nonce without consuming the flow.
+Bootstrap flow consumption is transactional with first-identity/token creation.
 The existing `expired` terminal state also represents canceled attempts, so no migration is required.
 Configuration Debug output redacts Apple key material and paths (issue #463).
 Exactly one of `private_key` or `private_key_path` is required; files are bounded to 16 KiB and require owner-only permissions on Unix.

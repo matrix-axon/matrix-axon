@@ -250,6 +250,38 @@ pub async fn authorize(
     Ok(Redirect::to(&redirect_url).into_response())
 }
 
+/// Query callback adapter; both methods share the same validation and completion.
+#[utoipa::path(
+    get,
+    path = "/v1/oauth/{provider}/callback",
+    params(
+        ("provider" = String, Path, description = "Enabled upstream identity provider"),
+        ("state" = String, Query, description = "Server-issued upstream state"),
+        ("code" = Option<String>, Query, description = "Authorization code; mutually exclusive with error"),
+        ("error" = Option<String>, Query, description = "Provider error; mutually exclusive with code"),
+    ),
+    responses(
+        (status = 200, description = "Binding/bootstrap result or native-app handoff page", content_type = "text/html", body = String),
+        (status = 303, description = "Return to the validated client with a code or sanitized OAuth error"),
+        (status = 400, description = "Invalid, stale, or malformed callback", content_type = "text/html", body = String),
+        (status = 403, description = "Bootstrap peer is not permitted", content_type = "text/html", body = String),
+        (status = 404, description = "OAuth or provider disabled", content_type = "text/html", body = String),
+        (status = 413, description = "Callback exceeds 16 KiB", content_type = "text/html", body = String),
+        (status = 429, description = "Rate limit exceeded", content_type = "text/html", body = String),
+    ),
+    tag = "oauth", security(),
+)]
+pub async fn callback_get(
+    store: State<Store>,
+    runtime: State<Option<Arc<OAuthRuntime>>>,
+    bootstrap: State<Option<BootstrapConfig>>,
+    provider: Path<String>,
+    peer: ConnectInfo<SocketAddr>,
+    input: CallbackInput,
+) -> Result<Response, ApiError> {
+    callback(store, runtime, bootstrap, provider, peer, input).await
+}
+
 /// Complete either GET or bounded form POST through the same validated flow.
 #[utoipa::path(
     post,
@@ -257,13 +289,13 @@ pub async fn authorize(
     params(("provider" = String, Path, description = "Enabled upstream identity provider")),
     request_body(content = CallbackQuery, content_type = "application/x-www-form-urlencoded"),
     responses(
-        (status = 200, description = "Binding/bootstrap result or native-app handoff page", content_type = "text/html"),
+        (status = 200, description = "Binding/bootstrap result or native-app handoff page", content_type = "text/html", body = String),
         (status = 303, description = "Return to the validated client with a code or sanitized OAuth error"),
-        (status = 400, description = "Invalid, stale, or malformed callback"),
-        (status = 403, description = "Bootstrap peer is not permitted"),
-        (status = 404, description = "OAuth or provider disabled"),
-        (status = 413, description = "Callback exceeds 16 KiB"),
-        (status = 429, description = "Rate limit exceeded"),
+        (status = 400, description = "Invalid, stale, or malformed callback", content_type = "text/html", body = String),
+        (status = 403, description = "Bootstrap peer is not permitted", content_type = "text/html", body = String),
+        (status = 404, description = "OAuth or provider disabled", content_type = "text/html", body = String),
+        (status = 413, description = "Callback exceeds 16 KiB", content_type = "text/html", body = String),
+        (status = 429, description = "Rate limit exceeded", content_type = "text/html", body = String),
     ),
     tag = "oauth", security(),
 )]
@@ -281,18 +313,22 @@ pub async fn callback(
         .ok_or_else(|| ApiError::not_found("unknown or disabled provider"))?;
     let flow = if let Some(code) = q.state.strip_prefix(BIND_STATE_PREFIX) {
         let id = Uuid::parse_str(code).map_err(|_| invalid_flow())?;
-        let request = store
+        let mut request = store
             .find_bind_request(id)
             .await?
             .ok_or_else(invalid_flow)?;
         if request.status != "pending"
             || request.provider != provider_name
             || request.expires_at <= Utc::now()
-            || request.upstream_nonce.is_none()
         {
             return Err(invalid_flow());
         }
-        CallbackFlow::Bind(request)
+        let nonce = request
+            .upstream_nonce
+            .take()
+            .filter(|nonce| !nonce.is_empty())
+            .ok_or_else(invalid_flow)?;
+        CallbackFlow::Bind(request, nonce)
     } else {
         let request = store
             .find_authorization_request_by_upstream_state(&provider_name, &q.state)
@@ -306,20 +342,23 @@ pub async fn callback(
             CallbackFlow::Bootstrap(request, config)
         } else {
             // Bootstrap's reserved destination can never be used as an ordinary login.
-            if !matches!(
-                runtime.check_client(&request.client_id, &request.redirect_uri),
-                ClientCheck::Allowed
-            ) {
+            if request.client_id == bootstrap::BOOTSTRAP_CLIENT_ID
+                || !matches!(
+                    runtime.check_client(&request.client_id, &request.redirect_uri),
+                    ClientCheck::Allowed
+                )
+            {
                 return Err(invalid_flow());
             }
             CallbackFlow::Login(request)
         }
     };
     if let Some(error) = q.error {
-        let failure = if error == "access_denied" {
-            SignInFailure::ProviderDenied
-        } else {
-            SignInFailure::ProviderUnavailable
+        let failure = match error.as_str() {
+            "access_denied" => SignInFailure::ProviderDenied,
+            "user_cancelled_authorize" if provider_name == "apple" => SignInFailure::ProviderDenied,
+            "server_error" | "temporarily_unavailable" => SignInFailure::ProviderUnavailable,
+            _ => SignInFailure::ProviderRejected,
         };
         return fail_callback(&store, &flow, failure).await;
     }
@@ -341,7 +380,7 @@ pub async fn callback(
         }
     };
     match flow {
-        CallbackFlow::Bind(request) => complete_bind(&store, verified, request).await,
+        CallbackFlow::Bind(request, _) => complete_bind(&store, verified, request).await,
         CallbackFlow::Bootstrap(request, config) => {
             bootstrap::complete_oauth_callback(&store, &runtime, config, &request, verified).await
         }
@@ -383,6 +422,7 @@ fn invalid_flow() -> ApiError {
 #[derive(Clone, Copy)]
 enum SignInFailure {
     ProviderDenied,
+    ProviderRejected,
     ProviderUnavailable,
     VerificationFailed,
     IdentityNotBound,
@@ -410,6 +450,7 @@ impl SignInFailure {
     fn reason(self) -> &'static str {
         match self {
             Self::ProviderDenied => "provider_denied",
+            Self::ProviderRejected => "provider_rejected",
             Self::ProviderUnavailable => "provider_unavailable",
             Self::VerificationFailed => "verification_failed",
             Self::IdentityNotBound => "identity_not_bound",
@@ -420,14 +461,17 @@ impl SignInFailure {
         match self {
             Self::ProviderDenied | Self::IdentityNotBound => "access_denied",
             // Preserve the existing wire error; description supplies the action.
-            Self::ProviderUnavailable | Self::VerificationFailed => "temporarily_unavailable",
+            Self::ProviderUnavailable | Self::ProviderRejected | Self::VerificationFailed => {
+                "temporarily_unavailable"
+            }
         }
     }
 
     fn description(self) -> &'static str {
         match self {
             Self::ProviderDenied => "Sign-in was canceled or denied by the provider. Start sign-in again when you are ready.",
-            Self::ProviderUnavailable => "Axon could not complete sign-in with the provider. Please try again later. If this continues, contact the instance owner.",
+            Self::ProviderRejected => "The provider did not complete sign-in. Start a new sign-in attempt.",
+            Self::ProviderUnavailable => "Axon could not complete sign-in with the provider. Start a new sign-in attempt later. If this continues, contact the instance owner.",
             Self::VerificationFailed => "Axon could not verify the sign-in credential. Start sign-in again. If this continues, contact the instance owner.",
             Self::IdentityNotBound => "This account is not authorized to sign in to this Axon instance. Ask the instance owner to bind it, or use another account.",
         }
@@ -436,7 +480,7 @@ impl SignInFailure {
 
 enum CallbackFlow {
     Login(axon_store::AuthorizationRequest),
-    Bind(BindRequest),
+    Bind(BindRequest, String),
     Bootstrap(axon_store::AuthorizationRequest, BootstrapConfig),
 }
 
@@ -444,7 +488,7 @@ impl CallbackFlow {
     fn nonce(&self) -> &str {
         match self {
             Self::Login(request) | Self::Bootstrap(request, _) => &request.upstream_nonce,
-            Self::Bind(request) => request.upstream_nonce.as_deref().unwrap_or_default(),
+            Self::Bind(_, nonce) => nonce,
         }
     }
 }
@@ -458,7 +502,7 @@ async fn fail_callback(
 ) -> Result<Response, ApiError> {
     let (provider, flow_type) = match flow {
         CallbackFlow::Login(request) => (request.provider.as_str(), "login"),
-        CallbackFlow::Bind(request) => (request.provider.as_str(), "bind"),
+        CallbackFlow::Bind(request, _) => (request.provider.as_str(), "bind"),
         CallbackFlow::Bootstrap(request, _) => (request.provider.as_str(), "bootstrap"),
     };
     failure.log(provider, flow_type);
@@ -466,7 +510,7 @@ async fn fail_callback(
         CallbackFlow::Login(request) | CallbackFlow::Bootstrap(request, _) => {
             store.cancel_authorization(request.id).await?
         }
-        CallbackFlow::Bind(request) => store.cancel_bind_request(request.device_code).await?,
+        CallbackFlow::Bind(request, _) => store.cancel_bind_request(request.device_code).await?,
     };
     if !claimed {
         return Err(invalid_flow());
@@ -487,8 +531,8 @@ async fn fail_callback(
                 Ok(Html(handoff_page_with_status(url.as_str(), false)).into_response())
             }
         }
-        CallbackFlow::Bind(_) | CallbackFlow::Bootstrap(_, _) => {
-            let retry = if matches!(flow, CallbackFlow::Bind(_)) {
+        CallbackFlow::Bind(_, _) | CallbackFlow::Bootstrap(_, _) => {
+            let retry = if matches!(flow, CallbackFlow::Bind(_, _)) {
                 "Run axon oauth bind again to retry."
             } else {
                 "Reopen your original setup URL to retry."
@@ -687,7 +731,7 @@ pub struct BindQuery {
 
 /// `GET /v1/oauth/bind?user_code=...` — the CLI device-code handshake's
 /// browser leg (`axon oauth bind`, ADR 0054). Looks up the pending request
-/// by its human-typeable `user_code`, stashes a fresh nonce, and redirects
+/// by its human-typeable `user_code`, reads the CLI-created nonce, and redirects
 /// straight to the upstream provider — the bind request's own `device_code`
 /// doubles as the `state` sent upstream (see [`callback`]).
 pub async fn bind(
@@ -706,21 +750,16 @@ pub async fn bind(
         return Err(ApiError::not_found("unknown or disabled provider"));
     };
 
-    let nonce = tokens::generate_opaque_value();
-    if !store
-        .set_bind_request_upstream_nonce(request.device_code, &nonce)
-        .await?
-    {
-        // Expired, completed, or already started. Never redirect with a nonce
-        // that was not stored, or replace one a callback is already verifying.
-        return Err(ApiError::bad_request(
-            "bind already started or expired; rerun oauth bind",
-        ));
-    }
+    // Created by the CLI before the URL was printed; GET/HEAD never mutate it.
+    // Legacy pending rows without a nonce must restart with the updated CLI.
+    let nonce = request
+        .upstream_nonce
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("bind has no nonce; rerun oauth bind"))?;
 
     let callback_uri = runtime.callback_url(&request.provider);
     let state = format!("{BIND_STATE_PREFIX}{}", request.device_code);
-    let redirect_url = provider.authorize_url(&state, &nonce, &callback_uri);
+    let redirect_url = provider.authorize_url(&state, nonce, &callback_uri);
     Ok(Redirect::to(&redirect_url).into_response())
 }
 
@@ -936,6 +975,7 @@ mod failure_tests {
         let buffer = LogBuffer::default();
         let writer = buffer.clone();
         let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
             .without_time()
             .with_ansi(false)
             .with_writer(move || writer.clone())
@@ -994,6 +1034,11 @@ mod failure_tests {
             "token_time_invalid",
             "nonce_mismatch",
             "unknown refresh token",
+            "issuer_mismatch",
+            "audience_mismatch",
+            "upstream_request_failed",
+            "upstream_response_invalid",
+            "algorithm_disallowed",
         ] {
             assert!(
                 logs.contains(reason),

@@ -111,7 +111,7 @@ async fn bind(store: &Store, config: &Config, provider: &str) -> anyhow::Result<
                 return Ok(());
             }
             other => anyhow::bail!(
-                "bind request did not complete (status {other:?}, likely expired) — try again"
+                "bind request did not complete (canceled, failed, or expired; status {other:?}) — run oauth bind again to start a new attempt"
             ),
         }
     }
@@ -125,8 +125,10 @@ pub(crate) async fn apple_provider(
     use tokio::io::AsyncReadExt;
     const MAX_KEY_BYTES: usize = 16 * 1024;
     let apple = &config.providers.apple;
-    let runtime = axon_api::OAuthRuntime::new(config, Default::default());
-    let callback = runtime.callback_url("apple");
+    let callback = axon_api::oauth_callback_url(
+        config.external_base_url.as_deref().unwrap_or_default(),
+        "apple",
+    );
     let url =
         url::Url::parse(&callback).map_err(|_| anyhow::anyhow!("invalid Apple callback URL"))?;
     anyhow::ensure!(
@@ -153,7 +155,7 @@ pub(crate) async fn apple_provider(
         (None, Some(path)) => tokio::time::timeout(Duration::from_secs(5), async {
             let metadata = tokio::fs::metadata(path)
                 .await
-                .map_err(|_| anyhow::anyhow!("cannot inspect Apple key file"))?;
+                .map_err(|error| key_file_error("inspect", path.is_relative(), error.kind()))?;
             anyhow::ensure!(
                 metadata.is_file() && metadata.len() <= MAX_KEY_BYTES as u64,
                 "Apple key must be a regular file of at most 16 KiB"
@@ -167,11 +169,11 @@ pub(crate) async fn apple_provider(
             let file = options
                 .open(path)
                 .await
-                .map_err(|_| anyhow::anyhow!("cannot read Apple key file"))?;
+                .map_err(|error| key_file_error("read", path.is_relative(), error.kind()))?;
             let metadata = file
                 .metadata()
                 .await
-                .map_err(|_| anyhow::anyhow!("cannot inspect Apple key file"))?;
+                .map_err(|error| key_file_error("inspect", path.is_relative(), error.kind()))?;
             anyhow::ensure!(metadata.is_file(), "Apple key must be a regular file");
             #[cfg(unix)]
             {
@@ -185,7 +187,7 @@ pub(crate) async fn apple_provider(
             file.take((MAX_KEY_BYTES + 1) as u64)
                 .read_to_end(&mut bytes)
                 .await
-                .map_err(|_| anyhow::anyhow!("cannot read Apple key file"))?;
+                .map_err(|error| key_file_error("read", path.is_relative(), error.kind()))?;
             anyhow::ensure!(
                 !bytes.is_empty() && bytes.len() <= MAX_KEY_BYTES,
                 "Apple key file must contain at most 16 KiB of PEM"
@@ -200,6 +202,19 @@ pub(crate) async fn apple_provider(
     };
     axon_api::AppleProvider::new(axon_api::oauth_http_client(), apple, &pem)
         .map_err(|_| anyhow::anyhow!("invalid Apple provider credentials"))
+}
+
+fn key_file_error(
+    operation: &'static str,
+    relative: bool,
+    kind: std::io::ErrorKind,
+) -> anyhow::Error {
+    let hint = if relative {
+        "private_key_path is relative to the process working directory; use an absolute path"
+    } else {
+        "check private_key_path and file permissions"
+    };
+    anyhow::anyhow!("cannot {operation} Apple key file ({kind:?}); {hint}")
 }
 
 /// List or unbind already-bound identities.
@@ -259,10 +274,7 @@ fn generate_user_code() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../axon-api/tests/common/signing_key.rs"
-    ));
+    use axon_test_support::{ec_key, TEST_KID};
 
     #[tokio::test]
     async fn apple_startup_registers_browser_provider_with_a_valid_callback() {
@@ -280,7 +292,6 @@ mod tests {
             redirect_uri: Some("https://axon.example/prefix/v1/oauth/apple/callback".into()),
             ..Default::default()
         };
-        assert!(!ec_key().x.is_empty() && !ec_key().y.is_empty());
         let runtime = crate::build_oauth_runtime(&config).await.unwrap();
         let provider = runtime.provider("apple").unwrap();
         let callback = runtime.callback_url("apple");
@@ -377,7 +388,9 @@ mod tests {
             .contains("exactly one"));
         config.providers.apple.private_key = None;
         let error = apple_provider(&config).await.err().unwrap().to_string();
-        assert_eq!(error, "cannot inspect Apple key file");
+        assert!(error.contains("NotFound"));
+        assert!(error.contains("relative to the process working directory"));
+        assert!(!error.contains("PRIVATE_SENTINEL"));
         config.providers.apple.private_key_path = Some(std::env::temp_dir());
         assert!(apple_provider(&config)
             .await
