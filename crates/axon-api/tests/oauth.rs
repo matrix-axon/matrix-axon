@@ -1433,8 +1433,7 @@ async fn expired_bind_request_does_not_bind_an_identity() {
     );
 }
 
-/// Regression: `axon oauth identities unbind` (revoke tokens, then delete the
-/// identity) must succeed even for an identity that was actually bound
+/// Regression: `axon oauth identities unbind` must succeed for an identity bound
 /// through `axon oauth bind` — a completed bind request's `oauth_identity_id`
 /// FK previously had no `ON DELETE` action, so `delete_identity` failed with
 /// a foreign-key violation for exactly this case.
@@ -1459,15 +1458,7 @@ async fn unbind_succeeds_for_an_identity_bound_via_the_bind_flow() {
         .expect("complete bind request")
         .expect("bind request must complete");
 
-    // Mirrors `axon oauth identities unbind`'s own sequence.
-    store
-        .revoke_tokens_for_identity(identity_id)
-        .await
-        .expect("revoke tokens");
-    store
-        .revoke_refresh_tokens_for_identity(identity_id)
-        .await
-        .expect("revoke refresh tokens");
+    // Mirrors `axon oauth identities unbind`'s atomic store operation.
     let deleted = store
         .delete_identity(identity_id)
         .await

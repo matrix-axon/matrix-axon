@@ -268,11 +268,9 @@ impl Store {
     }
 
     /// Revoke every still-active token minted for `oauth_identity_id`.
-    /// `axon oauth identities unbind`'s first step — `delete_identity`
-    /// leaves any `tokens`/`oauth_refresh_tokens` rows referencing the
-    /// identity alone (no `ON DELETE` action on that FK), so a caller must
-    /// revoke them before the identity can be deleted. Returns the number of
-    /// tokens revoked.
+    /// Returns the number of tokens revoked without removing the identity.
+    /// Unbinding uses [`delete_identity`](Self::delete_identity) instead,
+    /// which invalidates all credentials and removes the identity atomically.
     pub async fn revoke_tokens_for_identity(
         &self,
         oauth_identity_id: Uuid,

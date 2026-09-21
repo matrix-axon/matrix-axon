@@ -106,16 +106,45 @@ impl Store {
     }
 
     /// Unbind an identity by id. Returns `true` if a row was deleted.
-    /// Callers (the `identities unbind` CLI verb, M14c) are responsible for
-    /// revoking any tokens/refresh-tokens tied to this identity *first* — the
-    /// `tokens`/`oauth_refresh_tokens` foreign keys have no `ON DELETE`
-    /// action, so a still-referenced identity fails to delete rather than
-    /// silently orphaning live credentials.
+    /// Atomically revoke and detach access tokens (retaining their audit rows),
+    /// remove refresh tokens and authorization requests, then delete the identity.
+    /// No caller-side revocation is needed. A failure rolls back all changes.
     pub async fn delete_identity(&self, id: Uuid) -> Result<bool, StoreError> {
-        let result = sqlx_core::query::query("DELETE FROM oauth_identities WHERE id = $1")
-            .bind(id)
-            .execute(&self.pool)
+        let mut tx = self.pool.begin().await?;
+        // Bound waits, including contention with an in-flight token rotation.
+        sqlx_core::query::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *tx)
             .await?;
-        Ok(result.rows_affected() > 0)
+        // FOR UPDATE conflicts with the key-share locks taken by FK inserts:
+        // credentials committed before this lock are cleaned up below; later
+        // inserts cannot reference the deleted identity after we commit.
+        let identity =
+            sqlx_core::query::query("SELECT id FROM oauth_identities WHERE id = $1 FOR UPDATE")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if identity.is_none() {
+            return Ok(false);
+        }
+        for sql in [
+            "UPDATE tokens SET revoked_at = COALESCE(revoked_at, now()), oauth_identity_id = NULL \
+             WHERE oauth_identity_id = $1",
+            // Delete the entire rotation chain in one statement so its
+            // self-referencing replaced_by FK stays satisfied.
+            "DELETE FROM oauth_refresh_tokens WHERE oauth_identity_id = $1",
+            "DELETE FROM oauth_authorization_requests WHERE oauth_identity_id = $1",
+        ] {
+            sqlx_core::query::query(sql)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        // Completed bind requests already use ON DELETE SET NULL.
+        sqlx_core::query::query("DELETE FROM oauth_identities WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 }

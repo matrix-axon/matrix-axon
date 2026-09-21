@@ -226,25 +226,14 @@ async fn identities(store: &Store, action: IdentitiesAction) -> anyhow::Result<(
             }
         }
         IdentitiesAction::Unbind { id } => {
-            // Tokens/refresh tokens must be revoked before the identity row
-            // can be deleted — the FK carries no `ON DELETE` action, by
-            // design (see `Store::delete_identity`'s doc comment).
-            let tokens_revoked = store
-                .revoke_tokens_for_identity(id)
-                .await
-                .context("revoking tokens")?;
-            let refresh_revoked = store
-                .revoke_refresh_tokens_for_identity(id)
-                .await
-                .context("revoking refresh tokens")?;
             if store
                 .delete_identity(id)
                 .await
                 .context("deleting identity")?
             {
                 println!(
-                    "Unbound identity {id} (revoked {tokens_revoked} token(s), \
-                     {refresh_revoked} refresh token(s))."
+                    "Unbound identity {id} (invalidated associated access tokens, \
+                     refresh tokens, and authorization codes)."
                 );
             } else {
                 println!("No bound identity with id {id}.");

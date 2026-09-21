@@ -37,6 +37,7 @@ For transaction and handler coverage, set `DATABASE_URL` to a disposable, isolat
 ```sh
 cargo test -p axon-api --test oauth -- --ignored --test-threads=1
 cargo test -p axon-store --test tokens -- --ignored --test-threads=1
+cargo test -p axon-store --test oauth_unbind -- --ignored --test-threads=1
 TMPDIR=/opt/adam/tmp scripts/smoke-gate.sh server
 ```
 
@@ -62,6 +63,15 @@ Server-rendered callback failure pages are covered by the HTTP tests, not a live
 Do not enable unattended Apple authorization revocation or persist upstream access/refresh tokens as part of this check.
 Those lifecycle decisions remain follow-up work in ADR 0054.
 
+### Unbinding regression check
+
+After signing in, run `axon-server oauth identities list` and then `axon-server oauth identities unbind <identity-id>` for the test identity.
+Unbinding atomically invalidates its Axon access tokens, refresh tokens, and outstanding authorization codes, and removes the identity.
+Access-token audit rows remain revoked, with their identity reference cleared; other identities are unaffected.
+Ordinary sign-in must now fail until you explicitly bind that Apple account again.
+This is local Axon credential invalidation, not revocation of consent at Apple.
+No migration or manual database cleanup is required, including after a previously failed unbind attempt.
+
 ## Code review guide
 
 1. `crates/axon-core/src/config.rs`: additive key-file configuration and redacted Debug output, including nested config.
@@ -70,6 +80,9 @@ Those lifecycle decisions remain follow-up work in ADR 0054.
 4. `crates/axon-api/src/oauth/mod.rs` and `rate_limit.rs`: shared callback resolver and bounded POST-state throttling.
 5. `crates/axon-api/src/routes/oauth.rs`, `bootstrap.rs`, and router wiring: one exchange/verification path, flow-purpose validation before dispatch, sanitized failure delivery, and no-cache/no-referrer callback responses.
 6. OAuth HTTP/store tests, startup/config tests, OpenAPI, generated schema, and operator docs.
+
+For the unbinding follow-up, review `crates/axon-store/src/oauth_identities.rs` before its CLI caller and `crates/axon-store/tests/oauth_unbind.rs`.
+Check transaction rollback, the identity row lock against concurrent credential insertion, and invalidation of both issued codes and refresh-token rotation chains.
 
 Keep a close eye on the boundaries between server-stored state and browser-supplied fields, the single-use transaction guards, the absence of secrets in diagnostics, and the continued refusal of Apple's nonce-free native grant.
 No migration is needed: canceled flows use the existing terminal `expired` status.

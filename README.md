@@ -209,7 +209,7 @@ Configure a provider (`oauth.providers.google` / `.microsoft` in `axon.toml`), t
 ```bash
 axon-server oauth bind --provider google      # or --provider microsoft
 axon-server oauth identities list
-axon-server oauth identities unbind <id>       # revokes every token/refresh token that identity minted
+axon-server oauth identities unbind <id>       # atomically invalidates the identity's tokens and authorization codes
 ```
 
 `bind` prints a URL — open it in any browser, on this machine or elsewhere, since it only needs to reach Axon's already-running `/v1/` surface — and polls until that browser leg completes or the 10-minute handshake expires.
