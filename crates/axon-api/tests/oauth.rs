@@ -222,6 +222,12 @@ async fn callback_cancellation_and_failures_are_sanitized_and_retryable() {
         let location = response.headers()["location"].to_str().unwrap();
         assert!(!location.contains("PRIVATE_SENTINEL"));
         let url = url::Url::parse(location).unwrap();
+        let description = query_param(&url, "error_description");
+        assert!(description.contains(if error == "access_denied" {
+            "canceled or denied"
+        } else {
+            "try again later"
+        }));
         assert_eq!(
             query_param(&url, "error"),
             if error == "access_denied" {
@@ -246,6 +252,8 @@ async fn callback_cancellation_and_failures_are_sanitized_and_retryable() {
     let code = provider.issue_code("not-bound", None, "wrong-nonce");
     let response = post_callback(&app, "apple", &[("state", &state), ("code", &code)]).await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let url = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
+    assert!(query_param(&url, "error_description").contains("could not verify"));
     assert!(response.headers()["location"]
         .to_str()
         .unwrap()
@@ -257,6 +265,7 @@ async fn callback_cancellation_and_failures_are_sanitized_and_retryable() {
     let response = post_callback(&app, "apple", &[("state", &state), ("code", &code)]).await;
     let url = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
     assert_eq!(query_param(&url, "error"), "access_denied");
+    assert!(query_param(&url, "error_description").contains("Ask the instance owner to bind it"));
     assert!(store
         .find_identity("apple", &subject)
         .await
@@ -1081,6 +1090,52 @@ async fn oauth_token_route_is_not_shadowed_by_the_authed_catch_all() {
     let (status, body) = post_form(&app, "/v1/oauth/token", &[("grant_type", "bogus")]).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "unsupported_grant_type");
+}
+
+/// Rejected token grants never reflect submitted credentials in their feedback.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn bad_token_requests_return_safe_actionable_feedback() {
+    let (app, _provider) = app_with_oauth(store().await);
+    for fields in [
+        vec![
+            ("grant_type", "refresh_token"),
+            ("refresh_token", "PRIVATE_SENTINEL"),
+        ],
+        vec![
+            ("grant_type", "authorization_code"),
+            ("code", "PRIVATE_SENTINEL"),
+            ("code_verifier", "PRIVATE_SENTINEL"),
+            ("client_id", CLIENT_ID),
+            ("redirect_uri", REDIRECT_URI),
+        ],
+        vec![
+            ("grant_type", "urn:axon:identity_token"),
+            ("identity_token", "PRIVATE_SENTINEL"),
+            ("provider", TEST_PROVIDER),
+            ("client_id", CLIENT_ID),
+        ],
+    ] {
+        let (status, body) = post_form(&app, "/v1/oauth/token", &fields).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_grant");
+        assert!(body["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("Start sign-in again"));
+        assert!(!body.to_string().contains("PRIVATE_SENTINEL"));
+    }
+    for fields in [
+        vec![("grant_type", "PRIVATE_SENTINEL")],
+        vec![
+            ("grant_type", "refresh_token"),
+            ("grant_type", "PRIVATE_SENTINEL"),
+        ],
+    ] {
+        let (status, body) = post_form(&app, "/v1/oauth/token", &fields).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!body.to_string().contains("PRIVATE_SENTINEL"));
+    }
 }
 
 /// Regression: a pre-existing CLI-minted token (`expires_at IS NULL`) must

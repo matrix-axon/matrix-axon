@@ -316,12 +316,12 @@ pub async fn callback(
         }
     };
     if let Some(error) = q.error {
-        let category = if error == "access_denied" {
-            "access_denied"
+        let failure = if error == "access_denied" {
+            SignInFailure::ProviderDenied
         } else {
-            "temporarily_unavailable"
+            SignInFailure::ProviderUnavailable
         };
-        return fail_callback(&store, &flow, category).await;
+        return fail_callback(&store, &flow, failure).await;
     }
     let code = q.code.ok_or_else(invalid_flow)?;
     let callback_uri = runtime.callback_url(&provider_name);
@@ -335,9 +335,9 @@ pub async fn callback(
     let verified = match verified {
         Ok(verified) => verified,
         Err(error) => {
-            // Provider implementations sanitize errors; never log callback fields.
-            tracing::warn!(provider = %provider_name, error = %error, "OAuth callback verification failed");
-            return fail_callback(&store, &flow, "temporarily_unavailable").await;
+            tracing::warn!(provider = %provider_name, reason = error.diagnostic_reason(), "OAuth callback verification failed");
+            let failure = SignInFailure::from_oidc(&error);
+            return fail_callback(&store, &flow, failure).await;
         }
     };
     match flow {
@@ -350,7 +350,12 @@ pub async fn callback(
                 .find_identity(&provider_name, &verified.subject)
                 .await?
             else {
-                return fail_callback(&store, &CallbackFlow::Login(request), "access_denied").await;
+                return fail_callback(
+                    &store,
+                    &CallbackFlow::Login(request),
+                    SignInFailure::IdentityNotBound,
+                )
+                .await;
             };
             let axon_code = tokens::generate_opaque_value();
             if !store
@@ -371,7 +376,62 @@ pub async fn callback(
 }
 
 fn invalid_flow() -> ApiError {
+    tracing::warn!(reason = "invalid_or_stale_flow", "OAuth callback rejected");
     ApiError::bad_request("unknown, completed, or expired authorization flow; start sign-in again")
+}
+
+#[derive(Clone, Copy)]
+enum SignInFailure {
+    ProviderDenied,
+    ProviderUnavailable,
+    VerificationFailed,
+    IdentityNotBound,
+}
+
+impl SignInFailure {
+    fn from_oidc(error: &crate::oauth::OidcError) -> Self {
+        match error {
+            crate::oauth::OidcError::Http(_) | crate::oauth::OidcError::Malformed(_) => {
+                Self::ProviderUnavailable
+            }
+            _ => Self::VerificationFailed,
+        }
+    }
+
+    fn log(self, provider: &str, flow_type: &'static str) {
+        tracing::warn!(
+            provider,
+            flow_type,
+            reason = self.reason(),
+            "OAuth sign-in failed"
+        );
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::ProviderDenied => "provider_denied",
+            Self::ProviderUnavailable => "provider_unavailable",
+            Self::VerificationFailed => "verification_failed",
+            Self::IdentityNotBound => "identity_not_bound",
+        }
+    }
+
+    fn oauth_error(self) -> &'static str {
+        match self {
+            Self::ProviderDenied | Self::IdentityNotBound => "access_denied",
+            // Preserve the existing wire error; description supplies the action.
+            Self::ProviderUnavailable | Self::VerificationFailed => "temporarily_unavailable",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::ProviderDenied => "Sign-in was canceled or denied by the provider. Start sign-in again when you are ready.",
+            Self::ProviderUnavailable => "Axon could not complete sign-in with the provider. Please try again later. If this continues, contact the instance owner.",
+            Self::VerificationFailed => "Axon could not verify the sign-in credential. Start sign-in again. If this continues, contact the instance owner.",
+            Self::IdentityNotBound => "This account is not authorized to sign in to this Axon instance. Ask the instance owner to bind it, or use another account.",
+        }
+    }
 }
 
 enum CallbackFlow {
@@ -394,8 +454,14 @@ impl CallbackFlow {
 async fn fail_callback(
     store: &Store,
     flow: &CallbackFlow,
-    category: &'static str,
+    failure: SignInFailure,
 ) -> Result<Response, ApiError> {
+    let (provider, flow_type) = match flow {
+        CallbackFlow::Login(request) => (request.provider.as_str(), "login"),
+        CallbackFlow::Bind(request) => (request.provider.as_str(), "bind"),
+        CallbackFlow::Bootstrap(request, _) => (request.provider.as_str(), "bootstrap"),
+    };
+    failure.log(provider, flow_type);
     let claimed = match flow {
         CallbackFlow::Login(request) | CallbackFlow::Bootstrap(request, _) => {
             store.cancel_authorization(request.id).await?
@@ -407,9 +473,11 @@ async fn fail_callback(
     }
     match flow {
         CallbackFlow::Login(request) => {
-            let mut url = url::Url::parse(&request.redirect_uri).map_err(|_| ApiError::internal())?;
-            url.query_pairs_mut().append_pair("error", category)
-                .append_pair("error_description", "Sign-in did not complete. Please try again.");
+            let mut url =
+                url::Url::parse(&request.redirect_uri).map_err(|_| ApiError::internal())?;
+            url.query_pairs_mut()
+                .append_pair("error", failure.oauth_error())
+                .append_pair("error_description", failure.description());
             if let Some(state) = &request.client_state {
                 url.query_pairs_mut().append_pair("state", state);
             }
@@ -419,8 +487,19 @@ async fn fail_callback(
                 Ok(Html(handoff_page_with_status(url.as_str(), false)).into_response())
             }
         }
-        CallbackFlow::Bind(_) => Ok(Html("<!doctype html><title>Sign-in did not complete</title><p>Sign-in did not complete. Run axon oauth bind again to retry.</p>").into_response()),
-        CallbackFlow::Bootstrap(_, _) => Ok(Html("<!doctype html><title>Sign-in did not complete</title><p>Sign-in did not complete. Reopen your original setup URL to retry.</p>").into_response()),
+        CallbackFlow::Bind(_) | CallbackFlow::Bootstrap(_, _) => {
+            let retry = if matches!(flow, CallbackFlow::Bind(_)) {
+                "Run axon oauth bind again to retry."
+            } else {
+                "Reopen your original setup URL to retry."
+            };
+            // Both interpolated strings are application-owned constants.
+            Ok(Html(format!(
+                "<!doctype html><title>Sign-in did not complete</title><p>{}</p><p>{retry}</p>",
+                failure.description()
+            ))
+            .into_response())
+        }
     }
 }
 
@@ -580,12 +659,17 @@ pub async fn token(
                 )),
             }
         }
-        other => {
+        _ => {
+            tracing::warn!(
+                flow_type = "token",
+                reason = "unsupported_grant_type",
+                "OAuth token request rejected"
+            );
             return oauth_error_response(
                 StatusCode::BAD_REQUEST,
                 "unsupported_grant_type",
-                format!("unsupported grant_type {other:?}"),
-            )
+                "Unsupported token grant type.",
+            );
         }
     };
 
@@ -716,11 +800,18 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         match axum::extract::Form::<T>::from_request(req, state).await {
             Ok(axum::extract::Form(value)) => Ok(OAuthForm(value)),
-            Err(rejection) => Err(oauth_error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                rejection.body_text(),
-            )),
+            Err(_) => {
+                tracing::warn!(
+                    flow_type = "token",
+                    reason = "malformed_request",
+                    "OAuth token request rejected"
+                );
+                Err(oauth_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "Invalid token request. Use a URL-encoded form with the required fields.",
+                ))
+            }
         }
     }
 }
@@ -769,25 +860,44 @@ fn oauth_error_response(
 
 fn token_error_into_response(err: TokenError) -> Response {
     match err {
-        TokenError::InvalidGrant(msg) => {
-            oauth_error_response(StatusCode::BAD_REQUEST, "invalid_grant", msg)
+        TokenError::InvalidGrant(reason) => {
+            tracing::warn!(flow_type = "token", reason, "OAuth token request rejected");
+            oauth_error_response(StatusCode::BAD_REQUEST, "invalid_grant", "The sign-in code or token is invalid, expired, already used, or does not match this request. Start sign-in again.")
         }
-        TokenError::UnknownProvider => oauth_error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "unknown or disabled provider",
-        ),
-        TokenError::NotBound => oauth_error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "identity is not bound to this axon instance",
-        ),
-        TokenError::Oidc(err) => {
-            tracing::warn!(error = %err, "oidc verification failed redeeming a token");
+        TokenError::UnknownProvider => {
+            tracing::warn!(
+                flow_type = "token",
+                reason = "unknown_provider",
+                "OAuth token request rejected"
+            );
+            oauth_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "unknown or disabled provider",
+            )
+        }
+        TokenError::NotBound => {
+            tracing::warn!(
+                flow_type = "token",
+                reason = "identity_not_bound",
+                "OAuth token request rejected"
+            );
             oauth_error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_grant",
-                "identity token verification failed",
+                SignInFailure::IdentityNotBound.description(),
+            )
+        }
+        TokenError::Oidc(err) => {
+            tracing::warn!(
+                flow_type = "token",
+                reason = err.diagnostic_reason(),
+                "OAuth token verification failed"
+            );
+            oauth_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                SignInFailure::from_oidc(&err).description(),
             )
         }
         TokenError::Store(err) => {
@@ -798,6 +908,100 @@ fn token_error_into_response(err: TokenError) -> Response {
                 "internal server error",
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+    use crate::oauth::OidcError;
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn failure_diagnostics_are_actionable_and_do_not_log_upstream_values() {
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let responses = tracing::subscriber::with_default(subscriber, || {
+            for failure in [
+                SignInFailure::IdentityNotBound,
+                SignInFailure::ProviderDenied,
+                SignInFailure::ProviderUnavailable,
+                SignInFailure::VerificationFailed,
+            ] {
+                failure.log("apple", "login");
+            }
+            let mut responses = Vec::new();
+            for error in [
+                OidcError::Http("PRIVATE_SENTINEL".into()),
+                OidcError::Malformed("PRIVATE_SENTINEL".into()),
+                OidcError::InvalidIssuer("PRIVATE_SENTINEL".into()),
+                OidcError::InvalidAudience("PRIVATE_SENTINEL".into()),
+                OidcError::InvalidNonce,
+                OidcError::Expired("PRIVATE_SENTINEL".into()),
+                OidcError::BadSignature("PRIVATE_SENTINEL".into()),
+                OidcError::DisallowedAlgorithm("PRIVATE_SENTINEL".into()),
+            ] {
+                responses.push(token_error_into_response(TokenError::Oidc(error)));
+            }
+            responses.push(token_error_into_response(TokenError::NotBound));
+            responses.push(token_error_into_response(TokenError::InvalidGrant(
+                "unknown refresh token",
+            )));
+            responses.push(crate::auth::invalid_token_response());
+            responses
+        });
+        for response in responses {
+            assert!(response.status().is_client_error());
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body = std::str::from_utf8(&body).unwrap();
+            assert!(!body.contains("PRIVATE_SENTINEL"));
+            assert!(
+                body.contains("sign-in")
+                    || body.contains("Sign in again")
+                    || body.contains("bind it")
+            );
+        }
+        let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        assert!(!logs.contains("PRIVATE_SENTINEL"));
+        for reason in [
+            "identity_not_bound",
+            "provider_denied",
+            "provider_unavailable",
+            "verification_failed",
+            "invalid_bearer_token",
+            "signature_invalid",
+            "token_time_invalid",
+            "nonce_mismatch",
+            "unknown refresh token",
+        ] {
+            assert!(
+                logs.contains(reason),
+                "missing diagnostic category {reason}"
+            );
+        }
+        assert!(logs.contains("provider=\"apple\""));
+        assert!(logs.contains("flow_type=\"login\""));
     }
 }
 

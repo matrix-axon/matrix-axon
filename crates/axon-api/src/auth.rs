@@ -98,8 +98,15 @@ pub(crate) fn missing_token_response(message: impl Into<String>) -> Response {
 /// A `401` for a *present but rejected* token (unknown or revoked), carrying
 /// `WWW-Authenticate: Bearer error="invalid_token"` (RFC 6750 §3.1). See
 /// [`missing_token_response`] for why this is not on `ApiError`.
-pub(crate) fn invalid_token_response(message: impl Into<String>) -> Response {
-    challenge(message, CHALLENGE_INVALID_TOKEN)
+pub(crate) fn invalid_token_response() -> Response {
+    tracing::warn!(
+        reason = "invalid_bearer_token",
+        "Axon authentication rejected"
+    );
+    challenge(
+        "The access token is invalid, expired, or revoked. Sign in again or ask the instance owner for a new token.",
+        CHALLENGE_INVALID_TOKEN,
+    )
 }
 
 /// Build the enveloped `401` and attach the given RFC 6750 `WWW-Authenticate`
@@ -128,7 +135,7 @@ pub async fn require_bearer(
 
     match verifier.verify(token).await {
         Ok(true) => next.run(req).await,
-        Ok(false) => invalid_token_response("invalid or revoked token"),
+        Ok(false) => invalid_token_response(),
         Err(err) => err.into_response(),
     }
 }

@@ -72,6 +72,23 @@ Ordinary sign-in must now fail until you explicitly bind that Apple account agai
 This is local Axon credential invalidation, not revocation of consent at Apple.
 No migration or manual database cleanup is required, including after a previously failed unbind attempt.
 
+### Authentication failure feedback
+
+An unbound account now receives an instruction to ask the instance owner to bind it or use another account.
+Cancellation, provider unavailability, and credential verification failures have distinct, application-owned descriptions.
+The current web client already displays the returned OAuth `error_description`; no web change is required for these messages.
+Invalid authorization codes and refresh tokens instruct the user to start sign-in again.
+Rejected bearer tokens return the existing HTTP 401 and `invalid_token` challenge with instructions to sign in again or obtain a new token.
+Unknown, expired, and revoked bearer tokens deliberately share one message.
+The manual token-paste web form currently discards a rejected token without displaying the API error; displaying that feedback requires a separate web-client change.
+
+At the normal warning log level, OAuth failures report controlled reasons and, for validated callback flows, the provider and flow type.
+Verification diagnostics distinguish signature, issuer, audience, nonce, and token-time failures without printing attached upstream values.
+Bearer rejections are logged for HTTP and WebSocket authentication; repeated rejected requests may produce repeated warnings.
+No credentials, callback state, authorization codes, email addresses, or subjects are included in these diagnostic events.
+To verify, attempt ordinary login after unbinding, cancel a fresh sign-in, and submit an invalid test bearer token; check both the user-facing response and the server warning.
+Do not capture real tokens or full callback URLs in test transcripts.
+
 ## Code review guide
 
 1. `crates/axon-core/src/config.rs`: additive key-file configuration and redacted Debug output, including nested config.

@@ -69,6 +69,22 @@ pub enum OidcError {
     DisallowedAlgorithm(String),
 }
 
+impl OidcError {
+    /// Safe diagnostic category; never format the attached upstream value.
+    pub fn diagnostic_reason(&self) -> &'static str {
+        match self {
+            Self::Http(_) => "upstream_request_failed",
+            Self::Malformed(_) => "upstream_response_invalid",
+            Self::InvalidIssuer(_) => "issuer_mismatch",
+            Self::InvalidAudience(_) => "audience_mismatch",
+            Self::InvalidNonce => "nonce_mismatch",
+            Self::Expired(_) => "token_time_invalid",
+            Self::BadSignature(_) => "signature_invalid",
+            Self::DisallowedAlgorithm(_) => "algorithm_disallowed",
+        }
+    }
+}
+
 /// The seam between Path A/B's HTTP handlers and however a given upstream
 /// provider actually works. Held as `Arc<dyn OidcProvider>` in
 /// [`OAuthRuntime`](crate::oauth::OAuthRuntime), one per enabled provider.
