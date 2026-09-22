@@ -1175,6 +1175,66 @@ describe('ingestLive', () => {
     expect(store.events.value.map((e) => e.event_id)).toEqual(['$live'])
   })
 
+  it('keeps a live event that arrives while the head page is in flight', async () => {
+    // The page is issued before the event exists, so it cannot contain it,
+    // and `applyHead` replaces a non-overlapping slice wholesale. Without
+    // buffering the frame is dropped outright — a message lost, not delayed,
+    // for anyone who opens a room while someone is typing.
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(TIMELINE_PATH, async () => {
+        await held
+        return HttpResponse.json({
+          data: { events: [event('$seeded', 100)], next_cursor: null },
+        })
+      }),
+    )
+    const store = makeStore()
+    const load = store.loadLatest()
+
+    store.ingestLive(event('$live', 200))
+
+    release()
+    await load
+
+    expect(store.events.value.map((e) => e.event_id)).toEqual([
+      '$seeded',
+      '$live',
+    ])
+  })
+
+  it('does not duplicate a held event the head page turns out to carry', async () => {
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(TIMELINE_PATH, async () => {
+        await held
+        return HttpResponse.json({
+          data: {
+            // Server order: newest first.
+            events: [event('$live', 200), event('$seeded', 100)],
+            next_cursor: null,
+          },
+        })
+      }),
+    )
+    const store = makeStore()
+    const load = store.loadLatest()
+    store.ingestLive(event('$live', 200))
+    release()
+    await load
+
+    expect(store.events.value.map((e) => e.event_id)).toEqual([
+      '$seeded',
+      '$live',
+    ])
+  })
+
   it('ignores events for another room or account', () => {
     const store = makeStore()
     store.ingestLive(event('$a', 1, { room_id: '!elsewhere:hs' }))
