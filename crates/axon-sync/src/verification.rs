@@ -295,7 +295,7 @@ impl<K: Eq + Hash + Clone> TtlSet<K> {
 /// therefore bounded by concurrent verifications plus recently-invited DMs, never
 /// the whole DM list (the blast radius that sank the earlier attempt).
 ///
-/// `RoomListService::subscribe_to_rooms` *replaces* all prior explicit
+/// `RoomListService::set_room_subscriptions` *replaces* all prior explicit
 /// subscriptions, so the loop always re-subscribes the full union on any change;
 /// the [`mpsc`] waker tells it when to.
 #[derive(Clone, Default)]

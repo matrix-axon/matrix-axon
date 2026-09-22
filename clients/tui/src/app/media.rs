@@ -105,7 +105,7 @@ impl CachedProtocol {
     }
 
     fn generated(&self, generation: u64) -> &Protocol {
-        if generation % 2 == 0 {
+        if generation.is_multiple_of(2) {
             &self.inline
         } else {
             self.sixel_alternate.as_ref().unwrap_or(&self.inline)

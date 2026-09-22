@@ -27,8 +27,8 @@ use futures_util::{
 };
 use matrix_sdk::{
     authentication::oauth::qrcode::{
-        CheckCodeSender, GeneratedQrProgress, GrantLoginProgress, QRCodeGrantLoginError,
-        QrCodeData, QrProgress, SecureChannelError,
+        CheckCodeSender, ContinuationMessageSender, GeneratedQrProgress, GrantLoginProgress,
+        QRCodeGrantLoginError, QrCodeData, QrProgress, SecureChannelError,
     },
     Client,
 };
@@ -856,6 +856,7 @@ impl MatrixOAuthGrantEngine {
         let signal = Arc::new(PollSignal::default());
         let mut progress = Box::pin(progress);
         let mut check_sender: Option<CheckCodeSender> = None;
+        let mut continuation: Option<ContinuationMessageSender> = None;
         let account_id = flow.snapshot().account_id;
         // The first SDK poll can follow a long wait for a scanned QR payload,
         // so it always gets an active-account read. Subsequent wakeups reuse
@@ -884,8 +885,17 @@ impl MatrixOAuthGrantEngine {
                 let waker = waker_ref(&signal);
                 let mut context = Context::from_waker(&waker);
                 while let Poll::Ready(Some(update)) = progress.as_mut().poll_next(&mut context) {
-                    check_sender = update.apply(flow, check_sender)?;
+                    check_sender = update.apply(flow, check_sender, &mut continuation)?;
                 }
+            }
+
+            // Release the SDK's authorization wait before parking below;
+            // nothing else wakes the grant future out of it.
+            if let Some(continuation) = continuation.take() {
+                continuation
+                    .confirm()
+                    .await
+                    .map_err(|_| DriverFailure::Internal)?;
             }
 
             tokio::select! {
@@ -942,6 +952,7 @@ trait GrantProgress: Sized {
         self,
         flow: &Arc<Flow>,
         check_sender: Option<CheckCodeSender>,
+        continuation: &mut Option<ContinuationMessageSender>,
     ) -> Result<Option<CheckCodeSender>, DriverFailure>;
 }
 
@@ -950,10 +961,11 @@ impl GrantProgress for QrProgress {
         self,
         flow: &Arc<Flow>,
         check_sender: Option<CheckCodeSender>,
+        _continuation: &mut Option<ContinuationMessageSender>,
     ) -> Result<Option<CheckCodeSender>, DriverFailure> {
         publish_stable_update(
             flow,
-            StableGrantUpdate::CheckCodeToDisplay(format!("{:02}", self.check_code.to_digit())),
+            StableGrantUpdate::CheckCodeToDisplay(format!("{:02}", self.check_code)),
         );
         Ok(check_sender)
     }
@@ -964,6 +976,7 @@ impl GrantProgress for GeneratedQrProgress {
         self,
         flow: &Arc<Flow>,
         _check_sender: Option<CheckCodeSender>,
+        _continuation: &mut Option<ContinuationMessageSender>,
     ) -> Result<Option<CheckCodeSender>, DriverFailure> {
         match self {
             GeneratedQrProgress::QrReady(qr) => {
@@ -983,6 +996,7 @@ trait ApplyGrantProgress<Q> {
         self,
         flow: &Arc<Flow>,
         check_sender: Option<CheckCodeSender>,
+        continuation: &mut Option<ContinuationMessageSender>,
     ) -> Result<Option<CheckCodeSender>, DriverFailure>;
 }
 
@@ -991,18 +1005,29 @@ impl<Q: GrantProgress> ApplyGrantProgress<Q> for GrantLoginProgress<Q> {
         self,
         flow: &Arc<Flow>,
         check_sender: Option<CheckCodeSender>,
+        continuation: &mut Option<ContinuationMessageSender>,
     ) -> Result<Option<CheckCodeSender>, DriverFailure> {
         match self {
             GrantLoginProgress::Starting => Ok(check_sender),
             GrantLoginProgress::EstablishingSecureChannel(progress) => {
-                progress.apply(flow, check_sender)
+                progress.apply(flow, check_sender, continuation)
             }
-            GrantLoginProgress::WaitingForAuth { verification_uri } => {
+            GrantLoginProgress::WaitingForAuth {
+                verification_uri,
+                continuation_sender,
+            } => {
                 validate_qr_url(&verification_uri).map_err(|_| DriverFailure::Upstream)?;
                 publish_stable_update(
                     flow,
                     StableGrantUpdate::WaitingForAuthorization(verification_uri.to_string()),
                 );
+                // The SDK now parks here until the app confirms it is ready to
+                // proceed, which is what releases `m.login.protocol_accepted`
+                // to the new device. Axon has no separate client-side "browser
+                // opened" step: publishing the verification URI to the flow
+                // state *is* handing it to the client, so confirm as soon as
+                // that update is out. The driver loop does the awaiting.
+                *continuation = Some(continuation_sender);
                 Ok(check_sender)
             }
             GrantLoginProgress::SyncingSecrets => {

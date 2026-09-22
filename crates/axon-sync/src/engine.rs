@@ -1370,7 +1370,8 @@ impl UnreadCountsSnapshot {
     /// read-receipt state *settled* — i.e. every receipt it knows about has been
     /// matched to an event in the room's in-memory linked chunk.
     ///
-    /// An unmatched receipt lands in `RoomReadReceipts::pending`, and while one
+    /// An unmatched receipt lands in `ReadReceipts::pending` (`RoomReadReceipts`
+    /// before matrix-sdk 0.19 renamed it), and while one
     /// sits there the counts beside it were computed from a *fallback* anchor:
     /// `select_best_receipt` walks the linked chunk for the most recent event it
     /// can treat as a read position, and when the real receipt's target isn't in
@@ -1508,10 +1509,16 @@ async fn join_candidate_invites(client: &Client, account_id: Uuid, rooms: &Verif
 
 /// Re-derive the explicit subscription set (active-flow rooms ∪ live candidate
 /// invites) and, **only if it changed**, push it to the sliding-sync service (ADR
-/// 0040). `subscribe_to_rooms` replaces all prior subscriptions and cancels the
-/// in-flight request, so we must not call it when nothing changed — otherwise the
-/// 5-second poll would repeatedly disrupt sync. The set is bounded by concurrent
-/// verifications plus recently-invited DMs, never the whole DM list.
+/// 0040). `set_room_subscriptions` makes the subscription set exactly the rooms
+/// it is given, so the loop re-sends the whole union rather than a delta. Under
+/// matrix-sdk 0.18 it also cleared and recreated every subscription and
+/// cancelled the in-flight request unconditionally, which is why the
+/// no-op guard below exists — otherwise the 5-second poll disrupted sync on
+/// every tick. 0.19 applies the change as a delta and only cancels when the set
+/// actually moved, so the guard is now an optimization rather than the thing
+/// keeping sync alive; it stays because skipping the call entirely is still
+/// cheaper. The set is bounded by concurrent verifications plus
+/// recently-invited DMs, never the whole DM list.
 async fn maybe_resubscribe_verification_rooms(
     rls: &RoomListService,
     registry: &FlowRegistry,
@@ -1528,7 +1535,7 @@ async fn maybe_resubscribe_verification_rooms(
     }
     let ids: Vec<OwnedRoomId> = desired.iter().cloned().collect();
     let refs: Vec<&RoomId> = ids.iter().map(AsRef::as_ref).collect();
-    rls.subscribe_to_rooms(&refs).await;
+    rls.set_room_subscriptions(&refs).await;
     tracing::info!(
         %account_id,
         count = refs.len(),
