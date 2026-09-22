@@ -1,0 +1,87 @@
+name: Third-party license disclosure
+
+# The root workspace's half of the check `desktop-build.yml`'s `thirdparty`
+# job already does for the desktop shell.
+#
+# `cross-build.yml` owns generating `build/THIRDPARTY` for the server and TUI
+# release archives, but it runs only on a release tag or a manual dispatch,
+# and it never compares what it generated against what is committed. So the
+# committed root notices could drift from the dependency graph indefinitely,
+# and did: when this workflow was added, `THIRDPARTY.md` was 1,346 lines away
+# from its own lockfile.
+#
+# The desktop shell has not had that problem, because its check is on
+# `pull_request`. This is the same check, for the other workspace, on the same
+# trigger. `cross-build.yml` gains the same assertion so a release cannot ship
+# a drifted notice either, but a gate that only fires at tag time tells you
+# after review rather than during it.
+#
+# Deliberately its own workflow rather than a job in `cross-build.yml`: that
+# one builds four platforms and is not something to put on every pull request,
+# and a `pull_request` trigger there would need every other job gated off it.
+
+on:
+  pull_request:
+    paths:
+      # The graph itself.
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      # A new workspace member changes the graph without touching the root
+      # manifest, since members are globbed.
+      - 'crates/*/Cargo.toml'
+      - 'clients/tui/Cargo.toml'
+      - 'smoke/*/Cargo.toml'
+      # Everything the generator reads for the root notices: the accepted
+      # license list, the two templates, the committed outputs, and the script.
+      # Without these a change to any of them ran no gate at all.
+      - 'build/about.toml'
+      - 'build/about-markdown.hbs'
+      - 'build/about-plain.hbs'
+      - 'build/THIRDPARTY'
+      - 'THIRDPARTY.md'
+      - 'scripts/generate-thirdparty.sh'
+      - '.github/workflows/thirdparty.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  thirdparty:
+    name: Check the root license disclosure
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Keyed on the script, not on a version written here: the script pins
+      # cargo-about and installs the pinned one when the binary on PATH is not
+      # it, so bumping the pin is a cache miss and a key naming a version this
+      # job does not enforce would describe nothing. Same reasoning, and same
+      # key shape, as `desktop-build.yml`.
+      - name: Cache cargo-about
+        id: cache-about
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-about
+          key: cargo-about-${{ runner.os }}-${{ hashFiles('scripts/generate-thirdparty.sh') }}
+
+      # --root-only: the desktop shell's notices belong to `desktop-build.yml`,
+      # and regenerating them here would make a root-only dependency change
+      # fail on a license in a workspace it does not touch.
+      - name: Regenerate the root notices
+        run: scripts/generate-thirdparty.sh --root-only
+
+      - name: Assert the committed notices match the dependency graph
+        run: |
+          if ! git diff --exit-code --stat -- build/THIRDPARTY THIRDPARTY.md; then
+            echo "::error::the committed root license notice is stale. Run scripts/generate-thirdparty.sh --root-only and commit the result." >&2
+            exit 1
+          fi
