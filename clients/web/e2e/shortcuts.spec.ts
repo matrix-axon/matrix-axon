@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import {
   active,
+  expectSendsSettled,
   LAST_ROOM_URL,
   openRoom,
   ROOM_URL,
@@ -280,6 +281,16 @@ test('? opens the help; Escape closes it; typing ? does not open it', async ({
   )
   await expect(dialog).toContainText('Cycle filter')
 
+  // The dialog's DOM is committed a beat before its effects flush, and Escape
+  // is bound in one of those effects (`useShortcuts`, capture phase). The
+  // assertions above are satisfied by the commit, so pressing Escape straight
+  // after them can land while nothing is listening — the key is swallowed and
+  // the dialog stays open. `useModalFocus` moves focus to this button in the
+  // same flush that registers the binding, so focus arriving here is the
+  // signal that the handler is live. Measured on Windows WebKit: 49 failures
+  // in 200 runs without this wait, 0 in 200 with it.
+  await expect(dialog.locator('button.ghost')).toBeFocused()
+
   await page.keyboard.press('Escape')
   await expect(dialog).toBeHidden()
 
@@ -330,6 +341,10 @@ test('ArrowUp on an empty composer edits your last message', async ({
     page.locator('.event-row .body-text', { hasText: 'my last words' }).last(),
   ).toBeVisible()
   await expect(composer).toHaveValue('')
+  // Both waits above are satisfied by the *pending* echo, which `editLast`
+  // skips — so without this the chord edits whatever was sent before this
+  // test, which in a full run is another spec's message entirely.
+  await expectSendsSettled(page)
 
   await composer.press('ArrowUp')
 

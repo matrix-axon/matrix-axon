@@ -464,6 +464,30 @@ const MIME = {
   '.png': 'image/png',
 }
 
+/**
+ * Parse a request body, treating anything that is not JSON as empty.
+ *
+ * Every one of these parses runs inside a `req.on('end')` callback, which is
+ * not inside any promise chain: a throw there is an *uncaught exception*, and
+ * Node answers that by exiting the process. The mock then vanishes mid-run —
+ * the request in flight at that instant reports `socket hang up` and every
+ * later one gets ECONNREFUSED, which is how one truncated body turns into a
+ * red lane with no failing assertion anywhere near the cause. A body only
+ * arrives truncated when a page is torn down mid-POST, so it is rare, and the
+ * spec it lands on is whichever happened to be talking at the time.
+ *
+ * Empty rather than a 400 on purpose: the only clients are the app and the
+ * specs, so a body this server cannot read is a torn-down request, not a
+ * contract to enforce.
+ */
+function parseJsonBody(raw) {
+  try {
+    return JSON.parse(raw || '{}')
+  } catch {
+    return {}
+  }
+}
+
 const json = (res, body, status = 200) => {
   res.writeHead(status, { 'content-type': 'application/json' })
   res.end(JSON.stringify(body))
@@ -599,7 +623,7 @@ async function handleApi(req, res, url) {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
-      const request = JSON.parse(raw || '{}')
+      const request = parseJsonBody(raw)
       messageGesturePreference = request.value
       broadcast({
         type: 'preferences.changed',
@@ -628,7 +652,7 @@ async function handleApi(req, res, url) {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
-      const request = JSON.parse(raw || '{}')
+      const request = parseJsonBody(raw)
       qrFlow = {
         flow_id: QR_FLOW_ID,
         expected_user_id: request.expected_user_id,
@@ -658,7 +682,7 @@ async function handleApi(req, res, url) {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
-      const request = JSON.parse(raw || '{}')
+      const request = parseJsonBody(raw)
       submittedQrBase64 = request.qr_code_data
       qrFlow = {
         flow_id: QR_FLOW_ID,
@@ -730,7 +754,7 @@ async function handleApi(req, res, url) {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
-      const body = JSON.parse(raw || '{}')
+      const body = parseJsonBody(raw)
       const flowId = `flow-${randomUUID()}`
       const dto = {
         flow_id: flowId,
@@ -942,7 +966,7 @@ async function handleApi(req, res, url) {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
-      const typing = JSON.parse(raw || '{}').typing === true
+      const typing = parseJsonBody(raw).typing === true
       broadcast({
         type: 'ephemeral.passthrough',
         account_id: ACCOUNT_ID,
@@ -963,7 +987,7 @@ async function handleApi(req, res, url) {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
-      const key = JSON.parse(raw || '{}').key
+      const key = parseJsonBody(raw).key
       const eventId = decodeURIComponent(pathname.split('/').at(-2))
       const event = events.get(eventId)
       if (event === undefined || typeof key !== 'string') {
@@ -1011,7 +1035,7 @@ async function handleApi(req, res, url) {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
-      const request = JSON.parse(raw || '{}')
+      const request = parseJsonBody(raw)
       // An empty string is the documented clear signal, not a no-op.
       roomSettings[field] = request[field] === '' ? null : request[field]
       json(res, { data: {} })
@@ -1022,7 +1046,7 @@ async function handleApi(req, res, url) {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
-      const request = JSON.parse(raw || '{}')
+      const request = parseJsonBody(raw)
       const staged = uploads.get(request.upload_id)
       if (staged === undefined) {
         return json(
@@ -1088,7 +1112,7 @@ async function handleApi(req, res, url) {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
-      const request = JSON.parse(raw || '{}')
+      const request = parseJsonBody(raw)
       const staged = uploads.get(request.upload_id)
       if (staged === undefined) {
         return json(
@@ -1135,7 +1159,7 @@ async function handleApi(req, res, url) {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
-      const body = (JSON.parse(raw || '{}').body ?? '').toString()
+      const body = (parseJsonBody(raw).body ?? '').toString()
       const eventId = `$${createHash('sha1')
         .update(body + Date.now())
         .digest('hex')
@@ -1339,7 +1363,7 @@ const server = createServer((req, res) => {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
-      const body = JSON.parse(raw || '{}')
+      const body = parseJsonBody(raw)
       verifyDevices.set(body.account_id, {
         user_id: body.user_id ?? USER_ID,
         devices: body.devices ?? [],
@@ -1352,7 +1376,7 @@ const server = createServer((req, res) => {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
-      const body = JSON.parse(raw || '{}')
+      const body = parseJsonBody(raw)
       const accountId = body.account_id ?? ACCOUNT_ID
       const flowId = body.flow_id ?? `flow-${randomUUID()}`
       const kind = body.kind ?? 'requested'
@@ -1418,7 +1442,18 @@ const server = createServer((req, res) => {
     return json(res, { data: { open } })
   }
   if (url.pathname.startsWith('/v1/')) {
-    void handleApi(req, res, url)
+    // Same failure mode one layer up: an `async` handler's rejection is an
+    // unhandled rejection, which Node also answers by exiting.
+    void handleApi(req, res, url).catch((error) => {
+      console.error('mock backend: handleApi failed', error)
+      if (!res.headersSent) {
+        json(
+          res,
+          { error: { code: 'mock_failure', message: String(error) } },
+          500,
+        )
+      }
+    })
   } else {
     void serveStatic(res, url.pathname)
   }
@@ -1521,6 +1556,17 @@ server.on('upgrade', (req, socket) => {
   socket.on('error', () => {
     sockets.delete(socket)
   })
+})
+
+// Last resort. Staying up with a logged error beats exiting: a mock that
+// disappears takes the rest of the lane with it and reports the failure
+// against whichever spec was unlucky, while a logged one names itself in the
+// webServer output.
+process.on('uncaughtException', (error) => {
+  console.error('mock backend: uncaught exception', error)
+})
+process.on('unhandledRejection', (error) => {
+  console.error('mock backend: unhandled rejection', error)
 })
 
 server.listen(PORT, '127.0.0.1', () => {

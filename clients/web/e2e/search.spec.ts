@@ -4,7 +4,12 @@ import {
   test,
   type Page,
 } from '@playwright/test'
-import { openRoom, ROOM_URL, shortcutForProject } from './helpers'
+import {
+  expectSendsSettled,
+  openRoom,
+  ROOM_URL,
+  shortcutForProject,
+} from './helpers'
 
 /**
  * Message search (ADR 0066, M-W10). A real browser earns its keep here: the
@@ -53,13 +58,13 @@ test('open with /, search, jump to the hit, and Back reopens the search', async 
   await composer.press('Enter')
   // Let the echo reconcile before the next send: a fill racing the
   // confirmation re-render can lose the keystrokes.
-  await expect(page.locator('.event-row.pending')).toHaveCount(0)
+  await expectSendsSettled(page)
   await composer.fill('unrelated chatter')
   await composer.press('Enter')
   await expect(page.locator('[data-event-id]').last()).toContainText(
     'unrelated chatter',
   )
-  await expect(page.locator('.event-row.pending')).toHaveCount(0)
+  await expectSendsSettled(page)
 
   // `/` never fires from the composer (it must type a slash); park focus on
   // the page first.
@@ -228,15 +233,32 @@ test('a jumped timeline pages forward back to the present', async ({
 
   // The slice is parked at the hit and pages forward from there — via the
   // IntersectionObserver sentinel (which can fire the moment the reveal
-  // scroll puts it in view) plus scrolling below. The "Load newer messages"
-  // affordance is transient by design, so assert the end state rather than
-  // racing the observer for a glimpse of the button.
+  // scroll puts it in view) plus scrolling below. The affordance is transient
+  // by design, so assert the end state rather than racing the observer for a
+  // glimpse of the button.
+  //
+  // Scroll the *scroller*, never the button. `scrollIntoViewIfNeeded()` on a
+  // locator that has just stopped matching does not fail fast: it waits for
+  // the element to come back, with no timeout of its own, so it outlives the
+  // retry it was meant to be part of and spends the whole test budget. The
+  // button is gone the instant the last forward page lands, which makes a
+  // `count()` that sees it and a scroll a moment later a check-then-act
+  // across exactly the window where it disappears. A trace of the failure has
+  // the count returning 1 at 1.44s and the scroll then hanging to the 30s
+  // timeout, over a page that had finished paging and retired the button.
+  // The scroller is always there and reveals the sentinel just as well.
+  //
+  // Matched structurally rather than by name: the button relabels itself
+  // "Loading…" while a page is in flight, so a name-based locator reads zero
+  // mid-flight and would let this pass before the paging it is waiting for
+  // has actually finished.
+  const scroller = page.locator('.timeline')
+  const loadNewer = page.locator('.timeline-list-shell ~ button.timeline-edge')
   await expect(async () => {
-    const button = page.getByRole('button', { name: 'Load newer messages' })
-    if (await button.count()) {
-      await button.scrollIntoViewIfNeeded()
-    }
-    expect(await button.count()).toBe(0)
+    await scroller.evaluate((element) => {
+      element.scrollTop = element.scrollHeight
+    })
+    expect(await loadNewer.count()).toBe(0)
   }).toPass()
   await expect(
     page.locator('[data-event-id]', { hasText: `pageme${NONCE} number 59` }),

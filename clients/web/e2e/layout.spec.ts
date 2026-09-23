@@ -1,16 +1,17 @@
 import { expect, test, type Locator } from '@playwright/test'
-import { SEED_IMAGE_ROOT_OFFSET_MS } from './fixture-times.mjs'
 import {
   ACCOUNT_ID,
   active,
-  expectLive,
   expectPaneCenterUncovered,
+  expectRoomReady,
+  expectSendsSettled,
   openRoom,
   reloadFromInsidePage,
   ROOM_ID,
   ROOM_URL,
   shown,
   signIn,
+  skipWithoutScrollbarColor,
   width,
 } from './helpers'
 
@@ -76,7 +77,7 @@ test('wide: sidebar beside the room-entry pane and timeline', async ({
   await expect(page.getByRole('heading', { name: 'Add a Room' })).toBeVisible()
 
   await page.goto(ROOM_URL)
-  await expectLive(page)
+  await expectRoomReady(page)
   await expect(page.locator('.shell-body')).toHaveClass(/mode-room/)
   expect(await shown(page, '.sidebar')).toBe('visible')
   expect(await shown(page, '.timeline')).toBe('visible')
@@ -143,6 +144,7 @@ test('wide: space scrollbar appears only while the pane is active', async ({
   await signIn(page)
   await page.setViewportSize({ width: 1536, height: 864 })
   await page.goto('/')
+  await skipWithoutScrollbarColor(page)
   const rail = page.locator('.space-picker')
 
   await expect(rail).toHaveCSS(
@@ -162,6 +164,7 @@ test('wide: room-list scrollbar appears only while the pane is active', async ({
   await signIn(page)
   await page.setViewportSize({ width: 1536, height: 864 })
   await page.goto('/')
+  await skipWithoutScrollbarColor(page)
   const list = page.locator('.room-list-pane')
 
   await expect(list).toHaveCSS(
@@ -187,6 +190,7 @@ test('space avatars retain an accessible button without button chrome', async ({
   await expect(space).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
   await space.focus()
   await expect(space).toHaveCSS('outline-style', 'solid')
+  await skipWithoutScrollbarColor(page)
   await expect(page.locator('.space-picker')).toHaveCSS(
     'scrollbar-color',
     'rgba(0, 0, 0, 0) rgba(0, 0, 0, 0)',
@@ -779,9 +783,7 @@ test('narrow: connection indicator sits immediately after the room name', async 
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
   await expect(page.locator('.topbar-room-title')).toContainText('E2E Room')
 
   const geometry = await page.evaluate(() => {
@@ -811,9 +813,7 @@ test('topbar stays pinned when the composer is focused', async ({ page }) => {
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
   // Live is the socket. The placeholder stays the generic "Message" until
   // the room list names this room; WebKit in a long suite loses that race.
   const composer = page.getByRole('textbox', { name: 'Message E2E Room' })
@@ -941,9 +941,7 @@ test('standalone iOS focus inset leaves only a small composer gap', async ({
     }
   })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
   await expect(page.locator('html')).toHaveCSS(
     '--app-standalone-composer-bottom-padding',
     '4px',
@@ -1027,9 +1025,7 @@ test('narrow: delayed thread badges preserve the bottom-pinned newest message', 
   })
 
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
   await expect(page.getByRole('button', { name: /3 replies/ })).toBeVisible()
 
   const geometry = await page.evaluate((body) => {
@@ -1059,9 +1055,7 @@ test('narrow: event timestamps do not wrap after mobile chrome settles', async (
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
 
   await expect(page.locator('.event-head time').first()).toBeVisible()
   await page.getByRole('textbox', { name: /^Message/ }).fill('typing')
@@ -1093,9 +1087,7 @@ test('narrow: message actions fit as icon buttons', async ({ page }) => {
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
 
   const body = `mobile action fit ${Date.now()}`
   await page.getByRole('textbox', { name: /^Message/ }).fill(body)
@@ -1136,15 +1128,16 @@ test('narrow: opening message actions does not move the sender or avatar', async
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
 
   const body = `stable header ${Date.now()}`
   await page.getByRole('textbox', { name: /^Message/ }).fill(body)
   await page.getByRole('button', { name: 'Send' }).click()
   const row = page.locator('.event-row', { hasText: body }).last()
   await expect(row).toBeVisible()
+  // A pending echo renders the row but carries no action bar, so the tap below
+  // needs the send confirmed, not merely painted.
+  await expectSendsSettled(page)
 
   const before = await rowHeaderGeometry(row)
   await tapMessageBody(row.locator('.event-body'))
@@ -1171,9 +1164,7 @@ test('narrow: tapping a second message dismisses the first action bar', async ({
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
 
   const first = `first action ${Date.now()}`
   const second = `second action ${Date.now()}`
@@ -1186,6 +1177,7 @@ test('narrow: tapping a second message dismisses the first action bar', async ({
   await page.getByRole('button', { name: 'Send' }).click()
   const row2 = page.locator('.event-row', { hasText: second }).last()
   await expect(row2).toBeVisible()
+  await expectSendsSettled(page)
 
   await tapMessageBody(row1.locator('.event-body'))
   await expect(row1.getByRole('button', { name: 'Reply' })).toBeVisible()
@@ -1218,9 +1210,7 @@ test('narrow: thread badge opens on the first tap', async ({ page }) => {
   )
 
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
 
   const badge = page.getByRole('button', { name: /2 replies/ })
   await expect(badge).toBeVisible()
@@ -1315,9 +1305,7 @@ test('narrow: opening a thread from the unread drawer uncovers the thread pane',
   })
 
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
   const button = page.getByRole('button', { name: 'Unread threads, 1' })
   await expect(button).toBeVisible()
   await button.click()
@@ -1355,9 +1343,7 @@ test('narrow: sparse room messages remain visible when composing', async ({
   )
 
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
   await page.getByRole('textbox', { name: /^Message/ }).focus()
   await page.evaluate(() => {
     document.documentElement.style.setProperty('--app-viewport-height', '520px')
@@ -1392,24 +1378,28 @@ test('narrow: sparse room messages remain visible when composing', async ({
 
 test('narrow: sparse thread messages remain visible when composing', async ({
   page,
+  request,
 }) => {
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
+  // Read the root's *real* timestamp rather than recomputing it. Issue #272
+  // anchored this reply to `Date.now() - SEED_IMAGE_ROOT_OFFSET_MS`, but that
+  // is a second `Date.now()`, in a second process, at a second moment: the
+  // mock seeds the root at its own boot, and this runs whenever the page asks
+  // for the thread. The two are minutes apart in a cross-browser invocation
+  // (webkit runs last, so its gap is the widest — which is why both webkit
+  // projects, and only they, failed together), and when those minutes straddle
+  // local midnight the root and the reply land on different calendar days and
+  // `ThreadPanel` draws a day separator between them. That separator is
+  // 23.05px tall, which is the whole of the 9.59px → 32.64px gap this test
+  // then measures. One clock, one instant, no window.
+  const rootTs = await seedImageRootTs(request)
   await page.route(/\/threads\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
     route.fulfill({
       json: {
         data: {
-          // `$seed-image:hs` (this thread's root, seeded in mock-server.mjs)
-          // is timestamped `Date.now() - SEED_IMAGE_ROOT_OFFSET_MS`. Anchor
-          // this reply to the same moment rather than a bare `Date.now()`,
-          // which can land on the next UTC calendar day and insert an
-          // unexpected day separator between root and reply (issue #272).
           events: [
-            sparseEvent(
-              '$sparse-thread',
-              'short thread',
-              Date.now() - SEED_IMAGE_ROOT_OFFSET_MS + 1_000,
-            ),
+            sparseEvent('$sparse-thread', 'short thread', besideRoot(rootTs)),
           ],
           next_cursor: null,
         },
@@ -1421,6 +1411,12 @@ test('narrow: sparse thread messages remain visible when composing', async ({
   await expect(
     page.getByRole('complementary', { name: 'Thread' }),
   ).toBeVisible()
+  // The root arrives with the room timeline, separately from the thread page,
+  // and `ThreadPanel` suppresses the separator while it is pending. Without
+  // this wait the measurement below lands on whichever side of that race the
+  // engine happened to be on — and passed, for years, mostly by measuring the
+  // root-pending layout instead of the one it means to describe.
+  await expect(page.locator('.thread-root-event')).toBeVisible()
   await expect(page.locator('.thread-list .event-row')).toBeVisible()
 
   const grouped = await page.evaluate(() => {
@@ -1476,9 +1472,7 @@ for (const viewport of [320, 640, 880, 1024, 1400, 1920]) {
     await signIn(page)
     await page.setViewportSize({ width: viewport, height: 900 })
     await page.goto(ROOM_URL)
-    await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-      'Live',
-    )
+    await expectRoomReady(page)
 
     const overflow = await page.evaluate(() => {
       const el = document.documentElement
@@ -1542,6 +1536,47 @@ async function mobileActionGeometry(actions: Locator) {
       visibleLabelCount: visibleLabels.length,
     }
   })
+}
+
+/**
+ * The seeded thread root's real `origin_ts`, straight from the mock.
+ *
+ * `$seed-image:hs` is stamped at the mock server's boot and served only in the
+ * room timeline (`/v1/events/:id` does not know it), so this is the only way to
+ * anchor a fixture to the same instant the root actually carries.
+ */
+async function seedImageRootTs(
+  request: import('@playwright/test').APIRequestContext,
+): Promise<number> {
+  const response = await request.get(
+    `/v1/rooms/${encodeURIComponent(ROOM_ID)}/timeline`,
+    { params: { account_id: ACCOUNT_ID } },
+  )
+  expect(response.ok()).toBe(true)
+  const body = (await response.json()) as {
+    data: { events: { event_id: string; origin_ts: number }[] }
+  }
+  const root = body.data.events.find(
+    (event) => event.event_id === '$seed-image:hs',
+  )
+  expect(
+    root,
+    'the seeded thread root should be in the room timeline',
+  ).toBeDefined()
+  return root!.origin_ts
+}
+
+/**
+ * A timestamp one second from `rootTs` that is guaranteed to share its local
+ * calendar day, so no day separator can come between them. Normally one second
+ * later; one second earlier in the single second per day where later would tip
+ * over midnight.
+ */
+function besideRoot(rootTs: number): number {
+  const later = rootTs + 1_000
+  return new Date(later).getDate() === new Date(rootTs).getDate()
+    ? later
+    : rootTs - 1_000
 }
 
 function sparseEvent(eventId: string, body: string, originTs = Date.now()) {

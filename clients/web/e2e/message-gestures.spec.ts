@@ -11,6 +11,75 @@ test.afterEach(async ({ request }) => {
   await request.post('/__e2e/reset-message-gestures')
 })
 
+type BurstWindow = typeof window & {
+  __reactionBursts?: { eventId: string; text: string }[]
+}
+
+/**
+ * Start recording every reaction burst the page inserts.
+ *
+ * `.message-reaction-burst` is a 450ms animation that unmounts itself
+ * (`MESSAGE_REACTION_BURST_MS` in `use-gesture-reaction.ts`), so asserting on
+ * its *presence* races that timer. The race is invisible when the assertion is
+ * the next thing after the gesture and lost when anything sits in between: the
+ * desktop double-click case has a `page.evaluate` round trip first, which on a
+ * loaded WebKit outlasts the burst, and the assertion then reports
+ * `element(s) not found` for feedback that did fire and has simply finished.
+ *
+ * Recording each burst as it is inserted turns that race into a fact. Install
+ * this before the gesture; the observer lives as long as the document.
+ */
+async function recordReactionBursts(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const store: { eventId: string; text: string }[] = []
+    ;(window as BurstWindow).__reactionBursts = store
+    const note = (element: HTMLElement) => {
+      store.push({
+        eventId:
+          element.closest('[data-event-id]')?.getAttribute('data-event-id') ??
+          '',
+        text: element.textContent ?? '',
+      })
+    }
+    new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (!(node instanceof HTMLElement)) {
+            continue
+          }
+          if (node.classList.contains('message-reaction-burst')) {
+            note(node)
+            continue
+          }
+          const nested = node.querySelector<HTMLElement>(
+            '.message-reaction-burst',
+          )
+          if (nested !== null) {
+            note(nested)
+          }
+        }
+      }
+    }).observe(document.body, { childList: true, subtree: true })
+  })
+}
+
+/** Assert a burst of `emoji` fired on `target`'s event, whenever it fired. */
+async function expectReactionBurst(
+  page: Page,
+  target: Locator,
+  emoji: string,
+): Promise<void> {
+  const eventId = await target.evaluate(
+    (element) =>
+      element.closest('[data-event-id]')?.getAttribute('data-event-id') ?? '',
+  )
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as BurstWindow).__reactionBursts ?? []),
+    )
+    .toContainEqual({ eventId, text: emoji })
+}
+
 async function touchPointer(
   target: Locator,
   type: 'pointerdown' | 'pointermove' | 'pointerup',
@@ -273,10 +342,10 @@ test('default message gestures arbitrate with preserved swipe-right navigation',
   let row = await sendMessage(page, body)
   let target = row.locator('.event-body')
 
+  await recordReactionBursts(page)
   await tap(target)
   await tap(target)
-  await expect(row.locator('.message-reaction-burst')).toHaveText('👍')
-  await expect(row.locator('.message-reaction-burst')).toBeVisible()
+  await expectReactionBurst(page, row, '👍')
   await expect(row.locator('.reaction-chip')).toContainText('👍')
   await expect(row).not.toHaveClass(/actions-open/)
 
@@ -442,6 +511,7 @@ test('gallery gestures target the loaded tile where they begin', async ({
     '.gallery-cell[data-event-id="$gallery-3:hs"]',
   )
   const lastImage = lastTile.locator('.gallery-cell-open')
+  await recordReactionBursts(page)
   await swipeLeft(lastImage, async () => {
     await expect(lastTile.locator('.gallery-cell-box')).toHaveCSS(
       'transform',
@@ -451,7 +521,7 @@ test('gallery gestures target the loaded tile where they begin', async ({
       'React',
     )
   })
-  await expect(lastTile.locator('.message-reaction-burst')).toHaveText('👍')
+  await expectReactionBurst(page, lastTile, '👍')
 })
 
 test('desktop preserves selection and supports timestamp and message double-clicks', async ({
@@ -508,11 +578,12 @@ test('desktop preserves selection and supports timestamp and message double-clic
     .toBe(body)
   await expect(row.getByRole('status')).toHaveText('Text copied')
 
+  await recordReactionBursts(page)
   await message.dblclick({ position: { x: 20, y: 10 } })
   expect(
     await page.evaluate(() => window.getSelection()?.toString().length ?? 0),
   ).toBe(0)
-  await expect(row.locator('.message-reaction-burst')).toHaveText('👍')
+  await expectReactionBurst(page, row, '👍')
   await expect(row.locator('.reaction-chip')).toContainText('👍')
   await expect(row).not.toHaveClass(/actions-open/)
 
