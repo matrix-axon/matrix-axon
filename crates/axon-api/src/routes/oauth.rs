@@ -355,8 +355,7 @@ pub async fn callback(
     };
     if let Some(error) = q.error {
         let failure = match error.as_str() {
-            "access_denied" => SignInFailure::ProviderDenied,
-            "user_cancelled_authorize" if provider_name == "apple" => SignInFailure::ProviderDenied,
+            error if provider.is_cancellation(error) => SignInFailure::ProviderDenied,
             "server_error" | "temporarily_unavailable" => SignInFailure::ProviderUnavailable,
             _ => SignInFailure::ProviderRejected,
         };
@@ -448,32 +447,25 @@ impl SignInFailure {
     }
 
     fn reason(self) -> &'static str {
-        match self {
-            Self::ProviderDenied => "provider_denied",
-            Self::ProviderRejected => "provider_rejected",
-            Self::ProviderUnavailable => "provider_unavailable",
-            Self::VerificationFailed => "verification_failed",
-            Self::IdentityNotBound => "identity_not_bound",
-        }
+        self.details().0
     }
 
     fn oauth_error(self) -> &'static str {
-        match self {
-            Self::ProviderDenied | Self::IdentityNotBound => "access_denied",
-            // Preserve the existing wire error; description supplies the action.
-            Self::ProviderUnavailable | Self::ProviderRejected | Self::VerificationFailed => {
-                "temporarily_unavailable"
-            }
-        }
+        self.details().1
     }
 
     fn description(self) -> &'static str {
+        self.details().2
+    }
+
+    /// One exhaustive mapping of diagnostic reason, wire error, and user action.
+    fn details(self) -> (&'static str, &'static str, &'static str) {
         match self {
-            Self::ProviderDenied => "Sign-in was canceled or denied by the provider. Start sign-in again when you are ready.",
-            Self::ProviderRejected => "The provider did not complete sign-in. Start a new sign-in attempt.",
-            Self::ProviderUnavailable => "Axon could not complete sign-in with the provider. Start a new sign-in attempt later. If this continues, contact the instance owner.",
-            Self::VerificationFailed => "Axon could not verify the sign-in credential. Start sign-in again. If this continues, contact the instance owner.",
-            Self::IdentityNotBound => "This account is not authorized to sign in to this Axon instance. Ask the instance owner to bind it, or use another account.",
+            Self::ProviderDenied => ("provider_denied", "access_denied", "Sign-in was canceled or denied by the provider. Start sign-in again when you are ready."),
+            Self::ProviderRejected => ("provider_rejected", "temporarily_unavailable", "The provider did not complete sign-in. Start a new sign-in attempt."),
+            Self::ProviderUnavailable => ("provider_unavailable", "temporarily_unavailable", "Axon could not complete sign-in with the provider. Start a new sign-in attempt later. If this continues, contact the instance owner."),
+            Self::VerificationFailed => ("verification_failed", "temporarily_unavailable", "Axon could not verify the sign-in credential. Start sign-in again. If this continues, contact the instance owner."),
+            Self::IdentityNotBound => ("identity_not_bound", "access_denied", "This account is not authorized to sign in to this Axon instance. Ask the instance owner to bind it, or use another account."),
         }
     }
 }
@@ -525,11 +517,7 @@ async fn fail_callback(
             if let Some(state) = &request.client_state {
                 url.query_pairs_mut().append_pair("state", state);
             }
-            if matches!(url.scheme(), "http" | "https") {
-                Ok(Redirect::to(url.as_str()).into_response())
-            } else {
-                Ok(Html(handoff_page_with_status(url.as_str(), false)).into_response())
-            }
+            Ok(respond_with_redirect_or_handoff(&url, false))
         }
         CallbackFlow::Bind(_, _) | CallbackFlow::Bootstrap(_, _) => {
             let retry = if matches!(flow, CallbackFlow::Bind(_, _)) {
@@ -579,10 +567,14 @@ pub async fn callback_response(mut response: Response) -> Response {
 /// the link is still there to click, where the redirect would simply have
 /// failed with a console message the user never sees.
 fn deliver_authorization_code(redirect_url: &url::Url) -> Response {
+    respond_with_redirect_or_handoff(redirect_url, true)
+}
+
+fn respond_with_redirect_or_handoff(redirect_url: &url::Url, success: bool) -> Response {
     if matches!(redirect_url.scheme(), "http" | "https") {
         return Redirect::to(redirect_url.as_str()).into_response();
     }
-    Html(handoff_page(redirect_url.as_str())).into_response()
+    Html(handoff_page_with_status(redirect_url.as_str(), success)).into_response()
 }
 
 /// The interstitial for a private-scheme client.
@@ -594,6 +586,7 @@ fn deliver_authorization_code(redirect_url: &url::Url) -> Response {
 /// attribute, and never enters a script context at all. `getAttribute` rather
 /// than `.href` so the browser's URL normalisation cannot alter a non-special
 /// scheme on the way through.
+#[cfg(test)]
 fn handoff_page(target: &str) -> String {
     handoff_page_with_status(target, true)
 }
@@ -1148,6 +1141,32 @@ mod handoff_tests {
     use super::{deliver_authorization_code, handoff_page};
     use axum::http::{header::LOCATION, StatusCode};
     use axum::response::IntoResponse;
+
+    #[tokio::test]
+    async fn failures_use_the_same_scheme_dispatch_without_success_copy() {
+        for target in [
+            "http://localhost/callback",
+            "https://client.test/callback",
+            "axon://oauth/callback",
+        ] {
+            let mut url = url::Url::parse(target).unwrap();
+            url.query_pairs_mut().append_pair("error", "access_denied");
+            let response = super::respond_with_redirect_or_handoff(&url, false);
+            if url.scheme() == "axon" {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert!(!response.headers().contains_key(LOCATION));
+                let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+                    .await
+                    .unwrap();
+                let page = String::from_utf8(bytes.to_vec()).unwrap();
+                assert!(page.contains("Sign-in did not complete"));
+                assert!(page.contains("error=access_denied"));
+            } else {
+                assert_eq!(response.status(), StatusCode::SEE_OTHER);
+                assert_eq!(response.headers()[LOCATION], url.as_str());
+            }
+        }
+    }
 
     /// Build the delivery URL the same way `callback` does, so the encoding
     /// under test is the encoding that actually ships.

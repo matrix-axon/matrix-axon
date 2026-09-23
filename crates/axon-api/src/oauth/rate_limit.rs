@@ -145,6 +145,10 @@ const KEYED_BODY_PARAMS: &[&str] = &["code", "refresh_token", "identity_token"];
 /// to whatever passes through).
 const MAX_KEY_PEEK_BYTES: usize = 64 * 1024;
 
+/// Installed by the callback router, before this middleware inspects the body.
+#[derive(Clone, Copy)]
+pub(crate) struct CallbackRateLimit;
+
 /// Axum middleware enforcing both buckets over every `/v1/oauth/*` request.
 /// Applied as a `route_layer` over the oauth sub-router, so it runs for every
 /// method/path under it uniformly. `oauth.enabled = false` (a `None` runtime)
@@ -200,12 +204,13 @@ async fn keyed_param_from_form_body(
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| ct.starts_with("application/x-www-form-urlencoded"));
+            .and_then(|ct| ct.parse::<mime::Mime>().ok())
+            .is_some_and(|ct| ct.essence_str() == "application/x-www-form-urlencoded");
     if !is_form_post {
         return Ok((None, req));
     }
 
-    let is_callback = req.uri().path().ends_with("/callback");
+    let is_callback = req.extensions().get::<CallbackRateLimit>().is_some();
     let (parts, body) = req.into_parts();
     let limit = if is_callback {
         super::MAX_CALLBACK_BYTES
@@ -238,6 +243,52 @@ fn too_many_requests() -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn form_media_type_and_route_metadata_control_key_selection() {
+        for content_type in [
+            "application/x-www-form-urlencoded",
+            "Application/X-WWW-Form-Urlencoded",
+            "APPLICATION/X-WWW-FORM-URLENCODED; charset=UTF-8",
+        ] {
+            for callback in [false, true] {
+                // The path must not decide semantics: only router metadata does.
+                let mut request = Request::post("/arbitrary/callback")
+                    .header(header::CONTENT_TYPE, content_type)
+                    .body(Body::from("state=flow&code=credential"))
+                    .unwrap();
+                if callback {
+                    request.extensions_mut().insert(CallbackRateLimit);
+                }
+                let (key, request) = keyed_param_from_form_body(request).await.unwrap();
+                assert_eq!(
+                    key.as_deref(),
+                    Some(if callback { "flow" } else { "credential" })
+                );
+                assert_eq!(
+                    axum::body::to_bytes(request.into_body(), 100)
+                        .await
+                        .unwrap(),
+                    "state=flow&code=credential"
+                );
+            }
+        }
+        for content_type in [
+            "text/plain",
+            "application/x-www-form-urlencoded-extra",
+            "invalid",
+        ] {
+            let request = Request::post("/callback")
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::from("code=credential"))
+                .unwrap();
+            assert!(keyed_param_from_form_body(request)
+                .await
+                .unwrap()
+                .0
+                .is_none());
+        }
+    }
 
     #[test]
     fn per_ip_bucket_exhausts_after_its_quota() {

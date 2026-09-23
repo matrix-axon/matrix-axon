@@ -123,6 +123,10 @@ fn required<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, OidcErro
 
 #[async_trait::async_trait]
 impl OidcProvider for AppleProvider {
+    fn is_cancellation(&self, error: &str) -> bool {
+        matches!(error, "access_denied" | "user_cancelled_authorize")
+    }
+
     fn name(&self) -> &'static str {
         "apple"
     }

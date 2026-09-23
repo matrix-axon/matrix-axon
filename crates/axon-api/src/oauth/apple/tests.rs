@@ -32,6 +32,15 @@ fn provider() -> AppleProvider {
     .unwrap()
 }
 
+#[test]
+fn cancellation_vocabulary_is_owned_by_apple() {
+    let provider = provider();
+    assert!(provider.is_cancellation("access_denied"));
+    assert!(provider.is_cancellation("user_cancelled_authorize"));
+    assert!(!provider.is_cancellation("server_error"));
+    assert!(!provider.is_cancellation("unknown"));
+}
+
 async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

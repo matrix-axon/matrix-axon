@@ -136,6 +136,10 @@ impl TestOidcProvider {
 
 #[async_trait]
 impl OidcProvider for TestOidcProvider {
+    fn is_cancellation(&self, error: &str) -> bool {
+        error == "access_denied" || (self.name() == "apple" && error == "user_cancelled_authorize")
+    }
+
     fn name(&self) -> &'static str {
         self.name
     }

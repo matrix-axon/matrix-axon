@@ -483,7 +483,14 @@ async fn callback_post_state_is_rate_limited_even_with_a_different_query_state()
     let (app, _) = app_with_named_provider(store().await, None, "apple");
     for index in 0..11 {
         let request = Request::post(format!("/v1/oauth/apple/callback?state=decoy-{index}"))
-            .header("content-type", "application/x-www-form-urlencoded")
+            .header(
+                "content-type",
+                if index % 2 == 0 {
+                    "Application/X-WWW-Form-Urlencoded; charset=UTF-8"
+                } else {
+                    "application/x-www-form-urlencoded"
+                },
+            )
             .body(Body::from("state=same-flow&error=access_denied"))
             .unwrap();
         let response = app
@@ -492,6 +499,40 @@ async fn callback_post_state_is_rate_limited_even_with_a_different_query_state()
             .await
             .unwrap();
         assert_callback_headers(&response);
+        assert_eq!(
+            response.status(),
+            if index < 10 {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn token_post_key_is_rate_limited_across_content_type_casing() {
+    let (app, _) = app_with_named_provider(store().await, None, "apple");
+    for index in 0..11 {
+        let request = Request::post("/v1/oauth/token")
+            .header(
+                "content-type",
+                if index % 2 == 0 {
+                    "APPLICATION/X-WWW-FORM-URLENCODED; charset=UTF-8"
+                } else {
+                    "application/x-www-form-urlencoded"
+                },
+            )
+            .body(Body::from(
+                "grant_type=refresh_token&refresh_token=same-invalid-token&client_id=test-client",
+            ))
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(with_fake_connect_info(request))
+            .await
+            .unwrap();
         assert_eq!(
             response.status(),
             if index < 10 {

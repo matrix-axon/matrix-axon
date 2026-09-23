@@ -15,6 +15,7 @@ Userinfo, query strings, fragments, noncanonical URLs, and non-HTTPS callbacks a
 Set `client_id`, `team_id`, and `key_id` under `[oauth.providers.apple]`.
 Supply exactly one of `private_key` (PEM in protected configuration) or `private_key_path` (a regular PEM file, at most 16 KiB).
 On Unix the file must have owner-only permissions, for example `chmod 600`.
+On Windows, restrict the key file's ACL to the service identity and trusted administrators yourself; startup does not yet validate Windows ACLs ([tracked follow-up](https://github.com/matrix-axon/matrix-axon/issues/482)).
 Relative paths are resolved from the process working directory; use an absolute path when the service and CLI run from different directories.
 Key-file I/O errors report the error category and whether relative-path resolution applies, without printing the configured path or key.
 Then set both `oauth.enabled` and `oauth.providers.apple.enabled` to true.
@@ -45,6 +46,7 @@ TMPDIR=/opt/adam/tmp scripts/smoke-gate.sh server
 
 The database tests delete bootstrap-related rows and must never target a live Axon database.
 Tests cover GET regression behavior, cookie-free form POST, signed mock-provider exchanges, cancellation/retry, malformed and oversized input, provider/state/purpose checks, expiry, concurrent completion, per-state POST rate limiting, and transactional bootstrap token issuance.
+Mixed-case form Content-Types and charset parameters use the same per-key rate limits on callback and token endpoints.
 The smoke command needs Docker and creates its own local stack.
 The generated web schema changes mechanically; no client behavior or demo scene changes are included.
 Server-rendered callback failure pages are covered by the HTTP tests, not a live-provider demo recording.

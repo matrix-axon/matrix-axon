@@ -95,6 +95,11 @@ pub trait OidcProvider: Send + Sync {
     /// references it.
     fn name(&self) -> &'static str;
 
+    /// Recognize cancellation without exposing the provider's raw error text.
+    fn is_cancellation(&self, error: &str) -> bool {
+        error == "access_denied"
+    }
+
     /// Build the URL axon redirects the browser to, starting Path A's
     /// upstream leg. `state`/`nonce` are axon's own CSRF-binding values for
     /// this leg (distinct from the client's own `state`, which axon tracks

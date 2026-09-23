@@ -543,7 +543,7 @@ pub struct OauthProvidersConfig {
 
 /// Config shared by Google and Microsoft — both are plain discovery-doc-driven
 /// OIDC providers (`GenericOidcProvider`).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct GenericOauthProviderConfig {
     /// Whether this provider is wired up. Defaults to `false`.
     #[serde(default)]
@@ -560,6 +560,20 @@ pub struct GenericOauthProviderConfig {
     /// `sync.store_key`: nothing to recover, must stay cheap to read.
     #[serde(default)]
     pub client_secret: Option<String>,
+}
+
+impl std::fmt::Debug for GenericOauthProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GenericOauthProviderConfig")
+            .field("enabled", &self.enabled)
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 /// Credentialed Sign in with Apple browser settings.
@@ -1168,12 +1182,18 @@ mod tests {
         .unwrap();
         config.oauth.providers.apple.private_key = Some("PRIVATE_SENTINEL".into());
         config.oauth.providers.apple.private_key_path = Some("PATH_SENTINEL".into());
+        config.oauth.providers.google.client_secret = Some("GOOGLE_SECRET_SENTINEL".into());
+        config.oauth.providers.microsoft.client_secret = Some("MICROSOFT_SECRET_SENTINEL".into());
         for output in [
             format!("{:?}", config.oauth.providers.apple),
+            format!("{:?}", config.oauth.providers.google),
+            format!("{:?}", config.oauth.providers.microsoft),
             format!("{:#?}", config),
         ] {
             assert!(!output.contains("PRIVATE_SENTINEL"));
             assert!(!output.contains("PATH_SENTINEL"));
+            assert!(!output.contains("GOOGLE_SECRET_SENTINEL"));
+            assert!(!output.contains("MICROSOFT_SECRET_SENTINEL"));
             assert!(output.contains("[REDACTED]"));
         }
     }

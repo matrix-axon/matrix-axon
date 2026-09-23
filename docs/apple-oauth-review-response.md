@@ -33,13 +33,26 @@ All changes remain in the server silo except documentation and the mechanically 
 - **Transaction cleanup:** explicitly roll back the missing-identity branch of unbind.
 - **Bootstrap separation:** reject the reserved bootstrap client in ordinary login even if operator configuration registers it; add a regression test.
 
-## Verification
+## PR review follow-up
+
+- Parse form Content-Type using the same MIME rules as the handler; mixed case and charset parameters cannot bypass per-key throttling.
+  Callback and token endpoint regression tests exercise the router and limiter together.
+- Explicit callback router metadata selects the state field and callback body cap; URL suffixes no longer select security policy.
+- Redact Google/Microsoft client secrets in direct and nested configuration Debug output, with sentinel tests.
+- Share redirect-versus-handoff dispatch between success and failure, delegate cancellation vocabulary to `OidcProvider`, and keep failure reason/error/description in one exhaustive table.
+- Initialize independent Apple/Google/Microsoft providers concurrently and clone one shared HTTP client for their connection pools.
+- Defer Windows key-file ACL validation and any genuinely shared secret-file primitives to [issue 482](https://github.com/matrix-axon/matrix-axon/issues/482).
+  `init::write_secure` writes and mutates permissions; it is not a bounded reader or an ACL validator and must not be called on operator-owned signing keys during startup.
+  The operator guide now states the Windows limitation explicitly.
+
+## Verification commands
 
 Use the commands in [the verification guide](apple-oauth-browser.md#verification-guide), plus:
 
 ```sh
 cargo test -p axon-api --lib auth::tests
 cargo test -p axon-api --lib routes::oauth
+cargo test -p axon-server oauth_runtime_tests
 pnpm --dir clients/web check:api
 ```
 

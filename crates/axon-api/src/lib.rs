@@ -474,6 +474,7 @@ pub fn router(state: AppState) -> Router {
             oauth_state.clone(),
             oauth::rate_limit::rate_limit,
         ))
+        .layer(axum::Extension(oauth::rate_limit::CallbackRateLimit))
         // Outermost: also harden responses returned early by the limiter.
         .layer(axum::middleware::map_response(
             routes::oauth::callback_response,

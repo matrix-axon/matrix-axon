@@ -122,6 +122,13 @@ async fn bind(store: &Store, config: &Config, provider: &str) -> anyhow::Result<
 pub(crate) async fn apple_provider(
     config: &axon_core::OauthConfig,
 ) -> anyhow::Result<axon_api::AppleProvider> {
+    apple_provider_with_http(config, axon_api::oauth_http_client()).await
+}
+
+pub(crate) async fn apple_provider_with_http(
+    config: &axon_core::OauthConfig,
+    http: reqwest::Client,
+) -> anyhow::Result<axon_api::AppleProvider> {
     use tokio::io::AsyncReadExt;
     const MAX_KEY_BYTES: usize = 16 * 1024;
     let apple = &config.providers.apple;
@@ -200,7 +207,7 @@ pub(crate) async fn apple_provider(
             "set exactly one of Apple private_key (at most 16 KiB) or private_key_path"
         ),
     };
-    axon_api::AppleProvider::new(axon_api::oauth_http_client(), apple, &pem)
+    axon_api::AppleProvider::new(http, apple, &pem)
         .map_err(|_| anyhow::anyhow!("invalid Apple provider credentials"))
 }
 
