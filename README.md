@@ -17,6 +17,13 @@ Two reference clients consume that same open, versioned `/v1/` API today — [`a
 Check out our [client parity](docs/client-parity.md) document for the current implementation status of these clients and future roadmap.
 And because Axon can be self-hosted on your own hardware or cloud instance rather than a SaaS holding your decrypted history, it's working toward a single-command setup that works painlessly on Linux, MacOS, or Windows: a Docker Compose stack that brings up Postgres, Axon, and the web client behind one front door, with Caddy handling TLS and a Tailscale profile for private remote access already built in.
 
+## Download
+
+- [Latest release](https://github.com/matrix-axon/matrix-axon/releases/latest): includes Linux, MacOS, and Windows builds for server and both clients (desktop and terminal)
+- [Full client/server Docker stack](#user-quick-start-with-docker)
+- Get an iOS TestFlight beta build by posting in [#axon-developer:bostoncoop.net](https://matrix.to/#/%23axon-developer%3Abostoncoop.net)
+- Android build coming soon
+
 ## See it
 
 [![axon-tui rendering a seeded demo world: a room list, a photo timeline with inline terminal graphics, and a search across rooms](docs/img/tui-demo-poster.png)](https://matrix-axon.github.io/matrix-axon/demo.html#tui)
