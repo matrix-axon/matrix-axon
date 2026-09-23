@@ -25,7 +25,7 @@ The developer does not collect any information from you or about your use of thi
 
 To function, the app stores some data locally on your device, none of which is ever sent to the developer:
 
-- **Authentication credentials** for the Axon server you configure (e.g. an access token), stored using your device's secure storage (such as the OS keychain).
+- **Authentication credentials** for the Axon server you configure (e.g. an access token), stored locally in the app's storage.
 - **A local cache** of messages, room state, and media, used to make the app responsive and to support offline viewing.
   This cache mirrors data already held by your Axon server and homeserver account.
 - **Optional, on-device performance diagnostics**, if you enable this setting.
