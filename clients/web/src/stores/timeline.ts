@@ -376,14 +376,23 @@ export function createTimelineStore(
   /** Whether more arrived than `LIVE_BUFFER_LIMIT` was willing to hold. */
   let liveBufferOverflowed = false
   /**
-   * Whether a slice-replacing load has ever begun.
+   * How many head loads are in flight.
    *
-   * `loading` starts true on a cold store and means "nothing loaded yet",
-   * which is not the same as "a page is on its way". Buffering on the flag
-   * alone would hold a frame forever for a store nobody ever loads — and
-   * `ingestLive` on such a store is a supported path, not a mistake.
+   * Deliberately *not* the `loading` signal. That signal is the timeline's
+   * placeholder — "nothing to show" — and the two are not the same question.
+   * It starts true on a cold store nobody has loaded yet, and `refreshHead`
+   * never raises it at all, on purpose: doing so blanked the timeline on
+   * every reconnect. Gating the buffer on it therefore both held frames
+   * forever for a store with no load coming, and missed the reconnect and
+   * re-entry paths entirely, where `foldHead` can replace a disjoint slice
+   * and drop exactly the frame the buffer exists to keep (review on #465).
+   *
+   * A count rather than a flag because these overlap: a sibling head load, or
+   * the overflow re-read below, can be in flight while another still is. The
+   * buffer drains when the last one lands, so the replay always meets a
+   * settled slice.
    */
-  let loadStarted = false
+  let loadsInFlight = 0
   const collapsedRelationTargets = new Map<string, string>()
 
   /**
@@ -407,10 +416,17 @@ export function createTimelineStore(
     }
   }
 
-  /** Release the slice, then hand it whatever arrived while it was held. */
-  function finishLoading(): void {
-    loading.value = false
-    flushPendingLive()
+  /** Mark a head load in flight, holding live frames until it lands. */
+  function beginLoad(): void {
+    loadsInFlight += 1
+  }
+
+  /** Release one load, and replay what it held once it was the last. */
+  function endLoad(): void {
+    loadsInFlight = Math.max(0, loadsInFlight - 1)
+    if (loadsInFlight === 0) {
+      flushPendingLive()
+    }
   }
 
   /**
@@ -604,7 +620,17 @@ export function createTimelineStore(
     // does not come through here: raising `loading` there blanked the
     // timeline on every reconnect (see `refreshHead`).
     loading.value = true
-    loadStarted = true
+    beginLoad()
+    try {
+      return await replaceSliceInner(query)
+    } finally {
+      endLoad()
+    }
+  }
+
+  async function replaceSliceInner(query: {
+    at_ts?: number
+  }): Promise<HeadLoadOutcome> {
     const generation = ++sliceGeneration
     const head = query.at_ts === undefined
     if (!head) {
@@ -623,7 +649,7 @@ export function createTimelineStore(
         // A sibling head painted first, and the reader may already be
         // scrolling it: fold this page in as a gap-fill would, not replace.
         const outcome = foldHead(page, generation)
-        finishLoading()
+        loading.value = false
         return outcome
       }
       events.value = page.events
@@ -638,13 +664,13 @@ export function createTimelineStore(
         headGeneration = generation
       }
       resolveReplyTargets(page.events)
-      finishLoading()
+      loading.value = false
       return 'applied'
     }
     // A superseding replacement owns the flag now; racing it here would
     // unveil the stale slice while the newer page is still in flight.
     if (generation === sliceGeneration) {
-      finishLoading()
+      loading.value = false
     }
     return page === null ? 'failed' : 'superseded'
   }
@@ -655,7 +681,19 @@ export function createTimelineStore(
     anchor: ((event: EventDto) => boolean) | undefined,
   ): Promise<void> {
     loading.value = true
-    loadStarted = true
+    beginLoad()
+    try {
+      await replaceSliceForDateInner(startTs, endTs, anchor)
+    } finally {
+      endLoad()
+    }
+  }
+
+  async function replaceSliceForDateInner(
+    startTs: number,
+    endTs: number,
+    anchor: ((event: EventDto) => boolean) | undefined,
+  ): Promise<void> {
     const generation = ++sliceGeneration
     parkedGeneration = generation
     let page = await fetchPage({ at_ts: endTs })
@@ -678,7 +716,7 @@ export function createTimelineStore(
       resolveReplyTargets(page.events)
     }
     if (generation === sliceGeneration) {
-      finishLoading()
+      loading.value = false
     }
   }
 
@@ -735,6 +773,18 @@ export function createTimelineStore(
   /// deliberate no-op on a parked slice below — which a caller cannot otherwise
   /// tell apart from success, since the no-op leaves every signal untouched.
   async function refreshHead(): Promise<HeadLoadOutcome> {
+    // Counts as in flight even though it never raises `loading`: the frames
+    // that arrive during its fetch are exactly the ones `foldHead` can drop
+    // when the page it brings back is disjoint from a cache-restored slice.
+    beginLoad()
+    try {
+      return await refreshHeadInner()
+    } finally {
+      endLoad()
+    }
+  }
+
+  async function refreshHeadInner(): Promise<HeadLoadOutcome> {
     const generation = sliceGeneration
     const page = await fetchPage({})
     if (page === null) {
@@ -742,7 +792,7 @@ export function createTimelineStore(
       // nothing else will. After `resumeAtHead` the flag can belong to a
       // discarded jump. Never under a jump still in flight.
       if (generation === sliceGeneration && parkedGeneration < generation) {
-        finishLoading()
+        loading.value = false
       }
       return 'failed'
     }
@@ -769,7 +819,7 @@ export function createTimelineStore(
     const painted = (): HeadLoadOutcome => {
       headGeneration = Math.max(headGeneration, issued)
       if (parkedGeneration < issued) {
-        finishLoading()
+        loading.value = false
       }
       return 'applied'
     }
@@ -999,7 +1049,7 @@ export function createTimelineStore(
     if (event.account_id !== accountId || event.room_id !== roomId) {
       return
     }
-    if (loading.value && loadStarted) {
+    if (loadsInFlight > 0) {
       // Held, not handled: see `pendingLive`. Deferring the whole frame —
       // reactions and redactions included — keeps one rule instead of a
       // per-branch one, and the replay runs this same function once the
