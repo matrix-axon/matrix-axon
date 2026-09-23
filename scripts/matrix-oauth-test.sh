@@ -148,7 +148,11 @@ export MATRIX_OAUTH_USER_ID='@alice:localhost'
 export MATRIX_OAUTH_TRUSTED_DEVICE_ID="$trusted_device_id"
 export MATRIX_OAUTH_HARNESS_RUN_DIR="$run_dir/harness"
 
-echo "matrix-oauth: running $mode lane against Synapse ${synapse_image##*:}, MAS ${mas_image##*:}, and matrix-sdk 0.18"
+# Read the SDK version out of the lockfile rather than repeating it here. The
+# banner names what the run actually exercised, and a hand-written version is
+# wrong the first time anyone bumps the dependency -- as it was, for one.
+matrix_sdk_version=$(awk '/^name = "matrix-sdk"$/ { getline; gsub(/^version = "|"$/, "", $0); print; exit }' "$workspace_root/Cargo.lock")
+echo "matrix-oauth: running $mode lane against Synapse ${synapse_image##*:}, MAS ${mas_image##*:}, and matrix-sdk ${matrix_sdk_version:-unknown}"
 "$target_bin/axon-smoke-matrix-oauth" "$mode" &
 harness_pid=$!
 wait "$harness_pid"

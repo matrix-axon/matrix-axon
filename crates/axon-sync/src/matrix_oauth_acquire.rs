@@ -725,7 +725,7 @@ impl MatrixOAuthAcquireEngine {
                     Some(LoginProgress::EstablishingSecureChannel(QrProgress { check_code })) => {
                         flow.update(|state| {
                             state.set_stage(MatrixOAuthAcquireStage::CheckCodeToDisplay);
-                            state.check_code = Some(format!("{:02}", check_code.to_digit()));
+                            state.check_code = Some(format!("{:02}", check_code));
                         });
                     }
                     Some(LoginProgress::WaitingForToken { user_code }) => {

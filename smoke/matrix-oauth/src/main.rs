@@ -10,6 +10,7 @@ use std::{
     fs::OpenOptions,
     future::{Future, IntoFuture},
     path::{Path, PathBuf},
+    pin::Pin,
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
@@ -569,17 +570,29 @@ struct GrantFlow {
 
 trait FlowState {
     fn stage(&self) -> &str;
+    /// The flow's terminal `error_code`, if it failed. Naming it in the bail
+    /// below is the difference between "something went wrong" and a diagnosis:
+    /// the run directory holding Axon's log is deleted when the lane exits.
+    fn error_code(&self) -> Option<&str>;
 }
 
 impl FlowState for AcquireFlow {
     fn stage(&self) -> &str {
         &self.stage
     }
+
+    fn error_code(&self) -> Option<&str> {
+        self.error_code.as_deref()
+    }
 }
 
 impl FlowState for GrantFlow {
     fn stage(&self) -> &str {
         &self.stage
+    }
+
+    fn error_code(&self) -> Option<&str> {
+        self.error_code.as_deref()
     }
 }
 
@@ -869,6 +882,16 @@ async fn drive_peer_grant(
     let mut progress = Box::pin(grant.subscribe_to_progress());
     let mut future = grant.into_future();
     let mut progress_ended = false;
+    // Everything the harness does once the grant is waiting for authorization,
+    // driven by this `select!` rather than run inline in the progress arm. The
+    // SDK sends `m.login.protocol_accepted` only on the poll that follows
+    // `confirm()`, and the new device cannot reach `waiting_for_authorization`
+    // until that message arrives -- so waiting for the stage inline would
+    // starve the one future that can deliver it, and Axon would sit on the
+    // rendezvous channel until it expired. The earlier stage waits are inline
+    // because nothing they wait on depends on the grant future being polled.
+    let mut authorizing: Pin<Box<dyn Future<Output = Result<()>> + '_>> =
+        Box::pin(std::future::pending());
     let deadline = tokio::time::Instant::now() + FLOW_TIMEOUT;
     loop {
         tokio::select! {
@@ -878,6 +901,10 @@ async fn drive_peer_grant(
                     (Approval::Consent, false) => Err(anyhow!("trusted SDK grant failed")),
                     (Approval::Reject, true) => Err(anyhow!("rejected authorization unexpectedly completed")),
                 };
+            }
+            result = &mut authorizing => {
+                result?;
+                authorizing = Box::pin(std::future::pending());
             }
             update = progress.next(), if !progress_ended => match update {
                 Some(GrantLoginProgress::Starting | GrantLoginProgress::SyncingSecrets) => {}
@@ -894,14 +921,25 @@ async fn drive_peer_grant(
                         .map_err(|_| anyhow!("trusted-device check-code submission timed out"))?
                         .map_err(|_| anyhow!("submit trusted-device check code failed"))?;
                 }
-                Some(GrantLoginProgress::WaitingForAuth { verification_uri }) => {
-                    let state = wait_acquire_stage(api, flow_id, "waiting_for_authorization", FLOW_TIMEOUT).await?;
-                    let user_code = state.authorization_user_code.ok_or_else(|| anyhow!("acquire flow omitted its authorization user code"))?;
-                    secrets.remember(user_code);
-                    let uri = verification_uri.to_string();
-                    secrets.remember(uri.clone());
-                    assert_waits_for_approval(|| api.acquire(flow_id), "acquire").await?;
-                    approver.act(&uri, approval).await?;
+                Some(GrantLoginProgress::WaitingForAuth { verification_uri, continuation_sender }) => {
+                    // 0.19 parks the grant here until the app confirms it is ready to
+                    // proceed; 0.18 went on by itself. Confirming is what releases
+                    // `m.login.protocol_accepted`, so it happens immediately -- the rest
+                    // is handed to the `authorizing` branch above, which is polled
+                    // alongside the grant future.
+                    tokio::time::timeout(HTTP_TIMEOUT, continuation_sender.confirm())
+                        .await
+                        .map_err(|_| anyhow!("trusted-device continuation confirmation timed out"))?
+                        .map_err(|_| anyhow!("confirm trusted-device continuation failed"))?;
+                    authorizing = Box::pin(async move {
+                        let state = wait_acquire_stage(api, flow_id, "waiting_for_authorization", FLOW_TIMEOUT).await?;
+                        let user_code = state.authorization_user_code.ok_or_else(|| anyhow!("acquire flow omitted its authorization user code"))?;
+                        secrets.remember(user_code);
+                        let uri = verification_uri.to_string();
+                        secrets.remember(uri.clone());
+                        assert_waits_for_approval(|| api.acquire(flow_id), "acquire").await?;
+                        approver.act(&uri, approval).await
+                    });
                 }
                 Some(GrantLoginProgress::Done) | None => progress_ended = true,
             },
@@ -1009,7 +1047,15 @@ where
             FlowWait::Stage(wanted) if state.stage() == wanted => return Ok(state),
             FlowWait::Terminal if terminal => return Ok(state),
             FlowWait::Stage(_) if terminal => {
-                bail!("{flow} flow reached an unexpected terminal stage");
+                bail!(
+                    "{flow} flow reached an unexpected terminal stage: {} ({}), while waiting for {}",
+                    state.stage(),
+                    state.error_code().unwrap_or("no_error_code"),
+                    match target {
+                        FlowWait::Stage(wanted) => wanted,
+                        FlowWait::Terminal => "terminal",
+                    }
+                );
             }
             FlowWait::Stage(_) | FlowWait::Terminal => {}
         }
