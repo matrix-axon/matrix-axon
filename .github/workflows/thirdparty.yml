@@ -26,8 +26,10 @@ on:
       # The graph itself.
       - 'Cargo.toml'
       - 'Cargo.lock'
-      # A new workspace member changes the graph without touching the root
-      # manifest, since members are globbed.
+      # The root Cargo.toml [morkspace] members is an explicit array, not 
+      # a glob, so adding any new member will modify that file and 
+      # trigger a check. The globs below catch dependency bumps in these
+      # manifests that don't change the root file.
       - 'crates/*/Cargo.toml'
       - 'clients/tui/Cargo.toml'
       - 'smoke/*/Cargo.toml'
