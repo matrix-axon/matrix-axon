@@ -251,6 +251,12 @@ For any non-local deployment, place a TLS-terminating reverse proxy (Caddy, ngin
 Axon refuses to start on a non-loopback address over plain HTTP unless `AXON_SERVER__ALLOW_INSECURE_BIND=true` is explicitly set.
 The `caddy` profile in the full `deploy/` stack automates this — see [deploy/README.md](deploy/README.md).
 
+### Privacy Policy
+
+Axon does not collect, store, transmit, or share any personal information, usage data, or analytics on behalf of its developer. This app is a client for a self-hosted Axon server that you (or someone you trust) run and control. All of your data — messages, media, contacts, and account credentials — is exchanged directly between this app and the Axon server address you configure. The developer of this app has no server, database, or analytics service that receives your data, and no ability to access it.
+
+Read the full [privacy policy](https://github.com/matrix-axon/matrix-axon/blob/main/docs/PRIVACY_POLICY.md).
+
 ### Third-Party Open Source Components
 
 This project uses several third-party open-source components, described in [THIRDPARTY.md](THIRDPARTY.md).
