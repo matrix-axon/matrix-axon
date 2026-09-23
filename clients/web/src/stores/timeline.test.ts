@@ -1206,6 +1206,51 @@ describe('ingestLive', () => {
     ])
   })
 
+  it('keeps a live event that arrives while a head refresh is in flight', async () => {
+    // The re-entry path (ADR 0085's timeline cache): `loadLatest` sees a
+    // populated slice and calls `refreshHead`, which deliberately never raises
+    // `loading` — blanking the timeline on every reconnect is what that
+    // avoids. So gating the buffer on `loading` missed this path entirely, and
+    // a frame arriving during the refresh was dropped by `foldHead`'s
+    // disjoint-replace exactly as it was on the cold path (review on #465).
+    server.use(
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: { events: [event('$stale', 100)], next_cursor: null },
+        }),
+      ),
+    )
+    const store = makeStore()
+    await store.loadLatest()
+    expect(store.events.value.map((e) => e.event_id)).toEqual(['$stale'])
+
+    // Now the head has moved on entirely: the refreshed page shares nothing
+    // with the loaded slice, which is what sends `foldHead` down its
+    // wholesale-replace branch.
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(TIMELINE_PATH, async () => {
+        await held
+        return HttpResponse.json({
+          // Server order: newest first.
+          data: { events: [event('$fresh', 300)], next_cursor: null },
+        })
+      }),
+    )
+    const refresh = store.loadLatest()
+    store.ingestLive(event('$live', 400))
+    release()
+    await refresh
+
+    expect(store.events.value.map((e) => e.event_id)).toEqual([
+      '$fresh',
+      '$live',
+    ])
+  })
+
   it('does not duplicate a held event the head page turns out to carry', async () => {
     let release = (): void => {}
     const held = new Promise<void>((resolve) => {
