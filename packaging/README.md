@@ -12,7 +12,13 @@ packaging/package.sh
 ```
 
 Artifacts land in `target/nfpm/`.
-CI (`.github/workflows/package.yml`) does the same on `ubuntu-22.04` so Bookworm/Jammy can run the glibc binary.
+Set `ARCH=arm64` for aarch64 packages.
+
+CI (`.github/workflows/package.yml`) builds amd64 on `ubuntu-22.04` and arm64 on
+`ubuntu-22.04-arm` so Bookworm/Jammy can run the glibc-2.35 binary.
+On `v*` / `beta-*` / `alpha-*` tags it attaches the `.deb` and `.rpm` files to
+the GitHub Release (alongside the zip archives from `cross-build.yml`).
+The `.deb` version is `Cargo.toml`'s `version`, not the git tag.
 
 ## First install (local Postgres)
 

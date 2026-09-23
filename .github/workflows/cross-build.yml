@@ -359,6 +359,11 @@ jobs:
     name: Publish GitHub Release
     needs: [windows, macos, linux]
     if: ${{ !failure() && !cancelled() && github.ref_type == 'tag' }}
+    # Same group as package.yml's release job: serialize first-time
+    # GitHub Release creates for a tag. Builds still run in parallel.
+    concurrency:
+      group: github-release-${{ github.ref }}
+      cancel-in-progress: false
 
     permissions:
       contents: write
