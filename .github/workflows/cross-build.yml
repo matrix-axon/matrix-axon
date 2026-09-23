@@ -50,6 +50,10 @@ on:
         description: "Build Linux binaries"
         type: boolean
         default: true
+      homebrew:
+        description: "Publish Homebrew formula"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -396,3 +400,23 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: release-binaries/*
+
+  # Checksums the macOS and Linux zips just attached to the GitHub Release
+  # and pushes Formula/axon-server.rb to matrix-axon/homebrew-tap.
+  # Does not upload release assets, so it stays out of the github-release
+  # concurrency group. needs: release is what makes the zips exist first.
+  homebrew-tap:
+    name: Publish Homebrew formula
+    needs: release
+    if: ${{ github.event.inputs.homebrew != 'false' || (github.ref_type == 'tag' && needs.release.result == 'success')  }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Publish formula to matrix-axon/homebrew-tap
+        env:
+          TAG: ${{ github.ref_name }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: packaging/homebrew/publish-tap.sh

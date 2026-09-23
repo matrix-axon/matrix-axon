@@ -31,16 +31,17 @@ permissions:
 
 jobs:
   shellcheck:
-    name: Shellcheck maintainer scripts
+    name: Shellcheck packaging scripts
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
       - name: Shellcheck
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends shellcheck
+          sudo apt-get install -y --no-install-recommends shellcheck ruby
           shellcheck -s sh packaging/scripts/postinst.sh packaging/scripts/prerm.sh packaging/scripts/postrm.sh
-          shellcheck packaging/package.sh
+          shellcheck packaging/package.sh packaging/homebrew/render-formula.sh packaging/homebrew/publish-tap.sh packaging/homebrew/render-formula-test.sh
+          packaging/homebrew/render-formula-test.sh
 
   packages:
     name: .deb and .rpm (${{ matrix.arch }})
