@@ -34,9 +34,29 @@ import {
  * Deliberately *not* applied where the container side is `window.innerHeight`,
  * as in the thread-drawer and composer checks above: that is an integer, and the
  * question there is whether a pane runs off the bottom of the screen. A pixel of
- * slack is precisely what those tests exist to catch, so they stay strict.
+ * slack is precisely what those tests exist to catch, so they stay strict —
+ * strict to within `EDGE_SUBPIXEL_EPSILON_PX`, which is a different thing from
+ * a pixel of slack and is explained there.
  */
 const LAYOUT_EDGE_TOLERANCE_PX = 1
+
+/**
+ * Slack for a *float* measurement compared against an integer viewport edge.
+ *
+ * `getBoundingClientRect()` returns a float and the `env()`/`calc()` inset
+ * chain accumulates rounding through it. Since ADR 0105 gave each edge one
+ * inset owner, the composer lands *exactly* on the viewport bottom — which is
+ * the goal — and Firefox reports that as 844.0000305175781 against a viewport
+ * of 844. Thirty microns of a pixel is float noise, not an overhang; no engine
+ * can render it and no person can see it.
+ *
+ * A 64th of a pixel is below the smallest unit a layout engine works in
+ * (Firefox lays out in 60ths), so this cannot hide a pane that genuinely runs
+ * off the bottom — the thing those assertions exist to catch — while absorbing
+ * noise some 500x smaller than itself. It is emphatically not
+ * `LAYOUT_EDGE_TOLERANCE_PX`: a whole pixel there would defeat the test.
+ */
+const EDGE_SUBPIXEL_EPSILON_PX = 1 / 64
 
 /**
  * The two-pane layout (ADR 0062). Everything here is decided by CSS, so it can
@@ -439,8 +459,12 @@ test('standalone iOS thread composer stays on screen when keyboard is dismissed'
   })
 
   expect(geometry.boxSizing).toBe('border-box')
-  expect(geometry.drawerBottom).toBeLessThanOrEqual(geometry.viewportBottom)
-  expect(geometry.composerBottom).toBeLessThanOrEqual(geometry.viewportBottom)
+  expect(geometry.drawerBottom).toBeLessThanOrEqual(
+    geometry.viewportBottom + EDGE_SUBPIXEL_EPSILON_PX,
+  )
+  expect(geometry.composerBottom).toBeLessThanOrEqual(
+    geometry.viewportBottom + EDGE_SUBPIXEL_EPSILON_PX,
+  )
 })
 
 test('utility pages are full-width with no sidebar', async ({ page }) => {

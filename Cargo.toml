@@ -29,7 +29,12 @@ exclude = ["clients/web/src-tauri"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.86"
+# Dictated by the dependency graph, not by anything this workspace writes:
+# matrix-sdk 0.19 and its sibling crates declare `rust-version = "1.96"`, so
+# cargo refuses to build at all below that. Claiming 1.86 while the graph
+# needs 1.96 is a promise no checkout can keep -- `rust-toolchain.toml` pins
+# the toolchain the gate actually runs.
+rust-version = "1.96"
 license = "Apache-2.0"
 
 [workspace.dependencies]
@@ -73,10 +78,10 @@ include_dir = { version = "0.7" }
 fs4 = { version = "0.13" }
 
 # Matrix. Keep the SDK's default features (they carry its intended TLS/HTTP
-# stack — 0.18 exposes no standalone tls feature). Extra features are added at
+# stack — 0.19 exposes no standalone tls feature). Extra features are added at
 # the crate level.
-matrix-sdk    = { version = "0.18" }
-matrix-sdk-ui = { version = "0.18" }
+matrix-sdk    = { version = "0.19" }
+matrix-sdk-ui = { version = "0.19" }
 
 # Platform-standard data/config/cache directory resolution (XDG on Linux,
 # ~/Library on macOS, Known Folders on Windows) for the on-disk store defaults.

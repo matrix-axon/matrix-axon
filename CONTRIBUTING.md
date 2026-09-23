@@ -12,7 +12,7 @@ Take the first block plus whichever silo you plan to touch.
 **Always:**
 
 - **Rust, via [rustup](https://rustup.rs).**
-  Do not install a specific toolchain by hand — `rust-toolchain.toml` pins the version (1.95.0 today) along with `clippy` and `rustfmt`, and rustup installs it on the first `cargo` command in the checkout.
+  Do not install a specific toolchain by hand — `rust-toolchain.toml` pins the version (1.96.1 today) along with `clippy` and `rustfmt`, and rustup installs it on the first `cargo` command in the checkout.
 - **[`pre-commit`](https://pre-commit.com)**, which drives the pre-push gate.
   `pipx install pre-commit`, `uv tool install pre-commit`, `pip install --user pre-commit`, or `sudo apt install pre-commit`.
   `./scripts/setup-hooks.sh` refuses to run without it.

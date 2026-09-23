@@ -490,6 +490,7 @@ pub(crate) async fn build_matrix_oauth_acquire_client(
         | ClientBuildError::Http(_) => MatrixOAuthAcquireClientError::Upstream,
         ClientBuildError::MissingHomeserver
         | ClientBuildError::InvalidServerName
+        | ClientBuildError::WellKnownLookupDisabled
         | ClientBuildError::Url(_) => MatrixOAuthAcquireClientError::Configuration,
         ClientBuildError::SqliteStore(_) => MatrixOAuthAcquireClientError::LocalStorage,
     })

@@ -52,9 +52,7 @@ ignore = [
   # Each of these is unmaintained rather than vulnerable, and each arrives
   # through a dependency this repo does not choose. None can be resolved by a
   # lockfile edit here; all clear from above when the crate naming them moves.
-  { id = "RUSTSEC-2026-0247", reason = "bitmaps, via imbl <- eyeball-im <- matrix-sdk-ui" },
   { id = "RUSTSEC-2024-0436", reason = "paste, via sqlx-core" },
-  { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2, via aquamarine" },
   # RustSec's own entry says "No safe upgrade is available".
   { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile, via sqlx-core; no upgrade exists" },
 ]

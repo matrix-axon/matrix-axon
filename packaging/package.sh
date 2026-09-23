@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build axon-server .deb and .rpm via nFPM.
-# Usage: packaging/package.sh [deb|rpm|all]
+# Usage: ARCH=amd64|arm64 packaging/package.sh [deb|rpm|all]
 set -euo pipefail
 
 root=$(CDPATH="" cd -- "$(dirname "$0")/.." && pwd)

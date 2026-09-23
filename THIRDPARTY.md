@@ -3,18 +3,230 @@
 The following open-source components are used in this application.
 
 ## OVERVIEW
-- MIT License (used by 546 crates)
-- Apache License 2.0 (used by 26 crates)
-- Unicode License v3 (used by 20 crates)
-- Mozilla Public License 2.0 (used by 11 crates)
-- BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (used by 6 crates)
-- zlib License (used by 5 crates)
-- ISC License (used by 4 crates)
-- BSD 2-Clause &quot;Simplified&quot; License (used by 3 crates)
+- MIT License (used by 584 crates)
+- Apache License 2.0 (used by 27 crates)
+- Unicode License v3 (used by 21 crates)
+- Mozilla Public License 2.0 (used by 10 crates)
+- BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (used by 9 crates)
+- ISC License (used by 6 crates)
+- BSD 2-Clause &quot;Simplified&quot; License (used by 5 crates)
+- zlib License (used by 4 crates)
 - Community Data License Agreement Permissive 2.0 (used by 3 crates)
 - Boost Software License 1.0 (used by 1 crate)
 
 ## LICENSE DETAILS
+
+================================================================================
+## LICENSE: Apache License 2.0 (SPDX ID: Apache-2.0)
+### USED BY:
+  - nonzero_ext 0.3.0
+================================================================================
+
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      &quot;License&quot; shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      &quot;Licensor&quot; shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      &quot;Legal Entity&quot; shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      &quot;control&quot; means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      &quot;You&quot; (or &quot;Your&quot;) shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      &quot;Source&quot; form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      &quot;Object&quot; form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      &quot;Work&quot; shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      &quot;Derivative Works&quot; shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      &quot;Contribution&quot; shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, &quot;submitted&quot;
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as &quot;Not a Contribution.&quot;
+
+      &quot;Contributor&quot; shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a &quot;NOTICE&quot; text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an &quot;AS IS&quot; BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets &quot;[]&quot;
+      replaced with your own identifying information. (Don&#x27;t include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same &quot;printed page&quot; as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright 2018 Andreas Fuchs
+
+   Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+
+-----------------------
+
 
 ================================================================================
 ## LICENSE: Apache License 2.0 (SPDX ID: Apache-2.0)
@@ -863,7 +1075,7 @@ The following open-source components are used in this application.
 ================================================================================
 ## LICENSE: Apache License 2.0 (SPDX ID: Apache-2.0)
 ### USED BY:
-  - bytesize 2.4.2
+  - bytesize 2.7.0
 ================================================================================
                                  Apache License
                            Version 2.0, January 2004
@@ -1287,24 +1499,24 @@ limitations under the License.
 ================================================================================
 ## LICENSE: Apache License 2.0 (SPDX ID: Apache-2.0)
 ### USED BY:
-  - aws-lc-sys 0.42.0
-  - blake3 1.8.5
+  - aws-lc-sys 0.45.0
+  - blake3 1.8.7
   - constant_time_eq 0.4.2
   - datasketches 0.2.0
   - dunce 1.0.5
   - matrix-pickle-derive 0.2.3
   - matrix-pickle 0.2.3
-  - matrix-sdk-base 0.18.0
-  - matrix-sdk-common 0.18.0
-  - matrix-sdk-crypto 0.18.0
-  - matrix-sdk-sqlite 0.18.0
-  - matrix-sdk-store-encryption 0.18.0
-  - matrix-sdk-ui 0.18.0
-  - matrix-sdk 0.18.0
+  - matrix-sdk-base 0.19.1
+  - matrix-sdk-common 0.19.1
+  - matrix-sdk-crypto 0.19.1
+  - matrix-sdk-sqlite 0.19.1
+  - matrix-sdk-store-encryption 0.19.1
+  - matrix-sdk-ui 0.19.1
+  - matrix-sdk 0.19.1
   - ryu 1.0.23
   - serial2 0.2.37
   - sync_wrapper 1.0.2
-  - vodozemac 0.10.0
+  - vodozemac 0.11.0
 ================================================================================
 Apache License
 Version 2.0, January 2004
@@ -1387,34 +1599,192 @@ limitations under the License.
 ================================================================================
 ## LICENSE: BSD 2-Clause &quot;Simplified&quot; License (SPDX ID: BSD-2-Clause)
 ### USED BY:
-  - arrayref 0.3.9
+  - kamadak-exif 0.6.1
 ================================================================================
-Copyright (c) 2015 David Roundy &lt;roundyd@physics.oregonstate.edu&gt;
-All rights reserved.
+//
+// Copyright (c) 2016 KAMADA Ken&#x27;ichi.
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+// 1. Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright
+//    notice, this list of conditions and the following disclaimer in the
+//    documentation and/or other materials provided with the distribution.
+//
+// THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS &#x60;&#x60;AS IS&#x27;&#x27; AND
+// ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+// OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+// LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+// OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+// SUCH DAMAGE.
+//
 
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are
-met:
+// Macros for testing.
 
-1. Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
+macro_rules! assert_ok {
+    ($expr:expr, $value:expr) &#x3D;&gt; (
+        match $expr {
+            Ok(v) &#x3D;&gt; assert_eq!(v, $value),
+            r &#x3D;&gt; panic!(&quot;assertion failed: unexpected {:?}&quot;, r),
+        }
+    )
+}
 
-2. Redistributions in binary form must reproduce the above copyright
-   notice, this list of conditions and the following disclaimer in the
-   documentation and/or other materials provided with the
-   distribution.
+macro_rules! assert_pat {
+    ($expr:expr, $pat:pat) &#x3D;&gt; (
+        match $expr {
+            $pat &#x3D;&gt; {},
+            ref r &#x3D;&gt; panic!(&quot;assertion failed: unexpected {:?}&quot;, r),
+        }
+    )
+}
 
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-&quot;AS IS&quot; AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+macro_rules! assert_err_pat {
+    ($expr:expr, $variant:pat) &#x3D;&gt; (
+        match $expr {
+            Err($variant) &#x3D;&gt; {},
+            r &#x3D;&gt; panic!(&quot;assertion failed: unexpected {:?}&quot;, r),
+        }
+    )
+}
+
+// This macro is intended to be used with std::io::Error, but other
+// types with kind() will also work.
+macro_rules! assert_err_kind {
+    ($expr:expr, $kind:expr) &#x3D;&gt; (
+        match $expr {
+            Err(e) &#x3D;&gt; assert_eq!(e.kind(), $kind),
+            r &#x3D;&gt; panic!(&quot;assertion failed: unexpected {:?}&quot;, r),
+        }
+    )
+}
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: BSD 2-Clause &quot;Simplified&quot; License (SPDX ID: BSD-2-Clause)
+### USED BY:
+  - kamadak-exif 0.6.1
+================================================================================
+//
+// Copyright (c) 2016 KAMADA Ken&#x27;ichi.
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+// 1. Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright
+//    notice, this list of conditions and the following disclaimer in the
+//    documentation and/or other materials provided with the distribution.
+//
+// THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS &#x60;&#x60;AS IS&#x27;&#x27; AND
+// ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+// OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+// LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+// OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+// SUCH DAMAGE.
+//
+
+extern crate exif;
+
+use std::env;
+use std::fs::File;
+use std::io::BufReader;
+use std::path::{Path, PathBuf};
+
+fn main() {
+    for path in env::args_os().skip(1).map(PathBuf::from) {
+        if let Err(e) &#x3D; dump_file(&amp;path) {
+            println!(&quot;{}: {}&quot;, path.display(), e);
+        }
+    }
+}
+
+fn dump_file(path: &amp;Path) -&gt; Result&lt;(), exif::Error&gt; {
+    let file &#x3D; File::open(path)?;
+
+    // To parse strictly:
+    // let exif &#x3D; exif::Reader::new()
+    //     .read_from_container(&amp;mut BufReader::new(&amp;file))?;
+
+    // To parse with continue-on-error mode:
+    let exif &#x3D; exif::Reader::new()
+        .continue_on_error(true)
+        .read_from_container(&amp;mut BufReader::new(&amp;file))
+        .or_else(|e| e.distill_partial_result(|errors| {
+            eprintln!(&quot;{}: {} warning(s)&quot;, path.display(), errors.len());
+            errors.iter().for_each(|e| eprintln!(&quot;  {}&quot;, e));
+        }))?;
+
+    println!(&quot;{}&quot;, path.display());
+    for f in exif.fields() {
+        println!(&quot;  {}/{}: {}&quot;,
+                 f.ifd_num.index(), f.tag,
+                 f.display_value().with_unit(&amp;exif));
+        println!(&quot;      {:?}&quot;, f.value);
+    }
+    Ok(())
+}
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: BSD 2-Clause &quot;Simplified&quot; License (SPDX ID: BSD-2-Clause)
+### USED BY:
+  - kamadak-exif 0.6.1
+================================================================================
+//
+// Copyright (c) 2016 KAMADA Ken&#x27;ichi.
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+// 1. Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright
+//    notice, this list of conditions and the following disclaimer in the
+//    documentation and/or other materials provided with the distribution.
+//
+// THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS &#x60;&#x60;AS IS&#x27;&#x27; AND
+// ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+// OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+// LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+// OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+// SUCH DAMAGE.
+//
+
+use std::mem;
+
+// This library assumes that usize is not smaller than u32.
+#[test]
+fn size_of_usize() {
+    assert!(mem::size_of::&lt;usize&gt;() &gt;&#x3D; mem::size_of::&lt;u32&gt;());
+}
 
 
 -----------------------
@@ -1528,6 +1898,29 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ================================================================================
 ## LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
 ### USED BY:
+  - alloc-no-stdlib 2.0.4
+  - brotli 8.0.4
+================================================================================
+Copyright (c) 2016 Dropbox, Inc.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot; AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
+### USED BY:
   - subtle 2.6.1
 ================================================================================
 Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All rights reserved.
@@ -1567,7 +1960,46 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ================================================================================
 ## LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
 ### USED BY:
-  - ed25519-dalek 2.2.0
+  - curve25519-dalek 5.0.0
+================================================================================
+Copyright (c) 2016-2021 isis agora lovecruft. All rights reserved.
+Copyright (c) 2016-2021 Henry de Valence. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+1. Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS
+IS&quot; AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
+### USED BY:
+  - ed25519-dalek 3.0.0
 ================================================================================
 Copyright (c) 2017-2019 isis agora lovecruft. All rights reserved.
 
@@ -1605,7 +2037,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ================================================================================
 ## LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
 ### USED BY:
-  - x25519-dalek 2.0.1
+  - x25519-dalek 3.0.0
 ================================================================================
 Copyright (c) 2017-2021 isis agora lovecruft. All rights reserved.
 Copyright (c) 2019-2021 DebugSteven. All rights reserved.
@@ -1644,8 +2076,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ================================================================================
 ## LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
 ### USED BY:
-  - aws-lc-sys 0.42.0
-  - curve25519-dalek 4.1.3
+  - alloc-stdlib 0.2.4
+  - aws-lc-sys 0.45.0
 ================================================================================
 Copyright (c) &lt;year&gt; &lt;owner&gt;. 
 
@@ -1772,6 +2204,7 @@ insights.
 ================================================================================
 ## LICENSE: ISC License (SPDX ID: ISC)
 ### USED BY:
+  - untrusted 0.7.1
   - untrusted 0.9.0
 ================================================================================
 // Copyright 2015-2016 Brian Smith.
@@ -1795,7 +2228,30 @@ insights.
 ================================================================================
 ## LICENSE: ISC License (SPDX ID: ISC)
 ### USED BY:
-  - rustls-webpki 0.103.13
+  - simple_asn1 0.6.4
+================================================================================
+Copyright (c) 2017 Adam Wick
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot; AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: ISC License (SPDX ID: ISC)
+### USED BY:
+  - rustls-webpki 0.103.15
 ================================================================================
 Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:
@@ -1824,8 +2280,8 @@ third-party/chromium/LICENSE.
 ================================================================================
 ## LICENSE: ISC License (SPDX ID: ISC)
 ### USED BY:
-  - aws-lc-rs 1.17.1
-  - aws-lc-sys 0.42.0
+  - aws-lc-rs 1.18.1
+  - aws-lc-sys 0.45.0
 ================================================================================
 ISC License:
 
@@ -1835,6 +2291,42 @@ Copyright (c) 1995-2003 by Internet Software Consortium
 Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies.
 
 THE SOFTWARE IS PROVIDED &quot;AS IS&quot; AND ISC DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL ISC BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - cfg_aliases 0.1.1
+================================================================================
+# 3rd Party Notices
+
+The &#x60;cfg_aliases!&#x60; macro uses a lot of the code from [&#x60;tectonic_cfg_support::target_cfg!&#x60;] macro which is under the following license:
+
+[&#x60;tectonic_cfg_support::target_cfg!&#x60;]: https://github.com/tectonic-typesetting/tectonic/blob/f2439b936470ad27bdf92882064bc4702ee01899/cfg_support/src/lib.rs#L166
+
+    tectonic_cfg_support is licensed under the MIT License.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the “Software”), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+---
 
 
 -----------------------
@@ -1938,6 +2430,90 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - quanta 0.12.6
+================================================================================
+// Copyright (c) 2019 Nuclear Furnace
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the &quot;Software&quot;), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - atomic-waker 1.1.2
+================================================================================
+&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;
+
+Copyright (c) 2016 Alex Crichton
+Copyright (c) 2017 The Tokio Authors
+
+Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;
+
+Copyright (c) 2016 Alex Crichton
+Copyright (c) 2017 The Tokio Authors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - md-5 0.10.6
   - sha1 0.10.6
   - sha2 0.10.9
@@ -1969,6 +2545,35 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - brotli 8.0.4
+================================================================================
+Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 
 -----------------------
@@ -2158,19 +2763,20 @@ DEALINGS IN THE SOFTWARE.
   - cfg-if 1.0.4
   - cmake 0.1.58
   - find-msvc-tools 0.1.9
+  - futures-timer 3.0.4
   - jobserver 0.1.35
-  - js-sys 0.3.103
+  - js-sys 0.3.105
   - oauth2 5.0.0
   - openssl-probe 0.2.1
   - pkg-config 0.3.33
   - scoped-tls 1.0.1
   - socket2 0.6.4
-  - wasm-bindgen-futures 0.4.76
-  - wasm-bindgen-macro-support 0.2.126
-  - wasm-bindgen-macro 0.2.126
-  - wasm-bindgen-shared 0.2.126
-  - wasm-bindgen 0.2.126
-  - web-sys 0.3.103
+  - wasm-bindgen-futures 0.4.78
+  - wasm-bindgen-macro-support 0.2.128
+  - wasm-bindgen-macro 0.2.128
+  - wasm-bindgen-shared 0.2.128
+  - wasm-bindgen 0.2.128
+  - web-sys 0.3.105
 ================================================================================
 Copyright (c) 2014 Alex Crichton
 
@@ -2370,13 +2976,51 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - base16ct 1.0.0
+================================================================================
+Copyright (c) 2014 Steve &quot;Sc00bz&quot; Thomas (steve at tobtu dot com)
+Copyright (c) 2022-2025 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - bitflags 1.3.2
-  - bitflags 2.13.0
+  - bitflags 2.13.2
   - log 0.4.33
+  - num-bigint 0.4.8
+  - num-integer 0.1.46
   - num-traits 0.2.19
-  - regex-automata 0.4.14
+  - regex-automata 0.4.18
   - regex-syntax 0.8.11
-  - regex 1.12.4
+  - regex 1.13.1
 ================================================================================
 Copyright (c) 2014 The Rust Project Developers
 
@@ -2411,7 +3055,7 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - uuid 1.23.4
+  - uuid 1.26.1
 ================================================================================
 Copyright (c) 2014 The Rust Project Developers
 Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
@@ -2484,8 +3128,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - libsqlite3-sys 0.35.0
-  - rusqlite 0.37.0
+  - libsqlite3-sys 0.38.2
+  - rusqlite 0.40.2
 ================================================================================
 Copyright (c) 2014 The rusqlite developers
 
@@ -2639,8 +3283,8 @@ THE SOFTWARE.
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
   - either 1.16.0
-  - itertools 0.10.5
   - itertools 0.14.0
+  - itertools 0.15.0
   - maplit 1.0.2
 ================================================================================
 Copyright (c) 2015
@@ -3080,44 +3724,10 @@ SOFTWARE.
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
   - hkdf 0.12.4
+  - hkdf 0.13.0
 ================================================================================
 Copyright (c) 2015-2018 Vlad Filippov
 Copyright (c) 2018-2021 RustCrypto Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the &quot;Software&quot;), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
------------------------
-
-
-================================================================================
-## LICENSE: MIT License (SPDX ID: MIT)
-### USED BY:
-  - poly1305 0.8.0
-================================================================================
-Copyright (c) 2015-2019 RustCrypto Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -3181,14 +3791,49 @@ THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - futures-channel 0.3.32
-  - futures-core 0.3.32
-  - futures-executor 0.3.32
-  - futures-io 0.3.32
-  - futures-macro 0.3.32
-  - futures-sink 0.3.32
-  - futures-task 0.3.32
-  - futures-util 0.3.32
+  - poly1305 0.9.1
+================================================================================
+Copyright (c) 2015-2026 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - futures-channel 0.3.34
+  - futures-core 0.3.34
+  - futures-executor 0.3.34
+  - futures-io 0.3.34
+  - futures-macro 0.3.34
+  - futures-sink 0.3.34
+  - futures-task 0.3.34
+  - futures-util 0.3.34
 ================================================================================
 Copyright (c) 2016 Alex Crichton
 Copyright (c) 2017 The Tokio Authors
@@ -3225,7 +3870,6 @@ DEALINGS IN THE SOFTWARE.
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
   - hashbrown 0.14.5
-  - hashbrown 0.15.5
   - hashbrown 0.16.1
   - hashbrown 0.17.1
 ================================================================================
@@ -3336,7 +3980,7 @@ DEALINGS IN THE SOFTWARE.
   - hyper-rustls 0.27.9
   - rustls-native-certs 0.8.4
   - rustls-pemfile 2.2.0
-  - rustls 0.23.41
+  - rustls 0.23.45
 ================================================================================
 Copyright (c) 2016 Joseph Birr-Pixton &lt;jpixton@gmail.com&gt;
 
@@ -3522,7 +4166,7 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - indexmap 2.14.0
+  - indexmap 2.14.2
 ================================================================================
 Copyright (c) 2016--2017
 
@@ -3627,9 +4271,9 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - cipher 0.4.4
+  - cipher 0.5.2
 ================================================================================
-Copyright (c) 2016-2020 RustCrypto Developers
+Copyright (c) 2016-2025 RustCrypto Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -3662,7 +4306,7 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - reqwest 0.13.4
+  - reqwest 0.13.5
 ================================================================================
 Copyright (c) 2016-2026 Sean McArthur
 
@@ -3684,6 +4328,44 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - sha2 0.11.0
+================================================================================
+Copyright (c) 2016-2026 The RustCrypto Project Developers
+Copyright (c) 2016 Artyom Pavlov
+Copyright (c) 2009-2013 Mozilla Foundation
+Copyright (c) 2006-2009 Graydon Hoare
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 
 
 -----------------------
@@ -3725,6 +4407,7 @@ THE SOFTWARE.
 ### USED BY:
   - digest 0.10.7
   - hmac 0.12.1
+  - hmac 0.13.0
 ================================================================================
 Copyright (c) 2017 Artyom Pavlov
 
@@ -3759,7 +4442,7 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - pbkdf2 0.12.2
+  - pbkdf2 0.13.0
 ================================================================================
 Copyright (c) 2017 Artyom Pavlov
 Copyright (c) 2018-2023 The RustCrypto Project Developers
@@ -4068,6 +4751,42 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - cookie 0.18.2
+================================================================================
+Copyright (c) 2017 Sergio Benitez
+Copyright (c) 2014 Alex Crichton
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - stringprep 0.1.5
 ================================================================================
 Copyright (c) 2017 The rust-stringprep Developers
@@ -4166,7 +4885,7 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - h2 0.4.15
+  - h2 0.4.19
 ================================================================================
 Copyright (c) 2017 h2 authors
 
@@ -4201,7 +4920,7 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - http 1.4.2
+  - http 1.5.0
 ================================================================================
 Copyright (c) 2017 http-rs authors
 
@@ -4308,9 +5027,10 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - aes 0.8.4
+  - digest 0.11.3
 ================================================================================
-Copyright (c) 2018 Artyom Pavlov
+Copyright (c) 2017-2025 RustCrypto Developers
+Copyright (c) 2017 Artyom Pavlov
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -4343,7 +5063,7 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - bytes 1.12.0
+  - bytes 1.12.1
 ================================================================================
 Copyright (c) 2018 Carl Lerche
 
@@ -4629,7 +5349,6 @@ THE SOFTWARE.
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
   - block-buffer 0.10.4
-  - block-padding 0.3.3
 ================================================================================
 Copyright (c) 2018-2019 The RustCrypto Project Developers
 
@@ -4693,8 +5412,8 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - cbc 0.1.2
-  - ctr 0.9.2
+  - cbc 0.2.1
+  - ctr 0.10.1
 ================================================================================
 Copyright (c) 2018-2022 RustCrypto Developers
 Copyright (c) 2018 Artyom Pavlov
@@ -4730,7 +5449,6 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - ed25519 2.2.3
   - signature 2.2.0
 ================================================================================
 Copyright (c) 2018-2023 RustCrypto Developers
@@ -4797,9 +5515,10 @@ THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - opaque-debug 0.3.1
+  - aes 0.9.3
 ================================================================================
 Copyright (c) 2018-2024 The RustCrypto Project Developers
+Copyright (c) 2018 Artyom Pavlov
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -4868,10 +5587,82 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - block-buffer 0.12.1
+  - block-padding 0.4.2
+================================================================================
+Copyright (c) 2018-2025 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - getrandom 0.3.4
 ================================================================================
 Copyright (c) 2018-2025 The rust-random Project Developers
 Copyright (c) 2014 The Rust Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - ed25519 3.0.0
+  - signature 3.0.0
+================================================================================
+Copyright (c) 2018-2026 RustCrypto Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -5273,77 +6064,6 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - chacha20poly1305 0.10.1
-================================================================================
-Copyright (c) 2019 The RustCrypto Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the &quot;Software&quot;), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
------------------------
-
-
-================================================================================
-## LICENSE: MIT License (SPDX ID: MIT)
-### USED BY:
-  - aead 0.5.2
-================================================================================
-Copyright (c) 2019 The RustCrypto Project Developers
-Copyright (c) 2019 MobileCoin, LLC
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the &quot;Software&quot;), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
------------------------
-
-
-================================================================================
-## LICENSE: MIT License (SPDX ID: MIT)
-### USED BY:
   - tracing-attributes 0.1.31
   - tracing-core 0.1.36
   - tracing-log 0.2.0
@@ -5455,79 +6175,9 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - universal-hash 0.5.1
-================================================================================
-Copyright (c) 2019-2020 RustCrypto Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the &quot;Software&quot;), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
------------------------
-
-
-================================================================================
-## LICENSE: MIT License (SPDX ID: MIT)
-### USED BY:
   - tower-http 0.6.11
 ================================================================================
 Copyright (c) 2019-2021 Tower Contributors
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the &quot;Software&quot;), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
------------------------
-
-
-================================================================================
-## LICENSE: MIT License (SPDX ID: MIT)
-### USED BY:
-  - chacha20 0.9.1
-================================================================================
-Copyright (c) 2019-2023 The RustCrypto Project Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -5595,6 +6245,41 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - universal-hash 0.6.1
+================================================================================
+Copyright (c) 2019-2025 RustCrypto Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - http-body-util 0.1.3
 ================================================================================
 Copyright (c) 2019-2025 Sean McArthur &amp; Hyper Contributors
@@ -5630,10 +6315,47 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - chacha20 0.10.1
+  - chacha20 0.10.2
+  - chacha20poly1305 0.11.0
   - zeroize_derive 1.5.0
 ================================================================================
 Copyright (c) 2019-2026 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - aead 0.6.1
+================================================================================
+Copyright (c) 2019-2026 The RustCrypto Project Developers
+Copyright (c) 2019 MobileCoin, LLC
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -5910,6 +6632,41 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - const-oid 0.10.2
+================================================================================
+Copyright (c) 2020-2026 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - num_threads 0.1.7
 ================================================================================
 Copyright (c) 2021 Jacob Pratt
@@ -5931,6 +6688,35 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - mime2ext 0.1.54
+================================================================================
+Copyright (c) 2021 Jan Verbeek
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 
 -----------------------
@@ -6037,10 +6823,9 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - inout 0.1.4
+  - crypto-common 0.2.2
 ================================================================================
-Copyright (c) 2022 The RustCrypto Project Developers
-Copyright (c) 2022 Artyom Pavlov
+Copyright (c) 2021-2026 RustCrypto Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -6108,27 +6893,70 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - async-once-cell 0.5.4
+  - inout 0.2.2
 ================================================================================
-Copyright (c) 2023 Daniel De Graaf
+Copyright (c) 2022-2025 The RustCrypto Project Developers
+Copyright (c) 2022 Artyom Pavlov
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the &quot;Software&quot;), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
 
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - cmov 0.5.4
+  - hybrid-array 0.4.15
+================================================================================
+Copyright (c) 2022-2026 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 
 
 -----------------------
@@ -6230,6 +7058,41 @@ THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - cpubits 0.1.1
+================================================================================
+Copyright (c) 2023-2026 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - ratatui-macros 0.7.2
 ================================================================================
 Copyright (c) 2024 Dheepak Krishnamurthy
@@ -6323,6 +7186,41 @@ THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRES
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - ctutils 0.4.2
+================================================================================
+Copyright (c) 2025-2026 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the &quot;Software&quot;), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - anstream 1.0.0
   - anstyle-parse 1.0.0
   - anstyle-query 1.1.5
@@ -6403,7 +7301,8 @@ SOFTWARE.
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
   - time-core 0.1.9
-  - time 0.3.53
+  - time-macros 0.2.32
+  - time 0.3.55
 ================================================================================
 Copyright (c) Jacob Pratt et al.
 
@@ -6801,7 +7700,39 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - publicsuffix 2.3.0
+================================================================================
+MIT License
+
+Copyright (c) 2016 Rushmore Mushambi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - atoi 2.0.0
+  - cookie_store 0.22.1
 ================================================================================
 MIT License
 
@@ -6863,7 +7794,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - ulid 1.2.1
+  - ulid 3.0.0
 ================================================================================
 MIT License
 
@@ -7239,6 +8170,37 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - dashmap 6.2.1
+================================================================================
+MIT License
+
+Copyright (c) 2019 Acrimon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - crc-catalog 2.5.0
 ================================================================================
 MIT License
@@ -7354,11 +8316,11 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - radium 0.7.0
+  - no-std-compat 0.4.1
 ================================================================================
 MIT License
 
-Copyright (c) 2019 kneecaw (Nika Layzell)
+Copyright (c) 2019 jD91mZM2
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the &quot;Software&quot;), to deal
@@ -7385,12 +8347,11 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - proc-macro-error-attr2 2.0.0
-  - proc-macro-error2 2.0.1
+  - radium 0.7.0
 ================================================================================
 MIT License
 
-Copyright (c) 2019-2020 CreepySkeleton
+Copyright (c) 2019 kneecaw (Nika Layzell)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the &quot;Software&quot;), to deal
@@ -7464,6 +8425,37 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - spinning_top 0.3.0
+================================================================================
+MIT License
+
+Copyright (c) 2020 Philipp Oppermann
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 
 -----------------------
@@ -7600,6 +8592,37 @@ SOFTWARE.
 MIT License
 
 Copyright (c) 2021 Parker Timmerman
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - psl-types 2.0.11
+================================================================================
+MIT License
+
+Copyright (c) 2021 Rushmore Mushambi
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the &quot;Software&quot;), to deal
@@ -7780,6 +8803,37 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - serdect 0.4.3
+================================================================================
+MIT License
+
+Copyright (c) 2022-2025 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - libredox 0.1.18
 ================================================================================
 MIT License
@@ -7811,6 +8865,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - safe_arch 0.7.4
   - safe_arch 0.9.3
 ================================================================================
 MIT License
@@ -7953,13 +9008,15 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - aquamarine 0.6.0
   - async-stream-impl 0.3.6
   - async-stream 0.3.6
   - base64-simd 0.8.0
+  - brotli-decompressor 5.0.3
   - chrono 0.4.45
   - decancer 3.3.3
   - gloo-timers 0.3.0
+  - gloo-timers 0.4.0
+  - governor 0.7.0
   - htmlescape 0.3.1
   - icy_sixel 0.5.0
   - include_dir 0.7.4
@@ -7975,13 +9032,17 @@ SOFTWARE.
   - quantette 0.5.1
   - r-efi 5.3.0
   - r-efi 6.0.0
-  - ruma-client-api 0.24.0
+  - ruma-client-api 0.25.0
   - ruma-common 0.19.0
-  - ruma-events 0.34.0
+  - ruma-common 0.20.0
+  - ruma-events 0.35.0
   - ruma-html 0.8.0
+  - ruma-html 0.9.0
   - ruma-identifiers-validation 0.12.1
   - ruma-macros 0.19.0
+  - ruma-macros 0.20.0
   - ruma 0.16.0
+  - ruma 0.17.0
   - rustls-platform-verifier-android 0.1.1
   - siphasher 1.0.3
   - tantivy-bitpacker 0.10.0
@@ -7994,6 +9055,7 @@ SOFTWARE.
   - vsimd 0.8.0
   - wasite 0.1.0
   - whoami 1.6.1
+  - wide 0.7.33
   - wide 0.8.3
   - winapi-i686-pc-windows-gnu 0.4.0
   - winapi-x86_64-pc-windows-gnu 0.4.0
@@ -8056,9 +9118,9 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - tokio-stream 0.1.18
-  - tokio-util 0.7.18
-  - tokio 1.52.3
+  - tokio-stream 0.1.19
+  - tokio-util 0.7.19
+  - tokio 1.53.1
 ================================================================================
 MIT License
 
@@ -8126,6 +9188,41 @@ SOFTWARE.
 MIT License
 
 Copyright (c) zune-image developers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - miniz_oxide 0.8.9
+================================================================================
+MIT License
+
+Copyright 2013-2014 RAD Game Tools and Valve Software
+Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC
+Copyright (c) 2017 Frommi
+Copyright (c) 2017-2024 oyvindln
+
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the &quot;Software&quot;), to deal
@@ -8408,16 +9505,13 @@ DEALINGS IN THE SOFTWARE.
 ### USED BY:
   - adler2 2.0.1
   - anyhow 1.0.103
-  - async-channel 2.5.0
-  - async-trait 0.1.89
+  - async-trait 0.1.92
   - atomic-waker 1.1.2
-  - concurrent-queue 2.5.0
   - curve25519-dalek-derive 0.1.1
   - displaydoc 0.2.6
   - erased-serde 0.4.10
   - etcetera 0.8.0
-  - event-listener-strategy 0.5.4
-  - event-listener 5.4.1
+  - event-listener 5.4.2
   - fastrand 2.4.1
   - hermit-abi 0.5.2
   - home 0.5.12
@@ -8432,6 +9526,7 @@ DEALINGS IN THE SOFTWARE.
   - parking 2.2.1
   - paste 1.0.15
   - pin-project-lite 0.2.17
+  - portable-atomic 1.13.1
   - prettyplease 0.2.37
   - proc-macro-crate 3.5.0
   - proc-macro2 1.0.106
@@ -8442,20 +9537,21 @@ DEALINGS IN THE SOFTWARE.
   - rustix 1.1.4
   - rustversion 1.0.22
   - semver 1.0.28
-  - serde 1.0.228
+  - serde 1.0.229
   - serde_bytes 0.11.19
-  - serde_core 1.0.228
-  - serde_derive 1.0.228
+  - serde_core 1.0.229
+  - serde_derive 1.0.229
   - serde_html_form 0.4.1
-  - serde_json 1.0.150
+  - serde_json 1.0.151
   - serde_path_to_error 0.1.20
   - simd_cesu8 1.1.1
   - sqlformat 0.2.6
   - syn 2.0.118
+  - syn 3.0.6
   - thiserror-impl 1.0.69
-  - thiserror-impl 2.0.18
+  - thiserror-impl 2.0.20
   - thiserror 1.0.69
-  - thiserror 2.0.18
+  - thiserror 2.0.20
   - typeid 1.0.3
   - typetag-impl 0.2.22
   - typetag 0.2.22
@@ -8561,6 +9657,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
   - emojis 0.8.2
+  - emojis 0.9.0
 ================================================================================
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the &quot;Software&quot;), to deal
@@ -8656,6 +9753,37 @@ FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
 COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - tracing-core 0.1.36
+================================================================================
+The MIT License (MIT)
+
+Copyright (c) 2014 Mathijs van de Nes
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 
 -----------------------
@@ -8924,6 +10052,36 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - raw-cpuid 11.6.0
+================================================================================
+The MIT License (MIT)
+
+Copyright (c) 2015 Gerd Zellweger
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - combine 4.6.7
 ================================================================================
 The MIT License (MIT)
@@ -9018,6 +10176,37 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - jsonwebtoken 10.4.0
+================================================================================
+The MIT License (MIT)
+
+Copyright (c) 2015 Vincent Prouillet
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - gif 0.14.2
 ================================================================================
 The MIT License (MIT)
@@ -9081,7 +10270,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - aws-lc-sys 0.42.0
+  - aws-lc-sys 0.45.0
 ================================================================================
 The MIT License (MIT)
 
@@ -9113,7 +10302,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - fiat-crypto 0.2.9
+  - fiat-crypto 0.3.0
 ================================================================================
 The MIT License (MIT)
 
@@ -9220,6 +10409,37 @@ the Software without restriction, including without limitation the rights to
 use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
 of the Software, and to permit persons to whom the Software is furnished to do
 so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - pem 3.0.6
+================================================================================
+The MIT License (MIT)
+
+Copyright (c) 2016 Jonathan Creekmore
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
@@ -9468,7 +10688,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ### USED BY:
   - crossbeam-channel 0.5.15
   - crossbeam-deque 0.8.6
-  - crossbeam-epoch 0.9.18
+  - crossbeam-epoch 0.9.21
   - crossbeam-queue 0.3.12
   - crossbeam-utils 0.8.21
 ================================================================================
@@ -9499,6 +10719,34 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - hpke 0.14.1
+================================================================================
+The MIT License (MIT)
+
+Copyright (c) 2020 Michael Rosenberg
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the &quot;Software&quot;), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute,
+sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 -----------------------
@@ -9601,6 +10849,37 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
+  - base64 0.23.1
+================================================================================
+The MIT License (MIT)
+
+Copyright (c) 2025 Alice Maz, Marshall Pierce
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 
 -----------------------
@@ -9904,7 +11183,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - hashlink 0.10.0
+  - hashlink 0.12.2
   - hashlink 0.9.1
 ================================================================================
 This work is derived in part from the &#x60;linked-hash-map&#x60; crate, Copyright (c)
@@ -9938,41 +11217,10 @@ DEALINGS IN THE SOFTWARE.
 
 
 ================================================================================
-## LICENSE: MIT License (SPDX ID: MIT)
-### USED BY:
-  - urlencoding 2.1.3
-================================================================================
-© 2016 Bertram Truong
-© 2021 Kornel Lesiński
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the &quot;Software&quot;), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-
-
------------------------
-
-
-================================================================================
 ## LICENSE: Mozilla Public License 2.0 (SPDX ID: MPL-2.0)
 ### USED BY:
-  - bitmaps 3.2.1
-  - imbl-sized-chunks 0.1.3
-  - imbl 6.1.0
+  - imbl-sized-chunks 0.2.0
+  - imbl 7.0.2
 ================================================================================
 Mozilla Public License Version 2.0
 &#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;
@@ -10339,8 +11587,8 @@ You may add additional accurate notices of copyright ownership.
 ### USED BY:
   - as_variant 1.3.0
   - async-rx 0.2.1
-  - eyeball-im-util 0.10.0
-  - eyeball-im 0.8.0
+  - eyeball-im-util 0.11.0
+  - eyeball-im 0.9.1
   - eyeball 0.8.8
   - option-ext 0.2.0
   - readlock-tokio 0.1.6
@@ -10728,6 +11976,7 @@ Exhibit B - &quot;Incompatible With Secondary Licenses&quot; Notice
 ## LICENSE: Unicode License v3 (SPDX ID: Unicode-3.0)
 ### USED BY:
   - emojis 0.8.2
+  - emojis 0.9.0
   - unicode-ident 1.0.24
 ================================================================================
 UNICODE LICENSE V3
@@ -10903,7 +12152,6 @@ freely, subject to the following restrictions:
 ================================================================================
 ## LICENSE: zlib License (SPDX ID: Zlib)
 ### USED BY:
-  - foldhash 0.1.5
   - foldhash 0.2.0
 ================================================================================
 Copyright (c) 2024 Orson Peters

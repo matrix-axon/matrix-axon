@@ -85,6 +85,19 @@ jobs:
       - name: Generate license disclosure file
         run: scripts/generate-thirdparty.sh --root-only
 
+      # The same assertion `desktop-build.yml` makes about the shell's notices,
+      # for the root pair. A release must not ship a disclosure that has
+      # drifted from the graph it was built from. `thirdparty.yml` makes this
+      # same check on pull requests, which is where a contributor can still act
+      # on it; by the time a tag is pushed, failing here is the last chance
+      # rather than the first.
+      - name: Assert the committed notices match the dependency graph
+        run: |
+          if ! git diff --exit-code --stat -- build/THIRDPARTY THIRDPARTY.md; then
+            echo "::error::the committed root license notice is stale. Run scripts/generate-thirdparty.sh --root-only and commit the result." >&2
+            exit 1
+          fi
+
       - name: Upload license disclosure artifact
         uses: actions/upload-artifact@v7
         with:
@@ -359,6 +372,11 @@ jobs:
     name: Publish GitHub Release
     needs: [windows, macos, linux]
     if: ${{ !failure() && !cancelled() && github.ref_type == 'tag' }}
+    # Same group as package.yml's release job: serialize first-time
+    # GitHub Release creates for a tag. Builds still run in parallel.
+    concurrency:
+      group: github-release-${{ github.ref }}
+      cancel-in-progress: false
 
     permissions:
       contents: write

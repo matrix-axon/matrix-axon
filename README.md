@@ -17,6 +17,13 @@ Two reference clients consume that same open, versioned `/v1/` API today — [`a
 Check out our [client parity](docs/client-parity.md) document for the current implementation status of these clients and future roadmap.
 And because Axon can be self-hosted on your own hardware or cloud instance rather than a SaaS holding your decrypted history, it's working toward a single-command setup that works painlessly on Linux, MacOS, or Windows: a Docker Compose stack that brings up Postgres, Axon, and the web client behind one front door, with Caddy handling TLS and a Tailscale profile for private remote access already built in.
 
+## Download
+
+- [Latest release](https://github.com/matrix-axon/matrix-axon/releases/latest): includes Linux, MacOS, and Windows builds for server and both clients (desktop and terminal)
+- [Full client/server Docker stack](#user-quick-start-with-docker)
+- Get an iOS TestFlight beta build by posting in [#axon-developer:bostoncoop.net](https://matrix.to/#/%23axon-developer%3Abostoncoop.net)
+- Android build coming soon
+
 ## See it
 
 [![axon-tui rendering a seeded demo world: a room list, a photo timeline with inline terminal graphics, and a search across rooms](docs/img/tui-demo-poster.png)](https://matrix-axon.github.io/matrix-axon/demo.html#tui)
@@ -243,6 +250,12 @@ Axon serves plain HTTP.
 For any non-local deployment, place a TLS-terminating reverse proxy (Caddy, nginx, etc.) in front of it and keep Axon bound to loopback (the default).
 Axon refuses to start on a non-loopback address over plain HTTP unless `AXON_SERVER__ALLOW_INSECURE_BIND=true` is explicitly set.
 The `caddy` profile in the full `deploy/` stack automates this — see [deploy/README.md](deploy/README.md).
+
+### Privacy Policy
+
+Axon does not collect, store, transmit, or share any personal information, usage data, or analytics on behalf of its developer. This app is a client for a self-hosted Axon server that you (or someone you trust) run and control. All of your data — messages, media, contacts, and account credentials — is exchanged directly between this app and the Axon server address you configure. The developer of this app has no server, database, or analytics service that receives your data, and no ability to access it.
+
+Read the full [privacy policy](https://github.com/matrix-axon/matrix-axon/blob/main/docs/PRIVACY_POLICY.md).
 
 ### Third-Party Open Source Components
 
