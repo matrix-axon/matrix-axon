@@ -110,6 +110,11 @@ jobs:
     needs: packages
     if: ${{ github.ref_type == 'tag' }}
     runs-on: ubuntu-22.04
+    # Same group as cross-build.yml's release job: serialize first-time
+    # GitHub Release creates for a tag. Builds still run in parallel.
+    concurrency:
+      group: github-release-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
