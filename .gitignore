@@ -36,8 +36,10 @@ axon.toml
 # vim/nvim swap files
 .*.sw[a-p]
 
-# Claude Code local tooling state (worktrees, local settings) — never tracked
+# Agent local tooling state (worktrees, local settings) — never tracked
 .claude/
+.codex/
+.grok/
 
 # Node / web client
 clients/web/node_modules/
