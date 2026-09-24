@@ -32,7 +32,21 @@ fn native_apple_contract_is_additive_and_form_encoded() {
         assert!(post["requestBody"]["content"]["application/x-www-form-urlencoded"].is_object());
         assert_eq!(post["security"], serde_json::json!([]));
         assert!(post["responses"]["200"]["content"]["application/json"].is_object());
+        assert!(post["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "Authorization"
+                && p["in"] == "header"
+                && p["required"] == false));
+        for status in ["413", "429"] {
+            assert_eq!(
+                post["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/ErrorResponse"
+            );
+        }
     }
+    assert!(spec["paths"]["/v1/oauth/apple/native/token"]["post"]["responses"]["403"].is_null());
     assert!(spec["paths"]["/v1/oauth/providers"]["get"]["parameters"]
         .as_array()
         .unwrap()

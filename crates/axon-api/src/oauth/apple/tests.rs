@@ -1,4 +1,5 @@
 use super::*;
+use crate::oauth::NativeIdentityVerifier;
 use axum::{
     routing::{get, post},
     Form, Json, Router,
@@ -81,7 +82,10 @@ async fn verification_provider() -> (AppleProvider, tokio::task::JoinHandle<()>)
         Json(json!({"keys": [{"kty":"RSA", "kid":"apple-test", "alg":"RS256", "use":"sig", "n":&rsa_key().n, "e":&rsa_key().e}]}))
     }))).await;
     let mut provider = provider();
-    provider.jwks = JwksCache::new(super::super::http_client(), format!("{base}/keys"));
+    provider.jwks = Arc::new(JwksCache::new(
+        super::super::http_client(),
+        format!("{base}/keys"),
+    ));
     (provider, task)
 }
 
@@ -161,13 +165,13 @@ fn bad_configuration_fails_without_disclosing_key_material() {
         .err()
         .unwrap();
     assert!(!error.to_string().contains("PRIVATE_SENTINEL"));
-    for field in ["client_id", "team_id", "key_id", "native_audiences"] {
+    for field in ["client_id", "team_id", "key_id"] {
         let mut cfg = config();
         match field {
             "client_id" => cfg.client_id = None,
             "team_id" => cfg.team_id = Some(String::new()),
             "key_id" => cfg.key_id = Some(" ".into()),
-            _ => cfg.native_audiences.push(String::new()),
+            _ => unreachable!(),
         }
         assert!(
             AppleProvider::new(super::super::http_client(), &cfg, ec_key().pem.as_bytes()).is_err()
@@ -178,16 +182,15 @@ fn bad_configuration_fails_without_disclosing_key_material() {
 #[tokio::test]
 async fn signed_apple_tokens_keep_web_and_native_audiences_separate() {
     let (provider, task) = verification_provider().await;
+    let native_verifier = provider.native_verifier(config().native_audiences).unwrap();
+    assert!(Arc::ptr_eq(&provider.jwks, &native_verifier.jwks));
     let web = sign(&claims("com.example.web"));
     let native = sign(&claims("com.example.ios"));
     assert!(provider
         .verify_identity_token(&web, Some(""))
         .await
         .is_err());
-    assert!(provider
-        .verify_native_identity_token(&native, "")
-        .await
-        .is_err());
+    assert!(native_verifier.verify(&native, "").await.is_err());
     let verified = provider
         .verify_identity_token(&web, Some("expected"))
         .await
@@ -207,14 +210,9 @@ async fn signed_apple_tokens_keep_web_and_native_audiences_separate() {
             .unwrap()
             .replay_key
     );
-    assert!(provider
-        .verify_native_identity_token(&native, "expected")
-        .await
-        .is_ok());
+    assert!(native_verifier.verify(&native, "expected").await.is_ok());
     assert!(matches!(
-        provider
-            .verify_native_identity_token(&web, "expected")
-            .await,
+        native_verifier.verify(&web, "expected").await,
         Err(OidcError::InvalidAudience(_))
     ));
     assert!(matches!(
@@ -422,7 +420,7 @@ async fn transport_categories_survive_exchange_and_jwks_verification() {
         ("invalid-url-PRIVATE_SENTINEL".into(), "transport"),
     ] {
         provider.token_url = url.clone();
-        provider.jwks = JwksCache::new(provider.http.clone(), url);
+        provider.jwks = Arc::new(JwksCache::new(provider.http.clone(), url));
         let exchange = provider
             .exchange_code("SECRET_CODE", "https://axon.example/callback")
             .await

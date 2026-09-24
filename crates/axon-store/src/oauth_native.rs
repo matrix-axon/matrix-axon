@@ -5,6 +5,9 @@ use sqlx_core::{row::Row, transaction::Transaction};
 use sqlx_postgres::Postgres;
 use uuid::Uuid;
 
+/// Shared by challenge storage and the public expires_in response.
+pub const NATIVE_CHALLENGE_TTL_SECS: i32 = 300;
+
 /// Only hashes of client-held capabilities are persisted.
 pub struct NativeChallenge {
     pub hash: String,
@@ -40,10 +43,14 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         let inserted = sqlx_core::query::query(
-            "INSERT INTO oauth_native_challenges (hash, purpose, client_id, instance, nonce, authority_hash)
-             SELECT $1,$2,$3,$4,$5,$6 WHERE (SELECT count(*) FROM oauth_native_challenges) < 1024")
+            "INSERT INTO oauth_native_challenges (hash, purpose, client_id, instance, nonce, authority_hash, expires_at)
+             SELECT $1,$2,$3,$4,$5,$6,clock_timestamp() + make_interval(secs => $7)
+             WHERE (SELECT count(*) FROM oauth_native_challenges
+                    WHERE (purpose = 'login') = ($2 = 'login')) < $8")
             .bind(&c.hash).bind(&c.purpose).bind(&c.client_id).bind(&c.instance)
-            .bind(&c.nonce).bind(&c.authority_hash).execute(&mut *tx).await?.rows_affected() == 1;
+            .bind(&c.nonce).bind(&c.authority_hash).bind(f64::from(NATIVE_CHALLENGE_TTL_SECS))
+            .bind(if c.purpose == "login" { 1024_i64 } else { 64_i64 })
+            .execute(&mut *tx).await?.rows_affected() == 1;
         tx.commit().await?;
         Ok(inserted)
     }

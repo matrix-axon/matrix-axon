@@ -174,7 +174,7 @@ pub async fn providers(
     match query.flow.as_deref() {
         None | Some("browser") => {}
         Some("native") => {
-            names.retain(|name| *name != "apple");
+            names.clear();
             if runtime.native_apple.is_some() {
                 names.push("apple");
             }
@@ -188,7 +188,7 @@ pub async fn providers(
             .map(|provider| OAuthProviderDto {
                 provider: provider.to_owned(),
                 browser: runtime.providers.contains_key(provider),
-                native: provider != "apple" || runtime.native_apple.is_some(),
+                native: provider == "apple" && runtime.native_apple.is_some(),
             })
             .collect(),
     ))
@@ -955,10 +955,9 @@ pub(super) fn token_error_into_response(err: TokenError) -> Response {
             )
         }
         TokenError::Store(err) => {
-            // Database detail can reflect values from a failed insert.
-            drop(err);
             tracing::error!(
                 reason = "store_failure",
+                error_kind = err.diagnostic_reason(),
                 "store error serving oauth token request"
             );
             oauth_error_response(
@@ -1115,6 +1114,27 @@ mod providers_tests {
             })
             .collect::<HashMap<_, _>>();
         Arc::new(OAuthRuntime::new(&OauthConfig::default(), providers))
+    }
+
+    #[tokio::test]
+    async fn browser_audiences_do_not_advertise_native_sdk_support() {
+        let runtime = runtime(&["google", "microsoft", "apple"]);
+        let browser = providers(
+            State(Some(runtime.clone())),
+            Query(ProviderQuery::default()),
+        )
+        .await
+        .unwrap();
+        assert!(browser.data.iter().all(|p| p.browser && !p.native));
+        let native = providers(
+            State(Some(runtime)),
+            Query(ProviderQuery {
+                flow: Some("native".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(native.data.is_empty());
     }
 
     #[tokio::test]

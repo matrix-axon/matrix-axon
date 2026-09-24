@@ -36,6 +36,11 @@ async fn native_failed_mint_rolls_back_challenge_binding_replay_and_access_token
     let owner = store.issue_token("rollback-owner").await.unwrap();
     let c = challenge("bind", Some(axon_core::hash_secret(&owner.token)));
     assert!(store.create_native_challenge(&c).await.unwrap());
+    let remaining: f64 = sqlx_core::query_scalar::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM expires_at-clock_timestamp())::float8 FROM oauth_native_challenges WHERE hash=$1",
+    ).bind(&c.hash).fetch_one(&pool).await.unwrap();
+    let ttl = f64::from(axon_store::NATIVE_CHALLENGE_TTL_SECS);
+    assert!(remaining > ttl - 10.0 && remaining <= ttl);
     let subject = Uuid::new_v4().to_string();
     let replay = Uuid::new_v4().to_string();
     let r = redemption(&subject, &replay);
@@ -49,7 +54,10 @@ async fn native_failed_mint_rolls_back_challenge_binding_replay_and_access_token
     .execute(&pool)
     .await
     .unwrap();
-    assert!(failed.is_err());
+    assert_eq!(
+        failed.unwrap_err().diagnostic_reason(),
+        "database_constraint"
+    );
     assert!(store.native_challenge(&c.hash).await.unwrap().is_some());
     assert!(store
         .find_identity("apple", &subject)
@@ -155,11 +163,22 @@ async fn native_pending_challenges_are_bounded_and_expired_rows_reclaimed() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx_core::query::query("INSERT INTO oauth_native_challenges (hash,purpose,client_id,instance,nonce)
-        SELECT n::text,'login','capacity-test','https://axon.example','nonce' FROM generate_series(1,1024) n")
+    sqlx_core::query::query("INSERT INTO oauth_native_challenges (hash,purpose,client_id,instance,nonce,expires_at)
+        SELECT n::text,'login','capacity-test','https://axon.example','nonce',clock_timestamp()+interval '1 hour' FROM generate_series(1,1024) n")
         .execute(&pool).await.unwrap();
     let c = challenge("login", None);
     assert!(!store.create_native_challenge(&c).await.unwrap());
+    // A saturated public pool cannot consume the reserved authorized slots.
+    for _ in 0..64 {
+        assert!(store
+            .create_native_challenge(&challenge("bind", Some("owner-hash".into())))
+            .await
+            .unwrap());
+    }
+    assert!(!store
+        .create_native_challenge(&challenge("bootstrap", Some("session-hash".into())))
+        .await
+        .unwrap());
     sqlx_core::query::query("UPDATE oauth_native_challenges SET expires_at=clock_timestamp()")
         .execute(&pool)
         .await

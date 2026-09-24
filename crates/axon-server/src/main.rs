@@ -531,7 +531,7 @@ async fn build_oauth_runtime(
         async {
             if oauth_config.providers.apple.enabled {
                 let provider = oauth::apple_provider_with_http(oauth_config, http.clone()).await?;
-                Ok::<_, anyhow::Error>(Some(Arc::new(provider) as Arc<dyn axon_api::OidcProvider>))
+                Ok::<_, anyhow::Error>(Some(provider))
             } else {
                 Ok(None)
             }
@@ -539,8 +539,20 @@ async fn build_oauth_runtime(
         discover_generic_provider("google", &oauth_config.providers.google, &http),
         discover_generic_provider("microsoft", &oauth_config.providers.microsoft, &http),
     )?;
+    let native_apple = if oauth_config.providers.apple.native_enabled {
+        let audiences = oauth_config.providers.apple.native_audiences.clone();
+        Some(Arc::new(match &apple {
+            Some(provider) => provider.native_verifier(audiences)?,
+            None => axon_api::AppleNativeVerifier::new(http, audiences)?,
+        }) as Arc<dyn axon_api::NativeIdentityVerifier>)
+    } else {
+        None
+    };
     for (name, provider) in [
-        ("apple", apple),
+        (
+            "apple",
+            apple.map(|provider| Arc::new(provider) as Arc<dyn axon_api::OidcProvider>),
+        ),
         ("google", google),
         ("microsoft", microsoft),
     ] {
@@ -550,12 +562,7 @@ async fn build_oauth_runtime(
     }
 
     let mut runtime = axon_api::OAuthRuntime::new(oauth_config, providers);
-    if oauth_config.providers.apple.native_enabled {
-        runtime.native_apple = Some(Arc::new(axon_api::AppleNativeVerifier::new(
-            http,
-            oauth_config.providers.apple.native_audiences.clone(),
-        )?));
-    }
+    runtime.native_apple = native_apple;
     Ok(Arc::new(runtime))
 }
 

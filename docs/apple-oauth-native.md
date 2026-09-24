@@ -31,6 +31,9 @@ The native client must use the same selected Axon HTTPS instance throughout a fl
 `GET /v1/oauth/providers?flow=native` lists native-capable providers, including native-only Apple.
 Each provider includes additive `browser` and `native` capability booleans.
 No Apple entry is returned for a disabled flow.
+Only Apple currently advertises native SDK support.
+The legacy Google/Microsoft identity-token grant still requires the configured browser audience; it does not establish native SDK audience support.
+When both Apple flows are enabled, they share one JWKS cache while retaining independent audience validation and browser-only signing credentials.
 
 ## Challenge and redemption
 
@@ -64,6 +67,10 @@ Use `purpose=bind` and the existing owner's `Authorization: Bearer` header at bo
 The same bearer must still be active when the transaction redeems the challenge.
 Success binds the verified Apple subject and returns its new access/refresh pair.
 There is no unauthenticated first-user claim.
+As specified by ADR 0054, an active owner session includes an OAuth-issued bearer, not just a CLI-issued token.
+These are full-owner credentials: a stolen short-lived bearer can authorize a persistent identity binding that survives its expiry or revocation.
+Operators must revoke unauthorized identities as well as compromised sessions.
+Requiring local approval, step-up authentication, or a separate binding privilege would be a separate authorization-policy change, not a restriction implemented by this endpoint.
 
 For a genuinely empty instance, the operator may explicitly arm the existing first-run bootstrap capability.
 Use `purpose=bootstrap` and `bootstrap_code` at both steps.
@@ -71,6 +78,8 @@ Existing loopback/allow-remote restrictions and wrong-code lockout apply.
 The capability must match the one used to create the challenge and the instance must still have no accounts, credentials, or bound identities at commit.
 Concurrent native/browser/bearer bootstrap attempts share the first-credential lock; only one can succeed.
 Bootstrap is intentionally unavailable after credentials have existed, even if later revoked.
+The short access code remains memory-only: the stored authority hash derives from an independent high-entropy bootstrap-session binding, never from the code.
+Restarting bootstrap invalidates pending flows even if the same access code is reused.
 
 ## Failure, bounds, and diagnostics
 
@@ -78,10 +87,14 @@ Unknown clients or malformed forms are rejected before upstream verification.
 Challenge creation uses the existing API error envelope; token validation failures use OAuth `error` and `error_description`, including retry guidance and unbound-identity feedback.
 Invalid or revoked binding authority is a non-redeemable grant, never implicit authorization.
 Logs use allowlisted verification categories; raw Apple tokens, challenge capabilities, bootstrap codes, and upstream responses are not diagnostics.
+Database failures include an allowlisted kind distinguishing pool exhaustion, lock timeout, cancellation, deadlock, and constraint failures without SQL details.
+Successful bind/bootstrap transactions emit an informational audit event identifying the provider and purpose, never credentials or subjects.
 No new debug option is needed to expose secret-bearing data.
 
 Flows expire after five minutes.
-Creation prunes expired rows and serializes a global 1,024-pending-flow cap.
+Creation prunes expired rows and serializes separate caps of 1,024 public login flows and 64 authorized bind/bootstrap flows.
+Unauthenticated login traffic cannot consume the authorized reserve.
+The store's TTL constant controls both inserted expiry and the advertised lifetime.
 The existing OAuth IP/key limiter, bounded form buffering, ten-second body and upstream timeouts, and five-second database lock timeout bound each boundary.
 Database transactions have ten-second statement timeouts.
 Challenge claim, binding (where authorized), replay insertion, and both credential hashes commit together.

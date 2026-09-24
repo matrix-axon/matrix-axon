@@ -3338,6 +3338,11 @@ export interface components {
             /** @description Set ASAuthorizationAppleIDRequest.nonce to this exact string. Do not hash again. */
             nonce: string;
         };
+        /**
+         * @description Schema-only union: grant/form failures use OAuth errors, whereas transport,
+         *     availability, and authorization gates may use the standard API envelope.
+         */
+        NativeErrorBody: components["schemas"]["OAuthErrorBody"] | components["schemas"]["ErrorResponse"];
         NativeTokenRequest: {
             bootstrap_code?: string | null;
             challenge: string;
@@ -9319,7 +9324,10 @@ export interface operations {
     challenge: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Bearer owner token; required for purpose=bind, omitted for login/bootstrap. */
+                Authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -9337,47 +9345,78 @@ export interface operations {
                     "application/json": components["schemas"]["NativeChallengeResponse"];
                 };
             };
-            /** @description Invalid request */
+            /** @description Invalid form or request */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["NativeErrorBody"];
+                };
             };
             /** @description Owner authorization required */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
             };
             /** @description Native Apple disabled */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
             };
             /** @description Bootstrap closed */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
             };
             /** @description Challenge capacity or rate exceeded */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Storage unavailable */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
             };
         };
     };
     token: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Same Bearer owner token used to create a bind challenge; still required and must remain active. Omitted for login/bootstrap. */
+                Authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -9395,28 +9434,50 @@ export interface operations {
                     "application/json": components["schemas"]["TokenSuccessBody"];
                 };
             };
-            /** @description Invalid, expired, unbound, or replayed identity */
+            /** @description Invalid request, expired/replayed identity, or invalid owner authorization (invalid_grant); body timeouts use the API envelope */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["OAuthErrorBody"];
+                    "application/json": components["schemas"]["NativeErrorBody"];
                 };
-            };
-            /** @description Owner authorization invalid */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
             /** @description Native Apple disabled */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Storage unavailable */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthErrorBody"];
+                };
             };
         };
     };

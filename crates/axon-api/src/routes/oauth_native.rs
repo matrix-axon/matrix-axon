@@ -46,6 +46,16 @@ pub struct NativeTokenRequest {
     pub bootstrap_code: Option<String>,
 }
 
+/// Schema-only union: grant/form failures use OAuth errors, whereas transport,
+/// availability, and authorization gates may use the standard API envelope.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum NativeErrorBody {
+    OAuth(super::oauth::OAuthErrorBody),
+    Api(crate::response::ErrorResponse),
+}
+
 fn enabled(runtime: Option<Arc<OAuthRuntime>>) -> Result<Arc<OAuthRuntime>, ApiError> {
     runtime
         .filter(|r| r.native_apple.is_some())
@@ -85,10 +95,11 @@ impl From<AuthorityError> for ApiError {
     fn from(error: AuthorityError) -> Self {
         match error {
             AuthorityError::Rejected(error) => error,
-            AuthorityError::Store(_) => {
+            AuthorityError::Store(error) => {
                 tracing::error!(
                     provider = "apple",
                     reason = "store_failure",
+                    error_kind = error.diagnostic_reason(),
                     "Native authorization unavailable"
                 );
                 ApiError::internal()
@@ -140,17 +151,22 @@ async fn authority(
             if !store.first_credential_bootstrap_available().await? {
                 return Err(ApiError::conflict("bootstrap is no longer available").into());
             }
-            Ok(Some(axon_core::hash_secret(code)))
+            Ok(Some(axon_core::hash_secret(bootstrap.native_binding())))
         }
         _ => Err(ApiError::bad_request("invalid native flow purpose or authorization").into()),
     }
 }
 
 #[utoipa::path(post, path="/v1/oauth/apple/native/challenge",
+    params(("Authorization" = Option<String>, Header, description = "Bearer owner token; required for purpose=bind, omitted for login/bootstrap.")),
     request_body(content=NativeChallengeRequest, content_type="application/x-www-form-urlencoded"),
-    responses((status=200, body=NativeChallengeResponse), (status=400, description="Invalid request"),
-        (status=403, description="Owner authorization required"), (status=404, description="Native Apple disabled"),
-        (status=409, description="Bootstrap closed"), (status=429, description="Challenge capacity or rate exceeded")),
+    responses((status=200, body=NativeChallengeResponse), (status=400, description="Invalid form or request", body=NativeErrorBody),
+        (status=403, description="Owner authorization required", body=crate::response::ErrorResponse),
+        (status=404, description="Native Apple disabled", body=crate::response::ErrorResponse),
+        (status=409, description="Bootstrap closed", body=crate::response::ErrorResponse),
+        (status=413, description="Body too large", body=crate::response::ErrorResponse),
+        (status=429, description="Challenge capacity or rate exceeded", body=crate::response::ErrorResponse),
+        (status=500, description="Storage unavailable", body=crate::response::ErrorResponse)),
     tag="oauth", security())]
 pub async fn challenge(
     State(store): State<Store>,
@@ -198,15 +214,19 @@ pub async fn challenge(
     Ok(Json(NativeChallengeResponse {
         challenge: secret,
         nonce,
-        expires_in: 300,
+        expires_in: axon_store::NATIVE_CHALLENGE_TTL_SECS as u64,
     }))
 }
 
 #[utoipa::path(post, path="/v1/oauth/apple/native/token",
+    params(("Authorization" = Option<String>, Header, description = "Same Bearer owner token used to create a bind challenge; still required and must remain active. Omitted for login/bootstrap.")),
     request_body(content=NativeTokenRequest, content_type="application/x-www-form-urlencoded"),
     responses((status=200, body=super::oauth::TokenSuccessBody),
-        (status=400, description="Invalid, expired, unbound, or replayed identity", body=super::oauth::OAuthErrorBody),
-        (status=403, description="Owner authorization invalid"), (status=404, description="Native Apple disabled")),
+        (status=400, description="Invalid request, expired/replayed identity, or invalid owner authorization (invalid_grant); body timeouts use the API envelope", body=NativeErrorBody),
+        (status=404, description="Native Apple disabled", body=crate::response::ErrorResponse),
+        (status=413, description="Body too large", body=crate::response::ErrorResponse),
+        (status=429, description="Rate limit exceeded", body=crate::response::ErrorResponse),
+        (status=500, description="Storage unavailable", body=super::oauth::OAuthErrorBody)),
     tag="oauth", security())]
 pub async fn token(
     State(store): State<Store>,
@@ -290,6 +310,10 @@ pub async fn token(
             .ok_or(TokenError::InvalidGrant(
                 "native challenge no longer redeemable",
             ))?;
+        if matches!(c.purpose.as_str(), "bind" | "bootstrap") {
+            tracing::info!(provider = "apple", purpose = %c.purpose,
+                "Native OAuth owner identity bound and credentials issued");
+        }
         Ok(TokenPair {
             access_token: pair.access_token,
             refresh_token: pair.refresh_token,
