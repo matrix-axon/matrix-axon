@@ -576,7 +576,7 @@ impl std::fmt::Debug for GenericOauthProviderConfig {
     }
 }
 
-/// Credentialed Sign in with Apple browser settings.
+/// Independent browser and native Sign in with Apple settings.
 #[derive(Clone, Default, Deserialize)]
 pub struct AppleOauthConfig {
     /// Whether Apple browser sign-in is enabled. Defaults to `false`.
@@ -590,6 +590,9 @@ pub struct AppleOauthConfig {
     /// (Path B) carry this as `aud` instead of `client_id`.
     #[serde(default)]
     pub native_audiences: Vec<String>,
+    /// Enable the keyless native Apple challenge flow independently of browser SSO.
+    #[serde(default)]
+    pub native_enabled: bool,
     /// Apple Developer team id, used to sign the ES256 client-secret JWT.
     #[serde(default)]
     pub team_id: Option<String>,
@@ -614,6 +617,7 @@ impl std::fmt::Debug for AppleOauthConfig {
             .field("enabled", &self.enabled)
             .field("client_id", &self.client_id)
             .field("native_audiences", &self.native_audiences)
+            .field("native_enabled", &self.native_enabled)
             .field("team_id", &self.team_id)
             .field("key_id", &self.key_id)
             .field(

@@ -237,19 +237,33 @@ pub async fn redeem_identity_token(
     // prevent forgery/replay independent of binding — so there is no
     // security reason to consume a token's single-use slot on a rejection
     // that isn't itself a replay.
-    let identity = store
+    let _identity = store
         .find_identity(provider_name, &verified.subject)
         .await?
         .ok_or(TokenError::NotBound)?;
 
-    let fresh = store
-        .consume_identity_token(provider_name, &verified.replay_key)
-        .await?;
-    if !fresh {
-        return Err(TokenError::InvalidGrant("identity token already used"));
-    }
-
-    mint_token_pair(store, runtime, identity.id, provider_name, client_id).await
+    let pair = store
+        .redeem_identity_atomically(
+            &axon_store::IdentityRedemption {
+                provider: provider_name,
+                subject: &verified.subject,
+                email: verified.email.as_deref(),
+                replay_key: &verified.replay_key,
+                client_id,
+                access_expires_at: Utc::now() + runtime.access_token_ttl,
+                refresh_expires_at: Utc::now() + runtime.refresh_token_ttl,
+            },
+            None,
+        )
+        .await?
+        .ok_or(TokenError::InvalidGrant(
+            "identity unavailable or token already used",
+        ))?;
+    Ok(TokenPair {
+        access_token: pair.access_token,
+        refresh_token: pair.refresh_token,
+        expires_in: runtime.access_token_ttl.as_secs(),
+    })
 }
 
 /// Generate a fresh opaque, high-entropy value: 256 bits of CSPRNG entropy,

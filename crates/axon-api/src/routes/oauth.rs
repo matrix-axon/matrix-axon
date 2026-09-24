@@ -121,6 +121,14 @@ pub struct OAuthProviderDto {
     /// The value to pass as `provider` to `GET /v1/oauth/authorize`, e.g.
     /// `"google"`.
     pub provider: String,
+    pub browser: bool,
+    pub native: bool,
+}
+
+#[derive(Default, Deserialize, utoipa::IntoParams)]
+pub struct ProviderQuery {
+    /// Omit for browser providers (legacy behavior); use native for SDK login.
+    pub flow: Option<String>,
 }
 
 /// `GET /v1/oauth/providers`: which sign-in providers this instance offers.
@@ -145,6 +153,7 @@ pub struct OAuthProviderDto {
 #[utoipa::path(
     get,
     path = "/v1/oauth/providers",
+    params(ProviderQuery),
     responses(
         (status = 200, description = "The enabled sign-in providers", body = ApiResponse<Vec<OAuthProviderDto>>),
         (status = 404, description = "OAuth is disabled", body = crate::response::ErrorResponse),
@@ -154,6 +163,7 @@ pub struct OAuthProviderDto {
 )]
 pub async fn providers(
     State(runtime): State<Option<Arc<OAuthRuntime>>>,
+    Query(query): Query<ProviderQuery>,
 ) -> Result<ApiResponse<Vec<OAuthProviderDto>>, ApiError> {
     let Some(runtime) = runtime else {
         return Err(ApiError::not_found("oauth is disabled"));
@@ -161,12 +171,24 @@ pub async fn providers(
     // Sorted so the sign-in screen's button order is stable across restarts;
     // `providers` is a HashMap, whose iteration order is not.
     let mut names = runtime.providers.keys().copied().collect::<Vec<_>>();
+    match query.flow.as_deref() {
+        None | Some("browser") => {}
+        Some("native") => {
+            names.retain(|name| *name != "apple");
+            if runtime.native_apple.is_some() {
+                names.push("apple");
+            }
+        }
+        _ => return Err(ApiError::bad_request("flow must be browser or native")),
+    }
     names.sort_unstable();
     Ok(ApiResponse::new(
         names
             .into_iter()
             .map(|provider| OAuthProviderDto {
                 provider: provider.to_owned(),
+                browser: runtime.providers.contains_key(provider),
+                native: provider != "apple" || runtime.native_apple.is_some(),
             })
             .collect(),
     ))
@@ -850,8 +872,8 @@ where
 
 /// `POST /v1/oauth/token`'s success body (RFC 6749 §5.1) — plain, not
 /// wrapped in `{"data": ...}`.
-#[derive(Debug, Serialize)]
-struct TokenSuccessBody {
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct TokenSuccessBody {
     access_token: String,
     token_type: &'static str,
     expires_in: u64,
@@ -859,13 +881,13 @@ struct TokenSuccessBody {
 }
 
 /// `POST /v1/oauth/token`'s error body (RFC 6749 §5.2).
-#[derive(Debug, Serialize)]
-struct OAuthErrorBody {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct OAuthErrorBody {
     error: &'static str,
     error_description: String,
 }
 
-fn token_success_response(pair: TokenPair) -> Response {
+pub(super) fn token_success_response(pair: TokenPair) -> Response {
     Json(TokenSuccessBody {
         access_token: pair.access_token,
         token_type: "Bearer",
@@ -875,7 +897,7 @@ fn token_success_response(pair: TokenPair) -> Response {
     .into_response()
 }
 
-fn oauth_error_response(
+pub(super) fn oauth_error_response(
     status: StatusCode,
     error: &'static str,
     description: impl Into<String>,
@@ -890,7 +912,7 @@ fn oauth_error_response(
         .into_response()
 }
 
-fn token_error_into_response(err: TokenError) -> Response {
+pub(super) fn token_error_into_response(err: TokenError) -> Response {
     match err {
         TokenError::InvalidGrant(reason) => {
             tracing::warn!(flow_type = "token", reason, "OAuth token request rejected");
@@ -933,7 +955,12 @@ fn token_error_into_response(err: TokenError) -> Response {
             )
         }
         TokenError::Store(err) => {
-            tracing::error!(error = %err, "store error serving oauth token request");
+            // Database detail can reflect values from a failed insert.
+            drop(err);
+            tracing::error!(
+                reason = "store_failure",
+                "store error serving oauth token request"
+            );
             oauth_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
@@ -1092,9 +1119,12 @@ mod providers_tests {
 
     #[tokio::test]
     async fn lists_only_the_enabled_providers() {
-        let response = providers(State(Some(runtime(&["google"]))))
-            .await
-            .expect("enabled");
+        let response = providers(
+            State(Some(runtime(&["google"]))),
+            Query(ProviderQuery::default()),
+        )
+        .await
+        .expect("enabled");
         let names = response
             .data
             .iter()
@@ -1107,9 +1137,12 @@ mod providers_tests {
     async fn sorts_them_so_the_sign_in_screen_is_stable() {
         // `OAuthRuntime::providers` is a HashMap; unsorted, the buttons would
         // reorder between restarts for no reason the user can see.
-        let response = providers(State(Some(runtime(&["microsoft", "apple", "google"]))))
-            .await
-            .expect("enabled");
+        let response = providers(
+            State(Some(runtime(&["microsoft", "apple", "google"]))),
+            Query(ProviderQuery::default()),
+        )
+        .await
+        .expect("enabled");
         let names = response
             .data
             .iter()
@@ -1122,7 +1155,9 @@ mod providers_tests {
     async fn is_404_when_oauth_is_disabled() {
         // Not 503: an unauthenticated caller of a disabled surface should see
         // "no such route", the same as a genuinely unregistered path.
-        let error = providers(State(None)).await.expect_err("disabled");
+        let error = providers(State(None), Query(ProviderQuery::default()))
+            .await
+            .expect_err("disabled");
         assert_eq!(error.into_response().status(), StatusCode::NOT_FOUND);
     }
 
@@ -1131,7 +1166,9 @@ mod providers_tests {
         // OAuth on with no provider wired up is a real configuration; the
         // client needs "none available", not a 404 it would read as "no such
         // server".
-        let response = providers(State(Some(runtime(&[])))).await.expect("enabled");
+        let response = providers(State(Some(runtime(&[]))), Query(ProviderQuery::default()))
+            .await
+            .expect("enabled");
         assert!(response.data.is_empty());
     }
 }

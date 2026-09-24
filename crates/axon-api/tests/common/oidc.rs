@@ -57,6 +57,13 @@ pub struct TestOidcProvider {
     codes: Mutex<HashMap<String, PendingCode>>,
 }
 
+#[async_trait]
+impl axon_api::NativeIdentityVerifier for TestOidcProvider {
+    async fn verify(&self, token: &str, nonce: &str) -> Result<VerifiedIdentity, OidcError> {
+        self.verify_identity_token(token, Some(nonce)).await
+    }
+}
+
 impl TestOidcProvider {
     /// Build a fake provider asserting the given `issuer`/`audience` in every
     /// token it signs (mirroring a real provider's discovery-doc issuer and

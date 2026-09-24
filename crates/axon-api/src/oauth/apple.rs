@@ -1,7 +1,6 @@
 //! Sign in with Apple provider foundation (ADR 0054).
 //!
-//! Registered for credentialed browser login. Native login remains gated until
-//! the server-issued challenge and native owner-binding contract lands.
+//! Credentialed browser login and independent public-key-only native verification.
 
 use axon_core::AppleOauthConfig;
 use chrono::Utc;
@@ -18,6 +17,46 @@ const JWKS_URL: &str = "https://appleid.apple.com/auth/keys";
 // Sign on demand, so idle servers never retain an expired client secret and
 // no timer, cache lock, or background task is needed. Apple's limit is six months.
 const CLIENT_SECRET_TTL_SECS: i64 = 300;
+
+/// Public-key-only verifier: no Services ID, team ID, or private key required.
+pub struct AppleNativeVerifier {
+    jwks: JwksCache,
+    audiences: Vec<String>,
+}
+
+impl AppleNativeVerifier {
+    pub fn new(http: reqwest::Client, audiences: Vec<String>) -> Result<Self, OidcError> {
+        if audiences.is_empty() || audiences.iter().any(|a| a.trim().is_empty()) {
+            return Err(OidcError::Malformed(
+                "Apple native audiences are required".into(),
+            ));
+        }
+        Ok(Self {
+            jwks: JwksCache::new(http, JWKS_URL.into()),
+            audiences,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl super::NativeIdentityVerifier for AppleNativeVerifier {
+    async fn verify(&self, token: &str, nonce: &str) -> Result<VerifiedIdentity, OidcError> {
+        verify_native(&self.jwks, &self.audiences, token, nonce).await
+    }
+}
+
+async fn verify_native(
+    jwks: &JwksCache,
+    audiences: &[String],
+    token: &str,
+    nonce: &str,
+) -> Result<VerifiedIdentity, OidcError> {
+    if nonce.is_empty() {
+        return Err(OidcError::InvalidNonce);
+    }
+    let audiences: Vec<&str> = audiences.iter().map(String::as_str).collect();
+    super::verification::verify(jwks, token, ISSUER, &audiences, Some(nonce)).await
+}
 
 #[cfg(test)]
 mod tests;
@@ -100,18 +139,14 @@ impl AppleProvider {
     }
 
     /// Native tokens use explicitly configured bundle IDs, never the web
-    /// Services ID. The future native handler must obtain this nonce from its
+    /// Services ID. A native handler must obtain this nonce from its
     /// own single-use challenge record, not from a client-provided expectation.
     pub async fn verify_native_identity_token(
         &self,
         token: &str,
         nonce: &str,
     ) -> Result<VerifiedIdentity, OidcError> {
-        if nonce.is_empty() {
-            return Err(OidcError::InvalidNonce);
-        }
-        let audiences: Vec<&str> = self.native_audiences.iter().map(String::as_str).collect();
-        super::verification::verify(&self.jwks, token, ISSUER, &audiences, Some(nonce)).await
+        verify_native(&self.jwks, &self.native_audiences, token, nonce).await
     }
 }
 

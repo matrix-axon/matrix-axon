@@ -76,7 +76,7 @@ impl OAuthRateLimiter {
     /// could otherwise pin tens of KiB in the keyed store per request (GH
     /// #285). Hashing bounds every entry to a fixed-size digest regardless of
     /// input length.
-    fn check_key(&self, key: &str) -> bool {
+    pub(crate) fn check_key(&self, key: &str) -> bool {
         self.per_key.check_key(&axon_core::hash_secret(key)).is_ok()
     }
 

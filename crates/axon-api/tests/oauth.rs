@@ -49,6 +49,378 @@ const TEST_PROVIDER: &str = "test";
 const TEST_ISSUER: &str = "https://fake-idp.test/";
 const TEST_AUDIENCE: &str = "test-upstream-client-id";
 
+const NATIVE_CHALLENGE: &str = "/v1/oauth/apple/native/challenge";
+const NATIVE_TOKEN: &str = "/v1/oauth/apple/native/token";
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn native_challenge_rejects_substitution_and_rate_limits_before_verification() {
+    let store = store().await;
+    let (app, _) = app_with_named_provider(store.clone(), None, "native-only");
+    assert_eq!(
+        native_form(
+            &app,
+            NATIVE_CHALLENGE,
+            &[("client_id", "unknown"), ("purpose", "login")],
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        native_form(
+            &app,
+            NATIVE_CHALLENGE,
+            &[
+                ("client_id", CLIENT_ID),
+                ("purpose", "login"),
+                ("nonce", "client-controlled")
+            ],
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (_, c) = native_form(
+        &app,
+        NATIVE_CHALLENGE,
+        &[("client_id", CLIENT_ID), ("purpose", "login")],
+        None,
+    )
+    .await;
+    let secret = c["challenge"].as_str().unwrap();
+    for i in 0..11 {
+        // Different JWTs and form ordering cannot bypass the flow-key bucket.
+        let (status, _) = native_form(
+            &app,
+            NATIVE_TOKEN,
+            &[
+                ("identity_token", &format!("invalid-{i}")),
+                ("challenge", secret),
+                ("client_id", CLIENT_ID),
+            ],
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            if i < 10 {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+    }
+    assert!(store
+        .native_challenge(&axon_core::hash_secret(secret))
+        .await
+        .unwrap()
+        .is_some());
+    let (app, provider) = app_with_named_provider(store.clone(), None, "native-only");
+    let secret = axon_core::generate_opaque_secret();
+    let c = axon_store::NativeChallenge {
+        hash: axon_core::hash_secret(&secret),
+        purpose: "login".into(),
+        client_id: CLIENT_ID.into(),
+        instance: "https://another-instance.test".into(),
+        nonce: "expected".into(),
+        authority_hash: None,
+    };
+    store.create_native_challenge(&c).await.unwrap();
+    let subject = Uuid::new_v4().to_string();
+    store.bind_identity("apple", &subject, None).await.unwrap();
+    let jwt = provider.sign_identity_token(&subject, None, Some(&c.nonce), None);
+    assert_eq!(
+        native_form(
+            &app,
+            NATIVE_TOKEN,
+            &[
+                ("client_id", CLIENT_ID),
+                ("challenge", &secret),
+                ("identity_token", &jwt)
+            ],
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(store.native_challenge(&c.hash).await.unwrap().is_some());
+}
+
+async fn native_form(
+    app: &axum::Router,
+    uri: &str,
+    fields: &[(&str, &str)],
+    bearer: Option<&str>,
+) -> (StatusCode, Value) {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(fields.iter().copied())
+        .finish();
+    let mut request =
+        Request::post(uri).header("content-type", "application/x-www-form-urlencoded");
+    if let Some(bearer) = bearer {
+        request = request.header("authorization", format!("Bearer {bearer}"));
+    }
+    let response = app
+        .clone()
+        .oneshot(with_fake_connect_info(
+            request.body(Body::from(body)).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn native_apple_login_requires_server_nonce_and_bound_subject_and_redeems_once() {
+    let store = store().await;
+    let (app, provider) = app_with_named_provider(store.clone(), None, "native-only");
+    let (status, browser) = get_text(&app, "/v1/oauth/providers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<Value>(&browser).unwrap()["data"],
+        serde_json::json!([])
+    );
+    let (_, native) = get_text(&app, "/v1/oauth/providers?flow=native").await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&native).unwrap()["data"],
+        serde_json::json!([{"provider":"apple","browser":false,"native":true}])
+    );
+    let (status, challenge) = native_form(
+        &app,
+        NATIVE_CHALLENGE,
+        &[("client_id", CLIENT_ID), ("purpose", "login")],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let secret = challenge["challenge"].as_str().unwrap();
+    let nonce = challenge["nonce"].as_str().unwrap();
+    let subject = Uuid::new_v4().to_string();
+    store
+        .bind_identity(
+            "apple",
+            &Uuid::new_v4().to_string(),
+            Some("same@example.test"),
+        )
+        .await
+        .unwrap();
+    let wrong = provider.sign_identity_token(&subject, None, Some("client-chosen"), None);
+    assert_eq!(
+        native_form(
+            &app,
+            NATIVE_TOKEN,
+            &[
+                ("client_id", CLIENT_ID),
+                ("challenge", secret),
+                ("identity_token", &wrong)
+            ],
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let token =
+        provider.sign_identity_token(&subject, Some("same@example.test"), Some(nonce), None);
+    let fields = [
+        ("client_id", CLIENT_ID),
+        ("challenge", secret),
+        ("identity_token", &token),
+    ];
+    // A valid Apple identity cannot claim ownership of an unbound instance.
+    assert_eq!(
+        native_form(&app, NATIVE_TOKEN, &fields, None).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    store.bind_identity("apple", &subject, None).await.unwrap();
+    let (a, b) = tokio::join!(
+        native_form(&app, NATIVE_TOKEN, &fields, None),
+        native_form(&app, NATIVE_TOKEN, &fields, None)
+    );
+    assert_eq!(
+        usize::from(a.0 == StatusCode::OK) + usize::from(b.0 == StatusCode::OK),
+        1
+    );
+    let success = if a.0 == StatusCode::OK { a.1 } else { b.1 };
+    assert!(store
+        .verify_token(success["access_token"].as_str().unwrap())
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        native_form(&app, NATIVE_TOKEN, &fields, None).await.0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn native_binding_requires_same_still_active_owner() {
+    let store = store().await;
+    let (app, provider) = app_with_named_provider(store.clone(), None, "native-only");
+    let fields = [("client_id", CLIENT_ID), ("purpose", "bind")];
+    assert_eq!(
+        native_form(&app, NATIVE_CHALLENGE, &fields, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let owner = store.issue_token("native-owner").await.unwrap();
+    let other = store.issue_token("other-owner").await.unwrap();
+    let (_, challenge) = native_form(&app, NATIVE_CHALLENGE, &fields, Some(&owner.token)).await;
+    let subject = Uuid::new_v4().to_string();
+    let token = provider.sign_identity_token(&subject, None, challenge["nonce"].as_str(), None);
+    let fields = [
+        ("client_id", CLIENT_ID),
+        ("challenge", challenge["challenge"].as_str().unwrap()),
+        ("identity_token", &token),
+    ];
+    assert_eq!(
+        native_form(&app, NATIVE_TOKEN, &fields, Some(&other.token))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        native_form(&app, NATIVE_TOKEN, &fields, Some(&owner.token))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert!(store
+        .find_identity("apple", &subject)
+        .await
+        .unwrap()
+        .is_some());
+    let (_, challenge) = native_form(
+        &app,
+        NATIVE_CHALLENGE,
+        &[("client_id", CLIENT_ID), ("purpose", "bind")],
+        Some(&owner.token),
+    )
+    .await;
+    let subject = Uuid::new_v4().to_string();
+    let token = provider.sign_identity_token(&subject, None, challenge["nonce"].as_str(), None);
+    store.revoke_token(owner.id).await.unwrap();
+    assert_eq!(
+        native_form(
+            &app,
+            NATIVE_TOKEN,
+            &[
+                ("client_id", CLIENT_ID),
+                ("challenge", challenge["challenge"].as_str().unwrap()),
+                ("identity_token", &token)
+            ],
+            Some(&owner.token)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(store
+        .find_identity("apple", &subject)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn native_bootstrap_is_explicit_and_one_time() {
+    let store = store().await;
+    reset_bootstrap_tables(&store).await;
+    let (app, provider) =
+        app_with_named_provider(store.clone(), Some(bootstrap_config()), "native-only");
+    assert_eq!(
+        native_form(
+            &app,
+            NATIVE_CHALLENGE,
+            &[("client_id", CLIENT_ID), ("purpose", "bootstrap")],
+            None
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let fields = [
+        ("client_id", CLIENT_ID),
+        ("purpose", "bootstrap"),
+        ("bootstrap_code", "ABC234"),
+    ];
+    let (status, challenge) = native_form(&app, NATIVE_CHALLENGE, &fields, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let subject = Uuid::new_v4().to_string();
+    let token = provider.sign_identity_token(&subject, None, challenge["nonce"].as_str(), None);
+    let fields = [
+        ("client_id", CLIENT_ID),
+        ("challenge", challenge["challenge"].as_str().unwrap()),
+        ("identity_token", &token),
+        ("bootstrap_code", "ABC234"),
+    ];
+    let (a, b) = tokio::join!(
+        native_form(&app, NATIVE_TOKEN, &fields, None),
+        native_form(&app, NATIVE_TOKEN, &fields, None)
+    );
+    assert_eq!(
+        usize::from(a.0 == StatusCode::OK) + usize::from(b.0 == StatusCode::OK),
+        1
+    );
+    assert!(!store.first_credential_bootstrap_available().await.unwrap());
+    reset_bootstrap_tables(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn native_bootstrap_preserves_remote_policy_and_lockout() {
+    let store = store().await;
+    reset_bootstrap_tables(&store).await;
+    let bootstrap = bootstrap_config();
+    let (app, _) = app_with_named_provider(store.clone(), Some(bootstrap.clone()), "native-only");
+    let form = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs([
+            ("client_id", CLIENT_ID),
+            ("purpose", "bootstrap"),
+            ("bootstrap_code", "ABC234"),
+        ])
+        .finish();
+    let request = Request::post(NATIVE_CHALLENGE)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(form))
+        .unwrap();
+    let response = app
+        .clone()
+        .oneshot(with_connect_info_addr(request, "192.0.2.1:12345"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let fields = [
+        ("client_id", CLIENT_ID),
+        ("purpose", "bootstrap"),
+        ("bootstrap_code", "ABC234"),
+    ];
+    assert_eq!(
+        native_form(&app, NATIVE_CHALLENGE, &fields, None).await.0,
+        StatusCode::OK
+    );
+    // Locking the armed capability also closes the native path.
+    for _ in 0..10 {
+        let _ = bootstrap.validate_access_code("WRONG2");
+    }
+    assert_eq!(
+        native_form(&app, NATIVE_CHALLENGE, &fields, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    reset_bootstrap_tables(&store).await;
+}
+
 fn assert_callback_headers(response: &axum::response::Response) {
     assert_eq!(response.headers()["cache-control"], "no-store");
     assert_eq!(response.headers()["referrer-policy"], "no-referrer");
@@ -151,7 +523,12 @@ fn app_with_clients(
         clients,
         providers: axon_core::OauthProvidersConfig::default(),
     };
-    let runtime = Arc::new(OAuthRuntime::new(&oauth_config, providers));
+    let mut runtime = OAuthRuntime::new(&oauth_config, providers);
+    if name == "native-only" {
+        runtime.providers.clear();
+        runtime.native_apple = Some(provider.clone());
+    }
+    let runtime = Arc::new(runtime);
 
     let (live, _rx) = tokio::sync::broadcast::channel(16);
     let mut state = AppState::new(
