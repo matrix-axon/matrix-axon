@@ -610,7 +610,7 @@ The additive endpoints are `POST /v1/oauth/apple/native/challenge` and `POST /v1
 Native-only discovery uses `GET /v1/oauth/providers?flow=native`; the default list retains browser-only semantics for old clients.
 Apple receives the server-returned base64 SHA-256 nonce verbatim, without an additional client hash.
 An independent client-held challenge capability is stored only as a hash and is never sent to Apple.
-Flows expire after five minutes, bind the configured instance URL, public client ID, purpose, and authorizing capability, and are capped at 1,024 pending rows.
+Flows expire after five minutes, bind the configured instance URL, public client ID, purpose, and authorizing capability, and are capped separately at 1,024 public login rows and 64 authorized bind/bootstrap rows.
 Owner binding requires the same still-active bearer at creation and redemption; bootstrap requires the same explicitly armed capability and retains the first-credential transaction lock.
 The shared identity-token transaction also closes the legacy Google/Microsoft replay-before-mint gap.
 Browser authorization-code and refresh-token orchestration are unchanged.

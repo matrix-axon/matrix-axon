@@ -7,7 +7,7 @@ CREATE TABLE oauth_native_challenges (
     instance TEXT NOT NULL,
     nonce TEXT NOT NULL,
     authority_hash TEXT,
-    expires_at TIMESTAMPTZ NOT NULL DEFAULT (clock_timestamp() + interval '5 minutes'),
+    expires_at TIMESTAMPTZ NOT NULL,
     CHECK ((purpose = 'login') = (authority_hash IS NULL))
 );
 CREATE INDEX oauth_native_challenges_expiry ON oauth_native_challenges (expires_at);

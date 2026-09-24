@@ -7388,6 +7388,20 @@
           "oauth"
         ],
         "operationId": "challenge",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "Bearer owner token; required for purpose=bind, omitted for login/bootstrap.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/x-www-form-urlencoded": {
@@ -7410,19 +7424,74 @@
             }
           },
           "400": {
-            "description": "Invalid request"
+            "description": "Invalid form or request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeErrorBody"
+                }
+              }
+            }
           },
           "403": {
-            "description": "Owner authorization required"
+            "description": "Owner authorization required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           },
           "404": {
-            "description": "Native Apple disabled"
+            "description": "Native Apple disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           },
           "409": {
-            "description": "Bootstrap closed"
+            "description": "Bootstrap closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           },
           "429": {
-            "description": "Challenge capacity or rate exceeded"
+            "description": "Challenge capacity or rate exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         },
         "security": []
@@ -7434,6 +7503,20 @@
           "oauth"
         ],
         "operationId": "token",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "Same Bearer owner token used to create a bind challenge; still required and must remain active. Omitted for login/bootstrap.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/x-www-form-urlencoded": {
@@ -7456,7 +7539,47 @@
             }
           },
           "400": {
-            "description": "Invalid, expired, unbound, or replayed identity",
+            "description": "Invalid request, expired/replayed identity, or invalid owner authorization (invalid_grant); body timeouts use the API envelope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Native Apple disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -7464,12 +7587,6 @@
                 }
               }
             }
-          },
-          "403": {
-            "description": "Owner authorization invalid"
-          },
-          "404": {
-            "description": "Native Apple disabled"
           }
         },
         "security": []
@@ -11337,6 +11454,17 @@
             "description": "Set ASAuthorizationAppleIDRequest.nonce to this exact string. Do not hash again."
           }
         }
+      },
+      "NativeErrorBody": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/OAuthErrorBody"
+          },
+          {
+            "$ref": "#/components/schemas/ErrorResponse"
+          }
+        ],
+        "description": "Schema-only union: grant/form failures use OAuth errors, whereas transport,\navailability, and authorization gates may use the standard API envelope."
       },
       "NativeTokenRequest": {
         "type": "object",

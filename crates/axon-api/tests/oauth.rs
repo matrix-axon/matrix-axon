@@ -357,6 +357,17 @@ async fn native_bootstrap_is_explicit_and_one_time() {
     ];
     let (status, challenge) = native_form(&app, NATIVE_CHALLENGE, &fields, None).await;
     assert_eq!(status, StatusCode::OK);
+    let stored = store
+        .native_challenge(&axon_core::hash_secret(
+            challenge["challenge"].as_str().unwrap(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        stored.authority_hash,
+        Some(axon_core::hash_secret("ABC234"))
+    );
     let subject = Uuid::new_v4().to_string();
     let token = provider.sign_identity_token(&subject, None, challenge["nonce"].as_str(), None);
     let fields = [
@@ -365,6 +376,13 @@ async fn native_bootstrap_is_explicit_and_one_time() {
         ("identity_token", &token),
         ("bootstrap_code", "ABC234"),
     ];
+    // Even reusing the same short code after restart must not revive a flow.
+    let (restarted, _) =
+        app_with_named_provider(store.clone(), Some(bootstrap_config()), "native-only");
+    assert_eq!(
+        native_form(&restarted, NATIVE_TOKEN, &fields, None).await.0,
+        StatusCode::BAD_REQUEST
+    );
     let (a, b) = tokio::join!(
         native_form(&app, NATIVE_TOKEN, &fields, None),
         native_form(&app, NATIVE_TOKEN, &fields, None)

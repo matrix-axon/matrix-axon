@@ -199,6 +199,9 @@ pub struct AppState {
 pub struct BootstrapConfig {
     pub allow_remote: bool,
     access_code: String,
+    // Independent random binding for this armed bootstrap session. Never
+    // derive a persistent verifier from the short human-entered access code.
+    native_binding: String,
     failed_url_attempts: Arc<AtomicUsize>,
     pub web_client_url: Option<String>,
 }
@@ -231,6 +234,7 @@ impl BootstrapConfig {
         Self {
             allow_remote,
             access_code,
+            native_binding: axon_core::generate_opaque_secret(),
             failed_url_attempts: Arc::new(AtomicUsize::new(0)),
             web_client_url,
         }
@@ -238,6 +242,10 @@ impl BootstrapConfig {
 
     pub fn access_code(&self) -> &str {
         &self.access_code
+    }
+
+    pub(crate) fn native_binding(&self) -> &str {
+        &self.native_binding
     }
 
     pub fn url_path(&self) -> String {

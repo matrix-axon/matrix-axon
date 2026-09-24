@@ -49,7 +49,7 @@ pub use migrations::{embedded_migrations, EmbeddedMigration};
 pub use oauth_authorization_requests::{AuthorizationRequest, NewAuthorizationRequest};
 pub use oauth_bind_requests::BindRequest;
 pub use oauth_identities::OauthIdentity;
-pub use oauth_native::{IdentityRedemption, NativeChallenge};
+pub use oauth_native::{IdentityRedemption, NativeChallenge, NATIVE_CHALLENGE_TTL_SECS};
 pub use oauth_refresh_tokens::{RedeemRefreshTokenError, RotatedRefreshToken};
 pub use rooms::{RoomSummary, RoomTag};
 pub use search::{
