@@ -405,11 +405,18 @@ jobs:
   # and pushes Formula/axon-server.rb to matrix-axon/homebrew-tap.
   # Does not upload release assets, so it stays out of the github-release
   # concurrency group. needs: release is what makes the zips exist first.
+  # Only v* tags: the tap has one formula, and beta-*/alpha-* would replace
+  # the stable release with a version Homebrew cannot order.
   homebrew-tap:
     name: Publish Homebrew formula
     needs: release
-    if: ${{ github.event.inputs.homebrew != 'false' || (github.ref_type == 'tag' && needs.release.result == 'success')  }}
+    if: ${{ github.event.inputs.homebrew != 'false' && needs.release.result == 'success' && startsWith(github.ref_name, 'v') }}
     runs-on: ubuntu-latest
+    # One tap branch for every tag: two tags pushed together would otherwise
+    # race to push main, and the loser fails non-fast-forward.
+    concurrency:
+      group: homebrew-tap
+      cancel-in-progress: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7

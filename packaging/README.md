@@ -43,7 +43,10 @@ Remote Postgres: the package still installs; see `README.Debian` in the doc dire
 
 The formula template is `packaging/homebrew/axon-server.rb.tmpl`.
 `packaging/homebrew/render-formula.sh` fills the version and the sha256 of the GitHub Release zips.
-On a `v*` / `beta-*` / `alpha-*` tag, `cross-build.yml` publishes that formula to `matrix-axon/homebrew-tap` after the macOS and Linux zips are on the Release.
+On a stable `vX.Y.Z` tag, `cross-build.yml` publishes that formula to `matrix-axon/homebrew-tap` after the macOS and Linux zips are on the Release.
+`beta-*` and `alpha-*` tags are skipped: the tap has one formula, and Homebrew cannot order a version like `beta-1` against `1.2.3`.
+A tag older than the formula already in the tap is skipped too, so re-running an old tag's workflow or pushing a backport tag cannot downgrade users.
+Tap publishes share one concurrency group, so two tags pushed together do not race to push the tap.
 
 ```sh
 brew install matrix-axon/tap/axon-server
@@ -77,7 +80,8 @@ Linuxbrew installs the x86_64 release zip from `cross-build.yml` (ubuntu-latest)
 Linux arm64 has no zip in that workflow; use the Debian or RPM package there.
 The Linux zip's glibc is newer than those packages.
 
-Check the renderer without brew or a release:
+Check the renderer without brew or a release.
+The test also runs `publish-tap.sh --dry-run`, which needs `--zip-dir` and `--tap-dir` and uses no network:
 
 ```sh
 packaging/homebrew/render-formula-test.sh

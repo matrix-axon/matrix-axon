@@ -4,8 +4,13 @@
 #
 #   TAG=v0.1.0 TAP_TOKEN=... packaging/homebrew/publish-tap.sh
 #
+# Only stable vX.Y.Z tags publish; beta-*/alpha-* tags exit 0 untouched.
+# A tag older than the formula already in the tap exits 0 untouched too,
+# so re-running an old tag's workflow or a backport tag cannot downgrade.
+#
 # Dry run (no network, no token): hash zips already on disk and commit into
-# a local checkout.
+# a local checkout. Both directories are required. The checkout's git
+# config is not changed.
 #
 #   TAG=v0.1.0 packaging/homebrew/publish-tap.sh \
 #     --dry-run --zip-dir DIR --tap-dir DIR
@@ -31,7 +36,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '2,12p' "$0" >&2
+		sed -n '2,16p' "$0" >&2
 		exit 0
 		;;
 	*)
@@ -43,6 +48,18 @@ done
 
 if [ -z "${TAG:-}" ]; then
 	echo "TAG is required (the release tag, for example v0.1.0)" >&2
+	exit 2
+fi
+
+# Same pattern as render-formula.sh. cross-build.yml already skips
+# non-v tags; this covers a manual run and a v tag like v1.0.0-rc1.
+if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+(\.[0-9]+)+$'; then
+	echo "skipping $TAG: only stable vX.Y.Z tags are published to the tap"
+	exit 0
+fi
+
+if [ "$dry_run" -eq 1 ] && { [ -z "$zip_dir" ] || [ -z "$tap_dir" ]; }; then
+	echo "--dry-run needs --zip-dir and --tap-dir: it downloads nothing and clones nothing" >&2
 	exit 2
 fi
 
@@ -104,21 +121,48 @@ sha256_file() {
 	fi
 }
 
-download_asset() {
-	name=$1
-	dest=$2
+assets="axon-server-macos-silicon.zip axon-server-macos-intel.zip axon-server-linux.zip"
+
+# One download of all three zips per attempt, so the retry backoff is paid
+# once rather than once per asset.
+download_assets() {
+	dest=$1
+	patterns=()
+	for name in $assets; do
+		patterns+=(--pattern "$name")
+	done
 	attempt=1
 	while [ "$attempt" -le 6 ]; do
 		if gh release download "$TAG" --repo matrix-axon/matrix-axon \
-			--pattern "$name" --dir "$dest" --clobber &&
-			[ -s "$dest/$name" ]; then
-			return 0
+			"${patterns[@]}" --dir "$dest" --clobber; then
+			missing=
+			for name in $assets; do
+				[ -s "$dest/$name" ] || missing="$missing $name"
+			done
+			if [ -z "$missing" ]; then
+				return 0
+			fi
 		fi
-		echo "waiting for release asset $name (attempt $attempt)" >&2
+		echo "waiting for release assets (attempt $attempt)" >&2
 		sleep $((attempt * 5))
 		attempt=$((attempt + 1))
 	done
-	echo "release $TAG is missing $name" >&2
+	echo "release $TAG is missing one of: $assets" >&2
+	return 1
+}
+
+# True when dotted-numeric version $1 is older than $2.
+version_lt() {
+	IFS=. read -r -a a <<<"$1"
+	IFS=. read -r -a b <<<"$2"
+	n=${#a[@]}
+	[ "${#b[@]}" -gt "$n" ] && n=${#b[@]}
+	for ((i = 0; i < n; i++)); do
+		x=$((10#${a[i]:-0}))
+		y=$((10#${b[i]:-0}))
+		[ "$x" -lt "$y" ] && return 0
+		[ "$x" -gt "$y" ] && return 1
+	done
 	return 1
 }
 
@@ -131,12 +175,10 @@ else
 	fi
 	zips=$work/zips
 	mkdir -p "$zips"
-	download_asset axon-server-macos-silicon.zip "$zips"
-	download_asset axon-server-macos-intel.zip "$zips"
-	download_asset axon-server-linux.zip "$zips"
+	download_assets "$zips"
 fi
 
-for name in axon-server-macos-silicon.zip axon-server-macos-intel.zip axon-server-linux.zip; do
+for name in $assets; do
 	if [ ! -s "$zips/$name" ]; then
 		echo "missing zip: $zips/$name" >&2
 		exit 1
@@ -171,8 +213,17 @@ if [ ! -d "$tap_dir/.git" ]; then
 	exit 1
 fi
 
-git -C "$tap_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-git -C "$tap_dir" config user.name "github-actions[bot]"
+current=
+if [ -f "$tap_dir/Formula/axon-server.rb" ]; then
+	current=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$tap_dir/Formula/axon-server.rb")
+fi
+# A non-numeric current version (a beta formula from before tags were
+# filtered) is replaced, not compared.
+if printf '%s' "$current" | grep -Eq '^[0-9]+(\.[0-9]+)+$' &&
+	version_lt "$version" "$current"; then
+	echo "skipping $TAG: the tap already has axon-server $current, which is newer than $version"
+	exit 0
+fi
 
 mkdir -p "$tap_dir/Formula"
 cp "$rendered" "$tap_dir/Formula/axon-server.rb"
@@ -184,7 +235,11 @@ if git -C "$tap_dir" diff --cached --quiet; then
 	exit 0
 fi
 
-git -C "$tap_dir" commit -m "axon-server ${version}"
+# -c, not git config: a --tap-dir checkout keeps its own identity.
+git -C "$tap_dir" \
+	-c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+	-c user.name="github-actions[bot]" \
+	commit -m "axon-server ${version}"
 
 if [ "$dry_run" -eq 1 ]; then
 	echo "dry run committed axon-server ${version} in $tap_dir"
