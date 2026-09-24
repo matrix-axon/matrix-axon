@@ -199,7 +199,13 @@ request_timeout_secs = 15
 # client_secret = "change-me"
 #
 # [oauth.providers.apple]
-# Sign in with Apple. NOT YET IMPLEMENTED — axon refuses to boot with
-# `enabled = true` here until M14c ships AppleProvider. The fields exist now so
-# this config shape won't change again when it does.
+# Browser sign-in requires deployment-owned Apple credentials.
 # enabled = false
+# client_id = "com.example.axon.web"
+# team_id = "YOURTEAMID"
+# key_id = "YOURKEYID"
+# private_key_path = "/etc/axon/apple.p8" # owner-only permissions on Unix
+# Native verification is independent: no Services ID or private key required.
+# native_enabled = false
+# native_audiences = ["org.matrixaxon.axon"] # actual entitled app bundle ID
+# See docs/apple-oauth-native.md for owner binding and the challenge contract.

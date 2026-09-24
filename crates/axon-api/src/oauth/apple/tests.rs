@@ -23,6 +23,34 @@ fn config() -> AppleOauthConfig {
     }
 }
 
+#[tokio::test]
+async fn native_verifier_needs_no_developer_credentials_and_rejects_web_audience() {
+    use crate::oauth::NativeIdentityVerifier;
+    assert!(AppleNativeVerifier::new(super::super::http_client(), vec![]).is_err());
+    let (browser, task) = verification_provider().await;
+    let native = AppleNativeVerifier {
+        jwks: browser.jwks,
+        audiences: vec!["com.example.ios".into()],
+    };
+    let token = sign(&claims("com.example.ios"));
+    assert!(native.verify(&token, "expected").await.is_ok());
+    assert!(matches!(
+        native.verify(&token, "wrong").await,
+        Err(OidcError::InvalidNonce)
+    ));
+    assert!(matches!(
+        native.verify(&token, "").await,
+        Err(OidcError::InvalidNonce)
+    ));
+    assert!(matches!(
+        native
+            .verify(&sign(&claims("com.example.web")), "expected")
+            .await,
+        Err(OidcError::InvalidAudience(_))
+    ));
+    task.abort();
+}
+
 fn provider() -> AppleProvider {
     AppleProvider::new(
         super::super::http_client(),

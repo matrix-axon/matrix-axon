@@ -605,6 +605,17 @@ Validate real Apple browser login and CLI/bootstrap binding on a registered test
 
 ### PR 3: native server contract and owner binding
 
+Implemented by the final core-server layer; see [the native contract and verification guide](../apple-oauth-native.md).
+The additive endpoints are `POST /v1/oauth/apple/native/challenge` and `POST /v1/oauth/apple/native/token`.
+Native-only discovery uses `GET /v1/oauth/providers?flow=native`; the default list retains browser-only semantics for old clients.
+Apple receives the server-returned base64 SHA-256 nonce verbatim, without an additional client hash.
+An independent client-held challenge capability is stored only as a hash and is never sent to Apple.
+Flows expire after five minutes, bind the configured instance URL, public client ID, purpose, and authorizing capability, and are capped at 1,024 pending rows.
+Owner binding requires the same still-active bearer at creation and redemption; bootstrap requires the same explicitly armed capability and retains the first-credential transaction lock.
+The shared identity-token transaction also closes the legacy Google/Microsoft replay-before-mint gap.
+Browser authorization-code and refresh-token orchestration are unchanged.
+Native device acceptance and Apple App ID/Services ID subject-grouping verification remain outstanding until the native client integration.
+
 Add a short-lived, server-issued challenge for Apple native login, bound to an explicit flow purpose and selected Axon instance.
 Specify precisely whether the native SDK receives the raw nonce or its digest and verify the corresponding signed claim.
 The expected nonce comes from server state, never from an untrusted token or request field.

@@ -22,6 +22,25 @@ fn golden_path() -> PathBuf {
 }
 
 #[test]
+fn native_apple_contract_is_additive_and_form_encoded() {
+    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for path in [
+        "/v1/oauth/apple/native/challenge",
+        "/v1/oauth/apple/native/token",
+    ] {
+        let post = &spec["paths"][path]["post"];
+        assert!(post["requestBody"]["content"]["application/x-www-form-urlencoded"].is_object());
+        assert_eq!(post["security"], serde_json::json!([]));
+        assert!(post["responses"]["200"]["content"]["application/json"].is_object());
+    }
+    assert!(spec["paths"]["/v1/oauth/providers"]["get"]["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["name"] == "flow" && p["required"] == false));
+}
+
+#[test]
 fn callbacks_document_query_get_form_post_and_html_failures() {
     let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
     let path = &spec["paths"]["/v1/oauth/{provider}/callback"];

@@ -43,6 +43,7 @@ pub mod media;
 pub mod membership;
 pub mod messages;
 pub mod oauth;
+pub mod oauth_native;
 pub mod power_levels;
 pub mod preferences;
 pub mod room_entry;

@@ -61,8 +61,9 @@ pub use member_profiles::{
 };
 pub use oauth::{
     callback_url as oauth_callback_url, http_client as oauth_http_client,
-    rate_limit::spawn_sweeper as spawn_oauth_rate_limit_sweeper, AppleProvider,
-    GenericOidcProvider, OAuthRuntime, OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity,
+    rate_limit::spawn_sweeper as spawn_oauth_rate_limit_sweeper, AppleNativeVerifier,
+    AppleProvider, GenericOidcProvider, NativeIdentityVerifier, OAuthRuntime, OidcError,
+    OidcProvider, UpstreamTokens, VerifiedIdentity,
 };
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
@@ -480,6 +481,14 @@ pub fn router(state: AppState) -> Router {
             routes::oauth::callback_response,
         ));
     let oauth_router = Router::new()
+        .route(
+            "/v1/oauth/apple/native/challenge",
+            post(routes::oauth_native::challenge),
+        )
+        .route(
+            "/v1/oauth/apple/native/token",
+            post(routes::oauth_native::token),
+        )
         .route("/v1/oauth/providers", get(routes::oauth::providers))
         .route("/v1/oauth/authorize", get(routes::oauth::authorize))
         .route("/v1/oauth/token", post(routes::oauth::token))
@@ -488,7 +497,10 @@ pub fn router(state: AppState) -> Router {
             oauth_state,
             oauth::rate_limit::rate_limit,
         ))
-        .merge(callback_router);
+        .merge(callback_router)
+        .layer(axum::middleware::map_response(
+            routes::oauth_native::no_store,
+        ));
 
     let bootstrap_state = state.bootstrap.clone();
     let bootstrap_router = Router::new()

@@ -19,8 +19,8 @@ mod migrations;
 mod oauth_authorization_requests;
 mod oauth_bind_requests;
 mod oauth_identities;
+mod oauth_native;
 mod oauth_refresh_tokens;
-mod oauth_replay;
 mod rooms;
 mod search;
 mod spaces;
@@ -49,6 +49,7 @@ pub use migrations::{embedded_migrations, EmbeddedMigration};
 pub use oauth_authorization_requests::{AuthorizationRequest, NewAuthorizationRequest};
 pub use oauth_bind_requests::BindRequest;
 pub use oauth_identities::OauthIdentity;
+pub use oauth_native::{IdentityRedemption, NativeChallenge};
 pub use oauth_refresh_tokens::{RedeemRefreshTokenError, RotatedRefreshToken};
 pub use rooms::{RoomSummary, RoomTag};
 pub use search::{
