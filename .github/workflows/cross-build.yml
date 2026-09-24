@@ -77,6 +77,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Every build job needs this one, so a tag that disagrees with the
+      # Cargo version (what `axon-server --version` prints) stops here,
+      # before anything is built or attached to a Release. release-plz
+      # keeps the two equal; this catches a tag pushed by hand.
+      - name: Tag matches the workspace version
+        run: scripts/release-version.sh check
+
       # --root-only: this job feeds the server and TUI release archives, which
       # ship none of the desktop shell. Without the flag it would also resolve
       # and license-check `src-tauri`'s dependency graph and then discard both

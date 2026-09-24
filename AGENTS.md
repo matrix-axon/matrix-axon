@@ -66,6 +66,7 @@ matrix-axon/
     lint-and-clippy.yml      # required PR/main Rust gate: cargo fmt + clippy + test
     lint-and-test.yml        # cargo fmt + clippy + test
     package.yml              # nFPM .deb/.rpm (amd64 on ubuntu-22.04, arm64 on ubuntu-22.04-arm); tag uploads to GitHub Releases
+    release-plz.yml          # on main: opens the release PR that bumps the Cargo version, and tags its merge (ADR 0106, release-plz.toml)
     integration.yml          # selectable E2EE re-decryption and Matrix OAuth QR real-service suites
     matrix-oauth.yml         # reusable Matrix OAuth QR real-service workflow used by integration and smoke
     smoke.yml                # S1 black-box smoke (PR 1: TUI PTY suite; PR 2 added the server gate)

@@ -18,7 +18,8 @@ CI (`.github/workflows/package.yml`) builds amd64 on `ubuntu-22.04` and arm64 on
 `ubuntu-22.04-arm` so Bookworm/Jammy can run the glibc-2.35 binary.
 On `v*` / `beta-*` / `alpha-*` tags it attaches the `.deb` and `.rpm` files to
 the GitHub Release (alongside the zip archives from `cross-build.yml`).
-The `.deb` version is `Cargo.toml`'s `version`, not the git tag.
+The `.deb` version is `Cargo.toml`'s `version` (`scripts/release-version.sh print`).
+On a `v*` tag, the job fails unless the tag equals `v` plus that version (ADR 0106).
 
 ## First install (local Postgres)
 

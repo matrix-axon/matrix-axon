@@ -19,6 +19,8 @@ on:
       - "crates/axon-search/**"
       - "crates/axon-media/**"
       - "Cargo.lock"
+      - "scripts/release-version.sh"
+      - "scripts/release-version-test.sh"
   push:
     tags:
       - "v*"
@@ -41,6 +43,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends shellcheck
           shellcheck -s sh packaging/scripts/postinst.sh packaging/scripts/prerm.sh packaging/scripts/postrm.sh
           shellcheck packaging/package.sh
+
+      - name: Release version script
+        run: |
+          shellcheck scripts/release-version.sh scripts/release-version-test.sh
+          scripts/release-version-test.sh
 
   packages:
     name: .deb and .rpm (${{ matrix.arch }})
@@ -68,6 +75,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      # package.sh stamps the Cargo version on the .deb/.rpm, so a tag that
+      # disagrees would attach packages named for another release.
+      - name: Tag matches the workspace version
+        run: scripts/release-version.sh check
 
       - name: Install nFPM
         env:
