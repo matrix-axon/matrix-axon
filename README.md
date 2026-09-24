@@ -209,13 +209,21 @@ Configure a provider (`oauth.providers.google` / `.microsoft` in `axon.toml`), t
 ```bash
 axon-server oauth bind --provider google      # or --provider microsoft
 axon-server oauth identities list
-axon-server oauth identities unbind <id>       # revokes every token/refresh token that identity minted
+axon-server oauth identities unbind <id>       # atomically invalidates the identity's tokens and authorization codes
 ```
 
 `bind` prints a URL — open it in any browser, on this machine or elsewhere, since it only needs to reach Axon's already-running `/v1/` surface — and polls until that browser leg completes or the 10-minute handshake expires.
-Sign in with Apple is not yet available to operators.
-The provider foundation is implemented, but enabling Apple still fails at startup until POST callbacks and owner binding are integrated.
+Apple browser sign-in is implemented for deployments with their own registered Apple credentials; owner binding, web login, repeat login, and Google/Microsoft regression checks have been verified on a registered deployment.
+Configure a Services ID (`client_id`), `team_id`, `key_id`, and exactly one of inline `private_key` or `private_key_path` under `[oauth.providers.apple]`, then set `enabled = true`.
+Key files must be regular files of at most 16 KiB, with owner-only permissions on Unix (`chmod 600`); relative paths are resolved from the server/CLI working directory.
+The callback is `oauth.external_base_url` (without trailing slashes) plus `/v1/oauth/apple/callback` and must be a canonical HTTPS URL without userinfo, query, or fragment.
+Register that exact return URL with Apple; if `redirect_uri` is also configured, it must match exactly.
+Use `axon-server oauth bind --provider apple` against the same configuration as the running server, or the explicitly armed first-run web bootstrap, to bind the owner before ordinary sign-in.
+Cancellation ends the current attempt; restart sign-in or rerun the binding command to retry.
+Native Apple server verification is enabled independently with `native_enabled = true` and explicit `native_audiences` under `[oauth.providers.apple]`; no project signing key is distributed to self-hosters.
+The [native server contract](docs/apple-oauth-native.md) provides single-use challenges, owner-authorized binding, and atomic redemption; native client integration and real-device acceptance remain separate work.
 See [ADR 0054's implementation addendum](docs/adr/0054-oauth-authorization-server.md#implementation-addendum-apple-rollout) for the remaining server and mobile work.
+The [Apple browser verification guide](docs/apple-oauth-browser.md) covers configuration, automated checks, and the required registered-deployment acceptance pass.
 
 The Matrix OAuth session foundation for Axon's own homeserver sessions is configured separately under `sync.matrix_oauth` (ADR 0097).
 It dynamically registers a public client when the discovered authorization server permits it; operators can configure a static public client ID for issuers that disable dynamic registration.

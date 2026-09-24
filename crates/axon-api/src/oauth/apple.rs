@@ -1,12 +1,12 @@
 //! Sign in with Apple provider foundation (ADR 0054).
 //!
-//! Not registered by the binary yet: Apple's POST callback and owner-binding
-//! integration must land before operators can enable this provider.
+//! Credentialed browser login and independent public-key-only native verification.
 
 use axon_core::AppleOauthConfig;
 use chrono::Utc;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::Serialize;
+use std::sync::Arc;
 
 use super::jwks::JwksCache;
 use super::{OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity};
@@ -19,6 +19,47 @@ const JWKS_URL: &str = "https://appleid.apple.com/auth/keys";
 // no timer, cache lock, or background task is needed. Apple's limit is six months.
 const CLIENT_SECRET_TTL_SECS: i64 = 300;
 
+/// Public-key-only verifier: no Services ID, team ID, or private key required.
+pub struct AppleNativeVerifier {
+    jwks: Arc<JwksCache>,
+    audiences: Vec<String>,
+}
+
+impl AppleNativeVerifier {
+    pub fn new(http: reqwest::Client, audiences: Vec<String>) -> Result<Self, OidcError> {
+        Self::with_jwks(Arc::new(JwksCache::new(http, JWKS_URL.into())), audiences)
+    }
+
+    fn with_jwks(jwks: Arc<JwksCache>, audiences: Vec<String>) -> Result<Self, OidcError> {
+        if audiences.is_empty() || audiences.iter().any(|a| a.trim().is_empty()) {
+            return Err(OidcError::Malformed(
+                "Apple native audiences are required".into(),
+            ));
+        }
+        Ok(Self { jwks, audiences })
+    }
+}
+
+#[async_trait::async_trait]
+impl super::NativeIdentityVerifier for AppleNativeVerifier {
+    async fn verify(&self, token: &str, nonce: &str) -> Result<VerifiedIdentity, OidcError> {
+        verify_native(&self.jwks, &self.audiences, token, nonce).await
+    }
+}
+
+async fn verify_native(
+    jwks: &JwksCache,
+    audiences: &[String],
+    token: &str,
+    nonce: &str,
+) -> Result<VerifiedIdentity, OidcError> {
+    if nonce.is_empty() {
+        return Err(OidcError::InvalidNonce);
+    }
+    let audiences: Vec<&str> = audiences.iter().map(String::as_str).collect();
+    super::verification::verify(jwks, token, ISSUER, &audiences, Some(nonce)).await
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -27,11 +68,10 @@ mod tests;
 pub struct AppleProvider {
     http: reqwest::Client,
     client_id: String,
-    native_audiences: Vec<String>,
     team_id: String,
     key_id: String,
     signing_key: EncodingKey,
-    jwks: JwksCache,
+    jwks: Arc<JwksCache>,
     token_url: String,
 }
 
@@ -56,20 +96,12 @@ impl AppleProvider {
         let client_id = required(config.client_id.as_deref(), "client_id")?;
         let team_id = required(config.team_id.as_deref(), "team_id")?;
         let key_id = required(config.key_id.as_deref(), "key_id")?;
-        if config
-            .native_audiences
-            .iter()
-            .any(|aud| aud.trim().is_empty())
-        {
-            return Err(OidcError::Malformed("empty Apple native audience".into()));
-        }
         let signing_key = EncodingKey::from_ec_pem(private_key_pem)
             .map_err(|_| OidcError::Malformed("invalid Apple ES256 private key".into()))?;
         let provider = Self {
-            jwks: JwksCache::new(http.clone(), JWKS_URL.into()),
+            jwks: Arc::new(JwksCache::new(http.clone(), JWKS_URL.into())),
             http,
             client_id: client_id.into(),
-            native_audiences: config.native_audiences.clone(),
             team_id: team_id.into(),
             key_id: key_id.into(),
             signing_key,
@@ -99,19 +131,13 @@ impl AppleProvider {
         .map_err(|_| OidcError::Malformed("Apple client-secret signing failed".into()))
     }
 
-    /// Native tokens use explicitly configured bundle IDs, never the web
-    /// Services ID. The future native handler must obtain this nonce from its
-    /// own single-use challenge record, not from a client-provided expectation.
-    pub async fn verify_native_identity_token(
+    /// Share the browser cache and refresh limiter without sharing audiences
+    /// or private credentials with the keyless native verifier.
+    pub fn native_verifier(
         &self,
-        token: &str,
-        nonce: &str,
-    ) -> Result<VerifiedIdentity, OidcError> {
-        if nonce.is_empty() {
-            return Err(OidcError::InvalidNonce);
-        }
-        let audiences: Vec<&str> = self.native_audiences.iter().map(String::as_str).collect();
-        super::verification::verify(&self.jwks, token, ISSUER, &audiences, Some(nonce)).await
+        audiences: Vec<String>,
+    ) -> Result<AppleNativeVerifier, OidcError> {
+        AppleNativeVerifier::with_jwks(self.jwks.clone(), audiences)
     }
 }
 
@@ -123,6 +149,10 @@ fn required<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, OidcErro
 
 #[async_trait::async_trait]
 impl OidcProvider for AppleProvider {
+    fn is_cancellation(&self, error: &str) -> bool {
+        matches!(error, "access_denied" | "user_cancelled_authorize")
+    }
+
     fn name(&self) -> &'static str {
         "apple"
     }

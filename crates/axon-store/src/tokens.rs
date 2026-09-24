@@ -268,11 +268,9 @@ impl Store {
     }
 
     /// Revoke every still-active token minted for `oauth_identity_id`.
-    /// `axon oauth identities unbind`'s first step — `delete_identity`
-    /// leaves any `tokens`/`oauth_refresh_tokens` rows referencing the
-    /// identity alone (no `ON DELETE` action on that FK), so a caller must
-    /// revoke them before the identity can be deleted. Returns the number of
-    /// tokens revoked.
+    /// Returns the number of tokens revoked without removing the identity.
+    /// Unbinding uses [`delete_identity`](Self::delete_identity) instead,
+    /// which invalidates all credentials and removes the identity atomically.
     pub async fn revoke_tokens_for_identity(
         &self,
         oauth_identity_id: Uuid,
@@ -292,10 +290,9 @@ impl Store {
     /// available. The identity and both tokens are written in one transaction.
     pub async fn issue_first_oauth_token_pair(
         &self,
-        provider: &str,
+        request: &crate::AuthorizationRequest,
         subject: &str,
         email: Option<&str>,
-        client_id: &str,
         access_expires_at: DateTime<Utc>,
         refresh_expires_at: DateTime<Utc>,
     ) -> Result<Option<IssuedOAuthTokenPair>, StoreError> {
@@ -305,6 +302,27 @@ impl Store {
             tx.rollback().await?;
             return Ok(None);
         }
+
+        // The flow claim, identity, and token pair commit together. Cancellation,
+        // expiry, or a concurrent callback cannot leave a bootstrap credential.
+        let claimed = sqlx_core::query::query(
+            "UPDATE oauth_authorization_requests SET status = 'redeemed' \
+             WHERE id = $1 AND provider = $2 AND client_id = $3 AND redirect_uri = $4 \
+               AND upstream_nonce = $5 AND status = 'pending' AND expires_at > clock_timestamp()",
+        )
+        .bind(request.id)
+        .bind(&request.provider)
+        .bind(&request.client_id)
+        .bind(&request.redirect_uri)
+        .bind(&request.upstream_nonce)
+        .execute(&mut *tx)
+        .await?;
+        if claimed.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let provider = request.provider.as_str();
+        let client_id = request.client_id.as_str();
 
         let identity_id: Uuid = sqlx_core::query::query(
             "INSERT INTO oauth_identities (provider, subject, email) \
@@ -316,7 +334,27 @@ impl Store {
         .fetch_one(&mut *tx)
         .await?
         .try_get("id")?;
+        let pair = Self::mint_oauth_pair_in_tx(
+            &mut tx,
+            provider,
+            identity_id,
+            client_id,
+            access_expires_at,
+            refresh_expires_at,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Some(pair))
+    }
 
+    pub(crate) async fn mint_oauth_pair_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        provider: &str,
+        identity_id: Uuid,
+        client_id: &str,
+        access_expires_at: DateTime<Utc>,
+        refresh_expires_at: DateTime<Utc>,
+    ) -> Result<IssuedOAuthTokenPair, StoreError> {
         let access_token = generate_token();
         let access_hash = hash_token(&access_token);
         sqlx_core::query::query(
@@ -329,7 +367,7 @@ impl Store {
         .bind(provider)
         .bind(identity_id)
         .bind(client_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         let refresh_token = generate_refresh_token();
@@ -342,17 +380,19 @@ impl Store {
         .bind(identity_id)
         .bind(client_id)
         .bind(refresh_expires_at)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
-        tx.commit().await?;
-        Ok(Some(IssuedOAuthTokenPair {
+        Ok(IssuedOAuthTokenPair {
             access_token,
             refresh_token,
-        }))
+        })
     }
 
-    async fn lock_bootstrap(&self, tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    pub(crate) async fn lock_bootstrap(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> Result<(), StoreError> {
         sqlx_core::query::query("SELECT pg_advisory_xact_lock($1)")
             .bind(BOOTSTRAP_LOCK_KEY)
             .execute(&mut **tx)
@@ -360,7 +400,7 @@ impl Store {
         Ok(())
     }
 
-    async fn bootstrap_available_in_tx(
+    pub(crate) async fn bootstrap_available_in_tx(
         tx: &mut Transaction<'_, Postgres>,
     ) -> Result<bool, StoreError> {
         let available: bool = sqlx_core::query::query(

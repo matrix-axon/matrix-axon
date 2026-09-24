@@ -7382,6 +7382,216 @@
         }
       }
     },
+    "/v1/oauth/apple/native/challenge": {
+      "post": {
+        "tags": [
+          "oauth"
+        ],
+        "operationId": "challenge",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "Bearer owner token; required for purpose=bind, omitted for login/bootstrap.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeChallengeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeChallengeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid form or request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Owner authorization required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Native Apple disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Bootstrap closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Challenge capacity or rate exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/oauth/apple/native/token": {
+      "post": {
+        "tags": [
+          "oauth"
+        ],
+        "operationId": "token",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "Same Bearer owner token used to create a bind challenge; still required and must remain active. Omitted for login/bootstrap.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenSuccessBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, expired/replayed identity, or invalid owner authorization (invalid_grant); body timeouts use the API envelope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Native Apple disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/v1/oauth/providers": {
       "get": {
         "tags": [
@@ -7390,6 +7600,20 @@
         "summary": "`GET /v1/oauth/providers`: which sign-in providers this instance offers.",
         "description": "A client cannot know this by configuration. Which providers exist is a\nproperty of the *server*, and a client that is distributed as a binary —\nthe desktop and mobile shells of ADR 0102 — is pointed at a server it has\nnever seen and cannot have been built against. Baking the list in at build\ntime, as the web client's `VITE_AXON_OAUTH_PROVIDERS` does, works only when\nwhoever builds the bundle also runs the server.\n\nDeliberately un-gated, like the rest of this module: it is read *before*\nthere is a token, to decide which buttons the sign-in screen has. It\ntherefore reveals which IdPs an instance trusts to anyone who can reach it,\nwhich is the same thing its sign-in page would show them, and no more than\n`/v1/oauth/authorize` already tells them by accepting or rejecting a\n`provider`.\n\n`404` when OAuth is off, matching this module's stated policy: an\nunauthenticated caller of a disabled surface sees \"no such route\", not\n\"come back later\".",
         "operationId": "providers",
+        "parameters": [
+          {
+            "name": "flow",
+            "in": "query",
+            "description": "Omit for browser providers (legacy behavior); use native for SDK login.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "The enabled sign-in providers",
@@ -7407,6 +7631,213 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/oauth/{provider}/callback": {
+      "get": {
+        "tags": [
+          "oauth"
+        ],
+        "summary": "Query callback adapter; both methods share the same validation and completion.",
+        "operationId": "callback_get",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "description": "Enabled upstream identity provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Server-issued upstream state",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "description": "Authorization code; mutually exclusive with error",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "description": "Provider error; mutually exclusive with code",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Binding/bootstrap result or native-app handoff page",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "303": {
+            "description": "Return to the validated client with a code or sanitized OAuth error"
+          },
+          "400": {
+            "description": "Invalid, stale, or malformed callback",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Bootstrap peer is not permitted",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "OAuth or provider disabled",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Callback exceeds 16 KiB",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      },
+      "post": {
+        "tags": [
+          "oauth"
+        ],
+        "summary": "Complete either GET or bounded form POST through the same validated flow.",
+        "operationId": "callback",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "description": "Enabled upstream identity provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Binding/bootstrap result or native-app handoff page",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "303": {
+            "description": "Return to the validated client with a code or sanitized OAuth error"
+          },
+          "400": {
+            "description": "Invalid, stale, or malformed callback",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Bootstrap peer is not permitted",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "OAuth or provider disabled",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Callback exceeds 16 KiB",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -9509,9 +9940,17 @@
               "type": "object",
               "description": "One sign-in provider this instance has enabled.\n\nAn object rather than a bare string so a later addition — a display label,\nan icon, whether the provider supports Path B — is an additive field rather\nthan a reshaped array, which ADR 0099's additive-first policy would\notherwise make a breaking change.",
               "required": [
-                "provider"
+                "provider",
+                "browser",
+                "native"
               ],
               "properties": {
+                "browser": {
+                  "type": "boolean"
+                },
+                "native": {
+                  "type": "boolean"
+                },
                 "provider": {
                   "type": "string",
                   "description": "The value to pass as `provider` to `GET /v1/oauth/authorize`, e.g.\n`\"google\"`."
@@ -9956,6 +10395,32 @@
           },
           "version": {
             "type": "string"
+          }
+        }
+      },
+      "CallbackQuery": {
+        "type": "object",
+        "description": "Upstream callback fields, carried in a GET query or URL-encoded POST form.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Exactly one of code or error is required."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "description": "Opaque state from an unexpired, pending server-side flow."
           }
         }
       },
@@ -10944,13 +11409,120 @@
           }
         }
       },
+      "NativeChallengeRequest": {
+        "type": "object",
+        "required": [
+          "client_id",
+          "purpose"
+        ],
+        "properties": {
+          "bootstrap_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string",
+            "description": "login, bind (existing bearer), or bootstrap (explicit setup capability)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "NativeChallengeResponse": {
+        "type": "object",
+        "required": [
+          "challenge",
+          "nonce",
+          "expires_in"
+        ],
+        "properties": {
+          "challenge": {
+            "type": "string",
+            "description": "Client-held secret. Never pass it to Apple or persist it."
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "nonce": {
+            "type": "string",
+            "description": "Set ASAuthorizationAppleIDRequest.nonce to this exact string. Do not hash again."
+          }
+        }
+      },
+      "NativeErrorBody": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/OAuthErrorBody"
+          },
+          {
+            "$ref": "#/components/schemas/ErrorResponse"
+          }
+        ],
+        "description": "Schema-only union: grant/form failures use OAuth errors, whereas transport,\navailability, and authorization gates may use the standard API envelope."
+      },
+      "NativeTokenRequest": {
+        "type": "object",
+        "required": [
+          "client_id",
+          "challenge",
+          "identity_token"
+        ],
+        "properties": {
+          "bootstrap_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "challenge": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "identity_token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "OAuthErrorBody": {
+        "type": "object",
+        "description": "`POST /v1/oauth/token`'s error body (RFC 6749 §5.2).",
+        "required": [
+          "error",
+          "error_description"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "error_description": {
+            "type": "string"
+          }
+        }
+      },
       "OAuthProviderDto": {
         "type": "object",
         "description": "One sign-in provider this instance has enabled.\n\nAn object rather than a bare string so a later addition — a display label,\nan icon, whether the provider supports Path B — is an additive field rather\nthan a reshaped array, which ADR 0099's additive-first policy would\notherwise make a breaking change.",
         "required": [
-          "provider"
+          "provider",
+          "browser",
+          "native"
         ],
         "properties": {
+          "browser": {
+            "type": "boolean"
+          },
+          "native": {
+            "type": "boolean"
+          },
           "provider": {
             "type": "string",
             "description": "The value to pass as `provider` to `GET /v1/oauth/authorize`, e.g.\n`\"google\"`."
@@ -12128,6 +12700,32 @@
               "null"
             ],
             "description": "Opaque cursor for the next (older) page, or `null` at the end."
+          }
+        }
+      },
+      "TokenSuccessBody": {
+        "type": "object",
+        "description": "`POST /v1/oauth/token`'s success body (RFC 6749 §5.1) — plain, not\nwrapped in `{\"data\": ...}`.",
+        "required": [
+          "access_token",
+          "token_type",
+          "expires_in",
+          "refresh_token"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "refresh_token": {
+            "type": "string"
+          },
+          "token_type": {
+            "type": "string"
           }
         }
       },

@@ -22,7 +22,7 @@ use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-include!("signing_key.rs");
+use axon_test_support::{ec_key, TEST_KID};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TestClaims {
@@ -55,6 +55,13 @@ pub struct TestOidcProvider {
     encoding_key: EncodingKey,
     decoding_key: DecodingKey,
     codes: Mutex<HashMap<String, PendingCode>>,
+}
+
+#[async_trait]
+impl axon_api::NativeIdentityVerifier for TestOidcProvider {
+    async fn verify(&self, token: &str, nonce: &str) -> Result<VerifiedIdentity, OidcError> {
+        self.verify_identity_token(token, Some(nonce)).await
+    }
 }
 
 impl TestOidcProvider {
@@ -136,6 +143,10 @@ impl TestOidcProvider {
 
 #[async_trait]
 impl OidcProvider for TestOidcProvider {
+    fn is_cancellation(&self, error: &str) -> bool {
+        error == "access_denied" || (self.name() == "apple" && error == "user_cancelled_authorize")
+    }
+
     fn name(&self) -> &'static str {
         self.name
     }

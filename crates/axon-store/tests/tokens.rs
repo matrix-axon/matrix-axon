@@ -14,6 +14,29 @@ use chrono::{Duration, Utc};
 use common::{migrated_store, raw_pool, test_account};
 use sqlx_postgres::PgPool;
 
+async fn bootstrap_request(store: &axon_store::Store) -> axon_store::AuthorizationRequest {
+    let state = uuid::Uuid::new_v4().to_string();
+    store
+        .create_authorization_request(&axon_store::NewAuthorizationRequest {
+            client_id: "bootstrap-web",
+            redirect_uri: "urn:axon:bootstrap",
+            code_challenge: "bootstrap-web",
+            code_challenge_method: "S256",
+            client_state: None,
+            provider: "google",
+            upstream_state: &state,
+            upstream_nonce: "nonce",
+            expires_at: Utc::now() + Duration::minutes(10),
+        })
+        .await
+        .unwrap();
+    store
+        .find_authorization_request_by_upstream_state("google", &state)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
 async fn reset_bootstrap_tables(pool: &PgPool) {
     for sql in [
         "DELETE FROM oauth_authorization_requests",
@@ -176,12 +199,12 @@ async fn first_oauth_bootstrap_binds_identity_and_mints_tokens_once() {
     let pool = raw_pool().await;
     reset_bootstrap_tables(&pool).await;
 
+    let request = bootstrap_request(&store).await;
     let pair = store
         .issue_first_oauth_token_pair(
-            "google",
+            &request,
             "subject-1",
             Some("owner@example.com"),
-            "bootstrap-web",
             Utc::now() + Duration::hours(1),
             Utc::now() + Duration::days(30),
         )
@@ -209,10 +232,9 @@ async fn first_oauth_bootstrap_binds_identity_and_mints_tokens_once() {
     assert!(
         store
             .issue_first_oauth_token_pair(
-                "google",
+                &request,
                 "subject-2",
                 None,
-                "bootstrap-web",
                 Utc::now() + Duration::hours(1),
                 Utc::now() + Duration::days(30),
             )
@@ -222,5 +244,40 @@ async fn first_oauth_bootstrap_binds_identity_and_mints_tokens_once() {
         "second bootstrap OAuth credential should be refused"
     );
 
+    reset_bootstrap_tables(&pool).await;
+}
+
+#[tokio::test]
+#[ignore = "requires empty Postgres"]
+async fn canceled_or_expired_bootstrap_flow_cannot_mint_even_when_bootstrap_is_available() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    reset_bootstrap_tables(&pool).await;
+    for canceled in [true, false] {
+        let request = bootstrap_request(&store).await;
+        if canceled {
+            assert!(store.cancel_authorization(request.id).await.unwrap());
+        } else {
+            sqlx_core::query::query("UPDATE oauth_authorization_requests SET expires_at = now() - interval '1 second' WHERE id = $1")
+                .bind(request.id).execute(&pool).await.unwrap();
+        }
+        assert!(store
+            .issue_first_oauth_token_pair(
+                &request,
+                "must-not-bind",
+                None,
+                Utc::now() + Duration::hours(1),
+                Utc::now() + Duration::days(30)
+            )
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store.first_credential_bootstrap_available().await.unwrap());
+        assert!(store
+            .find_identity("google", "must-not-bind")
+            .await
+            .unwrap()
+            .is_none());
+    }
     reset_bootstrap_tables(&pool).await;
 }

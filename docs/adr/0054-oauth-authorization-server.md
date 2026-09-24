@@ -509,7 +509,7 @@ M14c to decide.
 
 This addendum records the Apple implementation sequence as of September 2026 and supersedes conflicting Apple-specific details above.
 Google and Microsoft sign-in, Axon access/refresh tokens, provider discovery, owner binding, browser clients, and the Tauri shell now exist.
-Apple remains unavailable to operators until the callback and binding integration below lands.
+Apple's credentialed browser callback and binding integration is now implemented; real Apple deployment verification remains pending.
 This authenticates the owner of an Axon instance; it is separate from Matrix homeserver OAuth in ADR 0097.
 
 ### Deployment and trust
@@ -575,6 +575,21 @@ The shared Google/Microsoft verifier also needs signed-token regression coverage
 
 ### PR 2: browser callbacks, runtime configuration, and owner binding
 
+Implemented by the second server change, with real Apple acceptance still required before browser support is called complete.
+Callbacks accept at most 16 KiB, do not depend on cookies, ignore unsigned profile data, and consume cancellations without issuing credentials.
+Login failures return fixed OAuth errors only to the stored, currently registered client destination; CLI binding and bootstrap use retry instructions instead.
+Unknown or invalid flows get a static failure page, never a caller-supplied redirect.
+Callback responses disable caching and referrer disclosure.
+This includes rate-limit, oversized-body, and body-timeout rejections.
+Both GET and POST callbacks use browser-facing HTML for error responses; GET previously returned the JSON API error envelope.
+Binding nonces are created with the CLI request before printing its URL, so repeated GET/HEAD redirects reuse the nonce without consuming the flow.
+Bootstrap flow consumption is transactional with first-identity/token creation.
+The existing `expired` terminal state also represents canceled attempts, so no migration is required.
+Configuration Debug output redacts Apple key material and paths (issue #463).
+Exactly one of `private_key` or `private_key_path` is required; files are bounded to 16 KiB and require owner-only permissions on Unix.
+Relative key paths use the process working directory, so the CLI and server must use the same resolved file.
+Automated tests use local signed-token providers and isolated Postgres, never live Apple credentials.
+
 Add bounded form POST handling beside GET on `/v1/oauth/{provider}/callback`, with one shared completion implementation for login, CLI binding, and first-run bootstrap.
 Decode success and cancellation/error responses explicitly.
 Validate state, provider, expiry, and flow purpose before dispatch, and preserve atomic single-use completion.
@@ -589,6 +604,17 @@ Update configuration examples, README, OpenAPI where applicable, and the impleme
 Validate real Apple browser login and CLI/bootstrap binding on a registered test deployment before calling browser support complete.
 
 ### PR 3: native server contract and owner binding
+
+Implemented by the final core-server layer; see [the native contract and verification guide](../apple-oauth-native.md).
+The additive endpoints are `POST /v1/oauth/apple/native/challenge` and `POST /v1/oauth/apple/native/token`.
+Native-only discovery uses `GET /v1/oauth/providers?flow=native`; the default list retains browser-only semantics for old clients.
+Apple receives the server-returned base64 SHA-256 nonce verbatim, without an additional client hash.
+An independent client-held challenge capability is stored only as a hash and is never sent to Apple.
+Flows expire after five minutes, bind the configured instance URL, public client ID, purpose, and authorizing capability, and are capped separately at 1,024 public login rows and 64 authorized bind/bootstrap rows.
+Owner binding requires the same still-active bearer at creation and redemption; bootstrap requires the same explicitly armed capability and retains the first-credential transaction lock.
+The shared identity-token transaction also closes the legacy Google/Microsoft replay-before-mint gap.
+Browser authorization-code and refresh-token orchestration are unchanged.
+Native device acceptance and Apple App ID/Services ID subject-grouping verification remain outstanding until the native client integration.
 
 Add a short-lived, server-issued challenge for Apple native login, bound to an explicit flow purpose and selected Axon instance.
 Specify precisely whether the native SDK receives the raw nonce or its digest and verify the corresponding signed claim.

@@ -510,16 +510,10 @@ fn indexer_options(search: &axon_core::SearchConfig) -> axon_search::IndexerOpti
 
 /// Build the OAuth runtime from `[oauth]` config: construct a
 /// `GenericOidcProvider` (discovery-doc fetch) for each of Google/Microsoft
-/// that has `enabled = true`, and refuse to boot if Apple is enabled until
-/// its POST callbacks and owner binding are integrated.
+/// that has `enabled = true`, plus the credentialed Apple browser provider.
 async fn build_oauth_runtime(
     oauth_config: &axon_core::OauthConfig,
 ) -> anyhow::Result<Arc<axon_api::OAuthRuntime>> {
-    anyhow::ensure!(
-        !oauth_config.providers.apple.enabled,
-        "oauth.providers.apple.enabled = true, but Sign in with Apple callbacks and owner \
-         binding are not integrated yet (ADR 0054) — disable it until that work lands"
-    );
     anyhow::ensure!(
         oauth_config
             .external_base_url
@@ -533,21 +527,43 @@ async fn build_oauth_runtime(
     let mut providers: std::collections::HashMap<&'static str, Arc<dyn axon_api::OidcProvider>> =
         std::collections::HashMap::new();
 
-    if let Some(provider) =
-        discover_generic_provider("google", &oauth_config.providers.google, &http).await?
-    {
-        providers.insert("google", provider);
-    }
-    if let Some(provider) =
-        discover_generic_provider("microsoft", &oauth_config.providers.microsoft, &http).await?
-    {
-        providers.insert("microsoft", provider);
+    let (apple, google, microsoft) = tokio::try_join!(
+        async {
+            if oauth_config.providers.apple.enabled {
+                let provider = oauth::apple_provider_with_http(oauth_config, http.clone()).await?;
+                Ok::<_, anyhow::Error>(Some(provider))
+            } else {
+                Ok(None)
+            }
+        },
+        discover_generic_provider("google", &oauth_config.providers.google, &http),
+        discover_generic_provider("microsoft", &oauth_config.providers.microsoft, &http),
+    )?;
+    let native_apple = if oauth_config.providers.apple.native_enabled {
+        let audiences = oauth_config.providers.apple.native_audiences.clone();
+        Some(Arc::new(match &apple {
+            Some(provider) => provider.native_verifier(audiences)?,
+            None => axon_api::AppleNativeVerifier::new(http, audiences)?,
+        }) as Arc<dyn axon_api::NativeIdentityVerifier>)
+    } else {
+        None
+    };
+    for (name, provider) in [
+        (
+            "apple",
+            apple.map(|provider| Arc::new(provider) as Arc<dyn axon_api::OidcProvider>),
+        ),
+        ("google", google),
+        ("microsoft", microsoft),
+    ] {
+        if let Some(provider) = provider {
+            providers.insert(name, provider);
+        }
     }
 
-    Ok(Arc::new(axon_api::OAuthRuntime::new(
-        oauth_config,
-        providers,
-    )))
+    let mut runtime = axon_api::OAuthRuntime::new(oauth_config, providers);
+    runtime.native_apple = native_apple;
+    Ok(Arc::new(runtime))
 }
 
 /// Confirm `provider_name`'s config carries everything `GenericOidcProvider`
@@ -714,4 +730,94 @@ async fn shutdown_signal() {
     }
 
     tracing::info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod oauth_runtime_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_only_needs_audiences_but_no_apple_private_credentials() {
+        let mut config = axon_core::OauthConfig {
+            external_base_url: Some("https://axon.example".into()),
+            ..Default::default()
+        };
+        config.providers.apple.native_enabled = true;
+        assert!(build_oauth_runtime(&config).await.is_err());
+        config.providers.apple.native_audiences = vec!["org.matrixaxon.axon".into()];
+        let runtime = build_oauth_runtime(&config).await.unwrap();
+        assert!(runtime.native_apple.is_some());
+        assert!(runtime.providers.is_empty());
+        config.providers.apple.native_enabled = false;
+        let runtime = build_oauth_runtime(&config).await.unwrap();
+        assert!(runtime.native_apple.is_none());
+    }
+
+    #[tokio::test]
+    async fn providers_initialize_concurrently_and_disabled_providers_are_skipped() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let app = axum::Router::new().route(
+            "/{provider}/.well-known/openid-configuration",
+            axum::routing::get({
+                let base = base.clone();
+                move || {
+                    let barrier = barrier.clone();
+                    let base = base.clone();
+                    async move {
+                        // Neither discovery may finish until both have started.
+                        barrier.wait().await;
+                        axum::Json(serde_json::json!({
+                            "issuer": base,
+                            "authorization_endpoint": format!("{base}/authorize"),
+                            "token_endpoint": format!("{base}/token"),
+                            "jwks_uri": format!("{base}/keys")
+                        }))
+                    }
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = axon_core::OauthConfig {
+            external_base_url: Some("https://axon.example".into()),
+            ..Default::default()
+        };
+        config.providers.google = axon_core::GenericOauthProviderConfig {
+            enabled: true,
+            issuer: Some(format!("{base}/google")),
+            client_id: Some("test-client".into()),
+            client_secret: Some(axon_core::generate_opaque_secret()),
+        };
+        config.providers.microsoft = config.providers.google.clone();
+        config.providers.microsoft.issuer = Some(format!("{base}/microsoft"));
+        config.providers.apple = axon_core::AppleOauthConfig {
+            enabled: true,
+            client_id: Some("com.example.web".into()),
+            team_id: Some("TEAM123456".into()),
+            key_id: Some(axon_test_support::TEST_KID.into()),
+            private_key: Some(axon_test_support::ec_key().pem.clone()),
+            ..Default::default()
+        };
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), build_oauth_runtime(&config)).await;
+        server.abort();
+        let _ = server.await;
+        let runtime = result.expect("discovery was serialized").unwrap();
+        assert_eq!(runtime.providers.len(), 3);
+        for provider in runtime.providers.values().filter(|p| p.name() != "apple") {
+            assert!(provider.is_cancellation("access_denied"));
+            assert!(!provider.is_cancellation("user_cancelled_authorize"));
+        }
+
+        config.providers.google.enabled = false;
+        config.providers.microsoft.enabled = false;
+        config.providers.apple.enabled = false;
+        // Discovery listener is gone; disabled providers must not contact it.
+        assert!(build_oauth_runtime(&config)
+            .await
+            .unwrap()
+            .providers
+            .is_empty());
+    }
 }

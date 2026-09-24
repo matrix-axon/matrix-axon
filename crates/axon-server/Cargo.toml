@@ -60,6 +60,8 @@ chrono = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+axon-test-support = { workspace = true }
+tempfile = "3"
 # Non-optional here (unlike the `dev-tools`-gated dep above) so `uploads.rs`'s
 # tests can drive raw state transitions the store API doesn't expose, without
 # requiring `--features dev-tools` just to run `cargo test`.
