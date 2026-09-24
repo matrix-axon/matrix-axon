@@ -9,9 +9,7 @@ cd "$root"
 format=${1:-all}
 export ARCH="${ARCH:-amd64}"
 export AXON_SERVER_BIN="${AXON_SERVER_BIN:-"$root/target/release/axon-server"}"
-export VERSION="${VERSION:-$(
-	sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1
-)}"
+export VERSION="${VERSION:-$("$root/scripts/release-version.sh" print)}"
 
 if [ ! -x "$AXON_SERVER_BIN" ]; then
 	echo "missing binary: $AXON_SERVER_BIN (cargo build --release -p axon-server)" >&2
