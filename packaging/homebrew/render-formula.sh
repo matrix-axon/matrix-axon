@@ -57,10 +57,12 @@ if [ -z "$tag" ] || [ -z "$sha_silicon" ] || [ -z "$sha_intel" ] || [ -z "$sha_l
 	exit 2
 fi
 
-# Same tag shapes as cross-build.yml / package.yml, and nothing a formula
-# string or a release URL could treat as syntax.
-if ! printf '%s' "$tag" | grep -Eq '^(v[0-9][0-9A-Za-z._-]*|beta-[0-9A-Za-z._-]+|alpha-[0-9A-Za-z._-]+)$'; then
-	echo "refusing tag: $tag" >&2
+# Stable release tags only (v1.2.3). The tap has one formula, so a
+# beta-*/alpha-* tag would replace the stable release, and Homebrew cannot
+# order a version like beta-1 against 1.2.3. publish-tap.sh skips those tags
+# before calling this; refusing here keeps the renderer honest on its own.
+if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+(\.[0-9]+)+$'; then
+	echo "refusing tag: $tag (only stable vX.Y.Z tags are published)" >&2
 	exit 1
 fi
 
@@ -79,10 +81,7 @@ for sha in "$sha_silicon" "$sha_intel" "$sha_linux"; do
 	fi
 done
 
-version=$tag
-case $version in
-v*) version=${version#v} ;;
-esac
+version=${tag#v}
 
 root=$(CDPATH="" cd -- "$(dirname "$0")/../.." && pwd)
 template=$root/packaging/homebrew/axon-server.rb.tmpl

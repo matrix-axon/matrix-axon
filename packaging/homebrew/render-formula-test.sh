@@ -34,6 +34,13 @@ grep -q "sha256 \"$sha_silicon\"" "$out"
 grep -q "sha256 \"$sha_intel\"" "$out"
 grep -q "sha256 \"$sha_linux\"" "$out"
 
+grep -Fq 'assert_match "axon-server #{version} "' "$out"
+grep -Fq 'url "https://github.com/matrix-axon/matrix-axon.git"' "$out"
+if grep -Eq 'url "[^"]*releases/latest' "$out"; then
+	echo "livecheck follows releases/latest, which can be a beta" >&2
+	exit 1
+fi
+
 if grep -Eq 'depends_on[[:space:]]+"tailscale"' "$out"; then
 	echo "formula depends on tailscale" >&2
 	exit 1
@@ -122,6 +129,15 @@ if grep -Fq 'GLIBC' "$work/caveats-mac.txt"; then
 	exit 1
 fi
 
+# Starting the service before init is a keep_alive restart loop, so the
+# first start the caveats show has to come after the first init.
+first_init=$(grep -n 'axon-server init' "$work/caveats-mac.txt" | head -n 1 | cut -d: -f1)
+first_start=$(grep -n 'brew services start axon-server' "$work/caveats-mac.txt" | head -n 1 | cut -d: -f1)
+if [ -z "$first_init" ] || [ -z "$first_start" ] || [ "$first_start" -le "$first_init" ]; then
+	echo "caveats show brew services start before axon-server init" >&2
+	exit 1
+fi
+
 # Rebuild the copy-paste block and syntax-check it. The heredoc terminator
 # is the line whose entire contents are SQL.
 awk '
@@ -134,9 +150,18 @@ if [ ! -s "$work/local-postgres.sh" ]; then
 	echo "could not find the local Postgres block in the caveats" >&2
 	exit 1
 fi
-# `sh -n` does not execute. A terminator that is still indented fails here
-# only if the shell parser sees an unclosed heredoc, which is the bug.
-sh -n "$work/local-postgres.sh"
+# `sh -n` exits 0 on an unclosed heredoc (bash only warns), so it cannot
+# catch an indented terminator. Look for the terminator line itself, then
+# parse with bash and treat any warning as a failure.
+if ! grep -qx 'SQL' "$work/local-postgres.sh"; then
+	echo "the SQL heredoc terminator is not alone in column 0" >&2
+	exit 1
+fi
+if ! bash -n "$work/local-postgres.sh" 2>"$work/local-postgres.err" || [ -s "$work/local-postgres.err" ]; then
+	echo "the local Postgres block does not parse cleanly:" >&2
+	cat "$work/local-postgres.err" >&2
+	exit 1
+fi
 
 # Uppercase checksums are normalized. A tag that is not a release ref is refused.
 upper=$(printf 'A%.0s' $(seq 1 64))
@@ -165,26 +190,15 @@ reject "$render" --tag v1.2.3 \
 	--sha-macos-intel "$sha_intel" \
 	--sha-linux-x86_64 "$sha_linux" \
 	--out "$work/bad.rb"
-reject "$render" --tag beta- \
-	--sha-macos-silicon "$sha_silicon" \
-	--sha-macos-intel "$sha_intel" \
-	--sha-linux-x86_64 "$sha_linux" \
-	--out "$work/bad.rb"
-
-"$render" --tag beta-1 \
-	--sha-macos-silicon "$sha_silicon" \
-	--sha-macos-intel "$sha_intel" \
-	--sha-linux-x86_64 "$sha_linux" \
-	--out "$work/beta.rb"
-grep -q 'version "beta-1"' "$work/beta.rb"
-grep -Fq 'releases/download/beta-1/axon-server-macos-silicon.zip' "$work/beta.rb"
-
-"$render" --tag alpha-2 \
-	--sha-macos-silicon "$sha_silicon" \
-	--sha-macos-intel "$sha_intel" \
-	--sha-linux-x86_64 "$sha_linux" \
-	--out "$work/alpha.rb"
-grep -q 'version "alpha-2"' "$work/alpha.rb"
+# Prerelease tags are not rendered: the tap has one formula, and Homebrew
+# cannot order beta-1 against 1.2.3.
+for tag in beta-1 alpha-2 beta-v0.0.4 v1.2.3-rc1 v1; do
+	reject "$render" --tag "$tag" \
+		--sha-macos-silicon "$sha_silicon" \
+		--sha-macos-intel "$sha_intel" \
+		--sha-linux-x86_64 "$sha_linux" \
+		--out "$work/bad.rb"
+done
 
 # Publish dry run: commit the rendered formula into a local tap checkout and
 # refuse to commit again when nothing changed.
@@ -208,6 +222,12 @@ if [ "$commits" -ne 1 ]; then
 	exit 1
 fi
 
+# The tap checkout's own git identity is left alone.
+if git -C "$work/tap" config --local user.name >/dev/null; then
+	echo "publish-tap.sh wrote user.name into the tap checkout's config" >&2
+	exit 1
+fi
+
 # A dry run must not require the push token.
 if TAG=v1.2.3 TAP_TOKEN='' "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"; then
 	:
@@ -215,6 +235,30 @@ else
 	echo "dry run failed when TAP_TOKEN was empty" >&2
 	exit 1
 fi
+
+# Prerelease tags exit 0 without touching the tap.
+TAG=beta-1 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
+TAG=alpha-2 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
+grep -q 'version "1.2.3"' "$work/tap/Formula/axon-server.rb"
+
+# An older tag (a re-run, or a backport) does not downgrade the tap.
+TAG=v1.2.2 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
+TAG=v1.1.10 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
+grep -q 'version "1.2.3"' "$work/tap/Formula/axon-server.rb"
+commits=$(git -C "$work/tap" rev-list --count HEAD)
+if [ "$commits" -ne 1 ]; then
+	echo "an older tag changed the tap" >&2
+	exit 1
+fi
+
+# A newer tag does publish, including one that sorts before as a string.
+TAG=v1.2.10 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
+grep -q 'version "1.2.10"' "$work/tap/Formula/axon-server.rb"
+
+# A dry run downloads and clones nothing, so it needs both directories.
+reject env TAG=v1.2.3 "$publish" --dry-run
+reject env TAG=v1.2.3 "$publish" --dry-run --zip-dir "$work/zips"
+reject env TAG=v1.2.3 "$publish" --dry-run --tap-dir "$work/tap"
 
 if grep -q 'AUTHORIZATION: bearer' "$publish"; then
 	echo "git HTTPS must send TAP_TOKEN as the basic password, not a bearer header" >&2
