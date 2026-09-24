@@ -34,7 +34,7 @@ grep -q "sha256 \"$sha_silicon\"" "$out"
 grep -q "sha256 \"$sha_intel\"" "$out"
 grep -q "sha256 \"$sha_linux\"" "$out"
 
-grep -Fq 'assert_match "axon-server #{version} "' "$out"
+grep -Fq 'assert_match(/\Aaxon-server \d+\.\d+\.\d+ /' "$out"
 grep -Fq 'url "https://github.com/matrix-axon/matrix-axon.git"' "$out"
 if grep -Eq 'url "[^"]*releases/latest' "$out"; then
 	echo "livecheck follows releases/latest, which can be a beta" >&2
