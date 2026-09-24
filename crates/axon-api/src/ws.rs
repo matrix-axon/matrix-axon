@@ -418,7 +418,7 @@ pub async fn ws_handler(
     };
     match verifier.verify(&token).await {
         Ok(true) => {}
-        Ok(false) => return auth::invalid_token_response("invalid or revoked token"),
+        Ok(false) => return auth::invalid_token_response(),
         Err(err) => return err.into_response(),
     }
 

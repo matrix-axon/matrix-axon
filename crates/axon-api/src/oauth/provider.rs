@@ -3,8 +3,8 @@
 //! Axon is an OIDC Relying Party to Apple/Google/Microsoft purely to answer
 //! "is this the bound owner?" — upstream tokens are consumed internally and
 //! never handed to a client. [`GenericOidcProvider`](crate::oauth::generic::GenericOidcProvider)
-//! covers Google and Microsoft (discovery-doc driven); Apple's provider
-//! foundation is implemented but not registered until POST callbacks land.
+//! covers Google and Microsoft (discovery-doc driven); Apple's browser provider
+//! is registered when configured; native challenges are pending.
 
 use async_trait::async_trait;
 
@@ -69,6 +69,22 @@ pub enum OidcError {
     DisallowedAlgorithm(String),
 }
 
+impl OidcError {
+    /// Safe diagnostic category; never format the attached upstream value.
+    pub fn diagnostic_reason(&self) -> &'static str {
+        match self {
+            Self::Http(_) => "upstream_request_failed",
+            Self::Malformed(_) => "upstream_response_invalid",
+            Self::InvalidIssuer(_) => "issuer_mismatch",
+            Self::InvalidAudience(_) => "audience_mismatch",
+            Self::InvalidNonce => "nonce_mismatch",
+            Self::Expired(_) => "token_time_invalid",
+            Self::BadSignature(_) => "signature_invalid",
+            Self::DisallowedAlgorithm(_) => "algorithm_disallowed",
+        }
+    }
+}
+
 /// The seam between Path A/B's HTTP handlers and however a given upstream
 /// provider actually works. Held as `Arc<dyn OidcProvider>` in
 /// [`OAuthRuntime`](crate::oauth::OAuthRuntime), one per enabled provider.
@@ -78,6 +94,11 @@ pub trait OidcProvider: Send + Sync {
     /// also the `provider` column value stored alongside every row that
     /// references it.
     fn name(&self) -> &'static str;
+
+    /// Recognize cancellation without exposing the provider's raw error text.
+    fn is_cancellation(&self, error: &str) -> bool {
+        error == "access_denied"
+    }
 
     /// Build the URL axon redirects the browser to, starting Path A's
     /// upstream leg. `state`/`nonce` are axon's own CSRF-binding values for

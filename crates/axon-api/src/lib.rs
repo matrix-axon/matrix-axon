@@ -60,9 +60,9 @@ pub use member_profiles::{
     MemberProfile, MemberProfileError, MemberProfileService, NoopMemberProfileService,
 };
 pub use oauth::{
-    http_client as oauth_http_client, rate_limit::spawn_sweeper as spawn_oauth_rate_limit_sweeper,
-    AppleProvider, GenericOidcProvider, OAuthRuntime, OidcError, OidcProvider, UpstreamTokens,
-    VerifiedIdentity,
+    callback_url as oauth_callback_url, http_client as oauth_http_client,
+    rate_limit::spawn_sweeper as spawn_oauth_rate_limit_sweeper, AppleProvider,
+    GenericOidcProvider, OAuthRuntime, OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity,
 };
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
@@ -463,19 +463,32 @@ pub fn router(state: AppState) -> Router {
     // `require_bearer`. Its own `oauth.enabled`/per-provider checks (and this
     // layer's rate limiter) are the boundary instead — see `routes::oauth`.
     let oauth_state = state.oauth.clone();
+    let callback_router = Router::new()
+        .route(
+            "/v1/oauth/{provider}/callback",
+            get(routes::oauth::callback_get)
+                .post(routes::oauth::callback)
+                .layer(DefaultBodyLimit::max(oauth::MAX_CALLBACK_BYTES)),
+        )
+        .route_layer(from_fn_with_state(
+            oauth_state.clone(),
+            oauth::rate_limit::rate_limit,
+        ))
+        .layer(axum::Extension(oauth::rate_limit::CallbackRateLimit))
+        // Outermost: also harden responses returned early by the limiter.
+        .layer(axum::middleware::map_response(
+            routes::oauth::callback_response,
+        ));
     let oauth_router = Router::new()
         .route("/v1/oauth/providers", get(routes::oauth::providers))
         .route("/v1/oauth/authorize", get(routes::oauth::authorize))
-        .route(
-            "/v1/oauth/{provider}/callback",
-            get(routes::oauth::callback),
-        )
         .route("/v1/oauth/token", post(routes::oauth::token))
         .route("/v1/oauth/bind", get(routes::oauth::bind))
         .route_layer(from_fn_with_state(
             oauth_state,
             oauth::rate_limit::rate_limit,
-        ));
+        ))
+        .merge(callback_router);
 
     let bootstrap_state = state.bootstrap.clone();
     let bootstrap_router = Router::new()
