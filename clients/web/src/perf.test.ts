@@ -4,8 +4,10 @@ import {
   perfMark,
   perfMarkBootRoomList,
   perfOverlayEntries,
+  perfTraceRequest,
   setPerfEnabled,
   setPerfOverlay,
+  setTelemetrySink,
 } from './perf'
 
 /** The detail of the one `transition:back` mark, or `null` if none was made. */
@@ -439,7 +441,10 @@ describe('room-open summary', () => {
     expect(summary).not.toBeNull()
     expect(summary!.rows).toBeNull()
     expect(summary!.loading).toBe(true)
-    expect(summary!.heads).toBe('superseded+pending')
+    // Each outcome carries its offset from the open, so the order in which the
+    // loads settled can be read as a time line; real timers, so the offsets
+    // here are near zero.
+    expect(summary!.heads).toMatch(/^superseded@\d+\+pending$/)
     expect(summary!.attempts).toBe(2)
   })
 
@@ -477,7 +482,7 @@ describe('room-open summary', () => {
 
     const summary = roomOpenSummary()
     expect(summary).not.toBeNull()
-    expect(summary!.heads).toBe('applied')
+    expect(summary!.heads).toMatch(/^applied@\d+$/)
   })
 
   /**
@@ -485,6 +490,226 @@ describe('room-open summary', () => {
    * cannot be dated from the session header; and a socket reconnecting during
    * the open is what doubled its head loads. Both belong on the line itself.
    */
+  /**
+   * `heads=failed+applied` with no times could not say whether the first load
+   * failed at the 20 s deadline or two minutes later at the reconnect. The
+   * difference decided which of two causes a 153 s stall had.
+   */
+  it('dates each head outcome from the start of the open', () => {
+    vi.useFakeTimers()
+    try {
+      openRoom()
+      const head = { kind: 'head', roomId: ROOM, thread: false }
+      const startedAt = performance.now()
+      perfMark('timeline:fetch:start', head)
+      vi.advanceTimersByTime(20_000)
+      perfMark('timeline:head:settled', {
+        roomId: ROOM,
+        thread: false,
+        outcome: 'failed',
+        startedAt,
+      })
+      vi.advanceTimersByTime(1_500)
+      perfMark('timeline:fetch:start', head)
+      vi.advanceTimersByTime(500)
+      perfMark('timeline:head:settled', {
+        roomId: ROOM,
+        thread: false,
+        outcome: 'applied',
+        startedAt,
+      })
+      perfMark('timeline:fetch:end', { ...head, ok: true })
+      settleCompetitors()
+      vi.advanceTimersByTime(100)
+
+      const summary = roomOpenSummary()
+      expect(summary!.phase).toBe('settled')
+      expect(summary!.heads).toBe('failed@20000+applied@22000')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /**
+   * One `waiting` line at 10 s and then silence left a 153 s stall as two data
+   * points. It now reports every 30 s, but only so many times: a room that
+   * never settles must not fill the session's persisted lines by itself.
+   */
+  it('keeps reporting a room that stays unsettled, up to a bound', () => {
+    vi.useFakeTimers()
+    // Counted at the sink rather than on the overlay, which keeps ten lines.
+    let waits = 0
+    setTelemetrySink((name, _at, detail) => {
+      if (name === 'boot:room-open' && detail?.phase === 'waiting') {
+        waits += 1
+      }
+    })
+    try {
+      openRoom()
+      perfMark('timeline:fetch:start', { kind: 'head', thread: false })
+
+      vi.advanceTimersByTime(10_000)
+      expect(waits).toBe(1)
+      vi.advanceTimersByTime(29_999)
+      expect(waits).toBe(1)
+      vi.advanceTimersByTime(1)
+      expect(waits).toBe(2)
+
+      vi.advanceTimersByTime(60 * 60_000)
+      expect(waits).toBe(8)
+    } finally {
+      setTelemetrySink(null)
+      vi.useRealTimers()
+    }
+  })
+
+  /** The details of every `name` mark that reached the sink, in order. */
+  function captured(run: () => void): {
+    name: string
+    detail: Record<string, unknown>
+  }[] {
+    const marks: { name: string; detail: Record<string, unknown> }[] = []
+    setTelemetrySink((name, _at, detail) => {
+      marks.push({ name, detail: detail ?? {} })
+    })
+    try {
+      run()
+    } finally {
+      setTelemetrySink(null)
+    }
+    return marks
+  }
+
+  const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
+  const timelineUrl = (room: string) =>
+    `https://axon.test/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(room)}/timeline?limit=50`
+
+  /**
+   * The 2026-09-25 stall, read off one line: the timeline's headers were in at
+   * 640 ms and its body never came. Resource Timing has no entry for a request
+   * still in flight, so the `waiting` line could not show this before.
+   */
+  it('shows a head request stalled mid-body on the waiting line', () => {
+    vi.useFakeTimers()
+    try {
+      const marks = captured(() => {
+        openRoom()
+        const head = perfTraceRequest(timelineUrl(ROOM))!
+        const preview = perfTraceRequest(timelineUrl('!other:example.org'))!
+        const members = perfTraceRequest(
+          `https://axon.test/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}/members`,
+        )!
+        head.sent()
+        preview.sent()
+        members.sent()
+        vi.advanceTimersByTime(640)
+        head.headers(200)
+        preview.headers(200)
+        preview.end('ok')
+        vi.advanceTimersByTime(9_360)
+      })
+
+      const api = marks.filter((mark) => mark.name === 'boot:room-open:api')
+      // The head, then the members request still out; the preview for another
+      // room finished normally and is the `:req` lines' business.
+      expect(api.map((mark) => mark.detail)).toEqual([
+        {
+          route: 'accounts/{account}/rooms/{id}/timeline',
+          head: true,
+          at: 0,
+          hdr: 640,
+          total: null,
+          outcome: 'pending',
+          stage: 'body',
+          status: 200,
+        },
+        {
+          route: 'accounts/{account}/rooms/{id}/members',
+          head: false,
+          at: 0,
+          hdr: null,
+          total: null,
+          outcome: 'pending',
+          stage: 'headers',
+          status: null,
+        },
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('marks a deadline with the stage it fired in, and a late arrival', () => {
+    vi.useFakeTimers()
+    try {
+      const marks = captured(() => {
+        const body = perfTraceRequest(timelineUrl(ROOM))!
+        body.sent()
+        vi.advanceTimersByTime(640)
+        body.headers(200)
+        vi.advanceTimersByTime(19_360)
+        body.end('timeout')
+        body.end('failed') // a second settle is ignored
+
+        const token = perfTraceRequest(timelineUrl(ROOM))!
+        vi.advanceTimersByTime(20_000)
+        token.end('timeout')
+
+        const late = perfTraceRequest(timelineUrl(ROOM))!
+        late.sent()
+        vi.advanceTimersByTime(20_000)
+        late.end('timeout')
+        vi.advanceTimersByTime(5_000)
+        late.late()
+      })
+
+      expect(
+        marks
+          .filter((mark) => mark.name.startsWith('api:'))
+          .map((mark) => [mark.name, mark.detail]),
+      ).toEqual([
+        [
+          'api:deadline',
+          {
+            route: 'accounts/{account}/rooms/{id}/timeline',
+            stage: 'body',
+            hdr: 640,
+            after: 20_000,
+          },
+        ],
+        [
+          'api:deadline',
+          {
+            route: 'accounts/{account}/rooms/{id}/timeline',
+            stage: 'token',
+            hdr: null,
+            after: 20_000,
+          },
+        ],
+        [
+          'api:deadline',
+          {
+            route: 'accounts/{account}/rooms/{id}/timeline',
+            stage: 'headers',
+            hdr: null,
+            after: 20_000,
+          },
+        ],
+        [
+          'api:late',
+          { route: 'accounts/{account}/rooms/{id}/timeline', after: 25_000 },
+        ],
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('traces nothing while perf marks are off', () => {
+    setPerfEnabled(false)
+    expect(perfTraceRequest(timelineUrl(ROOM))).toBeNull()
+  })
+
   it("stamps the line with wall-clock time and the socket's reconnects", () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-12T18:25:44.000Z'))

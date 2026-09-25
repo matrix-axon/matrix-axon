@@ -22,6 +22,7 @@ import {
   matrixProtocolHandlerAvailable,
   registerMatrixProtocolHandler,
 } from '../matrix-protocol'
+import { isInstalledDisplay } from '../platform'
 import { browserReloadEnvironment, reloadNow } from '../reload'
 import { disconnectFromServer } from '../server-url'
 import { formatTelemetry } from '../stores/telemetry'
@@ -1035,16 +1036,6 @@ function installCopy(platform: InstallPlatform): InstallCopy {
         unavailable: 'App install is available from supported browsers.',
       }
   }
-}
-
-function isInstalledDisplay(): boolean {
-  const navigatorStandalone = (
-    navigator as Navigator & { standalone?: boolean }
-  ).standalone
-  return (
-    navigatorStandalone === true ||
-    window.matchMedia?.('(display-mode: standalone)').matches === true
-  )
 }
 
 /**

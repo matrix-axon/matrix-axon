@@ -1,5 +1,10 @@
 import createClient, { type Client, type Middleware } from 'openapi-fetch'
 import type { AuthProvider } from '../auth/provider'
+import {
+  perfTraceRequest,
+  type RequestOutcome,
+  type RequestTrace,
+} from '../perf'
 import { browserPlatform, type Platform } from '../platform'
 import type { paths } from './schema'
 
@@ -163,12 +168,19 @@ function withinDeadline<T>(
 async function fetchWithinDeadline(
   fetch: Platform['fetch'],
   request: Request,
-  deadline: AbortSignal | null,
+  flight: Flight | undefined,
 ): Promise<Response> {
+  const deadline = flight?.deadline ?? null
+  const trace = flight?.trace ?? null
   const bounded = <T>(work: PromiseLike<T>): Promise<T> => {
     const byCaller = withinDeadline(work, request.signal)
     return deadline === null ? byCaller : withinDeadline(byCaller, deadline)
   }
+  const fail = (error: unknown): never => {
+    trace?.end(outcomeOf(deadline, request.signal))
+    throw error
+  }
+  trace?.sent()
   const pending = fetch(request)
   let response: Response
   try {
@@ -177,12 +189,17 @@ async function fetchWithinDeadline(
     // Headers that turn up after the race was lost still open a body, and
     // nothing else will ever read or cancel it.
     pending.then(
-      (late) => late.body?.cancel().catch(() => {}),
+      (late) => {
+        trace?.late()
+        late.body?.cancel().catch(() => {})
+      },
       () => {},
     )
-    throw error
+    return fail(error)
   }
+  trace?.headers(response.status)
   if (response.body === null || NULL_BODY_STATUSES.has(response.status)) {
+    trace?.end('ok')
     return response
   }
   const reader = response.body.getReader()
@@ -193,13 +210,37 @@ async function fetchWithinDeadline(
     // Settles the pending read as done, so `readAll` returns into a race that
     // is already decided rather than leaving anything unhandled.
     reader.cancel(error).catch(() => {})
-    throw error
+    return fail(error)
   }
+  trace?.end('ok')
   return new Response(body, {
     status: response.status,
     statusText: response.statusText,
     headers: response.headers,
   })
+}
+
+/** What `createApiClient` keeps per in-flight request. */
+interface Flight {
+  deadline: AbortSignal | null
+  /** `null` while perf marks are off. */
+  trace: RequestTrace | null
+}
+
+/**
+ * Which of the two signals ended a request, for the readout. The deadline is
+ * checked first because `request.signal` follows it: when the deadline fires,
+ * `request.signal` reads aborted too, and checking it first would report
+ * every timeout as the caller's own abort.
+ */
+function outcomeOf(
+  deadline: AbortSignal | null,
+  signal: AbortSignal,
+): RequestOutcome {
+  if (deadline?.aborted === true) {
+    return 'timeout'
+  }
+  return signal.aborted ? 'aborted' : 'failed'
 }
 
 /** Statuses a `Response` may not be constructed with a body for. */
@@ -359,15 +400,13 @@ export function createApiClient(
   // Each outgoing request's deadline, held strongly for as long as its request
   // is in flight. `fetchWithinDeadline` must race the deadline itself, not the
   // `Request` signal derived from it, which WebKit can let go of (see there).
-  const deadlines = new WeakMap<Request, AbortSignal>()
+  // The request's perf trace rides along, because it starts here, before the
+  // token wait, and ends there.
+  const flights = new WeakMap<Request, Flight>()
   const client = createClient<paths>({
     baseUrl,
     fetch: (request) =>
-      fetchWithinDeadline(
-        platform.fetch,
-        request,
-        deadlines.get(request) ?? null,
-      ),
+      fetchWithinDeadline(platform.fetch, request, flights.get(request)),
   })
 
   const bearer: Middleware = {
@@ -375,6 +414,7 @@ export function createApiClient(
       // Created before the token is asked for, because acquiring one can be a
       // network round trip of its own — see `withinDeadline`.
       const deadline = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : null
+      const trace = perfTraceRequest(request.url)
       // Only a provider that *went* somewhere can fail to come back, and the
       // synchronous ones are the common case (a pasted token is a string).
       // Racing those would add microtask hops to every request in the client
@@ -383,18 +423,22 @@ export function createApiClient(
       // render that a caller may already have painted from the optimistic echo
       // beside it.
       const pending = auth.getToken()
-      const token =
-        deadline === null || !isThenable(pending)
-          ? await pending
-          : await withinDeadline(pending, deadline)
+      let token: string | null
+      try {
+        token =
+          deadline === null || !isThenable(pending)
+            ? await pending
+            : await withinDeadline(pending, deadline)
+      } catch (error) {
+        trace?.end(outcomeOf(deadline, request.signal))
+        throw error
+      }
       if (token !== null) {
         request.headers.set('authorization', `Bearer ${token}`)
       }
       // Last, so the rebuilt request carries the header just set on it.
       const signed = withDeadline(request, deadline)
-      if (deadline !== null) {
-        deadlines.set(signed, deadline)
-      }
+      flights.set(signed, { deadline, trace })
       return signed
     },
     onResponse({ response }) {

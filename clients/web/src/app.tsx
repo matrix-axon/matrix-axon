@@ -20,7 +20,7 @@ import { VerificationInboxPanel } from './components/VerificationInboxPanel'
 import { UpdateBanner } from './components/UpdateBanner'
 import { useModalFocus } from './components/use-modal-focus'
 import { layoutMode, SINGLE_PANE_QUERY, useMediaQuery } from './layout'
-import type { Platform } from './platform'
+import { isInstalledDisplay, type Platform } from './platform'
 import {
   localRoomHref,
   parseMatrixRoomReference,
@@ -434,7 +434,7 @@ function useStandaloneKeyboardAccessoryInset(): void {
     }
     const update = () => {
       const editableFocused = isEditableFocused()
-      if (isApplePlatform() && isStandaloneDisplay(standaloneMedia)) {
+      if (isApplePlatform() && isInstalledDisplay(standaloneMedia)) {
         root.style.setProperty(
           '--app-standalone-composer-bottom-padding',
           '4px',
@@ -461,13 +461,6 @@ function useStandaloneKeyboardAccessoryInset(): void {
       clear()
     }
   }, [])
-}
-
-function isStandaloneDisplay(media: MediaQueryList | undefined): boolean {
-  const navigatorStandalone = (
-    navigator as Navigator & { standalone?: boolean }
-  ).standalone
-  return navigatorStandalone === true || media?.matches === true
 }
 
 function isReloadOrRestoreNavigation(): boolean {

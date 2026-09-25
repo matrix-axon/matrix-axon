@@ -292,6 +292,24 @@ export function browserPlatform(): Platform {
 }
 
 /**
+ * Whether this page runs as a home-screen web app rather than in a browser tab.
+ *
+ * iOS predates `display-mode` and reports it only through the non-standard
+ * `navigator.standalone`, so both are read. `media` lets a caller that also
+ * listens for changes pass the query it already holds.
+ */
+export function isInstalledDisplay(
+  media: MediaQueryList | undefined = window.matchMedia?.(
+    '(display-mode: standalone)',
+  ),
+): boolean {
+  const navigatorStandalone = (
+    navigator as Navigator & { standalone?: boolean }
+  ).standalone
+  return navigatorStandalone === true || media?.matches === true
+}
+
+/**
  * Whether this bundle is running inside the native shell.
  *
  * Feature-detected rather than compiled in, so one `dist` serves both targets —

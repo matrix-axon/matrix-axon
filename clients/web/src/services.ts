@@ -13,7 +13,12 @@ import {
 } from './api/frames'
 import { openLiveSocket } from './api/ws'
 import { setPerfEnabled, setTelemetrySink } from './perf'
-import { browserPlatform, type Platform } from './platform'
+import {
+  browserPlatform,
+  isInstalledDisplay,
+  isTauriRuntime,
+  type Platform,
+} from './platform'
 import { readStoredServerUrl } from './server-url'
 import {
   createCompositeAuthProvider,
@@ -1047,10 +1052,17 @@ export function createServices(
   const qr = createBrowserQrAdapter()
   const cache = createIndexedDbCacheStore()
   requestPersistentStorage()
+  const shell = isTauriRuntime() ? 'tauri' : 'browser'
   const telemetry = createTelemetryStore({
     cache,
     enabled: () =>
       settings.perfMarks.peek() && settings.persistTelemetry.peek(),
+    context: {
+      shell,
+      display:
+        shell === 'tauri' ? null : isInstalledDisplay() ? 'standalone' : 'tab',
+      build: BUILD_INFO.displayVersion,
+    },
   })
   // Registered here rather than imported by `perf.ts`: that module is imported
   // by stores and components, so reaching the service graph from it would be a

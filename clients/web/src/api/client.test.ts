@@ -10,6 +10,7 @@ import {
   vi,
 } from 'vitest'
 import type { AuthProvider } from '../auth/provider'
+import { setPerfEnabled, setTelemetrySink } from '../perf'
 import {
   apiErrorCode,
   apiErrorMessage,
@@ -482,6 +483,98 @@ describe('the transport seam (ADR 0102 § 2)', () => {
     }
 
     expect(unhandled).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * The client is what feeds `perfTraceRequest`, and its tests in `perf.test.ts`
+ * drive a trace by hand. These prove the client calls it at the right points,
+ * so a readout line means what it says about a real request.
+ */
+describe('request telemetry', () => {
+  const marks: { name: string; detail: Record<string, unknown> }[] = []
+  beforeAll(() => {
+    setPerfEnabled(true)
+    setTelemetrySink((name, _at, detail) => {
+      marks.push({ name, detail: detail ?? {} })
+    })
+  })
+  afterEach(() => {
+    marks.length = 0
+  })
+  afterAll(() => {
+    setTelemetrySink(null)
+    setPerfEnabled(false)
+  })
+
+  const deadlines = () => marks.filter((mark) => mark.name === 'api:deadline')
+
+  it('reports a deadline that fired mid-body, with when the headers came', async () => {
+    const stalling: typeof globalThis.fetch = async () =>
+      new Response(new ReadableStream<Uint8Array>(), { status: 200 })
+    const api = createApiClient(
+      stubAuth('tok-123'),
+      BASE_URL,
+      { fetch: stalling },
+      40,
+    )
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow()
+
+    expect(deadlines()).toHaveLength(1)
+    expect(deadlines()[0].detail).toMatchObject({
+      route: 'accounts',
+      stage: 'body',
+    })
+    expect(deadlines()[0].detail.hdr).toEqual(expect.any(Number))
+  })
+
+  it('reports a deadline that fired before the request was even sent', async () => {
+    const hangingAuth: AuthProvider = {
+      getToken: () => new Promise<string | null>(() => {}),
+      onAuthFailure: () => {},
+      LoginBootstrap: () => null,
+    }
+    const api = createApiClient(hangingAuth, BASE_URL, undefined, 40)
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow()
+
+    expect(deadlines().map((mark) => mark.detail.stage)).toEqual(['token'])
+  })
+
+  /**
+   * A transport that ignores the abort and answers anyway is the WebKit
+   * behavior the client races around. It is only visible if it is reported.
+   */
+  it('reports headers that arrive after the deadline gave up on them', async () => {
+    let answer!: (response: Response) => void
+    const ignoring: typeof globalThis.fetch = () =>
+      new Promise<Response>((resolve) => (answer = resolve))
+    const api = createApiClient(
+      stubAuth('tok-123'),
+      BASE_URL,
+      { fetch: ignoring },
+      40,
+    )
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow()
+    expect(deadlines().map((mark) => mark.detail.stage)).toEqual(['headers'])
+
+    answer(new Response('{"data":[]}', { status: 200 }))
+    await vi.waitFor(() =>
+      expect(marks.map((mark) => mark.name)).toContain('api:late'),
+    )
+  })
+
+  it("does not call a caller's own abort a deadline", async () => {
+    server.use(http.get(`${BASE_URL}/v1/accounts`, () => new Promise(() => {})))
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 5_000)
+    const controller = new AbortController()
+    const pending = api.GET('/v1/accounts', { signal: controller.signal })
+    controller.abort()
+
+    await expect(pending).rejects.toThrow()
+    expect(deadlines()).toEqual([])
   })
 })
 
