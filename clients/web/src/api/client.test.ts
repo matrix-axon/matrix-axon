@@ -363,6 +363,106 @@ describe('the transport seam (ADR 0102 § 2)', () => {
     await expect(api.GET('/v1/accounts')).rejects.toThrow()
   })
 
+  /**
+   * The WebKit hole, reproduced here by a transport that does what WebKit
+   * does. Its headers arrive, part of the body follows, and the rest never
+   * does. The stream also never listens to the abort, as WebKit's body does
+   * not when the signal came on a `Request`. Chromium's and Node's `fetch`
+   * abort a stalled body themselves, so a test that used msw here would pass
+   * without the fix; the stalling transport is the whole point.
+   */
+  it('fails a body that stalls after its headers, even when the transport ignores the abort', async () => {
+    let cancelled = false
+    const stalling: typeof globalThis.fetch = async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"data":['))
+        },
+        cancel() {
+          cancelled = true
+        },
+      })
+      return new Response(body, {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+
+    const api = createApiClient(
+      stubAuth('tok-123'),
+      BASE_URL,
+      { fetch: stalling },
+      40,
+    )
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow(
+      REQUEST_TIMEOUT_MESSAGE,
+    )
+    // Released, not merely abandoned: a stalled transfer left to itself keeps
+    // its connection, and six of them fill a browser's per-host pool.
+    expect(cancelled).toBe(true)
+  })
+
+  it("stops a stalled body on the caller's own abort too", async () => {
+    let arrived!: () => void
+    const headersIn = new Promise<void>((resolve) => (arrived = resolve))
+    const stalling: typeof globalThis.fetch = async () => {
+      arrived()
+      return new Response(new ReadableStream<Uint8Array>(), { status: 200 })
+    }
+
+    const api = createApiClient(
+      stubAuth('tok-123'),
+      BASE_URL,
+      { fetch: stalling },
+      5_000,
+    )
+    const controller = new AbortController()
+    const pending = api.GET('/v1/accounts', { signal: controller.signal })
+    await headersIn
+    controller.abort()
+
+    await expect(pending).rejects.toThrow()
+  })
+
+  /**
+   * Reading the body means rebuilding the `Response`, and the constructor
+   * throws on a body for these statuses, so a 204 must come through untouched.
+   * The rebuild must also carry everything openapi-fetch reads.
+   */
+  it('passes a bodiless response through and keeps status and headers on the rest', async () => {
+    const statuses = [204, 409]
+    const injected: typeof globalThis.fetch = async () => {
+      const status = statuses.shift()
+      return status === 204
+        ? new Response(null, { status })
+        : new Response(
+            JSON.stringify({ error: { code: 'conflict', message: 'no' } }),
+            {
+              status,
+              statusText: 'Conflict',
+              headers: { 'content-type': 'application/json', 'x-seen': '1' },
+            },
+          )
+    }
+    const api = createApiClient(
+      stubAuth('tok-123'),
+      BASE_URL,
+      { fetch: injected },
+      5_000,
+    )
+
+    const empty = await api.GET('/v1/accounts')
+    expect(empty.response.status).toBe(204)
+    expect(empty.error).toBeUndefined()
+
+    const refused = await api.GET('/v1/accounts')
+    expect(refused.response.status).toBe(409)
+    expect(refused.response.statusText).toBe('Conflict')
+    expect(refused.response.headers.get('x-seen')).toBe('1')
+    expect(apiErrorCode(refused.error)).toBe('conflict')
+  })
+
   it('does not leave a rejection behind when the token wins the race', async () => {
     server.use(
       http.get(`${BASE_URL}/v1/accounts`, () =>

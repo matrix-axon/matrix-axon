@@ -497,6 +497,21 @@ lessons that cost the most time in the ADR 0076 investigation:
   `REQUEST_TIMEOUT_MS` — both exist, and the shorter one decides). When triaging a report like this, establish which of
   the two you have: stale content that never updates is the socket, a
   placeholder that never resolves is the request.
+- **In WebKit, a signal on a `Request` does not bound the request.** Measured
+  in Playwright's WebKit, two separate failures. First, aborting fails a
+  request still waiting for headers but never a body that stalled after them.
+  Second, the chain `AbortSignal.any` builds can be garbage-collected, after
+  which the deadline fires and nothing hears it. A listener on `request.signal`
+  missed it 2 times in 10 under allocation pressure; a listener on the deadline
+  itself missed it 0 times in 10. So `fetchWithinDeadline` (`api/client.ts`)
+  races the headers and the body against the deadline directly, and the signal
+  on the `Request` only serves to tear the transport down. Chromium, Firefox,
+  Node and jsdom all abort correctly, so only a WebKit e2e run can catch a
+  regression (`e2e/stalled-body.spec.ts`). When testing this with a stalled
+  server, destroy each stalled response once the measurement is done: over
+  HTTP/1.1 a held response keeps its connection, six fill the per-host pool, and
+  later requests then hang waiting for _headers_, which looks like the bug
+  without being it.
 - **Confirm the deployed bundle contains the fix before debugging it.** Mark
   names are string literals and survive minification, so
   `(await (await fetch(src)).text()).includes('some:mark:name')` settles it in

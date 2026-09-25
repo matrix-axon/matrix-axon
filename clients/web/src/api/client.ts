@@ -119,6 +119,115 @@ function withinDeadline<T>(
 }
 
 /**
+ * The platform's `fetch`, with the headers *and* the body raced against the
+ * deadline in JS rather than left to the transport.
+ *
+ * Handing the deadline to `fetch` on the `Request` is not enough in WebKit, for
+ * two reasons, each measured in Playwright's WebKit against a server that sends
+ * headers and then stalls:
+ *
+ * - **The body is not aborted.** A request still waiting for headers fails
+ *   when its signal fires, but a response whose headers arrived and whose body
+ *   then stalled waits forever: 15 hangs in 15 reads. Chromium and Firefox
+ *   abort the body in every case.
+ * - **The signal chain can be garbage-collected.** The deadline reaches the
+ *   `Request` through `AbortSignal.any`, and WebKit can collect a link in that
+ *   chain, after which the deadline fires and nothing hears it. A listener on
+ *   `request.signal` missed the abort 2 times in 10 under allocation pressure.
+ *   A listener on the deadline itself, held strongly as it is here, missed it
+ *   0 times in 10. So even a JS race is only reliable against `deadline`
+ *   directly, and a request still waiting for headers is raced too.
+ *
+ * Together they were a room stuck on "Loading messages…" for 97 s on an
+ * iPhone. Its timeline got headers in 640 ms and its 6.7 KB body 107 s later,
+ * over a stalled HTTP/3 stream, while the server had answered in 6 ms.
+ *
+ * `request.signal` is still raced, but as the path for a *caller's* own abort
+ * (the QR stores pass one), which reaches this function no other way. The
+ * transport still receives the signal as well, so an engine that honors it
+ * tears the connection down. What bounds the wait is the race.
+ *
+ * A body abandoned by the race is cancelled, and so is one whose headers
+ * arrive after the race was lost, so a stalled transfer does not hold its
+ * connection. Over HTTP/1.1 six of those fill a browser's per-host pool.
+ *
+ * Reading the body here also fixes the wording of a failure mid-body.
+ * openapi-fetch reads the body *outside* the try that runs `onError`, so such
+ * a failure reached callers as the engine's raw message ("The user aborted a
+ * request."). Read here, it is reworded exactly like one before headers.
+ *
+ * Buffering costs nothing a caller relies on. No `/v1` call streams its body
+ * (none passes `parseAs: 'stream'`), and media is fetched by
+ * `media/media-service.ts`, not this client.
+ */
+async function fetchWithinDeadline(
+  fetch: Platform['fetch'],
+  request: Request,
+  deadline: AbortSignal | null,
+): Promise<Response> {
+  const bounded = <T>(work: PromiseLike<T>): Promise<T> => {
+    const byCaller = withinDeadline(work, request.signal)
+    return deadline === null ? byCaller : withinDeadline(byCaller, deadline)
+  }
+  const pending = fetch(request)
+  let response: Response
+  try {
+    response = await bounded(pending)
+  } catch (error) {
+    // Headers that turn up after the race was lost still open a body, and
+    // nothing else will ever read or cancel it.
+    pending.then(
+      (late) => late.body?.cancel().catch(() => {}),
+      () => {},
+    )
+    throw error
+  }
+  if (response.body === null || NULL_BODY_STATUSES.has(response.status)) {
+    return response
+  }
+  const reader = response.body.getReader()
+  let body: Uint8Array<ArrayBuffer>
+  try {
+    body = await bounded(readAll(reader))
+  } catch (error) {
+    // Settles the pending read as done, so `readAll` returns into a race that
+    // is already decided rather than leaving anything unhandled.
+    reader.cancel(error).catch(() => {})
+    throw error
+  }
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  })
+}
+
+/** Statuses a `Response` may not be constructed with a body for. */
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304])
+
+async function readAll(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const chunks: Uint8Array[] = []
+  let length = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) {
+      break
+    }
+    chunks.push(value)
+    length += value.byteLength
+  }
+  const body = new Uint8Array(length)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return body
+}
+
+/**
  * What the reader sees when a request never got an answer.
  *
  * "Fetch is aborted" is WebKit's words for our own deadline firing, and it
@@ -247,7 +356,19 @@ export function createApiClient(
   platform: Pick<Platform, 'fetch'> = browserPlatform(),
   timeoutMs = API_REQUEST_TIMEOUT_MS,
 ): ApiClient {
-  const client = createClient<paths>({ baseUrl, fetch: platform.fetch })
+  // Each outgoing request's deadline, held strongly for as long as its request
+  // is in flight. `fetchWithinDeadline` must race the deadline itself, not the
+  // `Request` signal derived from it, which WebKit can let go of (see there).
+  const deadlines = new WeakMap<Request, AbortSignal>()
+  const client = createClient<paths>({
+    baseUrl,
+    fetch: (request) =>
+      fetchWithinDeadline(
+        platform.fetch,
+        request,
+        deadlines.get(request) ?? null,
+      ),
+  })
 
   const bearer: Middleware = {
     async onRequest({ request }) {
@@ -270,7 +391,11 @@ export function createApiClient(
         request.headers.set('authorization', `Bearer ${token}`)
       }
       // Last, so the rebuilt request carries the header just set on it.
-      return withDeadline(request, deadline)
+      const signed = withDeadline(request, deadline)
+      if (deadline !== null) {
+        deadlines.set(signed, deadline)
+      }
+      return signed
     },
     onResponse({ response }) {
       if (response.status === 401) {
