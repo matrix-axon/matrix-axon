@@ -28,20 +28,20 @@ There is also **no timeout, abort, or retry anywhere in `api/client.ts`**, so a 
 
 They predict different fixes, which is why this is measured rather than guessed.
 
-|        | Claim                                                          | Signal in the readout                                                                      |
-| ------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| **H1** | Starvation — the timeline page queues behind the larger bodies | high `wait` on the timeline request; `net` landing after `list`/`members`                  |
-| **H2** | No timeout floor — a request stalls and nothing bounds it      | `phase: waiting`, or a `total` clustering near ~30 s / ~60 s rather than scaling with size |
-| **H3** | Media and reply-target contention saturate the link            | many `/v1/media/*` and `/events/{id}` entries overlapping the open                         |
-| **H4** | Reconnect loop re-triggers the mount fetches                   | `attempts` above 1                                                                         |
-| **H5** | A head page arrives but the pane keeps its placeholder         | `heads` includes `applied` or `superseded` while `loading=true` and `rows` is null         |
+|        | Claim                                                          | Signal in the readout                                                                                                                                  |
+| ------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **H1** | Starvation — the timeline page queues behind the larger bodies | high `wait` on the timeline request; `net` landing after `list`/`members`                                                                              |
+| **H2** | No timeout floor — a request stalls and nothing bounds it      | `phase: waiting`, or a `total` clustering near ~30 s / ~60 s rather than scaling with size; `outcome=pending` on an `:api` line, or any `api:deadline` |
+| **H3** | Media and reply-target contention saturate the link            | many `/v1/media/*` and `/events/{id}` entries overlapping the open                                                                                     |
+| **H4** | Reconnect loop re-triggers the mount fetches                   | `attempts` above 1                                                                                                                                     |
+| **H5** | A head page arrives but the pane keeps its placeholder         | `heads` includes `applied` or `superseded` while `loading=true` and `rows` is null                                                                     |
 
 H1 and H2 are the leading candidates and are not mutually exclusive.
 
 ## Reading the overlay
 
 Enable **Settings → Debug → Performance instrumentation** (not `?perf=1`: that flag latches before any store exists and can silently mask the ordering, see ADR 0077).
-Each cold room open then emits one summary line plus up to three request lines.
+Each cold room open then emits one summary line, up to four `:req` request lines, and up to four `:api` lines.
 
 **Turn off "Show the live readout on screen" and turn on "Keep performance summaries on this device".**
 The overlay only helps when someone is watching, and the loads worth capturing rarely happen while a screen recording is running.
@@ -51,9 +51,18 @@ Timings only: the marks that carry room and account identifiers are never writte
 Cleared on sign-out with the rest of the cache.
 
 ```
-boot:room-open  phase=settled rows=980 net=940 q=780 conn=0 ttfb=120 xfer=40 reqs=31 kb=402 list=3120 pending=null members=8800 threads=610 people=4200 attempts=1 warm=false heads=applied loading=false live=open reconnects=0 wall=2026-09-12T18:25:44.123Z
+# session pl50usgl — 2026-09-25T13:30:05.205Z shell=browser display=standalone build=0.1.1+d3adb33
+boot:room-open  phase=settled rows=980 net=940 q=780 conn=0 ttfb=120 xfer=40 reqs=31 kb=402 list=3120 pending=null members=8800 threads=610 people=4200 attempts=1 warm=false heads=applied@940 loading=false live=open reconnects=0 wall=2026-09-12T18:25:44.123Z
 boot:room-open:req  route=accounts/{account}/rooms/{id}/members total=8800 wait=7900 conn=0 ttfb=120 xfer=780 bytes=41000 gzip=true proto=h2 cors=false
+boot:room-open:api  route=accounts/{account}/rooms/{id}/timeline head=true at=2 hdr=130 total=938 outcome=ok stage=null status=200
 ```
+
+**Check the session header first.**
+`shell` says which client wrote the capture: `tauri` for the packaged app, `browser` for everything else, with `display` telling a home-screen web app (`standalone`) from a browser tab (`tab`).
+The two share an icon, and they measure differently.
+The packaged app sends `/v1` through `tauri-plugin-http`, outside the webview, so Resource Timing never sees those requests: in the shell the `:req` lines are absent and `q`/`conn`/`ttfb`/`xfer`/`reqs`/`kb` read `null`, and only the `:api` lines describe requests.
+`build` is the release plus the build hash, which settles whether a fix was deployed before anyone debugs it.
+Sessions recorded before these fields existed have a bare header.
 
 **The first line alone is a complete reading.** `q`/`conn`/`ttfb`/`xfer` on it
 decompose `net` for the head fetch — the one request that gates the paint — so a single screenshot from a phone is enough.
@@ -84,6 +93,8 @@ The `:req` lines below add the other requests it shared the link with.
   A missing line usually means none of the three was reached.
 - `attempts` — entry fetches for this one open. Above 1 is H4.
 - `heads` — what each head load did, in the order they settled: `applied`, `superseded` (a sibling load won the race), `declined` or `failed`, followed by `pending` for each still in flight.
+  Each outcome carries its time since the open began, as `failed@20100+applied@152950`.
+  The time is what separates a load the 20 s request deadline failed from one that failed minutes later when the socket reconnected.
   `timeline:fetch:end` only says a request came back; this says whether its page was used.
   Only loads started during this open count: a load left over from an earlier visit to the same room can settle mid-open, and is not this open's.
   **`applied` or `superseded` with `loading=true` and no `rows` is H5.**
@@ -97,6 +108,7 @@ The `:req` lines below add the other requests it shared the link with.
 - `phase` — `settled`, or `waiting` if the timeline page had still not landed
   ten seconds in.
   **`waiting` is a result, not a broken readout**: it is what H2 looks like.
+  A room that stays unsettled reports `waiting` again every 30 s, eight times in all (about four minutes), so a long stall shows its progress rather than a single point.
   Because that watchdog is ten seconds, wait at least twelve before screenshotting, or a stuck open shows no line at all.
 
 On the request lines, `wait` is queueing (fetch started → bytes went out), `ttfb` is server think-time, and `xfer` is the transfer phase.
@@ -111,6 +123,35 @@ Note that several entries can share the route `.../rooms/{id}/timeline`: the roo
 The summary line's `q`/`conn`/`ttfb`/`xfer` are matched to the _room's own_ head fetch by settle time, so they are unambiguous where the `:req` lines are not.
 
 `cors=true` means the timing breakdown was withheld (`wait`, `ttfb` and `xfer` read `null`), which happens when the API is a different origin with no `Timing-Allow-Origin`; the totals are still good.
+
+### The client's own request lines
+
+The `:api` lines come from the API client itself (`perfTraceRequest` in `src/perf.ts`), not from Resource Timing.
+That makes two readings possible that the `:req` lines cannot give.
+Resource Timing has no entry for a request until it finishes, so a request that is **still in flight** appears only here, which is exactly the request a `waiting` line is waiting on.
+And in the packaged app these are the only request lines there are.
+
+Each open lists every request for **this room's timeline** first, then any other request that failed or has not finished, up to four.
+A request that finished normally and is not the room's timeline is left to the `:req` lines.
+
+- `head` — whether this is the room's own timeline page rather than something it competed with.
+- `at` — when the request started, since the open began.
+- `hdr` — when its response headers arrived, since the request started; `null` if they never did.
+- `total` — when it settled, since the request started; `null` while it is still in flight.
+- `outcome` — `ok`, `timeout` (the 20 s API deadline), `aborted` (its caller gave up), `failed` (the transport refused), or `pending`.
+- `stage` — for anything but `ok`, where the request was: `token` (waiting for an access token, which can itself be a network round trip), `headers`, or `body`.
+- `status` — the HTTP status, once the headers are in.
+
+**`outcome=pending stage=body` with a small `hdr` is a response whose headers arrived and whose body stalled.**
+That was the 2026-09-25 stuck "Loading messages…": a timeline with its headers at 640 ms and its 6.7 KB body 107 s later.
+
+Two marks stand alone, outside any room open, because either one is worth seeing whenever it happens:
+
+- `api:deadline` — the request deadline failed a request: `route`, the `stage` it died in, `hdr` if its headers had arrived, and `after`, how long it had run.
+- `api:late` — headers arrived for a request the client had already given up on.
+  The transport ignored the abort and carried on.
+  In WebKit that is expected, and the deadline holds only because the client races it (`fetchWithinDeadline` in `src/api/client.ts`).
+  A run of these on a browser that should honor aborts is worth a report of its own.
 
 ## Getting a bad enough link
 

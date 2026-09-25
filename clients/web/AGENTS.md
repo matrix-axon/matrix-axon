@@ -516,6 +516,10 @@ lessons that cost the most time in the ADR 0076 investigation:
   names are string literals and survive minification, so
   `(await (await fetch(src)).text()).includes('some:mark:name')` settles it in
   one line. A stale deploy looks exactly like a fix that does not work.
+  A pasted telemetry capture answers it without a fetch. Its session header
+  names the build (`build=`), and the client that wrote it (`shell=` and
+  `display=`). Check that too: the packaged app and the home-screen web app
+  share an icon, and a capture from one was once diagnosed as the other.
 - **A video is a measuring instrument.** Frame extraction plus 2D phase
   correlation gives per-frame displacement. Two traps: 1D row-mean profiles
   alias against the ~50px message-row pitch, and only near-still frames yield

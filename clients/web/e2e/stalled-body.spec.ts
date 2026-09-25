@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { ROOM_URL, signIn } from './helpers'
+import { enablePerf, roomOpenSummary } from './perf-helpers'
 
 /**
  * A room whose first page starts arriving and then stops must fail at the
@@ -53,4 +54,53 @@ test('a timeline body that stalls mid-transfer fails at the deadline', async ({
     page.getByText('Axon did not respond in time', { exact: false }),
   ).toBeVisible(DEADLINE_AND_SLACK)
   await expect(page.getByText('Loading messages…')).toHaveCount(0)
+})
+
+/**
+ * The readout has to name this failure in the engine that has it. Unit tests
+ * drive the request trace by hand, and jsdom aborts a stalled body anyway, so
+ * only a real WebKit run shows the client reporting the stage it died in.
+ */
+test('the readout names a deadline that fired mid-body', async ({ page }) => {
+  test.setTimeout(60_000)
+  await signIn(page)
+  await enablePerf(page)
+  await setStall(page, true)
+
+  await page.goto(ROOM_URL)
+  await expect(
+    page.getByText('Axon did not respond in time', { exact: false }),
+  ).toBeVisible(DEADLINE_AND_SLACK)
+
+  const deadlines = await page.evaluate(() =>
+    performance
+      .getEntriesByName('axon:api:deadline')
+      .map(
+        (mark) => (mark as PerformanceMark).detail as Record<string, unknown>,
+      ),
+  )
+  expect(deadlines).toContainEqual(
+    expect.objectContaining({
+      route: expect.stringMatching(/rooms\/\{id\}\/timeline$/),
+      stage: 'body',
+      hdr: expect.any(Number),
+    }),
+  )
+  // The open's `waiting` line, written ten seconds in, already showed why:
+  // the timeline's headers were in and its body was not.
+  const apiLines = await page.evaluate(() =>
+    performance
+      .getEntriesByName('axon:boot:room-open:api')
+      .map(
+        (mark) => (mark as PerformanceMark).detail as Record<string, unknown>,
+      ),
+  )
+  expect(apiLines).toContainEqual(
+    expect.objectContaining({
+      head: true,
+      outcome: 'pending',
+      stage: 'body',
+    }),
+  )
+  expect(await roomOpenSummary(page)).not.toBeNull()
 })
