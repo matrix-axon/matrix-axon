@@ -138,6 +138,7 @@ export function MediaGalleryCell({
     onPointerMove,
     onPointerCancel,
     onPointerUp,
+    onTouchMove,
     onContextMenu,
     onClickCapture,
   } = touchGestures
@@ -148,6 +149,7 @@ export function MediaGalleryCell({
         onPointerMove,
         onPointerCancel,
         onPointerUp,
+        onTouchMove,
         onContextMenu,
         onClickCapture,
       }

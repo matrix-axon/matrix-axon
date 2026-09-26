@@ -304,6 +304,50 @@ export function useTouchMessageGestures<T extends HTMLElement>({
       }
     },
     onPointerCancel: cancelGesture,
+    /**
+     * Claim the touch once the swipe is leftward, so iOS cannot take it.
+     *
+     * `preventDefault` on a *pointer* event does not stop a native scroll; on
+     * `touchmove` it does. Without this, a normal-speed swipe with a little
+     * vertical drift started the timeline's own scroll and iOS cancelled the
+     * pointer 30-50ms in: the badge showed and the reply never ran. Measured
+     * in the shell on an iPhone 18 Pro Max — seven of seven such swipes ended
+     * in `pointercancel` with the timeline scrolled; only slow, flat ones
+     * survived. The room's swipe-back already claims rightward drags this way.
+     *
+     * The direction is decided here from the touch as well, not only read from
+     * the pointer handler, because which of `pointermove` and `touchmove`
+     * WebKit dispatches first for one movement is not something to rely on:
+     * the move that locks the swipe must be the one that claims it.
+     */
+    onTouchMove: (touchEvent: TouchEvent) => {
+      const gesture = pointer.current
+      const touch = touchEvent.touches[0]
+      if (
+        gesture === null ||
+        gesture.swipeAction === null ||
+        touch === undefined ||
+        touchEvent.touches.length !== 1 ||
+        !touchEvent.cancelable
+      ) {
+        return
+      }
+      if (gesture.direction === 'left') {
+        touchEvent.preventDefault()
+        return
+      }
+      if (gesture.direction !== 'none') return
+      const dx = touch.clientX - gesture.startX
+      const dy = touch.clientY - gesture.startY
+      const absX = Math.abs(dx)
+      if (
+        dx < 0 &&
+        absX >= SWIPE_DECISION_THRESHOLD &&
+        absX >= Math.abs(dy) * SWIPE_AXIS_RATIO
+      ) {
+        touchEvent.preventDefault()
+      }
+    },
     onPointerUp: (pointerEvent: PointerEvent) => {
       surfaceRef.current?.classList.remove('touch-gesture-active')
       clearHoldTimer()
