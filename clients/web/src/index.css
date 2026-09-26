@@ -1978,6 +1978,15 @@ button.pin[aria-pressed='true'] {
   color: var(--warn);
 }
 
+/* A bare glyph, not a bordered control: one outlined box per row read as
+   clutter down the whole list. Qualified with `.ghost` to outrank the generic
+   ghost-button border below; the focus ring is `outline`, so keyboard focus
+   stays visible. */
+button.ghost.pin,
+button.ghost.pin:hover {
+  border-color: transparent;
+}
+
 /* ---- room timeline ---- */
 
 .room-head {
