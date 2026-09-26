@@ -132,3 +132,19 @@ scrolling and text selection fighting the pan — but not for the reason given.
   culprit; counting `navigate`/`popstate` in the same window is what exposed the
   double navigation. The helper script used here lives under the gitignored
   `debug/` and is not part of the repo.
+
+## The native shell
+
+The decision rests on the browser owning the band. In the Tauri shell
+(ADR 0102) it does not: wry creates the WKWebView with
+`allowsBackForwardNavigationGestures` off, and Tauri exposes no builder option
+to change that. There is no recognizer to race, so declining the band there
+left it with no owner at all. On iOS an edge swipe did nothing, while the same
+bundle worked as a PWA and in Safari.
+
+The band is therefore read through `nativeBackEdgePx()`, which is zero when
+`isTauriRuntime()` is true. That covers the room's swipe-back and the media
+viewer's paging. The alternative, turning WebKit's gesture on in the shell,
+would bring back the double navigation this ADR removed. It would also do
+nothing in most shell sessions, because a cold start or deep link has no
+history entry behind it.

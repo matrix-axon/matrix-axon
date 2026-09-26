@@ -1527,6 +1527,31 @@ describe('threads', () => {
     }
   })
 
+  // The shell's WKWebView has no browser swipe-back, so declining the band
+  // there left it with no owner: an edge swipe did nothing (ADR 0075).
+  it('mobile swipe-right from the edge band navigates in the native shell', async () => {
+    const media = mockSinglePane()
+    const shell = window as unknown as Record<string, unknown>
+    shell.__TAURI_INTERNALS__ = {}
+    try {
+      const { container, findByLabelText } = renderRoom(
+        [event('$root', 100)],
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      await findByLabelText('Message Ops')
+      const body = container.querySelector('.room-body')!
+
+      swipeRight(body, 2, 120)
+
+      await waitFor(() =>
+        expect(window.location.pathname).not.toContain('/rooms/'),
+      )
+    } finally {
+      delete shell.__TAURI_INTERNALS__
+      media.mockRestore()
+    }
+  })
+
   it('/thread opens a thread on the latest visible message', async () => {
     let openedRoot: string | null = null
     server.use(

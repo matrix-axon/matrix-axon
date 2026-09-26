@@ -7,6 +7,8 @@
  * visibly cancel back into the current pane.
  */
 
+import { isTauriRuntime } from './platform'
+
 /** Minimum horizontal travel before a message or media swipe counts. */
 export const SWIPE_MIN_X = 72
 /** Minimum horizontal travel before an interactive back swipe completes. */
@@ -40,8 +42,23 @@ export const SWIPE_MIN_Y = 96
  * This applies to the lightbox too. The recognizer is live over a fullscreen
  * overlay — being on top in z-order does not take a gesture away from UIKit —
  * so the viewer declines the same band rather than fighting for it.
+ *
+ * Read it through `nativeBackEdgePx()`, not directly: the band exists only
+ * where that recognizer does.
  */
 export const NATIVE_BACK_EDGE_PX = 30
+
+/**
+ * The left-edge band to decline, which is zero in the native shell.
+ *
+ * wry creates the shell's WKWebView with `allowsBackForwardNavigationGestures`
+ * off, so there is no browser swipe-back to cede the band to. Declining it
+ * there left the band with no owner at all: an edge swipe did nothing
+ * (ADR 0075, "The native shell").
+ */
+export function nativeBackEdgePx(): number {
+  return isTauriRuntime() ? 0 : NATIVE_BACK_EDGE_PX
+}
 
 export interface SwipeStart {
   x: number

@@ -4,7 +4,7 @@ import {
   GESTURE_SWIPE_SETTLE_MS,
   isGestureControlTarget,
   isHorizontallyScrollable,
-  NATIVE_BACK_EDGE_PX,
+  nativeBackEdgePx,
   SWIPE_AXIS_RATIO,
   SWIPE_BACK_MIN_X,
   SWIPE_DECISION_THRESHOLD,
@@ -186,7 +186,7 @@ export function useMobileSwipeBack<T extends HTMLElement>({
     }
     const touch = event.touches[0]
     const presentation = getPresentation(event.currentTarget)
-    if (touch.clientX < NATIVE_BACK_EDGE_PX || presentation === null) {
+    if (touch.clientX < nativeBackEdgePx() || presentation === null) {
       swipeStart.current = null
       return
     }
