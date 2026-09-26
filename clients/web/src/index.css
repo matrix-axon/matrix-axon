@@ -19,6 +19,7 @@
   --ok: #1a7f37;
   --room-avatar-fg: #ffffff;
   --room-avatar-border: rgb(0 0 0 / 0.14);
+  --room-avatar-edge: rgb(0 0 0 / 0.08);
   --room-avatar-0: #3556c4;
   --room-avatar-1: #0f766e;
   --room-avatar-2: #a24d00;
@@ -46,6 +47,7 @@
     --ok: #4ac26b;
     --room-avatar-fg: #ffffff;
     --room-avatar-border: rgb(255 255 255 / 0.16);
+    --room-avatar-edge: rgb(255 255 255 / 0.1);
     --room-avatar-0: #4868d9;
     --room-avatar-1: #168178;
     --room-avatar-2: #b75c0b;
@@ -73,6 +75,7 @@
   --ok: #4ac26b;
   --room-avatar-fg: #ffffff;
   --room-avatar-border: rgb(255 255 255 / 0.16);
+  --room-avatar-edge: rgb(255 255 255 / 0.1);
   --room-avatar-0: #4868d9;
   --room-avatar-1: #168178;
   --room-avatar-2: #b75c0b;
@@ -1814,8 +1817,13 @@ select {
   border-radius: 8px;
   overflow: hidden;
   background: var(--room-avatar-bg);
+  /* No ring. A letter avatar's fill already gives it its shape, and on a photo
+     the ring read as a colored frame: the fill showed through a translucent
+     border. Transparent rather than removed, and the fill kept inside it, so
+     every avatar keeps its size. Photos get a faint inner edge instead, below. */
+  background-clip: padding-box;
   color: var(--room-avatar-fg);
-  border: 1px solid var(--room-avatar-border);
+  border: 1px solid transparent;
   font-size: 0.8rem;
   font-weight: 700;
   line-height: 1;
@@ -1856,6 +1864,19 @@ select {
   height: 100%;
   object-fit: cover;
   object-position: center center;
+}
+
+/* A photo with a white (or, in dark mode, black) background has no fill of
+   its own to show its shape against the list, so it gets a hairline just
+   inside its edge — faint enough to vanish on a colorful photo. Drawn over
+   the image, which would cover an inset shadow on the avatar itself. */
+.room-avatar-image::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--room-avatar-edge);
+  pointer-events: none;
 }
 
 .room-copy {
