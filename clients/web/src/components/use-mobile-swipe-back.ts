@@ -8,7 +8,7 @@ import {
   SWIPE_AXIS_RATIO,
   SWIPE_BACK_MIN_X,
   SWIPE_DECISION_THRESHOLD,
-  SWIPE_MAX_Y,
+  swipeBackMaxY,
 } from '../gestures'
 import { SINGLE_PANE_QUERY } from '../layout'
 
@@ -242,7 +242,7 @@ export function useMobileSwipeBack<T extends HTMLElement>({
     const absY = Math.abs(dy)
     if (
       dx < SWIPE_BACK_MIN_X ||
-      absY > SWIPE_MAX_Y ||
+      absY > swipeBackMaxY(dx) ||
       dx < absY * SWIPE_AXIS_RATIO
     ) {
       settle(start, false)

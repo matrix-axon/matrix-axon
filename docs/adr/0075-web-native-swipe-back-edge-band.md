@@ -148,3 +148,18 @@ viewer's paging. The alternative, turning WebKit's gesture on in the shell,
 would bring back the double navigation this ADR removed. It would also do
 nothing in most shell sessions, because a cold start or deep link has no
 history entry behind it.
+
+A test build with only that change did not help, and an on-device trace of
+each swipe (iPhone 18 Pro Max, packaged shell) showed why. The band was not the
+only dead zone:
+
+- **The swipe surface stopped 1.5rem short of the edge.** `.shell main` keeps
+  its inline padding on phones, and the surfaces the hook binds to sit inside
+  it. A swipe from x=4 landed on `main` and never reached the hook. In a
+  browser this was hidden, because the same strip is WebKit's. On phones the
+  surfaces now extend through that padding with a matching negative margin,
+  so the content stays where it was.
+- **Long swipes failed the vertical cap.** A thumb crossing a 440pt screen
+  arcs: `dx=390 dy=82`, refused by `SWIPE_MAX_Y` (64px). A back swipe may now
+  drift `max(SWIPE_MAX_Y, 0.3 × dx)`. The axis ratio still applies, and other
+  swipes keep the fixed cap.

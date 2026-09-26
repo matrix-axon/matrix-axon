@@ -1552,6 +1552,55 @@ describe('threads', () => {
     }
   })
 
+  // A thumb crossing a phone from its edge arcs; the fixed 64px cap refused
+  // this measured swipe (dx=390 dy=82) although it was plainly sideways.
+  it('mobile swipe-right accepts a long swipe with a thumb-arc drift', async () => {
+    const media = mockSinglePane()
+    try {
+      const { container, findByLabelText } = renderRoom(
+        [event('$root', 100)],
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      await findByLabelText('Message Ops')
+      const body = container.querySelector('.room-body')!
+
+      fireEvent.touchStart(body, { touches: [{ clientX: 33, clientY: 300 }] })
+      fireEvent.touchMove(body, { touches: [{ clientX: 200, clientY: 330 }] })
+      fireEvent.touchEnd(body, {
+        changedTouches: [{ clientX: 423, clientY: 382 }],
+      })
+
+      await waitFor(() =>
+        expect(window.location.pathname).not.toContain('/rooms/'),
+      )
+    } finally {
+      media.mockRestore()
+    }
+  })
+
+  it('mobile swipe-right still refuses a short swipe that drifts past the cap', async () => {
+    const media = mockSinglePane()
+    try {
+      const { container, findByLabelText } = renderRoom(
+        [event('$root', 100)],
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      await findByLabelText('Message Ops')
+      const body = container.querySelector('.room-body')!
+
+      fireEvent.touchStart(body, { touches: [{ clientX: 90, clientY: 300 }] })
+      fireEvent.touchMove(body, { touches: [{ clientX: 150, clientY: 310 }] })
+      fireEvent.touchEnd(body, {
+        changedTouches: [{ clientX: 200, clientY: 370 }],
+      })
+      await new Promise((resolve) => setTimeout(resolve, 250))
+
+      expect(window.location.pathname).toContain('/rooms/')
+    } finally {
+      media.mockRestore()
+    }
+  })
+
   it('/thread opens a thread on the latest visible message', async () => {
     let openedRoot: string | null = null
     server.use(

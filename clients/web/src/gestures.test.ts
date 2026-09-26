@@ -7,6 +7,7 @@ import {
   SWIPE_MAX_Y,
   SWIPE_MIN_X,
   SWIPE_MIN_Y,
+  swipeBackMaxY,
   swipeDirection,
 } from './gestures'
 
@@ -112,5 +113,21 @@ describe('SWIPE_BACK_MIN_X', () => {
   it('commits after an intentional drag while retaining a cancelable preview', () => {
     expect(SWIPE_BACK_MIN_X).toBeLessThan(SWIPE_MIN_X)
     expect(SWIPE_BACK_MIN_X).toBeGreaterThan(SWIPE_DECISION_THRESHOLD)
+  })
+})
+
+describe('swipeBackMaxY', () => {
+  it('keeps the fixed cap for a short swipe', () => {
+    expect(swipeBackMaxY(SWIPE_BACK_MIN_X)).toBe(SWIPE_MAX_Y)
+  })
+
+  it('lets a phone-width swipe carry its thumb arc', () => {
+    // Measured on an iPhone 18 Pro Max, and refused by the fixed cap.
+    expect(swipeBackMaxY(390)).toBeGreaterThan(82)
+  })
+
+  it('stays tighter than the axis ratio already allows', () => {
+    // Otherwise the drift allowance, not the ratio, would decide direction.
+    expect(swipeBackMaxY(1000)).toBeLessThan(1000 / SWIPE_AXIS_RATIO)
   })
 })

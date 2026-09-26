@@ -3622,6 +3622,17 @@ span.composer-attachment-thumb {
     overflow: hidden;
   }
 
+  /* Reach the screen edge through `main`'s inline padding (`.shell main`),
+     without moving anything drawn inside. Otherwise the first 1.5rem of the
+     display belongs to `main`, which has no swipe handler: a back swipe from
+     the far edge never reached the hook. That was invisible in a browser,
+     where the band is WebKit's own swipe-back, and the whole defect in the
+     native shell, which has none (ADR 0075, "The native shell"). */
+  .shell main .mobile-back-surface {
+    margin-left: -1.5rem;
+    padding-left: 1.5rem;
+  }
+
   .mobile-back-destination-active {
     transform: translate3d(var(--mobile-back-destination-offset, 0), 0, 0);
     will-change: transform;

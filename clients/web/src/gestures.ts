@@ -15,6 +15,21 @@ export const SWIPE_MIN_X = 72
 export const SWIPE_BACK_MIN_X = 48
 /** Maximum vertical drift a horizontal swipe may accumulate. */
 export const SWIPE_MAX_Y = 64
+/**
+ * How much of its horizontal travel a back swipe may drift vertically, once
+ * that exceeds `SWIPE_MAX_Y`.
+ *
+ * A thumb swiping the width of a phone from its edge travels an arc, not a
+ * line. Measured on an iPhone 18 Pro Max: `dx=390 dy=82` from x=33, plainly
+ * sideways and refused by the fixed cap. Back swipes only — message actions
+ * and media paging keep the fixed cap, where a short diagonal is ambiguous.
+ */
+export const SWIPE_BACK_DRIFT_RATIO = 0.3
+
+/** The vertical drift a back swipe of `dx` pixels may carry. */
+export function swipeBackMaxY(dx: number): number {
+  return Math.max(SWIPE_MAX_Y, dx * SWIPE_BACK_DRIFT_RATIO)
+}
 /** How much more horizontal than vertical the travel must be. */
 export const SWIPE_AXIS_RATIO = 1.4
 /**
