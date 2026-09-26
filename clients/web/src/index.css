@@ -740,7 +740,10 @@ body {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 1.5rem;
+  /* Inline padding, as a variable so `.mobile-back-surface` can reach through
+     exactly this much of it. Phones narrow it below. */
+  --main-inline-pad: 1.5rem;
+  padding: 1.5rem var(--main-inline-pad);
   /* The scroll container for Settings, Accounts, Invites and Licenses, and it
      reaches the bottom of the display. Without this the last control of a page
      sits under the home indicator with no way to scroll it clear — the same
@@ -808,6 +811,13 @@ body {
   .shell-body {
     position: relative;
     overflow: hidden;
+  }
+
+  /* iOS's standard side margin on iPhone is 16pt, which the room list already
+     uses. At 1.5rem a room's message avatars sat 32px in (the row's own 8px
+     highlight inset on top) and Settings 24px. */
+  .shell main {
+    --main-inline-pad: 1rem;
   }
 
   .sidebar {
@@ -3623,14 +3633,14 @@ span.composer-attachment-thumb {
   }
 
   /* Reach the screen edge through `main`'s inline padding (`.shell main`),
-     without moving anything drawn inside. Otherwise the first 1.5rem of the
-     display belongs to `main`, which has no swipe handler: a back swipe from
+     without moving anything drawn inside. Otherwise that strip of the display
+     belongs to `main`, which has no swipe handler: a back swipe from
      the far edge never reached the hook. That was invisible in a browser,
      where the band is WebKit's own swipe-back, and the whole defect in the
      native shell, which has none (ADR 0075, "The native shell"). */
   .shell main .mobile-back-surface {
-    margin-left: -1.5rem;
-    padding-left: 1.5rem;
+    margin-left: calc(-1 * var(--main-inline-pad));
+    padding-left: var(--main-inline-pad);
   }
 
   .mobile-back-destination-active {
