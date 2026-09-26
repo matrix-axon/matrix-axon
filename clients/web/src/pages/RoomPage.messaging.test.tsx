@@ -1601,6 +1601,35 @@ describe('threads', () => {
     }
   })
 
+  // A tap target needs a tap, and a drag that locked as a swipe is not one.
+  // The on-device trace had back swipes refused for starting on an avatar
+  // and a timestamp, which read as "swipe-back is broken".
+  for (const [label, selector] of [
+    ['the timestamp', '.event-time-copy time'],
+    ['a message action button', '.event-action-button'],
+  ] as const) {
+    it(`mobile swipe-right starting on ${label} returns to the room list`, async () => {
+      const media = mockSinglePane()
+      try {
+        const { container, findByLabelText } = renderRoom(
+          [event('$root', 100)],
+          `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+        )
+        await findByLabelText('Message Ops')
+        const control = container.querySelector(`.room-body ${selector}`)!
+        expect(control).not.toBeNull()
+
+        swipeRight(control)
+
+        await waitFor(() =>
+          expect(window.location.pathname).not.toContain('/rooms/'),
+        )
+      } finally {
+        media.mockRestore()
+      }
+    })
+  }
+
   it('/thread opens a thread on the latest visible message', async () => {
     let openedRoot: string | null = null
     server.use(

@@ -91,6 +91,29 @@ export function isGestureControlTarget(target: EventTarget | null): boolean {
 }
 
 /**
+ * Whether a back swipe must leave a touch alone because of where it started.
+ *
+ * Narrower than `isGestureControlTarget`. A link, a button or an avatar only
+ * needs a *tap*, and a drag that has travelled far enough to lock as a swipe
+ * is not one — WebKit does not synthesise a click after it. Declining those
+ * cost real swipes: an on-device trace showed two of four failed back swipes
+ * began on an avatar and a timestamp link.
+ *
+ * What stays declined is anything that uses a horizontal drag itself: text
+ * entry (caret placement and selection), sliders and native media controls
+ * (scrubbing), and the emoji picker. Horizontal scrollers are handled
+ * separately by `isHorizontallyScrollable`.
+ */
+export function isSwipeBackBlockedTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    target.closest(
+      'input, textarea, select, [contenteditable="true"], [role="textbox"], [role="slider"], audio, video, emoji-picker',
+    ) !== null
+  )
+}
+
+/**
  * Whether `target` sits inside content that pans horizontally on its own, such
  * as a wide code block or table. Room and row swipe recognizers both yield to
  * it so the same touch cannot mean content pan in one layer and an action in

@@ -2,8 +2,8 @@ import type { JSX } from 'preact'
 import { useEffect, useRef } from 'preact/hooks'
 import {
   GESTURE_SWIPE_SETTLE_MS,
-  isGestureControlTarget,
   isHorizontallyScrollable,
+  isSwipeBackBlockedTarget,
   nativeBackEdgePx,
   SWIPE_AXIS_RATIO,
   SWIPE_BACK_MIN_X,
@@ -49,8 +49,8 @@ export function roomListBackPresentation(
  * The shared narrow-screen rightward pane gesture.
  *
  * The caller supplies the pane that should follow the finger and the action
- * that replaces it. Controls, horizontal scrollers, and iOS's native-back edge
- * band are always left alone.
+ * that replaces it. Text entry and other drag-owning controls, horizontal
+ * scrollers, and iOS's native-back edge band are always left alone.
  */
 export function useMobileSwipeBack<T extends HTMLElement>({
   getPresentation,
@@ -178,7 +178,7 @@ export function useMobileSwipeBack<T extends HTMLElement>({
     if (
       !window.matchMedia(SINGLE_PANE_QUERY).matches ||
       event.touches.length !== 1 ||
-      isGestureControlTarget(event.target) ||
+      isSwipeBackBlockedTarget(event.target) ||
       isHorizontallyScrollable(event.target)
     ) {
       swipeStart.current = null
