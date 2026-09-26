@@ -185,8 +185,9 @@ impl Store {
     /// *every* client — broader than
     /// [`revoke_refresh_tokens_for_identity_client`](Self::revoke_refresh_tokens_for_identity_client),
     /// which is scoped to a single client's reuse-detection blast radius.
-    /// `axon oauth identities unbind`'s "sign out everywhere for this
-    /// identity" step.
+    /// Leaves the identity bound. Unbinding uses
+    /// [`delete_identity`](Self::delete_identity) to remove these rows and
+    /// invalidate the identity's other credentials in the same transaction.
     pub async fn revoke_refresh_tokens_for_identity(
         &self,
         oauth_identity_id: Uuid,

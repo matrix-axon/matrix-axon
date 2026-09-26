@@ -12,7 +12,8 @@
 //! `Authorization: Bearer` contract or any consumer code. The shipped
 //! implementation is [`StoreTokenVerifier`], backed by [`Store`].
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axon_store::Store;
@@ -98,8 +99,39 @@ pub(crate) fn missing_token_response(message: impl Into<String>) -> Response {
 /// A `401` for a *present but rejected* token (unknown or revoked), carrying
 /// `WWW-Authenticate: Bearer error="invalid_token"` (RFC 6750 §3.1). See
 /// [`missing_token_response`] for why this is not on `ApiError`.
-pub(crate) fn invalid_token_response(message: impl Into<String>) -> Response {
-    challenge(message, CHALLENGE_INVALID_TOKEN)
+pub(crate) fn invalid_token_response() -> Response {
+    static WARNINGS: RejectionWarnings = RejectionWarnings(Mutex::new(None));
+    if WARNINGS.allow(Instant::now()) {
+        tracing::warn!(
+            reason = "invalid_bearer_token",
+            "Axon authentication rejected; further bearer warnings suppressed for 30 seconds"
+        );
+    } else {
+        tracing::debug!(
+            reason = "invalid_bearer_token",
+            "Axon authentication rejected"
+        );
+    }
+    challenge(
+        "The access token is invalid, expired, or revoked. Sign in again or ask the instance owner for a new token.",
+        CHALLENGE_INVALID_TOKEN,
+    )
+}
+
+/// One process-wide slot, not an attacker-keyed map. HTTP and WS share it.
+struct RejectionWarnings(Mutex<Option<Instant>>);
+
+impl RejectionWarnings {
+    fn allow(&self, now: Instant) -> bool {
+        let Ok(mut last) = self.0.try_lock() else {
+            return false;
+        };
+        if last.is_some_and(|last| now.saturating_duration_since(last) < Duration::from_secs(30)) {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
 }
 
 /// Build the enveloped `401` and attach the given RFC 6750 `WWW-Authenticate`
@@ -128,7 +160,7 @@ pub async fn require_bearer(
 
     match verifier.verify(token).await {
         Ok(true) => next.run(req).await,
-        Ok(false) => invalid_token_response("invalid or revoked token"),
+        Ok(false) => invalid_token_response(),
         Err(err) => err.into_response(),
     }
 }
@@ -137,6 +169,28 @@ pub async fn require_bearer(
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    #[test]
+    fn rejection_warnings_are_bounded_across_threads_and_time() {
+        let warnings = Arc::new(RejectionWarnings(Mutex::new(None)));
+        let now = Instant::now();
+        let threads: Vec<_> = (0..32)
+            .map(|_| {
+                let warnings = warnings.clone();
+                std::thread::spawn(move || warnings.allow(now))
+            })
+            .collect();
+        assert_eq!(
+            threads
+                .into_iter()
+                .filter_map(|thread| thread.join().ok())
+                .filter(|allowed| *allowed)
+                .count(),
+            1
+        );
+        assert!(!warnings.allow(now + Duration::from_secs(29)));
+        assert!(warnings.allow(now + Duration::from_secs(30)));
+    }
 
     fn header(value: &'static str) -> HeaderMap {
         let mut headers = HeaderMap::new();

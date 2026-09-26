@@ -48,7 +48,15 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for BindRequest {
 }
 
 impl Store {
+    /// Cancel a pending bind so the polling CLI exits and a fresh attempt can start.
+    pub async fn cancel_bind_request(&self, id: Uuid) -> Result<bool, StoreError> {
+        let result = sqlx_core::query::query("UPDATE oauth_bind_requests SET status = 'expired' WHERE device_code = $1 AND status = 'pending' AND expires_at > now()")
+            .bind(id).execute(&self.pool).await?;
+        Ok(result.rows_affected() == 1)
+    }
     /// Create the `pending` row for a freshly-started bind handshake.
+    /// Its immutable nonce is generated before the CLI prints the URL, so
+    /// repeated GET/HEAD requests only read it and cannot consume the flow.
     ///
     /// Opportunistically sweeps expired rows first, same reasoning as
     /// [`create_authorization_request`](Self::create_authorization_request):
@@ -62,13 +70,14 @@ impl Store {
     ) -> Result<BindRequest, StoreError> {
         self.delete_expired_bind_requests().await?;
         let sql = format!(
-            "INSERT INTO oauth_bind_requests (user_code, provider, expires_at) \
-             VALUES ($1, $2, $3) RETURNING {BIND_REQUEST_COLUMNS}"
+            "INSERT INTO oauth_bind_requests (user_code, provider, expires_at, upstream_nonce) \
+             VALUES ($1, $2, $3, $4) RETURNING {BIND_REQUEST_COLUMNS}"
         );
         let request = sqlx_core::query_as::query_as::<Postgres, BindRequest>(&sql)
             .bind(user_code)
             .bind(provider)
             .bind(expires_at)
+            .bind(axon_core::generate_opaque_secret())
             .fetch_one(&self.pool)
             .await?;
         Ok(request)
@@ -109,26 +118,6 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(request)
-    }
-
-    /// Stash the nonce `GET /v1/oauth/bind` generated just before redirecting
-    /// upstream, so the callback can later verify the returned id_token's
-    /// nonce claim. Idempotent — safe to call again if the admin reloads the
-    /// bind-landing page before completing the flow.
-    pub async fn set_bind_request_upstream_nonce(
-        &self,
-        device_code: Uuid,
-        nonce: &str,
-    ) -> Result<bool, StoreError> {
-        let result = sqlx_core::query::query(
-            "UPDATE oauth_bind_requests SET upstream_nonce = $2 \
-              WHERE device_code = $1 AND status = 'pending' AND expires_at > now()",
-        )
-        .bind(device_code)
-        .bind(nonce)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected() > 0)
     }
 
     /// Terminal `pending` -> `completed` transition, **and** the identity

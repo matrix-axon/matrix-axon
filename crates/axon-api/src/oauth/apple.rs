@@ -1,7 +1,7 @@
 //! Sign in with Apple provider foundation (ADR 0054).
 //!
-//! Not registered by the binary yet: Apple's POST callback and owner-binding
-//! integration must land before operators can enable this provider.
+//! Registered for credentialed browser login. Native login remains gated until
+//! the server-issued challenge and native owner-binding contract lands.
 
 use axon_core::AppleOauthConfig;
 use chrono::Utc;
@@ -123,6 +123,10 @@ fn required<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, OidcErro
 
 #[async_trait::async_trait]
 impl OidcProvider for AppleProvider {
+    fn is_cancellation(&self, error: &str) -> bool {
+        matches!(error, "access_denied" | "user_cancelled_authorize")
+    }
+
     fn name(&self) -> &'static str {
         "apple"
     }

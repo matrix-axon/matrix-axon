@@ -7,10 +7,7 @@ use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/common/signing_key.rs"
-));
+use axon_test_support::{ec_key, TEST_KID};
 include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/common/apple_rsa_key.rs"
@@ -33,6 +30,15 @@ fn provider() -> AppleProvider {
         ec_key().pem.as_bytes(),
     )
     .unwrap()
+}
+
+#[test]
+fn cancellation_vocabulary_is_owned_by_apple() {
+    let provider = provider();
+    assert!(provider.is_cancellation("access_denied"));
+    assert!(provider.is_cancellation("user_cancelled_authorize"));
+    assert!(!provider.is_cancellation("server_error"));
+    assert!(!provider.is_cancellation("unknown"));
 }
 
 async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {

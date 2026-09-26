@@ -38,6 +38,7 @@ matrix-axon/
     axon-media/              # media proxy + disk-cache backend
     axon-api/                # axum HTTP + WS handlers, OpenAPI (utoipa)
     axon-itest/              # dev-only: integration-test seeder (the `seed` binary)
+    axon-test-support/       # dev-only: in-memory signing fixtures shared by server tests
   clients/
     tui/                     # axon-tui — terminal client for the Axon API, should grow to support all API endpoints as they are enabled
     web/                     # axon-web (Vite + Preact + TS, ADR 0046) — alpha client
@@ -78,17 +79,18 @@ matrix-axon/
 Each crate's own `Cargo.toml` `description` is the source of truth;
 this table is the orientation copy.
 
-| Crate         | Purpose                                                                                                                           |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `axon-core`   | Shared types, errors, and configuration.                                                                                          |
-| `axon-store`  | Postgres-backed event store, room state, and account data.                                                                        |
-| `axon-sync`   | matrix-rust-sdk sync-engine wrapper (Simplified Sliding Sync); owns verification and all crypto-adjacent logic.                   |
-| `axon-crypto` | Reserved stub — stays empty; verification lives in `axon-sync` (ADR 0027; see the "`axon-crypto` stays a stub" convention below). |
-| `axon-search` | Tantivy full-text search index, populated on event ingestion.                                                                     |
-| `axon-media`  | Media proxy with a bounded on-disk LRU cache for `mxc://` URLs.                                                                   |
-| `axon-api`    | axum HTTP + WebSocket handlers; OpenAPI spec via utoipa.                                                                          |
-| `axon-server` | The `axon` binary — wires the crates together and owns the process.                                                               |
-| `axon-itest`  | Dev-only end-to-end integration-test seeder (plays a verified Matrix client).                                                     |
+| Crate               | Purpose                                                                                                                           |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `axon-core`         | Shared types, errors, and configuration.                                                                                          |
+| `axon-store`        | Postgres-backed event store, room state, and account data.                                                                        |
+| `axon-sync`         | matrix-rust-sdk sync-engine wrapper (Simplified Sliding Sync); owns verification and all crypto-adjacent logic.                   |
+| `axon-crypto`       | Reserved stub — stays empty; verification lives in `axon-sync` (ADR 0027; see the "`axon-crypto` stays a stub" convention below). |
+| `axon-search`       | Tantivy full-text search index, populated on event ingestion.                                                                     |
+| `axon-media`        | Media proxy with a bounded on-disk LRU cache for `mxc://` URLs.                                                                   |
+| `axon-api`          | axum HTTP + WebSocket handlers; OpenAPI spec via utoipa.                                                                          |
+| `axon-server`       | The `axon` binary — wires the crates together and owns the process.                                                               |
+| `axon-itest`        | Dev-only end-to-end integration-test seeder (plays a verified Matrix client).                                                     |
+| `axon-test-support` | Dev-only in-memory signing fixtures shared by Axon server tests.                                                                  |
 
 ## Key conventions
 

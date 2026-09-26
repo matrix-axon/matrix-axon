@@ -325,6 +325,7 @@ dependencies = [
  "aws-lc-rs",
  "axon-core",
  "axon-store",
+ "axon-test-support",
  "axum",
  "base64 0.22.1",
  "bytes",
@@ -348,6 +349,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "tracing-subscriber",
  "url",
  "utoipa",
  "uuid",
@@ -435,6 +437,7 @@ dependencies = [
  "axon-search",
  "axon-store",
  "axon-sync",
+ "axon-test-support",
  "axum",
  "chrono",
  "clap",
@@ -450,6 +453,7 @@ dependencies = [
  "serde_json",
  "sqlx-core",
  "sqlx-postgres",
+ "tempfile",
  "tokio",
  "tokio-util",
  "toml_edit 0.22.27",
@@ -564,6 +568,14 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "axon-test-support"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.22.1",
 ]
 
 [[package]]

@@ -1491,6 +1491,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/oauth/{provider}/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Query callback adapter; both methods share the same validation and completion. */
+        get: operations["callback_get"];
+        put?: never;
+        /** Complete either GET or bounded form POST through the same validated flow. */
+        post: operations["callback"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/preferences/{key}": {
         parameters: {
             query?: never;
@@ -2714,6 +2732,14 @@ export interface components {
             profile: string;
             rustc_version: string;
             version: string;
+        };
+        /** @description Upstream callback fields, carried in a GET query or URL-encoded POST form. */
+        CallbackQuery: {
+            /** @description Exactly one of code or error is required. */
+            code?: string | null;
+            error?: string | null;
+            /** @description Opaque state from an unexpired, pending server-side flow. */
+            state: string;
         };
         /** @description Request body for creating a DM (`POST …/rooms/dm`; ADR 0068 M19c). */
         CreateDmRequest: {
@@ -9243,6 +9269,167 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    callback_get: {
+        parameters: {
+            query: {
+                /** @description Server-issued upstream state */
+                state: string;
+                /** @description Authorization code; mutually exclusive with error */
+                code?: string;
+                /** @description Provider error; mutually exclusive with code */
+                error?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Enabled upstream identity provider */
+                provider: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Binding/bootstrap result or native-app handoff page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Return to the validated client with a code or sanitized OAuth error */
+            303: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid, stale, or malformed callback */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Bootstrap peer is not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description OAuth or provider disabled */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Callback exceeds 16 KiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+        };
+    };
+    callback: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Enabled upstream identity provider */
+                provider: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/x-www-form-urlencoded": components["schemas"]["CallbackQuery"];
+            };
+        };
+        responses: {
+            /** @description Binding/bootstrap result or native-app handoff page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Return to the validated client with a code or sanitized OAuth error */
+            303: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid, stale, or malformed callback */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Bootstrap peer is not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description OAuth or provider disabled */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Callback exceeds 16 KiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
                 };
             };
         };

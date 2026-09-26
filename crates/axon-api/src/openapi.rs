@@ -130,6 +130,8 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::routes::matrix_oauth_grant::submit_check_code,
         crate::routes::matrix_oauth_grant::cancel,
         crate::routes::oauth::providers,
+        crate::routes::oauth::callback,
+        crate::routes::oauth::callback_get,
         crate::routes::search::search,
         crate::routes::status::get_status,
         crate::routes::rooms::list_rooms,

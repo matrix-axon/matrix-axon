@@ -11,6 +11,7 @@ members = [
     "crates/axon-media",
     "crates/axon-api",
     "crates/axon-itest",
+    "crates/axon-test-support",
     "clients/tui",
     "smoke/local-stack",
     "smoke/matrix-oauth",
@@ -45,6 +46,7 @@ axon-crypto = { path = "crates/axon-crypto" }
 axon-search = { path = "crates/axon-search" }
 axon-media  = { path = "crates/axon-media" }
 axon-api    = { path = "crates/axon-api" }
+axon-test-support = { path = "crates/axon-test-support" }
 
 # Async runtime + HTTP
 tokio = { version = "1", default-features = false }

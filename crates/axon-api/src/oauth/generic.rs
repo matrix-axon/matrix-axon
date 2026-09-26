@@ -171,10 +171,7 @@ mod tests {
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
     use serde_json::{json, Value};
 
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/common/signing_key.rs"
-    ));
+    use axon_test_support::{ec_key, TEST_KID};
 
     #[tokio::test]
     async fn real_signed_google_and_microsoft_tokens_use_the_shared_verifier() {

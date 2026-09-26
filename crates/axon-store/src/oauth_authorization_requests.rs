@@ -68,6 +68,13 @@ pub struct NewAuthorizationRequest<'a> {
 }
 
 impl Store {
+    /// Cancel a pending upstream flow without racing successful completion.
+    pub async fn cancel_authorization(&self, id: Uuid) -> Result<bool, StoreError> {
+        let result = sqlx_core::query::query("UPDATE oauth_authorization_requests SET status = 'expired' WHERE id = $1 AND status = 'pending' AND expires_at > now()")
+            .bind(id).execute(&self.pool).await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Create the `pending` row for a freshly-started Path A flow. The
     /// returned id is both this row's primary key and the value baked into
     /// the redirect axon sends the browser to next.

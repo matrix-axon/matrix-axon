@@ -1729,6 +1729,8 @@ async fn auth_gate_rejects_missing_and_invalid_tokens_before_the_handler() {
         headers["www-authenticate"],
         "Bearer error=\"invalid_token\""
     );
+    assert_eq!(err["error"]["message"], "The access token is invalid, expired, or revoked. Sign in again or ask the instance owner for a new token.");
+    assert!(!err.to_string().contains("not-the-test-token"));
 
     assert!(
         stub.calls().is_empty(),
