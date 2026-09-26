@@ -21,23 +21,23 @@ out=
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--tag)
-		tag=${2:-}
+		tag=${2:?missing value for $1}
 		shift 2
 		;;
 	--sha-macos-silicon)
-		sha_silicon=${2:-}
+		sha_silicon=${2:?missing value for $1}
 		shift 2
 		;;
 	--sha-macos-intel)
-		sha_intel=${2:-}
+		sha_intel=${2:?missing value for $1}
 		shift 2
 		;;
 	--sha-linux-x86_64)
-		sha_linux=${2:-}
+		sha_linux=${2:?missing value for $1}
 		shift 2
 		;;
 	--out)
-		out=${2:-}
+		out=${2:?missing value for $1}
 		shift 2
 		;;
 	-h | --help)

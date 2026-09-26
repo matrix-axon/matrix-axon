@@ -129,15 +129,6 @@ if grep -Fq 'GLIBC' "$work/caveats-mac.txt"; then
 	exit 1
 fi
 
-# Starting the service before init is a keep_alive restart loop, so the
-# first start the caveats show has to come after the first init.
-first_init=$(grep -n 'axon-server init' "$work/caveats-mac.txt" | head -n 1 | cut -d: -f1)
-first_start=$(grep -n 'brew services start axon-server' "$work/caveats-mac.txt" | head -n 1 | cut -d: -f1)
-if [ -z "$first_init" ] || [ -z "$first_start" ] || [ "$first_start" -le "$first_init" ]; then
-	echo "caveats show brew services start before axon-server init" >&2
-	exit 1
-fi
-
 # Rebuild the copy-paste block and syntax-check it. The heredoc terminator
 # is the line whose entire contents are SQL.
 awk '
@@ -163,6 +154,31 @@ if ! bash -n "$work/local-postgres.sh" 2>"$work/local-postgres.err" || [ -s "$wo
 	exit 1
 fi
 
+# Starting the service before init is a keep_alive restart loop. The check
+# is inside each copy-paste block: prose above them also mentions both
+# phrases, and the first hit in the whole caveats text is not the block.
+assert_init_before_start() {
+	block=$1
+	label=$2
+	init_line=$(grep -n 'axon-server init' "$block" | head -n 1 | cut -d: -f1)
+	start_line=$(grep -n 'brew services start axon-server' "$block" | head -n 1 | cut -d: -f1)
+	if [ -z "$init_line" ] || [ -z "$start_line" ] || [ "$start_line" -le "$init_line" ]; then
+		echo "$label starts the service before axon-server init" >&2
+		exit 1
+	fi
+}
+assert_init_before_start "$work/local-postgres.sh" "local Postgres block"
+awk '
+  /postgres:\/\/USER:PASSWORD/ { capture = 1 }
+  capture { print }
+  capture && /brew services start axon-server$/ { exit }
+' "$work/caveats-mac.txt" >"$work/remote-postgres.sh"
+if [ ! -s "$work/remote-postgres.sh" ]; then
+	echo "could not find the remote database block in the caveats" >&2
+	exit 1
+fi
+assert_init_before_start "$work/remote-postgres.sh" "remote database block"
+
 # Uppercase checksums are normalized. A tag that is not a release ref is refused.
 upper=$(printf 'A%.0s' $(seq 1 64))
 "$render" \
@@ -179,6 +195,26 @@ reject() {
 		exit 1
 	fi
 }
+
+# A flag with no value must name itself. `shift 2` alone exits with no text.
+if "$render" --tag >"$work/rejected.out" 2>"$work/rejected.err"; then
+	echo "expected failure for --tag with no value" >&2
+	exit 1
+fi
+if ! grep -q 'missing value for --tag' "$work/rejected.err"; then
+	echo "--tag with no value did not say what was missing" >&2
+	cat "$work/rejected.err" >&2
+	exit 1
+fi
+if TAG=v1.2.3 "$publish" --zip-dir >"$work/rejected.out" 2>"$work/rejected.err"; then
+	echo "expected failure for --zip-dir with no value" >&2
+	exit 1
+fi
+if ! grep -q 'missing value for --zip-dir' "$work/rejected.err"; then
+	echo "--zip-dir with no value did not say what was missing" >&2
+	cat "$work/rejected.err" >&2
+	exit 1
+fi
 
 reject "$render" --tag 'v1.2.3;touch /tmp/pwned' \
 	--sha-macos-silicon "$sha_silicon" \

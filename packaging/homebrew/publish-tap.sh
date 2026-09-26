@@ -28,11 +28,11 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	--zip-dir)
-		zip_dir=${2:-}
+		zip_dir=${2:?missing value for $1}
 		shift 2
 		;;
 	--tap-dir)
-		tap_dir=${2:-}
+		tap_dir=${2:?missing value for $1}
 		shift 2
 		;;
 	-h | --help)
@@ -151,19 +151,11 @@ download_assets() {
 	return 1
 }
 
-# True when dotted-numeric version $1 is older than $2.
+# True when dotted-numeric version $1 is older than $2. Equal versions are
+# not older: republishing the same tag must reach the "already matches" path.
 version_lt() {
-	IFS=. read -r -a a <<<"$1"
-	IFS=. read -r -a b <<<"$2"
-	n=${#a[@]}
-	[ "${#b[@]}" -gt "$n" ] && n=${#b[@]}
-	for ((i = 0; i < n; i++)); do
-		x=$((10#${a[i]:-0}))
-		y=$((10#${b[i]:-0}))
-		[ "$x" -lt "$y" ] && return 0
-		[ "$x" -gt "$y" ] && return 1
-	done
-	return 1
+	[ "$1" = "$2" ] && return 1
+	[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" = "$1" ]
 }
 
 if [ -n "$zip_dir" ]; then
