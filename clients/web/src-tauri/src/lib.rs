@@ -453,6 +453,14 @@ fn main_window<R: tauri::Runtime>(
     // `read_dropped_file` is how the page then reads it.
     #[cfg(not(target_os = "linux"))]
     let builder = builder.disable_drag_drop_handler();
+    // No form accessory bar (previous / next / done) above the iOS keyboard.
+    // It is WebKit's default for any focused field, and nothing in this app
+    // uses it: the composer is the only field on screen when the keyboard is
+    // up, so previous/next have nowhere to go, and "done" duplicates swiping
+    // the keyboard away. It also cost ~50pt of a phone's remaining height.
+    // A browser tab or PWA cannot remove it; only the host app can.
+    #[cfg(target_os = "ios")]
+    let builder = builder.with_input_accessory_view_builder(|_webview| None);
     builder.build()
 }
 
