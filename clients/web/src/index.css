@@ -116,6 +116,14 @@
   --safe-left: env(safe-area-inset-left, 0px);
 }
 
+/* The soft keyboard covers the home indicator, so nothing needs clearing
+   below the shell while it is up. Set from `app.tsx`, because WebKit keeps
+   reporting `safe-area-inset-bottom` (34px on an iPhone) with the keyboard
+   up, which left the composer floating that far above it. */
+:root[data-keyboard='open'] {
+  --safe-bottom: 0px;
+}
+
 :root[data-theme='light'] {
   color-scheme: light;
 }

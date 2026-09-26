@@ -920,6 +920,87 @@ describe('App', () => {
     ).toBe('')
   })
 
+  it('flags the soft keyboard so the bottom inset stops being paid', async () => {
+    const listeners = new Map<string, EventListener>()
+    const viewport = {
+      offsetTop: 0,
+      offsetLeft: 0,
+      width: 440,
+      height: 956,
+      scale: 1,
+      addEventListener: vi.fn((type: string, listener: EventListener) => {
+        listeners.set(type, listener)
+      }),
+      removeEventListener: vi.fn(),
+    } as unknown as VisualViewport
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: viewport,
+    })
+    Object.defineProperty(window, 'innerHeight', {
+      configurable: true,
+      value: 956,
+    })
+    const root = document.documentElement
+
+    const composer = document.createElement('textarea')
+    document.body.appendChild(composer)
+    const { unmount } = render(<App services={testServices()} />)
+    await waitFor(() =>
+      expect(root.style.getPropertyValue('--app-viewport-height')).toBe(
+        '956px',
+      ),
+    )
+    expect(root.dataset.keyboard).toBeUndefined()
+
+    try {
+      // A hardware keyboard's shortcut bar: focused, slightly shorter, and the
+      // home indicator is still showing — keep the inset.
+      composer.focus()
+      Object.assign(viewport, { height: 900 })
+      listeners.get('resize')?.(new Event('resize'))
+      expect(root.dataset.keyboard).toBeUndefined()
+
+      // The soft keyboard, first as WebKit reports it for a frame (layout
+      // viewport still full height)...
+      Object.assign(viewport, { height: 541 })
+      listeners.get('resize')?.(new Event('resize'))
+      expect(root.dataset.keyboard).toBe('open')
+
+      // ...then settled, with the layout viewport shrunk to match. Measured on
+      // an iPhone 18 Pro Max in the shell: `vvH=541 innerH=541`. Comparing
+      // against `innerHeight` lost the keyboard here and put the 34pt inset
+      // back under the composer.
+      Object.defineProperty(window, 'innerHeight', {
+        configurable: true,
+        value: 541,
+      })
+      Object.assign(viewport, { offsetTop: 415 })
+      listeners.get('resize')?.(new Event('resize'))
+      expect(root.dataset.keyboard).toBe('open')
+
+      // Dismissed.
+      composer.blur()
+      Object.defineProperty(window, 'innerHeight', {
+        configurable: true,
+        value: 956,
+      })
+      Object.assign(viewport, { height: 956, offsetTop: 0 })
+      listeners.get('resize')?.(new Event('resize'))
+      expect(root.dataset.keyboard).toBeUndefined()
+
+      // And never left behind by an unmount mid-keyboard.
+      composer.focus()
+      Object.assign(viewport, { height: 541 })
+      listeners.get('resize')?.(new Event('resize'))
+      expect(root.dataset.keyboard).toBe('open')
+      unmount()
+      expect(root.dataset.keyboard).toBeUndefined()
+    } finally {
+      composer.remove()
+    }
+  })
+
   it('keeps tracking a pinch-zoomed viewport with nothing focused', async () => {
     // Same shape as the stale case but legitimately short: zoomed in, so the
     // shell must keep following the visible area instead of snapping back.
