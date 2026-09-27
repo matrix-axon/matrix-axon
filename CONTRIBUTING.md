@@ -260,6 +260,9 @@ A `v*` tag pushed by hand must equal `v` plus the Cargo version, or `cross-build
 Check one before pushing it with `scripts/release-version.sh check vX.Y.Z`.
 `beta-*` and `alpha-*` tags are not checked.
 
+A PR that adds a workspace crate which ships in no release (a test or smoke crate) must also add it to `release-plz.toml`, next to `axon-test-support`.
+Without that entry, release-plz fails on `main` until the next release tag includes the crate.
+
 ## Start over
 
 To restart with a fresh instance and fresh data, destroy and recreate the Postgres container:
