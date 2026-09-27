@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Page, type Request } from '@playwright/test'
 import { ACCOUNT_ID, openRoom, ROOM_URL } from './helpers'
 
 /**
@@ -21,6 +21,16 @@ const SECOND_ROOM_MESSAGE = 'only in the second room'
 const HELD = 'held'
 /** Short enough that anything it catches cannot have waited on the hold. */
 const BEFORE_RESPONSE = { timeout: 1000 }
+
+/**
+ * The second room's own timeline GET. Armed only once the reload has committed,
+ * so a request from the outgoing document cannot satisfy it.
+ */
+function isSecondRoomTimeline(request: Request): boolean {
+  return decodeURIComponent(new URL(request.url()).pathname).endsWith(
+    '/rooms/!long:hs/timeline',
+  )
+}
 
 async function setTimelineHold(page: Page, hold: string): Promise<void> {
   const response = await page.request.post(`/__e2e/timeline-delay?hold=${hold}`)
@@ -55,7 +65,23 @@ test('a re-entered room paints its timeline before the refetch settles', async (
   // Control: a full document load throws the store away, so the same held
   // request *does* blank the timeline. Without this the assertions above would
   // also pass against a mock that answered instantly.
-  await page.reload()
+  //
+  // Keyed on the held request, not on `reload()`. That waits for `load`, and
+  // the app issues this GET before `load` fires, so a `load` that is slow in CI
+  // can land after the 3 s hold has already released: the placeholder has come
+  // and gone before a post-`reload()` assertion runs (#391). The request being
+  // issued is the moment the hold starts, whenever `load` happens.
+  //
+  // Seeing the placeholder is not enough on its own: with no hold at all the
+  // request still blanks the room for a few milliseconds, and WebKit catches
+  // that flash more often than not. So the answer must also still be
+  // outstanding once the placeholder has been seen — which only the hold can
+  // make true.
+  await page.reload({ waitUntil: 'commit' })
+  const held = await page.waitForRequest(isSecondRoomTimeline)
   await expect(page.getByText('Loading messages…')).toBeVisible(BEFORE_RESPONSE)
+  const seenAt = Date.now()
+  await held.response()
+  expect(Date.now() - seenAt).toBeGreaterThan(BEFORE_RESPONSE.timeout)
   await expect(page.getByText(SECOND_ROOM_MESSAGE)).toBeVisible()
 })
