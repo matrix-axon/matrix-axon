@@ -1,0 +1,91 @@
+name: Release-plz
+
+# Opens and updates the "release vX.Y.Z" PR on every push to main, and tags
+# the merge of that PR as vX.Y.Z (ADR 0106, release-plz.toml).
+#
+# That tag push is what starts cross-build.yml, package.yml,
+# desktop-build.yml and publish-images.yml, and the release PR needs the
+# pull_request gates like any other. GitHub starts no workflow for a tag or
+# PR created with GITHUB_TOKEN, so both jobs use RELEASE_PLZ_TOKEN instead:
+# a fine-grained PAT on this repository with Contents and Pull requests
+# read/write.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  # One check for both jobs below. Without the PAT, release's tag would
+  # start no release builds and release-pr's PR would get no CI.
+  token:
+    name: Require RELEASE_PLZ_TOKEN
+    runs-on: ubuntu-latest
+    if: ${{ github.repository == 'matrix-axon/matrix-axon' }}
+    steps:
+      - name: Require RELEASE_PLZ_TOKEN
+        env:
+          RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_PLZ_TOKEN" ]; then
+            echo "::error::RELEASE_PLZ_TOKEN is not set. release-plz's tags and PRs would start no workflows with GITHUB_TOKEN." >&2
+            exit 1
+          fi
+
+  release:
+    name: Tag a merged release PR
+    runs-on: ubuntu-latest
+    needs: token
+    # Two release-PR merges close together must not tag concurrently.
+    # Separate from release-pr's group, so opening the next PR never
+    # waits on (or cancels) a tag.
+    concurrency:
+      group: release-plz-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      # Full history: release-plz reads the v* tags to find the last release.
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # release_always = false: a push that is not a release PR's merge
+      # tags nothing.
+      - name: Tag the release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+  release-pr:
+    name: Open or update the release PR
+    runs-on: ubuntu-latest
+    needs: token
+    # Two pushes close together must not both rewrite the release branch.
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Open or update the release PR
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}

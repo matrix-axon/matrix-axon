@@ -1,0 +1,25 @@
+# release-plz: opens the "release vX.Y.Z" PR that bumps the workspace
+# version, and tags the merge of that PR (ADR 0106). Workflow:
+# .github/workflows/release-plz.yml.
+#
+# Nothing here is published to crates.io. git_only makes release-plz read
+# the last released version from the v* git tags instead of the registry.
+
+[workspace]
+git_only = true
+git_tag_name = "v{{ version }}"
+# Every crate inherits [workspace.package] version, so one tag names the
+# release. Only axon-server (below) creates it; the rest would collide.
+git_tag_enable = false
+# cross-build.yml, package.yml and desktop-build.yml create and fill the
+# GitHub Release when the tag lands. A release-plz Release would race them.
+git_release_enable = false
+changelog_update = false
+# Binaries, not a library API: cargo-semver-checks has nothing to check.
+semver_check = false
+# Tag only when a release PR merges, not on every push to main.
+release_always = false
+
+[[package]]
+name = "axon-server"
+git_tag_enable = true
