@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { openRoom, ROOM_URL, signIn } from './helpers'
+import { expectRoomReady, openRoom, ROOM_URL, signIn } from './helpers'
 
 /**
  * The state-events control moved from the room header into Settings, which
@@ -24,9 +24,7 @@ test('the three state-event tiers filter the timeline, and survive a reload', as
   await signIn(page)
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
 
   // The default tier renders the seeded join as a notice and hides the seeded
   // topic change (ADR 0083).
@@ -42,9 +40,7 @@ test('the three state-event tiers filter the timeline, and survive a reload', as
 
   // The preference outlives the tab, unlike the checkbox it replaced.
   await page.reload()
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
   await expect(page.locator('.event-row.state-event')).toHaveCount(2)
 
   await page.goto('/settings')

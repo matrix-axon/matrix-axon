@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { openRoom, ROOM_URL, signIn } from './helpers'
+import { expectRoomReady, openRoom, ROOM_URL, signIn } from './helpers'
 
 /**
  * Lightbox paging across the loaded timeline (ADR 0081). The seed room carries
@@ -208,9 +208,7 @@ test.describe('message actions on a phone', () => {
     // phone-layout test must keep the viewport declared above.
     await signIn(page)
     await page.goto(ROOM_URL)
-    await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-      'Live',
-    )
+    await expectRoomReady(page)
     const ids = await imageRowIds(page)
     await openImage(page, ids[0])
 
@@ -273,9 +271,7 @@ test.describe('message actions on a phone', () => {
     try {
       await signIn(page)
       await page.goto(ROOM_URL)
-      await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-        'Live',
-      )
+      await expectRoomReady(page)
       await openImage(page, '$seed-image-own:hs')
 
       const toolbar = page.locator('.lightbox-toolbar')

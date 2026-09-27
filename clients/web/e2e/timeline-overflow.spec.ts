@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { ACCOUNT_ID, ROOM_ID, signIn } from './helpers'
+import { ACCOUNT_ID, expectLive, ROOM_ID, signIn } from './helpers'
 
 /**
  * The timeline scrolls up and down, never sideways.
@@ -68,9 +68,7 @@ async function openRoomWith(
     route.fulfill({ json: { data: { events: EVENTS, next_cursor: null } } }),
   )
   await page.goto(`/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}`)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectLive(page)
   // Live is the socket, not the routed timeline. Measuring before those
   // events land made `.body-html pre` null — WebKit in a long suite loses
   // that race; Chromium usually does not. The table is unique to this

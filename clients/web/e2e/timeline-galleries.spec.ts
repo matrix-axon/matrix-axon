@@ -1,5 +1,11 @@
 import { expect, test } from '@playwright/test'
-import { LAST_ROOM_URL, ROOM_URL, openRoom, signIn } from './helpers'
+import {
+  expectRoomReady,
+  LAST_ROOM_URL,
+  openRoom,
+  ROOM_URL,
+  signIn,
+} from './helpers'
 
 /**
  * Timeline galleries (ADR 0081). The seed room carries a run of four images
@@ -152,9 +158,7 @@ test('a deep link into a gallery keeps it grouped and centres the cell', async (
   await signIn(page)
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.goto(`${ROOM_URL}?event=%24gallery-2%3Ahs`)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectRoomReady(page)
 
   // Still one gallery, not split around the target.
   await expect(page.locator('.gallery-row')).toHaveCount(1)

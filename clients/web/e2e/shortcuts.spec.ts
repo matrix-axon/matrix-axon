@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import {
   active,
+  expectLive,
   expectSendsSettled,
   LAST_ROOM_URL,
   openRoom,
@@ -364,9 +365,7 @@ test('Escape closes the thread panel, then focuses the composer', async ({
   await signIn(page)
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.goto(`${ROOM_URL}?thread=%24root`)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectLive(page)
   await expect(page.locator('.thread-panel')).toBeVisible()
 
   await page.keyboard.press('Escape')

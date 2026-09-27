@@ -218,10 +218,34 @@ export const RECONNECT_TIMEOUT_MS = 20_000
  * `role="status"` elements just as well, and reports `Reconnecting…` as text.
  */
 export async function expectLive(page: Page): Promise<void> {
-  await expect(page.getByRole('status', { name: /^WebSocket:/ })).toHaveText(
-    'Live',
-    { timeout: LIVE_TIMEOUT_MS },
-  )
+  await expect(socketStatus(page)).toHaveText('Live', {
+    timeout: LIVE_TIMEOUT_MS,
+  })
+}
+
+/**
+ * `expectLive` after a deliberate drop. The reconnect starts one rung up the
+ * ladder, because the drop refuses the first attempt outright, so it gets
+ * `RECONNECT_TIMEOUT_MS` rather than `LIVE_TIMEOUT_MS`.
+ */
+export async function expectReconnected(page: Page): Promise<void> {
+  await expect(socketStatus(page)).toHaveText('Live', {
+    timeout: RECONNECT_TIMEOUT_MS,
+  })
+}
+
+/**
+ * The socket has noticed a drop. Playwright's 5s default is deliberate here:
+ * the client shows this state as soon as the socket closes. It does not wait on
+ * the ladder, so none of the budgets above applies.
+ */
+export async function expectReconnecting(page: Page): Promise<void> {
+  await expect(socketStatus(page)).toHaveText(/Reconnecting/)
+}
+
+/** The connection indicator, anchored as `expectLive` explains. */
+function socketStatus(page: Page) {
+  return page.getByRole('status', { name: /^WebSocket:/ })
 }
 
 /**

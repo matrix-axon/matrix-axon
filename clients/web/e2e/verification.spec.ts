@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { ACCOUNT_ID, signIn } from './helpers'
+import { ACCOUNT_ID, expectLive, signIn } from './helpers'
 
 const SIBLING = {
   device_id: 'ELEMENT',
@@ -115,9 +115,7 @@ test('inbound request appears as a chip and Compare opens the modal', async ({
   await signIn(page)
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.goto('/')
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectLive(page)
   await request.post('/__e2e/push-verification', {
     data: {
       account_id: ACCOUNT_ID,
@@ -140,9 +138,7 @@ test('Decline on an inbound row removes it without opening the modal', async ({
   await signIn(page)
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.goto('/')
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectLive(page)
   await request.post('/__e2e/push-verification', {
     data: {
       account_id: ACCOUNT_ID,
