@@ -23,3 +23,47 @@ release_always = false
 [[package]]
 name = "axon-server"
 git_tag_enable = true
+
+# Crates that ship in no release artifact. Their changes alone should not
+# open a release PR, so release = false.
+#
+# The separate git_tag_name matters more. In git_only mode release-plz
+# looks up every workspace crate at the last tag matching its template,
+# release = false or not. With the shared "v{{ version }}", a crate added
+# after the last tag still matches that tag, is missing from its checkout,
+# and aborts the whole run ("cannot find package ... in workspace").
+# A template no tag uses makes it a first release instead, which is fine.
+#
+# Add every new test or smoke crate here in the PR that creates it.
+# A new crate that does ship hits the same failure until a release tag
+# includes it; ADR 0106 records that gap.
+
+[[package]]
+name = "axon-itest"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"
+
+[[package]]
+name = "axon-test-support"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"
+
+[[package]]
+name = "axon-smoke-local-stack"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"
+
+[[package]]
+name = "axon-smoke-matrix-oauth"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"
+
+[[package]]
+name = "axon-smoke-server"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"
+
+[[package]]
+name = "axon-smoke-tui"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"

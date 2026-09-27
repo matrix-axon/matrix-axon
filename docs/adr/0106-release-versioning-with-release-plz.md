@@ -51,6 +51,20 @@ Configuration (`release-plz.toml`):
 - `git_release_enable = false`: the tag workflows already create and fill the GitHub Release, and a second writer would race them.
 - `changelog_update = false`: commit subjects here are only partly conventional, so a generated changelog would be mostly noise. Revisit if they become consistent.
 - `semver_check = false`: these are binaries; there is no library API for cargo-semver-checks to compare.
+- Crates that ship in no artifact (`axon-itest`, `axon-test-support`, the four `axon-smoke-*`) get `release = false` and a tag template no tag uses, `{{ package }}-v{{ version }}`.
+  See "New crates" below for why the template is the part that matters.
+
+### New crates
+
+In `git_only` mode release-plz resolves every workspace crate at the last tag matching that crate's template, whether or not the crate is released.
+Under the shared `v{{ version }}`, a crate added after the last tag still matches it, is absent from that tag's checkout, and the whole run aborts.
+This broke `main` the first time it happened: `axon-test-support` landed after `v0.1.0`, and `release-pr` failed with `cannot find package "axon-test-support" in workspace` (release-plz 0.3.169, `process_git_only_package` in `next_ver.rs`).
+`release = false` alone does not avoid it; a template that matches no tag does, because a crate with no matching tag is treated as a first release instead.
+
+So every new test or smoke crate goes into `release-plz.toml` with that template, in the PR that creates it.
+
+A new crate that does ship hits the same failure until a release tag includes it, and there is no verified workaround yet.
+Inverting the list, so that crates are exempt by default and shipped ones opt in, was measured and rejected: a change confined to a crate that is not opted in then opens no release PR at all, so a forgotten entry would silently hold changes back instead of failing loudly.
 
 Dry-run against `main` at the time of writing: release-plz found `v0.0.16` as every crate's last release, took the committed `0.1.0` as already bumped, and after one more commit proposed `0.1.0 → 0.1.1` across all fourteen crates and `Cargo.lock`; a release dry run then planned exactly one tag, `v0.1.1`, from `axon-server`.
 
