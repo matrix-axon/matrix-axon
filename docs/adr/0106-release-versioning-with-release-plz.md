@@ -40,6 +40,8 @@ Making the committed version authoritative means a checkout at a tag reports tha
 - `release-pr` opens, or updates, one "release vX.Y.Z" PR that bumps `[workspace.package] version` and `Cargo.lock`.
   The next version comes from the commit messages since the last `v*` tag, conventional-commit style: in 0.x, `fix:` and `feat:` bump the patch and a breaking change bumps the minor.
 - `release` tags the merge of that PR as `vX.Y.Z`, and does nothing on any other push (`release_always = false`).
+- `release-pr` runs after `release`, never beside it.
+  On a release PR's merge it has to see the tag `release` just created; when the two ran in parallel, `v0.1.1`'s merge compared against `v0.1.0` and opened an empty `v0.1.2` release PR.
 
 That tag is the only thing a release now needs a person for: review and merge a PR.
 
