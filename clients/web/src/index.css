@@ -18,7 +18,6 @@
   --warn: #9a6700;
   --ok: #1a7f37;
   --room-avatar-fg: #ffffff;
-  --room-avatar-border: rgb(0 0 0 / 0.14);
   --room-avatar-edge: rgb(0 0 0 / 0.08);
   --room-avatar-0: #3556c4;
   --room-avatar-1: #0f766e;
@@ -46,7 +45,6 @@
     --warn: #d4a72c;
     --ok: #4ac26b;
     --room-avatar-fg: #ffffff;
-    --room-avatar-border: rgb(255 255 255 / 0.16);
     --room-avatar-edge: rgb(255 255 255 / 0.1);
     --room-avatar-0: #4868d9;
     --room-avatar-1: #168178;
@@ -74,7 +72,6 @@
   --warn: #d4a72c;
   --ok: #4ac26b;
   --room-avatar-fg: #ffffff;
-  --room-avatar-border: rgb(255 255 255 / 0.16);
   --room-avatar-edge: rgb(255 255 255 / 0.1);
   --room-avatar-0: #4868d9;
   --room-avatar-1: #168178;
@@ -1875,10 +1872,11 @@ select {
 }
 
 /* A photo with a white (or, in dark mode, black) background has no fill of
-   its own to show its shape against the list, so it gets a hairline just
+   its own to show its shape against the page, so it gets a hairline just
    inside its edge — faint enough to vanish on a colorful photo. Drawn over
    the image, which would cover an inset shadow on the avatar itself. */
-.room-avatar-image::after {
+.room-avatar-image::after,
+.user-avatar-image::after {
   content: '';
   position: absolute;
   inset: 0;
@@ -2347,8 +2345,11 @@ p.timeline-edge {
   border-radius: 999px;
   overflow: hidden;
   background: var(--user-avatar-bg);
+  /* No ring, as with `.room-avatar`: transparent so the size holds, the fill
+     kept inside it, and a hairline on photos only. */
+  background-clip: padding-box;
   color: var(--room-avatar-fg);
-  border: 1px solid var(--room-avatar-border);
+  border: 1px solid transparent;
   font-size: 0.72rem;
   font-weight: 700;
   line-height: 1;
