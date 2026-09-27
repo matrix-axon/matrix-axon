@@ -557,6 +557,32 @@ test('room information derives a parent space from its child relationship', asyn
   ).toBeVisible()
 })
 
+/**
+ * The Details and Pinned sections render the room-state reads (ADR 0084), not
+ * the "Unavailable" fallbacks. The mock's values are distinct from every
+ * fallback string, so a read that fails cannot pass this.
+ */
+test('room information shows the room-state reads', async ({ page }) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.goto(ROOM_URL)
+
+  await page.getByRole('button', { name: 'Open room information' }).click()
+  const panel = page.getByRole('complementary', { name: 'Room information' })
+
+  const detail = (label: string) =>
+    panel
+      .locator('dt')
+      .filter({ hasText: new RegExp(`^${label}$`) })
+      .locator('+ dd')
+  await expect(detail('Encryption')).toHaveText('m.megolm.v1.aes-sha2')
+  await expect(detail('Access')).toHaveText('invite')
+  await expect(detail('History visibility')).toHaveText('shared')
+  await expect(detail('Guest access')).toHaveText('forbidden')
+  await expect(panel.getByText('No pinned messages.')).toBeVisible()
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+})
+
 test('narrow: room information scrolls when the member list overflows', async ({
   page,
 }) => {
@@ -1727,10 +1753,9 @@ test('a file named like an image but corrupt is refused, not uploaded', async ({
     buffer: Buffer.from('this is definitely not a jpeg'),
   })
 
-  // Scoped to the form: the panel's other sections render their own alerts
-  // (the e2e mock serves no `/info`, `/pinned` or `/upgrade`), so an
-  // unscoped alert lookup is ambiguous.
-  const formAlert = panel.locator('.room-settings-form').getByRole('alert')
+  // Unscoped on purpose: the form's alert must be the only one in the panel,
+  // so a section read the mock stops serving fails here in strict mode.
+  const formAlert = panel.getByRole('alert')
   await expect(formAlert).toContainText('could not be read')
   await expect(formAlert).toContainText('holiday.jpg')
 

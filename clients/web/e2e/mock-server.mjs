@@ -946,11 +946,42 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && /\/space\/parents$/.test(pathname)) {
     return json(res, { data: [] })
   }
+  // The Room Information panel's state reads (ADR 0084). Unhandled, each one
+  // rendered its section as "Could not load this section." in every run, so
+  // nothing could assert on the panel and its three stray alerts made an
+  // unscoped alert lookup ambiguous. The values describe the seeded room as
+  // the rest of the fixture does: encrypted, invite-only, nothing pinned, and
+  // neither tombstoned nor upgraded.
+  if (method === 'GET' && /\/rooms\/[^/]+\/info$/.test(pathname)) {
+    return json(res, {
+      data: {
+        encryption_algorithm: 'm.megolm.v1.aes-sha2',
+        join_rule: 'invite',
+        history_visibility: 'shared',
+        guest_access: 'forbidden',
+      },
+    })
+  }
+  if (method === 'GET' && /\/rooms\/[^/]+\/pinned$/.test(pathname)) {
+    return json(res, { data: [] })
+  }
+  if (method === 'GET' && /\/rooms\/[^/]+\/upgrade$/.test(pathname)) {
+    return json(res, { data: { tombstoned_to: null, upgraded_from: null } })
+  }
   if (method === 'GET' && /\/rooms\/[^/]+\/members$/.test(pathname)) {
     return json(res, { data: [] })
   }
   if (method === 'GET' && /\/rooms\/[^/]+\/threads$/.test(pathname)) {
     return json(res, { data: [] })
+  }
+  // The thread panel's own page. No seeded event has replies, so every thread
+  // a spec opens (`?thread=%24root` is the usual one) is empty; unhandled, the
+  // panel showed "unexpected server response" instead.
+  if (
+    method === 'GET' &&
+    /\/rooms\/[^/]+\/threads\/[^/]+\/timeline$/.test(pathname)
+  ) {
+    return json(res, { data: { events: [], next_cursor: null } })
   }
   if (method === 'GET' && /\/rooms\/[^/]+\/timeline$/.test(pathname)) {
     if (timelineDelayMs > 0) {
