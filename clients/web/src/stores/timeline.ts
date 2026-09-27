@@ -1040,10 +1040,12 @@ export function createTimelineStore(
       liveLog.shift()
     }
     // Only a row this frame *adds* counts as arrived: one it re-delivers or
-    // updates in place already had its place in the slice.
+    // updates in place already had its place in the slice, and a relation,
+    // redaction or dropped frame adds no row at all, so recording those would
+    // leave entries no prune reaches until the next racing load.
     const known = events.value.some((e) => e.event_id === event.event_id)
     applyLive(event)
-    if (!known) {
+    if (!known && events.value.some((e) => e.event_id === event.event_id)) {
       liveArrivals.set(event.event_id, liveSeq)
     }
   }
