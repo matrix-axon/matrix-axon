@@ -348,6 +348,56 @@ const timelineHoldMs = (name) => {
 }
 let timelineDelayMs = 0
 /**
+ * Whether `ROOM_ID`'s timeline GET stalls mid-body, set via
+ * `/__e2e/timeline-stall?enabled=true`. The headers and the first bytes of
+ * the body go out, and then nothing more — the shape of a stalled HTTP/3
+ * stream on a phone, where the response started and never finished. That is
+ * a different failure from `timeline-delay`, which holds the *headers*: WebKit
+ * aborts a request still waiting for headers, but not a body that stalled
+ * after them, so only this reaches the client's own body deadline
+ * (`fetchWithinDeadline` in `src/api/client.ts`).
+ *
+ * One room, not every timeline. The mock speaks HTTP/1.1, where each stalled
+ * response holds a connection. Stall every room's preview as well and the
+ * browser's six-per-host pool fills, so the room's own request then hangs
+ * waiting for *headers* — which every engine aborts. The spec would pass
+ * without the fix.
+ *
+ * Every held response is kept, so that turning the stall off releases its
+ * connection rather than leaving it to the next spec.
+ *
+ * The stall also turns itself off after `TIMELINE_STALL_EXPIRY_MS`, so that no
+ * spec's `afterEach` is load-bearing for every spec after it. A worker that
+ * crashes or is killed mid-test never runs its `afterEach`, and a stall left
+ * on would make the next spec that opens `ROOM_ID` hang with no failing
+ * assertion anywhere near the cause (review on #487). The expiry is longer
+ * than the one spec that sets the stall needs: the 20 s request deadline plus
+ * its slack.
+ */
+const TIMELINE_STALL_EXPIRY_MS = 50_000
+let timelineStall = false
+let timelineStallExpiry = null
+const stalledResponses = new Set()
+
+function setTimelineStall(enabled) {
+  timelineStall = enabled
+  clearTimeout(timelineStallExpiry)
+  timelineStallExpiry = null
+  if (enabled) {
+    timelineStallExpiry = setTimeout(
+      () => setTimelineStall(false),
+      TIMELINE_STALL_EXPIRY_MS,
+    )
+    // Never the reason the mock outlives its run.
+    timelineStallExpiry.unref()
+    return
+  }
+  for (const held of stalledResponses) {
+    held.destroy()
+  }
+  stalledResponses.clear()
+}
+/**
  * How long the room-list GET sits on its answer, set via
  * `/__e2e/rooms-delay?hold=<name>`. Same literal-only holds as the timeline's,
  * and for the same two reasons: a spec that proves the *cached* room list
@@ -911,6 +961,13 @@ async function handleApi(req, res, url) {
     // the un-jumped read keeps returning everything, as the other specs'
     // fixtures assume.
     const roomId = decodeURIComponent(pathname.split('/').at(-2))
+    if (timelineStall && roomId === ROOM_ID) {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.write('{"data":{"events":[')
+      stalledResponses.add(res)
+      res.on('close', () => stalledResponses.delete(res))
+      return
+    }
     const seeded = roomHistories.get(roomId) ?? timeline
     const withOwnImage =
       roomId === ROOM_ID && lightboxOwnImage
@@ -1289,6 +1346,10 @@ const server = createServer((req, res) => {
   if (req.method === 'POST' && url.pathname === '/__e2e/rooms-delay') {
     roomsDelayMs = timelineHoldMs(url.searchParams.get('hold'))
     return json(res, { data: { rooms_delay_ms: roomsDelayMs } })
+  }
+  if (req.method === 'POST' && url.pathname === '/__e2e/timeline-stall') {
+    setTimelineStall(url.searchParams.get('enabled') === 'true')
+    return json(res, { data: { timeline_stall: timelineStall } })
   }
   if (req.method === 'POST' && url.pathname === '/__e2e/timeline-delay') {
     timelineDelayMs = timelineHoldMs(url.searchParams.get('hold'))
