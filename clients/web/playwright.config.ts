@@ -35,7 +35,11 @@ export default defineConfig({
   reporter: process.env.CI ? 'github' : 'list',
   use: {
     baseURL: BASE_URL,
-    trace: 'on-first-retry',
+    // Trace the *first* attempt, and keep it only if it fails. The retry
+    // `on-first-retry` recorded is the attempt that passes, so a CI flake left
+    // a trace of everything except the failure (#391). Costs ~11% of a lane's
+    // wall time: webkit-desktop took 246s against 222s untraced, twice over.
+    trace: 'retain-on-first-failure',
   },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
