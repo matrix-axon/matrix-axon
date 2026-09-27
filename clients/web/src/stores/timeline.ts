@@ -383,6 +383,15 @@ export function createTimelineStore(
   const liveLog: { seq: number; event: EventDto }[] = []
   /** The arrival sequence of the newest live event logged. */
   let liveSeq = 0
+  /**
+   * The arrival sequence of each live-applied row still in the slice, by event
+   * id. The log answers "what arrived since this load issued" for a replay; a
+   * merge needs the same answer about rows that are *already there*, and needs
+   * it exactly — past `LIVE_LOG_LIMIT` the log has forgotten the oldest of
+   * them, but they are still rows. Pruned to the slice after every load, so it
+   * is bounded by the slice rather than by the room's traffic.
+   */
+  const liveArrivals = new Map<string, number>()
   const collapsedRelationTargets = new Map<string, string>()
 
   /**
@@ -404,6 +413,20 @@ export function createTimelineStore(
     for (const entry of liveLog) {
       if (entry.seq > issuedAt) {
         applyLive(entry.event)
+      }
+    }
+    pruneLiveArrivals()
+  }
+
+  /** Forget arrivals for rows no longer in the slice. */
+  function pruneLiveArrivals(): void {
+    if (liveArrivals.size === 0) {
+      return
+    }
+    const present = new Set(events.value.map((e) => e.event_id))
+    for (const eventId of liveArrivals.keys()) {
+      if (!present.has(eventId)) {
+        liveArrivals.delete(eventId)
       }
     }
   }
@@ -809,9 +832,21 @@ export function createTimelineStore(
       loaded.filter((e) => !headIds.has(e.event_id)),
       page.events,
     )
-    const history = rest.filter((e) => e.localEcho === undefined)
-    const echoes = rest.filter((e) => e.localEcho !== undefined)
-    events.value = [...history, ...page.events, ...echoes]
+    // A row the page lacks is older history — unless it arrived live while
+    // the page was in flight. That one postdates the fetch, so it belongs
+    // after the page, not before it; filing it as history left it sandwiched
+    // between older rows for good (review on #465). Such rows keep their
+    // place relative to the echoes, as `applyLive` placed them.
+    const arrivedSince = (e: TimelineEvent): boolean =>
+      (liveArrivals.get(e.event_id) ?? 0) > liveIssuedAt
+    const history = rest.filter(
+      (e) => e.localEcho === undefined && !arrivedSince(e),
+    )
+    const tail = rest.filter(
+      (e) => e.localEcho !== undefined || arrivedSince(e),
+    )
+    events.value = [...history, ...page.events, ...tail]
+    pruneLiveArrivals()
     // The merged slice provably ends at the head just fetched.
     reachedEnd.value = true
     resolveReplyTargets(page.events)
@@ -1004,7 +1039,13 @@ export function createTimelineStore(
     if (liveLog.length > LIVE_LOG_LIMIT) {
       liveLog.shift()
     }
+    // Only a row this frame *adds* counts as arrived: one it re-delivers or
+    // updates in place already had its place in the slice.
+    const known = events.value.some((e) => e.event_id === event.event_id)
     applyLive(event)
+    if (!known) {
+      liveArrivals.set(event.event_id, liveSeq)
+    }
   }
 
   /** `ingestLive`'s rules, without logging — what a replay runs through. */

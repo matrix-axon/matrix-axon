@@ -1279,6 +1279,55 @@ describe('ingestLive', () => {
     ])
   })
 
+  it('keeps a live event that arrives during an overlapping refresh at the tail', async () => {
+    // The merge branch files every loaded row the head page lacks as older
+    // history, ahead of the page. A frame that arrived *while* the page was in
+    // flight is not history — it postdates the fetch — and filing it there
+    // left it sandwiched between older rows for good (review on #465).
+    server.use(
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          // Server order: newest first.
+          data: {
+            events: [event('$2', 200), event('$1', 100)],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    const store = makeStore()
+    await store.loadLatest()
+
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(TIMELINE_PATH, async () => {
+        await held
+        return HttpResponse.json({
+          // Overlaps the loaded slice at $2, so this merges rather than
+          // replaces. It was issued before $new existed and so cannot carry it.
+          data: {
+            events: [event('$3', 250), event('$2', 200)],
+            next_cursor: 'older',
+          },
+        })
+      }),
+    )
+    const refresh = store.loadLatest()
+    store.ingestLive(event('$new', 300))
+    release()
+    await refresh
+
+    expect(store.events.value.map((e) => e.event_id)).toEqual([
+      '$1',
+      '$2',
+      '$3',
+      '$new',
+    ])
+  })
+
   it('re-reads the head when more arrived during a load than the log holds', async () => {
     // Replaying a log that has already trimmed part of the window would look
     // contiguous without being so — the oldest of the raced events silently
