@@ -62,6 +62,14 @@ export type TimelineEvent = EventDto & {
 const PAGE_LIMIT = 50
 
 /**
+ * How many live events the replay log keeps (see `liveLog`). One page, because
+ * a page is the unit a head re-read fetches: a load that raced more live events
+ * than this has a page too stale to trust anyway, and re-reading the head is
+ * the cheaper and more honest recovery than replaying a run with a hole in it.
+ */
+const LIVE_LOG_LIMIT = PAGE_LIMIT
+
+/**
  * How many events a scroll-back keeps loaded before it starts dropping the
  * newest end. The timeline is not DOM-windowed — a row mounts per event and
  * lives until the room closes (issue #26) — so an unbounded scroll-back grows
@@ -347,7 +355,81 @@ export function createTimelineStore(
    * before a head that already has, whose rows would be older.
    */
   let headGeneration = 0
+  /**
+   * Live events as they arrived, newest last, each with its arrival sequence.
+   *
+   * A load issues its page, and the bus keeps delivering while that page is in
+   * flight. Those frames are applied as they come — nothing withholds them —
+   * but a load that then *replaces* the slice writes a page issued before they
+   * existed, which cannot carry them, and they are gone. That was a message
+   * lost outright, not delayed, for anyone who opened a room while someone was
+   * typing (#465).
+   *
+   * So every replacing load notes where the log stood when it issued, and
+   * after it replaces, replays everything that arrived since through
+   * `applyLive` — the same rules as the first time. A jump leaves `atEnd` false
+   * and the replay drops new events exactly as a live frame would be; an id the
+   * page already carries replaces in place rather than duplicating; an echo a
+   * frame confirms is still reconciled.
+   *
+   * Replay rather than holding frames back, deliberately. An earlier version
+   * buffered them until every load in flight settled, and a load can fail to
+   * settle — a sibling stalled on a slow link is a documented case (see the
+   * "later sibling stalls" tests). Holding on that withheld every live message
+   * for as long as the stall lasted, with the timeline looking fully loaded
+   * (review on #465). Applied immediately and replayed after, a frame is never
+   * invisible and nothing waits on a load that may not come back.
+   */
+  const liveLog: { seq: number; event: EventDto }[] = []
+  /** The arrival sequence of the newest live event logged. */
+  let liveSeq = 0
+  /**
+   * The arrival sequence of each live-applied row still in the slice, by event
+   * id. The log answers "what arrived since this load issued" for a replay; a
+   * merge needs the same answer about rows that are *already there*, and needs
+   * it exactly — past `LIVE_LOG_LIMIT` the log has forgotten the oldest of
+   * them, but they are still rows. Pruned to the slice after every load, so it
+   * is bounded by the slice rather than by the room's traffic.
+   */
+  const liveArrivals = new Map<string, number>()
   const collapsedRelationTargets = new Map<string, string>()
+
+  /**
+   * Re-apply every live event that arrived after a load issued at `issuedAt`,
+   * once that load has replaced the slice.
+   *
+   * If the log has already trimmed events from that window, a replay would look
+   * contiguous without being so — so re-read the head instead and let it merge.
+   */
+  function replayLiveSince(issuedAt: number): void {
+    if (liveSeq === issuedAt) {
+      return
+    }
+    const oldest = liveLog[0]?.seq
+    if (oldest === undefined || oldest > issuedAt + 1) {
+      inBackground(refreshHead())
+      return
+    }
+    for (const entry of liveLog) {
+      if (entry.seq > issuedAt) {
+        applyLive(entry.event)
+      }
+    }
+    pruneLiveArrivals()
+  }
+
+  /** Forget arrivals for rows no longer in the slice. */
+  function pruneLiveArrivals(): void {
+    if (liveArrivals.size === 0) {
+      return
+    }
+    const present = new Set(events.value.map((e) => e.event_id))
+    for (const eventId of liveArrivals.keys()) {
+      if (!present.has(eventId)) {
+        liveArrivals.delete(eventId)
+      }
+    }
+  }
 
   /**
    * Retire a media echo's local preview (ADR 0065). An echo that leaves the
@@ -545,6 +627,7 @@ export function createTimelineStore(
     if (!head) {
       parkedGeneration = generation
     }
+    const liveIssuedAt = liveSeq
     const page = await fetchPage(query)
     // A jump is owned by the newest replacement alone. A head load is also
     // owned past a *sibling head load*, since both ask for the same page:
@@ -557,7 +640,7 @@ export function createTimelineStore(
       if (head && headGeneration > parkedGeneration) {
         // A sibling head painted first, and the reader may already be
         // scrolling it: fold this page in as a gap-fill would, not replace.
-        const outcome = foldHead(page, generation)
+        const outcome = foldHead(page, generation, liveIssuedAt)
         loading.value = false
         return outcome
       }
@@ -573,6 +656,7 @@ export function createTimelineStore(
         headGeneration = generation
       }
       resolveReplyTargets(page.events)
+      replayLiveSince(liveIssuedAt)
       loading.value = false
       return 'applied'
     }
@@ -592,6 +676,7 @@ export function createTimelineStore(
     loading.value = true
     const generation = ++sliceGeneration
     parkedGeneration = generation
+    const liveIssuedAt = liveSeq
     let page = await fetchPage({ at_ts: endTs })
     let anchors = page === null ? [] : dateJumpAnchors(page.events, anchor)
     while (
@@ -610,6 +695,7 @@ export function createTimelineStore(
       reachedStart.value = page.next === null
       reachedEnd.value = false
       resolveReplyTargets(page.events)
+      replayLiveSince(liveIssuedAt)
     }
     if (generation === sliceGeneration) {
       loading.value = false
@@ -670,6 +756,7 @@ export function createTimelineStore(
   /// tell apart from success, since the no-op leaves every signal untouched.
   async function refreshHead(): Promise<HeadLoadOutcome> {
     const generation = sliceGeneration
+    const liveIssuedAt = liveSeq
     const page = await fetchPage({})
     if (page === null) {
       // As `replaceSlice` does when its newest load fails: lift a placeholder
@@ -683,7 +770,7 @@ export function createTimelineStore(
     if (generation !== sliceGeneration) {
       return 'superseded'
     }
-    return foldHead(page, generation)
+    return foldHead(page, generation, liveIssuedAt)
   }
 
   /**
@@ -699,6 +786,7 @@ export function createTimelineStore(
   function foldHead(
     page: { events: EventDto[]; next: string | null },
     issued: number,
+    liveIssuedAt: number,
   ): HeadLoadOutcome {
     const painted = (): HeadLoadOutcome => {
       headGeneration = Math.max(headGeneration, issued)
@@ -735,6 +823,7 @@ export function createTimelineStore(
       // The slice *is* the head now, wherever it was parked before.
       reachedEnd.value = true
       resolveReplyTargets(page.events)
+      replayLiveSince(liveIssuedAt)
       return painted()
     }
     // Overlap: merge. No generation bump — an in-flight `loadOlder` prepend
@@ -743,9 +832,21 @@ export function createTimelineStore(
       loaded.filter((e) => !headIds.has(e.event_id)),
       page.events,
     )
-    const history = rest.filter((e) => e.localEcho === undefined)
-    const echoes = rest.filter((e) => e.localEcho !== undefined)
-    events.value = [...history, ...page.events, ...echoes]
+    // A row the page lacks is older history — unless it arrived live while
+    // the page was in flight. That one postdates the fetch, so it belongs
+    // after the page, not before it; filing it as history left it sandwiched
+    // between older rows for good (review on #465). Such rows keep their
+    // place relative to the echoes, as `applyLive` placed them.
+    const arrivedSince = (e: TimelineEvent): boolean =>
+      (liveArrivals.get(e.event_id) ?? 0) > liveIssuedAt
+    const history = rest.filter(
+      (e) => e.localEcho === undefined && !arrivedSince(e),
+    )
+    const tail = rest.filter(
+      (e) => e.localEcho !== undefined || arrivedSince(e),
+    )
+    events.value = [...history, ...page.events, ...tail]
+    pruneLiveArrivals()
     // The merged slice provably ends at the head just fetched.
     reachedEnd.value = true
     resolveReplyTargets(page.events)
@@ -933,6 +1034,24 @@ export function createTimelineStore(
     if (event.account_id !== accountId || event.room_id !== roomId) {
       return
     }
+    liveSeq += 1
+    liveLog.push({ seq: liveSeq, event })
+    if (liveLog.length > LIVE_LOG_LIMIT) {
+      liveLog.shift()
+    }
+    // Only a row this frame *adds* counts as arrived: one it re-delivers or
+    // updates in place already had its place in the slice, and a relation,
+    // redaction or dropped frame adds no row at all, so recording those would
+    // leave entries no prune reaches until the next racing load.
+    const known = events.value.some((e) => e.event_id === event.event_id)
+    applyLive(event)
+    if (!known && events.value.some((e) => e.event_id === event.event_id)) {
+      liveArrivals.set(event.event_id, liveSeq)
+    }
+  }
+
+  /** `ingestLive`'s rules, without logging — what a replay runs through. */
+  function applyLive(event: EventDto): void {
     const relationTargetId = collapsedRelationTargetId(event)
     if (relationTargetId !== null) {
       collapsedRelationTargets.set(event.event_id, relationTargetId)
