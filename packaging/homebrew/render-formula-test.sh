@@ -102,15 +102,13 @@ if grep -q 'service do' "$tui"; then
 	echo "axon-tui formula defines a service" >&2
 	exit 1
 fi
-if grep -Fq 'GLIBC' "$tui" && ! grep -q 'OS.linux?' "$tui"; then
-	echo "GLIBC note is not limited to Linux" >&2
-	exit 1
-fi
 
-# Load the formula with the Homebrew DSL stubbed out and print caveats.
+# Load both formulas with the Homebrew DSL stubbed out and print caveats.
 # The SQL heredoc terminator has to land in column 0 or a pasted install
-# block never closes.
-ruby - "$out" "$work/caveats-mac.txt" "$work/caveats-linux.txt" <<'RUBY'
+# block never closes. The TUI's Linux-only GLIBC note has to be executed
+# for both operating systems, not merely grepped for the token OS.linux?.
+ruby - "$out" "$tui" "$work/caveats-mac.txt" "$work/caveats-linux.txt" \
+	"$work/tui-caveats-mac.txt" "$work/tui-caveats-linux.txt" <<'RUBY'
 module OS
   def self.mac?
     ENV.fetch("AXON_FORMULA_OS") == "mac"
@@ -140,14 +138,22 @@ class Formula
   end
 end
 
-load ARGV[0]
-formula = ObjectSpace.each_object(Class).find { |klass| klass < Formula && klass.name == "AxonServer" }
-raise "AxonServer formula did not load" unless formula
+def write_caveats(formula, mac_path, linux_path)
+  ENV["AXON_FORMULA_OS"] = "mac"
+  File.write(mac_path, formula.new.caveats)
+  ENV["AXON_FORMULA_OS"] = "linux"
+  File.write(linux_path, formula.new.caveats)
+end
 
-ENV["AXON_FORMULA_OS"] = "mac"
-File.write(ARGV[1], formula.new.caveats)
-ENV["AXON_FORMULA_OS"] = "linux"
-File.write(ARGV[2], formula.new.caveats)
+load ARGV[0]
+server = ObjectSpace.each_object(Class).find { |klass| klass < Formula && klass.name == "AxonServer" }
+raise "AxonServer formula did not load" unless server
+load ARGV[1]
+tui = ObjectSpace.each_object(Class).find { |klass| klass < Formula && klass.name == "AxonTui" }
+raise "AxonTui formula did not load" unless tui
+
+write_caveats(server, ARGV[2], ARGV[3])
+write_caveats(tui, ARGV[4], ARGV[5])
 RUBY
 
 grep -Fq 'macOS: ~/Library/Application Support/axon-server/config.toml' "$work/caveats-mac.txt"
@@ -155,6 +161,14 @@ grep -Fq 'Linux: ~/.config/axon-server/config.toml' "$work/caveats-mac.txt"
 grep -Fq 'GLIBC' "$work/caveats-linux.txt"
 if grep -Fq 'GLIBC' "$work/caveats-mac.txt"; then
 	echo "macOS caveats mention the Linux glibc floor" >&2
+	exit 1
+fi
+# The tilde is literal path text in the printed caveats.
+# shellcheck disable=SC2088
+grep -Fq '~/.config/axon-tui/config.toml' "$work/tui-caveats-mac.txt"
+grep -Fq 'GLIBC' "$work/tui-caveats-linux.txt"
+if grep -Fq 'GLIBC' "$work/tui-caveats-mac.txt"; then
+	echo "macOS axon-tui caveats mention the Linux glibc floor" >&2
 	exit 1
 fi
 

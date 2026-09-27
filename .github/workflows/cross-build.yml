@@ -416,19 +416,30 @@ jobs:
   # Formula/axon-server.rb and Formula/axon-tui.rb to matrix-axon/homebrew-tap
   # in one commit. Does not upload release assets, so it stays out of the
   # github-release concurrency group.
-  # A tag push waits for this workflow's release job and publishes that tag.
-  # A manual run with homebrew_tag set publishes that existing release and
-  # does not need the build jobs. beta-*/alpha-* tags are not published.
+  # A tag push publishes only after this workflow's release job succeeds.
+  # release is skipped, not failed, when a build job fails, so a tag push
+  # must not treat "skipped" as permission to publish: the zips were never
+  # uploaded. A manual run with homebrew_tag set publishes that existing
+  # release and does not need the build jobs. beta-*/alpha-* tags are not
+  # published.
   homebrew-tap:
     name: Publish Homebrew formula
     needs: release
     if: >-
       always() &&
+      !cancelled() &&
       github.event.inputs.homebrew != 'false' &&
-      (needs.release.result == 'success' || needs.release.result == 'skipped') &&
       (
-        (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) ||
-        (github.event_name == 'workflow_dispatch' && github.event.inputs.homebrew_tag != '')
+        (
+          github.ref_type == 'tag' &&
+          startsWith(github.ref_name, 'v') &&
+          needs.release.result == 'success'
+        ) ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.homebrew_tag != '' &&
+          (needs.release.result == 'success' || needs.release.result == 'skipped')
+        )
       )
     runs-on: ubuntu-latest
     # One tap branch for every tag: two tags pushed together would otherwise
