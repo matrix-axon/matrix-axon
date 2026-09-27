@@ -7,8 +7,8 @@ import {
   nativeBackEdgePx,
   SWIPE_AXIS_RATIO,
   SWIPE_BACK_MIN_X,
-  SWIPE_DECISION_THRESHOLD,
   swipeBackMaxY,
+  swipeLock,
 } from '../gestures'
 import { SINGLE_PANE_QUERY } from '../layout'
 
@@ -211,12 +211,11 @@ export function useMobileSwipeBack<T extends HTMLElement>({
       event.preventDefault()
       return
     }
-    const absX = Math.abs(dx)
-    const absY = Math.abs(dy)
-    if (absX < SWIPE_DECISION_THRESHOLD && absY < SWIPE_DECISION_THRESHOLD) {
+    const lock = swipeLock(dx, dy)
+    if (lock === null) {
       return
     }
-    if (dx > 0 && absX > absY * SWIPE_AXIS_RATIO) {
+    if (lock === 'right') {
       swipeLocked.current = true
       preview(start, dx)
       event.preventDefault()

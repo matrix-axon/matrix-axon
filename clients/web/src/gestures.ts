@@ -75,6 +75,32 @@ export function nativeBackEdgePx(): number {
   return isTauriRuntime() ? 0 : NATIVE_BACK_EDGE_PX
 }
 
+/**
+ * Which way a drag has committed, from its travel so far — `null` while it is
+ * still inside the decision threshold on both axes. Horizontal only when the
+ * sideways travel is `SWIPE_AXIS_RATIO` times the vertical.
+ *
+ * The one place this is decided. The message swipe and the room's swipe-back
+ * each call it from their pointer or touch handlers, and the touch handlers
+ * use it to claim the gesture from native scrolling on the very move that
+ * locks it; if the handlers decided separately, a tuning change to one would
+ * leave the others claiming a different set of gestures than they act on.
+ */
+export function swipeLock(
+  dx: number,
+  dy: number,
+): 'left' | 'right' | 'vertical' | null {
+  const absX = Math.abs(dx)
+  const absY = Math.abs(dy)
+  if (absX < SWIPE_DECISION_THRESHOLD && absY < SWIPE_DECISION_THRESHOLD) {
+    return null
+  }
+  if (absX >= absY * SWIPE_AXIS_RATIO) {
+    return dx < 0 ? 'left' : 'right'
+  }
+  return 'vertical'
+}
+
 export interface SwipeStart {
   x: number
   y: number

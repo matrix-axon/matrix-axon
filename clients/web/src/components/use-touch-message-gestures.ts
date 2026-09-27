@@ -4,10 +4,9 @@ import {
   isGestureControlTarget,
   isHorizontallyScrollable,
   MESSAGE_TOUCH_HOLD_MS,
-  SWIPE_AXIS_RATIO,
-  SWIPE_DECISION_THRESHOLD,
   SWIPE_MIN_X,
   swipeDirection,
+  swipeLock,
 } from '../gestures'
 import type {
   MessageGestureAction,
@@ -287,20 +286,14 @@ export function useTouchMessageGestures<T extends HTMLElement>({
         return
       }
       if (gesture.direction !== 'none') return
-      const absX = Math.abs(dx)
-      const absY = Math.abs(dy)
-      if (absX < SWIPE_DECISION_THRESHOLD && absY < SWIPE_DECISION_THRESHOLD)
-        return
+      const lock = swipeLock(dx, dy)
+      if (lock === null) return
       clearHoldTimer()
       cancelPendingTap()
-      if (absX >= absY * SWIPE_AXIS_RATIO) {
-        gesture.direction = dx < 0 ? 'left' : 'right'
-        if (dx < 0 && gesture.swipeAction !== null) {
-          previewSwipeAction(gesture.swipeAction, dx)
-          pointerEvent.preventDefault()
-        }
-      } else {
-        gesture.direction = 'vertical'
+      gesture.direction = lock
+      if (lock === 'left' && gesture.swipeAction !== null) {
+        previewSwipeAction(gesture.swipeAction, dx)
+        pointerEvent.preventDefault()
       }
     },
     onPointerCancel: cancelGesture,
@@ -337,13 +330,11 @@ export function useTouchMessageGestures<T extends HTMLElement>({
         return
       }
       if (gesture.direction !== 'none') return
-      const dx = touch.clientX - gesture.startX
-      const dy = touch.clientY - gesture.startY
-      const absX = Math.abs(dx)
       if (
-        dx < 0 &&
-        absX >= SWIPE_DECISION_THRESHOLD &&
-        absX >= Math.abs(dy) * SWIPE_AXIS_RATIO
+        swipeLock(
+          touch.clientX - gesture.startX,
+          touch.clientY - gesture.startY,
+        ) === 'left'
       ) {
         touchEvent.preventDefault()
       }
