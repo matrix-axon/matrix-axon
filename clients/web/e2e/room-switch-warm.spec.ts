@@ -23,8 +23,11 @@ const HELD = 'held'
 const BEFORE_RESPONSE = { timeout: 1000 }
 
 /**
- * The second room's own timeline GET. Armed only once the reload has committed,
- * so a request from the outgoing document cannot satisfy it.
+ * The second room's own timeline GET. Armed before the reload, since a wait
+ * armed after it could miss a request that fires in the same batch as the
+ * commit. The outgoing document cannot satisfy it either: its own GET for this
+ * room went out on the re-entry above, before this wait existed, and the
+ * reload tears the document down.
  */
 function isSecondRoomTimeline(request: Request): boolean {
   return decodeURIComponent(new URL(request.url()).pathname).endsWith(
@@ -77,8 +80,9 @@ test('a re-entered room paints its timeline before the refetch settles', async (
   // that flash more often than not. So the answer must also still be
   // outstanding once the placeholder has been seen — which only the hold can
   // make true.
+  const request = page.waitForRequest(isSecondRoomTimeline)
   await page.reload({ waitUntil: 'commit' })
-  const held = await page.waitForRequest(isSecondRoomTimeline)
+  const held = await request
   await expect(page.getByText('Loading messages…')).toBeVisible(BEFORE_RESPONSE)
   const seenAt = Date.now()
   await held.response()
