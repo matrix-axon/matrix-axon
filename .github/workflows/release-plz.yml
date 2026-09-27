@@ -40,8 +40,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: token
     # Two release-PR merges close together must not tag concurrently.
-    # Separate from release-pr's group, so opening the next PR never
-    # waits on (or cancels) a tag.
+    # A separate group from release-pr's: sharing one would let a queued
+    # run cancel the other job's pending run.
     concurrency:
       group: release-plz-release-${{ github.ref }}
       cancel-in-progress: false
@@ -68,7 +68,11 @@ jobs:
   release-pr:
     name: Open or update the release PR
     runs-on: ubuntu-latest
-    needs: token
+    # After release, not beside it. On a release PR's merge, this job must
+    # see the tag release just created; run in parallel, it compared
+    # against the previous tag and opened a second, empty release PR
+    # (v0.1.1's merge produced a v0.1.2 PR).
+    needs: [token, release]
     # Two pushes close together must not both rewrite the release branch.
     concurrency:
       group: release-plz-${{ github.ref }}
