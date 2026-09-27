@@ -175,6 +175,54 @@ describe('formatTelemetry', () => {
     expect(text).toContain('1230 boot:room-list saved=519 rows=688')
   })
 
+  /**
+   * The packaged app and the home-screen web app share an icon, and a capture
+   * from one was once diagnosed as the other. The header is where that is
+   * settled, so it has to survive the round trip through storage.
+   */
+  it('names the client that wrote the session', async () => {
+    const cache = createMemoryCacheStore()
+    const store = createTelemetryStore({
+      cache,
+      enabled: () => true,
+      sessionId: () => 'abc',
+      now: () => 1_700_000_000_000,
+      context: {
+        shell: 'browser',
+        display: 'standalone',
+        build: '0.1.1+d3adb33',
+      },
+    })
+    store.record('boot:room-open', 100, { rows: 5 })
+    await flushed()
+
+    const text = formatTelemetry(await store.read())
+    expect(text.split('\n')[0]).toBe(
+      '# session abc — 2023-11-14T22:13:20.000Z shell=browser display=standalone build=0.1.1+d3adb33',
+    )
+  })
+
+  it('leaves display out in the shell, where it means nothing', () => {
+    const text = formatTelemetry([
+      {
+        id: 'abc',
+        startedAt: 1_700_000_000_000,
+        context: { shell: 'tauri', display: null, build: '0.1.1' },
+        entries: [],
+      },
+    ])
+    expect(text).toBe(
+      '# session abc — 2023-11-14T22:13:20.000Z shell=tauri build=0.1.1',
+    )
+  })
+
+  it('still reads a session written before the header named its client', () => {
+    const text = formatTelemetry([
+      { id: 'abc', startedAt: 1_700_000_000_000, entries: [] },
+    ])
+    expect(text).toBe('# session abc — 2023-11-14T22:13:20.000Z')
+  })
+
   it('says so plainly when there is nothing recorded', () => {
     expect(formatTelemetry([])).toBe('No telemetry recorded.')
   })
