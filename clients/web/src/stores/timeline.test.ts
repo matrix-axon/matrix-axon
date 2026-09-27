@@ -260,6 +260,34 @@ describe('createTimelineStore', () => {
       expect(store.events.value.map((e) => e.event_id)).toEqual(['$1'])
     })
 
+    it('still shows live events while a later sibling stalls forever', async () => {
+      // The companion to the test above, and the assertion it was missing. A
+      // sibling head load that never settles is a real, documented scenario
+      // (the room open that stuck on an iPhone). A design that held live
+      // frames until *every* load in flight settled would hold them for the
+      // store's lifetime here — the timeline looking fully loaded, `loading`
+      // false, and every new message silently withheld (review on #465).
+      let calls = 0
+      server.use(
+        http.get(TIMELINE_PATH, async () => {
+          calls += 1
+          if (calls > 1) {
+            await new Promise(() => {})
+          }
+          return page([event('$1', 100)])
+        }),
+      )
+      const store = makeStore()
+
+      const first = store.loadLatest()
+      void store.loadLatest() // stalls, and never settles
+      expect(await first).toBe('applied')
+
+      store.ingestLive(event('$live', 200))
+
+      expect(store.events.value.map((e) => e.event_id)).toEqual(['$1', '$live'])
+    })
+
     it('folds a later sibling into the page an earlier one painted', async () => {
       let releaseSecond!: () => void
       const secondGate = new Promise<void>((resolve) => {
@@ -1249,6 +1277,54 @@ describe('ingestLive', () => {
       '$fresh',
       '$live',
     ])
+  })
+
+  it('re-reads the head when more arrived during a load than the log holds', async () => {
+    // Replaying a log that has already trimmed part of the window would look
+    // contiguous without being so — the oldest of the raced events silently
+    // missing. So past the log's bound, the store re-reads the head instead.
+    const raced = Array.from({ length: 51 }, (_, i) =>
+      event(`$live-${i + 1}`, 1_000 + i),
+    )
+    let calls = 0
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(TIMELINE_PATH, async () => {
+        calls += 1
+        if (calls === 1) {
+          await held
+          return HttpResponse.json({
+            data: { events: [event('$seeded', 100)], next_cursor: null },
+          })
+        }
+        // The re-read: a head that now carries what was raced. Server order:
+        // newest first.
+        return HttpResponse.json({
+          data: {
+            events: [...raced].reverse().concat(event('$seeded', 100)),
+            next_cursor: null,
+          },
+        })
+      }),
+    )
+    const store = makeStore()
+    const load = store.loadLatest()
+    for (const e of raced) {
+      store.ingestLive(e)
+    }
+    release()
+    await load
+
+    await vi.waitFor(() => {
+      expect(calls).toBe(2)
+      const ids = store.events.value.map((e) => e.event_id)
+      // The first raced event is the one a partial replay would have lost.
+      expect(ids).toContain('$live-1')
+      expect(ids).toContain('$live-51')
+    })
   })
 
   it('does not duplicate a held event the head page turns out to carry', async () => {

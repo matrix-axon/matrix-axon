@@ -62,11 +62,12 @@ export type TimelineEvent = EventDto & {
 const PAGE_LIMIT = 50
 
 /**
- * How many live frames a single load will hold before giving up on replaying
- * them (see `pendingLive`). A page is the unit the head re-read fetches
- * anyway, so past this the cheaper and more honest answer is to re-read.
+ * How many live events the replay log keeps (see `liveLog`). One page, because
+ * a page is the unit a head re-read fetches: a load that raced more live events
+ * than this has a page too stale to trust anyway, and re-reading the head is
+ * the cheaper and more honest recovery than replaying a run with a hole in it.
  */
-const LIVE_BUFFER_LIMIT = PAGE_LIMIT
+const LIVE_LOG_LIMIT = PAGE_LIMIT
 
 /**
  * How many events a scroll-back keeps loaded before it starts dropping the
@@ -355,77 +356,55 @@ export function createTimelineStore(
    */
   let headGeneration = 0
   /**
-   * Live frames that arrived while a load held the slice.
+   * Live events as they arrived, newest last, each with its arrival sequence.
    *
-   * The bus does not wait for a page to land. A frame that arrives mid-load
-   * has nowhere safe to go: appending it to the slice a load is about to
-   * replace loses it, because `applyHead`'s non-overlapping branch keeps only
-   * local echoes, and the page in flight was issued *before* the event
-   * existed and so cannot contain it. The result was a message silently
-   * dropped — not delayed — for a reader who happened to open the room while
-   * someone was typing, with nothing to bring it back until the next load.
+   * A load issues its page, and the bus keeps delivering while that page is in
+   * flight. Those frames are applied as they come — nothing withholds them —
+   * but a load that then *replaces* the slice writes a page issued before they
+   * existed, which cannot carry them, and they are gone. That was a message
+   * lost outright, not delayed, for anyone who opened a room while someone was
+   * typing (#465).
    *
-   * So frames are held here for the duration and replayed afterwards through
-   * `ingestLive` itself, which re-applies every placement rule against the
-   * slice that actually resulted: a jump leaves `atEnd` false and the replay
-   * is dropped exactly as a live frame would have been, an id the page
-   * already carries replaces in place instead of duplicating, and an echo the
-   * frame confirms is still reconciled where it stands.
+   * So every replacing load notes where the log stood when it issued, and
+   * after it replaces, replays everything that arrived since through
+   * `applyLive` — the same rules as the first time. A jump leaves `atEnd` false
+   * and the replay drops new events exactly as a live frame would be; an id the
+   * page already carries replaces in place rather than duplicating; an echo a
+   * frame confirms is still reconciled.
+   *
+   * Replay rather than holding frames back, deliberately. An earlier version
+   * buffered them until every load in flight settled, and a load can fail to
+   * settle — a sibling stalled on a slow link is a documented case (see the
+   * "later sibling stalls" tests). Holding on that withheld every live message
+   * for as long as the stall lasted, with the timeline looking fully loaded
+   * (review on #465). Applied immediately and replayed after, a frame is never
+   * invisible and nothing waits on a load that may not come back.
    */
-  const pendingLive: EventDto[] = []
-  /** Whether more arrived than `LIVE_BUFFER_LIMIT` was willing to hold. */
-  let liveBufferOverflowed = false
-  /**
-   * How many head loads are in flight.
-   *
-   * Deliberately *not* the `loading` signal. That signal is the timeline's
-   * placeholder — "nothing to show" — and the two are not the same question.
-   * It starts true on a cold store nobody has loaded yet, and `refreshHead`
-   * never raises it at all, on purpose: doing so blanked the timeline on
-   * every reconnect. Gating the buffer on it therefore both held frames
-   * forever for a store with no load coming, and missed the reconnect and
-   * re-entry paths entirely, where `foldHead` can replace a disjoint slice
-   * and drop exactly the frame the buffer exists to keep (review on #465).
-   *
-   * A count rather than a flag because these overlap: a sibling head load, or
-   * the overflow re-read below, can be in flight while another still is. The
-   * buffer drains when the last one lands, so the replay always meets a
-   * settled slice.
-   */
-  let loadsInFlight = 0
+  const liveLog: { seq: number; event: EventDto }[] = []
+  /** The arrival sequence of the newest live event logged. */
+  let liveSeq = 0
   const collapsedRelationTargets = new Map<string, string>()
 
   /**
-   * Replay what the load held back.
+   * Re-apply every live event that arrived after a load issued at `issuedAt`,
+   * once that load has replaced the slice.
    *
-   * On overflow the buffer no longer covers the gap, and the page just
-   * applied cannot be trusted to either — so re-read the head and let it
-   * merge, rather than replaying a partial run that would look contiguous
-   * and not be.
+   * If the log has already trimmed events from that window, a replay would look
+   * contiguous without being so — so re-read the head instead and let it merge.
    */
-  function flushPendingLive(): void {
-    const overflowed = liveBufferOverflowed
-    const held = pendingLive.splice(0, pendingLive.length)
-    liveBufferOverflowed = false
-    if (overflowed) {
+  function replayLiveSince(issuedAt: number): void {
+    if (liveSeq === issuedAt) {
+      return
+    }
+    const oldest = liveLog[0]?.seq
+    if (oldest === undefined || oldest > issuedAt + 1) {
       inBackground(refreshHead())
       return
     }
-    for (const event of held) {
-      ingestLive(event)
-    }
-  }
-
-  /** Mark a head load in flight, holding live frames until it lands. */
-  function beginLoad(): void {
-    loadsInFlight += 1
-  }
-
-  /** Release one load, and replay what it held once it was the last. */
-  function endLoad(): void {
-    loadsInFlight = Math.max(0, loadsInFlight - 1)
-    if (loadsInFlight === 0) {
-      flushPendingLive()
+    for (const entry of liveLog) {
+      if (entry.seq > issuedAt) {
+        applyLive(entry.event)
+      }
     }
   }
 
@@ -620,22 +599,12 @@ export function createTimelineStore(
     // does not come through here: raising `loading` there blanked the
     // timeline on every reconnect (see `refreshHead`).
     loading.value = true
-    beginLoad()
-    try {
-      return await replaceSliceInner(query)
-    } finally {
-      endLoad()
-    }
-  }
-
-  async function replaceSliceInner(query: {
-    at_ts?: number
-  }): Promise<HeadLoadOutcome> {
     const generation = ++sliceGeneration
     const head = query.at_ts === undefined
     if (!head) {
       parkedGeneration = generation
     }
+    const liveIssuedAt = liveSeq
     const page = await fetchPage(query)
     // A jump is owned by the newest replacement alone. A head load is also
     // owned past a *sibling head load*, since both ask for the same page:
@@ -648,7 +617,7 @@ export function createTimelineStore(
       if (head && headGeneration > parkedGeneration) {
         // A sibling head painted first, and the reader may already be
         // scrolling it: fold this page in as a gap-fill would, not replace.
-        const outcome = foldHead(page, generation)
+        const outcome = foldHead(page, generation, liveIssuedAt)
         loading.value = false
         return outcome
       }
@@ -664,6 +633,7 @@ export function createTimelineStore(
         headGeneration = generation
       }
       resolveReplyTargets(page.events)
+      replayLiveSince(liveIssuedAt)
       loading.value = false
       return 'applied'
     }
@@ -681,21 +651,9 @@ export function createTimelineStore(
     anchor: ((event: EventDto) => boolean) | undefined,
   ): Promise<void> {
     loading.value = true
-    beginLoad()
-    try {
-      await replaceSliceForDateInner(startTs, endTs, anchor)
-    } finally {
-      endLoad()
-    }
-  }
-
-  async function replaceSliceForDateInner(
-    startTs: number,
-    endTs: number,
-    anchor: ((event: EventDto) => boolean) | undefined,
-  ): Promise<void> {
     const generation = ++sliceGeneration
     parkedGeneration = generation
+    const liveIssuedAt = liveSeq
     let page = await fetchPage({ at_ts: endTs })
     let anchors = page === null ? [] : dateJumpAnchors(page.events, anchor)
     while (
@@ -714,6 +672,7 @@ export function createTimelineStore(
       reachedStart.value = page.next === null
       reachedEnd.value = false
       resolveReplyTargets(page.events)
+      replayLiveSince(liveIssuedAt)
     }
     if (generation === sliceGeneration) {
       loading.value = false
@@ -773,19 +732,8 @@ export function createTimelineStore(
   /// deliberate no-op on a parked slice below — which a caller cannot otherwise
   /// tell apart from success, since the no-op leaves every signal untouched.
   async function refreshHead(): Promise<HeadLoadOutcome> {
-    // Counts as in flight even though it never raises `loading`: the frames
-    // that arrive during its fetch are exactly the ones `foldHead` can drop
-    // when the page it brings back is disjoint from a cache-restored slice.
-    beginLoad()
-    try {
-      return await refreshHeadInner()
-    } finally {
-      endLoad()
-    }
-  }
-
-  async function refreshHeadInner(): Promise<HeadLoadOutcome> {
     const generation = sliceGeneration
+    const liveIssuedAt = liveSeq
     const page = await fetchPage({})
     if (page === null) {
       // As `replaceSlice` does when its newest load fails: lift a placeholder
@@ -799,7 +747,7 @@ export function createTimelineStore(
     if (generation !== sliceGeneration) {
       return 'superseded'
     }
-    return foldHead(page, generation)
+    return foldHead(page, generation, liveIssuedAt)
   }
 
   /**
@@ -815,6 +763,7 @@ export function createTimelineStore(
   function foldHead(
     page: { events: EventDto[]; next: string | null },
     issued: number,
+    liveIssuedAt: number,
   ): HeadLoadOutcome {
     const painted = (): HeadLoadOutcome => {
       headGeneration = Math.max(headGeneration, issued)
@@ -851,6 +800,7 @@ export function createTimelineStore(
       // The slice *is* the head now, wherever it was parked before.
       reachedEnd.value = true
       resolveReplyTargets(page.events)
+      replayLiveSince(liveIssuedAt)
       return painted()
     }
     // Overlap: merge. No generation bump — an in-flight `loadOlder` prepend
@@ -1049,18 +999,16 @@ export function createTimelineStore(
     if (event.account_id !== accountId || event.room_id !== roomId) {
       return
     }
-    if (loadsInFlight > 0) {
-      // Held, not handled: see `pendingLive`. Deferring the whole frame —
-      // reactions and redactions included — keeps one rule instead of a
-      // per-branch one, and the replay runs this same function once the
-      // slice it needs to reason about exists.
-      if (pendingLive.length >= LIVE_BUFFER_LIMIT) {
-        liveBufferOverflowed = true
-        return
-      }
-      pendingLive.push(event)
-      return
+    liveSeq += 1
+    liveLog.push({ seq: liveSeq, event })
+    if (liveLog.length > LIVE_LOG_LIMIT) {
+      liveLog.shift()
     }
+    applyLive(event)
+  }
+
+  /** `ingestLive`'s rules, without logging — what a replay runs through. */
+  function applyLive(event: EventDto): void {
     const relationTargetId = collapsedRelationTargetId(event)
     if (relationTargetId !== null) {
       collapsedRelationTargets.set(event.event_id, relationTargetId)
