@@ -8,7 +8,7 @@
 //! - [`provider`]: the [`OidcProvider`](provider::OidcProvider) port.
 //! - [`jwks`]: cached, refresh-rate-limited JWKS lookup.
 //! - [`generic`]: the discovery-doc-driven provider impl (Google, Microsoft).
-//! - [`apple`]: credentialed Apple browser provider; native challenges are pending.
+//! - [`apple`]: credentialed browser provider and keyless native verifier.
 //! - [`verification`]: shared JWT signature and claim validation.
 //! - [`exchange`]: bounded, redacted authorization-code exchange.
 //! - [`tokens`]: mint/verify/rotate orchestration atop `axon-store`.
@@ -29,9 +29,15 @@ use std::time::Duration;
 
 use axon_core::OauthConfig;
 
-pub use apple::AppleProvider;
+pub use apple::{AppleNativeVerifier, AppleProvider};
 pub use generic::GenericOidcProvider;
 pub use provider::{OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity};
+
+/// Native verification uses a server-owned nonce and no browser credentials.
+#[async_trait::async_trait]
+pub trait NativeIdentityVerifier: Send + Sync {
+    async fn verify(&self, token: &str, nonce: &str) -> Result<VerifiedIdentity, OidcError>;
+}
 
 /// Per-request timeout for every outbound call this module makes (discovery,
 /// JWKS, token-exchange) — an unauthenticated surface must never let an
@@ -104,6 +110,7 @@ pub struct OAuthRuntime {
     /// `"microsoft"`, `"apple"`). Only providers with `enabled = true` in
     /// config are present.
     pub providers: HashMap<&'static str, Arc<dyn OidcProvider>>,
+    pub native_apple: Option<Arc<dyn NativeIdentityVerifier>>,
     /// Per-IP / per-`state` token-bucket rate limiter over `/v1/oauth/*`.
     pub rate_limiter: rate_limit::OAuthRateLimiter,
 }
@@ -146,6 +153,7 @@ impl OAuthRuntime {
             refresh_token_ttl: Duration::from_secs(config.refresh_token_ttl_secs),
             clients,
             providers,
+            native_apple: None,
             rate_limiter: rate_limit::OAuthRateLimiter::new(),
         }
     }

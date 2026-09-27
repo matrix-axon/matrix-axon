@@ -4,7 +4,7 @@
 //! "is this the bound owner?" — upstream tokens are consumed internally and
 //! never handed to a client. [`GenericOidcProvider`](crate::oauth::generic::GenericOidcProvider)
 //! covers Google and Microsoft (discovery-doc driven); Apple's browser provider
-//! is registered when configured; native challenges are pending.
+//! is registered when configured; native Apple uses a separate keyless verifier.
 
 use async_trait::async_trait;
 
@@ -19,9 +19,8 @@ pub struct VerifiedIdentity {
     /// The token's `email` claim, if present.
     pub email: Option<String>,
     /// This token's replay-defense key: its `jti` claim, or a hash of the raw
-    /// token when the provider omits `jti`. Path B's handler consumes this
-    /// via [`Store::consume_identity_token`](axon_store::Store::consume_identity_token)
-    /// before trusting the identity.
+    /// token when the provider omits `jti`. Path B consumes it atomically with
+    /// its token pair via [`axon_store::Store::redeem_identity_atomically`].
     pub replay_key: String,
 }
 

@@ -531,7 +531,7 @@ async fn build_oauth_runtime(
         async {
             if oauth_config.providers.apple.enabled {
                 let provider = oauth::apple_provider_with_http(oauth_config, http.clone()).await?;
-                Ok::<_, anyhow::Error>(Some(Arc::new(provider) as Arc<dyn axon_api::OidcProvider>))
+                Ok::<_, anyhow::Error>(Some(provider))
             } else {
                 Ok(None)
             }
@@ -539,8 +539,20 @@ async fn build_oauth_runtime(
         discover_generic_provider("google", &oauth_config.providers.google, &http),
         discover_generic_provider("microsoft", &oauth_config.providers.microsoft, &http),
     )?;
+    let native_apple = if oauth_config.providers.apple.native_enabled {
+        let audiences = oauth_config.providers.apple.native_audiences.clone();
+        Some(Arc::new(match &apple {
+            Some(provider) => provider.native_verifier(audiences)?,
+            None => axon_api::AppleNativeVerifier::new(http, audiences)?,
+        }) as Arc<dyn axon_api::NativeIdentityVerifier>)
+    } else {
+        None
+    };
     for (name, provider) in [
-        ("apple", apple),
+        (
+            "apple",
+            apple.map(|provider| Arc::new(provider) as Arc<dyn axon_api::OidcProvider>),
+        ),
         ("google", google),
         ("microsoft", microsoft),
     ] {
@@ -549,10 +561,9 @@ async fn build_oauth_runtime(
         }
     }
 
-    Ok(Arc::new(axon_api::OAuthRuntime::new(
-        oauth_config,
-        providers,
-    )))
+    let mut runtime = axon_api::OAuthRuntime::new(oauth_config, providers);
+    runtime.native_apple = native_apple;
+    Ok(Arc::new(runtime))
 }
 
 /// Confirm `provider_name`'s config carries everything `GenericOidcProvider`
@@ -724,6 +735,23 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod oauth_runtime_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_only_needs_audiences_but_no_apple_private_credentials() {
+        let mut config = axon_core::OauthConfig {
+            external_base_url: Some("https://axon.example".into()),
+            ..Default::default()
+        };
+        config.providers.apple.native_enabled = true;
+        assert!(build_oauth_runtime(&config).await.is_err());
+        config.providers.apple.native_audiences = vec!["org.matrixaxon.axon".into()];
+        let runtime = build_oauth_runtime(&config).await.unwrap();
+        assert!(runtime.native_apple.is_some());
+        assert!(runtime.providers.is_empty());
+        config.providers.apple.native_enabled = false;
+        let runtime = build_oauth_runtime(&config).await.unwrap();
+        assert!(runtime.native_apple.is_none());
+    }
 
     #[tokio::test]
     async fn providers_initialize_concurrently_and_disabled_providers_are_skipped() {

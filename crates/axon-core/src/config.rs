@@ -562,21 +562,22 @@ pub struct GenericOauthProviderConfig {
     pub client_secret: Option<String>,
 }
 
+fn redacted_option<T>(value: &Option<T>) -> Option<&'static str> {
+    value.as_ref().map(|_| "[REDACTED]")
+}
+
 impl std::fmt::Debug for GenericOauthProviderConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GenericOauthProviderConfig")
             .field("enabled", &self.enabled)
             .field("issuer", &self.issuer)
             .field("client_id", &self.client_id)
-            .field(
-                "client_secret",
-                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("client_secret", &redacted_option(&self.client_secret))
             .finish()
     }
 }
 
-/// Credentialed Sign in with Apple browser settings.
+/// Independent browser and native Sign in with Apple settings.
 #[derive(Clone, Default, Deserialize)]
 pub struct AppleOauthConfig {
     /// Whether Apple browser sign-in is enabled. Defaults to `false`.
@@ -590,6 +591,9 @@ pub struct AppleOauthConfig {
     /// (Path B) carry this as `aud` instead of `client_id`.
     #[serde(default)]
     pub native_audiences: Vec<String>,
+    /// Enable the keyless native Apple challenge flow independently of browser SSO.
+    #[serde(default)]
+    pub native_enabled: bool,
     /// Apple Developer team id, used to sign the ES256 client-secret JWT.
     #[serde(default)]
     pub team_id: Option<String>,
@@ -614,16 +618,11 @@ impl std::fmt::Debug for AppleOauthConfig {
             .field("enabled", &self.enabled)
             .field("client_id", &self.client_id)
             .field("native_audiences", &self.native_audiences)
+            .field("native_enabled", &self.native_enabled)
             .field("team_id", &self.team_id)
             .field("key_id", &self.key_id)
-            .field(
-                "private_key",
-                &self.private_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "private_key_path",
-                &self.private_key_path.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("private_key", &redacted_option(&self.private_key))
+            .field("private_key_path", &redacted_option(&self.private_key_path))
             .field("redirect_uri", &self.redirect_uri)
             .finish()
     }
@@ -1173,6 +1172,13 @@ impl Config {
 // which is large; we cannot box it here.
 #[allow(clippy::result_large_err)]
 mod tests {
+    #[test]
+    fn redaction_preserves_presence_without_formatting_contents() {
+        struct NoDebug;
+        assert_eq!(super::redacted_option(&Some(NoDebug)), Some("[REDACTED]"));
+        assert_eq!(super::redacted_option::<NoDebug>(&None), None);
+    }
+
     #[test]
     fn apple_config_debug_redacts_inline_key_and_key_path_even_when_nested() {
         let mut config: super::Config = figment::Figment::from(Toml::string(

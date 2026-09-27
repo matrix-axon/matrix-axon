@@ -454,6 +454,12 @@ Non-obvious choices made in M10 (history backfill — see ADR 0043, ADR 0044):
 
 ### 14. OAuth authorization server
 
+**Apple follow-up (ADR 0054):** the provider foundation and browser integration now support credentialed Apple browser login, CLI binding, and bootstrap.
+The final core-server layer adds independently enabled keyless native verification, five-minute server-owned challenges, explicit owner/bootstrap binding, and atomic challenge/replay/token redemption.
+See [the native contract](../apple-oauth-native.md) for configuration and verification.
+Native client UI and real-device acceptance, authorization revocation/account deletion, and additional smoke coverage remain subsequent silo-specific work.
+The original milestone history below describes the Google/Microsoft-only state at initial delivery.
+
 **Landed.** **M14 — OAuth authorization server (ADR 0054).** Axon is its own minimal OAuth 2.0 authorization server for its own public clients (PKCE mandatory) _and_ an OIDC relying party to Google/Microsoft, purely to verify the bound owner (upstream tokens never leave the process). It preserves ADR 0029's `TokenVerifier` seam exactly — new nullable `tokens` columns, no change to the `Authorization` wire contract. Landed in two PRs, not the five originally planned — the first delivered more than its "architecture/schema" name suggested:
 
 - **M14b (PR 231).** Schema (`oauth_identities`, `oauth_refresh_tokens`, `oauth_authorization_requests`, `oauth_bind_requests`, `oauth_consumed_identity_tokens`); the `OidcProvider` trait + `GenericOidcProvider` (discovery-doc-driven, covers Google _and_ Microsoft, including Microsoft's `{tenantid}`-templated multi-tenant issuer matching); JWKS caching; Path A (web-redirect+PKCE) and Path B (native identity token) token orchestration with refresh-token rotation; the un-gated `/v1/oauth/*` router + rate limiting; and `axon-server`'s boot-time wiring that constructs real `GenericOidcProvider`s for Google/Microsoft from config. Apple is explicitly out (no `AppleProvider` yet; the binary refuses to boot with `oauth.providers.apple.enabled = true`).

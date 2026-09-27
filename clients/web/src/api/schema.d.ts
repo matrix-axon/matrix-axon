@@ -1455,6 +1455,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/oauth/apple/native/challenge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["challenge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/oauth/apple/native/token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/oauth/providers": {
         parameters: {
             query?: never;
@@ -2514,6 +2546,8 @@ export interface components {
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_Vec_OAuthProviderDto: {
             data: {
+                browser: boolean;
+                native: boolean;
                 /**
                  * @description The value to pass as `provider` to `GET /v1/oauth/authorize`, e.g.
                  *     `"google"`.
@@ -3290,6 +3324,36 @@ export interface components {
             /** @description Matrix user ID (the `m.room.member` state key). */
             user_id: string;
         };
+        NativeChallengeRequest: {
+            bootstrap_code?: string | null;
+            client_id: string;
+            /** @description login, bind (existing bearer), or bootstrap (explicit setup capability). */
+            purpose: string;
+        };
+        NativeChallengeResponse: {
+            /** @description Client-held secret. Never pass it to Apple or persist it. */
+            challenge: string;
+            /** Format: int64 */
+            expires_in: number;
+            /** @description Set ASAuthorizationAppleIDRequest.nonce to this exact string. Do not hash again. */
+            nonce: string;
+        };
+        /**
+         * @description Schema-only union: grant/form failures use OAuth errors, whereas transport,
+         *     availability, and authorization gates may use the standard API envelope.
+         */
+        NativeErrorBody: components["schemas"]["OAuthErrorBody"] | components["schemas"]["ErrorResponse"];
+        NativeTokenRequest: {
+            bootstrap_code?: string | null;
+            challenge: string;
+            client_id: string;
+            identity_token: string;
+        };
+        /** @description `POST /v1/oauth/token`'s error body (RFC 6749 §5.2). */
+        OAuthErrorBody: {
+            error: string;
+            error_description: string;
+        };
         /**
          * @description One sign-in provider this instance has enabled.
          *
@@ -3299,6 +3363,8 @@ export interface components {
          *     otherwise make a breaking change.
          */
         OAuthProviderDto: {
+            browser: boolean;
+            native: boolean;
             /**
              * @description The value to pass as `provider` to `GET /v1/oauth/authorize`, e.g.
              *     `"google"`.
@@ -4006,6 +4072,17 @@ export interface components {
             events: components["schemas"]["EventDto"][];
             /** @description Opaque cursor for the next (older) page, or `null` at the end. */
             next_cursor?: string | null;
+        };
+        /**
+         * @description `POST /v1/oauth/token`'s success body (RFC 6749 §5.1) — plain, not
+         *     wrapped in `{"data": ...}`.
+         */
+        TokenSuccessBody: {
+            access_token: string;
+            /** Format: int64 */
+            expires_in: number;
+            refresh_token: string;
+            token_type: string;
         };
         /** @description The at-decrypt snapshot half of a [`VerificationBundleDto`]. */
         TrustSnapshotDto: {
@@ -9244,9 +9321,172 @@ export interface operations {
             };
         };
     };
-    providers: {
+    challenge: {
         parameters: {
             query?: never;
+            header?: {
+                /** @description Bearer owner token; required for purpose=bind, omitted for login/bootstrap. */
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/x-www-form-urlencoded": components["schemas"]["NativeChallengeRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeChallengeResponse"];
+                };
+            };
+            /** @description Invalid form or request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeErrorBody"];
+                };
+            };
+            /** @description Owner authorization required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Native Apple disabled */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bootstrap closed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Challenge capacity or rate exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Storage unavailable */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    token: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Same Bearer owner token used to create a bind challenge; still required and must remain active. Omitted for login/bootstrap. */
+                Authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/x-www-form-urlencoded": components["schemas"]["NativeTokenRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenSuccessBody"];
+                };
+            };
+            /** @description Invalid request, expired/replayed identity, or invalid owner authorization (invalid_grant); body timeouts use the API envelope */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeErrorBody"];
+                };
+            };
+            /** @description Native Apple disabled */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Storage unavailable */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthErrorBody"];
+                };
+            };
+        };
+    };
+    providers: {
+        parameters: {
+            query?: {
+                /** @description Omit for browser providers (legacy behavior); use native for SDK login. */
+                flow?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;

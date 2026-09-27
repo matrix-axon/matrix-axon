@@ -334,7 +334,27 @@ impl Store {
         .fetch_one(&mut *tx)
         .await?
         .try_get("id")?;
+        let pair = Self::mint_oauth_pair_in_tx(
+            &mut tx,
+            provider,
+            identity_id,
+            client_id,
+            access_expires_at,
+            refresh_expires_at,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Some(pair))
+    }
 
+    pub(crate) async fn mint_oauth_pair_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        provider: &str,
+        identity_id: Uuid,
+        client_id: &str,
+        access_expires_at: DateTime<Utc>,
+        refresh_expires_at: DateTime<Utc>,
+    ) -> Result<IssuedOAuthTokenPair, StoreError> {
         let access_token = generate_token();
         let access_hash = hash_token(&access_token);
         sqlx_core::query::query(
@@ -347,7 +367,7 @@ impl Store {
         .bind(provider)
         .bind(identity_id)
         .bind(client_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         let refresh_token = generate_refresh_token();
@@ -360,17 +380,19 @@ impl Store {
         .bind(identity_id)
         .bind(client_id)
         .bind(refresh_expires_at)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
-        tx.commit().await?;
-        Ok(Some(IssuedOAuthTokenPair {
+        Ok(IssuedOAuthTokenPair {
             access_token,
             refresh_token,
-        }))
+        })
     }
 
-    async fn lock_bootstrap(&self, tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    pub(crate) async fn lock_bootstrap(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> Result<(), StoreError> {
         sqlx_core::query::query("SELECT pg_advisory_xact_lock($1)")
             .bind(BOOTSTRAP_LOCK_KEY)
             .execute(&mut **tx)
@@ -378,7 +400,7 @@ impl Store {
         Ok(())
     }
 
-    async fn bootstrap_available_in_tx(
+    pub(crate) async fn bootstrap_available_in_tx(
         tx: &mut Transaction<'_, Postgres>,
     ) -> Result<bool, StoreError> {
         let available: bool = sqlx_core::query::query(
