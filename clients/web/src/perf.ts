@@ -61,6 +61,10 @@ const OVERLAY_PREFIXES = [
   // rooms. Cheap to leave on: at most two marks per socket, where the
   // ten-line buffer's real enemy is a mark that fires per scroll frame.
   'live:',
+  // A request the deadline failed, or one that answered after it had been
+  // given up on. Both are rare, and both are the reading a stuck placeholder
+  // needs.
+  'api:',
 ]
 
 /**
@@ -401,6 +405,30 @@ function summariseBoot(): void {
 const ROOM_OPEN_WATCHDOG_MS = 10_000
 
 /**
+ * How often a room open that is *still* waiting reports again, after the
+ * first report at `ROOM_OPEN_WATCHDOG_MS`.
+ *
+ * One report at 10 s and then silence until the open settles made a 153 s
+ * stall read as two data points, with nothing to say whether the head fetch
+ * was still out, had failed, or had arrived and been thrown away in between.
+ */
+const ROOM_OPEN_WAITING_REPEAT_MS = 30_000
+
+/**
+ * `waiting` lines per open, the first included: 10 s, then every 30 s up to
+ * about four minutes. Bounded because each one is several persisted lines,
+ * and a session keeps only `ENTRY_LIMIT` (`stores/telemetry.ts`); an open that
+ * never settles must not push out everything else the session recorded.
+ */
+const ROOM_OPEN_WAITING_REPEATS = 8
+
+/** Requests kept per open; the room list's preview burst alone can pass 100. */
+const ROOM_OPEN_REQUESTS_MAX = 300
+
+/** `boot:room-open:api` lines per room-open line. */
+const ROOM_OPEN_API_LINES = 4
+
+/**
  * How much longer to wait, after the timeline page has landed, for the three
  * requests it was sharing the link with.
  *
@@ -512,6 +540,20 @@ interface RoomOpen {
   emitted: boolean
   watchdog: ReturnType<typeof setTimeout> | null
   grace: ReturnType<typeof setTimeout> | null
+  /** `waiting` lines emitted so far; see `ROOM_OPEN_WAITING_REPEATS`. */
+  waits: number
+  /**
+   * Every `/v1` request the API client issued during this open, as the client
+   * itself saw it (`perfTraceRequest`), updated in place as each one progresses.
+   *
+   * Resource Timing cannot answer the two questions a stuck open raises. It
+   * has no entry for a request until it *finishes*, so a request stalled
+   * mid-body is invisible on the `waiting` line, which is exactly when it
+   * matters. And it has none at all in the packaged app, whose requests leave
+   * through `tauri-plugin-http` rather than the webview. Bounded by
+   * `ROOM_OPEN_REQUESTS_MAX`.
+   */
+  requests: RequestRecord[]
 }
 
 let roomOpen: RoomOpen | null = null
@@ -621,13 +663,11 @@ function noteRoomOpen(
       settled: false,
       emitted: false,
       grace: null,
-      watchdog: setTimeout(() => {
-        if (roomOpen !== null) {
-          roomOpen.watchdog = null
-        }
-        emitRoomOpen('waiting')
-      }, ROOM_OPEN_WATCHDOG_MS),
+      watchdog: null,
+      waits: 0,
+      requests: [],
     }
+    armWatchdog(roomOpen, ROOM_OPEN_WATCHDOG_MS)
     return
   }
   const open = roomOpen
@@ -670,7 +710,7 @@ function noteRoomOpen(
         typeof detail?.outcome === 'string' &&
         !(typeof detail.startedAt === 'number' && detail.startedAt < open.start)
       ) {
-        open.heads.push(detail.outcome)
+        open.heads.push(`${detail.outcome}@${since()}`)
       }
       break
     case 'live:open':
@@ -858,10 +898,26 @@ function emitRoomOpen(phase: 'settled' | 'waiting'): void {
     wall: new Date().toISOString(),
   })
   summariseRequests(entries, headEntry)
+  summariseApiRequests(open)
   if (phase === 'settled') {
     open.emitted = true
     roomOpen = null
+    return
   }
+  open.waits += 1
+  if (open.waits < ROOM_OPEN_WAITING_REPEATS) {
+    armWatchdog(open, ROOM_OPEN_WAITING_REPEAT_MS)
+  }
+}
+
+/** Report `open` as still waiting after `ms`, unless it settles first. */
+function armWatchdog(open: RoomOpen, ms: number): void {
+  open.watchdog = setTimeout(() => {
+    open.watchdog = null
+    if (roomOpen === open) {
+      emitRoomOpen('waiting')
+    }
+  }, ms)
 }
 
 /**
@@ -982,6 +1038,171 @@ function headsOf(open: RoomOpen): string | null {
     ...Array.from({ length: pending }, () => 'pending'),
   ]
   return names.length === 0 ? null : names.join('+')
+}
+
+/** How a `/v1` request ended, as `api/client.ts` classifies it. */
+export type RequestOutcome = 'ok' | 'timeout' | 'aborted' | 'failed'
+
+/**
+ * Where a request was when it ended, or where it is now if it has not.
+ * `token` is before it was sent at all: `getToken()` can be a network round
+ * trip of its own (an OAuth refresh), and the deadline covers it.
+ */
+type RequestStage = 'token' | 'headers' | 'body'
+
+/** One `/v1` request, as the API client saw it; see `perfTraceRequest`. */
+interface RequestRecord {
+  url: string
+  start: number
+  sentAt: number | null
+  headersAt: number | null
+  endAt: number | null
+  outcome: RequestOutcome | null
+  status: number | null
+}
+
+/** The API client's handle on one request's record. */
+export interface RequestTrace {
+  /** Handed to the transport. */
+  sent(): void
+  /** Response headers in. */
+  headers(status: number): void
+  /** Settled: the body is in, or it failed. */
+  end(outcome: RequestOutcome): void
+  /**
+   * Headers arrived after the request had already been given up on.
+   *
+   * The transport did not honor the abort: it carried on with a request its
+   * caller had already failed. That is the WebKit behavior `fetchWithinDeadline`
+   * (`api/client.ts`) exists to route around, and seeing it here means a
+   * deadline is holding only because the client races it.
+   */
+  late(): void
+}
+
+/**
+ * Start recording one `/v1` request, or `null` while perf marks are off.
+ *
+ * Driven by the API client rather than read from Resource Timing, for two
+ * reasons. A request that is still in flight has no resource entry, so the
+ * `waiting` line could never show the request it was waiting *on*. And the
+ * packaged app's requests go through `tauri-plugin-http`, so the webview
+ * records no entry for them at all.
+ *
+ * Records are not marks. A room list's preview burst would push the mark ring
+ * (`RECENT_MARKS_MAX`) past the marks `summariseTransition` scans for, so only
+ * a deadline or a late arrival, both rare, becomes a mark of its own.
+ */
+export function perfTraceRequest(url: string): RequestTrace | null {
+  if (!perfEnabled()) {
+    return null
+  }
+  const record: RequestRecord = {
+    url,
+    start: performance.now(),
+    sentAt: null,
+    headersAt: null,
+    endAt: null,
+    outcome: null,
+    status: null,
+  }
+  const open = roomOpen
+  if (open !== null && open.requests.length < ROOM_OPEN_REQUESTS_MAX) {
+    open.requests.push(record)
+  }
+  const after = (): number => Math.round(performance.now() - record.start)
+  return {
+    sent() {
+      record.sentAt ??= performance.now()
+    },
+    headers(status) {
+      record.headersAt ??= performance.now()
+      record.status = status
+    },
+    end(outcome) {
+      if (record.endAt !== null) {
+        return
+      }
+      record.endAt = performance.now()
+      record.outcome = outcome
+      if (outcome === 'timeout') {
+        perfMark('api:deadline', {
+          route: shortRoute(url),
+          stage: stageOf(record),
+          hdr: sinceStart(record, record.headersAt),
+          after: after(),
+        })
+      }
+    },
+    late() {
+      perfMark('api:late', { route: shortRoute(url), after: after() })
+    },
+  }
+}
+
+function stageOf(record: RequestRecord): RequestStage {
+  if (record.sentAt === null) {
+    return 'token'
+  }
+  return record.headersAt === null ? 'headers' : 'body'
+}
+
+function sinceStart(record: RequestRecord, at: number | null): number | null {
+  return at === null ? null : Math.round(at - record.start)
+}
+
+/**
+ * This room's own timeline page, as opposed to a preview for another room.
+ *
+ * The room id appears in the URL percent-encoded, with `:` as `%3A`, so the
+ * path is decoded before comparing.
+ */
+function isRoomTimeline(open: RoomOpen, record: RequestRecord): boolean {
+  if (open.roomId === null || !roomTimelinePage(record.url)) {
+    return false
+  }
+  let path = record.url
+  try {
+    path = decodeURIComponent(
+      new URL(record.url, window.location.href).pathname,
+    )
+  } catch {
+    // Malformed: compare the raw string, which can only fail to match.
+  }
+  return path.includes(`/rooms/${open.roomId}/timeline`)
+}
+
+/**
+ * The client's own view of this open's requests, as `boot:room-open:api`
+ * lines: every request for this room's timeline, then any other request
+ * that failed or has not finished, oldest first, up to `ROOM_OPEN_API_LINES`.
+ *
+ * Where a `:req` line says what the network carried, this says what the app
+ * experienced, including what Resource Timing cannot show. `outcome=pending
+ * stage=body hdr=640` is a request whose headers arrived and whose body did
+ * not, which is the 2026-09-25 stall read directly off one line. A request
+ * that the deadline failed shows `outcome=timeout` with the stage it died in.
+ *
+ * A request that finished normally and is not this room's timeline is left
+ * out: the `:req` lines already rank those.
+ */
+function summariseApiRequests(open: RoomOpen): void {
+  const head = open.requests.filter((record) => isRoomTimeline(open, record))
+  const troubled = open.requests.filter(
+    (record) => !head.includes(record) && record.outcome !== 'ok',
+  )
+  for (const record of [...head, ...troubled].slice(0, ROOM_OPEN_API_LINES)) {
+    perfMark('boot:room-open:api', {
+      route: shortRoute(record.url),
+      head: head.includes(record),
+      at: Math.round(record.start - open.start),
+      hdr: sinceStart(record, record.headersAt),
+      total: sinceStart(record, record.endAt),
+      outcome: record.outcome ?? 'pending',
+      stage: record.outcome === 'ok' ? null : stageOf(record),
+      status: record.status,
+    })
+  }
 }
 
 /** The requested-but-unsettled competitors at emit time, or `null` if none. */

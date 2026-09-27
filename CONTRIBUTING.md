@@ -249,6 +249,20 @@ The rules that most often surprise a first contributor:
   Whitespace inside backticks is content, so prettier cannot re-indent a continuation line and dedents it out of the block instead — which drops the list indent or the blockquote's `>`.
   It still renders correctly, which is exactly why it goes unnoticed.
 
+## Releasing
+
+Releases go through a pull request, not a hand-pushed tag (ADR 0106).
+On every push to `main`, `release-plz.yml` opens or updates one "release vX.Y.Z" PR that bumps `[workspace.package] version` and `Cargo.lock`.
+Merging it tags the merge commit `vX.Y.Z`, and that tag starts the release builds.
+The next version is read from commit subjects since the last tag: `fix:` and `feat:` bump the patch while the version is 0.x, and a breaking change (`feat!:`, or a `BREAKING CHANGE:` footer) bumps the minor.
+
+A `v*` tag pushed by hand must equal `v` plus the Cargo version, or `cross-build.yml` and `package.yml` stop before building anything.
+Check one before pushing it with `scripts/release-version.sh check vX.Y.Z`.
+`beta-*` and `alpha-*` tags are not checked.
+
+A PR that adds a workspace crate which ships in no release (a test or smoke crate) must also add it to `release-plz.toml`, next to `axon-test-support`.
+Without that entry, release-plz fails on `main` until the next release tag includes the crate.
+
 ## Start over
 
 To restart with a fresh instance and fresh data, destroy and recreate the Postgres container:

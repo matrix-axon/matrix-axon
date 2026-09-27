@@ -1,5 +1,10 @@
 import createClient, { type Client, type Middleware } from 'openapi-fetch'
 import type { AuthProvider } from '../auth/provider'
+import {
+  perfTraceRequest,
+  type RequestOutcome,
+  type RequestTrace,
+} from '../perf'
 import { browserPlatform, type Platform } from '../platform'
 import type { paths } from './schema'
 
@@ -116,6 +121,171 @@ function withinDeadline<T>(
       },
     )
   })
+}
+
+/**
+ * The platform's `fetch`, with the headers *and* the body raced against the
+ * deadline in JS rather than left to the transport.
+ *
+ * Handing the deadline to `fetch` on the `Request` is not enough in WebKit, for
+ * two reasons, each measured in Playwright's WebKit against a server that sends
+ * headers and then stalls:
+ *
+ * - **The body is not aborted.** A request still waiting for headers fails
+ *   when its signal fires, but a response whose headers arrived and whose body
+ *   then stalled waits forever: 15 hangs in 15 reads. Chromium and Firefox
+ *   abort the body in every case.
+ * - **The signal chain can be garbage-collected.** The deadline reaches the
+ *   `Request` through `AbortSignal.any`, and WebKit can collect a link in that
+ *   chain, after which the deadline fires and nothing hears it. A listener on
+ *   `request.signal` missed the abort 2 times in 10 under allocation pressure.
+ *   A listener on the deadline itself, held strongly as it is here, missed it
+ *   0 times in 10. So even a JS race is only reliable against `deadline`
+ *   directly, and a request still waiting for headers is raced too.
+ *
+ * Together they were a room stuck on "Loading messages…" for 97 s on an
+ * iPhone. Its timeline got headers in 640 ms and its 6.7 KB body 107 s later,
+ * over a stalled HTTP/3 stream, while the server had answered in 6 ms.
+ *
+ * `request.signal` is still raced, but as the path for a *caller's* own abort
+ * (the QR stores pass one), which reaches this function no other way. The
+ * transport still receives the signal as well, so an engine that honors it
+ * tears the connection down. What bounds the wait is the race.
+ *
+ * A body abandoned by the race is cancelled, and so is one whose headers
+ * arrive after the race was lost, so a stalled transfer does not hold its
+ * connection. Over HTTP/1.1 six of those fill a browser's per-host pool.
+ *
+ * Reading the body here also fixes the wording of a failure mid-body.
+ * openapi-fetch reads the body *outside* the try that runs `onError`, so such
+ * a failure reached callers as the engine's raw message ("The user aborted a
+ * request."). Read here, it is reworded exactly like one before headers.
+ *
+ * Buffering costs nothing a caller relies on. No `/v1` call streams its body
+ * (none passes `parseAs: 'stream'`), and media is fetched by
+ * `media/media-service.ts`, not this client.
+ */
+async function fetchWithinDeadline(
+  fetch: Platform['fetch'],
+  request: Request,
+  flight: Flight | undefined,
+): Promise<Response> {
+  const deadline = flight?.deadline ?? null
+  const trace = flight?.trace ?? null
+  const bounded = <T>(work: PromiseLike<T>): Promise<T> => {
+    const byCaller = withinDeadline(work, request.signal)
+    return deadline === null ? byCaller : withinDeadline(byCaller, deadline)
+  }
+  const fail = (error: unknown): never => {
+    trace?.end(outcomeOf(deadline, request.signal))
+    throw error
+  }
+  trace?.sent()
+  const pending = fetch(request)
+  let response: Response
+  try {
+    response = await bounded(pending)
+  } catch (error) {
+    // Headers that turn up after the race was lost still open a body, and
+    // nothing else will ever read or cancel it.
+    pending.then(
+      (late) => {
+        trace?.late()
+        late.body?.cancel().catch(() => {})
+      },
+      () => {},
+    )
+    return fail(error)
+  }
+  trace?.headers(response.status)
+  if (response.body === null || NULL_BODY_STATUSES.has(response.status)) {
+    trace?.end('ok')
+    return response
+  }
+  const reader = response.body.getReader()
+  let body: Uint8Array<ArrayBuffer>
+  try {
+    body = await bounded(readAll(reader))
+  } catch (error) {
+    // Settles the pending read as done, so `readAll` returns into a race that
+    // is already decided rather than leaving anything unhandled.
+    reader.cancel(error).catch(() => {})
+    return fail(error)
+  }
+  trace?.end('ok')
+  return rebuilt(response, body)
+}
+
+/**
+ * `response` with its body swapped for bytes already read.
+ *
+ * The constructor takes only status, status text and headers, and would leave
+ * `url` empty, `redirected` false and `type` `default` on every `/v1`
+ * response. Nothing reads them today, but a caller that one day checked
+ * `redirected` to spot a proxy, or `type` to diagnose CORS, would silently
+ * read defaults. So they are copied across as own properties, the way
+ * `tauri-plugin-http` already sets `url` on the responses it builds.
+ */
+function rebuilt(response: Response, body: Uint8Array<ArrayBuffer>): Response {
+  const copy = new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  })
+  Object.defineProperties(copy, {
+    url: { value: response.url },
+    redirected: { value: response.redirected },
+    type: { value: response.type },
+  })
+  return copy
+}
+
+/** What `createApiClient` keeps per in-flight request. */
+interface Flight {
+  deadline: AbortSignal | null
+  /** `null` while perf marks are off. */
+  trace: RequestTrace | null
+}
+
+/**
+ * Which of the two signals ended a request, for the readout. The deadline is
+ * checked first because `request.signal` follows it: when the deadline fires,
+ * `request.signal` reads aborted too, and checking it first would report
+ * every timeout as the caller's own abort.
+ */
+function outcomeOf(
+  deadline: AbortSignal | null,
+  signal: AbortSignal,
+): RequestOutcome {
+  if (deadline?.aborted === true) {
+    return 'timeout'
+  }
+  return signal.aborted ? 'aborted' : 'failed'
+}
+
+/** Statuses a `Response` may not be constructed with a body for. */
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304])
+
+async function readAll(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const chunks: Uint8Array[] = []
+  let length = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) {
+      break
+    }
+    chunks.push(value)
+    length += value.byteLength
+  }
+  const body = new Uint8Array(length)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return body
 }
 
 /**
@@ -247,13 +417,24 @@ export function createApiClient(
   platform: Pick<Platform, 'fetch'> = browserPlatform(),
   timeoutMs = API_REQUEST_TIMEOUT_MS,
 ): ApiClient {
-  const client = createClient<paths>({ baseUrl, fetch: platform.fetch })
+  // Each outgoing request's deadline, held strongly for as long as its request
+  // is in flight. `fetchWithinDeadline` must race the deadline itself, not the
+  // `Request` signal derived from it, which WebKit can let go of (see there).
+  // The request's perf trace rides along, because it starts here, before the
+  // token wait, and ends there.
+  const flights = new WeakMap<Request, Flight>()
+  const client = createClient<paths>({
+    baseUrl,
+    fetch: (request) =>
+      fetchWithinDeadline(platform.fetch, request, flights.get(request)),
+  })
 
   const bearer: Middleware = {
     async onRequest({ request }) {
       // Created before the token is asked for, because acquiring one can be a
       // network round trip of its own — see `withinDeadline`.
       const deadline = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : null
+      const trace = perfTraceRequest(request.url)
       // Only a provider that *went* somewhere can fail to come back, and the
       // synchronous ones are the common case (a pasted token is a string).
       // Racing those would add microtask hops to every request in the client
@@ -262,15 +443,23 @@ export function createApiClient(
       // render that a caller may already have painted from the optimistic echo
       // beside it.
       const pending = auth.getToken()
-      const token =
-        deadline === null || !isThenable(pending)
-          ? await pending
-          : await withinDeadline(pending, deadline)
+      let token: string | null
+      try {
+        token =
+          deadline === null || !isThenable(pending)
+            ? await pending
+            : await withinDeadline(pending, deadline)
+      } catch (error) {
+        trace?.end(outcomeOf(deadline, request.signal))
+        throw error
+      }
       if (token !== null) {
         request.headers.set('authorization', `Bearer ${token}`)
       }
       // Last, so the rebuilt request carries the header just set on it.
-      return withDeadline(request, deadline)
+      const signed = withDeadline(request, deadline)
+      flights.set(signed, { deadline, trace })
+      return signed
     },
     onResponse({ response }) {
       if (response.status === 401) {

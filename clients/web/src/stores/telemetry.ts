@@ -27,8 +27,9 @@ const ENTRY_LIMIT = 200
  * The marks that reach disk, as an explicit allow-list of *names*.
  *
  * Every one of these is a reduced summary: numbers, plus a few enumerated
- * strings (`phase`, `via`, `nav`, `pending`) and a route shape whose ids are
- * already collapsed by `shortRoute`. None carries an identifier.
+ * strings (`phase`, `via`, `nav`, `pending`, `outcome`, `stage`) and a route
+ * shape whose ids are already collapsed by `shortRoute`. None carries an
+ * identifier.
  *
  * The raw mark stream very much does — `room-page:initial-load-effect` carries
  * `accountId` and `roomId`, and both `room-list:navigate-to-room` and
@@ -42,6 +43,9 @@ export const PERSISTED_MARKS: readonly string[] = [
   'boot:room-list',
   'boot:room-open',
   'boot:room-open:req',
+  'boot:room-open:api',
+  'api:deadline',
+  'api:late',
   'transition:back',
 ]
 
@@ -57,7 +61,36 @@ export interface TelemetrySession {
   id: string
   /** Wall clock at session start, so a reader can date a capture. */
   startedAt: number
+  /**
+   * Which client produced these lines. Absent from sessions written before
+   * the field existed.
+   */
+  context?: TelemetryContext
   entries: TelemetryEntry[]
+}
+
+/**
+ * What ran, recorded once per session, because the transport decides how
+ * every number below it reads.
+ *
+ * The packaged app and the home-screen web app share an icon, and a capture
+ * pasted from the wrong one was diagnosed as the other (2026-09-25). They
+ * behave differently in exactly the ways this readout measures. The shell
+ * sends `/v1` through `tauri-plugin-http`, so Resource Timing never sees those
+ * requests and every `:req` field is empty; the browser sends them through
+ * WebKit's own stack, which is where its abort quirks live. `build` settles
+ * "was the fix even deployed?" without a second round trip.
+ */
+export interface TelemetryContext {
+  /** `tauri` for the packaged app, `browser` for everything else. */
+  shell: 'tauri' | 'browser'
+  /**
+   * `standalone` for a home-screen web app, `tab` for a browser tab. `null` in
+   * the shell, where the question does not apply.
+   */
+  display: 'standalone' | 'tab' | null
+  /** `BUILD_INFO.displayVersion`: the release, plus the build hash when known. */
+  build: string
 }
 
 interface TelemetryRecord {
@@ -127,6 +160,8 @@ export interface TelemetryStoreOptions {
    */
   sessionId?: () => string
   now?: () => number
+  /** Stamped on this session's header; see `TelemetryContext`. */
+  context?: TelemetryContext
 }
 
 export function createTelemetryStore({
@@ -134,10 +169,12 @@ export function createTelemetryStore({
   enabled,
   sessionId = () => Math.random().toString(36).slice(2, 10),
   now = () => Date.now(),
+  context,
 }: TelemetryStoreOptions): TelemetryStore {
   const session: TelemetrySession = {
     id: sessionId(),
     startedAt: now(),
+    ...(context === undefined ? {} : { context }),
     entries: [],
   }
   // Writes are coalesced: a room open emits a summary plus up to four request
@@ -248,7 +285,7 @@ export function formatTelemetry(sessions: readonly TelemetrySession[]): string {
   }
   return sessions
     .map((session) => {
-      const header = `# session ${session.id} — ${new Date(session.startedAt).toISOString()}`
+      const header = `# session ${session.id} — ${new Date(session.startedAt).toISOString()}${contextOf(session)}`
       const lines = session.entries.map((entry) => {
         const detail = Object.entries(entry.detail)
           .map(([key, value]) => `${key}=${String(value)}`)
@@ -258,4 +295,14 @@ export function formatTelemetry(sessions: readonly TelemetrySession[]): string {
       return [header, ...lines].join('\n')
     })
     .join('\n\n')
+}
+
+/** The header's `shell=… display=… build=…` suffix, or nothing for old sessions. */
+function contextOf(session: TelemetrySession): string {
+  const context = session.context
+  if (context === undefined) {
+    return ''
+  }
+  const display = context.display === null ? '' : ` display=${context.display}`
+  return ` shell=${context.shell}${display} build=${context.build}`
 }

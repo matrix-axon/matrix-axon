@@ -1,0 +1,69 @@
+# release-plz: opens the "release vX.Y.Z" PR that bumps the workspace
+# version, and tags the merge of that PR (ADR 0106). Workflow:
+# .github/workflows/release-plz.yml.
+#
+# Nothing here is published to crates.io. git_only makes release-plz read
+# the last released version from the v* git tags instead of the registry.
+
+[workspace]
+git_only = true
+git_tag_name = "v{{ version }}"
+# Every crate inherits [workspace.package] version, so one tag names the
+# release. Only axon-server (below) creates it; the rest would collide.
+git_tag_enable = false
+# cross-build.yml, package.yml and desktop-build.yml create and fill the
+# GitHub Release when the tag lands. A release-plz Release would race them.
+git_release_enable = false
+changelog_update = false
+# Binaries, not a library API: cargo-semver-checks has nothing to check.
+semver_check = false
+# Tag only when a release PR merges, not on every push to main.
+release_always = false
+
+[[package]]
+name = "axon-server"
+git_tag_enable = true
+
+# Crates that ship in no release artifact. Their changes alone should not
+# open a release PR, so release = false.
+#
+# The separate git_tag_name matters more. In git_only mode release-plz
+# looks up every workspace crate at the last tag matching its template,
+# release = false or not. With the shared "v{{ version }}", a crate added
+# after the last tag still matches that tag, is missing from its checkout,
+# and aborts the whole run ("cannot find package ... in workspace").
+# A template no tag uses makes it a first release instead, which is fine.
+#
+# Add every new test or smoke crate here in the PR that creates it.
+# A new crate that does ship hits the same failure until a release tag
+# includes it; ADR 0106 records that gap.
+
+[[package]]
+name = "axon-itest"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"
+
+[[package]]
+name = "axon-test-support"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"
+
+[[package]]
+name = "axon-smoke-local-stack"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"
+
+[[package]]
+name = "axon-smoke-matrix-oauth"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"
+
+[[package]]
+name = "axon-smoke-server"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"
+
+[[package]]
+name = "axon-smoke-tui"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"
