@@ -149,6 +149,10 @@ const MAX_KEY_PEEK_BYTES: usize = 64 * 1024;
 #[derive(Clone, Copy)]
 pub(crate) struct CallbackRateLimit;
 
+/// Native redemption keys on the server challenge in its handler, never JWTs.
+#[derive(Clone, Copy)]
+pub(crate) struct NativeRateLimit;
+
 /// Axum middleware enforcing both buckets over every `/v1/oauth/*` request.
 /// Applied as a `route_layer` over the oauth sub-router, so it runs for every
 /// method/path under it uniformly. `oauth.enabled = false` (a `None` runtime)
@@ -211,6 +215,7 @@ async fn keyed_param_from_form_body(
     }
 
     let is_callback = req.extensions().get::<CallbackRateLimit>().is_some();
+    let is_native = req.extensions().get::<NativeRateLimit>().is_some();
     let (parts, body) = req.into_parts();
     let limit = if is_callback {
         super::MAX_CALLBACK_BYTES
@@ -226,7 +231,9 @@ async fn keyed_param_from_form_body(
     .map_err(|_| ApiError::payload_too_large("request body too large"))?;
     let key = url::form_urlencoded::parse(&bytes)
         .find(|(name, _)| {
-            if is_callback {
+            if is_native {
+                false
+            } else if is_callback {
                 name == "state"
             } else {
                 KEYED_BODY_PARAMS.contains(&name.as_ref())
@@ -243,6 +250,37 @@ fn too_many_requests() -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_metadata_skips_jwt_keys_without_skipping_body_bounds() {
+        let body = "identity_token=attacker-jwt&challenge=server-capability";
+        for native in [false, true] {
+            let mut request = Request::post("/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap();
+            if native {
+                request.extensions_mut().insert(NativeRateLimit);
+            }
+            let (key, request) = keyed_param_from_form_body(request).await.unwrap();
+            assert_eq!(
+                key.as_deref(),
+                if native { None } else { Some("attacker-jwt") }
+            );
+            assert_eq!(
+                axum::body::to_bytes(request.into_body(), 100)
+                    .await
+                    .unwrap(),
+                body
+            );
+        }
+        let mut oversized = Request::post("/token")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(vec![b'x'; MAX_KEY_PEEK_BYTES + 1]))
+            .unwrap();
+        oversized.extensions_mut().insert(NativeRateLimit);
+        assert!(keyed_param_from_form_body(oversized).await.is_err());
+    }
 
     #[tokio::test]
     async fn form_media_type_and_route_metadata_control_key_selection() {

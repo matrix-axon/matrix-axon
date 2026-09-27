@@ -562,16 +562,17 @@ pub struct GenericOauthProviderConfig {
     pub client_secret: Option<String>,
 }
 
+fn redacted_option<T>(value: &Option<T>) -> Option<&'static str> {
+    value.as_ref().map(|_| "[REDACTED]")
+}
+
 impl std::fmt::Debug for GenericOauthProviderConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GenericOauthProviderConfig")
             .field("enabled", &self.enabled)
             .field("issuer", &self.issuer)
             .field("client_id", &self.client_id)
-            .field(
-                "client_secret",
-                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("client_secret", &redacted_option(&self.client_secret))
             .finish()
     }
 }
@@ -620,14 +621,8 @@ impl std::fmt::Debug for AppleOauthConfig {
             .field("native_enabled", &self.native_enabled)
             .field("team_id", &self.team_id)
             .field("key_id", &self.key_id)
-            .field(
-                "private_key",
-                &self.private_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "private_key_path",
-                &self.private_key_path.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("private_key", &redacted_option(&self.private_key))
+            .field("private_key_path", &redacted_option(&self.private_key_path))
             .field("redirect_uri", &self.redirect_uri)
             .finish()
     }
@@ -1177,6 +1172,13 @@ impl Config {
 // which is large; we cannot box it here.
 #[allow(clippy::result_large_err)]
 mod tests {
+    #[test]
+    fn redaction_preserves_presence_without_formatting_contents() {
+        struct NoDebug;
+        assert_eq!(super::redacted_option(&Some(NoDebug)), Some("[REDACTED]"));
+        assert_eq!(super::redacted_option::<NoDebug>(&None), None);
+    }
+
     #[test]
     fn apple_config_debug_redacts_inline_key_and_key_path_even_when_nested() {
         let mut config: super::Config = figment::Figment::from(Toml::string(

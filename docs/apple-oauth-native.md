@@ -94,6 +94,8 @@ No new debug option is needed to expose secret-bearing data.
 Flows expire after five minutes.
 Creation prunes expired rows and serializes separate caps of 1,024 public login flows and 64 authorized bind/bootstrap flows.
 Unauthenticated login traffic cannot consume the authorized reserve.
+The classes still share the creation advisory lock, so login load can delay authorized creation despite the separate row caps; lock isolation is tracked in [issue 491](https://github.com/matrix-axon/matrix-axon/issues/491).
+Per-IP rate limiting does not prevent distributed exhaustion of the public login pool; admission-quota hardening is tracked in [issue 492](https://github.com/matrix-axon/matrix-axon/issues/492).
 The store's TTL constant controls both inserted expiry and the advertised lifetime.
 The existing OAuth IP/key limiter, bounded form buffering, ten-second body and upstream timeouts, and five-second database lock timeout bound each boundary.
 Database transactions have ten-second statement timeouts.

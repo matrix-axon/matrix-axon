@@ -123,9 +123,12 @@ struct RejectionWarnings(Mutex<Option<Instant>>);
 
 impl RejectionWarnings {
     fn allow(&self, now: Instant) -> bool {
-        let Ok(mut last) = self.0.try_lock() else {
-            return false;
-        };
+        // Only timestamp comparison/update is protected: no I/O or await.
+        // Contention must not masquerade as an active suppression window.
+        let mut last = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if last.is_some_and(|last| now.saturating_duration_since(last) < Duration::from_secs(30)) {
             return false;
         }
@@ -169,6 +172,26 @@ pub async fn require_bearer(
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    #[test]
+    fn rejection_warning_waits_for_contended_slot() {
+        let warnings = RejectionWarnings(Mutex::new(None));
+        let guard = warnings.0.lock().unwrap();
+        std::thread::scope(|scope| {
+            let (result_tx, result_rx) = std::sync::mpsc::channel();
+            let warnings = &warnings;
+            let worker = scope.spawn(move || {
+                result_tx.send(warnings.allow(Instant::now())).unwrap();
+            });
+            assert_eq!(
+                result_rx.recv_timeout(Duration::from_millis(50)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            );
+            drop(guard);
+            assert!(result_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+            worker.join().unwrap();
+        });
+    }
 
     #[test]
     fn rejection_warnings_are_bounded_across_threads_and_time() {

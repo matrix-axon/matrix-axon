@@ -8,6 +8,13 @@ use uuid::Uuid;
 /// Shared by challenge storage and the public expires_in response.
 pub const NATIVE_CHALLENGE_TTL_SECS: i32 = 300;
 
+/// Credential rejection is distinct from a storage failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityRedemptionRejection {
+    NotBound,
+    InvalidGrant,
+}
+
 /// Only hashes of client-held capabilities are persisted.
 pub struct NativeChallenge {
     pub hash: String,
@@ -81,14 +88,14 @@ impl Store {
         &self,
         r: &IdentityRedemption<'_>,
         challenge: Option<&NativeChallenge>,
-    ) -> Result<Option<IssuedOAuthTokenPair>, StoreError> {
+    ) -> Result<Result<IssuedOAuthTokenPair, IdentityRedemptionRejection>, StoreError> {
         let mut tx = self.pool.begin().await?;
         native_timeouts(&mut tx).await?;
         let purpose = challenge.map_or("login", |c| c.purpose.as_str());
         if purpose == "bootstrap" {
             self.lock_bootstrap(&mut tx).await?;
             if !Self::bootstrap_available_in_tx(&mut tx).await? {
-                return Ok(None);
+                return Ok(Err(IdentityRedemptionRejection::InvalidGrant));
             }
         }
         if let Some(c) = challenge {
@@ -107,7 +114,7 @@ impl Store {
             .execute(&mut *tx)
             .await?;
             if claimed.rows_affected() != 1 {
-                return Ok(None);
+                return Ok(Err(IdentityRedemptionRejection::InvalidGrant));
             }
             if purpose == "bind" {
                 // FOR SHARE conflicts with token revocation. Authorization must
@@ -120,7 +127,7 @@ impl Store {
                 .fetch_optional(&mut *tx)
                 .await?;
                 if owner.is_none() {
-                    return Ok(None);
+                    return Ok(Err(IdentityRedemptionRejection::InvalidGrant));
                 }
             }
         }
@@ -144,7 +151,7 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?;
         let Some(identity) = identity else {
-            return Ok(None);
+            return Ok(Err(IdentityRedemptionRejection::NotBound));
         };
         let identity_id: Uuid = identity.try_get("id")?;
         let fresh = sqlx_core::query::query(
@@ -156,7 +163,7 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         if fresh.rows_affected() != 1 {
-            return Ok(None);
+            return Ok(Err(IdentityRedemptionRejection::InvalidGrant));
         }
         let pair = Self::mint_oauth_pair_in_tx(
             &mut tx,
@@ -168,7 +175,7 @@ impl Store {
         )
         .await?;
         tx.commit().await?;
-        Ok(Some(pair))
+        Ok(Ok(pair))
     }
 }
 

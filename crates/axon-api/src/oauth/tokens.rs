@@ -53,6 +53,17 @@ impl From<StoreError> for TokenError {
     }
 }
 
+impl From<axon_store::IdentityRedemptionRejection> for TokenError {
+    fn from(rejection: axon_store::IdentityRedemptionRejection) -> Self {
+        match rejection {
+            axon_store::IdentityRedemptionRejection::NotBound => Self::NotBound,
+            axon_store::IdentityRedemptionRejection::InvalidGrant => {
+                Self::InvalidGrant("identity token or native challenge no longer redeemable")
+            }
+        }
+    }
+}
+
 impl From<OidcError> for TokenError {
     fn from(err: OidcError) -> Self {
         TokenError::Oidc(err)
@@ -231,17 +242,8 @@ pub async fn redeem_identity_token(
         .verify_identity_token(raw_identity_token, None)
         .await?;
 
-    // Check bound-ness *before* burning the replay key: `NotBound` is a
-    // recoverable, client-retriable condition (the client may simply be
-    // racing `axon oauth bind`), and the provider's signature/expiry already
-    // prevent forgery/replay independent of binding — so there is no
-    // security reason to consume a token's single-use slot on a rejection
-    // that isn't itself a replay.
-    let _identity = store
-        .find_identity(provider_name, &verified.subject)
-        .await?
-        .ok_or(TokenError::NotBound)?;
-
+    // The transaction distinguishes an unbound subject without an extra
+    // preflight lookup, and consumes no replay key on that rejection.
     let pair = store
         .redeem_identity_atomically(
             &axon_store::IdentityRedemption {
@@ -255,10 +257,7 @@ pub async fn redeem_identity_token(
             },
             None,
         )
-        .await?
-        .ok_or(TokenError::InvalidGrant(
-            "identity unavailable or token already used",
-        ))?;
+        .await??;
     Ok(TokenPair {
         access_token: pair.access_token,
         refresh_token: pair.refresh_token,

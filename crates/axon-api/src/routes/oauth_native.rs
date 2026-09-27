@@ -285,14 +285,6 @@ pub async fn token(
             .expect("enabled native verifier")
             .verify(&body.identity_token, &c.nonce)
             .await?;
-        if c.purpose == "login"
-            && store
-                .find_identity("apple", &verified.subject)
-                .await?
-                .is_none()
-        {
-            return Err(TokenError::NotBound);
-        }
         let pair = store
             .redeem_identity_atomically(
                 &IdentityRedemption {
@@ -306,10 +298,7 @@ pub async fn token(
                 },
                 Some(&c),
             )
-            .await?
-            .ok_or(TokenError::InvalidGrant(
-                "native challenge no longer redeemable",
-            ))?;
+            .await??;
         if matches!(c.purpose.as_str(), "bind" | "bootstrap") {
             tracing::info!(provider = "apple", purpose = %c.purpose,
                 "Native OAuth owner identity bound and credentials issued");

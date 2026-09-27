@@ -78,7 +78,7 @@ async fn native_failed_mint_rolls_back_challenge_binding_replay_and_access_token
         .redeem_identity_atomically(&r, Some(&c))
         .await
         .unwrap()
-        .is_none());
+        .is_err());
 }
 
 #[tokio::test]
@@ -96,9 +96,43 @@ async fn legacy_identity_redemption_is_atomic_under_concurrency() {
             store.redeem_identity_atomically(&r, None)
         );
         assert_eq!(
-            usize::from(a.unwrap().is_some()) + usize::from(b.unwrap().is_some()),
+            usize::from(a.unwrap().is_ok()) + usize::from(b.unwrap().is_ok()),
             1
         );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn unbound_redemption_does_not_consume_challenge_or_replay() {
+    let store = migrated_store().await;
+    for provider in ["apple", "google", "microsoft"] {
+        let subject = Uuid::new_v4().to_string();
+        let replay = Uuid::new_v4().to_string();
+        let mut r = redemption(&subject, &replay);
+        r.provider = provider;
+        let c = challenge("login", None);
+        let native = (provider == "apple").then_some(&c);
+        if native.is_some() {
+            assert!(store.create_native_challenge(&c).await.unwrap());
+        }
+        assert!(matches!(
+            store.redeem_identity_atomically(&r, native).await.unwrap(),
+            Err(axon_store::IdentityRedemptionRejection::NotBound)
+        ));
+        if native.is_some() {
+            assert!(store.native_challenge(&c.hash).await.unwrap().is_some());
+        }
+        store.bind_identity(provider, &subject, None).await.unwrap();
+        assert!(store
+            .redeem_identity_atomically(&r, native)
+            .await
+            .unwrap()
+            .is_ok());
+        assert!(matches!(
+            store.redeem_identity_atomically(&r, native).await.unwrap(),
+            Err(axon_store::IdentityRedemptionRejection::InvalidGrant)
+        ));
     }
 }
 
@@ -118,21 +152,21 @@ async fn native_expiry_context_and_revoked_owner_fail_without_consumption() {
         .redeem_identity_atomically(&r, Some(&c))
         .await
         .unwrap()
-        .is_none());
+        .is_err());
     c.instance = "https://axon.example".into();
     c.purpose = "login".into();
     assert!(store
         .redeem_identity_atomically(&r, Some(&c))
         .await
         .unwrap()
-        .is_none());
+        .is_err());
     c.purpose = "bind".into();
     store.revoke_token(owner.id).await.unwrap();
     assert!(store
         .redeem_identity_atomically(&r, Some(&c))
         .await
         .unwrap()
-        .is_none());
+        .is_err());
     assert!(store.native_challenge(&c.hash).await.unwrap().is_some());
     sqlx_core::query::query(
         "UPDATE oauth_native_challenges SET expires_at=clock_timestamp() WHERE hash=$1",
@@ -146,7 +180,7 @@ async fn native_expiry_context_and_revoked_owner_fail_without_consumption() {
         .redeem_identity_atomically(&r, Some(&c))
         .await
         .unwrap()
-        .is_none());
+        .is_err());
     assert!(store
         .find_identity("apple", &subject)
         .await
