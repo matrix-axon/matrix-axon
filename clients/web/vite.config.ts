@@ -104,9 +104,17 @@ const RELEASE = String(
 const VERSION = webClientVersion()
 const BUILT_AT = new Date().toISOString()
 
-/** The `version.json` body — the origin's answer to "what build do you serve?" */
-function versionManifest(): string {
-  return `${JSON.stringify({ release: RELEASE, version: VERSION, builtAt: BUILT_AT }, null, 2)}\n`
+/**
+ * The `version.json` body — the origin's answer to "what build do you serve?"
+ *
+ * `apiBase` is the `VITE_AXON_SERVER_URL` this bundle was built with, or `null`
+ * for the same-origin default. The client never reads it. It is there for
+ * whoever has only the deployed bundle to go on, and for the e2e mock, which
+ * refuses to serve a `dist/` whose API lives somewhere else (#286): every spec
+ * would otherwise time out waiting for a socket the mock never sees.
+ */
+function versionManifest(apiBase: string | null): string {
+  return `${JSON.stringify({ release: RELEASE, version: VERSION, builtAt: BUILT_AT, apiBase }, null, 2)}\n`
 }
 
 /**
@@ -124,25 +132,30 @@ function versionManifest(): string {
  */
 function versionManifestPlugin(): Plugin {
   let distDir = join(webClientDir, 'dist')
+  let apiBase: string | null = null
   return {
     name: 'axon-version-manifest',
     configResolved(config) {
       distDir = config.build.outDir.startsWith('/')
         ? config.build.outDir
         : join(config.root, config.build.outDir)
+      // `config.env`, not `process.env`: it is what `import.meta.env` is built
+      // from, `.env` files included, so it names the base the bundle will use.
+      const configured: unknown = config.env.VITE_AXON_SERVER_URL
+      apiBase = typeof configured === 'string' ? configured : null
     },
     generateBundle() {
       this.emitFile({
         type: 'asset',
         fileName: 'version.json',
-        source: versionManifest(),
+        source: versionManifest(apiBase),
       })
     },
     configureServer(server) {
       server.middlewares.use('/version.json', (_req, res) => {
         res.setHeader('Content-Type', 'application/json')
         res.setHeader('Cache-Control', 'no-store')
-        res.end(versionManifest())
+        res.end(versionManifest(apiBase))
       })
     },
     configurePreviewServer(server) {

@@ -1661,6 +1661,47 @@ process.on('unhandledRejection', (error) => {
   console.error('mock backend: unhandled rejection', error)
 })
 
+/**
+ * Refuse a `dist/` built to talk to some other server (#286). Such a bundle
+ * never calls this mock: every spec then times out waiting for a socket that
+ * never connects, and only the browser console says why. The build records
+ * its `VITE_AXON_SERVER_URL` in `version.json` as `apiBase`. A same-origin
+ * base (the default, `null`) is fine, and so is one that resolves to this
+ * mock. An older `dist/` without the field cannot be checked, so it is served
+ * as before.
+ */
+async function assertDistTargetsThisMock() {
+  const origin = `http://127.0.0.1:${PORT}`
+  let apiBase
+  try {
+    ;({ apiBase } = JSON.parse(
+      await readFile(join(DIST, 'version.json'), 'utf8'),
+    ))
+  } catch {
+    return
+  }
+  if (typeof apiBase !== 'string') {
+    return
+  }
+  let target
+  try {
+    target = new URL(apiBase, origin).origin
+  } catch {
+    target = null
+  }
+  if (target === origin) {
+    return
+  }
+  console.error(
+    `mock backend: dist/ was built with VITE_AXON_SERVER_URL=${apiBase}, so ` +
+      'the app would call that server instead of this mock. Rebuild without ' +
+      'it: `pnpm build` (unset the variable, and check .env files).',
+  )
+  process.exit(1)
+}
+
+await assertDistTargetsThisMock()
+
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`mock axon backend on http://127.0.0.1:${PORT}`)
 })
