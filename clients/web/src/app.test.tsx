@@ -1001,6 +1001,75 @@ describe('App', () => {
     }
   })
 
+  it('still sees the keyboard after rotating while typing', async () => {
+    // The first reading at the new width is already keyboard-short. Seeded
+    // from itself, the resting height would be that short reading, and the
+    // keyboard would go unseen at this width for the rest of the session.
+    const listeners = new Map<string, EventListener>()
+    const viewport = {
+      offsetTop: 0,
+      offsetLeft: 0,
+      width: 440,
+      height: 956,
+      scale: 1,
+      addEventListener: vi.fn((type: string, listener: EventListener) => {
+        listeners.set(type, listener)
+      }),
+      removeEventListener: vi.fn(),
+    } as unknown as VisualViewport
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: viewport,
+    })
+    const setInnerHeight = (value: number) =>
+      Object.defineProperty(window, 'innerHeight', {
+        configurable: true,
+        value,
+      })
+    setInnerHeight(956)
+    // iOS reports the screen in portrait whatever the orientation.
+    Object.defineProperty(window.screen, 'width', {
+      configurable: true,
+      value: 440,
+    })
+    Object.defineProperty(window.screen, 'height', {
+      configurable: true,
+      value: 956,
+    })
+    const root = document.documentElement
+
+    const composer = document.createElement('textarea')
+    document.body.appendChild(composer)
+    const { unmount } = render(<App services={testServices()} />)
+    try {
+      composer.focus()
+      Object.assign(viewport, { height: 541 })
+      setInnerHeight(541)
+      listeners.get('resize')?.(new Event('resize'))
+      expect(root.dataset.keyboard).toBe('open')
+
+      // Rotated to landscape with the composer still focused: 956 wide, and
+      // the keyboard leaves ~200 of the 440 the screen has on this axis.
+      Object.assign(viewport, { width: 956, height: 200 })
+      setInnerHeight(200)
+      listeners.get('resize')?.(new Event('resize'))
+      expect(root.dataset.keyboard).toBe('open')
+
+      // Keyboard dismissed in landscape: the full 440, no flag.
+      composer.blur()
+      Object.assign(viewport, { height: 440 })
+      setInnerHeight(440)
+      listeners.get('resize')?.(new Event('resize'))
+      expect(root.dataset.keyboard).toBeUndefined()
+    } finally {
+      unmount()
+      composer.remove()
+      // Back to the prototype's getters.
+      delete (window.screen as unknown as Record<string, unknown>).width
+      delete (window.screen as unknown as Record<string, unknown>).height
+    }
+  })
+
   it('keeps tracking a pinch-zoomed viewport with nothing focused', async () => {
     // Same shape as the stale case but legitimately short: zoomed in, so the
     // shell must keep following the visible area instead of snapping back.

@@ -302,8 +302,8 @@ function useVisualViewportShell(settings: AppServices['settings']): void {
       clear()
       return
     }
-    /** Tallest visual viewport seen, per width: its height with no keyboard. */
-    const restingHeights = new Map<number, number>()
+    /** The visual viewport's height with no keyboard, at its current width. */
+    let resting: { width: number; height: number } | null = null
     const update = () => {
       // A short visual viewport is only legitimate while the keyboard is up or
       // the page is pinch-zoomed. When neither holds, the reading is stale:
@@ -345,16 +345,22 @@ function useVisualViewportShell(settings: AppServices['settings']): void {
       // frame after the keyboard lands (`vvH=541 innerH=541`), so
       // `innerHeight` loses sight of it. The keyboard and pinch zoom only ever
       // make the visual viewport shorter, so the tallest reading is the one
-      // with neither. Keyed by width, so a rotation or an iPad window resize
-      // starts afresh.
+      // with neither.
+      //
+      // A new width (a rotation, an iPad window resize) starts again, seeded
+      // from the screen rather than from its own first reading: that reading
+      // can already be keyboard-short — rotating mid-typing — and a seed that
+      // low would never see the keyboard at that width at all.
       const width = Math.round(viewport.width)
-      const restingHeight = Math.max(
+      if (resting === null || resting.width !== width) {
+        resting = { width, height: screenHeightAcross(width) }
+      }
+      resting.height = Math.max(
+        resting.height,
         window.innerHeight,
         viewport.height,
-        restingHeights.get(width) ?? 0,
       )
-      restingHeights.set(width, restingHeight)
-      if (isSoftKeyboardUp(viewport, restingHeight)) {
+      if (isSoftKeyboardUp(viewport, resting.height)) {
         root.dataset.keyboard = 'open'
       } else {
         delete root.dataset.keyboard
@@ -449,6 +455,22 @@ function isViewportHeightStale(viewport: VisualViewport): boolean {
  * indicator exposed (px).
  */
 const SOFT_KEYBOARD_MIN_PX = 120
+
+/**
+ * The screen's extent along the vertical axis for a viewport `width` wide.
+ * iOS reports `screen` in portrait whatever the orientation, so this is the
+ * side the width is not. `0` where the screen is not reported (jsdom), which
+ * leaves the resting height to the viewport's own readings.
+ */
+function screenHeightAcross(width: number): number {
+  const { width: screenWidth, height: screenHeight } = window.screen ?? {
+    width: 0,
+    height: 0,
+  }
+  return Math.abs(width - screenWidth) <= Math.abs(width - screenHeight)
+    ? screenHeight
+    : screenWidth
+}
 
 /**
  * Whether the soft keyboard is covering the bottom of the screen, given the
