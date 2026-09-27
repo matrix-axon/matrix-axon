@@ -2,12 +2,14 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   apiUrl,
   clearStoredServerUrl,
+  disconnectFromServer,
   httpFallbackFor,
   normalizeServerUrl,
   readStoredServerUrl,
   SERVER_URL_KEY,
   storeServerUrl,
 } from './server-url'
+import type { SecureStorage } from './platform'
 import { memoryStorage } from './test/memory-storage'
 
 describe('normalizeServerUrl', () => {
@@ -203,5 +205,48 @@ describe('httpFallbackFor', () => {
     // Asking for https by name is a decision, not a guess to be improved on.
     expect(fallback('https://axon.local:8080')).toBeNull()
     expect(fallback('http://axon.local:8080')).toBeNull()
+  })
+})
+
+describe('disconnectFromServer with a Keychain', () => {
+  it('reloads only after the Keychain has forgotten the token', async () => {
+    let finishWrites!: () => void
+    const secure: SecureStorage = Object.assign(memoryStorage(), {
+      settled: () =>
+        new Promise<void>((resolve) => {
+          finishWrites = resolve
+        }),
+    })
+    const reload = vi.fn()
+
+    disconnectFromServer(
+      memoryStorage(),
+      () => {},
+      reload,
+      memoryStorage(),
+      secure,
+    )
+
+    await Promise.resolve()
+    expect(reload).not.toHaveBeenCalled()
+    finishWrites()
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledWith('/'))
+  })
+
+  it('still reloads when a Keychain write failed', async () => {
+    const secure: SecureStorage = Object.assign(memoryStorage(), {
+      settled: () => Promise.reject(new Error('a Keychain write failed')),
+    })
+    const reload = vi.fn()
+
+    disconnectFromServer(
+      memoryStorage(),
+      () => {},
+      reload,
+      memoryStorage(),
+      secure,
+    )
+
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledWith('/'))
   })
 })

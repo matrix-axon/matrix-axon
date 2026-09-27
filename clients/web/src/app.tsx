@@ -606,7 +606,13 @@ function ServerFooter() {
         type="button"
         class="link-button"
         onClick={() =>
-          disconnectFromServer(window.localStorage, () => auth.clearToken())
+          disconnectFromServer(
+            window.localStorage,
+            () => auth.clearToken(),
+            undefined,
+            undefined,
+            platform.secureStorage,
+          )
         }
       >
         Use a different server

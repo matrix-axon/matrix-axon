@@ -1,4 +1,5 @@
 import { STORAGE_KEY as TOKEN_KEY } from './auth/token-paste'
+import type { SecureStorage } from './platform'
 import {
   PENDING_KEY as OAUTH_PENDING_KEY,
   SESSION_KEY as OAUTH_SESSION_KEY,
@@ -276,6 +277,7 @@ export function disconnectFromServer(
   clearToken: () => void = () => {},
   reload: (url: string) => void = (url) => window.location.assign(url),
   sessionStorage: Storage = window.sessionStorage,
+  secureStorage: SecureStorage | null = null,
 ): void {
   // In-memory first: the auth provider holds signals that outlive a storage
   // write, so clearing only the keys leaves a signed-in shell pointing at a
@@ -299,5 +301,15 @@ export function disconnectFromServer(
   // into the service graph at construction (`createServices`), so nothing
   // short of rebuilding it can point the app somewhere else. `/` rather than
   // the current path, because the current path belongs to the old server.
-  reload('/')
+  if (secureStorage === null) {
+    reload('/')
+    return
+  }
+  // The Keychain is written behind `clearToken` (`Platform.secureStorage`).
+  // Reloading first could bring the next document up holding the old
+  // server's token, to send to whichever server is chosen next.
+  void secureStorage.settled().then(
+    () => reload('/'),
+    () => reload('/'),
+  )
 }

@@ -1045,9 +1045,12 @@ export function createServices(
     // identity provider's password field. `openExternal` is exactly that
     // hand-off, and is null in a browser where a plain navigation is right.
     navigate: platform.openExternal ?? undefined,
-    storage,
+    // Credentials go to the OS credential store where the platform has one
+    // (the iOS Keychain, ADR 0054); everything else stays in `storage`.
+    storage: platform.secureStorage ?? storage,
     sessionStorage,
     platform,
+    appleSignIn: platform.appleSignIn,
   })
   const api = createApiClient(auth, baseUrl, platform)
   const media = createMediaService({ auth, baseUrl, platform })

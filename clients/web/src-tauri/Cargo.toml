@@ -52,6 +52,8 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-http = "~2.5"
+# In-repo: Sign in with Apple and Keychain token storage on iOS (ADR 0054).
+tauri-plugin-native-auth = { path = "native-auth" }
 tauri-plugin-opener = "2"
 tauri-plugin-websocket = "2"
 

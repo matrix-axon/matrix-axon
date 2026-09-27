@@ -6,6 +6,7 @@ import {
   notificationPermissionAvailable,
   requestAppBadgeNotificationPermission,
 } from '../app-badge'
+import { LinkAppleSection } from '../auth/oauth'
 import { BUILD_INFO } from '../build-info'
 import { CopyableText } from '../components/CopyableText'
 import { ReactionPicker } from '../components/MessageEventRow'
@@ -301,6 +302,7 @@ function SettingsPageContents() {
         </a>
       </section>
       <ServerSettings />
+      <LinkAppleSection oauth={auth.oauth} bearer={() => auth.getToken()} />
       <DebugSettings />
       <section class="panel">
         <h2>Session</h2>
@@ -1078,7 +1080,13 @@ function ServerSettings() {
         // `reload('/')`, and assigning `/` again here was a second document
         // load racing the first.
         onClick={() =>
-          disconnectFromServer(window.localStorage, () => auth.clearToken())
+          disconnectFromServer(
+            window.localStorage,
+            () => auth.clearToken(),
+            undefined,
+            undefined,
+            platform.secureStorage,
+          )
         }
       >
         Change server

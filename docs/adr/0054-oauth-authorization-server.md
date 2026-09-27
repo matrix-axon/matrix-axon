@@ -628,11 +628,42 @@ Concurrent redemption may mint at most once, and an interrupted attempt must be 
 Authorize native binding through an existing owner session or the explicit bootstrap capability, so self-hosters need no Apple browser credentials to establish ownership.
 Verify App ID/Services ID grouping and subject behavior with real Apple credentials rather than linking by matching emails.
 
-### Subsequent client, lifecycle, and smoke PRs
+### PR 4: native iOS client
 
-After server stabilization, integrate native Sign in with Apple into the Tauri iOS shell, with the Apple entitlement and compliant button, secure Axon-token persistence, cancellation/retry, restart recovery, and refresh/reconnect.
-Keep client behavior in its own PR and update client parity and demo coverage there.
-Retain the existing browser PKCE flow for registered browser deployments.
+The Tauri iOS shell signs in with Apple through `ASAuthorizationController`, with no browser and no web callback.
+An in-repo plugin (`clients/web/src-tauri/native-auth`) exposes Apple's sheet and the Keychain as ordinary Tauri commands that exist on every platform and are implemented only on iOS; its `capabilities` command tells the page which apply.
+It was written rather than taken from a third-party crate because the nonce must reach Apple verbatim, and the plugin sits on the credential path.
+
+Discovery asks for both provider lists when the platform has a native Apple sheet.
+Native Apple replaces a browser Apple entry, or joins the list on a native-only server; Google and Microsoft continue through the system browser with PKCE, unchanged.
+The shell reuses its existing `axon-desktop` client registration: the native endpoints need only a registered client ID, so operators add nothing new.
+The challenge capability lives in one function scope and is never stored; cancellation or any failure abandons it, and the next attempt starts a fresh challenge and Apple request.
+The Apple request asks for no scopes, since ownership is the signed subject alone and profile data would only be discarded.
+Apple therefore never shows its Share My Email / Hide My Email choice to the native app: with no email requested, there is none to hide, which is the strongest form of Guideline 4.8's private-email requirement.
+The browser flow still requests `email`, so Hide My Email remains a browser acceptance check.
+
+A signed-in owner links an Apple ID from Settings with `purpose=bind` and their current bearer, then adopts the returned Apple session.
+Settings offers the link only when the current session is not an Apple one: an Apple session proves the link, while no `/v1` route lists linked identities, so any other session cannot tell whether one exists.
+Re-linking an already-linked Apple ID is harmless (the server binds idempotently) but would look like a button that does nothing.
+This is how a self-hoster with no Apple web credentials makes Apple sign-in work: sign in once with a CLI token or another provider, then link.
+Native bootstrap of an empty instance is not offered in the app; the web bootstrap and CLI remain the first-run paths.
+
+Axon's own access and refresh tokens persist in the Keychain (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`) rather than the webview's `localStorage`.
+`AuthPersistence` reads synchronously, so the shell loads the Keychain once before the first render and writes behind in order.
+Server changes wait for pending Keychain writes before reloading, so a deleted token cannot come back.
+An upgraded shell moves existing tokens out of `localStorage` and deletes the plaintext copy only once the Keychain holds it.
+A reinstall clears the previous installation's Keychain items, detected by a `UserDefaults` marker that does not survive deletion.
+Apple's identity token is handed to the page once and is never stored.
+
+The entitlement lives in `clients/web/src-tauri/Entitlements.ios.plist`.
+Tauri has no iOS entitlements setting, so `scripts/package-ios.sh` copies the file over the generated one, then checks the exported `.ipa` and refuses to install or upload one missing the entitlement or the `org.matrixaxon.axon` URL scheme (TestFlight build 25 shipped without the scheme, breaking browser sign-in).
+An unentitled build fails only at run time, with Apple error 1000, which the plugin reports with that diagnosis.
+
+Verified on a TestFlight build on 2026-09-27: an unlinked Apple ID is refused with `identity_not_bound`, linking from Settings succeeds, and Sign in with Apple then signs in directly.
+
+Still outstanding after this PR: Apple revocation and account deletion (below), black-box smoke, and the real-device release-gate checks.
+
+### Subsequent lifecycle and smoke PRs
 
 Resolve Apple authorization revocation and applicable account-deletion requirements before App Store submission.
 Local Axon logout/unbinding does not revoke Apple's authorization.
@@ -642,6 +673,6 @@ Deletion must define its Axon-data scope, local token invalidation, retries afte
 See Apple's [account-deletion guidance](https://developer.apple.com/support/offering-account-deletion-in-your-app) and [TN3194](https://developer.apple.com/documentation/technotes/tn3194-handling-account-deletions-and-revoking-tokens-for-sign-in-with-apple).
 
 Keep black-box smoke additions in their own smoke-silo PR.
-The release gate includes real-device first and repeat sign-in, Hide My Email, binding, cancellation/retry, restart, refresh, logout, and deletion/revocation, plus Google/Microsoft regression checks.
+The release gate includes real-device first and repeat sign-in, binding, cancellation/retry, restart, refresh, logout, and deletion/revocation, plus Google/Microsoft regression checks.
 Logs and persisted test artifacts must contain no real tokens, authorization codes, private keys, or client-secret JWTs.
 App Review needs a working review deployment and instructions that exercise the actual supported flow.

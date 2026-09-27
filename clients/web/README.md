@@ -389,6 +389,22 @@ without reading it out of someone's address bar (#399). A server older than
 that answers `unknown client_id or redirect_uri` for all three and logs
 nothing.
 
+The iOS app signs in with Apple natively rather than through the browser, with
+the same `axon-desktop` registration. It needs native Apple enabled on the
+server, with the bundle ID as the audience; no Services ID, key or return URL
+is involved:
+
+```toml
+[oauth.providers.apple]
+native_enabled = true
+native_audiences = ["org.matrixaxon.axon"]
+```
+
+Native Apple only finds an Apple ID that is already linked to the owner. Link
+one from the app: sign in any other way (a token from `axon token issue`, or
+Google or Microsoft), then Settings → Sign in with Apple → Link an Apple ID.
+Linking is by Apple's subject alone, never by email.
+
 Provider buttons are discovered at runtime from `GET /v1/oauth/providers`, so
 a client can be pointed at a server it was not built against and still offer
 the right ones. `VITE_AXON_OAUTH_PROVIDERS` remains the fallback for a server

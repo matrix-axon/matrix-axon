@@ -10,6 +10,9 @@ import { fileFromPath } from '../media/dropped-file'
 import { MAX_UPLOAD_BYTES } from '../media/media-service'
 import { basename } from '../media/filename'
 import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
+import { NO_NATIVE_AUTH, type NativeAuth } from './native-auth'
+
+export { loadNativeAuth } from './native-auth'
 
 /**
  * The packaged-build platform (ADR 0102 § 2).
@@ -310,8 +313,15 @@ async function readDroppedFiles(paths: readonly string[]): Promise<File[]> {
   return files
 }
 
-export function tauriPlatform(): Platform {
+/**
+ * `native` is what `loadNativeAuth` found: the Keychain and the Apple sheet on
+ * iOS, neither anywhere else. Passed in rather than loaded here because loading
+ * it is async and this is not; `main.tsx` awaits it before the first render.
+ */
+export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
   return {
+    secureStorage: native.secureStorage,
+    appleSignIn: native.appleSignIn,
     // The plugin's fetch is signature-compatible with the global, but has no
     // timeout of its own; see `REQUEST_TIMEOUT_MS`. The signal has to go in
     // `init` and not on the `Request`: the plugin reads `init?.signal` alone

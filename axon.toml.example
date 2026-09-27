@@ -199,13 +199,16 @@ request_timeout_secs = 15
 # client_secret = "change-me"
 #
 # [oauth.providers.apple]
-# Browser sign-in requires deployment-owned Apple credentials.
+# Two independent switches. `enabled` is Sign in with Apple in a *browser* and
+# needs all of client_id, team_id, key_id and a private key below; turning it
+# on without them stops startup. For the iOS app alone, leave it false and set
+# native_enabled instead.
 # enabled = false
 # client_id = "com.example.axon.web"
 # team_id = "YOURTEAMID"
 # key_id = "YOURKEYID"
 # private_key_path = "/etc/axon/apple.p8" # owner-only permissions on Unix
-# Native verification is independent: no Services ID or private key required.
+# The iOS app's native Sign in with Apple: no Services ID or private key.
 # native_enabled = false
 # native_audiences = ["org.matrixaxon.axon"] # actual entitled app bundle ID
 # See docs/apple-oauth-native.md for owner binding and the challenge contract.

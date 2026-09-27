@@ -5,24 +5,34 @@ It does not ship native client UI, Apple authorization revocation, or account de
 
 ## Configuration and discovery
 
-Enable OAuth, set the externally selected Axon HTTPS base URL, register the native public client in `[[oauth.clients]]`, and configure:
+Enable OAuth, set the externally selected Axon HTTPS base URL, register the client in `[[oauth.clients]]`, and configure:
 
 ```toml
 [oauth]
 enabled = true
 external_base_url = "https://axon.example"
 
+# The packaged app's registration. Native Apple needs only a registered
+# client_id; the redirect URI is for the app's browser sign-in (Google,
+# Microsoft), which uses the same entry.
 [[oauth.clients]]
-client_id = "axon-native"
-redirect_uris = []
+client_id = "axon-desktop"
+redirect_uris = ["org.matrixaxon.axon:/oauth/callback"]
 
 [oauth.providers.apple]
-enabled = false
-native_enabled = true
+enabled = false          # browser sign-in; see below
+native_enabled = true    # the iOS app
 native_audiences = ["org.matrixaxon.axon"]
 ```
 
-Use the actual bundle ID of the app with the Sign in with Apple entitlement, not a Services ID.
+`enabled` and `native_enabled` switch on two different flows:
+
+- `native_enabled` is the iOS app's Sign in with Apple. The server only checks Apple's signature on the identity token against Apple's public keys, so it needs nothing but `native_audiences`.
+- `enabled` is Sign in with Apple **in a browser** (the web client, and `axon-server oauth bind`). The server exchanges codes with Apple itself, so it requires a Services ID, team ID, key ID and private key (see [the browser guide](apple-oauth-browser.md)). Setting `enabled = true` without them stops startup with `set exactly one of Apple private_key … or private_key_path`.
+
+For iOS-only Apple sign-in, leave `enabled = false`. Both can be on at once.
+
+Use the actual bundle ID of the app with the Sign in with Apple entitlement, not a Services ID. For the distributed app that is `org.matrixaxon.axon`, and the app identifies itself as `axon-desktop`.
 Native verification requires no team ID, key ID, private key, or browser callback registration.
 Browser sign-in remains independently configured with `enabled = true`.
 The native client must use the same selected Axon HTTPS instance throughout a flow and never forward credentials across redirects or server changes.
@@ -124,7 +134,8 @@ Store tests force a final-insert failure to check rollback, race legacy redempti
 Public-key tests use ephemeral signing fixtures, not real Apple credentials.
 Run the existing `scripts/smoke-gate.sh server` lane as a regression check; it is not native-device acceptance.
 
-Real Apple acceptance remains required with the subsequent native client: entitled device login, Hide My Email, repeat login with no profile object, cancellation, restart, refreshed Axon session, and App ID/Services ID grouping.
+Real Apple acceptance remains required with the subsequent native client: entitled device login, repeat login with no profile object, cancellation, restart, refreshed Axon session, and App ID/Services ID grouping.
+The native client requests no scopes, so Apple never offers Hide My Email to it; that check applies to the browser flow, which requests `email`.
 If Apple subjects differ between native and browser registrations, bind each explicitly; never repair it by email matching.
 
 ## Code review guide

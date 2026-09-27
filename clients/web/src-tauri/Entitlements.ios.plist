@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    The iOS app's entitlements. Unlike Info.ios.plist, Tauri does not merge
+    this file into anything: `tauri ios init` writes an empty
+    gen/apple/axon_iOS/axon_iOS.entitlements, and tauri.conf.json has no iOS
+    entitlements setting. `scripts/package-ios.sh` copies this file over the
+    generated one after every regeneration, and the dev loop needs the same
+    copy once after `tauri ios init` (see src-tauri/README.md).
+
+    Sign in with Apple (ADR 0054). Without it the build still compiles and
+    signs, and the failure appears only at run time: the Apple sheet never
+    opens and ASAuthorizationController reports error 1000 ("unknown"). The
+    App ID must have the capability enabled in the developer portal too;
+    automatic signing then puts it into the provisioning profile.
+
+    "Default" is the only value Apple defines.
+  -->
+  <key>com.apple.developer.applesignin</key>
+  <array>
+    <string>Default</string>
+  </array>
+</dict>
+</plist>

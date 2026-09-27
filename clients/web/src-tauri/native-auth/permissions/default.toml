@@ -1,0 +1,11 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Everything the shell's sign-in needs: ask what this platform supports, run Sign in with Apple, and keep Axon's own tokens in the Keychain."
+permissions = [
+  "allow-capabilities",
+  "allow-apple-sign-in",
+  "allow-secret-load",
+  "allow-secret-set",
+  "allow-secret-delete",
+]
