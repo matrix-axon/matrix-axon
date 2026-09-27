@@ -16,7 +16,7 @@ set -euo pipefail
 root=$(CDPATH="" cd -- "$(dirname "$0")/.." && pwd)
 
 usage() {
-	sed -n '2,14p' "$0" >&2
+	sed -n '2,13p' "$0" >&2
 }
 
 # cargo metadata, not a grep of Cargo.toml: it resolves version.workspace

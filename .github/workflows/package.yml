@@ -45,6 +45,12 @@ jobs:
           shellcheck packaging/package.sh packaging/homebrew/render-formula.sh packaging/homebrew/publish-tap.sh packaging/homebrew/render-formula-test.sh
           packaging/homebrew/render-formula-test.sh
 
+      # release-version-test.sh runs cargo metadata. Install the toolchain
+      # like every other job that calls cargo, rather than relying on
+      # whatever the runner image ships.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Release version script
         run: |
           shellcheck scripts/release-version.sh scripts/release-version-test.sh

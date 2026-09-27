@@ -58,15 +58,17 @@ Dry-run against `main` at the time of writing: release-plz found `v0.0.16` as ev
 
 GitHub starts no workflow for a tag or a PR created with the default `GITHUB_TOKEN`.
 With it, release-plz's tag would build nothing, and its release PR would get none of the required checks.
-Both jobs use `RELEASE_PLZ_TOKEN`, a fine-grained PAT on this repository with Contents and Pull requests read/write, and fail at their first step when it is missing.
+Both jobs use `RELEASE_PLZ_TOKEN`, a fine-grained PAT on this repository with Contents and Pull requests read/write, and neither runs when it is missing: they both need a `token` job that fails with an explicit error.
 A GitHub App would remove the dependency on one person's account; it is more setup and can replace the PAT later without changing anything else here.
 
 ### The first release
 
-The committed version is `0.1.0` and no `v0.1.0` tag exists.
-release-plz treats `0.1.0` as already bumped, so its first PR proposes `0.1.1`.
-To make `v0.1.0` the first release instead, push that tag by hand on the commit that merges this; the guard accepts it, since Cargo says `0.1.0`.
-After that, releases go through the release PR.
+The committed version was already `0.1.0`, with no `v0.1.0` tag, so release-plz would have treated it as already bumped and opened its first PR as `0.1.1`.
+`v0.1.0` was pushed by hand instead, on this change's own branch commit before merge; the guard passed it in `cross-build.yml` and `package.yml`, since Cargo says `0.1.0`.
+
+A squash merge leaves that tag outside `main`'s history.
+Simulated beforehand: with the branch squashed onto `main` and `v0.1.0` not an ancestor, release-plz still found `v0.1.0` by name as the last release, reported every crate up to date, and proposed `0.1.1` after one more `fix:` commit.
+So the first release PR appears after the next commit to `main`, and releases go through it from then on.
 
 ## Consequences
 
