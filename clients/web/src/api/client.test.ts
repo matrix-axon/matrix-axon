@@ -426,6 +426,40 @@ describe('the transport seam (ADR 0102 § 2)', () => {
   })
 
   /**
+   * The rebuilt response must still say where it came from. A caller checking
+   * `redirected` to spot a proxy, or `type` to diagnose CORS, would otherwise
+   * read constructor defaults on every `/v1` response (review on #487).
+   */
+  it('keeps url, redirected and type on the rebuilt response', async () => {
+    const injected: typeof globalThis.fetch = async () => {
+      const response = new Response('{"data":[]}', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+      // A plain `Response` cannot carry these, so the fixture sets them the
+      // way a real network response would have them.
+      Object.defineProperties(response, {
+        url: { value: `${BASE_URL}/v1/accounts/after-redirect` },
+        redirected: { value: true },
+        type: { value: 'cors' },
+      })
+      return response
+    }
+    const api = createApiClient(
+      stubAuth('tok-123'),
+      BASE_URL,
+      { fetch: injected },
+      5_000,
+    )
+
+    const { response } = await api.GET('/v1/accounts')
+
+    expect(response.url).toBe(`${BASE_URL}/v1/accounts/after-redirect`)
+    expect(response.redirected).toBe(true)
+    expect(response.type).toBe('cors')
+  })
+
+  /**
    * Reading the body means rebuilding the `Response`, and the constructor
    * throws on a body for these statuses, so a 204 must come through untouched.
    * The rebuild must also carry everything openapi-fetch reads.

@@ -195,11 +195,31 @@ async function fetchWithinDeadline(
     reader.cancel(error).catch(() => {})
     throw error
   }
-  return new Response(body, {
+  return rebuilt(response, body)
+}
+
+/**
+ * `response` with its body swapped for bytes already read.
+ *
+ * The constructor takes only status, status text and headers, and would leave
+ * `url` empty, `redirected` false and `type` `default` on every `/v1`
+ * response. Nothing reads them today, but a caller that one day checked
+ * `redirected` to spot a proxy, or `type` to diagnose CORS, would silently
+ * read defaults. So they are copied across as own properties, the way
+ * `tauri-plugin-http` already sets `url` on the responses it builds.
+ */
+function rebuilt(response: Response, body: Uint8Array<ArrayBuffer>): Response {
+  const copy = new Response(body, {
     status: response.status,
     statusText: response.statusText,
     headers: response.headers,
   })
+  Object.defineProperties(copy, {
+    url: { value: response.url },
+    redirected: { value: response.redirected },
+    type: { value: response.type },
+  })
+  return copy
 }
 
 /** Statuses a `Response` may not be constructed with a body for. */

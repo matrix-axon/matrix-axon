@@ -365,9 +365,38 @@ let timelineDelayMs = 0
  *
  * Every held response is kept, so that turning the stall off releases its
  * connection rather than leaving it to the next spec.
+ *
+ * The stall also turns itself off after `TIMELINE_STALL_EXPIRY_MS`, so that no
+ * spec's `afterEach` is load-bearing for every spec after it. A worker that
+ * crashes or is killed mid-test never runs its `afterEach`, and a stall left
+ * on would make the next spec that opens `ROOM_ID` hang with no failing
+ * assertion anywhere near the cause (review on #487). The expiry is longer
+ * than the one spec that sets the stall needs: the 20 s request deadline plus
+ * its slack.
  */
+const TIMELINE_STALL_EXPIRY_MS = 50_000
 let timelineStall = false
+let timelineStallExpiry = null
 const stalledResponses = new Set()
+
+function setTimelineStall(enabled) {
+  timelineStall = enabled
+  clearTimeout(timelineStallExpiry)
+  timelineStallExpiry = null
+  if (enabled) {
+    timelineStallExpiry = setTimeout(
+      () => setTimelineStall(false),
+      TIMELINE_STALL_EXPIRY_MS,
+    )
+    // Never the reason the mock outlives its run.
+    timelineStallExpiry.unref()
+    return
+  }
+  for (const held of stalledResponses) {
+    held.destroy()
+  }
+  stalledResponses.clear()
+}
 /**
  * How long the room-list GET sits on its answer, set via
  * `/__e2e/rooms-delay?hold=<name>`. Same literal-only holds as the timeline's,
@@ -1319,13 +1348,7 @@ const server = createServer((req, res) => {
     return json(res, { data: { rooms_delay_ms: roomsDelayMs } })
   }
   if (req.method === 'POST' && url.pathname === '/__e2e/timeline-stall') {
-    timelineStall = url.searchParams.get('enabled') === 'true'
-    if (!timelineStall) {
-      for (const held of stalledResponses) {
-        held.destroy()
-      }
-      stalledResponses.clear()
-    }
+    setTimelineStall(url.searchParams.get('enabled') === 'true')
     return json(res, { data: { timeline_stall: timelineStall } })
   }
   if (req.method === 'POST' && url.pathname === '/__e2e/timeline-delay') {
