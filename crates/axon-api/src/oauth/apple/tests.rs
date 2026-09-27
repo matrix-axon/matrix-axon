@@ -397,11 +397,11 @@ async fn transport_categories_survive_exchange_and_jwks_verification() {
             ),
     )
     .await;
-    // A bound, non-listening socket deterministically refuses connections
-    // without racing another test for a freshly released port.
-    let closed = tokio::net::TcpSocket::new_v4().unwrap();
-    closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let refused = format!("http://{}/PRIVATE_SENTINEL", closed.local_addr().unwrap());
+    // Port 0 fails at connect time on every platform, and involves no socket
+    // that another test could race for. A bound, non-listening socket is
+    // refused on Linux but silently dropped on macOS, where the attempt ran
+    // into the 250 ms timeout and was categorised `timeout` (#501).
+    let refused = "http://127.0.0.1:0/PRIVATE_SENTINEL".to_owned();
     let mut provider = provider();
     provider.http = reqwest::Client::builder()
         .no_proxy()
