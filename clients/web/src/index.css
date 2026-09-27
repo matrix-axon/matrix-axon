@@ -752,7 +752,15 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   /* Inline padding, as a variable so `.mobile-back-surface` can reach through
-     exactly this much of it. Phones narrow it below. */
+     exactly this much of it. Phones narrow it below.
+
+     Change `main`'s inline padding here, through this variable, and never
+     with a bare `padding`/`padding-inline` in a later rule: the swipe-back
+     surface (`.shell main .mobile-back-surface`, in the phone breakpoint)
+     cancels this value with a negative margin to reach the screen edge. A
+     padding that bypasses the variable leaves a dead strip at the edge again,
+     which no headless test shows — the layout spec "swipe-back surface
+     reaches the screen edge" is the one that would catch it. */
   --main-inline-pad: 1.5rem;
   padding: 1.5rem var(--main-inline-pad);
   /* The scroll container for Settings, Accounts, Invites and Licenses, and it
