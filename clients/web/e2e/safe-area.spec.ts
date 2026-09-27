@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { expectLive, ROOM_URL, signIn } from './helpers'
+import { expectRoomReady, ROOM_URL, signIn } from './helpers'
 
 /**
  * The safe-area form-factor matrix (ADR 0105).
@@ -213,7 +213,11 @@ for (const factor of FORM_FACTORS) {
     await applySafeAreas(page, factor.insets)
     await page.setViewportSize(factor.viewport)
     await page.goto(ROOM_URL)
-    await expectLive(page)
+    // Not `expectLive`: while the first page is in flight the room renders a
+    // bare "Loading messages…" paragraph in place of the flex-filling timeline,
+    // so the composer sits under it, hundreds of pixels above the edge this
+    // measures. The socket is routinely up before that page lands.
+    await expectRoomReady(page)
     await expect(page.getByRole('textbox', { name: /^Message/ })).toBeVisible()
 
     const geometry = await roomGeometry(page)

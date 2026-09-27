@@ -6,7 +6,7 @@ import {
   type Page,
   type TestInfo,
 } from '@playwright/test'
-import { LIVE_TIMEOUT_MS, RECONNECT_TIMEOUT_MS } from './helpers'
+import { expectLive, expectReconnected, expectReconnecting } from './helpers'
 
 const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111'
 const ROOM_ID = '!room:hs'
@@ -67,10 +67,7 @@ async function openRoom(context: BrowserContext) {
   await page.goto(ROOM_URL)
   // The connection indicator reaching "Live" proves the #238 handshake and the
   // LiveConnection wiring against a real socket.
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-    { timeout: LIVE_TIMEOUT_MS },
-  )
+  await expectLive(page)
   return page
 }
 
@@ -136,9 +133,7 @@ test('a dropped socket shows Reconnecting, then heals by gap-fill', async ({
   // Kill the socket rudely (no close frame) and refuse upgrades for a moment,
   // so the client cannot reconnect in time to receive what we send next.
   await request.post('/__e2e/drop-sockets?block_ms=1500')
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    /Reconnecting/,
-  )
+  await expectReconnecting(page)
 
   // Sent while the tab is disconnected: the broadcast reaches nobody, so this
   // event exists only in the room history. The bus is lossy by design.
@@ -150,10 +145,7 @@ test('a dropped socket shows Reconnecting, then heals by gap-fill', async ({
   // the room head — the only path by which this event can appear. The 1.5s
   // upgrade block guarantees the first attempt is refused, so recovery cannot
   // land before the second rung; the budget clears the fourth plus the gap-fill.
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-    { timeout: RECONNECT_TIMEOUT_MS },
-  )
+  await expectReconnected(page)
   await expect(page.getByText(missed)).toBeVisible()
 
   await context.close()

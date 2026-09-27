@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { ROOM_URL, signIn } from './helpers'
+import { expectLive, ROOM_URL, signIn } from './helpers'
 
 /**
  * Automatic refresh when a new build is deployed (ADR 0087).
@@ -121,9 +121,7 @@ test('a tab on the current build neither warns nor reloads', async ({
 }) => {
   await signIn(page)
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectLive(page)
 
   await page.evaluate(() => {
     window.__reloaded = true
@@ -142,9 +140,7 @@ test('a new build shows the banner while the user is looking', async ({
 }) => {
   await signIn(page)
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectLive(page)
 
   await stageDeploy(page, 'build-from-e2e')
   // Dropping every socket is what a deploy does to a client; the reconnect is
@@ -161,9 +157,7 @@ test('the banner reloads onto the served build when clicked', async ({
 }) => {
   await signIn(page)
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectLive(page)
 
   await stageDeploy(page, 'build-from-e2e')
   await page.request.post('/__e2e/drop-sockets')
@@ -176,9 +170,7 @@ test('the banner reloads onto the served build when clicked', async ({
   await clearDeploy(page)
   await page.getByRole('button', { name: 'Reload' }).click()
 
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectLive(page)
   await expect(
     page.getByText('A new version of Axon is available'),
   ).toHaveCount(0)
@@ -187,9 +179,7 @@ test('the banner reloads onto the served build when clicked', async ({
 test('a backgrounded tab reloads itself on return', async ({ page }) => {
   await signIn(page)
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectLive(page)
 
   await page.evaluate(() => {
     window.__reloaded = true
@@ -216,9 +206,7 @@ test('a manifest that never matches reloads exactly once', async ({ page }) => {
   })
 
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectLive(page)
   await returnAfterAwayExpectingReload(page, 90_000)
 
   // Give a loop time to show itself: a settling window *after* the permitted
@@ -227,9 +215,7 @@ test('a manifest that never matches reloads exactly once', async ({ page }) => {
 
   // The initial goto plus at most the one permitted reload.
   expect(navigations).toBeLessThanOrEqual(2)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
-    'Live',
-  )
+  await expectLive(page)
 })
 
 /**

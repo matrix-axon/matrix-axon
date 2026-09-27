@@ -119,7 +119,8 @@ jobs:
         run: pnpm exec playwright test --project=${{ matrix.project }} --fail-on-flaky-tests
 
       # The CI reporter is `github` (inline annotations), so the artifact worth
-      # keeping is the trace `retries: 1` captures on a first-attempt failure.
+      # keeping is the trace of the failing first attempt
+      # (`trace: 'retain-on-first-failure'` in playwright.config.ts).
       - uses: actions/upload-artifact@v7
         if: ${{ failure() }}
         with:

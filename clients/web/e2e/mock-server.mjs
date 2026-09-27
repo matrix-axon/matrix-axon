@@ -946,11 +946,42 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && /\/space\/parents$/.test(pathname)) {
     return json(res, { data: [] })
   }
+  // The Room Information panel's state reads (ADR 0084). Unhandled, each one
+  // rendered its section as "Could not load this section." in every run, so
+  // nothing could assert on the panel and its three stray alerts made an
+  // unscoped alert lookup ambiguous. The values describe the seeded room as
+  // the rest of the fixture does: encrypted, invite-only, nothing pinned, and
+  // neither tombstoned nor upgraded.
+  if (method === 'GET' && /\/rooms\/[^/]+\/info$/.test(pathname)) {
+    return json(res, {
+      data: {
+        encryption_algorithm: 'm.megolm.v1.aes-sha2',
+        join_rule: 'invite',
+        history_visibility: 'shared',
+        guest_access: 'forbidden',
+      },
+    })
+  }
+  if (method === 'GET' && /\/rooms\/[^/]+\/pinned$/.test(pathname)) {
+    return json(res, { data: [] })
+  }
+  if (method === 'GET' && /\/rooms\/[^/]+\/upgrade$/.test(pathname)) {
+    return json(res, { data: { tombstoned_to: null, upgraded_from: null } })
+  }
   if (method === 'GET' && /\/rooms\/[^/]+\/members$/.test(pathname)) {
     return json(res, { data: [] })
   }
   if (method === 'GET' && /\/rooms\/[^/]+\/threads$/.test(pathname)) {
     return json(res, { data: [] })
+  }
+  // The thread panel's own page. No seeded event has replies, so every thread
+  // a spec opens (`?thread=%24root` is the usual one) is empty; unhandled, the
+  // panel showed "unexpected server response" instead.
+  if (
+    method === 'GET' &&
+    /\/rooms\/[^/]+\/threads\/[^/]+\/timeline$/.test(pathname)
+  ) {
+    return json(res, { data: { events: [], next_cursor: null } })
   }
   if (method === 'GET' && /\/rooms\/[^/]+\/timeline$/.test(pathname)) {
     if (timelineDelayMs > 0) {
@@ -1629,6 +1660,47 @@ process.on('uncaughtException', (error) => {
 process.on('unhandledRejection', (error) => {
   console.error('mock backend: unhandled rejection', error)
 })
+
+/**
+ * Refuse a `dist/` built to talk to some other server (#286). Such a bundle
+ * never calls this mock: every spec then times out waiting for a socket that
+ * never connects, and only the browser console says why. The build records
+ * its `VITE_AXON_SERVER_URL` in `version.json` as `apiBase`. A same-origin
+ * base (the default, `null`) is fine, and so is one that resolves to this
+ * mock. An older `dist/` without the field cannot be checked, so it is served
+ * as before.
+ */
+async function assertDistTargetsThisMock() {
+  const origin = `http://127.0.0.1:${PORT}`
+  let apiBase
+  try {
+    ;({ apiBase } = JSON.parse(
+      await readFile(join(DIST, 'version.json'), 'utf8'),
+    ))
+  } catch {
+    return
+  }
+  if (typeof apiBase !== 'string') {
+    return
+  }
+  let target
+  try {
+    target = new URL(apiBase, origin).origin
+  } catch {
+    target = null
+  }
+  if (target === origin) {
+    return
+  }
+  console.error(
+    `mock backend: dist/ was built with VITE_AXON_SERVER_URL=${apiBase}, so ` +
+      'the app would call that server instead of this mock. Rebuild without ' +
+      'it: `pnpm build` (unset the variable, and check .env files).',
+  )
+  process.exit(1)
+}
+
+await assertDistTargetsThisMock()
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`mock axon backend on http://127.0.0.1:${PORT}`)
