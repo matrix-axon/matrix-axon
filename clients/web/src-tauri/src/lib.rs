@@ -333,6 +333,11 @@ fn read_dropped_file(
 /// Failure is never fatal. macOS returns `UnsupportedPlatform` by design — the
 /// `.app` declares `CFBundleURLTypes` and the OS reads it there — and Linux
 /// needs `xdg-mime`, which a minimal container may lack.
+///
+/// Android has nothing to claim: the plugin's Android `DeepLink` has no
+/// `register_all` at all (not even one returning `UnsupportedPlatform`, as on
+/// iOS), and the scheme is declared in the generated manifest's intent filter.
+#[cfg(not(target_os = "android"))]
 fn claim_deep_link_schemes<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if !cfg!(dev) {
         return;
@@ -344,7 +349,11 @@ fn claim_deep_link_schemes<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+#[cfg(target_os = "android")]
+fn claim_deep_link_schemes<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) {}
+
 /// Split out so the message is written once and the reason is stated.
+#[cfg(not(target_os = "android"))]
 fn log_scheme_registration(error: &tauri_plugin_deep_link::Error) {
     if matches!(error, tauri_plugin_deep_link::Error::UnsupportedPlatform) {
         // macOS: the bundle declares the scheme, so there is nothing to do and
