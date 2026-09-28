@@ -1,6 +1,6 @@
 # Native packages
 
-Debian and RPM packages via nFPM, and Homebrew formulas for `axon-server` and `axon-tui`.
+Debian and RPM packages via nFPM, Homebrew formulas for `axon-server` and `axon-tui`, and a Homebrew cask for the desktop app.
 Docker Compose remains the path that includes Postgres and the web client.
 `docs/self-hosting.md` is a separate docs change.
 
@@ -43,10 +43,14 @@ Remote Postgres: the package still installs; see `README.Debian` in the doc dire
 ## Homebrew
 
 The formula templates are `packaging/homebrew/axon-server.rb.tmpl` and `packaging/homebrew/axon-tui.rb.tmpl`.
-`packaging/homebrew/render-formula.sh` fills the version and the sha256 of the GitHub Release zips.
-On a stable `vX.Y.Z` tag, `cross-build.yml` publishes both formulas to `matrix-axon/homebrew-tap` in one commit, after the macOS and Linux zips are on the Release.
+The cask template is `packaging/homebrew/axon.rb.tmpl`.
+`packaging/homebrew/render-formula.sh` fills each formula from the release zips.
+`packaging/homebrew/render-cask.sh` fills the cask from `Axon_<version>_universal.dmg`.
+On a stable `vX.Y.Z` tag, `cross-build.yml` publishes both formulas and the cask to `matrix-axon/homebrew-tap` in one commit.
+The zips are already on the Release when that job starts.
 A manual run of that workflow can publish without building: set `homebrew_tag` to an existing stable tag and turn the platform builds off.
 It checksums the zips already on that release.
+The disk image is attached by `desktop-build.yml`, so the publish waits up to 20 minutes for it.
 `beta-*` and `alpha-*` tags are skipped: each formula is the stable release, and Homebrew cannot order a version like `beta-1` against `1.2.3`.
 A tag older than the formula already in the tap is skipped too, so re-running an old tag's workflow or pushing a backport tag cannot downgrade users.
 Tap publishes share one concurrency group, so two tags pushed together do not race to push the tap.
@@ -54,11 +58,16 @@ Tap publishes share one concurrency group, so two tags pushed together do not ra
 ```sh
 brew install matrix-axon/tap/axon-server
 brew install matrix-axon/tap/axon-tui
+brew install --cask matrix-axon/tap/axon
 ```
 
 `axon-tui` is the terminal client.
 It does not install or start `axon-server`.
 Its config is `~/.config/axon-tui/config.toml` on macOS and on Linux.
+
+The `axon` cask is the desktop app.
+It does not install or start `axon-server`.
+On first launch the app asks for the URL of a server you already have.
 
 `matrix-axon/tap` is the repository `matrix-axon/homebrew-tap`.
 Create that public repository once before the first tag that should update it, and store a fine-grained PAT as the `HOMEBREW_TAP_TOKEN` secret on `matrix-axon/matrix-axon` (contents write on the tap repository only).

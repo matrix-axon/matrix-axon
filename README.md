@@ -23,10 +23,12 @@ And because Axon can be self-hosted on your own hardware or cloud instance rathe
 - [Full client/server Docker stack](#user-quick-start-with-docker)
 - Get an iOS TestFlight beta build by posting in [#axon-developer:bostoncoop.net](https://matrix.to/#/%23axon-developer%3Abostoncoop.net)
 - Android build coming soon
-- axon-server for MacOS via homebrew:
+- Server, terminal client, and desktop app for MacOS via homebrew:
 
 ```sh
 brew install matrix-axon/tap/axon-server
+brew install matrix-axon/tap/axon-tui
+brew install --cask matrix-axon/tap/axon
 ```
 
 ## See it

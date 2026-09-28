@@ -77,6 +77,18 @@ if ! command -v ruby >/dev/null 2>&1; then
 fi
 
 ruby -c "$out"
+cask=$work/axon.rb
+"$root/packaging/homebrew/render-cask.sh" \
+	--tag v1.2.3 \
+	--sha "$sha_silicon" \
+	--out "$cask"
+ruby -c "$cask"
+grep -Fq "releases/download/v1.2.3/Axon_1.2.3_universal.dmg" "$cask"
+grep -Fq 'app "Axon.app"' "$cask"
+if grep -q '@@' "$cask"; then
+	echo "placeholder left in rendered cask" >&2
+	exit 1
+fi
 
 tui=$work/axon-tui.rb
 "$render" \
@@ -284,7 +296,8 @@ done
 mkdir -p "$work/zips"
 for name in \
 	axon-server-macos-silicon.zip axon-server-macos-intel.zip axon-server-linux.zip \
-	axon-tui-macos-silicon.zip axon-tui-macos-intel.zip axon-tui-linux.zip; do
+	axon-tui-macos-silicon.zip axon-tui-macos-intel.zip axon-tui-linux.zip \
+	Axon_1.2.3_universal.dmg Axon_1.2.10_universal.dmg; do
 	printf '%s' "$name" >"$work/zips/$name"
 done
 git init -q -b main "$work/tap"
@@ -292,6 +305,13 @@ TAG=v1.2.3 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 grep -q 'version "1.2.3"' "$work/tap/Formula/axon-server.rb"
 grep -q 'version "1.2.3"' "$work/tap/Formula/axon-tui.rb"
 grep -Fq 'axon-tui-macos-silicon.zip' "$work/tap/Formula/axon-tui.rb"
+grep -q 'version "1.2.3"' "$work/tap/Casks/axon.rb"
+grep -Fq 'Axon_1.2.3_universal.dmg' "$work/tap/Casks/axon.rb"
+grep -Fq 'app "Axon.app"' "$work/tap/Casks/axon.rb"
+if grep -Eq 'depends_on' "$work/tap/Casks/axon.rb"; then
+	echo "desktop cask depends on another package" >&2
+	exit 1
+fi
 test -f "$work/tap/README.md"
 commits=$(git -C "$work/tap" rev-list --count HEAD)
 if [ "$commits" -ne 1 ]; then
@@ -340,6 +360,7 @@ TAG=v1.2.2 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 TAG=v1.1.10 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 grep -q 'version "1.2.3"' "$work/tap/Formula/axon-server.rb"
 grep -q 'version "1.2.3"' "$work/tap/Formula/axon-tui.rb"
+grep -q 'version "1.2.3"' "$work/tap/Casks/axon.rb"
 commits=$(git -C "$work/tap" rev-list --count HEAD)
 if [ "$commits" -ne 3 ]; then
 	echo "an older tag changed the tap" >&2
@@ -350,6 +371,23 @@ fi
 TAG=v1.2.10 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 grep -q 'version "1.2.10"' "$work/tap/Formula/axon-server.rb"
 grep -q 'version "1.2.10"' "$work/tap/Formula/axon-tui.rb"
+grep -q 'version "1.2.10"' "$work/tap/Casks/axon.rb"
+grep -Fq 'Axon_1.2.10_universal.dmg' "$work/tap/Casks/axon.rb"
+
+# A newer tag with no disk image fails before it changes the tap.
+if TAG=v9.9.9 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap" \
+	>"$work/rejected.out" 2>"$work/rejected.err"; then
+	echo "missing disk image should fail the publish" >&2
+	exit 1
+fi
+if ! grep -q 'missing disk image: .*/Axon_9.9.9_universal.dmg' "$work/rejected.err"; then
+	echo "missing disk image did not name the file" >&2
+	cat "$work/rejected.err" >&2
+	exit 1
+fi
+grep -q 'version "1.2.10"' "$work/tap/Formula/axon-server.rb"
+grep -q 'version "1.2.10"' "$work/tap/Formula/axon-tui.rb"
+grep -q 'version "1.2.10"' "$work/tap/Casks/axon.rb"
 
 # A dry run downloads and clones nothing, so it needs both directories.
 reject env TAG=v1.2.3 "$publish" --dry-run
