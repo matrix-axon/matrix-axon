@@ -1352,6 +1352,48 @@ const INVITES_RESWEEP: Duration = Duration::from_secs(300);
 /// unsolicited invites, not a 1755-room joined list.
 const INVITES_SWEEP_CONCURRENCY: usize = 8;
 
+/// matrix-sdk's read-receipt position for a room: the receipt its counts are
+/// anchored on, and the receipts it could not match to an event.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ReceiptState {
+    active: Option<String>,
+    pending: Vec<String>,
+}
+
+impl ReceiptState {
+    /// Every receipt matrix-sdk knows about has been matched to an event.
+    fn settled(&self) -> bool {
+        self.pending.is_empty()
+    }
+}
+
+/// Whether the unmatched receipts in `receipts` are all *stale*: each names an
+/// event axon holds that precedes the active receipt's event, so none can be
+/// the room's real read position and the counts are anchored on the active
+/// receipt, not on a fallback (issue #507). Anything unprovable — no active
+/// receipt, an event axon never stored, or a store error — answers `false`, so
+/// the caller keeps holding.
+async fn pending_receipts_stale(
+    store: &Store,
+    account_id: Uuid,
+    room_id: &RoomId,
+    receipts: &ReceiptState,
+) -> bool {
+    let Some(active) = receipts.active.as_deref() else {
+        return false;
+    };
+    match store
+        .events_precede(account_id, room_id.as_str(), active, &receipts.pending)
+        .await
+    {
+        Ok(stale) => stale,
+        Err(err) => {
+            tracing::warn!(%account_id, %room_id, error = %err, "failed to compare pending read receipts");
+            false
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UnreadCountsSnapshot {
     notification: u64,
@@ -1378,11 +1420,26 @@ impl UnreadCountsSnapshot {
     /// the chunk it settles for an older one, then counts everything after it.
     /// That is how a silent room reports fresh unread notifications (see
     /// [`capture_unread_counts`]).
-    fn from_room(room: &Room) -> (Self, bool) {
+    ///
+    /// Not every unmatched receipt means a fallback anchor, though: a receipt
+    /// naming an event *older* than the active one also sits in `pending`
+    /// forever once that event has left the chunk (issue #507). The returned
+    /// [`ReceiptState`] carries the ids needed to tell the two apart.
+    fn from_room(room: &Room) -> (Self, ReceiptState) {
         let read_receipts = room.read_receipts();
         (
             Self::new(read_receipts.num_notifications, read_receipts.num_mentions),
-            read_receipts.pending.is_empty(),
+            ReceiptState {
+                active: read_receipts
+                    .latest_active
+                    .as_ref()
+                    .map(|r| r.event_id.to_string()),
+                pending: read_receipts
+                    .pending
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            },
         )
     }
 
@@ -2163,7 +2220,7 @@ async fn capture_unread_counts(
     if room.state() != RoomState::Joined {
         return;
     }
-    let (sdk_snapshot, receipts_settled) = UnreadCountsSnapshot::from_room(room);
+    let (sdk_snapshot, receipts) = UnreadCountsSnapshot::from_room(room);
     let room_id = room.room_id();
     // A room that can never again be corrected by reading it is pinned to zero
     // rather than skipped (ADR 0090): skipping would leave whatever wrong value
@@ -2216,15 +2273,33 @@ async fn capture_unread_counts(
     // afterwards, so the true value lands within one sweep. Suppressing an
     // increase leaves both the cache and the row untouched, which is what makes
     // that later re-evaluation see a diff and write it.
-    if suppression.is_none() && !receipts_settled && unread_counts_increased(cached, snapshot) {
-        tracing::debug!(
+    //
+    // `pending` does not always drain, though. A receipt naming an event older
+    // than the active one — typically a stale `thread_id: "main"` receipt from
+    // another client — stays unmatched for good once its event is out of the
+    // chunk, and would hold every increase in the room forever (issue #507).
+    // Such a receipt cannot be the read position, so it does not make the
+    // counts a fallback; only a pending receipt that might be *newer* does.
+    if suppression.is_none() && !receipts.settled() && unread_counts_increased(cached, snapshot) {
+        if !pending_receipts_stale(store, account_id, room_id, &receipts).await {
+            tracing::debug!(
+                %account_id,
+                %room_id,
+                notification_count = snapshot.notification,
+                highlight_count = snapshot.highlight,
+                pending = ?receipts.pending,
+                "holding unread-count increase: matrix-sdk has unmatched read receipts for this room"
+            );
+            return;
+        }
+        tracing::info!(
             %account_id,
             %room_id,
             notification_count = snapshot.notification,
-            highlight_count = snapshot.highlight,
-            "holding unread-count increase: matrix-sdk has unmatched read receipts for this room"
+            active = ?receipts.active,
+            pending = ?receipts.pending,
+            "releasing unread-count increase: every unmatched read receipt precedes the active one"
         );
-        return;
     }
     // matrix-sdk's counts are `u64`; Postgres has no unsigned type, so narrow
     // at this boundary via the shared helper, and derive the live frame's
