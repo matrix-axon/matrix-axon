@@ -1,5 +1,6 @@
 import { render } from 'preact'
 import './index.css'
+import { installAbortSignalAny } from './abort-signal-any.ts'
 import { AppRoot } from './app-root.tsx'
 import { browserPlatform, isTauriRuntime } from './platform/index.ts'
 import { BUILD_INFO } from './build-info.ts'
@@ -9,6 +10,9 @@ import {
   initReloadGuard,
   reloadOnce,
 } from './reload.ts'
+
+// Before anything composes a signal: the first request does, on the first paint.
+installAbortSignalAny(AbortSignal)
 
 const reloadEnv = browserReloadEnvironment()
 
