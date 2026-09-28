@@ -268,6 +268,49 @@ test('the room list survives a room switch, filter and all', async ({
   await expect(page.getByLabel('Filter by name')).toHaveValue('room')
 })
 
+/**
+ * While the room's first page is in flight, "Loading messages…" stands in for
+ * the timeline, and the composer must already be on the bottom edge rather
+ * than parked under the placeholder until the page lands (#509). The page is
+ * held with a route that releases only after the measurement, so the loading
+ * state cannot end mid-test, and the phone width is covered because that is
+ * where it was seen.
+ */
+for (const viewport of [
+  { width: 390, height: 844 },
+  { width: 1400, height: 900 },
+]) {
+  test(`the composer holds the bottom edge while the first page loads: ${viewport.width}px`, async ({
+    page,
+  }) => {
+    let release = () => {}
+    const released = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await page.route(/\/rooms\/[^/]+\/timeline(\?|$)/, async (route) => {
+      await released
+      await route.continue().catch(() => {})
+    })
+    await signIn(page)
+    await page.setViewportSize(viewport)
+    await page.goto(ROOM_URL)
+    await expect(page.getByText('Loading messages…')).toBeVisible()
+
+    const gap = await page.evaluate(() => {
+      const stream = document.querySelector('.room-stream')!
+      const composer = document.querySelector('.room-stream > .composer')!
+      return (
+        stream.getBoundingClientRect().bottom -
+        composer.getBoundingClientRect().bottom
+      )
+    })
+    expect(gap).toBeLessThanOrEqual(1)
+
+    release()
+    await expectRoomReady(page)
+  })
+}
+
 test('wide: the thread is a third column that shrinks the timeline', async ({
   page,
 }) => {

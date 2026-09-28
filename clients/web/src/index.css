@@ -2026,6 +2026,15 @@ button.pin[aria-pressed='true'] {
   color: var(--accent);
 }
 
+/* Stands in for `.timeline` until the first page lands, so it takes the same
+   `flex: 1` share of `.room-stream`. As a bare paragraph it was only as tall as
+   its text, which left the sticky composer directly under it, near the top of
+   the pane, until the page arrived and the timeline pushed it down (#509). */
+.timeline-loading {
+  flex: 1;
+  min-height: 0;
+}
+
 /* The message scroller — a *nested* scroll container inside `main`, and the
    element that actually holds the timeline, so it is what a phone scrolls. Its
    `overflow-y: auto` silently made `overflow-x` compute to `auto` too, so it
