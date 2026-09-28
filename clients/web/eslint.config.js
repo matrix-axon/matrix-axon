@@ -46,6 +46,16 @@ export default tseslint.config(
     rules: { 'no-console': 'off' },
   },
   {
+    // Scripts the Android shell injects into the WebView (`src-tauri/android/`,
+    // ADR 0105). They are plain JavaScript, not TypeScript, and run in the page,
+    // so they need the browser globals the `**/*.{ts,tsx}` block above grants
+    // only to TypeScript.
+    files: ['src-tauri/android/**/*.js'],
+    languageOptions: {
+      globals: globals.browser,
+    },
+  },
+  {
     // The e2e lane, its config/mock, and local helper scripts run in Node, not
     // the browser.
     files: ['e2e/**', 'playwright.config.ts', 'scripts/**'],
