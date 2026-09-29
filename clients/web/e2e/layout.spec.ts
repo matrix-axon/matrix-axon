@@ -1220,6 +1220,9 @@ test('narrow: message actions fit as icon buttons', async ({ page }) => {
 
   const row = page.locator('.event-row', { hasText: body }).last()
   await expect(row).toBeVisible()
+  // A pending echo already shows as this row but carries no action bar, so a
+  // tap before the send lands opens nothing.
+  await expectSendsSettled(page)
   await expect(row.getByRole('button', { name: 'Reply' })).toHaveCount(0)
   await tapMessageBody(row.locator('.event-body'))
 
