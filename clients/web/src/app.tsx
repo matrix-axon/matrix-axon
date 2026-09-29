@@ -296,11 +296,14 @@ function useVisualViewportShell(settings: AppServices['settings']): void {
       root.style.removeProperty('--app-viewport-left')
       root.style.removeProperty('--app-viewport-width')
       root.style.removeProperty('--app-viewport-height')
+      delete root.dataset.keyboard
     }
     if (viewport == null) {
       clear()
       return
     }
+    /** The visual viewport's height with no keyboard, at its current width. */
+    let resting: { width: number; height: number } | null = null
     const update = () => {
       // A short visual viewport is only legitimate while the keyboard is up or
       // the page is pinch-zoomed. When neither holds, the reading is stale:
@@ -330,6 +333,38 @@ function useVisualViewportShell(settings: AppServices['settings']): void {
       root.style.setProperty('--app-viewport-left', `${viewport.offsetLeft}px`)
       root.style.setProperty('--app-viewport-width', `${viewport.width}px`)
       root.style.setProperty('--app-viewport-height', `${viewport.height}px`)
+      // With the soft keyboard up the shell ends at the keyboard, which covers
+      // the home indicator, so the bottom inset has nothing left to clear.
+      // WebKit does not zero `safe-area-inset-bottom` for it: measured in the
+      // shell on an iPhone 18 Pro Max, the inset read 34px throughout, and
+      // the composer floated that far above the keyboard. `index.css` zeroes
+      // `--safe-bottom` under this flag instead.
+      //
+      // The keyboard is judged against the tallest height seen at this width,
+      // not `innerHeight`: WebKit shrinks the layout viewport to match about a
+      // frame after the keyboard lands (`vvH=541 innerH=541`), so
+      // `innerHeight` loses sight of it. The keyboard and pinch zoom only ever
+      // make the visual viewport shorter, so the tallest reading is the one
+      // with neither.
+      //
+      // A new width (a rotation, an iPad window resize) starts again, seeded
+      // from the screen rather than from its own first reading: that reading
+      // can already be keyboard-short — rotating mid-typing — and a seed that
+      // low would never see the keyboard at that width at all.
+      const width = Math.round(viewport.width)
+      if (resting === null || resting.width !== width) {
+        resting = { width, height: screenHeightAcross(width) }
+      }
+      resting.height = Math.max(
+        resting.height,
+        window.innerHeight,
+        viewport.height,
+      )
+      if (isSoftKeyboardUp(viewport, resting.height)) {
+        root.dataset.keyboard = 'open'
+      } else {
+        delete root.dataset.keyboard
+      }
     }
     // The keyboard leaves over about a frame, and a blur that comes from the
     // focused node being removed reports the pre-dismissal size, so re-measure
@@ -411,6 +446,45 @@ function isViewportHeightStale(viewport: VisualViewport): boolean {
     typeof viewport.scale === 'number' &&
     viewport.scale <= 1 + VIEWPORT_ZOOM_EPSILON &&
     viewport.height < window.innerHeight - VIEWPORT_SHRINK_EPSILON
+  )
+}
+
+/**
+ * How far the visual viewport must shrink before it counts as a soft keyboard
+ * rather than a hardware keyboard's shortcut bar, which leaves the home
+ * indicator exposed (px).
+ */
+const SOFT_KEYBOARD_MIN_PX = 120
+
+/**
+ * The screen's extent along the vertical axis for a viewport `width` wide.
+ * iOS reports `screen` in portrait whatever the orientation, so this is the
+ * side the width is not. `0` where the screen is not reported (jsdom), which
+ * leaves the resting height to the viewport's own readings.
+ */
+function screenHeightAcross(width: number): number {
+  const { width: screenWidth, height: screenHeight } = window.screen ?? {
+    width: 0,
+    height: 0,
+  }
+  return Math.abs(width - screenWidth) <= Math.abs(width - screenHeight)
+    ? screenHeight
+    : screenWidth
+}
+
+/**
+ * Whether the soft keyboard is covering the bottom of the screen, given the
+ * height the viewport has with no keyboard at all.
+ */
+function isSoftKeyboardUp(
+  viewport: VisualViewport,
+  restingHeight: number,
+): boolean {
+  return (
+    isEditableFocused() &&
+    (typeof viewport.scale !== 'number' ||
+      viewport.scale <= 1 + VIEWPORT_ZOOM_EPSILON) &&
+    viewport.height < restingHeight - SOFT_KEYBOARD_MIN_PX
   )
 }
 

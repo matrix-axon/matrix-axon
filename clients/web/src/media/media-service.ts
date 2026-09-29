@@ -504,10 +504,20 @@ export function createMediaService(deps: {
         })
         if (res.ok) {
           const raw = await res.blob()
+          // The shell's fetch (`@tauri-apps/plugin-http`) builds its
+          // `Response` without headers and attaches them afterwards, so
+          // `blob()` comes back untyped though `Content-Type` is readable.
+          // Untyped, an image is only half there: WebKit's long-press Copy
+          // put the `blob:` URL on the iOS clipboard instead of the picture.
+          const type =
+            options?.contentType ??
+            (raw.type === ''
+              ? (res.headers.get('content-type') ?? undefined)
+              : undefined)
           const blob =
-            options?.contentType === undefined
+            type === undefined || type === raw.type
               ? raw
-              : new Blob([raw], { type: options.contentType })
+              : new Blob([raw], { type })
           return { ok: true, blob, format: await sniffBlob(blob) }
         }
         if (res.status === 401) {
