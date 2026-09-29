@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createApiClient } from '../api/client'
 import { memoryStorage } from '../test/memory-storage'
 import { cacheNamespace, createMemoryCacheStore } from './cache-store'
-import { createRoomListCache } from './room-list-cache'
+import { createRoomListCache, type RoomListCache } from './room-list-cache'
 import type { RoomDto } from './room-list'
 import { createRoomsStore } from './rooms'
 
@@ -90,6 +90,27 @@ const waitForRows = async (store: { rooms: { value: unknown[] } }) => {
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
   throw new Error('timed out waiting for the cache restore')
+}
+
+/**
+ * Wait for a write-back to land, then return what the cache holds. The write
+ * is fire-and-forget (`RoomListCache.write` returns `void`), so a settled
+ * `refresh()` says nothing about the record yet. `until` names the record the
+ * test expects, not merely "a record": where a write *replaces* one, the old
+ * record is readable the whole time, so waiting for any record would return it
+ * (#285). On timeout this returns whatever is there, so the caller's assertion
+ * reports the actual mismatch instead of a bare timeout.
+ */
+const waitForCached = async (
+  roomList: RoomListCache,
+  until: (rooms: readonly RoomDto[] | undefined) => boolean,
+) => {
+  for (let i = 0; i < 200; i += 1) {
+    const rooms = await roomList.read()
+    if (until(rooms)) return rooms
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  return roomList.read()
 }
 
 describe('room-list cache', () => {
@@ -333,9 +354,8 @@ describe('room-list cache', () => {
     await settle()
     await store.refresh()
     expect(store.rooms.value.map((room) => room.room_id)).toEqual(['!ops:hs'])
-    expect((await roomList.read())?.map((room) => room.room_id)).toEqual([
-      '!ops:hs',
-    ])
+    const cached = await waitForCached(roomList, (rooms) => rooms?.length === 1)
+    expect(cached?.map((room) => room.room_id)).toEqual(['!ops:hs'])
   })
 
   it('does not let a late restore land on top of a settled refresh', async () => {
