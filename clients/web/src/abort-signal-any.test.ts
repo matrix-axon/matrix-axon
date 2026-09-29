@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { installAbortSignalAny } from './abort-signal-any'
 
 const native = AbortSignal.any
@@ -69,5 +69,41 @@ describe('installAbortSignalAny', () => {
     withoutNative()
     installAbortSignalAny(AbortSignal)
     expect(AbortSignal.any([]).aborted).toBe(false)
+  })
+
+  // Review feedback on the polyfill: a combined signal that is never aborted
+  // leaves a listener on each source. True until the deadline fires, and both
+  // call sites (`boundedSignal`, `withDeadline`) always include one, so the
+  // listener count is bounded by the requests inside one deadline window rather
+  // than growing for the life of the session. This pins both halves.
+  describe('listener lifetime', () => {
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+    it('holds a listener on a long-lived source until the combined signal aborts', () => {
+      withoutNative()
+      installAbortSignalAny(AbortSignal)
+      const longLived = new AbortController()
+      const add = vi.spyOn(longLived.signal, 'addEventListener')
+      const remove = vi.spyOn(longLived.signal, 'removeEventListener')
+      for (let i = 0; i < 50; i++) {
+        AbortSignal.any([longLived.signal, AbortSignal.timeout(20_000)])
+      }
+      expect(add).toHaveBeenCalledTimes(50)
+      expect(remove).not.toHaveBeenCalled()
+    })
+
+    it('releases every one of them when the bounding timeout fires', async () => {
+      withoutNative()
+      installAbortSignalAny(AbortSignal)
+      const longLived = new AbortController()
+      const add = vi.spyOn(longLived.signal, 'addEventListener')
+      const remove = vi.spyOn(longLived.signal, 'removeEventListener')
+      for (let i = 0; i < 50; i++) {
+        AbortSignal.any([longLived.signal, AbortSignal.timeout(20)])
+      }
+      await sleep(80)
+      expect(add).toHaveBeenCalledTimes(50)
+      expect(remove).toHaveBeenCalledTimes(50)
+    })
   })
 })
