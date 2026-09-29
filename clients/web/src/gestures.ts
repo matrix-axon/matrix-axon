@@ -7,12 +7,29 @@
  * visibly cancel back into the current pane.
  */
 
+import { isTauriRuntime } from './platform'
+
 /** Minimum horizontal travel before a message or media swipe counts. */
 export const SWIPE_MIN_X = 72
 /** Minimum horizontal travel before an interactive back swipe completes. */
 export const SWIPE_BACK_MIN_X = 48
 /** Maximum vertical drift a horizontal swipe may accumulate. */
 export const SWIPE_MAX_Y = 64
+/**
+ * How much of its horizontal travel a back swipe may drift vertically, once
+ * that exceeds `SWIPE_MAX_Y`.
+ *
+ * A thumb swiping the width of a phone from its edge travels an arc, not a
+ * line. Measured on an iPhone 18 Pro Max: `dx=390 dy=82` from x=33, plainly
+ * sideways and refused by the fixed cap. Back swipes only — message actions
+ * and media paging keep the fixed cap, where a short diagonal is ambiguous.
+ */
+export const SWIPE_BACK_DRIFT_RATIO = 0.3
+
+/** The vertical drift a back swipe of `dx` pixels may carry. */
+export function swipeBackMaxY(dx: number): number {
+  return Math.max(SWIPE_MAX_Y, dx * SWIPE_BACK_DRIFT_RATIO)
+}
 /** How much more horizontal than vertical the travel must be. */
 export const SWIPE_AXIS_RATIO = 1.4
 /**
@@ -40,8 +57,49 @@ export const SWIPE_MIN_Y = 96
  * This applies to the lightbox too. The recognizer is live over a fullscreen
  * overlay — being on top in z-order does not take a gesture away from UIKit —
  * so the viewer declines the same band rather than fighting for it.
+ *
+ * Read it through `nativeBackEdgePx()`, not directly: the band exists only
+ * where that recognizer does.
  */
 export const NATIVE_BACK_EDGE_PX = 30
+
+/**
+ * The left-edge band to decline, which is zero in the native shell.
+ *
+ * wry creates the shell's WKWebView with `allowsBackForwardNavigationGestures`
+ * off, so there is no browser swipe-back to cede the band to. Declining it
+ * there left the band with no owner at all: an edge swipe did nothing
+ * (ADR 0075, "The native shell").
+ */
+export function nativeBackEdgePx(): number {
+  return isTauriRuntime() ? 0 : NATIVE_BACK_EDGE_PX
+}
+
+/**
+ * Which way a drag has committed, from its travel so far — `null` while it is
+ * still inside the decision threshold on both axes. Horizontal only when the
+ * sideways travel is `SWIPE_AXIS_RATIO` times the vertical.
+ *
+ * The one place this is decided. The message swipe and the room's swipe-back
+ * each call it from their pointer or touch handlers, and the touch handlers
+ * use it to claim the gesture from native scrolling on the very move that
+ * locks it; if the handlers decided separately, a tuning change to one would
+ * leave the others claiming a different set of gestures than they act on.
+ */
+export function swipeLock(
+  dx: number,
+  dy: number,
+): 'left' | 'right' | 'vertical' | null {
+  const absX = Math.abs(dx)
+  const absY = Math.abs(dy)
+  if (absX < SWIPE_DECISION_THRESHOLD && absY < SWIPE_DECISION_THRESHOLD) {
+    return null
+  }
+  if (absX >= absY * SWIPE_AXIS_RATIO) {
+    return dx < 0 ? 'left' : 'right'
+  }
+  return 'vertical'
+}
 
 export interface SwipeStart {
   x: number
@@ -54,6 +112,29 @@ export function isGestureControlTarget(target: EventTarget | null): boolean {
     target instanceof Element &&
     target.closest(
       'a, button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="textbox"], emoji-picker',
+    ) !== null
+  )
+}
+
+/**
+ * Whether a back swipe must leave a touch alone because of where it started.
+ *
+ * Narrower than `isGestureControlTarget`. A link, a button or an avatar only
+ * needs a *tap*, and a drag that has travelled far enough to lock as a swipe
+ * is not one — WebKit does not synthesise a click after it. Declining those
+ * cost real swipes: an on-device trace showed two of four failed back swipes
+ * began on an avatar and a timestamp link.
+ *
+ * What stays declined is anything that uses a horizontal drag itself: text
+ * entry (caret placement and selection), sliders and native media controls
+ * (scrubbing), and the emoji picker. Horizontal scrollers are handled
+ * separately by `isHorizontallyScrollable`.
+ */
+export function isSwipeBackBlockedTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    target.closest(
+      'input, textarea, select, [contenteditable="true"], [role="textbox"], [role="slider"], audio, video, emoji-picker',
     ) !== null
   )
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Fill Formula/axon-server.rb from the GitHub Release zips and push it to
-# matrix-axon/homebrew-tap.
+# Fill Formula/axon-server.rb and Formula/axon-tui.rb from the GitHub
+# Release zips and push them to matrix-axon/homebrew-tap in one commit.
 #
 #   TAG=v0.1.0 TAP_TOKEN=... packaging/homebrew/publish-tap.sh
 #
@@ -121,9 +121,9 @@ sha256_file() {
 	fi
 }
 
-assets="axon-server-macos-silicon.zip axon-server-macos-intel.zip axon-server-linux.zip"
+assets="axon-server-macos-silicon.zip axon-server-macos-intel.zip axon-server-linux.zip axon-tui-macos-silicon.zip axon-tui-macos-intel.zip axon-tui-linux.zip"
 
-# One download of all three zips per attempt, so the retry backoff is paid
+# One download of every zip per attempt, so the retry backoff is paid
 # once rather than once per asset.
 download_assets() {
 	dest=$1
@@ -177,17 +177,24 @@ for name in $assets; do
 	fi
 done
 
-rendered=$work/axon-server.rb
-"$root/packaging/homebrew/render-formula.sh" \
-	--tag "$TAG" \
-	--sha-macos-silicon "$(sha256_file "$zips/axon-server-macos-silicon.zip")" \
-	--sha-macos-intel "$(sha256_file "$zips/axon-server-macos-intel.zip")" \
-	--sha-linux-x86_64 "$(sha256_file "$zips/axon-server-linux.zip")" \
-	--out "$rendered"
+render_formula() {
+	formula=$1
+	"$root/packaging/homebrew/render-formula.sh" \
+		--tag "$TAG" \
+		--template "$root/packaging/homebrew/${formula}.rb.tmpl" \
+		--sha-macos-silicon "$(sha256_file "$zips/${formula}-macos-silicon.zip")" \
+		--sha-macos-intel "$(sha256_file "$zips/${formula}-macos-intel.zip")" \
+		--sha-linux-x86_64 "$(sha256_file "$zips/${formula}-linux.zip")" \
+		--out "$work/${formula}.rb"
+}
 
-version=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$rendered")
-if [ -z "$version" ]; then
-	echo "rendered formula has no version" >&2
+render_formula axon-server
+render_formula axon-tui
+
+version=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$work/axon-server.rb")
+tui_version=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$work/axon-tui.rb")
+if [ -z "$version" ] || [ "$version" != "$tui_version" ]; then
+	echo "rendered formulas disagree on version ('${version}' vs '${tui_version}')" >&2
 	exit 1
 fi
 
@@ -205,22 +212,26 @@ if [ ! -d "$tap_dir/.git" ]; then
 	exit 1
 fi
 
-current=
-if [ -f "$tap_dir/Formula/axon-server.rb" ]; then
-	current=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$tap_dir/Formula/axon-server.rb")
-fi
 # A non-numeric current version (a beta formula from before tags were
-# filtered) is replaced, not compared.
-if printf '%s' "$current" | grep -Eq '^[0-9]+(\.[0-9]+)+$' &&
-	version_lt "$version" "$current"; then
-	echo "skipping $TAG: the tap already has axon-server $current, which is newer than $version"
-	exit 0
-fi
+# filtered) is replaced, not compared. Either formula being newer skips
+# the whole commit, so one tag cannot move the two formulas apart.
+for formula in axon-server axon-tui; do
+	current=
+	if [ -f "$tap_dir/Formula/${formula}.rb" ]; then
+		current=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$tap_dir/Formula/${formula}.rb")
+	fi
+	if printf '%s' "$current" | grep -Eq '^[0-9]+(\.[0-9]+)+$' &&
+		version_lt "$version" "$current"; then
+		echo "skipping $TAG: the tap already has ${formula} ${current}, which is newer than ${version}"
+		exit 0
+	fi
+done
 
 mkdir -p "$tap_dir/Formula"
-cp "$rendered" "$tap_dir/Formula/axon-server.rb"
+cp "$work/axon-server.rb" "$tap_dir/Formula/axon-server.rb"
+cp "$work/axon-tui.rb" "$tap_dir/Formula/axon-tui.rb"
 cp "$root/packaging/homebrew/tap-README.md" "$tap_dir/README.md"
-git -C "$tap_dir" add Formula/axon-server.rb README.md
+git -C "$tap_dir" add Formula/axon-server.rb Formula/axon-tui.rb README.md
 
 if git -C "$tap_dir" diff --cached --quiet; then
 	echo "tap already matches $TAG"
@@ -231,10 +242,10 @@ fi
 git -C "$tap_dir" \
 	-c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
 	-c user.name="github-actions[bot]" \
-	commit -m "axon-server ${version}"
+	commit -m "axon-server and axon-tui ${version}"
 
 if [ "$dry_run" -eq 1 ]; then
-	echo "dry run committed axon-server ${version} in $tap_dir"
+	echo "dry run committed axon-server and axon-tui ${version} in $tap_dir"
 	exit 0
 fi
 
@@ -245,4 +256,4 @@ if git -C "$tap_dir" show-ref --verify --quiet refs/remotes/origin/HEAD; then
 fi
 
 git_github -C "$tap_dir" push origin "HEAD:${branch}"
-echo "pushed axon-server ${version} to ${tap_repo} (${branch})"
+echo "pushed axon-server and axon-tui ${version} to ${tap_repo} (${branch})"
