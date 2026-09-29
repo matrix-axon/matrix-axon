@@ -85,6 +85,12 @@ cask=$work/axon.rb
 ruby -c "$cask"
 grep -Fq "releases/download/v1.2.3/Axon_1.2.3_universal.dmg" "$cask"
 grep -Fq 'app "Axon.app"' "$cask"
+grep -Fq 'depends_on macos: ">= :high_sierra"' "$cask"
+grep -Fq 'Gatekeeper blocks the app on first launch.' "$cask"
+if grep -Eq 'depends_on[[:space:]]+"' "$cask"; then
+	echo "desktop cask depends on another package" >&2
+	exit 1
+fi
 if grep -q '@@' "$cask"; then
 	echo "placeholder left in rendered cask" >&2
 	exit 1
@@ -308,7 +314,9 @@ grep -Fq 'axon-tui-macos-silicon.zip' "$work/tap/Formula/axon-tui.rb"
 grep -q 'version "1.2.3"' "$work/tap/Casks/axon.rb"
 grep -Fq 'Axon_1.2.3_universal.dmg' "$work/tap/Casks/axon.rb"
 grep -Fq 'app "Axon.app"' "$work/tap/Casks/axon.rb"
-if grep -Eq 'depends_on' "$work/tap/Casks/axon.rb"; then
+grep -Fq 'depends_on macos: ">= :high_sierra"' "$work/tap/Casks/axon.rb"
+grep -Fq 'Gatekeeper blocks the app on first launch.' "$work/tap/Casks/axon.rb"
+if grep -Eq 'depends_on[[:space:]]+"' "$work/tap/Casks/axon.rb"; then
 	echo "desktop cask depends on another package" >&2
 	exit 1
 fi

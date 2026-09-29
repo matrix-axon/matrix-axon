@@ -53,8 +53,11 @@ It checksums the zips already on that release.
 The disk image is attached by `desktop-build.yml`, so the publish waits up to 20 minutes for it.
 If the image never appears, the job still publishes the formulas and leaves the cask unchanged.
 A later run of the same tag adds the cask.
+The cask requires macOS 10.13 or newer, which is Tauri's default minimum system version.
+The disk image is signed and notarized when that workflow had the Apple signing secrets.
+Without them, Gatekeeper blocks the app on first launch.
 `beta-*` and `alpha-*` tags are skipped: each formula is the stable release, and Homebrew cannot order a version like `beta-1` against `1.2.3`.
-A tag older than the formula already in the tap is skipped too, so re-running an old tag's workflow or pushing a backport tag cannot downgrade users.
+A tag older than a formula or the cask already in the tap is skipped too, so re-running an old tag's workflow or pushing a backport tag cannot downgrade users.
 Tap publishes share one concurrency group, so two tags pushed together do not race to push the tap.
 
 ```sh

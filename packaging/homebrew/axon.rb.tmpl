@@ -5,8 +5,7 @@ cask "axon" do
   version "@@VERSION@@"
   sha256 "@@SHA_DMG@@"
 
-  # The universal disk image from desktop-build.yml. It is signed and
-  # notarized when the Apple secrets are present on that workflow.
+  # The universal disk image from desktop-build.yml.
   url "https://github.com/matrix-axon/matrix-axon/releases/download/@@TAG@@/Axon_@@VERSION@@_universal.dmg"
   name "Axon"
   desc "Native desktop client for a self-hosted Axon server"
@@ -21,6 +20,10 @@ cask "axon" do
 
   # A client, not the server. Do not depend on the axon-server formula:
   # the server is often on another machine.
+  # :high_sierra is macOS 10.13, Tauri's default minimumSystemVersion.
+  # The iOS bundle's minimumSystemVersion is a different target.
+  depends_on macos: ">= :high_sierra"
+
   app "Axon.app"
 
   zap trash: [
@@ -34,5 +37,7 @@ cask "axon" do
     Axon is the desktop client. It does not install or run axon-server.
     On first launch, enter the URL of an Axon server you already have.
     A local Homebrew axon-server listens on http://127.0.0.1:8080.
+    The disk image is signed and notarized when the desktop release workflow had the Apple signing secrets.
+    Without them, Gatekeeper blocks the app on first launch.
   EOS
 end
