@@ -184,6 +184,16 @@ export const KEYS = {
     appleLabel: '⌘-Option-R',
     appleAria: 'Meta+Alt+R',
   },
+  /**
+   * Favourite reorder is a separate chord from `reorderSpaces`. The room list
+   * is present in single-pane chat, so this one is not limited to the rail.
+   */
+  reorderFavorites: {
+    label: 'Ctrl-Alt-Shift-R',
+    aria: 'Control+Alt+Shift+R',
+    appleLabel: '⌘-Option-Shift-R',
+    appleAria: 'Meta+Alt+Shift+R',
+  },
   spaceStep: {
     label: 'Ctrl-Alt-[ / Ctrl-Alt-]',
     aria: 'Control+Alt+[ Control+Alt+]',
@@ -299,6 +309,14 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
       {
         keys: KEYS.toggleSidebar,
         description: 'Show or hide the room list',
+      },
+      {
+        keys: KEYS.reorderFavorites,
+        description: 'Show or hide the favorite reordering controls',
+      },
+      {
+        keys: 'Alt-↑ / Alt-↓',
+        description: 'Move the focused room up or down in the favourite list',
       },
     ],
   },

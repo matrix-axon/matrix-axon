@@ -7,12 +7,15 @@ import {
 import { perfMark, perfMarkBootRoomList } from '../perf'
 import type { components } from '../api/schema'
 import { apiErrorCode, apiErrorMessage, type ApiClient } from '../api/client'
+import type { AccountDataChange } from '../api/frames'
 import { markdownToPlainText } from '../markdown/markdown'
+import { parseRoomTags, roomIdsInDirectMap, type RoomTag } from './favourites'
 import {
   dmPeerAvatarFromMembers,
   dmTitleFromMembers,
   isLikelyDm,
   memberDisplay,
+  needsDerivedTitle,
   roomKey,
   roomTitle,
   type MemberDto,
@@ -70,6 +73,12 @@ export interface RoomsStore {
    * survives a failed refresh, still marked stale.
    */
   stale: ReadonlySignal<boolean>
+  /**
+   * True after a refresh has succeeded this session. A cache restore paints
+   * rows without confirming them, and favourite migration waits for this
+   * (ADR 0103) so it never uploads tags computed from a stale list.
+   */
+  confirmed: ReadonlySignal<boolean>
   error: Signal<string | null>
   /**
    * Member-derived titles for unnamed rooms, keyed by room key. Read through
@@ -159,6 +168,27 @@ export interface RoomsStore {
   ): Promise<RoomEntryResult>
   /** Create a DM through M19c, then refresh room state. */
   createDm(accountId: string, userId: string): Promise<RoomEntryResult>
+  /** The rows currently held, including an unconfirmed cache restore. */
+  peekRooms(): readonly RoomDto[]
+  /**
+   * Replace one room's tags and return the generation of that write.
+   * `0` when the room is not in the list. A newer generation wins a later
+   * restore, so an in-flight failure cannot clobber a newer edit or frame.
+   */
+  assignRoomTags(key: string, tags: RoomTag[]): number
+  /**
+   * Put `tags` back when `generation` is still the latest assignment for
+   * `key`. Returns false when a newer assignment has already landed.
+   * Bumps the metadata sequence so an in-flight refresh keeps the restored
+   * tags, and does not itself move the generation.
+   */
+  restoreRoomTags(
+    key: string,
+    generation: number,
+    tags: RoomTag[] | undefined,
+  ): boolean
+  /** Apply one `account_data.changed` payload to the held rows. */
+  applyAccountData(accountId: string, change: AccountDataChange): void
   /** Latest-message preview for one room. */
   preview(key: string): RoomPreview | undefined
   /** Server-derived unread notification count for one room. */
@@ -208,6 +238,7 @@ export function createRoomsStore(
   const unreadTotal = signal(0)
   const loading = signal(true)
   const stale = signal(false)
+  const confirmed = signal(false)
   const error = signal<string | null>(null)
   const titles = signal<ReadonlyMap<string, string>>(loadTitleCache(storage))
   const dmAvatars = signal<ReadonlyMap<string, string>>(new Map())
@@ -241,6 +272,12 @@ export function createRoomsStore(
     string,
     Partial<Record<RoomMetadataPatch['field'], number>>
   >()
+  /** `roomKey` -> generation returned by the latest `assignRoomTags`. */
+  const tagGenByKey = new Map<string, number>()
+  /** `roomKey` -> metadata sequence of the latest tag write or live frame. */
+  const tagsPatchedAt = new Map<string, number>()
+  /** Account id -> metadata sequence of the latest `m.direct` patch. */
+  const directPatchedAt = new Map<string, number>()
   /**
    * Room creation can return before sync has reflected the m.room.name/topic
    * events into `/v1/rooms`. Keep the user's explicit create-room metadata as
@@ -325,7 +362,7 @@ export function createRoomsStore(
     const next = new Map(titles.value)
     let changed = false
     for (const room of current) {
-      if (!isLikelyDm(room)) {
+      if (!needsDerivedTitle(room)) {
         const title = roomTitle(room, next)
         if (title !== room.room_id && next.get(roomKey(room)) !== title) {
           next.set(roomKey(room), title)
@@ -359,11 +396,9 @@ export function createRoomsStore(
   }
 
   /**
-   * Keep name/topic/avatar from a live frame that arrived after this refresh
-   * was issued. Only those three fields: everything else on the row (activity,
-   * unread counts, membership) is the server's to state, and a stale value
-   * there self-corrects on the next refresh rather than looking like a write
-   * that did not happen.
+   * Keep name/topic/avatar, tags, and `is_direct` from a patch that arrived
+   * after this refresh was issued. Activity, unread counts, and membership
+   * stay the server's: a stale value there self-corrects on the next refresh.
    */
   function keepFresherMetadata(
     incoming: RoomDto[],
@@ -375,10 +410,6 @@ export function createRoomsStore(
     const live = new Map(rooms.value.map((room) => [roomKey(room), room]))
     return incoming.map((room) => {
       const key = roomKey(room)
-      const patchedAt = metadataPatchedAt.get(key)
-      if (patchedAt === undefined) {
-        return room
-      }
       const patched = live.get(key)
       if (patched === undefined) {
         return room
@@ -386,12 +417,20 @@ export function createRoomsStore(
       // Per field, not per room: a live `m.room.name` frame says nothing
       // about the topic, and this response may legitimately carry a newer
       // topic set by another client that has not reached this socket yet.
-      // Reverting all three would silently undo it.
       let kept = room
-      for (const field of ROOM_METADATA_FIELDS) {
-        if ((patchedAt[field] ?? 0) > seqAtStart) {
-          kept = { ...kept, [field]: patched[field] }
+      const patchedAt = metadataPatchedAt.get(key)
+      if (patchedAt !== undefined) {
+        for (const field of ROOM_METADATA_FIELDS) {
+          if ((patchedAt[field] ?? 0) > seqAtStart) {
+            kept = { ...kept, [field]: patched[field] }
+          }
         }
+      }
+      if ((tagsPatchedAt.get(key) ?? 0) > seqAtStart) {
+        kept = { ...kept, tags: patched.tags ?? [] }
+      }
+      if ((directPatchedAt.get(room.account_id) ?? 0) > seqAtStart) {
+        kept = { ...kept, is_direct: patched.is_direct === true }
       }
       return kept
     })
@@ -401,9 +440,16 @@ export function createRoomsStore(
     current: RoomDto[],
     generation: number,
   ): Promise<void> {
-    const queue = current.filter(
-      (room) => isLikelyDm(room) && !requested.has(roomKey(room)),
-    )
+    const queue = current.filter((room) => {
+      if (requested.has(roomKey(room))) {
+        return false
+      }
+      // Only an unnamed direct room. A named room keeps its name (the peer
+      // avatar falls back to a letter), and an unnamed room that is not a
+      // direct message keeps the room id. Fetching every unnamed room, or
+      // every named DM missing an avatar, fans `/members` out across the list.
+      return needsDerivedTitle(room) && isLikelyDm(room)
+    })
     for (const room of queue) {
       requested.add(roomKey(room))
     }
@@ -690,6 +736,9 @@ export function createRoomsStore(
       error.value = null
       settled = true
       stale.value = false
+      if (!confirmed.peek()) {
+        confirmed.value = true
+      }
       cache?.write(visibleRooms)
       // Fire-and-forget: titles arrive incrementally; the list re-renders as
       // the titles signal updates.
@@ -731,6 +780,12 @@ export function createRoomsStore(
     // the very first refresh leaves the store empty but still has a response
     // in flight, and that response must not be applied to the next reader.
     sessionGeneration += 1
+    if (confirmed.peek()) {
+      confirmed.value = false
+    }
+    tagGenByKey.clear()
+    tagsPatchedAt.clear()
+    directPatchedAt.clear()
     // Above the pristine-store guard on purpose. A sign-out during the very
     // first refresh is exactly the shared-browser case: the store is empty,
     // but `titles` was populated from `ROOM_TITLE_CACHE_KEY` at construction
@@ -814,9 +869,10 @@ export function createRoomsStore(
     syncUnreadCounts(visible)
     recomputeNewest(visible)
     // Deliberately *not* `resolveUnnamedTitles`: that is a `/members` fetch per
-    // unnamed room, and firing a burst of them at boot would spend exactly the
-    // network the cache exists to avoid waiting on. DM titles paint from the
-    // `axon.room_titles.v1` cache meanwhile, and the refresh resolves the rest.
+    // unnamed direct room, and firing a burst of them at boot would spend
+    // exactly the network the cache exists to avoid waiting on. DM titles
+    // paint from the `axon.room_titles.v1` cache meanwhile, and the refresh
+    // resolves the rest.
     stale.value = true
     loading.value = false
     perfMark('rooms:hydrate', { rooms: visible.length })
@@ -1092,8 +1148,13 @@ export function createRoomsStore(
     if (loading.value) {
       await refresh()
     }
+    // `is_direct` is not the whole set. An existing DM that never landed in
+    // `m.direct` is still unnamed, and creating another one duplicates it.
+    // Named rooms stay out: a title means this is not that unnamed DM.
     const candidates = rooms.value.filter(
-      (room) => room.account_id === accountId && isLikelyDm(room),
+      (room) =>
+        room.account_id === accountId &&
+        (isLikelyDm(room) || needsDerivedTitle(room)),
     )
     const matches = await Promise.all(
       candidates.map(async (room) =>
@@ -1253,12 +1314,92 @@ export function createRoomsStore(
     )
   }
 
+  function peekRooms(): readonly RoomDto[] {
+    return rooms.value
+  }
+
+  function assignRoomTags(key: string, tags: RoomTag[]): number {
+    const current = rooms.value
+    const index = current.findIndex((room) => roomKey(room) === key)
+    if (index === -1) {
+      return 0
+    }
+    metadataPatchSeq += 1
+    const generation = metadataPatchSeq
+    tagGenByKey.set(key, generation)
+    tagsPatchedAt.set(key, generation)
+    rooms.value = current.map((entry, i) =>
+      i === index ? { ...entry, tags } : entry,
+    )
+    return generation
+  }
+
+  function restoreRoomTags(
+    key: string,
+    generation: number,
+    tags: RoomTag[] | undefined,
+  ): boolean {
+    if (tagGenByKey.get(key) !== generation) {
+      return false
+    }
+    metadataPatchSeq += 1
+    tagsPatchedAt.set(key, metadataPatchSeq)
+    const current = rooms.value
+    const index = current.findIndex((room) => roomKey(room) === key)
+    if (index === -1) {
+      return true
+    }
+    rooms.value = current.map((entry, i) =>
+      i === index ? { ...entry, tags: tags ?? [] } : entry,
+    )
+    return true
+  }
+
+  function applyAccountData(
+    accountId: string,
+    change: AccountDataChange,
+  ): void {
+    if (change.eventType === 'm.tag') {
+      if (change.roomId === null) {
+        return
+      }
+      assignRoomTags(
+        roomKey({ account_id: accountId, room_id: change.roomId }),
+        parseRoomTags(change.content),
+      )
+      return
+    }
+    if (change.eventType !== 'm.direct') {
+      return
+    }
+    const ids = roomIdsInDirectMap(change.content)
+    let changed = false
+    const next = rooms.value.map((room) => {
+      if (room.account_id !== accountId) {
+        return room
+      }
+      const direct = ids.has(room.room_id)
+      if ((room.is_direct === true) === direct) {
+        return room
+      }
+      changed = true
+      return { ...room, is_direct: direct }
+    })
+    if (!changed) {
+      return
+    }
+    metadataPatchSeq += 1
+    directPatchedAt.set(accountId, metadataPatchSeq)
+    rooms.value = next
+  }
+
   return {
     rooms: computed(() => rooms.value),
     unreadKeys: computed(() => unreadKeys.value),
     unreadTotal: computed(() => unreadTotal.value),
     loading: computed(() => loading.value),
     stale: computed(() => stale.value),
+    confirmed: computed(() => confirmed.value),
     error,
     titles: computed(() => titles.value),
     dmAvatars: computed(() => dmAvatars.value),
@@ -1281,6 +1422,10 @@ export function createRoomsStore(
     noteActivity,
     noteTimelineEvent,
     noteUnreadCounts,
+    peekRooms,
+    assignRoomTags,
+    restoreRoomTags,
+    applyAccountData,
   }
 }
 

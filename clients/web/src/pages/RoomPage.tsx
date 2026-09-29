@@ -203,6 +203,7 @@ export function RoomPage() {
     threadUnread,
     composerFocus,
     settings,
+    favourites,
     messageGestures,
     search,
     timelines,
@@ -1463,9 +1464,12 @@ export function RoomPage() {
       if (command.target === null) {
         const key = roomKey({ account_id: accountId, room_id: roomId })
         if (command.kind === 'pin') {
-          settings.pinRoom(key)
+          if (!favourites.pin(key)) {
+            commandTimeline.error.value = 'room is not in the room list'
+            return false
+          }
         } else {
-          settings.unpinRoom(key)
+          favourites.unpin(key)
         }
         return true
       }
@@ -1480,9 +1484,12 @@ export function RoomPage() {
       }
       const key = roomKey(targetRoom)
       if (command.kind === 'pin') {
-        settings.pinRoom(key)
+        if (!favourites.pin(key)) {
+          commandTimeline.error.value = 'room is not in the room list'
+          return false
+        }
       } else {
-        settings.unpinRoom(key)
+        favourites.unpin(key)
       }
       return true
     }

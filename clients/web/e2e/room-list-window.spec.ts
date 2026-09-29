@@ -123,7 +123,11 @@ test('the pinned separator lands on the pinned/unpinned boundary', async ({
   await expect(rows(page).first()).toBeVisible()
 
   // Pin the second row; it floats to the top and the separator appears below it.
-  await page.locator('li.room-row').nth(1).getByRole('button').click()
+  await page
+    .locator('li.room-row')
+    .nth(1)
+    .getByRole('button', { name: /^Pin .+ to top$/ })
+    .click()
 
   const separator = page.locator('.room-separator')
   await expect(separator).toHaveCount(1)

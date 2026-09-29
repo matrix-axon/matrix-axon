@@ -361,7 +361,7 @@ describe('room-list cache', () => {
   it('does not let a late restore land on top of a settled refresh', async () => {
     const { cache } = harness()
     await cache.write('rooms', (await cacheNamespace(BASE_URL, 'tok-test'))!, {
-      version: 1,
+      version: 2,
       savedAt: 0,
       rooms: [LOUNGE],
     })
@@ -386,7 +386,7 @@ describe('room-list cache', () => {
   it('does not let a late restore land on top of a sign-out', async () => {
     const { cache } = harness()
     await cache.write('rooms', (await cacheNamespace(BASE_URL, 'tok-test'))!, {
-      version: 1,
+      version: 2,
       savedAt: 0,
       rooms: [LOUNGE],
     })
@@ -520,6 +520,14 @@ describe('room-list cache', () => {
     expect(await harness({ cache }).roomList.read()).toBeUndefined()
     await cache.write('rooms', key, {
       version: 1,
+      savedAt: 0,
+      rooms: [{ room_id: '!broken:hs' }, OPS],
+    })
+    // Version 1 has no tags. Restoring it would hide favourites, so the
+    // whole record is ignored.
+    expect(await harness({ cache }).roomList.read()).toBeUndefined()
+    await cache.write('rooms', key, {
+      version: 2,
       savedAt: 0,
       rooms: [{ room_id: '!broken:hs' }, OPS],
     })

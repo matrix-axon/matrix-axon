@@ -886,9 +886,12 @@ test('the rooms edge tab sits close to the favorite controls', async ({
   page,
 }) => {
   await openRoom(page)
-  const favorite = page.locator('.room-row').first().getByRole('button', {
-    name: '☆',
-  })
+  const favorite = page
+    .locator('.room-row')
+    .first()
+    .getByRole('button', {
+      name: /^Pin .+ to top$/,
+    })
   const tab = page.getByRole('button', { name: 'Hide rooms' }).locator('span')
 
   const [favoriteBox, tabBox] = await Promise.all([

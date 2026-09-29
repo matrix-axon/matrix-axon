@@ -712,9 +712,12 @@ not set` — it archives for `iphoneos` while you asked for a simulator. The
   (`src/stores/accounts.ts`); when the server adds the field, `gen:api`
   makes it real and the extension alias gets deleted. Tracked in the parent
   repo's issues.
-- **ADR 0055 `is_direct`** is docs-only; the DM heuristic (blank name +
-  alias, `isLikelyDm`) is the interim, swapped in one function when the
-  server field lands — same plan as the TUI.
+- `is_direct` is on `RoomDto` (ADR 0103).
+  `isLikelyDm` reads that flag.
+  A refresh fetches `/members` only for an unnamed direct room (`needsDerivedTitle` and `isLikelyDm`).
+  `createDm` still checks the roster of an unnamed room that is not marked direct, so an existing DM missing from `m.direct` is reused.
+  Favourites are the Matrix tag `m.favourite` (`stores/favourites.ts`).
+  Space-rail order is the instance preference `space_order` (`stores/space-order.ts`).
 
 ## Roadmap position (ADR 0046 table)
 

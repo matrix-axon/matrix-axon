@@ -12,7 +12,7 @@ export type EventDto = components['schemas']['EventDto']
  * breaking decode. Known tags today: `timeline.event`, `verification.*`,
  * `sender_trust.violation`, `device_state.changed`, `ephemeral.passthrough`,
  * `unread_counts.changed`, `invite.added`, `invite.removed`,
- * `preferences.changed`, `heartbeat`.
+ * `account_data.changed`, `preferences.changed`, `heartbeat`.
  */
 export interface LiveFrame {
   /** Namespaced tag, e.g. `timeline.event`. */
@@ -44,6 +44,9 @@ export const INVITE_REMOVED = 'invite.removed'
 /** The `type` tag for an Axon instance preference write (ADRs 0103/0104). */
 export const PREFERENCES_CHANGED = 'preferences.changed'
 
+/** The `type` tag for a Matrix account-data write (ADR 0103). */
+export const ACCOUNT_DATA_CHANGED = 'account_data.changed'
+
 /**
  * The `type` tag for the server's liveness beat (`ws.rs` `HEARTBEAT`).
  *
@@ -72,6 +75,17 @@ export interface PreferenceChange {
   key: string
   value: unknown
   deviceId: string
+}
+
+/**
+ * The payload of an `account_data.changed` frame (ADR 0103). `roomId` is
+ * omitted for global types such as `m.direct`. There is no device id: every
+ * client applies the frame, including the one that wrote it.
+ */
+export interface AccountDataChange {
+  roomId: string | null
+  eventType: string
+  content: unknown
 }
 
 /**
@@ -185,6 +199,31 @@ export function preferenceChange(frame: LiveFrame): PreferenceChange | null {
     return null
   }
   return { key, value, deviceId }
+}
+
+/**
+ * One account-data write, or `null` for another tag or a malformed body.
+ * The frame's account is on the envelope (`frame.accountId`).
+ */
+export function accountDataChange(frame: LiveFrame): AccountDataChange | null {
+  if (frame.type !== ACCOUNT_DATA_CHANGED) {
+    return null
+  }
+  if (typeof frame.payload !== 'object' || frame.payload === null) {
+    return null
+  }
+  const {
+    room_id: roomId,
+    event_type: eventType,
+    content,
+  } = frame.payload as Record<string, unknown>
+  if (
+    !(typeof roomId === 'string' || roomId === undefined || roomId === null) ||
+    typeof eventType !== 'string'
+  ) {
+    return null
+  }
+  return { roomId: roomId ?? null, eventType, content }
 }
 
 /**

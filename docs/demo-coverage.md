@@ -100,6 +100,8 @@ shows it.
   follow: script the _undo_ as well, so the scene leaves the room as it found it
   and its assertions stay honest on a second run — a react-only scene passes
   vacuously the second time, on the badge the first run left behind.
+- **Favourite reorder and space order.**
+  Durable `m.favourite` reorder and the instance `space_order` rail are not shown in a scene.
 - **Device verification.** Needs a second device to verify against, which the
   corpus does not stand up.
 - **Matrix OAuth QR account acquisition.** Needs MAS and a second trusted

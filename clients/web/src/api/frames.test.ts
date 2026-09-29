@@ -8,6 +8,8 @@ import {
   INVITE_ADDED,
   inviteRemoved,
   INVITE_REMOVED,
+  accountDataChange,
+  ACCOUNT_DATA_CHANGED,
   preferenceChange,
   PREFERENCES_CHANGED,
   timelineEvent,
@@ -155,6 +157,51 @@ describe('preferenceChange', () => {
     expect(
       preferenceChange(
         preferenceFrame({ key: 'message_gestures', value: {}, device_id: 2 }),
+      ),
+    ).toBeNull()
+  })
+})
+
+describe('accountDataChange', () => {
+  const accountFrame = (payload: unknown) =>
+    decodeFrame(envelope(ACCOUNT_DATA_CHANGED, 'acct-1', payload))!
+
+  it('extracts a room tag write and a global direct map', () => {
+    expect(
+      accountDataChange(
+        accountFrame({
+          room_id: '!r:hs',
+          event_type: 'm.tag',
+          content: { tags: { 'm.favourite': { order: 0.5 } } },
+        }),
+      ),
+    ).toEqual({
+      roomId: '!r:hs',
+      eventType: 'm.tag',
+      content: { tags: { 'm.favourite': { order: 0.5 } } },
+    })
+    expect(
+      accountDataChange(
+        accountFrame({
+          event_type: 'm.direct',
+          content: { '@bob:hs': ['!dm:hs'] },
+        }),
+      ),
+    ).toEqual({
+      roomId: null,
+      eventType: 'm.direct',
+      content: { '@bob:hs': ['!dm:hs'] },
+    })
+  })
+
+  it('rejects another tag or a missing event type', () => {
+    expect(
+      accountDataChange(decodeFrame(envelope(TIMELINE_EVENT, 'a', {}))!),
+    ).toBeNull()
+    expect(accountDataChange(accountFrame({ room_id: '!r:hs' }))).toBeNull()
+    expect(
+      accountDataChange(
+        accountFrame({ room_id: 1, event_type: 'm.tag', content: {} }),
       ),
     ).toBeNull()
   })

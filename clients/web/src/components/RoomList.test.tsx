@@ -42,7 +42,7 @@ const LOUNGE = makeRoom({
   canonical_alias: '#lounge:hs',
   last_activity_ts: Date.now() - 3_600_000,
 })
-const DM = makeRoom({ room_id: '!dm:hs' })
+const DM = makeRoom({ room_id: '!dm:hs', is_direct: true })
 const OTHER = makeRoom({
   account_id: OTHER_ACCOUNT,
   account_user_id: '@work:example.org',
@@ -151,6 +151,14 @@ function renderPage(
     ),
     http.put(`${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`, () =>
       HttpResponse.json({ data: { updated_at: '2026-07-20T12:00:00Z' } }),
+    ),
+    http.put(
+      `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/tags/:tag`,
+      () => HttpResponse.json({ data: {} }),
+    ),
+    http.delete(
+      `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/tags/:tag`,
+      () => HttpResponse.json({ data: {} }),
     ),
     // DM title resolution for the unnamed room.
     http.get(
@@ -672,7 +680,7 @@ describe('RoomList', () => {
     expect(queryByText('Bob')).toBeNull()
 
     services.settings.pinRoom(roomKey(LOUNGE as never))
-    fireEvent.click(getByRole('button', { name: 'Favorites' }))
+    fireEvent.click(getByRole('button', { name: 'Favorites', exact: true }))
     expect(await findByText('#lounge:hs')).toBeTruthy()
     expect(queryByText('Ops')).toBeNull()
 
@@ -745,9 +753,16 @@ describe('RoomList', () => {
 
     await waitFor(() => expect(titles()[0]).toBe('#lounge:hs'))
     expect(container.querySelector('.room-separator')).toBeTruthy()
-    expect(services.settings.pinnedRooms.value).toEqual([
-      roomKey(LOUNGE as never),
-    ])
+    const top = container.querySelector('.room-row')
+    expect(top?.querySelector('button.pin')?.getAttribute('aria-pressed')).toBe(
+      'true',
+    )
+    expect(services.settings.pinnedRooms.value).toEqual([])
+    expect(
+      services.rooms.rooms.value.find(
+        (room) => roomKey(room) === roomKey(LOUNGE as never),
+      )?.tags,
+    ).toEqual([{ name: 'm.favourite', order: 0.5 }])
   })
 
   it('sort modes reorder the unpinned tail', async () => {

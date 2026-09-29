@@ -312,6 +312,45 @@ let blockUpgradesUntil = 0
 /** Synthetic rooms `/v1/rooms` appends; set via `/__e2e/bulk-rooms`. */
 let bulkRooms = 0
 /**
+ * Room tags written by `PUT /v1/accounts/…/rooms/…/tags/{tag}` (ADR 0103).
+ * Keyed `${accountId}\0${roomId}` so a pin survives the room-list refresh that
+ * follows a tag write. The windowing spec posts `/__e2e/bulk-rooms` in
+ * `afterEach`, which clears this map — a pin must not leak into the next file
+ * and float a different room to the top of an unrelated list.
+ */
+const roomTags = new Map()
+
+function tagsFor(accountId, roomId) {
+  const tags = roomTags.get(`${accountId}\0${roomId}`)
+  return tags === undefined || tags.length === 0 ? undefined : tags
+}
+
+function attachTags(room) {
+  const tags = tagsFor(room.account_id, room.room_id)
+  return tags === undefined ? room : { ...room, tags }
+}
+
+function setRoomTag(accountId, roomId, tag, order) {
+  const key = `${accountId}\0${roomId}`
+  const tags = (roomTags.get(key) ?? []).filter((entry) => entry.name !== tag)
+  const next = { name: tag }
+  if (typeof order === 'number') {
+    next.order = order
+  }
+  tags.push(next)
+  roomTags.set(key, tags)
+}
+
+function removeRoomTag(accountId, roomId, tag) {
+  const key = `${accountId}\0${roomId}`
+  const tags = (roomTags.get(key) ?? []).filter((entry) => entry.name !== tag)
+  if (tags.length === 0) {
+    roomTags.delete(key)
+    return
+  }
+  roomTags.set(key, tags)
+}
+/**
  * Synthetic message events the timeline GET prepends to its fixtures; set via
  * `/__e2e/bulk-timeline`. Zero by default so every other spec sees the small
  * seeded history. The perf lane sets this high to mount a long, un-windowed
@@ -921,7 +960,7 @@ async function handleApi(req, res, url) {
           last_activity_ts: now - 8 * 86_400_000,
         },
         ...filler,
-      ],
+      ].map(attachTags),
     })
   }
   // Unnamed rooms ask for members to derive a DM title; none here, so the
@@ -1306,6 +1345,30 @@ async function handleApi(req, res, url) {
       },
     })
   }
+  // Favourite pins (ADR 0103). A 404 here is not a quiet miss: the client
+  // writes the tag optimistically and rolls it back when the response is not
+  // ok, so the room-list separator never stays. Echoing the tag on the next
+  // `/v1/rooms` keeps a refresh from undoing the same pin.
+  const tagRoute = pathname.match(
+    /^\/v1\/accounts\/([^/]+)\/rooms\/([^/]+)\/tags\/([^/]+)$/,
+  )
+  if (tagRoute !== null && (method === 'PUT' || method === 'DELETE')) {
+    const [, accountId, roomId, tag] = tagRoute
+    if (method === 'DELETE') {
+      removeRoomTag(accountId, roomId, tag)
+      return json(res, { data: { updated_at: new Date().toISOString() } })
+    }
+    let raw = ''
+    req.on('data', (chunk) => {
+      raw += chunk
+    })
+    req.on('end', () => {
+      const request = parseJsonBody(raw)
+      setRoomTag(accountId, roomId, tag, request.order)
+      json(res, { data: { updated_at: new Date().toISOString() } })
+    })
+    return
+  }
   return json(res, { error: 'unhandled' }, 404)
 }
 
@@ -1319,6 +1382,7 @@ const server = createServer((req, res) => {
   // default, so every other spec sees the three it always has.
   if (req.method === 'POST' && url.pathname === '/__e2e/bulk-rooms') {
     bulkRooms = Number(url.searchParams.get('count') ?? 0)
+    roomTags.clear()
     return json(res, { data: { bulk_rooms: bulkRooms } })
   }
   if (

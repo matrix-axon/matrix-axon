@@ -788,7 +788,11 @@ body {
 }
 
 /* The sidebar's controls stack: they were laid out for a 56rem column, and
-   the five filter chips do not fit one line of it. */
+   the five filter chips do not fit one line of it. The reorder row has the
+   same problem once Reorder sits beside Sort and Rooms: its min-content is
+   wider than the pane, and `min-width: auto` would keep that width so
+   `overflow-x: hidden` clips the end. Wrapping lets the row shrink to the
+   pane the way the chips do. */
 .sidebar .room-controls {
   flex-direction: column;
   align-items: stretch;
@@ -806,6 +810,9 @@ body {
 
 .sidebar .room-control-row {
   justify-content: space-between;
+  flex-wrap: wrap;
+  min-width: 0;
+  row-gap: 0.35rem;
 }
 
 @media (min-width: 48rem) {
@@ -2004,6 +2011,54 @@ button.pin {
 
 button.pin[aria-pressed='true'] {
   color: var(--warn);
+}
+
+.room-reorder-toggle {
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.room-reorder-toggle.active {
+  background: var(--bg-raised);
+  color: var(--accent-strong);
+}
+
+.room-reorder {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+}
+
+button.ghost.room-move,
+button.ghost.room-move:hover {
+  width: 1.15rem;
+  height: 0.85rem;
+  padding: 0;
+  border-color: transparent;
+  font-size: 0.55rem;
+  line-height: 1;
+}
+
+/* The separator is a zero-height marker until a drag needs a drop target.
+   The hit slop exists only while `.room-list-dragging` is set, so a resting
+   list keeps every row on the same pitch. */
+.room-list.room-list-dragging .room-separator {
+  z-index: 1;
+  height: 12px;
+  pointer-events: auto;
+  transform: translateY(-6px);
+  border-top: 0;
+  background: linear-gradient(
+    to bottom,
+    transparent 5px,
+    var(--border) 5px,
+    var(--border) 7px,
+    transparent 7px
+  );
 }
 
 /* A bare glyph, not a bordered control: one outlined box per row read as

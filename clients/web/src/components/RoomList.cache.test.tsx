@@ -39,7 +39,7 @@ afterAll(() => server.close())
 async function seededCache(rooms: unknown[]) {
   const cache = createMemoryCacheStore()
   const key = await cacheNamespace(TEST_BASE_URL, 'tok-test')
-  await cache.write('rooms', key!, { version: 1, savedAt: 1, rooms })
+  await cache.write('rooms', key!, { version: 2, savedAt: 1, rooms })
   return cache
 }
 

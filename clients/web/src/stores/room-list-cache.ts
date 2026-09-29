@@ -15,8 +15,12 @@ export interface RoomListCache {
 
 const AREA: CacheArea = 'rooms'
 
-/** Bumped when the record below changes shape incompatibly. */
-const RECORD_VERSION = 1
+/**
+ * Bumped when the record below changes shape incompatibly.
+ * Version 2 stores `tags`. A version 1 record has none, so restoring it
+ * would hide favourites until the next refresh. Those records are discarded.
+ */
+const RECORD_VERSION = 2
 
 interface RoomListRecord {
   version: number
@@ -55,7 +59,32 @@ function persistable(room: RoomDto): RoomDto {
     notification_count: count(room.notification_count),
     highlight_count: count(room.highlight_count),
     is_direct: room.is_direct === true,
+    tags: persistableTags(room.tags),
   }
+}
+
+function persistableTags(value: RoomDto['tags']): NonNullable<RoomDto['tags']> {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  const tags: NonNullable<RoomDto['tags']> = []
+  for (const tag of value) {
+    if (
+      typeof tag !== 'object' ||
+      tag === null ||
+      typeof tag.name !== 'string'
+    ) {
+      continue
+    }
+    if (typeof tag.order === 'number' && Number.isFinite(tag.order)) {
+      tags.push({ name: tag.name, order: tag.order })
+    } else if (tag.order === null) {
+      tags.push({ name: tag.name, order: null })
+    } else {
+      tags.push({ name: tag.name })
+    }
+  }
+  return tags
 }
 
 /** Unread counts are normalized, matching `countFromRoom` in the store. */

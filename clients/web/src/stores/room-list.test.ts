@@ -4,8 +4,10 @@ import {
   dmPeerAvatarFromMembers,
   dmTitleFromMembers,
   filterRooms,
+  isFavourite,
   isLikelyDm,
   localpart,
+  needsDerivedTitle,
   roomKey,
   roomListAvatarUrl,
   roomTitle,
@@ -49,13 +51,30 @@ describe('roomKey', () => {
   })
 })
 
-describe('isLikelyDm (ADR 0042 interim heuristic)', () => {
-  it('is true only when both name and alias are blank', () => {
-    expect(isLikelyDm(room({ room_id: '!r:hs' }))).toBe(true)
-    expect(isLikelyDm(room({ room_id: '!r:hs', name: '  ' }))).toBe(true)
-    expect(isLikelyDm(room({ room_id: '!r:hs', name: 'Ops' }))).toBe(false)
+describe('isLikelyDm', () => {
+  it('follows the server is_direct flag', () => {
     expect(
-      isLikelyDm(room({ room_id: '!r:hs', canonical_alias: '#ops:hs' })),
+      isLikelyDm(room({ room_id: '!r:hs', is_direct: true, name: 'Bob' })),
+    ).toBe(true)
+    expect(isLikelyDm(room({ room_id: '!r:hs' }))).toBe(false)
+    expect(isLikelyDm(room({ room_id: '!r:hs', name: '  ' }))).toBe(false)
+  })
+})
+
+describe('needsDerivedTitle', () => {
+  it('is true only when both name and alias are blank', () => {
+    expect(needsDerivedTitle(room({ room_id: '!r:hs' }))).toBe(true)
+    expect(needsDerivedTitle(room({ room_id: '!r:hs', name: '  ' }))).toBe(true)
+    expect(needsDerivedTitle(room({ room_id: '!r:hs', name: 'Ops' }))).toBe(
+      false,
+    )
+    expect(
+      needsDerivedTitle(room({ room_id: '!r:hs', canonical_alias: '#ops:hs' })),
+    ).toBe(false)
+    expect(
+      needsDerivedTitle(
+        room({ room_id: '!r:hs', is_direct: true, name: 'Bob' }),
+      ),
     ).toBe(false)
   })
 })
@@ -126,10 +145,17 @@ describe('roomListAvatarUrl', () => {
     ).toBe('mxc://hs/room')
   })
 
-  it('uses the cached peer avatar only for unnamed rooms without a room avatar', () => {
-    expect(roomListAvatarUrl(room({ room_id: '!dm:hs' }), cache)).toBe(
-      'mxc://hs/bob',
-    )
+  it('uses the cached peer avatar for a direct room without a room avatar', () => {
+    expect(
+      roomListAvatarUrl(room({ room_id: '!dm:hs', is_direct: true }), cache),
+    ).toBe('mxc://hs/bob')
+    expect(
+      roomListAvatarUrl(
+        room({ room_id: '!dm:hs', is_direct: true, name: 'Bob' }),
+        cache,
+      ),
+    ).toBe('mxc://hs/bob')
+    expect(roomListAvatarUrl(room({ room_id: '!dm:hs' }), cache)).toBeNull()
     expect(
       roomListAvatarUrl(room({ room_id: '!ops:hs', name: 'Ops' }), cache),
     ).toBeNull()
@@ -187,6 +213,39 @@ describe('sortRooms (ADRs 0038/0042)', () => {
     }
   })
 
+  it('orders favourites by tag order and keeps a local pin in the prefix', () => {
+    const favourite = room({
+      room_id: '!fav:hs',
+      name: 'Fav',
+      last_activity_ts: 1,
+      tags: [{ name: 'm.favourite', order: 0.2 }],
+    })
+    const later = room({
+      room_id: '!later:hs',
+      name: 'Later',
+      last_activity_ts: 50,
+      tags: [{ name: 'm.favourite', order: 0.8 }],
+    })
+    const local = room({
+      room_id: '!local:hs',
+      name: 'Local',
+      last_activity_ts: 40,
+    })
+    const plain = room({
+      room_id: '!plain:hs',
+      name: 'Plain',
+      last_activity_ts: 90,
+    })
+    const sorted = sortRooms(
+      [plain, later, local, favourite],
+      [roomKey(local)],
+      'recent',
+      title,
+    )
+    expect(sorted.map(title)).toEqual(['Local', 'Fav', 'Later', 'Plain'])
+    expect(isFavourite(favourite)).toBe(true)
+  })
+
   it('does not mutate its input', () => {
     const input = [beta, alpha]
     sortRooms(input, [], 'az', title)
@@ -195,7 +254,7 @@ describe('sortRooms (ADRs 0038/0042)', () => {
 })
 
 describe('filterRooms (ADR 0042)', () => {
-  const dm = room({ room_id: '!dm:hs', last_activity_ts: 1 })
+  const dm = room({ room_id: '!dm:hs', last_activity_ts: 1, is_direct: true })
   const ops = room({
     room_id: '!ops:hs',
     name: 'Ops',
