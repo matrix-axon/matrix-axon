@@ -29,6 +29,17 @@ export function installAbortSignalAny(target: typeof AbortSignal): void {
       controller.abort((event.target as AbortSignal).reason)
       // The first source to abort settles the result; drop the rest so a
       // long-lived signal does not keep this closure and controller alive.
+      //
+      // That is the only release there is: a combined signal that is never
+      // aborted leaves one listener on every source. Both callers
+      // (`boundedSignal`, `withDeadline`) include an `AbortSignal.timeout`, so
+      // each combined signal aborts at the latest when its deadline fires, and
+      // the listeners it added go with it — held for at most one deadline
+      // (120 s in `boundedSignal`), not for the session. The native
+      // implementation holds its sources weakly and needs none of this; doing
+      // the same here would let a signal chain be collected mid-request, which
+      // is the WebKit failure `api/client.ts` documents. A caller that combined
+      // signals with no deadline would leak here, so don't.
       for (const source of sources) source.removeEventListener('abort', onAbort)
     }
     for (const source of sources) {
