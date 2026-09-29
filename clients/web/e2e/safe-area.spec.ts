@@ -213,10 +213,10 @@ for (const factor of FORM_FACTORS) {
     await applySafeAreas(page, factor.insets)
     await page.setViewportSize(factor.viewport)
     await page.goto(ROOM_URL)
-    // Not `expectLive`: while the first page is in flight the room renders a
-    // bare "Loading messages…" paragraph in place of the flex-filling timeline,
-    // so the composer sits under it, hundreds of pixels above the edge this
-    // measures. The socket is routinely up before that page lands.
+    // Not `expectLive`: this measures the loaded room, and the socket is
+    // routinely up before its first page lands. Until #509 the loading state
+    // also parked the composer hundreds of pixels above the edge; the loading
+    // geometry has its own test in `layout.spec.ts`.
     await expectRoomReady(page)
     await expect(page.getByRole('textbox', { name: /^Message/ })).toBeVisible()
 

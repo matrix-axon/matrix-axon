@@ -910,7 +910,8 @@ body {
        every width, and this one used to be the only place that did. */
   }
 
-  .mobile-room-shell .timeline {
+  .mobile-room-shell .timeline,
+  .mobile-room-shell .timeline-loading {
     margin-top: 0.25rem;
   }
 
@@ -2078,6 +2079,18 @@ button.ghost.pin:hover {
 .room-title-button[aria-expanded='true']::after {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* Stands in for `.timeline` until the first page lands, so it takes the same
+   `flex: 1` share of `.room-stream`. As a bare paragraph it was only as tall as
+   its text, which left the sticky composer directly under it, near the top of
+   the pane, until the page arrived and the timeline pushed it down (#509). */
+.timeline-loading {
+  flex: 1;
+  min-height: 0;
+  /* `.timeline`'s margins, not a paragraph's, so the placeholder occupies the
+     box the timeline will. The phone override sits with `.timeline`'s own. */
+  margin: 1rem 0 0;
 }
 
 /* The message scroller — a *nested* scroll container inside `main`, and the
