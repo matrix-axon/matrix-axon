@@ -480,42 +480,45 @@ assets instead of the checked-out source.
 ```sh
 # One desktop engine at a time.
 pnpm build
-pnpm exec playwright test --project=chromium --fail-on-flaky-tests
-pnpm exec playwright test --project=firefox --fail-on-flaky-tests
-pnpm exec playwright test --project=webkit-desktop --fail-on-flaky-tests
+pnpm exec playwright test --project=chromium
+pnpm exec playwright test --project=firefox
+pnpm exec playwright test --project=webkit-desktop
 
 # The iPhone 13 WebKit profile (the post-merge lane).
-MOBILE_E2E=1 pnpm exec playwright test --project=webkit-iphone --fail-on-flaky-tests
+MOBILE_E2E=1 pnpm exec playwright test --project=webkit-iphone
 
 # Every configured desktop and iPhone-profile target.
-MOBILE_E2E=1 pnpm exec playwright test --fail-on-flaky-tests
+MOBILE_E2E=1 pnpm exec playwright test
 ```
 
-`--fail-on-flaky-tests` turns a pass-on-retry into a failure — which means it
-does nothing at all unless retries are enabled, and `playwright.config.ts` sets
-`retries: process.env.CI ? 1 : 0`. So:
+`playwright.config.ts` sets `retries: process.env.CI ? 1 : 0`. So:
 
 - **Locally** there are no retries, so there is no "flaky" outcome to begin with:
-  a test that fails its first attempt is simply a failure, with or without the
-  flag. The flag is harmless here but redundant.
-- **On CI** `retries: 1` applies, and the lanes pass the flag, so a test that
-  fails its first attempt still fails the job even when its retry passes.
+  a test that fails its first attempt is simply a failure.
+- **On CI** `retries: 1` applies, and `e2e/flaky-policy-reporter.ts` decides
+  what a passing retry is worth. A test that fails its first attempt still
+  fails the job, exactly as `--fail-on-flaky-tests` did, _unless_ every failed
+  attempt ran on WebKit and carries the signature of WebKit itself breaking
+  (`e2e/webkit-infra.ts`, #391). That is either the driver's own
+  `WebKit encountered an internal error`, or a network-process crash under an
+  app-initiated reload. Those are accepted, and listed as warnings and in the
+  job summary.
 
 The practical consequence is that both environments reject a first-attempt
-failure, while CI still retries to capture a trace and distinguish a flaky test
-from a persistent failure. To reproduce the gate exactly, set `CI=1` and pass
-`--fail-on-flaky-tests`. Every run requires a fresh mock server: an existing
-listener on the default port 4599 is an error rather than a server Playwright
-can silently reuse from another workspace. Set `AXON_WEB_E2E_PORT` to an unused
-port when another workspace or a manually driven mock needs 4599.
+failure of our own making, while CI still retries to capture a trace and to
+ride out a browser crash. To reproduce the gate exactly, set `CI=1`. Every run
+requires a fresh mock server: an existing listener on the default port 4599 is
+an error rather than a server Playwright can silently reuse from another
+workspace. Set `AXON_WEB_E2E_PORT` to an unused port when another workspace or
+a manually driven mock needs 4599.
 
 **A local full-suite Firefox run should pass.** #157 traced its former
 order-dependent failures to the mock backend leaving every client-initiated
 WebSocket close half-finished. The retained connections eventually prevented
 Firefox from opening another socket, so whichever spec next entered shared
 setup (`openRoom`/`expectLive`) appeared to hang. The mock now completes the
-close handshake and the CI lanes use `--fail-on-flaky-tests`, so a retry can no
-longer hide a recurrence.
+close handshake, and the CI lanes fail a passing retry (see above), so a retry
+can no longer hide a recurrence.
 
 CI runs the peer-dependency check, the schema sync check, lint, format check,
 tests, and the build via `.github/workflows/web-lint-and-test.yml`

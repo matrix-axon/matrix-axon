@@ -116,7 +116,7 @@ jobs:
         run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
 
       - name: Run ${{ matrix.project }} e2e lane
-        run: pnpm exec playwright test --project=${{ matrix.project }} --fail-on-flaky-tests
+        run: pnpm exec playwright test --project=${{ matrix.project }}
 
       # The CI reporter is `github` (inline annotations), so the artifact worth
       # keeping is the trace of the failing first attempt
@@ -165,7 +165,7 @@ jobs:
         run: pnpm exec playwright install --with-deps webkit
 
       - name: Run iPhone-profile WebKit e2e lane
-        run: MOBILE_E2E=1 pnpm exec playwright test --project=webkit-iphone --fail-on-flaky-tests
+        run: MOBILE_E2E=1 pnpm exec playwright test --project=webkit-iphone
 
       - uses: actions/upload-artifact@v7
         if: ${{ failure() }}

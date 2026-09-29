@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { withWebKitCrashSignature } from './webkit-infra'
 
 export const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111'
 export const ROOM_ID = '!room:hs'
@@ -54,12 +55,14 @@ export function shortcutForProject(
  * down; calling `location.reload()` synchronously rejects it instead.
  */
 export async function reloadFromInsidePage(page: Page): Promise<void> {
-  await Promise.all([
-    page.waitForEvent('load'),
-    page.evaluate(() => {
-      window.setTimeout(() => location.reload(), 0)
-    }),
-  ])
+  await withWebKitCrashSignature(page, () =>
+    Promise.all([
+      page.waitForEvent('load'),
+      page.evaluate(() => {
+        window.setTimeout(() => location.reload(), 0)
+      }),
+    ]),
+  )
 }
 
 /** Wait until the initial room-list refresh has durably committed its cache. */
