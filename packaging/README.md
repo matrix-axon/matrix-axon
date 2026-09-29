@@ -51,6 +51,8 @@ The zips are already on the Release when that job starts.
 A manual run of that workflow can publish without building: set `homebrew_tag` to an existing stable tag and turn the platform builds off.
 It checksums the zips already on that release.
 The disk image is attached by `desktop-build.yml`, so the publish waits up to 20 minutes for it.
+If the image never appears, the job still publishes the formulas and leaves the cask unchanged.
+A later run of the same tag adds the cask.
 `beta-*` and `alpha-*` tags are skipped: each formula is the stable release, and Homebrew cannot order a version like `beta-1` against `1.2.3`.
 A tag older than the formula already in the tap is skipped too, so re-running an old tag's workflow or pushing a backport tag cannot downgrade users.
 Tap publishes share one concurrency group, so two tags pushed together do not race to push the tap.

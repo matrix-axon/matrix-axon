@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Fill Formula/axon-server.rb, Formula/axon-tui.rb, and Casks/axon.rb from
-# the GitHub Release assets and push them to matrix-axon/homebrew-tap in
-# one commit.
+# Fill Formula/axon-server.rb and Formula/axon-tui.rb from the GitHub
+# Release zips, and Casks/axon.rb from the universal disk image, and push
+# them to matrix-axon/homebrew-tap.
+# The formulas publish even when the disk image is missing. The cask is
+# added by a later run of the same tag once the image is attached.
 #
 #   TAG=v0.1.0 TAP_TOKEN=... packaging/homebrew/publish-tap.sh
 #
@@ -154,8 +156,8 @@ download_assets() {
 }
 
 # desktop-build.yml attaches the disk image on its own and usually finishes
-# after the zip release job. Poll instead of failing the tap update on the
-# first miss. 40 attempts at 30s is 20 minutes.
+# after the zip release job. Poll for up to 20 minutes. If it never
+# appears, the caller publishes the formulas without the cask.
 download_dmg() {
 	dest=$1
 	name=$2
@@ -249,33 +251,50 @@ for spec in Formula/axon-server.rb Formula/axon-tui.rb Casks/axon.rb; do
 	fi
 done
 
-# After the downgrade guard, so an older tag does not need its disk image.
+# After the downgrade guard, so an older tag does not sit on the poll.
+# A missing image must not hold the formulas back: desktop-build.yml can
+# fail, or the asset can be named differently. Republishing this same tag
+# once the image exists adds the cask, because an equal formula version
+# is not newer and the guard above does not skip it.
 dmg="Axon_${version}_universal.dmg"
-if [ ! -s "$zips/$dmg" ]; then
-	if [ -n "$zip_dir" ]; then
-		echo "missing disk image: $zips/$dmg" >&2
+publish_cask=0
+if [ -s "$zips/$dmg" ]; then
+	publish_cask=1
+elif [ -n "$zip_dir" ]; then
+	echo "disk image $zips/$dmg is missing; publishing the formulas without the cask" >&2
+else
+	if download_dmg "$zips" "$dmg"; then
+		publish_cask=1
+	else
+		echo "disk image $dmg is missing; publishing the formulas without the cask" >&2
+	fi
+fi
+
+if [ "$publish_cask" -eq 1 ]; then
+	cask=$work/axon.rb
+	"$root/packaging/homebrew/render-cask.sh" \
+		--tag "$TAG" \
+		--sha "$(sha256_file "$zips/$dmg")" \
+		--out "$cask"
+	cask_version=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$cask")
+	if [ "$version" != "$cask_version" ]; then
+		echo "rendered cask version '${cask_version}' does not match formula '${version}'" >&2
 		exit 1
 	fi
-	download_dmg "$zips" "$dmg"
 fi
 
-cask=$work/axon.rb
-"$root/packaging/homebrew/render-cask.sh" \
-	--tag "$TAG" \
-	--sha "$(sha256_file "$zips/$dmg")" \
-	--out "$cask"
-cask_version=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$cask")
-if [ "$version" != "$cask_version" ]; then
-	echo "rendered cask version '${cask_version}' does not match formula '${version}'" >&2
-	exit 1
-fi
-
-mkdir -p "$tap_dir/Formula" "$tap_dir/Casks"
+mkdir -p "$tap_dir/Formula"
 cp "$work/axon-server.rb" "$tap_dir/Formula/axon-server.rb"
 cp "$work/axon-tui.rb" "$tap_dir/Formula/axon-tui.rb"
-cp "$cask" "$tap_dir/Casks/axon.rb"
 cp "$root/packaging/homebrew/tap-README.md" "$tap_dir/README.md"
-git -C "$tap_dir" add Formula/axon-server.rb Formula/axon-tui.rb Casks/axon.rb README.md
+git -C "$tap_dir" add Formula/axon-server.rb Formula/axon-tui.rb README.md
+subject="axon-server and axon-tui ${version}"
+if [ "$publish_cask" -eq 1 ]; then
+	mkdir -p "$tap_dir/Casks"
+	cp "$cask" "$tap_dir/Casks/axon.rb"
+	git -C "$tap_dir" add Casks/axon.rb
+	subject="axon-server, axon-tui, and axon ${version}"
+fi
 
 if git -C "$tap_dir" diff --cached --quiet; then
 	echo "tap already matches $TAG"
@@ -286,10 +305,10 @@ fi
 git -C "$tap_dir" \
 	-c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
 	-c user.name="github-actions[bot]" \
-	commit -m "axon-server, axon-tui, and axon ${version}"
+	commit -m "$subject"
 
 if [ "$dry_run" -eq 1 ]; then
-	echo "dry run committed axon-server, axon-tui, and axon ${version} in $tap_dir"
+	echo "dry run committed ${subject} in $tap_dir"
 	exit 0
 fi
 
@@ -300,4 +319,4 @@ if git -C "$tap_dir" show-ref --verify --quiet refs/remotes/origin/HEAD; then
 fi
 
 git_github -C "$tap_dir" push origin "HEAD:${branch}"
-echo "pushed axon-server, axon-tui, and axon ${version} to ${tap_repo} (${branch})"
+echo "pushed ${subject} to ${tap_repo} (${branch})"

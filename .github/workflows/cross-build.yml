@@ -422,7 +422,9 @@ jobs:
   # must not treat "skipped" as permission to publish: the zips were never
   # uploaded. A manual run with homebrew_tag set publishes that existing
   # release and does not need the build jobs. beta-*/alpha-* tags are not
-  # published.
+  # published. If the disk image never appears, the formulas are still
+  # published and the cask is left unchanged. A later run of the same tag
+  # adds the cask.
   homebrew-tap:
     name: Publish Homebrew formula
     needs: release

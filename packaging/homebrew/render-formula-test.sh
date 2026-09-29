@@ -374,20 +374,47 @@ grep -q 'version "1.2.10"' "$work/tap/Formula/axon-tui.rb"
 grep -q 'version "1.2.10"' "$work/tap/Casks/axon.rb"
 grep -Fq 'Axon_1.2.10_universal.dmg' "$work/tap/Casks/axon.rb"
 
-# A newer tag with no disk image fails before it changes the tap.
-if TAG=v9.9.9 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap" \
-	>"$work/rejected.out" 2>"$work/rejected.err"; then
-	echo "missing disk image should fail the publish" >&2
-	exit 1
-fi
-if ! grep -q 'missing disk image: .*/Axon_9.9.9_universal.dmg' "$work/rejected.err"; then
-	echo "missing disk image did not name the file" >&2
+# A newer tag with no disk image still publishes the formulas.
+# The cask stays at the previous version until a later run has the image.
+before=$(git -C "$work/tap" rev-list --count HEAD)
+TAG=v9.9.9 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap" \
+	>"$work/rejected.out" 2>"$work/rejected.err"
+if ! grep -q 'disk image .*/Axon_9.9.9_universal.dmg is missing; publishing the formulas without the cask' "$work/rejected.err"; then
+	echo "missing disk image did not warn and continue" >&2
 	cat "$work/rejected.err" >&2
 	exit 1
 fi
-grep -q 'version "1.2.10"' "$work/tap/Formula/axon-server.rb"
-grep -q 'version "1.2.10"' "$work/tap/Formula/axon-tui.rb"
+grep -q 'version "9.9.9"' "$work/tap/Formula/axon-server.rb"
+grep -q 'version "9.9.9"' "$work/tap/Formula/axon-tui.rb"
 grep -q 'version "1.2.10"' "$work/tap/Casks/axon.rb"
+if ! git -C "$work/tap" log -1 --format=%s | grep -qx 'axon-server and axon-tui 9.9.9'; then
+	echo "a publish without the disk image claimed to update the cask" >&2
+	git -C "$work/tap" log -1 --format=%s >&2
+	exit 1
+fi
+after=$(git -C "$work/tap" rev-list --count HEAD)
+if [ "$after" -le "$before" ]; then
+	echo "missing disk image did not publish the formulas" >&2
+	exit 1
+fi
+TAG=v9.9.9 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap" \
+	>"$work/rejected.out" 2>"$work/rejected.err"
+again=$(git -C "$work/tap" rev-list --count HEAD)
+if [ "$again" -ne "$after" ]; then
+	echo "a second publish without the disk image created another commit" >&2
+	exit 1
+fi
+
+# The same tag adds the cask once the disk image is present.
+printf 'dmg-9.9.9' >"$work/zips/Axon_9.9.9_universal.dmg"
+TAG=v9.9.9 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
+grep -q 'version "9.9.9"' "$work/tap/Casks/axon.rb"
+grep -Fq 'Axon_9.9.9_universal.dmg' "$work/tap/Casks/axon.rb"
+if ! git -C "$work/tap" log -1 --format=%s | grep -qx 'axon-server, axon-tui, and axon 9.9.9'; then
+	echo "republishing the same tag did not record the cask" >&2
+	git -C "$work/tap" log -1 --format=%s >&2
+	exit 1
+fi
 
 # A dry run downloads and clones nothing, so it needs both directories.
 reject env TAG=v1.2.3 "$publish" --dry-run
