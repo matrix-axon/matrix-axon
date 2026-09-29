@@ -18,7 +18,7 @@
   --warn: #9a6700;
   --ok: #1a7f37;
   --room-avatar-fg: #ffffff;
-  --room-avatar-border: rgb(0 0 0 / 0.14);
+  --room-avatar-edge: rgb(0 0 0 / 0.08);
   --room-avatar-0: #3556c4;
   --room-avatar-1: #0f766e;
   --room-avatar-2: #a24d00;
@@ -45,7 +45,7 @@
     --warn: #d4a72c;
     --ok: #4ac26b;
     --room-avatar-fg: #ffffff;
-    --room-avatar-border: rgb(255 255 255 / 0.16);
+    --room-avatar-edge: rgb(255 255 255 / 0.1);
     --room-avatar-0: #4868d9;
     --room-avatar-1: #168178;
     --room-avatar-2: #b75c0b;
@@ -72,7 +72,7 @@
   --warn: #d4a72c;
   --ok: #4ac26b;
   --room-avatar-fg: #ffffff;
-  --room-avatar-border: rgb(255 255 255 / 0.16);
+  --room-avatar-edge: rgb(255 255 255 / 0.1);
   --room-avatar-0: #4868d9;
   --room-avatar-1: #168178;
   --room-avatar-2: #b75c0b;
@@ -114,6 +114,14 @@
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
+}
+
+/* The soft keyboard covers the home indicator, so nothing needs clearing
+   below the shell while it is up. Set from `app.tsx`, because WebKit keeps
+   reporting `safe-area-inset-bottom` (34px on an iPhone) with the keyboard
+   up, which left the composer floating that far above it. */
+:root[data-keyboard='open'] {
+  --safe-bottom: 0px;
 }
 
 :root[data-theme='light'] {
@@ -740,7 +748,18 @@ body {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 1.5rem;
+  /* Inline padding, as a variable so `.mobile-back-surface` can reach through
+     exactly this much of it. Phones narrow it below.
+
+     Change `main`'s inline padding here, through this variable, and never
+     with a bare `padding`/`padding-inline` in a later rule: the swipe-back
+     surface (`.shell main .mobile-back-surface`, in the phone breakpoint)
+     cancels this value with a negative margin to reach the screen edge. A
+     padding that bypasses the variable leaves a dead strip at the edge again,
+     which no headless test shows — the layout spec "swipe-back surface
+     reaches the screen edge" is the one that would catch it. */
+  --main-inline-pad: 1.5rem;
+  padding: 1.5rem var(--main-inline-pad);
   /* The scroll container for Settings, Accounts, Invites and Licenses, and it
      reaches the bottom of the display. Without this the last control of a page
      sits under the home indicator with no way to scroll it clear — the same
@@ -808,6 +827,13 @@ body {
   .shell-body {
     position: relative;
     overflow: hidden;
+  }
+
+  /* iOS's standard side margin on iPhone is 16pt, which the room list already
+     uses. At 1.5rem a room's message avatars sat 32px in (the row's own 8px
+     highlight inset on top) and Settings 24px. */
+  .shell main {
+    --main-inline-pad: 1rem;
   }
 
   .sidebar {
@@ -884,7 +910,8 @@ body {
        every width, and this one used to be the only place that did. */
   }
 
-  .mobile-room-shell .timeline {
+  .mobile-room-shell .timeline,
+  .mobile-room-shell .timeline-loading {
     margin-top: 0.25rem;
   }
 
@@ -1796,8 +1823,13 @@ select {
   border-radius: 8px;
   overflow: hidden;
   background: var(--room-avatar-bg);
+  /* No ring. A letter avatar's fill already gives it its shape, and on a photo
+     the ring read as a colored frame: the fill showed through a translucent
+     border. Transparent rather than removed, and the fill kept inside it, so
+     every avatar keeps its size. Photos get a faint inner edge instead, below. */
+  background-clip: padding-box;
   color: var(--room-avatar-fg);
-  border: 1px solid var(--room-avatar-border);
+  border: 1px solid transparent;
   font-size: 0.8rem;
   font-weight: 700;
   line-height: 1;
@@ -1838,6 +1870,20 @@ select {
   height: 100%;
   object-fit: cover;
   object-position: center center;
+}
+
+/* A photo with a white (or, in dark mode, black) background has no fill of
+   its own to show its shape against the page, so it gets a hairline just
+   inside its edge — faint enough to vanish on a colorful photo. Drawn over
+   the image, which would cover an inset shadow on the avatar itself. */
+.room-avatar-image::after,
+.user-avatar-image::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--room-avatar-edge);
+  pointer-events: none;
 }
 
 .room-copy {
@@ -1960,6 +2006,15 @@ button.pin[aria-pressed='true'] {
   color: var(--warn);
 }
 
+/* A bare glyph, not a bordered control: one outlined box per row read as
+   clutter down the whole list. Qualified with `.ghost` to outrank the generic
+   ghost-button border below; the focus ring is `outline`, so keyboard focus
+   stays visible. */
+button.ghost.pin,
+button.ghost.pin:hover {
+  border-color: transparent;
+}
+
 /* ---- room timeline ---- */
 
 .room-head {
@@ -2024,6 +2079,18 @@ button.pin[aria-pressed='true'] {
 .room-title-button[aria-expanded='true']::after {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* Stands in for `.timeline` until the first page lands, so it takes the same
+   `flex: 1` share of `.room-stream`. As a bare paragraph it was only as tall as
+   its text, which left the sticky composer directly under it, near the top of
+   the pane, until the page arrived and the timeline pushed it down (#509). */
+.timeline-loading {
+  flex: 1;
+  min-height: 0;
+  /* `.timeline`'s margins, not a paragraph's, so the placeholder occupies the
+     box the timeline will. The phone override sits with `.timeline`'s own. */
+  margin: 1rem 0 0;
 }
 
 /* The message scroller — a *nested* scroll container inside `main`, and the
@@ -2291,8 +2358,11 @@ p.timeline-edge {
   border-radius: 999px;
   overflow: hidden;
   background: var(--user-avatar-bg);
+  /* No ring, as with `.room-avatar`: transparent so the size holds, the fill
+     kept inside it, and a hairline on photos only. */
+  background-clip: padding-box;
   color: var(--room-avatar-fg);
-  border: 1px solid var(--room-avatar-border);
+  border: 1px solid transparent;
   font-size: 0.72rem;
   font-weight: 700;
   line-height: 1;
@@ -3620,6 +3690,17 @@ span.composer-attachment-thumb {
   .mobile-back-surface {
     position: relative;
     overflow: hidden;
+  }
+
+  /* Reach the screen edge through `main`'s inline padding (`.shell main`),
+     without moving anything drawn inside. Otherwise that strip of the display
+     belongs to `main`, which has no swipe handler: a back swipe from
+     the far edge never reached the hook. That was invisible in a browser,
+     where the band is WebKit's own swipe-back, and the whole defect in the
+     native shell, which has none (ADR 0075, "The native shell"). */
+  .shell main .mobile-back-surface {
+    margin-left: calc(-1 * var(--main-inline-pad));
+    padding-left: var(--main-inline-pad);
   }
 
   .mobile-back-destination-active {

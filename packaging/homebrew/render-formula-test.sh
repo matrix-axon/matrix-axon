@@ -77,11 +77,56 @@ if ! command -v ruby >/dev/null 2>&1; then
 fi
 
 ruby -c "$out"
+cask=$work/axon.rb
+"$root/packaging/homebrew/render-cask.sh" \
+	--tag v1.2.3 \
+	--sha "$sha_silicon" \
+	--out "$cask"
+ruby -c "$cask"
+grep -Fq "releases/download/v1.2.3/Axon_1.2.3_universal.dmg" "$cask"
+grep -Fq 'app "Axon.app"' "$cask"
+grep -Fq 'depends_on macos: ">= :high_sierra"' "$cask"
+grep -Fq 'Gatekeeper blocks the app on first launch.' "$cask"
+if grep -Eq 'depends_on[[:space:]]+"' "$cask"; then
+	echo "desktop cask depends on another package" >&2
+	exit 1
+fi
+if grep -q '@@' "$cask"; then
+	echo "placeholder left in rendered cask" >&2
+	exit 1
+fi
 
-# Load the formula with the Homebrew DSL stubbed out and print caveats.
+tui=$work/axon-tui.rb
+"$render" \
+	--tag v1.2.3 \
+	--template "$root/packaging/homebrew/axon-tui.rb.tmpl" \
+	--sha-macos-silicon "$sha_silicon" \
+	--sha-macos-intel "$sha_intel" \
+	--sha-linux-x86_64 "$sha_linux" \
+	--out "$tui"
+ruby -c "$tui"
+grep -Fq "releases/download/v1.2.3/axon-tui-macos-silicon.zip" "$tui"
+grep -Fq "releases/download/v1.2.3/axon-tui-macos-intel.zip" "$tui"
+grep -Fq "releases/download/v1.2.3/axon-tui-linux.zip" "$tui"
+# The tilde is literal path text in the formula, not this script's $HOME.
+# shellcheck disable=SC2088
+grep -Fq '~/.config/axon-tui/config.toml' "$tui"
+grep -Fq 'axon-tui --help' "$tui"
+if grep -Eq 'depends_on[[:space:]]+"axon-server"' "$tui"; then
+	echo "axon-tui formula depends on axon-server" >&2
+	exit 1
+fi
+if grep -q 'service do' "$tui"; then
+	echo "axon-tui formula defines a service" >&2
+	exit 1
+fi
+
+# Load both formulas with the Homebrew DSL stubbed out and print caveats.
 # The SQL heredoc terminator has to land in column 0 or a pasted install
-# block never closes.
-ruby - "$out" "$work/caveats-mac.txt" "$work/caveats-linux.txt" <<'RUBY'
+# block never closes. The TUI's Linux-only GLIBC note has to be executed
+# for both operating systems, not merely grepped for the token OS.linux?.
+ruby - "$out" "$tui" "$work/caveats-mac.txt" "$work/caveats-linux.txt" \
+	"$work/tui-caveats-mac.txt" "$work/tui-caveats-linux.txt" <<'RUBY'
 module OS
   def self.mac?
     ENV.fetch("AXON_FORMULA_OS") == "mac"
@@ -111,14 +156,22 @@ class Formula
   end
 end
 
-load ARGV[0]
-formula = ObjectSpace.each_object(Class).find { |klass| klass < Formula && klass.name == "AxonServer" }
-raise "AxonServer formula did not load" unless formula
+def write_caveats(formula, mac_path, linux_path)
+  ENV["AXON_FORMULA_OS"] = "mac"
+  File.write(mac_path, formula.new.caveats)
+  ENV["AXON_FORMULA_OS"] = "linux"
+  File.write(linux_path, formula.new.caveats)
+end
 
-ENV["AXON_FORMULA_OS"] = "mac"
-File.write(ARGV[1], formula.new.caveats)
-ENV["AXON_FORMULA_OS"] = "linux"
-File.write(ARGV[2], formula.new.caveats)
+load ARGV[0]
+server = ObjectSpace.each_object(Class).find { |klass| klass < Formula && klass.name == "AxonServer" }
+raise "AxonServer formula did not load" unless server
+load ARGV[1]
+tui = ObjectSpace.each_object(Class).find { |klass| klass < Formula && klass.name == "AxonTui" }
+raise "AxonTui formula did not load" unless tui
+
+write_caveats(server, ARGV[2], ARGV[3])
+write_caveats(tui, ARGV[4], ARGV[5])
 RUBY
 
 grep -Fq 'macOS: ~/Library/Application Support/axon-server/config.toml' "$work/caveats-mac.txt"
@@ -126,6 +179,14 @@ grep -Fq 'Linux: ~/.config/axon-server/config.toml' "$work/caveats-mac.txt"
 grep -Fq 'GLIBC' "$work/caveats-linux.txt"
 if grep -Fq 'GLIBC' "$work/caveats-mac.txt"; then
 	echo "macOS caveats mention the Linux glibc floor" >&2
+	exit 1
+fi
+# The tilde is literal path text in the printed caveats.
+# shellcheck disable=SC2088
+grep -Fq '~/.config/axon-tui/config.toml' "$work/tui-caveats-mac.txt"
+grep -Fq 'GLIBC' "$work/tui-caveats-linux.txt"
+if grep -Fq 'GLIBC' "$work/tui-caveats-mac.txt"; then
+	echo "macOS axon-tui caveats mention the Linux glibc floor" >&2
 	exit 1
 fi
 
@@ -239,12 +300,26 @@ done
 # Publish dry run: commit the rendered formula into a local tap checkout and
 # refuse to commit again when nothing changed.
 mkdir -p "$work/zips"
-printf 'silicon' >"$work/zips/axon-server-macos-silicon.zip"
-printf 'intel' >"$work/zips/axon-server-macos-intel.zip"
-printf 'linux' >"$work/zips/axon-server-linux.zip"
+for name in \
+	axon-server-macos-silicon.zip axon-server-macos-intel.zip axon-server-linux.zip \
+	axon-tui-macos-silicon.zip axon-tui-macos-intel.zip axon-tui-linux.zip \
+	Axon_1.2.3_universal.dmg Axon_1.2.10_universal.dmg; do
+	printf '%s' "$name" >"$work/zips/$name"
+done
 git init -q -b main "$work/tap"
 TAG=v1.2.3 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 grep -q 'version "1.2.3"' "$work/tap/Formula/axon-server.rb"
+grep -q 'version "1.2.3"' "$work/tap/Formula/axon-tui.rb"
+grep -Fq 'axon-tui-macos-silicon.zip' "$work/tap/Formula/axon-tui.rb"
+grep -q 'version "1.2.3"' "$work/tap/Casks/axon.rb"
+grep -Fq 'Axon_1.2.3_universal.dmg' "$work/tap/Casks/axon.rb"
+grep -Fq 'app "Axon.app"' "$work/tap/Casks/axon.rb"
+grep -Fq 'depends_on macos: ">= :high_sierra"' "$work/tap/Casks/axon.rb"
+grep -Fq 'Gatekeeper blocks the app on first launch.' "$work/tap/Casks/axon.rb"
+if grep -Eq 'depends_on[[:space:]]+"' "$work/tap/Casks/axon.rb"; then
+	echo "desktop cask depends on another package" >&2
+	exit 1
+fi
 test -f "$work/tap/README.md"
 commits=$(git -C "$work/tap" rev-list --count HEAD)
 if [ "$commits" -ne 1 ]; then
@@ -255,6 +330,17 @@ TAG=v1.2.3 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 commits=$(git -C "$work/tap" rev-list --count HEAD)
 if [ "$commits" -ne 1 ]; then
 	echo "second dry run created another commit" >&2
+	exit 1
+fi
+
+# A tap that already has this axon-server version still gains axon-tui.
+git -C "$work/tap" rm -q Formula/axon-tui.rb
+git -C "$work/tap" -c user.email=test@example.com -c user.name=test commit -m "drop tui"
+TAG=v1.2.3 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
+grep -q 'version "1.2.3"' "$work/tap/Formula/axon-tui.rb"
+commits=$(git -C "$work/tap" rev-list --count HEAD)
+if [ "$commits" -ne 3 ]; then
+	echo "republishing the same tag did not add the missing axon-tui formula (commits=$commits)" >&2
 	exit 1
 fi
 
@@ -281,8 +367,10 @@ grep -q 'version "1.2.3"' "$work/tap/Formula/axon-server.rb"
 TAG=v1.2.2 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 TAG=v1.1.10 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 grep -q 'version "1.2.3"' "$work/tap/Formula/axon-server.rb"
+grep -q 'version "1.2.3"' "$work/tap/Formula/axon-tui.rb"
+grep -q 'version "1.2.3"' "$work/tap/Casks/axon.rb"
 commits=$(git -C "$work/tap" rev-list --count HEAD)
-if [ "$commits" -ne 1 ]; then
+if [ "$commits" -ne 3 ]; then
 	echo "an older tag changed the tap" >&2
 	exit 1
 fi
@@ -290,6 +378,51 @@ fi
 # A newer tag does publish, including one that sorts before as a string.
 TAG=v1.2.10 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 grep -q 'version "1.2.10"' "$work/tap/Formula/axon-server.rb"
+grep -q 'version "1.2.10"' "$work/tap/Formula/axon-tui.rb"
+grep -q 'version "1.2.10"' "$work/tap/Casks/axon.rb"
+grep -Fq 'Axon_1.2.10_universal.dmg' "$work/tap/Casks/axon.rb"
+
+# A newer tag with no disk image still publishes the formulas.
+# The cask stays at the previous version until a later run has the image.
+before=$(git -C "$work/tap" rev-list --count HEAD)
+TAG=v9.9.9 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap" \
+	>"$work/rejected.out" 2>"$work/rejected.err"
+if ! grep -q 'disk image .*/Axon_9.9.9_universal.dmg is missing; publishing the formulas without the cask' "$work/rejected.err"; then
+	echo "missing disk image did not warn and continue" >&2
+	cat "$work/rejected.err" >&2
+	exit 1
+fi
+grep -q 'version "9.9.9"' "$work/tap/Formula/axon-server.rb"
+grep -q 'version "9.9.9"' "$work/tap/Formula/axon-tui.rb"
+grep -q 'version "1.2.10"' "$work/tap/Casks/axon.rb"
+if ! git -C "$work/tap" log -1 --format=%s | grep -qx 'axon-server and axon-tui 9.9.9'; then
+	echo "a publish without the disk image claimed to update the cask" >&2
+	git -C "$work/tap" log -1 --format=%s >&2
+	exit 1
+fi
+after=$(git -C "$work/tap" rev-list --count HEAD)
+if [ "$after" -le "$before" ]; then
+	echo "missing disk image did not publish the formulas" >&2
+	exit 1
+fi
+TAG=v9.9.9 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap" \
+	>"$work/rejected.out" 2>"$work/rejected.err"
+again=$(git -C "$work/tap" rev-list --count HEAD)
+if [ "$again" -ne "$after" ]; then
+	echo "a second publish without the disk image created another commit" >&2
+	exit 1
+fi
+
+# The same tag adds the cask once the disk image is present.
+printf 'dmg-9.9.9' >"$work/zips/Axon_9.9.9_universal.dmg"
+TAG=v9.9.9 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
+grep -q 'version "9.9.9"' "$work/tap/Casks/axon.rb"
+grep -Fq 'Axon_9.9.9_universal.dmg' "$work/tap/Casks/axon.rb"
+if ! git -C "$work/tap" log -1 --format=%s | grep -qx 'axon-server, axon-tui, and axon 9.9.9'; then
+	echo "republishing the same tag did not record the cask" >&2
+	git -C "$work/tap" log -1 --format=%s >&2
+	exit 1
+fi
 
 # A dry run downloads and clones nothing, so it needs both directories.
 reject env TAG=v1.2.3 "$publish" --dry-run

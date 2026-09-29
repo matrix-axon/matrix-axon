@@ -253,6 +253,48 @@ test('narrow: the room list fills the single-pane viewport', async ({
   )
 })
 
+// The native shell has no browser swipe-back, so the hook must own the far
+// edge itself — and `main`'s padding used to take the first 1.5rem away from
+// it (ADR 0075, "The native shell"). The surface reaches the edge while the
+// content inside stays where `main`'s padding put it.
+for (const [label, path, content] of [
+  ['room', ROOM_URL, '.room-stream'],
+  ['settings', '/settings', '.settings-back-pane'],
+] as const) {
+  test(`narrow: the ${label} swipe-back surface reaches the screen edge`, async ({
+    page,
+  }) => {
+    await signIn(page)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto(path)
+    if (label === 'room') {
+      await expectRoomReady(page)
+    }
+    const inner = page.locator(content)
+    await expect(inner).toBeVisible()
+
+    const geometry = await page.evaluate((selector) => {
+      const pane = document.querySelector<HTMLElement>(selector)!
+      const main = document.querySelector<HTMLElement>('.shell main')!
+      const box = pane.getBoundingClientRect()
+      // Mid-viewport, not mid-pane: Settings is taller than the screen.
+      const hit = document.elementFromPoint(2, window.innerHeight / 2)
+      return {
+        hit: hit === null ? null : hit.tagName.toLowerCase(),
+        hitSurface:
+          hit !== null && hit.closest('.mobile-back-surface') !== null,
+        contentLeft: box.left,
+        mainPadding: parseFloat(getComputedStyle(main).paddingLeft),
+      }
+    }, content)
+
+    console.log(JSON.stringify(geometry))
+    expect(geometry.hit).not.toBeNull()
+    expect(geometry.hitSurface, `x=2 landed on ${geometry.hit}`).toBe(true)
+    expect(geometry.contentLeft).toBeCloseTo(geometry.mainPadding, 0)
+  })
+}
+
 test('the room list survives a room switch, filter and all', async ({
   page,
 }) => {
@@ -267,6 +309,63 @@ test('the room list survives a room switch, filter and all', async ({
   // The sidebar was never unmounted, so its session-only filter is still set.
   await expect(page.getByLabel('Filter by name')).toHaveValue('room')
 })
+
+/**
+ * While the room's first page is in flight, "Loading messages…" stands in for
+ * the timeline, and the composer must already be on the bottom edge rather
+ * than parked under the placeholder until the page lands (#509). The page is
+ * held with a route that releases only after the measurement, so the loading
+ * state cannot end mid-test, and the phone width is covered because that is
+ * where it was seen.
+ */
+for (const viewport of [
+  { width: 390, height: 844 },
+  { width: 1400, height: 900 },
+]) {
+  test(`the composer holds the bottom edge while the first page loads: ${viewport.width}px`, async ({
+    page,
+  }) => {
+    let release = () => {}
+    const released = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await page.route(/\/rooms\/[^/]+\/timeline(\?|$)/, async (route) => {
+      await released
+      await route.continue().catch(() => {})
+    })
+    await signIn(page)
+    await page.setViewportSize(viewport)
+    await page.goto(ROOM_URL)
+    await expect(page.getByText('Loading messages…')).toBeVisible()
+
+    const loading = await page.evaluate(() => {
+      const stream = document.querySelector('.room-stream')!
+      const composer = document.querySelector('.room-stream > .composer')!
+      return {
+        gap:
+          stream.getBoundingClientRect().bottom -
+          composer.getBoundingClientRect().bottom,
+        top: document
+          .querySelector('.timeline-loading')!
+          .getBoundingClientRect().top,
+      }
+    })
+    // Both directions: a composer pushed *past* the edge reads as a negative
+    // gap, which a one-sided bound would pass.
+    expect(Math.abs(loading.gap)).toBeLessThanOrEqual(1)
+
+    release()
+    await expectRoomReady(page)
+
+    // The placeholder stood in the box the timeline now occupies, so nothing
+    // above the composer jumps when the page lands. On a phone the timeline's
+    // top margin is 0.25rem rather than 1rem, and a bare paragraph kept 1em.
+    const timelineTop = await page.evaluate(
+      () => document.querySelector('.timeline')!.getBoundingClientRect().top,
+    )
+    expect(Math.abs(loading.top - timelineTop)).toBeLessThanOrEqual(1)
+  })
+}
 
 test('wide: the thread is a third column that shrinks the timeline', async ({
   page,

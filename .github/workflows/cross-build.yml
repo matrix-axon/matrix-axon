@@ -51,9 +51,13 @@ on:
         type: boolean
         default: true
       homebrew:
-        description: "Publish Homebrew formula"
+        description: "Publish Homebrew formulas"
         type: boolean
         default: true
+      homebrew_tag:
+        description: "Existing stable release tag to publish (vX.Y.Z). Used only for a manual run; a tag push publishes that tag. Leave empty to skip the tap on a manual run."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -408,16 +412,38 @@ jobs:
         with:
           files: release-binaries/*
 
-  # Checksums the macOS and Linux zips just attached to the GitHub Release
-  # and pushes Formula/axon-server.rb to matrix-axon/homebrew-tap.
-  # Does not upload release assets, so it stays out of the github-release
-  # concurrency group. needs: release is what makes the zips exist first.
-  # Only v* tags: the tap has one formula, and beta-*/alpha-* would replace
-  # the stable release with a version Homebrew cannot order.
+  # Checksums the macOS and Linux zips on a GitHub Release, waits for
+  # desktop-build.yml to attach the universal disk image, and pushes
+  # Formula/axon-server.rb, Formula/axon-tui.rb, and Casks/axon.rb to
+  # matrix-axon/homebrew-tap in one commit. Does not upload release assets,
+  # so it stays out of the github-release concurrency group.
+  # A tag push publishes only after this workflow's release job succeeds.
+  # release is skipped, not failed, when a build job fails, so a tag push
+  # must not treat "skipped" as permission to publish: the zips were never
+  # uploaded. A manual run with homebrew_tag set publishes that existing
+  # release and does not need the build jobs. beta-*/alpha-* tags are not
+  # published. If the disk image never appears, the formulas are still
+  # published and the cask is left unchanged. A later run of the same tag
+  # adds the cask.
   homebrew-tap:
     name: Publish Homebrew formula
     needs: release
-    if: ${{ github.event.inputs.homebrew != 'false' && needs.release.result == 'success' && startsWith(github.ref_name, 'v') }}
+    if: >-
+      always() &&
+      !cancelled() &&
+      github.event.inputs.homebrew != 'false' &&
+      (
+        (
+          github.ref_type == 'tag' &&
+          startsWith(github.ref_name, 'v') &&
+          needs.release.result == 'success'
+        ) ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.homebrew_tag != '' &&
+          (needs.release.result == 'success' || needs.release.result == 'skipped')
+        )
+      )
     runs-on: ubuntu-latest
     # One tap branch for every tag: two tags pushed together would otherwise
     # race to push main, and the loser fails non-fast-forward.
@@ -430,7 +456,7 @@ jobs:
 
       - name: Publish formula to matrix-axon/homebrew-tap
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ github.event.inputs.homebrew_tag != '' && github.event.inputs.homebrew_tag || github.ref_name }}
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           GH_TOKEN: ${{ github.token }}
         run: packaging/homebrew/publish-tap.sh

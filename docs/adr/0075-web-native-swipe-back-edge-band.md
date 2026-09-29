@@ -132,3 +132,34 @@ scrolling and text selection fighting the pan — but not for the reason given.
   culprit; counting `navigate`/`popstate` in the same window is what exposed the
   double navigation. The helper script used here lives under the gitignored
   `debug/` and is not part of the repo.
+
+## The native shell
+
+The decision rests on the browser owning the band. In the Tauri shell
+(ADR 0102) it does not: wry creates the WKWebView with
+`allowsBackForwardNavigationGestures` off, and Tauri exposes no builder option
+to change that. There is no recognizer to race, so declining the band there
+left it with no owner at all. On iOS an edge swipe did nothing, while the same
+bundle worked as a PWA and in Safari.
+
+The band is therefore read through `nativeBackEdgePx()`, which is zero when
+`isTauriRuntime()` is true. That covers the room's swipe-back and the media
+viewer's paging. The alternative, turning WebKit's gesture on in the shell,
+would bring back the double navigation this ADR removed. It would also do
+nothing in most shell sessions, because a cold start or deep link has no
+history entry behind it.
+
+A test build with only that change did not help, and an on-device trace of
+each swipe (iPhone 18 Pro Max, packaged shell) showed why. The band was not the
+only dead zone:
+
+- **The swipe surface stopped 1.5rem short of the edge.** `.shell main` keeps
+  its inline padding on phones, and the surfaces the hook binds to sit inside
+  it. A swipe from x=4 landed on `main` and never reached the hook. In a
+  browser this was hidden, because the same strip is WebKit's. On phones the
+  surfaces now extend through that padding with a matching negative margin,
+  so the content stays where it was.
+- **Long swipes failed the vertical cap.** A thumb crossing a 440pt screen
+  arcs: `dx=390 dy=82`, refused by `SWIPE_MAX_Y` (64px). A back swipe may now
+  drift `max(SWIPE_MAX_Y, 0.3 × dx)`. The axis ratio still applies, and other
+  swipes keep the fixed cap.

@@ -797,3 +797,34 @@ describe('the transfer deadline', () => {
     expect(result.ok).toBe(false)
   })
 })
+
+describe('createMediaService blob types', () => {
+  /**
+   * The shape `@tauri-apps/plugin-http` hands back: a `Response` constructed
+   * with no headers, and `headers` attached afterwards. `blob()` reads its
+   * type from the construction-time headers, so it comes back untyped.
+   */
+  function shellResponse(body: Uint8Array, contentType: string): Response {
+    const res = new Response(new Uint8Array(body), { status: 200 })
+    Object.defineProperty(res, 'headers', {
+      value: new Headers({ 'content-type': contentType }),
+      writable: false,
+    })
+    return res
+  }
+
+  it('types a blob from Content-Type when the platform fetch drops it', async () => {
+    // Untyped, WebKit's image Copy put only the `blob:` URL on the iOS
+    // clipboard in the shell, where the PWA copied the image itself.
+    const media = createMediaService({
+      auth: stubAuth(),
+      baseUrl: BASE_URL,
+      platform: { fetch: async () => shellResponse(PNG, 'image/png') },
+    })
+
+    const result = await media.fetchBlob(ACCOUNT, 'mxc://hs/typed')
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.blob.type).toBe('image/png')
+  })
+})

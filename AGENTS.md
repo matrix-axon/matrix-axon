@@ -57,13 +57,13 @@ matrix-axon/
     adr/                     # architecture decision records
     self-hosting.md          # produced in Milestone 13 (deployment docs; still pending)
   docker-compose.yml         # Postgres 16 for dev; Synapse under `integration` profile
-  packaging/                 # nFPM .deb/.rpm, and the Homebrew formula template
+  packaging/                 # nFPM .deb/.rpm, and the Homebrew formula and cask templates
   scripts/
     integration-test.sh      # end-to-end E2EE re-decryption test vs local Synapse
   .github/workflows/         # public repo: GitHub-hosted runners have free minutes, so most workflows trigger on push or release (via new tag); a few stay manual-dispatch only for other reasons (expensive/manual runs)
     api-docs.yml             # build the Pages site: homepage + API reference at https://matrix-axon.github.io/matrix-axon/api.html
     check-environment.yml    # local-runner environment check
-    cross-build.yml          # fmt, clippy, test, and build for MacOS, Linux, and Windows; on tags, publishes the Homebrew formula
+    cross-build.yml          # fmt, clippy, test, and build for MacOS, Linux, and Windows; on tags, publishes the Homebrew formulas and cask
     lint-and-clippy.yml      # required PR/main Rust gate: cargo fmt + clippy + test
     lint-and-test.yml        # cargo fmt + clippy + test
     package.yml              # nFPM .deb/.rpm (amd64 on ubuntu-22.04, arm64 on ubuntu-22.04-arm); tag uploads to GitHub Releases

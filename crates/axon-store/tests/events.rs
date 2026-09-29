@@ -1161,3 +1161,62 @@ async fn arrival_order_follows_ingest_not_origin_ts() {
 
     common::cleanup_account(&pool, account_id).await;
 }
+
+/// `events_precede` answers true only when every candidate is a held event that
+/// precedes the anchor in both arrival order and `origin_ts` (issue #507).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn events_precede_requires_both_orders_and_known_events() {
+    let store = common::migrated_store().await;
+    let user = format!("@precede-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("upsert account")
+        .account_id;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+
+    // Arrival order follows insertion order.
+    let old = insert_message(&store, account_id, &room_id, 1_000, "old").await;
+    // Arrived before the anchor but stamped after it.
+    let early = insert_message(&store, account_id, &room_id, 2_500, "early").await;
+    let anchor = insert_message(&store, account_id, &room_id, 2_000, "anchor").await;
+    // Arrived after the anchor but stamped before it: a bridge backfill.
+    let backfilled = insert_message(&store, account_id, &room_id, 1_500, "backfilled").await;
+    let newer = insert_message(&store, account_id, &room_id, 3_000, "newer").await;
+    let unknown = format!("$missing-{}:localhost", Uuid::new_v4());
+
+    let precede = |candidates: Vec<String>| {
+        let store = &store;
+        let room_id = &room_id;
+        let anchor = &anchor;
+        async move {
+            store
+                .events_precede(account_id, room_id, anchor, &candidates)
+                .await
+                .expect("events_precede")
+        }
+    };
+
+    assert!(precede(vec![old.clone()]).await, "older on both orders");
+    assert!(
+        precede(vec![old.clone(), old.clone()]).await,
+        "duplicates count once"
+    );
+    assert!(!precede(vec![newer.clone()]).await, "newer on both orders");
+    assert!(!precede(vec![backfilled]).await, "older by origin_ts only");
+    assert!(!precede(vec![early]).await, "older by arrival order only");
+    assert!(
+        !precede(vec![old.clone(), unknown.clone()]).await,
+        "an unknown candidate"
+    );
+    assert!(!precede(vec![anchor.clone()]).await, "the anchor itself");
+    assert!(!precede(vec![]).await, "no candidates");
+    assert!(
+        !store
+            .events_precede(account_id, &room_id, &unknown, &[old])
+            .await
+            .expect("events_precede"),
+        "an unknown anchor"
+    );
+}
