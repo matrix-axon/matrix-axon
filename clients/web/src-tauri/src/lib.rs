@@ -453,6 +453,20 @@ fn main_window<R: tauri::Runtime>(
     // `read_dropped_file` is how the page then reads it.
     #[cfg(not(target_os = "linux"))]
     let builder = builder.disable_drag_drop_handler();
+    // No form accessory bar (previous / next / done) above the iOS keyboard.
+    // It is WebKit's default for any focused field, and this removes it for
+    // *every* field in the webview: the hook is webview-wide, and scoping it to
+    // one field would take private WebKit API.
+    //
+    // That is a deliberate trade. The composer, the field in constant use, has
+    // no other field to move to, and the bar cost it ~50pt of a phone's
+    // remaining height. The multi-field forms (sign-in and accounts, search
+    // filters, room settings) lose previous/next field-hopping; they still
+    // submit with the keyboard's Return key, and tapping outside a field
+    // dismisses the keyboard, so nothing becomes unreachable. Revisit if a
+    // long form is added. A browser tab or PWA cannot remove the bar at all.
+    #[cfg(target_os = "ios")]
+    let builder = builder.with_input_accessory_view_builder(|_webview| None);
     builder.build()
 }
 
