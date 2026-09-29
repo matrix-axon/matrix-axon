@@ -32,7 +32,12 @@ export default defineConfig({
   workers: 1,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  reporter: process.env.CI ? 'github' : 'list',
+  // In CI a passing retry fails the run unless the failure was WebKit's own
+  // (`e2e/flaky-policy-reporter.ts`, #391). That reporter replaces the lanes'
+  // `--fail-on-flaky-tests`, which cannot tell a browser crash from a race.
+  reporter: process.env.CI
+    ? [['github'], ['./e2e/flaky-policy-reporter.ts']]
+    : 'list',
   use: {
     baseURL: BASE_URL,
     // Trace the *first* attempt, and keep it only if it fails. The retry

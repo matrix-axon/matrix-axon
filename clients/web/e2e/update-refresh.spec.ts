@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { expectLive, ROOM_URL, signIn } from './helpers'
+import { withWebKitCrashSignature } from './webkit-infra'
 
 /**
  * Automatic refresh when a new build is deployed (ADR 0087).
@@ -94,22 +95,28 @@ async function returnAfterAway(page: Page, awayMs: number): Promise<void> {
  * The away/return evaluates can themselves be killed by that reload — hiding
  * the tab is enough when an update is already known — so a destroyed context
  * there is success, not a failed helper.
+ *
+ * Wrapped in `withWebKitCrashSignature`: this is where WebKit's network process
+ * has crashed under the app's reload in CI (#391), and the wait for `load` is
+ * all that sees it.
  */
 async function returnAfterAwayExpectingReload(
   page: Page,
   awayMs: number,
 ): Promise<void> {
-  await Promise.all([
-    page.waitForEvent('load', { timeout: 15_000 }),
-    returnAfterAway(page, awayMs).catch((error: unknown) => {
-      if (
-        !(error instanceof Error) ||
-        !error.message.includes('Execution context was destroyed')
-      ) {
-        throw error
-      }
-    }),
-  ])
+  await withWebKitCrashSignature(page, () =>
+    Promise.all([
+      page.waitForEvent('load', { timeout: 15_000 }),
+      returnAfterAway(page, awayMs).catch((error: unknown) => {
+        if (
+          !(error instanceof Error) ||
+          !error.message.includes('Execution context was destroyed')
+        ) {
+          throw error
+        }
+      }),
+    ]),
+  )
 }
 
 // Before as well as after. The after-hook is a request to the shared mock, and
