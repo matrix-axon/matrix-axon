@@ -95,6 +95,13 @@ async function measureCell(
   return breakdown
 }
 
+// Never traced, whatever `playwright.config.ts` says: tracing snapshots the DOM
+// on every action, inside the transitions this measures. With
+// `retain-on-first-failure` on, the chromium 4×/2000-event cell read ~1.5s
+// against ~0.7s, and 6×/2000 ~2.5s against ~0.85s. (`trace` forces a new
+// worker, so Playwright only accepts it at the top of a file.)
+test.use({ trace: 'off' })
+
 test.describe('timeline → room-list transition cost', () => {
   test.skip(!RUN, 'perf lane — set PERF=1 (pnpm test:e2e:perf) to run')
   test.setTimeout(360_000)
