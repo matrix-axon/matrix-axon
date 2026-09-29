@@ -432,6 +432,7 @@ export function MessageEventRow({
       data-event-id={event.event_id}
       onPointerDown={touchGestures.onPointerDown}
       onPointerMove={touchGestures.onPointerMove}
+      onTouchMove={touchGestures.onTouchMove}
       onPointerCancel={touchGestures.onPointerCancel}
       onPointerUp={touchGestures.onPointerUp}
       onContextMenu={touchGestures.onContextMenu}

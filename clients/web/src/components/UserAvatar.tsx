@@ -33,19 +33,17 @@ export function UserAvatar({
   const { ref, state } = useMediaBlob<HTMLSpanElement>(accountId, mxcUrl)
   const color = userAvatarColor(userId)
   const label = userAvatarLabel(displayName, userId)
+  const shown =
+    state.status === 'ready' && state.url !== undefined ? state.url : null
 
   return (
     <span
       ref={ref}
-      class={`user-avatar user-avatar-color-${color}`}
+      class={`user-avatar user-avatar-color-${color}${shown !== null ? ' user-avatar-image' : ''}`}
       aria-hidden="true"
       title={mxcUrl === null ? undefined : `${displayName} avatar`}
     >
-      {state.status === 'ready' && state.url !== undefined ? (
-        <img src={state.url} alt="" />
-      ) : (
-        <span>{label}</span>
-      )}
+      {shown !== null ? <img src={shown} alt="" /> : <span>{label}</span>}
     </span>
   )
 }

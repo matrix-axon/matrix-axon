@@ -7,7 +7,9 @@ import {
   SWIPE_MAX_Y,
   SWIPE_MIN_X,
   SWIPE_MIN_Y,
+  swipeBackMaxY,
   swipeDirection,
+  swipeLock,
 } from './gestures'
 
 /** From the origin, so a case reads as the travel it describes. */
@@ -112,5 +114,43 @@ describe('SWIPE_BACK_MIN_X', () => {
   it('commits after an intentional drag while retaining a cancelable preview', () => {
     expect(SWIPE_BACK_MIN_X).toBeLessThan(SWIPE_MIN_X)
     expect(SWIPE_BACK_MIN_X).toBeGreaterThan(SWIPE_DECISION_THRESHOLD)
+  })
+})
+
+describe('swipeBackMaxY', () => {
+  it('keeps the fixed cap for a short swipe', () => {
+    expect(swipeBackMaxY(SWIPE_BACK_MIN_X)).toBe(SWIPE_MAX_Y)
+  })
+
+  it('lets a phone-width swipe carry its thumb arc', () => {
+    // Measured on an iPhone 18 Pro Max, and refused by the fixed cap.
+    expect(swipeBackMaxY(390)).toBeGreaterThan(82)
+  })
+
+  it('stays tighter than the axis ratio already allows', () => {
+    // Otherwise the drift allowance, not the ratio, would decide direction.
+    expect(swipeBackMaxY(1000)).toBeLessThan(1000 / SWIPE_AXIS_RATIO)
+  })
+})
+
+describe('swipeLock', () => {
+  it('stays undecided inside the threshold on both axes', () => {
+    expect(
+      swipeLock(SWIPE_DECISION_THRESHOLD - 1, -(SWIPE_DECISION_THRESHOLD - 1)),
+    ).toBeNull()
+  })
+
+  it('locks sideways, in the direction travelled', () => {
+    expect(swipeLock(-30, 8)).toBe('left')
+    expect(swipeLock(30, -8)).toBe('right')
+  })
+
+  it('locks vertical when the drift beats the axis ratio', () => {
+    expect(swipeLock(-20, 20)).toBe('vertical')
+    expect(swipeLock(3, 40)).toBe('vertical')
+  })
+
+  it('treats exactly the axis ratio as sideways', () => {
+    expect(swipeLock(-SWIPE_AXIS_RATIO * 20, 20)).toBe('left')
   })
 })

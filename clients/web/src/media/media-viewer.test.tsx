@@ -813,6 +813,29 @@ describe('MediaViewerProvider', () => {
     expect(shownImage()).toBe('$2.png')
   })
 
+  it('pages from the edge band in the native shell', async () => {
+    // No browser back recognizer exists in the shell's webview, so there is
+    // nothing to cede the band to (ADR 0075).
+    const shell = window as unknown as Record<string, unknown>
+    shell.__TAURI_INTERNALS__ = {}
+    try {
+      serveBytes()
+      const events = [image('$1', 10), image('$2', 20)]
+      const { container } = render(<Surface events={events} atStart />)
+      await openAt(container, '$2')
+      await waitFor(() => expect(shownImage()).toBe('$2.png'))
+
+      const overlay = dialog()!
+      fireEvent.touchStart(overlay, { touches: [{ clientX: 5, clientY: 300 }] })
+      fireEvent.touchEnd(overlay, {
+        changedTouches: [{ clientX: 205, clientY: 305 }],
+      })
+      await waitFor(() => expect(shownImage()).toBe('$1.png'))
+    } finally {
+      delete shell.__TAURI_INTERNALS__
+    }
+  })
+
   it('ignores a mostly-vertical drag', async () => {
     serveBytes()
     const events = [image('$1', 10), image('$2', 20)]

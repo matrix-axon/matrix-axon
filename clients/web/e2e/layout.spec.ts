@@ -253,6 +253,48 @@ test('narrow: the room list fills the single-pane viewport', async ({
   )
 })
 
+// The native shell has no browser swipe-back, so the hook must own the far
+// edge itself — and `main`'s padding used to take the first 1.5rem away from
+// it (ADR 0075, "The native shell"). The surface reaches the edge while the
+// content inside stays where `main`'s padding put it.
+for (const [label, path, content] of [
+  ['room', ROOM_URL, '.room-stream'],
+  ['settings', '/settings', '.settings-back-pane'],
+] as const) {
+  test(`narrow: the ${label} swipe-back surface reaches the screen edge`, async ({
+    page,
+  }) => {
+    await signIn(page)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto(path)
+    if (label === 'room') {
+      await expectRoomReady(page)
+    }
+    const inner = page.locator(content)
+    await expect(inner).toBeVisible()
+
+    const geometry = await page.evaluate((selector) => {
+      const pane = document.querySelector<HTMLElement>(selector)!
+      const main = document.querySelector<HTMLElement>('.shell main')!
+      const box = pane.getBoundingClientRect()
+      // Mid-viewport, not mid-pane: Settings is taller than the screen.
+      const hit = document.elementFromPoint(2, window.innerHeight / 2)
+      return {
+        hit: hit === null ? null : hit.tagName.toLowerCase(),
+        hitSurface:
+          hit !== null && hit.closest('.mobile-back-surface') !== null,
+        contentLeft: box.left,
+        mainPadding: parseFloat(getComputedStyle(main).paddingLeft),
+      }
+    }, content)
+
+    console.log(JSON.stringify(geometry))
+    expect(geometry.hit).not.toBeNull()
+    expect(geometry.hitSurface, `x=2 landed on ${geometry.hit}`).toBe(true)
+    expect(geometry.contentLeft).toBeCloseTo(geometry.mainPadding, 0)
+  })
+}
+
 test('the room list survives a room switch, filter and all', async ({
   page,
 }) => {
