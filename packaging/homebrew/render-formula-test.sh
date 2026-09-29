@@ -77,6 +77,24 @@ if ! command -v ruby >/dev/null 2>&1; then
 fi
 
 ruby -c "$out"
+cask=$work/axon.rb
+"$root/packaging/homebrew/render-cask.sh" \
+	--tag v1.2.3 \
+	--sha "$sha_silicon" \
+	--out "$cask"
+ruby -c "$cask"
+grep -Fq "releases/download/v1.2.3/Axon_1.2.3_universal.dmg" "$cask"
+grep -Fq 'app "Axon.app"' "$cask"
+grep -Fq 'depends_on macos: ">= :high_sierra"' "$cask"
+grep -Fq 'Gatekeeper blocks the app on first launch.' "$cask"
+if grep -Eq 'depends_on[[:space:]]+"' "$cask"; then
+	echo "desktop cask depends on another package" >&2
+	exit 1
+fi
+if grep -q '@@' "$cask"; then
+	echo "placeholder left in rendered cask" >&2
+	exit 1
+fi
 
 tui=$work/axon-tui.rb
 "$render" \
@@ -284,7 +302,8 @@ done
 mkdir -p "$work/zips"
 for name in \
 	axon-server-macos-silicon.zip axon-server-macos-intel.zip axon-server-linux.zip \
-	axon-tui-macos-silicon.zip axon-tui-macos-intel.zip axon-tui-linux.zip; do
+	axon-tui-macos-silicon.zip axon-tui-macos-intel.zip axon-tui-linux.zip \
+	Axon_1.2.3_universal.dmg Axon_1.2.10_universal.dmg; do
 	printf '%s' "$name" >"$work/zips/$name"
 done
 git init -q -b main "$work/tap"
@@ -292,6 +311,15 @@ TAG=v1.2.3 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 grep -q 'version "1.2.3"' "$work/tap/Formula/axon-server.rb"
 grep -q 'version "1.2.3"' "$work/tap/Formula/axon-tui.rb"
 grep -Fq 'axon-tui-macos-silicon.zip' "$work/tap/Formula/axon-tui.rb"
+grep -q 'version "1.2.3"' "$work/tap/Casks/axon.rb"
+grep -Fq 'Axon_1.2.3_universal.dmg' "$work/tap/Casks/axon.rb"
+grep -Fq 'app "Axon.app"' "$work/tap/Casks/axon.rb"
+grep -Fq 'depends_on macos: ">= :high_sierra"' "$work/tap/Casks/axon.rb"
+grep -Fq 'Gatekeeper blocks the app on first launch.' "$work/tap/Casks/axon.rb"
+if grep -Eq 'depends_on[[:space:]]+"' "$work/tap/Casks/axon.rb"; then
+	echo "desktop cask depends on another package" >&2
+	exit 1
+fi
 test -f "$work/tap/README.md"
 commits=$(git -C "$work/tap" rev-list --count HEAD)
 if [ "$commits" -ne 1 ]; then
@@ -340,6 +368,7 @@ TAG=v1.2.2 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 TAG=v1.1.10 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 grep -q 'version "1.2.3"' "$work/tap/Formula/axon-server.rb"
 grep -q 'version "1.2.3"' "$work/tap/Formula/axon-tui.rb"
+grep -q 'version "1.2.3"' "$work/tap/Casks/axon.rb"
 commits=$(git -C "$work/tap" rev-list --count HEAD)
 if [ "$commits" -ne 3 ]; then
 	echo "an older tag changed the tap" >&2
@@ -350,6 +379,50 @@ fi
 TAG=v1.2.10 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 grep -q 'version "1.2.10"' "$work/tap/Formula/axon-server.rb"
 grep -q 'version "1.2.10"' "$work/tap/Formula/axon-tui.rb"
+grep -q 'version "1.2.10"' "$work/tap/Casks/axon.rb"
+grep -Fq 'Axon_1.2.10_universal.dmg' "$work/tap/Casks/axon.rb"
+
+# A newer tag with no disk image still publishes the formulas.
+# The cask stays at the previous version until a later run has the image.
+before=$(git -C "$work/tap" rev-list --count HEAD)
+TAG=v9.9.9 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap" \
+	>"$work/rejected.out" 2>"$work/rejected.err"
+if ! grep -q 'disk image .*/Axon_9.9.9_universal.dmg is missing; publishing the formulas without the cask' "$work/rejected.err"; then
+	echo "missing disk image did not warn and continue" >&2
+	cat "$work/rejected.err" >&2
+	exit 1
+fi
+grep -q 'version "9.9.9"' "$work/tap/Formula/axon-server.rb"
+grep -q 'version "9.9.9"' "$work/tap/Formula/axon-tui.rb"
+grep -q 'version "1.2.10"' "$work/tap/Casks/axon.rb"
+if ! git -C "$work/tap" log -1 --format=%s | grep -qx 'axon-server and axon-tui 9.9.9'; then
+	echo "a publish without the disk image claimed to update the cask" >&2
+	git -C "$work/tap" log -1 --format=%s >&2
+	exit 1
+fi
+after=$(git -C "$work/tap" rev-list --count HEAD)
+if [ "$after" -le "$before" ]; then
+	echo "missing disk image did not publish the formulas" >&2
+	exit 1
+fi
+TAG=v9.9.9 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap" \
+	>"$work/rejected.out" 2>"$work/rejected.err"
+again=$(git -C "$work/tap" rev-list --count HEAD)
+if [ "$again" -ne "$after" ]; then
+	echo "a second publish without the disk image created another commit" >&2
+	exit 1
+fi
+
+# The same tag adds the cask once the disk image is present.
+printf 'dmg-9.9.9' >"$work/zips/Axon_9.9.9_universal.dmg"
+TAG=v9.9.9 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
+grep -q 'version "9.9.9"' "$work/tap/Casks/axon.rb"
+grep -Fq 'Axon_9.9.9_universal.dmg' "$work/tap/Casks/axon.rb"
+if ! git -C "$work/tap" log -1 --format=%s | grep -qx 'axon-server, axon-tui, and axon 9.9.9'; then
+	echo "republishing the same tag did not record the cask" >&2
+	git -C "$work/tap" log -1 --format=%s >&2
+	exit 1
+fi
 
 # A dry run downloads and clones nothing, so it needs both directories.
 reject env TAG=v1.2.3 "$publish" --dry-run

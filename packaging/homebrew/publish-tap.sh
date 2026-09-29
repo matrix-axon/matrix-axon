@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Fill Formula/axon-server.rb and Formula/axon-tui.rb from the GitHub
-# Release zips and push them to matrix-axon/homebrew-tap in one commit.
+# Release zips, and Casks/axon.rb from the universal disk image, and push
+# them to matrix-axon/homebrew-tap.
+# The formulas publish even when the disk image is missing. The cask is
+# added by a later run of the same tag once the image is attached.
 #
 #   TAG=v0.1.0 TAP_TOKEN=... packaging/homebrew/publish-tap.sh
 #
 # Only stable vX.Y.Z tags publish; beta-*/alpha-* tags exit 0 untouched.
-# A tag older than the formula already in the tap exits 0 untouched too,
-# so re-running an old tag's workflow or a backport tag cannot downgrade.
+# A tag older than a formula or the cask already in the tap exits 0
+# untouched too, so re-running an old tag's workflow or a backport tag
+# cannot downgrade.
 #
 # Dry run (no network, no token): hash zips already on disk and commit into
 # a local checkout. Both directories are required. The checkout's git
@@ -151,6 +155,26 @@ download_assets() {
 	return 1
 }
 
+# desktop-build.yml attaches the disk image on its own and usually finishes
+# after the zip release job. Poll for up to 20 minutes. If it never
+# appears, the caller publishes the formulas without the cask.
+download_dmg() {
+	dest=$1
+	name=$2
+	attempt=1
+	while [ "$attempt" -le 40 ]; do
+		if gh release download "$TAG" --repo matrix-axon/matrix-axon \
+			--pattern "$name" --dir "$dest" --clobber && [ -s "$dest/$name" ]; then
+			return 0
+		fi
+		echo "waiting for $name (attempt $attempt)" >&2
+		sleep 30
+		attempt=$((attempt + 1))
+	done
+	echo "release $TAG is missing $name (desktop-build.yml attaches it)" >&2
+	return 1
+}
+
 # True when dotted-numeric version $1 is older than $2. Equal versions are
 # not older: republishing the same tag must reach the "already matches" path.
 version_lt() {
@@ -212,26 +236,65 @@ if [ ! -d "$tap_dir/.git" ]; then
 	exit 1
 fi
 
-# A non-numeric current version (a beta formula from before tags were
-# filtered) is replaced, not compared. Either formula being newer skips
-# the whole commit, so one tag cannot move the two formulas apart.
-for formula in axon-server axon-tui; do
+# A non-numeric current version is replaced, not compared. Any of the
+# formulas or the cask being newer skips the whole commit, so one tag
+# cannot move them apart.
+for spec in Formula/axon-server.rb Formula/axon-tui.rb Casks/axon.rb; do
 	current=
-	if [ -f "$tap_dir/Formula/${formula}.rb" ]; then
-		current=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$tap_dir/Formula/${formula}.rb")
+	if [ -f "$tap_dir/$spec" ]; then
+		current=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$tap_dir/$spec")
 	fi
 	if printf '%s' "$current" | grep -Eq '^[0-9]+(\.[0-9]+)+$' &&
 		version_lt "$version" "$current"; then
-		echo "skipping $TAG: the tap already has ${formula} ${current}, which is newer than ${version}"
+		echo "skipping $TAG: the tap already has ${spec} ${current}, which is newer than ${version}"
 		exit 0
 	fi
 done
+
+# After the downgrade guard, so an older tag does not sit on the poll.
+# A missing image must not hold the formulas back: desktop-build.yml can
+# fail, or the asset can be named differently. Republishing this same tag
+# once the image exists adds the cask, because an equal formula version
+# is not newer and the guard above does not skip it.
+dmg="Axon_${version}_universal.dmg"
+publish_cask=0
+if [ -s "$zips/$dmg" ]; then
+	publish_cask=1
+elif [ -n "$zip_dir" ]; then
+	echo "disk image $zips/$dmg is missing; publishing the formulas without the cask" >&2
+else
+	if download_dmg "$zips" "$dmg"; then
+		publish_cask=1
+	else
+		echo "disk image $dmg is missing; publishing the formulas without the cask" >&2
+	fi
+fi
+
+if [ "$publish_cask" -eq 1 ]; then
+	cask=$work/axon.rb
+	"$root/packaging/homebrew/render-cask.sh" \
+		--tag "$TAG" \
+		--sha "$(sha256_file "$zips/$dmg")" \
+		--out "$cask"
+	cask_version=$(sed -n 's/^  version "\([^"]*\)"/\1/p' "$cask")
+	if [ "$version" != "$cask_version" ]; then
+		echo "rendered cask version '${cask_version}' does not match formula '${version}'" >&2
+		exit 1
+	fi
+fi
 
 mkdir -p "$tap_dir/Formula"
 cp "$work/axon-server.rb" "$tap_dir/Formula/axon-server.rb"
 cp "$work/axon-tui.rb" "$tap_dir/Formula/axon-tui.rb"
 cp "$root/packaging/homebrew/tap-README.md" "$tap_dir/README.md"
 git -C "$tap_dir" add Formula/axon-server.rb Formula/axon-tui.rb README.md
+subject="axon-server and axon-tui ${version}"
+if [ "$publish_cask" -eq 1 ]; then
+	mkdir -p "$tap_dir/Casks"
+	cp "$cask" "$tap_dir/Casks/axon.rb"
+	git -C "$tap_dir" add Casks/axon.rb
+	subject="axon-server, axon-tui, and axon ${version}"
+fi
 
 if git -C "$tap_dir" diff --cached --quiet; then
 	echo "tap already matches $TAG"
@@ -242,10 +305,10 @@ fi
 git -C "$tap_dir" \
 	-c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
 	-c user.name="github-actions[bot]" \
-	commit -m "axon-server and axon-tui ${version}"
+	commit -m "$subject"
 
 if [ "$dry_run" -eq 1 ]; then
-	echo "dry run committed axon-server and axon-tui ${version} in $tap_dir"
+	echo "dry run committed ${subject} in $tap_dir"
 	exit 0
 fi
 
@@ -256,4 +319,4 @@ if git -C "$tap_dir" show-ref --verify --quiet refs/remotes/origin/HEAD; then
 fi
 
 git_github -C "$tap_dir" push origin "HEAD:${branch}"
-echo "pushed axon-server and axon-tui ${version} to ${tap_repo} (${branch})"
+echo "pushed ${subject} to ${tap_repo} (${branch})"

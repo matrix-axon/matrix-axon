@@ -42,7 +42,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends shellcheck ruby
           shellcheck -s sh packaging/scripts/postinst.sh packaging/scripts/prerm.sh packaging/scripts/postrm.sh
-          shellcheck packaging/package.sh packaging/homebrew/render-formula.sh packaging/homebrew/publish-tap.sh packaging/homebrew/render-formula-test.sh
+          shellcheck packaging/package.sh packaging/homebrew/render-formula.sh packaging/homebrew/render-cask.sh packaging/homebrew/publish-tap.sh packaging/homebrew/render-formula-test.sh
           packaging/homebrew/render-formula-test.sh
 
       # release-version-test.sh runs cargo metadata. Install the toolchain

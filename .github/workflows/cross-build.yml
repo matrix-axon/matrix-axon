@@ -412,16 +412,19 @@ jobs:
         with:
           files: release-binaries/*
 
-  # Checksums the macOS and Linux zips on a GitHub Release and pushes
-  # Formula/axon-server.rb and Formula/axon-tui.rb to matrix-axon/homebrew-tap
-  # in one commit. Does not upload release assets, so it stays out of the
-  # github-release concurrency group.
+  # Checksums the macOS and Linux zips on a GitHub Release, waits for
+  # desktop-build.yml to attach the universal disk image, and pushes
+  # Formula/axon-server.rb, Formula/axon-tui.rb, and Casks/axon.rb to
+  # matrix-axon/homebrew-tap in one commit. Does not upload release assets,
+  # so it stays out of the github-release concurrency group.
   # A tag push publishes only after this workflow's release job succeeds.
   # release is skipped, not failed, when a build job fails, so a tag push
   # must not treat "skipped" as permission to publish: the zips were never
   # uploaded. A manual run with homebrew_tag set publishes that existing
   # release and does not need the build jobs. beta-*/alpha-* tags are not
-  # published.
+  # published. If the disk image never appears, the formulas are still
+  # published and the cask is left unchanged. A later run of the same tag
+  # adds the cask.
   homebrew-tap:
     name: Publish Homebrew formula
     needs: release
