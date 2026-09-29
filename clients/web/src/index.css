@@ -910,7 +910,8 @@ body {
        every width, and this one used to be the only place that did. */
   }
 
-  .mobile-room-shell .timeline {
+  .mobile-room-shell .timeline,
+  .mobile-room-shell .timeline-loading {
     margin-top: 0.25rem;
   }
 
@@ -2087,6 +2088,9 @@ button.ghost.pin:hover {
 .timeline-loading {
   flex: 1;
   min-height: 0;
+  /* `.timeline`'s margins, not a paragraph's, so the placeholder occupies the
+     box the timeline will. The phone override sits with `.timeline`'s own. */
+  margin: 1rem 0 0;
 }
 
 /* The message scroller — a *nested* scroll container inside `main`, and the
