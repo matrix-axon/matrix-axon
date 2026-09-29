@@ -5,11 +5,12 @@
 # Usage:
 #   render-formula.sh --tag v0.1.0 \
 #     --sha-macos-silicon HEX --sha-macos-intel HEX --sha-linux-x86_64 HEX \
-#     --out PATH
+#     --out PATH [--template PATH]
+# --template defaults to packaging/homebrew/axon-server.rb.tmpl.
 set -euo pipefail
 
 usage() {
-	echo "usage: $0 --tag TAG --sha-macos-silicon HEX --sha-macos-intel HEX --sha-linux-x86_64 HEX --out PATH" >&2
+	echo "usage: $0 --tag TAG --sha-macos-silicon HEX --sha-macos-intel HEX --sha-linux-x86_64 HEX --out PATH [--template PATH]" >&2
 }
 
 tag=
@@ -17,6 +18,7 @@ sha_silicon=
 sha_intel=
 sha_linux=
 out=
+template=
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -40,6 +42,10 @@ while [ $# -gt 0 ]; do
 		out=${2:?missing value for $1}
 		shift 2
 		;;
+	--template)
+		template=${2:?missing value for $1}
+		shift 2
+		;;
 	-h | --help)
 		usage
 		exit 0
@@ -57,8 +63,8 @@ if [ -z "$tag" ] || [ -z "$sha_silicon" ] || [ -z "$sha_intel" ] || [ -z "$sha_l
 	exit 2
 fi
 
-# Stable release tags only (v1.2.3). The tap has one formula, so a
-# beta-*/alpha-* tag would replace the stable release, and Homebrew cannot
+# Stable release tags only (v1.2.3). Each formula in the tap is the stable
+# release, so a beta-*/alpha-* tag would replace it, and Homebrew cannot
 # order a version like beta-1 against 1.2.3. publish-tap.sh skips those tags
 # before calling this; refusing here keeps the renderer honest on its own.
 if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+(\.[0-9]+)+$'; then
@@ -84,7 +90,13 @@ done
 version=${tag#v}
 
 root=$(CDPATH="" cd -- "$(dirname "$0")/../.." && pwd)
-template=$root/packaging/homebrew/axon-server.rb.tmpl
+if [ -z "$template" ]; then
+	template=$root/packaging/homebrew/axon-server.rb.tmpl
+fi
+if [ ! -f "$template" ]; then
+	echo "template not found: $template" >&2
+	exit 1
+fi
 
 for token in VERSION TAG SHA_MACOS_SILICON SHA_MACOS_INTEL SHA_LINUX_X86_64; do
 	if ! grep -q "@@${token}@@" "$template"; then

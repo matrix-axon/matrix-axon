@@ -78,10 +78,37 @@ fi
 
 ruby -c "$out"
 
-# Load the formula with the Homebrew DSL stubbed out and print caveats.
+tui=$work/axon-tui.rb
+"$render" \
+	--tag v1.2.3 \
+	--template "$root/packaging/homebrew/axon-tui.rb.tmpl" \
+	--sha-macos-silicon "$sha_silicon" \
+	--sha-macos-intel "$sha_intel" \
+	--sha-linux-x86_64 "$sha_linux" \
+	--out "$tui"
+ruby -c "$tui"
+grep -Fq "releases/download/v1.2.3/axon-tui-macos-silicon.zip" "$tui"
+grep -Fq "releases/download/v1.2.3/axon-tui-macos-intel.zip" "$tui"
+grep -Fq "releases/download/v1.2.3/axon-tui-linux.zip" "$tui"
+# The tilde is literal path text in the formula, not this script's $HOME.
+# shellcheck disable=SC2088
+grep -Fq '~/.config/axon-tui/config.toml' "$tui"
+grep -Fq 'axon-tui --help' "$tui"
+if grep -Eq 'depends_on[[:space:]]+"axon-server"' "$tui"; then
+	echo "axon-tui formula depends on axon-server" >&2
+	exit 1
+fi
+if grep -q 'service do' "$tui"; then
+	echo "axon-tui formula defines a service" >&2
+	exit 1
+fi
+
+# Load both formulas with the Homebrew DSL stubbed out and print caveats.
 # The SQL heredoc terminator has to land in column 0 or a pasted install
-# block never closes.
-ruby - "$out" "$work/caveats-mac.txt" "$work/caveats-linux.txt" <<'RUBY'
+# block never closes. The TUI's Linux-only GLIBC note has to be executed
+# for both operating systems, not merely grepped for the token OS.linux?.
+ruby - "$out" "$tui" "$work/caveats-mac.txt" "$work/caveats-linux.txt" \
+	"$work/tui-caveats-mac.txt" "$work/tui-caveats-linux.txt" <<'RUBY'
 module OS
   def self.mac?
     ENV.fetch("AXON_FORMULA_OS") == "mac"
@@ -111,14 +138,22 @@ class Formula
   end
 end
 
-load ARGV[0]
-formula = ObjectSpace.each_object(Class).find { |klass| klass < Formula && klass.name == "AxonServer" }
-raise "AxonServer formula did not load" unless formula
+def write_caveats(formula, mac_path, linux_path)
+  ENV["AXON_FORMULA_OS"] = "mac"
+  File.write(mac_path, formula.new.caveats)
+  ENV["AXON_FORMULA_OS"] = "linux"
+  File.write(linux_path, formula.new.caveats)
+end
 
-ENV["AXON_FORMULA_OS"] = "mac"
-File.write(ARGV[1], formula.new.caveats)
-ENV["AXON_FORMULA_OS"] = "linux"
-File.write(ARGV[2], formula.new.caveats)
+load ARGV[0]
+server = ObjectSpace.each_object(Class).find { |klass| klass < Formula && klass.name == "AxonServer" }
+raise "AxonServer formula did not load" unless server
+load ARGV[1]
+tui = ObjectSpace.each_object(Class).find { |klass| klass < Formula && klass.name == "AxonTui" }
+raise "AxonTui formula did not load" unless tui
+
+write_caveats(server, ARGV[2], ARGV[3])
+write_caveats(tui, ARGV[4], ARGV[5])
 RUBY
 
 grep -Fq 'macOS: ~/Library/Application Support/axon-server/config.toml' "$work/caveats-mac.txt"
@@ -126,6 +161,14 @@ grep -Fq 'Linux: ~/.config/axon-server/config.toml' "$work/caveats-mac.txt"
 grep -Fq 'GLIBC' "$work/caveats-linux.txt"
 if grep -Fq 'GLIBC' "$work/caveats-mac.txt"; then
 	echo "macOS caveats mention the Linux glibc floor" >&2
+	exit 1
+fi
+# The tilde is literal path text in the printed caveats.
+# shellcheck disable=SC2088
+grep -Fq '~/.config/axon-tui/config.toml' "$work/tui-caveats-mac.txt"
+grep -Fq 'GLIBC' "$work/tui-caveats-linux.txt"
+if grep -Fq 'GLIBC' "$work/tui-caveats-mac.txt"; then
+	echo "macOS axon-tui caveats mention the Linux glibc floor" >&2
 	exit 1
 fi
 
@@ -239,12 +282,16 @@ done
 # Publish dry run: commit the rendered formula into a local tap checkout and
 # refuse to commit again when nothing changed.
 mkdir -p "$work/zips"
-printf 'silicon' >"$work/zips/axon-server-macos-silicon.zip"
-printf 'intel' >"$work/zips/axon-server-macos-intel.zip"
-printf 'linux' >"$work/zips/axon-server-linux.zip"
+for name in \
+	axon-server-macos-silicon.zip axon-server-macos-intel.zip axon-server-linux.zip \
+	axon-tui-macos-silicon.zip axon-tui-macos-intel.zip axon-tui-linux.zip; do
+	printf '%s' "$name" >"$work/zips/$name"
+done
 git init -q -b main "$work/tap"
 TAG=v1.2.3 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 grep -q 'version "1.2.3"' "$work/tap/Formula/axon-server.rb"
+grep -q 'version "1.2.3"' "$work/tap/Formula/axon-tui.rb"
+grep -Fq 'axon-tui-macos-silicon.zip' "$work/tap/Formula/axon-tui.rb"
 test -f "$work/tap/README.md"
 commits=$(git -C "$work/tap" rev-list --count HEAD)
 if [ "$commits" -ne 1 ]; then
@@ -255,6 +302,17 @@ TAG=v1.2.3 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 commits=$(git -C "$work/tap" rev-list --count HEAD)
 if [ "$commits" -ne 1 ]; then
 	echo "second dry run created another commit" >&2
+	exit 1
+fi
+
+# A tap that already has this axon-server version still gains axon-tui.
+git -C "$work/tap" rm -q Formula/axon-tui.rb
+git -C "$work/tap" -c user.email=test@example.com -c user.name=test commit -m "drop tui"
+TAG=v1.2.3 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
+grep -q 'version "1.2.3"' "$work/tap/Formula/axon-tui.rb"
+commits=$(git -C "$work/tap" rev-list --count HEAD)
+if [ "$commits" -ne 3 ]; then
+	echo "republishing the same tag did not add the missing axon-tui formula (commits=$commits)" >&2
 	exit 1
 fi
 
@@ -281,8 +339,9 @@ grep -q 'version "1.2.3"' "$work/tap/Formula/axon-server.rb"
 TAG=v1.2.2 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 TAG=v1.1.10 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 grep -q 'version "1.2.3"' "$work/tap/Formula/axon-server.rb"
+grep -q 'version "1.2.3"' "$work/tap/Formula/axon-tui.rb"
 commits=$(git -C "$work/tap" rev-list --count HEAD)
-if [ "$commits" -ne 1 ]; then
+if [ "$commits" -ne 3 ]; then
 	echo "an older tag changed the tap" >&2
 	exit 1
 fi
@@ -290,6 +349,7 @@ fi
 # A newer tag does publish, including one that sorts before as a string.
 TAG=v1.2.10 "$publish" --dry-run --zip-dir "$work/zips" --tap-dir "$work/tap"
 grep -q 'version "1.2.10"' "$work/tap/Formula/axon-server.rb"
+grep -q 'version "1.2.10"' "$work/tap/Formula/axon-tui.rb"
 
 # A dry run downloads and clones nothing, so it needs both directories.
 reject env TAG=v1.2.3 "$publish" --dry-run

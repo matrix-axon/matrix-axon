@@ -1527,6 +1527,139 @@ describe('threads', () => {
     }
   })
 
+  // The shell's WKWebView has no browser swipe-back, so declining the band
+  // there left it with no owner: an edge swipe did nothing (ADR 0075).
+  it('mobile swipe-right from the edge band navigates in the native shell', async () => {
+    const media = mockSinglePane()
+    const shell = window as unknown as Record<string, unknown>
+    shell.__TAURI_INTERNALS__ = {}
+    try {
+      const { container, findByLabelText } = renderRoom(
+        [event('$root', 100)],
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      await findByLabelText('Message Ops')
+      const body = container.querySelector('.room-body')!
+
+      swipeRight(body, 2, 120)
+
+      await waitFor(() =>
+        expect(window.location.pathname).not.toContain('/rooms/'),
+      )
+    } finally {
+      delete shell.__TAURI_INTERNALS__
+      media.mockRestore()
+    }
+  })
+
+  // A thumb crossing a phone from its edge arcs; the fixed 64px cap refused
+  // this measured swipe (dx=390 dy=82) although it was plainly sideways.
+  it('mobile swipe-right accepts a long swipe with a thumb-arc drift', async () => {
+    const media = mockSinglePane()
+    try {
+      const { container, findByLabelText } = renderRoom(
+        [event('$root', 100)],
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      await findByLabelText('Message Ops')
+      const body = container.querySelector('.room-body')!
+
+      fireEvent.touchStart(body, { touches: [{ clientX: 33, clientY: 300 }] })
+      fireEvent.touchMove(body, { touches: [{ clientX: 200, clientY: 330 }] })
+      fireEvent.touchEnd(body, {
+        changedTouches: [{ clientX: 423, clientY: 382 }],
+      })
+
+      await waitFor(() =>
+        expect(window.location.pathname).not.toContain('/rooms/'),
+      )
+    } finally {
+      media.mockRestore()
+    }
+  })
+
+  it('mobile swipe-right still refuses a short swipe that drifts past the cap', async () => {
+    const media = mockSinglePane()
+    try {
+      const { container, findByLabelText } = renderRoom(
+        [event('$root', 100)],
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      await findByLabelText('Message Ops')
+      const body = container.querySelector('.room-body')!
+
+      fireEvent.touchStart(body, { touches: [{ clientX: 90, clientY: 300 }] })
+      fireEvent.touchMove(body, { touches: [{ clientX: 150, clientY: 310 }] })
+      fireEvent.touchEnd(body, {
+        changedTouches: [{ clientX: 200, clientY: 370 }],
+      })
+      await new Promise((resolve) => setTimeout(resolve, 250))
+
+      expect(window.location.pathname).toContain('/rooms/')
+    } finally {
+      media.mockRestore()
+    }
+  })
+
+  // A tap target needs a tap, and a drag that locked as a swipe is not one.
+  // The on-device trace had back swipes refused for starting on an avatar
+  // and a timestamp, which read as "swipe-back is broken".
+  for (const [label, selector] of [
+    ['the timestamp', '.event-time-copy time'],
+    ['a message action button', '.event-action-button'],
+  ] as const) {
+    it(`mobile swipe-right starting on ${label} returns to the room list`, async () => {
+      const media = mockSinglePane()
+      try {
+        const { container, findByLabelText } = renderRoom(
+          [event('$root', 100)],
+          `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+        )
+        await findByLabelText('Message Ops')
+        const control = container.querySelector(`.room-body ${selector}`)!
+        expect(control).not.toBeNull()
+
+        swipeRight(control)
+
+        await waitFor(() =>
+          expect(window.location.pathname).not.toContain('/rooms/'),
+        )
+      } finally {
+        media.mockRestore()
+      }
+    })
+  }
+
+  // In-message links are tap targets like the avatar and timestamp above: a
+  // drag that locks as a back swipe is not a tap, so it goes back rather than
+  // being left to the link. Raised in review (#490) as untested.
+  it('mobile swipe-right starting on an in-message link returns to the room list', async () => {
+    const media = mockSinglePane()
+    try {
+      const body = 'see https://example.org/page for details'
+      const { container, findByLabelText } = renderRoom(
+        [event('$link', 100, { body, content: { msgtype: 'm.text', body } })],
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      await findByLabelText('Message Ops')
+      const link = container.querySelector<HTMLAnchorElement>(
+        '.room-body a[href^="https://example.org"]',
+      )
+      expect(link).not.toBeNull()
+      const followed = vi.fn((click: Event) => click.preventDefault())
+      link!.addEventListener('click', followed)
+
+      swipeRight(link!)
+
+      await waitFor(() =>
+        expect(window.location.pathname).not.toContain('/rooms/'),
+      )
+      expect(followed).not.toHaveBeenCalled()
+    } finally {
+      media.mockRestore()
+    }
+  })
+
   it('/thread opens a thread on the latest visible message', async () => {
     let openedRoot: string | null = null
     server.use(

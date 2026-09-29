@@ -2,13 +2,13 @@ import type { JSX } from 'preact'
 import { useEffect, useRef } from 'preact/hooks'
 import {
   GESTURE_SWIPE_SETTLE_MS,
-  isGestureControlTarget,
   isHorizontallyScrollable,
-  NATIVE_BACK_EDGE_PX,
+  isSwipeBackBlockedTarget,
+  nativeBackEdgePx,
   SWIPE_AXIS_RATIO,
   SWIPE_BACK_MIN_X,
-  SWIPE_DECISION_THRESHOLD,
-  SWIPE_MAX_Y,
+  swipeBackMaxY,
+  swipeLock,
 } from '../gestures'
 import { SINGLE_PANE_QUERY } from '../layout'
 
@@ -49,8 +49,8 @@ export function roomListBackPresentation(
  * The shared narrow-screen rightward pane gesture.
  *
  * The caller supplies the pane that should follow the finger and the action
- * that replaces it. Controls, horizontal scrollers, and iOS's native-back edge
- * band are always left alone.
+ * that replaces it. Text entry and other drag-owning controls, horizontal
+ * scrollers, and iOS's native-back edge band are always left alone.
  */
 export function useMobileSwipeBack<T extends HTMLElement>({
   getPresentation,
@@ -178,7 +178,7 @@ export function useMobileSwipeBack<T extends HTMLElement>({
     if (
       !window.matchMedia(SINGLE_PANE_QUERY).matches ||
       event.touches.length !== 1 ||
-      isGestureControlTarget(event.target) ||
+      isSwipeBackBlockedTarget(event.target) ||
       isHorizontallyScrollable(event.target)
     ) {
       swipeStart.current = null
@@ -186,7 +186,7 @@ export function useMobileSwipeBack<T extends HTMLElement>({
     }
     const touch = event.touches[0]
     const presentation = getPresentation(event.currentTarget)
-    if (touch.clientX < NATIVE_BACK_EDGE_PX || presentation === null) {
+    if (touch.clientX < nativeBackEdgePx() || presentation === null) {
       swipeStart.current = null
       return
     }
@@ -211,12 +211,11 @@ export function useMobileSwipeBack<T extends HTMLElement>({
       event.preventDefault()
       return
     }
-    const absX = Math.abs(dx)
-    const absY = Math.abs(dy)
-    if (absX < SWIPE_DECISION_THRESHOLD && absY < SWIPE_DECISION_THRESHOLD) {
+    const lock = swipeLock(dx, dy)
+    if (lock === null) {
       return
     }
-    if (dx > 0 && absX > absY * SWIPE_AXIS_RATIO) {
+    if (lock === 'right') {
       swipeLocked.current = true
       preview(start, dx)
       event.preventDefault()
@@ -242,7 +241,7 @@ export function useMobileSwipeBack<T extends HTMLElement>({
     const absY = Math.abs(dy)
     if (
       dx < SWIPE_BACK_MIN_X ||
-      absY > SWIPE_MAX_Y ||
+      absY > swipeBackMaxY(dx) ||
       dx < absY * SWIPE_AXIS_RATIO
     ) {
       settle(start, false)
