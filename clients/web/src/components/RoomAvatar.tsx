@@ -42,7 +42,7 @@ export function RoomAvatar({
   return (
     <span
       ref={ref}
-      class={`room-avatar room-avatar-color-${color}`}
+      class={`room-avatar room-avatar-color-${color}${shown !== null ? ' room-avatar-image' : ''}`}
       aria-hidden="true"
       title={shown === null ? undefined : `${title} avatar`}
     >

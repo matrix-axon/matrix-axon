@@ -171,7 +171,17 @@ repos:
         # Same reasoning as rustfmt: gates web-test and web-build below.
         fail_fast: true
         files: &web_sources '^(\.github/workflows/web-lint-and-test\.yml|clients/web/|\.pre-commit-config\.yaml)'
-        exclude: &shell_excluded_from_web "^clients/web/src-tauri/"
+        # The shell's own files (Rust, config, icons) are the shell hooks'
+        # business and would only make a Rust-only push wait on a web lint. But
+        # `pnpm lint` also runs eslint over any JavaScript or TypeScript under
+        # src-tauri (`src-tauri/android/insets.js`, ADR 0105), and CI does run
+        # it there. Excluding the whole directory let a `no-undef` failure
+        # through the local gate to CI, so this lets those files back in. The
+        # other web hooks keep the blanket exclude: the tests and the build read
+        # nothing under src-tauri. `target/` and `gen/` stay out either way:
+        # cargo and tauri write JavaScript there (`__global-api-script.js`) that
+        # eslint ignores and nobody edits.
+        exclude: "^clients/web/src-tauri/(target/|gen/|(?!.*\\.(js|mjs|cjs|ts|tsx)$))"
         pass_filenames: false
         stages: [pre-push]
       - id: web-test
@@ -179,7 +189,7 @@ repos:
         language: system
         entry: pnpm --dir clients/web test
         files: *web_sources
-        exclude: *shell_excluded_from_web
+        exclude: &shell_excluded_from_web "^clients/web/src-tauri/"
         pass_filenames: false
         stages: [pre-push]
       - id: web-build

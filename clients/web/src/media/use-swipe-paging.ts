@@ -1,10 +1,6 @@
 import { useEffect, useRef } from 'preact/hooks'
 import type { JSX } from 'preact'
-import {
-  NATIVE_BACK_EDGE_PX,
-  swipeDirection,
-  type SwipeStart,
-} from '../gestures'
+import { nativeBackEdgePx, swipeDirection, type SwipeStart } from '../gestures'
 
 /**
  * How long after a committed swipe a synthesised `click` is still assumed to
@@ -24,8 +20,9 @@ const SWIPE_CLICK_GRACE_MS = 400
  * the timeline's handlers. That is asserted end-to-end rather than defended
  * with a guard here.
  *
- * The left edge band is still declined — see `NATIVE_BACK_EDGE_PX`; WebKit's
- * back recognizer is live over a fullscreen overlay.
+ * The left edge band is still declined in a browser — see
+ * `NATIVE_BACK_EDGE_PX`; WebKit's back recognizer is live over a fullscreen
+ * overlay. The native shell has no such recognizer and declines nothing.
  */
 export function useSwipePaging(handlers: {
   onOlder: () => void
@@ -65,7 +62,7 @@ export function useSwipePaging(handlers: {
       if (
         event.touches.length !== 1 ||
         touch === undefined ||
-        touch.clientX < NATIVE_BACK_EDGE_PX
+        touch.clientX < nativeBackEdgePx()
       ) {
         start.current = null
         return

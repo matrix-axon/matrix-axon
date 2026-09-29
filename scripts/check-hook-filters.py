@@ -150,6 +150,15 @@ CASES: list[tuple[str, set[str]]] = [
     ("docs/brand/axon-mark-dark.png", {"icons-regenerated"}),
     # Cargo build output is not ours -- not linted, not formatted, not a gate.
     ("clients/web/src-tauri/target/debug/build/x/out/__global-api-script.js", set()),
+    # JavaScript the shell injects (ADR 0105) is the one thing under src-tauri
+    # that `pnpm lint` runs eslint over, and CI lints it: it must reach
+    # web-lint, and nothing that builds or tests the web app. Generated output
+    # under gen/ is never ours, whatever its extension.
+    (
+        "clients/web/src-tauri/android/insets.js",
+        {"prettier", "web-lint"},
+    ),
+    ("clients/web/src-tauri/gen/android/app/src/main/assets/x.js", set()),
     # ...but the root workspace's own manifest still gates the workspace hooks
     # even though it now names src-tauri in `exclude`.
     ("Cargo.toml", {"rustfmt", "rust-clippy", "cargo-test"}),

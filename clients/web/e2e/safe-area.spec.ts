@@ -272,6 +272,45 @@ for (const factor of FORM_FACTORS) {
  * for every route would put the last row of Settings under the home indicator
  * with no way to scroll it clear, which is the bug the inset was added for.
  */
+/**
+ * The soft keyboard covers the home indicator, so the composer must stop
+ * paying for it. `app.tsx` flags the keyboard on `:root`; `index.css` zeroes
+ * `--safe-bottom` under the flag. Measured on an iPhone 18 Pro Max in the
+ * shell: without it the composer sometimes floated 46pt above the keyboard,
+ * its own padding plus a 34pt inset WebKit had failed to drop.
+ *
+ * The inset arrives by stylesheet here, not `applySafeAreas`: an inline
+ * property would outrank the keyboard rule, which is the thing under test.
+ */
+test('the composer drops the bottom inset while the soft keyboard is up', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 440, height: 956 })
+  await page.goto(ROOM_URL)
+  await expectRoomReady(page)
+  await page.addStyleTag({ content: ':root { --safe-bottom: 34px; }' })
+
+  const composerPadding = () =>
+    page.evaluate(() =>
+      Number.parseFloat(
+        getComputedStyle(document.querySelector('.composer')!).paddingBottom,
+      ),
+    )
+  const resting = await composerPadding()
+  expect(resting).toBeGreaterThanOrEqual(34)
+
+  await page.evaluate(() => {
+    document.documentElement.dataset.keyboard = 'open'
+  })
+  expect(await composerPadding()).toBeCloseTo(resting - 34, 0)
+
+  await page.evaluate(() => {
+    delete document.documentElement.dataset.keyboard
+  })
+  expect(await composerPadding()).toBeCloseTo(resting, 0)
+})
+
 test('a scrolling utility page keeps the bottom inset `main` owns', async ({
   page,
 }) => {
