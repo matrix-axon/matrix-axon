@@ -795,6 +795,7 @@ function ShellChrome() {
   const { path, query } = location
   const {
     accounts,
+    favourites,
     rooms,
     search,
     settings,
@@ -1271,6 +1272,13 @@ function ShellChrome() {
         if (mode === 'utility' || !hasSpaces) return
         event.preventDefault()
         spaces.reordering.value = !spaces.reordering.value
+      },
+      'mod+alt+shift+r': (event) => {
+        // The room list is still on screen in single-pane chat. Utility pages
+        // have no list to reorder.
+        if (mode === 'utility') return
+        event.preventDefault()
+        favourites.reordering.value = !favourites.reordering.value
       },
       'mod+alt+[': (event) => {
         if (mode === 'utility' || singlePane || !hasSpaces) return

@@ -34,6 +34,7 @@ const UNNAMED = {
   last_activity_ts: 200,
   notification_count: 0,
   highlight_count: 0,
+  is_direct: true,
 }
 
 const server = setupServer()
@@ -901,6 +902,97 @@ describe('createRoomsStore', () => {
     expect(store.error.value).toBe('blocked')
   })
 
+  it('does not fetch members for a named direct room or an unnamed room that is not direct', async () => {
+    const namedDirect = {
+      ...NAMED,
+      room_id: '!named-dm:hs',
+      is_direct: true,
+    }
+    const unnamedPlain = {
+      ...UNNAMED,
+      room_id: '!plain:hs',
+      is_direct: false,
+    }
+    let memberCalls = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [namedDirect, unnamedPlain, UNNAMED] }),
+      ),
+      http.get(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
+        () => {
+          memberCalls += 1
+          return HttpResponse.json({
+            data: [
+              {
+                user_id: '@me:example.org',
+                membership: 'join',
+                display_name: 'Me',
+              },
+              {
+                user_id: '@bob:example.org',
+                membership: 'join',
+                display_name: 'Bob',
+              },
+            ],
+          })
+        },
+      ),
+    )
+    const store = makeStore()
+    await store.refresh()
+
+    await vi.waitFor(() =>
+      expect(store.titles.value.get(roomKey(UNNAMED))).toBe('Bob'),
+    )
+    expect(memberCalls).toBe(1)
+    expect(store.titles.value.has(roomKey(unnamedPlain))).toBe(false)
+    expect(store.dmAvatars.value.has(roomKey(namedDirect))).toBe(false)
+  })
+
+  it('reuses an existing unnamed DM that is missing from m.direct', async () => {
+    const unmarked = {
+      ...UNNAMED,
+      room_id: '!old-dm:hs',
+      is_direct: false,
+    }
+    let dmCalls = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [unmarked] }),
+      ),
+      http.get(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(unmarked.room_id)}/members`,
+        () =>
+          HttpResponse.json({
+            data: [
+              {
+                user_id: '@me:example.org',
+                membership: 'join',
+                display_name: 'Me',
+              },
+              {
+                user_id: '@bob:example.org',
+                membership: 'join',
+                display_name: 'Bob',
+              },
+            ],
+          }),
+      ),
+      http.post(`${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/dm`, () => {
+        dmCalls += 1
+        return HttpResponse.json({ data: { room_id: '!new-dm:hs' } })
+      }),
+    )
+    const store = makeStore()
+
+    await store.refresh()
+    const result = await store.createDm(ACCOUNT, '@bob:example.org')
+
+    expect(result).toEqual({ ok: true, roomId: unmarked.room_id })
+    expect(dmCalls).toBe(0)
+  })
+
   it('opens an existing one-to-one DM instead of creating a duplicate', async () => {
     let dmCalls = 0
     server.use(
@@ -1249,6 +1341,51 @@ it('does not let a slow refresh overwrite a live metadata patch', async () => {
   expect(
     store.rooms.value.find((r) => r.room_id === NAMED.room_id)?.avatar_url,
   ).toBe('mxc://hs/fresh')
+})
+
+it('keeps tag and is_direct patches that land during a refresh', async () => {
+  let release: (() => void) | undefined
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let call = 0
+  server.use(
+    http.get(`${BASE_URL}/v1/rooms`, async () => {
+      call += 1
+      if (call === 2) {
+        await held
+      }
+      return HttpResponse.json({ data: [{ ...NAMED, is_direct: false }] })
+    }),
+    http.get(
+      `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(NAMED.room_id)}/members`,
+      () => HttpResponse.json({ data: [] }),
+    ),
+  )
+  const store = makeStore()
+  await store.refresh()
+  expect(store.confirmed.value).toBe(true)
+
+  const slow = store.refresh()
+  await vi.waitFor(() => expect(call).toBe(2))
+  const key = roomKey(NAMED)
+  store.assignRoomTags(key, [{ name: 'm.favourite', order: 0.25 }])
+  store.applyAccountData(ACCOUNT, {
+    roomId: null,
+    eventType: 'm.direct',
+    content: { '@bob:example.org': [NAMED.room_id] },
+  })
+  release?.()
+  await slow
+
+  const room = store.rooms.value.find(
+    (entry) => entry.room_id === NAMED.room_id,
+  )
+  expect(room?.tags).toEqual([{ name: 'm.favourite', order: 0.25 }])
+  expect(room?.is_direct).toBe(true)
+
+  store.resetSession()
+  expect(store.confirmed.value).toBe(false)
 })
 
 it('ignores a same-type state event under another state key', () => {

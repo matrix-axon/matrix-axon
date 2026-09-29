@@ -19,6 +19,7 @@ import {
   vi,
 } from 'vitest'
 import { ServicesContext } from '../services'
+import { roomKey } from '../stores/room-list'
 import { SINGLE_PANE_QUERY } from '../layout'
 import type { EventDto } from '../stores/timeline'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -152,6 +153,14 @@ const server = setupServer(
   ),
   http.put(`${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/typing`, () =>
     HttpResponse.json({ data: {} }),
+  ),
+  http.put(
+    `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/tags/:tag`,
+    () => HttpResponse.json({ data: {} }),
+  ),
+  http.delete(
+    `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/tags/:tag`,
+    () => HttpResponse.json({ data: {} }),
   ),
 )
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
@@ -2658,14 +2667,31 @@ describe('room command', () => {
       'Message Ops',
     )) as HTMLTextAreaElement
     const key = `${ACCOUNT}/${ROOM}`
+    await waitFor(() =>
+      expect(
+        services.rooms.rooms.value.some((room) => roomKey(room) === key),
+      ).toBe(true),
+    )
 
     fireEvent.input(textarea, { target: { value: '/pin' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
-    expect(services.settings.pinnedRooms.value).toContain(key)
+    await waitFor(() =>
+      expect(
+        services.rooms.rooms.value
+          .find((room) => roomKey(room) === key)
+          ?.tags?.some((tag) => tag.name === 'm.favourite'),
+      ).toBe(true),
+    )
 
     fireEvent.input(textarea, { target: { value: '/unpin' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
-    expect(services.settings.pinnedRooms.value).not.toContain(key)
+    await waitFor(() =>
+      expect(
+        services.rooms.rooms.value
+          .find((room) => roomKey(room) === key)
+          ?.tags?.some((tag) => tag.name === 'm.favourite'),
+      ).toBe(false),
+    )
   })
 
   it('/refresh and /rooms refresh the room list', async () => {

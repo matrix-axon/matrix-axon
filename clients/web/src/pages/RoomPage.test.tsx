@@ -668,7 +668,7 @@ describe('RoomPage', () => {
             last_activity_ts: 0,
             notification_count: 0,
             highlight_count: 0,
-            is_direct: false,
+            is_direct: true,
           },
         ],
         members: [

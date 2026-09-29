@@ -850,7 +850,7 @@ it('does not treat a DM peer picture as the room avatar', async () => {
   server.use(
     // Registered before the shared factory: msw takes the first match, and
     // `handlers()` answers `/members` with an empty list.
-    // An unnamed two-person room: the store resolves its title and peer
+    // An unnamed direct room: the store resolves its title and peer
     // avatar from members, which is what populates `dmAvatars`.
     http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
       HttpResponse.json({
@@ -862,6 +862,7 @@ it('does not treat a DM peer picture as the room avatar', async () => {
             last_activity_ts: 1,
             notification_count: 0,
             highlight_count: 0,
+            is_direct: true,
           },
         ],
       }),

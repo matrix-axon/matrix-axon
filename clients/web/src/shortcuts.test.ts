@@ -93,6 +93,14 @@ describe('SHORTCUTS', () => {
     }
   })
 
+  it('documents favourite reorder on the room list', () => {
+    const rooms = SHORTCUTS.find((group) => group.group === 'Rooms')
+    expect(rooms?.rows.map((row) => row.keys)).toContain(KEYS.reorderFavorites)
+    expect(rooms?.rows.map((row) => row.description)).toContain(
+      'Move the focused room up or down in the favourite list',
+    )
+  })
+
   it('groups all space actions under Spaces', () => {
     const spaces = SHORTCUTS.find((group) => group.group === 'Spaces')
     expect(spaces?.rows.map((row) => row.keys)).toEqual([

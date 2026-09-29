@@ -35,7 +35,9 @@ import { createEphemeralStore } from '../stores/ephemeral'
 import { createEphemeralSender } from '../stores/ephemeral-sender'
 import { createMediaService } from '../media/media-service'
 import { createLiveConnection } from '../stores/live-connection'
+import { createFavouriteStore } from '../stores/favourites'
 import { createMessageGestureStore } from '../stores/message-gestures'
+import { createSpaceOrderStore } from '../stores/space-order'
 import { cacheNamespace, createMemoryCacheStore } from '../stores/cache-store'
 import { createTelemetryStore } from '../stores/telemetry'
 import { createRoomListCache } from '../stores/room-list-cache'
@@ -193,6 +195,24 @@ export function testServices(
     live,
     deviceState.deviceId,
   )
+  // Constructed, not started. `connectFavouriteSession` is what arms the
+  // one-shot pin migration, and calling it here would PUT from every harness
+  // that happens to hold a local pin. Same for space order: `hydrate` is the
+  // production start, and a GET from the shared graph would 404 in tests that
+  // never touch the rail.
+  const favourites = createFavouriteStore({
+    api,
+    live,
+    rooms,
+    settings,
+    accounts,
+  })
+  const spaceOrder = createSpaceOrderStore(
+    api,
+    live,
+    deviceState.deviceId,
+    settings,
+  )
   // Component tests opt in by calling `hydrate` (Settings does this itself).
   // Auto-hydrating every shared harness would add an unrelated preference GET
   // to hundreds of MSW tests that are deliberately scoped to another route.
@@ -253,6 +273,8 @@ export function testServices(
     live,
     deviceState,
     messageGestures,
+    favourites,
+    spaceOrder,
     ephemeral,
     ephemeralSender,
     activeRoom,

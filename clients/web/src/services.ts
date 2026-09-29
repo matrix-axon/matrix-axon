@@ -71,7 +71,12 @@ import {
   createVerificationStore,
   type VerificationStore,
 } from './stores/verification'
+import { createFavouriteStore, type FavouriteStore } from './stores/favourites'
 import { createRoomsStore, type RoomsStore } from './stores/rooms'
+import {
+  createSpaceOrderStore,
+  type SpaceOrderStore,
+} from './stores/space-order'
 import { createSearchStore, type SearchStore } from './stores/search'
 import { createSettingsStore, type SettingsStore } from './stores/settings'
 import { createSpacesStore, type SpacesStore } from './stores/spaces'
@@ -120,6 +125,10 @@ export interface AppServices {
   deviceState: DeviceStateStore
   /** Axon-wide, cross-device mobile message gesture bindings (ADR 0104). */
   messageGestures: MessageGestureStore
+  /** Matrix `m.favourite` writes and the one-shot local-pin migration (ADR 0103). */
+  favourites: FavouriteStore
+  /** Instance `space_order`, mirrored into `settings.spaceOrder` (ADR 0103). */
+  spaceOrder: SpaceOrderStore
   ephemeral: EphemeralStore
   /** Outbound read receipts + typing notices to the homeserver (ADR 0067/0068). */
   ephemeralSender: EphemeralSender
@@ -793,6 +802,34 @@ export function connectVerificationSessionReset(
   })
 }
 
+/** Arm favourite migration while signed in, and drop it on sign-out. */
+export function connectFavouriteSession(
+  auth: CompositeAuthProvider,
+  favourites: FavouriteStore,
+): () => void {
+  return effect(() => {
+    if (auth.signedIn.value) {
+      favourites.start()
+    } else {
+      favourites.resetSession()
+    }
+  })
+}
+
+/** Load instance space order while signed in, and drop it on sign-out. */
+export function connectSpaceOrderSession(
+  auth: CompositeAuthProvider,
+  spaceOrder: SpaceOrderStore,
+): () => void {
+  return effect(() => {
+    if (auth.signedIn.value) {
+      void spaceOrder.hydrate()
+    } else {
+      spaceOrder.resetSession()
+    }
+  })
+}
+
 /** Load and clear Axon-wide gesture preferences with the authenticated session. */
 export function connectMessageGestureSession(
   auth: CompositeAuthProvider,
@@ -1114,6 +1151,19 @@ export function createServices(
     live,
     deviceState.deviceId,
   )
+  const favourites = createFavouriteStore({
+    api,
+    live,
+    rooms,
+    settings,
+    accounts,
+  })
+  const spaceOrder = createSpaceOrderStore(
+    api,
+    live,
+    deviceState.deviceId,
+    settings,
+  )
   const spaces = createSpacesStore(api, rooms, live)
   const invites = createInvitesStore(api, rooms)
   const verification = createVerificationStore(api)
@@ -1124,6 +1174,8 @@ export function createServices(
   connectLiveVerification(live, verification, accounts)
   connectVerificationSessionReset(auth, verification)
   connectMessageGestureSession(auth, messageGestures)
+  connectFavouriteSession(auth, favourites)
+  connectSpaceOrderSession(auth, spaceOrder)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
@@ -1160,6 +1212,8 @@ export function createServices(
     live,
     deviceState,
     messageGestures,
+    favourites,
+    spaceOrder,
     ephemeral,
     ephemeralSender,
     activeRoom,

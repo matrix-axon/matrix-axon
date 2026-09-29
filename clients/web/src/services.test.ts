@@ -120,6 +120,7 @@ function roomsStub() {
     unreadTotal: computed(() => 0),
     loading: computed(() => false),
     stale: computed(() => false),
+    confirmed: computed(() => false),
     error: signal<string | null>(null),
     titles: computed(() => new Map<string, string>()),
     dmAvatars: computed(() => new Map<string, string>()),
@@ -172,6 +173,10 @@ function roomsStub() {
     ) => {
       unreadCounts.push([accountId, roomId, notificationCount, highlightCount])
     },
+    peekRooms: () => empty.value,
+    assignRoomTags: () => 0,
+    restoreRoomTags: () => false,
+    applyAccountData: () => {},
   }
   return {
     stub,

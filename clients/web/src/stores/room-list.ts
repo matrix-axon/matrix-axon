@@ -7,8 +7,8 @@ export type MemberDto = components['schemas']['MemberDto']
 /**
  * Pure room-list semantics (ADR 0046, M-W4), ported from the TUI
  * (`clients/tui/src/app/rooms.rs`) so the two clients slice the list the same
- * way: DM heuristic, member-derived titles, pin-aware sorting (ADR 0038), and
- * the filter modes (ADR 0042).
+ * way: the `is_direct` flag, member-derived titles, favourite-aware sorting
+ * (ADR 0038 / ADR 0103), and the filter modes (ADR 0042).
  */
 
 /**
@@ -24,14 +24,35 @@ function blank(value: string | null | undefined): boolean {
   return value === null || value === undefined || value.trim() === ''
 }
 
+/** Matrix `m.favourite` — the durable meaning of a pin (ADR 0103). */
+export const FAVOURITE_TAG = 'm.favourite'
+
+/** Whether the room carries `m.favourite`. */
+export function isFavourite(room: Pick<RoomDto, 'tags'>): boolean {
+  return room.tags?.some((tag) => tag.name === FAVOURITE_TAG) ?? false
+}
+
+/** `null` when the room is not a favourite or the tag carries no finite order. */
+export function favouriteOrder(room: Pick<RoomDto, 'tags'>): number | null {
+  const order = room.tags?.find((tag) => tag.name === FAVOURITE_TAG)?.order
+  return typeof order === 'number' && Number.isFinite(order) ? order : null
+}
+
 /**
- * Whether a room is *likely* a DM (ADR 0042). Interim heuristic: no
- * `m.room.name` and no canonical alias. Imperfect (a named two-person room
- * reads as a group, an unnamed small group as a DM); slated to be replaced by
- * the server-derived `is_direct` from ADR 0055 — swap the body here when that
- * lands, exactly as the TUI plans to.
+ * Whether a room is a direct message (ADR 0103). This is the server-derived
+ * `is_direct` flag from the global `m.direct` account data, the same check as
+ * the TUI's `is_likely_dm`.
  */
 export function isLikelyDm(room: RoomDto): boolean {
+  return room.is_direct === true
+}
+
+/**
+ * Whether the list should ask `/members` for a title. Blank name and blank
+ * canonical alias, including unnamed rooms that are not direct messages.
+ * Matches the TUI's `needs_derived_title`.
+ */
+export function needsDerivedTitle(room: RoomDto): boolean {
   return blank(room.name) && blank(room.canonical_alias)
 }
 
@@ -164,12 +185,16 @@ export function accountLabels(
 }
 
 /**
- * Order rooms with pinned rooms first — by their position in `pinned`, most
- * recently pinned first (ADR 0038) — then the unpinned tail by the active
- * sort (ADR 0042). The pinned section keeps pin order in every mode, since
- * distinct pin ranks never reach the tiebreak. Alphabetical modes compare the
- * lowercased rendered title, so unnamed DMs sort by their member-derived
- * names once known instead of by opaque room ids.
+ * Order rooms with the favourite prefix first, then the tail by the active
+ * sort (ADR 0042 / ADR 0103).
+ *
+ * The prefix is every `m.favourite` plus any not-yet-migrated local pin.
+ * Among that prefix a lower order sorts higher. A favourite with no order
+ * sorts after every finite order (the TUI uses `Infinity`). A local pin that
+ * is not already a favourite takes `index / n`, which stays in `[0, 1)`.
+ * The tail keeps the active sort. Alphabetical modes compare the lowercased
+ * rendered title, so unnamed rooms sort by their member-derived names once
+ * known instead of by opaque room ids.
  */
 export function sortRooms(
   rooms: RoomDto[],
@@ -183,12 +208,29 @@ export function sortRooms(
   // thousand-room list, re-run on every render of the list. Each room's
   // rank and sort key are computed exactly once here.
   const pinRank = new Map(pinned.map((key, index) => [key, index]))
+  const localCount = pinned.length
   const alphabetical = sort === 'az' || sort === 'za'
-  const decorated = rooms.map((room) => ({
-    room,
-    rank: pinRank.get(roomKey(room)) ?? Number.MAX_SAFE_INTEGER,
-    title: alphabetical ? title(room).toLowerCase() : '',
-  }))
+  const decorated = rooms.map((room) => {
+    const key = roomKey(room)
+    let group = 1
+    let order = 0
+    if (isFavourite(room)) {
+      group = 0
+      order = favouriteOrder(room) ?? Number.POSITIVE_INFINITY
+    } else {
+      const localIndex = pinRank.get(key)
+      if (localIndex !== undefined) {
+        group = 0
+        order = localCount === 0 ? 0 : localIndex / localCount
+      }
+    }
+    return {
+      room,
+      group,
+      order,
+      title: alphabetical ? title(room).toLowerCase() : '',
+    }
+  })
   type Decorated = (typeof decorated)[number]
   const tiebreak = (a: Decorated, b: Decorated): number => {
     switch (sort) {
@@ -202,8 +244,13 @@ export function sortRooms(
         return b.title.localeCompare(a.title)
     }
   }
+  const byOrder = (left: number, right: number): number =>
+    left === right ? 0 : left < right ? -1 : 1
   return decorated
-    .sort((a, b) => a.rank - b.rank || tiebreak(a, b))
+    .sort(
+      (a, b) =>
+        a.group - b.group || byOrder(a.order, b.order) || tiebreak(a, b),
+    )
     .map((entry) => entry.room)
 }
 
@@ -235,7 +282,9 @@ export function filterRooms(
     case 'groups':
       return rooms.filter((room) => !isLikelyDm(room))
     case 'favorites':
-      return rooms.filter((room) => context.isPinned(roomKey(room)))
+      return rooms.filter(
+        (room) => isFavourite(room) || context.isPinned(roomKey(room)),
+      )
     case 'name': {
       const query = filter.query.trim().toLowerCase()
       if (query === '') {

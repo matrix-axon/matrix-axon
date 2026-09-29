@@ -26,6 +26,7 @@ import { SLASH_COMMAND } from '../slash-commands'
 import {
   accountLabels,
   filterRooms,
+  isFavourite,
   isLikelyDm,
   roomKey,
   roomListAvatarUrl,
@@ -108,6 +109,7 @@ export function RoomList() {
     invites,
     verification,
     settings,
+    favourites,
     spaces,
     activeRoom,
     composerFocus,
@@ -121,6 +123,9 @@ export function RoomList() {
   const filterInput = useRef<HTMLInputElement>(null)
   const list = useRef<HTMLUListElement>(null)
   const scroller = useRef<HTMLElement | null>(null)
+  const dragKey = useRef<string | null>(null)
+  const focusAfterMove = useRef<string | null>(null)
+  const [listDragging, setListDragging] = useState(false)
   const actionsMenu = useRef<HTMLDetailsElement>(null)
   const firstRoomAction = useRef<HTMLAnchorElement>(null)
 
@@ -289,10 +294,27 @@ export function RoomList() {
       setAccountFilter('all')
     }
   }, [accountFilter, activeAccountIds, showAccountFilter])
-  const pinnedCount = useMemo(
-    () => visible.filter((room) => pinnedRooms.includes(roomKey(room))).length,
+  const visibleKeys = useMemo(() => visible.map(roomKey), [visible])
+  const favouriteCount = useMemo(
+    () =>
+      visible.filter(
+        (room) => isFavourite(room) || pinnedRooms.includes(roomKey(room)),
+      ).length,
     [visible, pinnedRooms],
   )
+  useLayoutEffect(() => {
+    const key = focusAfterMove.current
+    if (key === null) {
+      return
+    }
+    focusAfterMove.current = null
+    const moved = [
+      ...(list.current?.querySelectorAll<HTMLAnchorElement>(
+        '[data-room-key]',
+      ) ?? []),
+    ].find((link) => link.dataset.roomKey === key)
+    moved?.focus()
+  })
 
   // ---- windowing (see `virtual-window.ts`). Geometry is measured, never
   // assumed: `pitch` comes from two live rows, the viewport from the scrolling
@@ -796,6 +818,7 @@ export function RoomList() {
   return (
     <>
       <ErrorBanner error={rooms.error} />
+      <ErrorBanner error={favourites.error} />
 
       <div class="room-controls">
         {/* The chord cycles the group rather than activating any one chip, so
@@ -856,6 +879,32 @@ export function RoomList() {
           )}
         </span>
         <div class="room-control-row">
+          <button
+            type="button"
+            class={
+              favourites.reordering.value
+                ? 'room-reorder-toggle active'
+                : 'room-reorder-toggle'
+            }
+            aria-pressed={favourites.reordering.value}
+            title={hint(
+              favourites.reordering.value
+                ? 'Done reordering favorites'
+                : 'Reorder favorites',
+              KEYS.reorderFavorites,
+            )}
+            aria-label={
+              favourites.reordering.value
+                ? 'Done reordering favorites'
+                : 'Reorder favorites'
+            }
+            aria-keyshortcuts={keyAria(KEYS.reorderFavorites)}
+            onClick={() =>
+              (favourites.reordering.value = !favourites.reordering.value)
+            }
+          >
+            {favourites.reordering.value ? 'Done' : 'Reorder'}
+          </button>
           <label class="sort-select">
             Sort
             <select
@@ -1082,7 +1131,7 @@ export function RoomList() {
         )
       ) : (
         <ul
-          class="room-list"
+          class={listDragging ? 'room-list room-list-dragging' : 'room-list'}
           ref={list}
           onKeyDown={onListKeyDown}
           style={{ paddingTop: `${padTop}px`, paddingBottom: `${padBottom}px` }}
@@ -1101,7 +1150,20 @@ export function RoomList() {
                 // The rule between two rows belongs to the lower one. The first
                 // room has the list's own border above it, and the first
                 // unpinned room has the separator.
-                rule={index > 0 && index !== pinnedCount}
+                rule={index > 0 && index !== favouriteCount}
+                visibleKeys={visibleKeys}
+                favouriteCount={favouriteCount}
+                visibleLength={visible.length}
+                reordering={favourites.reordering.value}
+                listDragging={listDragging}
+                dragSource={() => dragKey.current}
+                onDragKey={(key) => {
+                  dragKey.current = key
+                  setListDragging(key !== null)
+                }}
+                onMoved={(key) => {
+                  focusAfterMove.current = key
+                }}
                 accountLabel={
                   showAccountFilter && accountFilter === 'all'
                     ? labels.get(room.account_id)
@@ -1113,12 +1175,31 @@ export function RoomList() {
           })}
           {/* Out of flow, so every row keeps the same pitch no matter where the
               pinned section ends — the windowing math depends on that. */}
-          {pinnedCount > 0 && pinnedCount < visible.length && (
+          {favouriteCount > 0 && favouriteCount < visible.length && (
             <li
               class="room-separator"
               role="separator"
               aria-label="unpinned rooms"
-              style={{ top: `${pinnedCount * pitch}px` }}
+              style={{ top: `${favouriteCount * pitch}px` }}
+              onDragOver={(event) => {
+                if (dragKey.current !== null) {
+                  event.preventDefault()
+                }
+              }}
+              onDrop={(event) => {
+                event.preventDefault()
+                const source = dragKey.current
+                dragKey.current = null
+                setListDragging(false)
+                if (source !== null) {
+                  favourites.move(
+                    source,
+                    favouriteCount,
+                    visibleKeys,
+                    favouriteCount,
+                  )
+                }
+              }}
             />
           )}
         </ul>
@@ -1182,6 +1263,14 @@ function RoomRow({
   accountLabel,
   index,
   rule,
+  visibleKeys,
+  favouriteCount,
+  visibleLength,
+  reordering,
+  listDragging,
+  dragSource,
+  onDragKey,
+  onMoved,
   onNavigate,
 }: {
   room: RoomDto
@@ -1191,12 +1280,20 @@ function RoomRow({
   index: number
   /** Draw the hairline above this row (see the caller). */
   rule: boolean
+  visibleKeys: readonly string[]
+  favouriteCount: number
+  visibleLength: number
+  reordering: boolean
+  listDragging: boolean
+  dragSource: () => string | null
+  onDragKey: (key: string | null) => void
+  onMoved: (key: string) => void
   /** Navigate on touch taps, but leave touch scroll gestures to the browser. */
   onNavigate: (room: RoomDto, href: string) => void
 }) {
-  const { rooms, settings, activeRoom } = useServices()
+  const { rooms, settings, favourites, activeRoom } = useServices()
   const key = roomKey(room)
-  const pinned = settings.pinnedRooms.value.includes(key)
+  const pinned = isFavourite(room) || settings.pinnedRooms.value.includes(key)
   // Reads this room's own count signal, so a count update elsewhere leaves
   // this row alone.
   const count = rooms.unreadCount(key)
@@ -1251,12 +1348,55 @@ function RoomRow({
   }, [key, previewEnabled, rooms, room])
   const showPreview = previewEnabled && preview !== undefined
 
+  const moveBy = (toIndex: number, debounce: boolean) => {
+    favourites.move(key, toIndex, visibleKeys, favouriteCount, {
+      debounce,
+    })
+    onMoved(key)
+  }
+
   return (
-    <li class={rule ? 'room-row rule' : 'room-row'}>
+    <li
+      class={rule ? 'room-row rule' : 'room-row'}
+      onDragOver={(event) => {
+        if (listDragging) {
+          event.preventDefault()
+        }
+      }}
+      onDrop={(event) => {
+        event.preventDefault()
+        const transferred = event.dataTransfer?.getData('text/plain') ?? ''
+        const source = transferred !== '' ? transferred : dragSource()
+        onDragKey(null)
+        if (source !== null && source !== '') {
+          favourites.move(source, index, visibleKeys, favouriteCount)
+        }
+      }}
+    >
       <a
         href={href}
         class="room-link"
+        draggable
         data-index={index}
+        data-room-key={key}
+        onDragStart={(event) => {
+          onDragKey(key)
+          event.dataTransfer?.setData('text/plain', key)
+          if (event.dataTransfer !== null) {
+            event.dataTransfer.effectAllowed = 'move'
+          }
+        }}
+        onDragEnd={() => onDragKey(null)}
+        onKeyDown={(event) => {
+          if (!event.altKey || event.ctrlKey || event.metaKey) {
+            return
+          }
+          if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') {
+            return
+          }
+          event.preventDefault()
+          moveBy(index + (event.key === 'ArrowUp' ? -1 : 1), true)
+        }}
         aria-current={open ? 'page' : undefined}
         onPointerDown={(pointerEvent) => {
           if (pointerEvent.pointerType === 'mouse') {
@@ -1371,14 +1511,37 @@ function RoomRow({
           )}
         </span>
       </a>
+      {reordering && (
+        <span class="room-reorder">
+          <button
+            type="button"
+            class="ghost room-move"
+            disabled={index === 0}
+            aria-label={`Move ${title} up`}
+            title={`Move ${title} up`}
+            onClick={() => moveBy(index - 1, false)}
+          >
+            ▲
+          </button>
+          <button
+            type="button"
+            class="ghost room-move"
+            disabled={index === visibleLength - 1}
+            aria-label={`Move ${title} down`}
+            title={`Move ${title} down`}
+            onClick={() => moveBy(index + 1, false)}
+          >
+            ▼
+          </button>
+        </span>
+      )}
       <button
         type="button"
         class="ghost pin"
         aria-pressed={pinned}
+        aria-label={pinned ? `Unpin ${title}` : `Pin ${title} to top`}
         title={pinned ? 'Unpin' : 'Pin to top'}
-        onClick={() =>
-          pinned ? settings.unpinRoom(key) : settings.pinRoom(key)
-        }
+        onClick={() => (pinned ? favourites.unpin(key) : favourites.pin(key))}
       >
         {pinned ? '★' : '☆'}
       </button>

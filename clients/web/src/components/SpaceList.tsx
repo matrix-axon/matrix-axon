@@ -1,4 +1,5 @@
 import { useLayoutEffect, useMemo, useRef } from 'preact/hooks'
+import { ErrorBanner } from './ErrorBanner'
 import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
 import { useMediaBlob } from '../media/use-media-blob'
 import { useServices } from '../services'
@@ -8,7 +9,7 @@ import { orderedSpaces } from '../stores/spaces'
 
 /** The space picker scopes the neighboring RoomList; it never changes Matrix state. */
 export function SpaceList() {
-  const { rooms, spaces, settings } = useServices()
+  const { rooms, spaces, settings, spaceOrder } = useServices()
   const dragging = useRef<string | null>(null)
   const selected = spaces.selected.value
   const entries = useMemo(
@@ -56,6 +57,7 @@ export function SpaceList() {
       aria-label="Spaces"
       ref={picker}
     >
+      <ErrorBanner error={spaceOrder.error} />
       <h2>Spaces</h2>
       {/* Present at every width: a phone has no Ctrl-Alt-R, and touch
           drag-and-drop is uneven across engines and undiscoverable where it
@@ -96,7 +98,7 @@ export function SpaceList() {
         const title = roomTitle(space, rooms.titles.value)
         const move = (toIndex: number) => {
           if (toIndex < 0 || toIndex >= order.length) return
-          settings.moveSpace(key, toIndex, order)
+          spaceOrder.move(key, toIndex, order)
         }
         return (
           <div
@@ -116,7 +118,7 @@ export function SpaceList() {
               event.preventDefault()
               const source = dragging.current
               dragging.current = null
-              if (source !== null) settings.moveSpace(source, index, order)
+              if (source !== null) spaceOrder.move(source, index, order)
             }}
           >
             <button
