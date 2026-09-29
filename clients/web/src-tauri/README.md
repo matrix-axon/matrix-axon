@@ -235,6 +235,75 @@ project instead does not survive.
 [#456](https://github.com/matrix-axon/matrix-axon/issues/456) tracks taking
 the committed default out.
 
+### Signing without a password prompt
+
+Signing happens inside `xcodebuild`, which uses the login keychain. That
+keychain is locked in an SSH session and after a reboot, so an unattended
+`scripts/package-ios.sh` stops at a password dialog, or fails with:
+
+```
+errSecInternalComponent
+```
+
+That error reads like a bad certificate. It is a locked keychain with nobody
+there to unlock it.
+
+Skip this section if you build at your own desk with the login keychain
+unlocked. It is for a build box, or for anyone tired of the prompt.
+
+Put the signing identities in a keychain of their own with an empty password,
+and point the script at it:
+
+```sh
+security create-keychain -p "" build
+security set-keychain-settings ~/Library/Keychains/build.keychain-db   # never auto-lock
+security list-keychains -d user -s \
+  ~/Library/Keychains/login.keychain-db ~/Library/Keychains/build.keychain-db
+
+# Export each identity from Keychain Access as a .p12 (needs your login
+# password once), then import it from the command line:
+security import dev.p12 -k ~/Library/Keychains/build.keychain-db -P '<p12 password>' \
+  -T /usr/bin/codesign -T /usr/bin/security
+security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" \
+  ~/Library/Keychains/build.keychain-db
+
+export AXON_IOS_KEYCHAIN=build   # a name under ~/Library/Keychains, or a path
+```
+
+The script then unlocks it before the build. Which identities it needs depends
+on `--export-method`:
+
+| `--export-method`                      | Identity             |
+| -------------------------------------- | -------------------- |
+| `debugging` (default)                  | `Apple Development`  |
+| `release-testing`, `app-store-connect` | `Apple Distribution` |
+
+Three things that are easy to get wrong:
+
+- **Remove the identities from the login keychain afterwards.** An identity that
+  exists in both keychains is resolved to the login copy, which is locked, even
+  when `build` is listed first. The same certificate signed with the login copy
+  gone and failed with it present. Delete the certificate and its private key
+  together.
+- **`set-key-partition-list` is not optional.** Without it macOS asks, through a
+  dialog, whether `codesign` may use the key. Run it again after every import.
+- **An empty password is the point, not an oversight.** Anyone who can read the
+  keychain file can sign as you, which is why this belongs on a machine you
+  already trust with the login keychain. If yours has a password, the script
+  reads `AXON_IOS_KEYCHAIN_PASSWORD`; that puts it on a command line where `ps`
+  shows it.
+
+`--upload` authenticates through an App Store Connect API key, not the
+keychain, so none of this applies to it.
+
+To check the setup without a full build, sign a scratch file with the keychain
+alone in the search list:
+
+```sh
+t=$(mktemp) && cp /bin/echo "$t"
+codesign -f -s "Apple Development: NAME (TEAMID)" "$t"; echo "exit $?"; rm -f "$t"
+```
+
 ## The bundle identifier is settled
 
 `org.matrixaxon.axon`, confirmed for ADR 0102 § 4. It is a permanent store

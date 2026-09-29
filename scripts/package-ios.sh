@@ -30,6 +30,15 @@
 #     "up to date", because rustup is telling the truth about a toolchain that
 #     is not the one cargo will run.
 #
+#   * The signing keychain. Signing runs inside xcodebuild, which reads the
+#     login keychain, and that one is locked in an SSH session and after a
+#     reboot. The failure is `errSecInternalComponent` from codesign, or a
+#     password dialog nobody is there to answer. Set AXON_IOS_KEYCHAIN to a
+#     keychain that holds only the signing identities and has an empty
+#     password, and this unlocks it first. Off unless set: it is one
+#     developer's setup, not a requirement. See "Signing without a password
+#     prompt" in clients/web/src-tauri/README.md for how to build that keychain.
+#
 # Not a gate and not run by CI; #445 tracks a lane that would, and this script
 # is what it should be built from. `--upload` needs App Store Connect
 # credentials this repo does not carry; see the block above that flag below.
@@ -137,6 +146,44 @@ shadowing rustup's shims and cannot build for iOS at all. Otherwise:
   rustup target add aarch64-apple-ios
 EOF
   exit 1
+fi
+
+# Unlock the signing keychain before the build rather than discovering it is
+# locked at the codesign step, minutes in. `codesign` failing with
+# errSecInternalComponent here looks like a bad certificate and is not: it is
+# what a locked keychain reports when there is nobody to ask for a password.
+#
+# The keychain must also be the only place the identities live. An identity
+# that exists in both this keychain and a locked login keychain is resolved to
+# the locked copy even when this one is listed first — the same certificate
+# signed cleanly with the login copy removed and failed with it present.
+#
+# `-p` puts the password on the command line, so it is visible to `ps` for the
+# duration of the call. That is acceptable only because the intended password
+# is empty; AXON_IOS_KEYCHAIN_PASSWORD exists for a keychain that has one, and
+# the one-time setup in the README explains why an empty one is the point.
+if [ -n "${AXON_IOS_KEYCHAIN:-}" ]; then
+  case "$AXON_IOS_KEYCHAIN" in
+    */*) keychain="$AXON_IOS_KEYCHAIN" ;;
+    *)   keychain="$HOME/Library/Keychains/${AXON_IOS_KEYCHAIN%.keychain-db}.keychain-db" ;;
+  esac
+  if [ ! -f "$keychain" ]; then
+    echo "error: AXON_IOS_KEYCHAIN is set but $keychain does not exist." >&2
+    exit 1
+  fi
+  if ! security unlock-keychain -p "${AXON_IOS_KEYCHAIN_PASSWORD:-}" "$keychain"; then
+    echo "error: could not unlock $keychain." >&2
+    echo "       An empty password is expected; set AXON_IOS_KEYCHAIN_PASSWORD if it has one." >&2
+    exit 1
+  fi
+  # Unlocking a keychain that is not in the search list does nothing useful:
+  # xcodebuild never looks there.
+  if ! security list-keychains -d user | grep -qF "$keychain"; then
+    echo "error: $keychain is unlocked but not in the keychain search list." >&2
+    echo "       security list-keychains -d user -s \"$keychain\" ~/Library/Keychains/login.keychain-db" >&2
+    exit 1
+  fi
+  echo "==> signing keychain unlocked: $keychain"
 fi
 
 cd "$web_dir"
