@@ -1367,29 +1367,92 @@ impl ReceiptState {
     }
 }
 
-/// Whether the unmatched receipts in `receipts` are all *stale*: each names an
-/// event axon holds that precedes the active receipt's event, so none can be
-/// the room's real read position and the counts are anchored on the active
-/// receipt, not on a fallback (issue #507). Anything unprovable — no active
-/// receipt, an event axon never stored, or a store error — answers `false`, so
-/// the caller keeps holding.
-async fn pending_receipts_stale(
-    store: &Store,
-    account_id: Uuid,
-    room_id: &RoomId,
-    receipts: &ReceiptState,
-) -> bool {
+/// The two facts [`pending_receipts_stale`] needs, behind a seam so the
+/// release/hold decision is testable without a live matrix-sdk room or
+/// Postgres. [`RoomReceiptEvidence`] is the production implementation.
+trait ReceiptEvidence {
+    /// Whether matrix-sdk's in-memory linked chunk — the one its counts are
+    /// computed over — currently holds `event_id`.
+    async fn in_chunk(&self, event_id: &str) -> bool;
+    /// Whether every one of `candidates` is an event axon holds that precedes
+    /// `anchor` (see [`Store::events_precede`]).
+    async fn all_precede(&self, anchor: &str, candidates: &[String]) -> bool;
+}
+
+/// Whether the unmatched receipts in `receipts` are all *stale*, so the counts
+/// beside them are anchored on the active receipt rather than a fallback, and a
+/// held increase may be written (issue #507). Two things must both hold:
+///
+/// 1. **The active receipt's event is in matrix-sdk's in-memory chunk.**
+///    `latest_active` is not proof on its own. When `compute_unread_counts`
+///    finds no receipt in the chunk it keeps the old `latest_active`, resets,
+///    and counts *every* event in the chunk (the fallback #313 guards against);
+///    `try_find_stored_receipts` can also seed `latest_active` from the state
+///    store with an event that was never loaded. Conversely, when the event
+///    *is* in the chunk, `select_best_receipt` always finds it (or a newer
+///    receipt) and counts from there. So chunk membership is exactly the
+///    "anchored" condition. Checked against matrix-sdk 0.19.1.
+/// 2. **Every pending receipt names an event that precedes it**, so none of them
+///    can be the real read position.
+///
+/// Anything unprovable — no active receipt, an evicted or never-loaded anchor,
+/// an event axon never stored, a store error — answers `false`, and the caller
+/// keeps holding.
+async fn pending_receipts_stale(evidence: &impl ReceiptEvidence, receipts: &ReceiptState) -> bool {
     let Some(active) = receipts.active.as_deref() else {
         return false;
     };
-    match store
-        .events_precede(account_id, room_id.as_str(), active, &receipts.pending)
-        .await
-    {
-        Ok(stale) => stale,
-        Err(err) => {
-            tracing::warn!(%account_id, %room_id, error = %err, "failed to compare pending read receipts");
-            false
+    evidence.in_chunk(active).await && evidence.all_precede(active, &receipts.pending).await
+}
+
+/// [`ReceiptEvidence`] for a live room: matrix-sdk's event cache for the chunk,
+/// axon's `events` table for the ordering.
+struct RoomReceiptEvidence<'a> {
+    room: &'a Room,
+    store: &'a Store,
+    account_id: Uuid,
+}
+
+impl ReceiptEvidence for RoomReceiptEvidence<'_> {
+    async fn in_chunk(&self, event_id: &str) -> bool {
+        let room_id = self.room.room_id();
+        let account_id = self.account_id;
+        let cache = match self.room.event_cache().await {
+            Ok((cache, _drop_handles)) => cache,
+            Err(err) => {
+                tracing::warn!(%account_id, %room_id, error = %err, "failed to open room event cache");
+                return false;
+            }
+        };
+        // In-memory only, deliberately: an event that is merely in the event
+        // cache's *storage* is not one the counts were computed over.
+        match cache
+            .rfind_map_event_in_memory_by(|event| {
+                (event.event_id().is_some_and(|id| id.as_str() == event_id)).then_some(())
+            })
+            .await
+        {
+            Ok(found) => found.is_some(),
+            Err(err) => {
+                tracing::warn!(%account_id, %room_id, error = %err, "failed to search room event cache");
+                false
+            }
+        }
+    }
+
+    async fn all_precede(&self, anchor: &str, candidates: &[String]) -> bool {
+        let room_id = self.room.room_id();
+        let account_id = self.account_id;
+        match self
+            .store
+            .events_precede(account_id, room_id.as_str(), anchor, candidates)
+            .await
+        {
+            Ok(stale) => stale,
+            Err(err) => {
+                tracing::warn!(%account_id, %room_id, error = %err, "failed to compare pending read receipts");
+                false
+            }
         }
     }
 }
@@ -2279,9 +2342,15 @@ async fn capture_unread_counts(
     // another client — stays unmatched for good once its event is out of the
     // chunk, and would hold every increase in the room forever (issue #507).
     // Such a receipt cannot be the read position, so it does not make the
-    // counts a fallback; only a pending receipt that might be *newer* does.
+    // counts a fallback, provided the active receipt really is the anchor; see
+    // `pending_receipts_stale` for what proves that.
     if suppression.is_none() && !receipts.settled() && unread_counts_increased(cached, snapshot) {
-        if !pending_receipts_stale(store, account_id, room_id, &receipts).await {
+        let evidence = RoomReceiptEvidence {
+            room,
+            store,
+            account_id,
+        };
+        if !pending_receipts_stale(&evidence, &receipts).await {
             tracing::debug!(
                 %account_id,
                 %room_id,
@@ -3745,5 +3814,85 @@ mod reconcile_loop_tests {
                 .is_empty(),
             "and is certainly not gone"
         );
+    }
+}
+
+#[cfg(test)]
+mod pending_receipt_tests {
+    use std::cell::RefCell;
+
+    use super::{pending_receipts_stale, ReceiptEvidence, ReceiptState};
+
+    /// Canned answers, plus a log of what was asked, so a test can assert both
+    /// the verdict and that the store is not consulted when the chunk check
+    /// already failed.
+    struct FakeEvidence {
+        in_chunk: bool,
+        all_precede: bool,
+        asked: RefCell<Vec<String>>,
+    }
+
+    impl FakeEvidence {
+        fn new(in_chunk: bool, all_precede: bool) -> Self {
+            Self {
+                in_chunk,
+                all_precede,
+                asked: RefCell::default(),
+            }
+        }
+    }
+
+    impl ReceiptEvidence for FakeEvidence {
+        async fn in_chunk(&self, event_id: &str) -> bool {
+            self.asked.borrow_mut().push(format!("in_chunk {event_id}"));
+            self.in_chunk
+        }
+
+        async fn all_precede(&self, anchor: &str, candidates: &[String]) -> bool {
+            self.asked
+                .borrow_mut()
+                .push(format!("all_precede {anchor} {}", candidates.join(",")));
+            self.all_precede
+        }
+    }
+
+    fn receipts(active: Option<&str>) -> ReceiptState {
+        ReceiptState {
+            active: active.map(str::to_owned),
+            pending: vec!["$stale".to_owned()],
+        }
+    }
+
+    #[tokio::test]
+    async fn releases_when_anchor_is_in_chunk_and_pending_precede() {
+        let evidence = FakeEvidence::new(true, true);
+        assert!(pending_receipts_stale(&evidence, &receipts(Some("$active"))).await);
+        assert_eq!(
+            *evidence.asked.borrow(),
+            ["in_chunk $active", "all_precede $active $stale"]
+        );
+    }
+
+    /// The review case on PR 508: matrix-sdk kept a `latest_active` whose event
+    /// is not in the chunk, so its counts are the fallback recount and a stale
+    /// pending receipt must not release them.
+    #[tokio::test]
+    async fn holds_when_anchor_is_not_in_chunk() {
+        let evidence = FakeEvidence::new(false, true);
+        assert!(!pending_receipts_stale(&evidence, &receipts(Some("$active"))).await);
+        assert_eq!(*evidence.asked.borrow(), ["in_chunk $active"]);
+    }
+
+    #[tokio::test]
+    async fn holds_when_a_pending_receipt_may_be_newer() {
+        let evidence = FakeEvidence::new(true, false);
+        assert!(!pending_receipts_stale(&evidence, &receipts(Some("$active"))).await);
+    }
+
+    #[tokio::test]
+    async fn holds_without_an_active_receipt() {
+        let evidence = FakeEvidence::new(true, true);
+        assert!(!pending_receipts_stale(&evidence, &receipts(None)).await);
+        assert!(evidence.asked.borrow().is_empty());
     }
 }
