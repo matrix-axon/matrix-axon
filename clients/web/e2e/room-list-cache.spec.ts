@@ -27,6 +27,12 @@ async function setRoomsHold(page: Page, hold: string): Promise<void> {
 // The mock is one process shared by every spec, so neither the hold nor the
 // failure may outlive this file — a stray one would look like a hang, or a
 // flake, three specs later.
+// Reset before each test as well, so a failed after-hook cannot leak it into
+// the next one (see `update-refresh.spec.ts`).
+test.beforeEach(async ({ page }) => {
+  await setRoomsHold(page, 'none')
+  await page.request.post('/__e2e/rooms-fail?fail=false')
+})
 test.afterEach(async ({ page }) => {
   await setRoomsHold(page, 'none')
   await page.request.post('/__e2e/rooms-fail?fail=false')

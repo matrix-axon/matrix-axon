@@ -36,6 +36,11 @@ async function setStall(page: Page, enabled: boolean): Promise<void> {
 
 // The mock is shared by every spec in the run, and a stall left on would hang
 // the next spec that opens this room, so it is reset on failure too.
+// Reset before each test as well, so a failed after-hook cannot leak it into
+// the next one (see `update-refresh.spec.ts`).
+test.beforeEach(async ({ page }) => {
+  await setStall(page, false)
+})
 test.afterEach(async ({ page }) => {
   await setStall(page, false)
 })

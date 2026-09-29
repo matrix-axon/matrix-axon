@@ -11,6 +11,11 @@ import { reloadFromInsidePage, signIn, waitForRoomListCache } from './helpers'
 // this file — and it must be reset even when the test *fails*, or the delay
 // leaks into every spec that follows. A first version reset it on the happy
 // path only, and one failure here turned into failures three specs away.
+// Reset before each test as well, so a failed after-hook cannot leak it into
+// the next one (see `update-refresh.spec.ts`).
+test.beforeEach(async ({ page }) => {
+  await page.request.post('/__e2e/rooms-delay?hold=none')
+})
 test.afterEach(async ({ page }) => {
   await page.request.post('/__e2e/rooms-delay?hold=none')
 })

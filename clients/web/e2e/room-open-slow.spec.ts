@@ -46,6 +46,11 @@ async function setRoomsHold(page: Page, hold: string): Promise<void> {
 // The mock is one process shared by every spec, and a leaked hold looks like a
 // hang three specs later — `room-switch-warm.spec.ts` learned this the hard
 // way, so reset on failure too, not only on the happy path.
+// Reset before each test as well, so a failed after-hook cannot leak it into
+// the next one (see `update-refresh.spec.ts`).
+test.beforeEach(async ({ page }) => {
+  await setRoomsHold(page, 'none')
+})
 test.afterEach(async ({ page }) => {
   await setRoomsHold(page, 'none')
 })
