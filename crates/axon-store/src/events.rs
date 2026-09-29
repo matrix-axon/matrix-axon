@@ -828,6 +828,46 @@ impl Store {
         Ok(row)
     }
 
+    /// Whether every event in `candidates` is held for this account in `room_id`
+    /// and strictly precedes `anchor` in **both** arrival order (`id`) and
+    /// `origin_ts`. False when `anchor` or any candidate is unknown, or when
+    /// `candidates` is empty.
+    ///
+    /// Used to tell a read receipt that is merely *stale* (it names an event
+    /// older than the room's active receipt, so it cannot move the read
+    /// position) from one that may be *newer* than it (issue #507). Requiring
+    /// both orders to agree keeps a bridge-backfilled event — old by
+    /// `origin_ts`, new by arrival — from being judged stale.
+    pub async fn events_precede(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        anchor: &str,
+        candidates: &[String],
+    ) -> Result<bool, StoreError> {
+        if candidates.is_empty() {
+            return Ok(false);
+        }
+        let (preceding,): (i64,) = sqlx_core::query_as::query_as::<Postgres, (i64,)>(
+            "SELECT count(DISTINCT p.event_id) \
+             FROM events a \
+             JOIN events p ON p.account_id = a.account_id AND p.room_id = a.room_id \
+             WHERE a.account_id = $1 AND a.room_id = $2 AND a.event_id = $3 \
+               AND p.event_id = ANY($4) AND p.id < a.id AND p.origin_ts < a.origin_ts",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .bind(anchor)
+        .bind(candidates)
+        .fetch_one(&self.pool)
+        .await?;
+        let distinct = candidates
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        Ok(usize::try_from(preceding).is_ok_and(|n| n == distinct))
+    }
+
     /// Like [`get_event`](Self::get_event), but returns `None` when the local user
     /// has *left or been banned* from the event's room — the membership filter that
     /// keeps left-room content out of search results (M10, ADR 0044). Reuses the
