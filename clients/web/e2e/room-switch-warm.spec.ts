@@ -40,6 +40,11 @@ async function setTimelineHold(page: Page, hold: string): Promise<void> {
 
 // The mock is one process shared by every spec, so the hold must not outlive
 // this file — a stray delay would look like a hang three specs later.
+// Reset before each test as well, so a failed after-hook cannot leak it into
+// the next one (see `update-refresh.spec.ts`).
+test.beforeEach(async ({ page }) => {
+  await setTimelineHold(page, 'none')
+})
 test.afterEach(async ({ page }) => {
   await setTimelineHold(page, 'none')
 })

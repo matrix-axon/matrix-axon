@@ -112,6 +112,14 @@ async function returnAfterAwayExpectingReload(
   ])
 }
 
+// Before as well as after. The after-hook is a request to the shared mock, and
+// when that request itself fails (a "socket hang up" did, 2026-09-29) the
+// staged deploy survives into the next test. In this serial file that is the
+// retry of the whole group, which starts with the test asserting that nothing
+// reloads.
+test.beforeEach(async ({ page }) => {
+  await clearDeploy(page)
+})
 test.afterEach(async ({ page }) => {
   await clearDeploy(page)
 })
