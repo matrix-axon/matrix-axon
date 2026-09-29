@@ -23,11 +23,9 @@ const HELD = 'held'
 const BEFORE_RESPONSE = { timeout: 1000 }
 
 /**
- * The second room's own timeline GET. Armed before the reload, since a wait
- * armed after it could miss a request that fires in the same batch as the
- * commit. The outgoing document cannot satisfy it either: its own GET for this
- * room went out on the re-entry above, before this wait existed, and the
- * reload tears the document down.
+ * The second room's own timeline GET. Every wait on it is armed before the
+ * action that sends it, because Playwright's waits are forward-only: a wait
+ * armed afterwards can miss a request that went out in the same batch.
  */
 function isSecondRoomTimeline(request: Request): boolean {
   return decodeURIComponent(new URL(request.url()).pathname).endsWith(
@@ -59,7 +57,16 @@ test('a re-entered room paints its timeline before the refetch settles', async (
   await expect(page.locator('.media-figure').first()).toBeVisible()
 
   await setTimelineHold(page, HELD)
+  const gapFill = page.waitForRequest(isSecondRoomTimeline)
   await page.locator(`a[href="${SECOND_ROOM_URL}"]`).click()
+  // The re-entry's own refetch, consumed here for two reasons. The warm
+  // assertions below then run while it is actually held, which is the claim
+  // they make. And the reload's wait further down cannot pick it up: the room
+  // paints from the store first and only then sends this, 55–90ms later in CI.
+  // That was late enough to land after the reload's wait was armed. The reload
+  // then aborted it, so its "response" came back within milliseconds and the
+  // outstanding-answer check failed.
+  await gapFill
 
   // The warm store, painted while the gap-fill request is still open.
   await expect(page.getByText(SECOND_ROOM_MESSAGE)).toBeVisible(BEFORE_RESPONSE)
