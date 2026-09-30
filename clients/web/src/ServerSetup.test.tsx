@@ -197,3 +197,18 @@ describe('ServerSetup', () => {
     }
   })
 })
+
+describe('ServerSetup privacy policy (ADR 0107)', () => {
+  it('shows the policy in place, before any server is known', () => {
+    setup(ok)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Privacy policy' }))
+    expect(
+      screen.getByRole('heading', { name: 'Axon Privacy Policy' }),
+    ).toBeTruthy()
+    expect(screen.queryByLabelText('Server address')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: '← Back' }))
+    expect(screen.getByLabelText('Server address')).toBeTruthy()
+  })
+})

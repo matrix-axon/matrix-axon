@@ -61,6 +61,11 @@ export function ShortcutsHelp({
             <CommandsHelp />
           </>
         )}
+        <p class="muted">
+          <a href="/privacy" onClick={onClose}>
+            Privacy policy
+          </a>
+        </p>
       </div>
     </div>
   )

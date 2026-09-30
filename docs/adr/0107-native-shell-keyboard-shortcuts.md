@@ -96,3 +96,29 @@ alike:
   before it closes the viewer. Paging to the next image starts at fit.
 - **Images only.** The image registers itself with the viewer through a
   context, so a video or a PDF gets no zoom controls.
+
+## Help menu and privacy policy
+
+App Store review requires the privacy policy to be reachable from inside the
+app, and a macOS user expects the app's help in the Help menu.
+
+- **The policy is bundled, not linked.** `docs/PRIVACY_POLICY.md` stays the one
+  copy, and the README and store listings link to it on GitHub. A Vite plugin
+  (`axon-privacy-policy`) renders it to HTML at build time, and the build fails
+  if the file is missing, so no build can ship without it.
+  `deploy/web/Dockerfile` copies the file in, and `.dockerignore` makes an
+  exception for it.
+- **Reachable from every screen, on every platform.** Signed in, it is the
+  `/privacy` route, linked from the Settings footer next to the open-source
+  licenses and from the help dialog. The server-setup and sign-in screens come
+  before the router, so they show it in place with a Back button. An App Store
+  reviewer meets those screens first.
+- **macOS gets a Help menu.** The shell keeps Tauri's default menu bar and adds
+  "Axon Help" (⇧⌘/, which is ⌘?) and "Privacy Policy" to its Help menu. The
+  menu only relays: it emits `axon://menu` and `AppRoot` turns that into the
+  page's own events, so every screen answers with what it already has.
+- **No menu bar on Windows or Linux.** Tauri gives them none. Adding one just
+  for Help would look out of place in a chat app, and Slack, Discord and
+  Element on those platforms keep these links inside the app. The Settings
+  footer and help dialog links are the Windows and Linux route, and they are
+  also where the iOS build's reviewers will find the policy.

@@ -12,11 +12,15 @@ vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }))
 vi.mock('@tauri-apps/plugin-websocket', () => ({
   default: { connect: vi.fn() },
 }))
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(() => Promise.resolve(() => {})),
+}))
 vi.mock('@tauri-apps/plugin-deep-link', () => ({
   getCurrent: vi.fn(() => Promise.resolve(null)),
   onOpenUrl: vi.fn(() => Promise.resolve(() => {})),
 }))
 
+import { listen } from '@tauri-apps/api/event'
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
@@ -385,5 +389,21 @@ describe('page zoom (ADR 0107)', () => {
     )
     expect(tauriPlatform().setZoom).toBeNull()
     vi.restoreAllMocks()
+  })
+})
+
+describe('native menu commands (ADR 0107)', () => {
+  it('passes on our commands and drops anything else', async () => {
+    const handler = vi.fn()
+    const unsubscribe = tauriPlatform().onMenuCommand!(handler)
+    const [event, callback] = vi.mocked(listen).mock.calls.at(-1)!
+    expect(event).toBe('axon://menu')
+
+    const deliver = callback as (event: { payload: string }) => void
+    deliver({ payload: 'help' })
+    deliver({ payload: 'privacy' })
+    deliver({ payload: 'quit' })
+    expect(handler.mock.calls).toEqual([['help'], ['privacy']])
+    unsubscribe()
   })
 })

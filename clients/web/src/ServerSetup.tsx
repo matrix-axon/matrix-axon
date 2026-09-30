@@ -1,4 +1,5 @@
 import { useState } from 'preact/hooks'
+import { usePrivacyInPlace } from './pages/PrivacyPage'
 import { browserPlatform, type Platform } from './platform'
 import {
   httpFallbackFor,
@@ -44,6 +45,8 @@ export function ServerSetup({
 }) {
   const [draft, setDraft] = useState('')
   const [status, setStatus] = useState<Status>({ state: 'idle' })
+  const [privacyOpen, setPrivacyOpen] = useState(false)
+  const privacy = usePrivacyInPlace(privacyOpen, setPrivacyOpen)
 
   const normalized = normalizeServerUrl(draft)
   const probing = status.state === 'probing'
@@ -109,6 +112,9 @@ export function ServerSetup({
     }
   }
 
+  if (privacy.page !== null) {
+    return privacy.page
+  }
   return (
     <main class="signin">
       <h1>axon</h1>
@@ -162,6 +168,7 @@ export function ServerSetup({
           </p>
         )}
       </form>
+      {privacy.link}
     </main>
   )
 }

@@ -60,7 +60,7 @@ pub fn run() {
         }
     }));
 
-    builder
+    let builder = builder
         .manage(DroppedPaths::default())
         .invoke_handler(tauri::generate_handler![read_dropped_file])
         // Transport. Both are configured by capability files under
@@ -85,7 +85,15 @@ pub fn run() {
         // app instead of 404ing. See `route`.
         .register_uri_scheme_protocol(APP_SCHEME, |ctx, request| {
             serve(ctx.app_handle(), request.uri().path())
-        })
+        });
+
+    // The macOS menu bar: Tauri's default, plus the app's own Help items.
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .menu(app_menu)
+        .on_menu_event(|app, event| forward_menu_command(app, event.id().as_ref()));
+
+    builder
         .setup(|app| {
             let window = main_window(app.handle())?;
             allow_camera_capture(&window);
@@ -95,6 +103,55 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running the Axon shell");
+}
+
+/// The event the page listens on for menu commands (`platform/tauri.ts`).
+#[cfg(target_os = "macos")]
+const MENU_EVENT: &str = "axon://menu";
+
+/// Menu item ids. Each one is forwarded to the page as the payload of
+/// [`MENU_EVENT`], which is where the action lives: the page already has help
+/// and the privacy policy, and the menu is only another way to reach them.
+#[cfg(target_os = "macos")]
+const MENU_HELP: &str = "help";
+#[cfg(target_os = "macos")]
+const MENU_PRIVACY: &str = "privacy";
+
+/// The macOS menu bar: Tauri's default, with the app's own entries in Help.
+///
+/// macOS apps are expected to put their help, and App Store apps their privacy
+/// policy, in the Help menu, which Tauri's default leaves empty (the system
+/// adds only its search field). Windows and Linux get no menu bar at all from
+/// Tauri, and adding one only for this would be an odd look for a chat app, so
+/// there the page's own Settings footer and help dialog link to both.
+#[cfg(target_os = "macos")]
+fn app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, HELP_SUBMENU_ID};
+
+    let menu = Menu::default(app)?;
+    if let Some(MenuItemKind::Submenu(help)) = menu.get(HELP_SUBMENU_ID) {
+        help.append_items(&[
+            // ⇧⌘/ is ⌘? — the Mac's help key, which the page binds as well.
+            &MenuItem::with_id(app, MENU_HELP, "Axon Help", true, Some("CmdOrCtrl+Shift+/"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, MENU_PRIVACY, "Privacy Policy", true, None::<&str>)?,
+        ])?;
+    }
+    Ok(menu)
+}
+
+/// Hand a menu command to the page. Ids that are not ours (the predefined
+/// items handle themselves) are ignored.
+#[cfg(target_os = "macos")]
+fn forward_menu_command<R: tauri::Runtime>(app: &tauri::AppHandle<R>, id: &str) {
+    use tauri::Emitter as _;
+
+    if id != MENU_HELP && id != MENU_PRIVACY {
+        return;
+    }
+    if let Err(error) = app.emit_to("main", MENU_EVENT, id) {
+        eprintln!("could not forward the {id} menu command: {error}");
+    }
 }
 
 /// Claim the OAuth deep-link scheme with the OS — in development builds only.

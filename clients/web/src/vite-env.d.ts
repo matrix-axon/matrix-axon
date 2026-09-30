@@ -24,3 +24,10 @@ declare module 'virtual:thirdparty-licenses' {
   const licenses: ThirdPartyLicense[]
   export default licenses
 }
+
+// Rendered at build time from docs/PRIVACY_POLICY.md by the
+// `axon-privacy-policy` plugin in vite.config.ts.
+declare module 'virtual:privacy-policy' {
+  const html: string
+  export default html
+}

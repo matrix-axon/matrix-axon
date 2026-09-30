@@ -2119,6 +2119,69 @@ describe('the browser keeps its own platform chords (ADR 0107)', () => {
   })
 })
 
+describe('privacy policy (ADR 0107)', () => {
+  it('is linked from the Settings footer', async () => {
+    history.replaceState(null, '', '/settings')
+    const { findByRole } = render(<App services={testServices()} />)
+
+    const link = await findByRole('link', { name: 'Privacy policy' })
+    fireEvent.click(link)
+
+    expect(
+      await findByRole('heading', { name: 'Axon Privacy Policy' }),
+    ).toBeTruthy()
+    expect(window.location.pathname).toBe('/privacy')
+  })
+
+  it('is linked from the help dialog, which closes on the way', async () => {
+    const { findByRole, queryByRole } = render(
+      <App services={testServices()} />,
+    )
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    const dialog = await findByRole('dialog', { name: 'Help' })
+
+    fireEvent.click(
+      within(dialog).getByRole('link', { name: 'Privacy policy' }),
+    )
+
+    await waitFor(() => expect(window.location.pathname).toBe('/privacy'))
+    expect(queryByRole('dialog', { name: 'Help' })).toBeNull()
+  })
+
+  it('opens when the menu asks, closing the help dialog first', async () => {
+    const { findByRole, queryByRole } = render(
+      <App services={testServices()} />,
+    )
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    await findByRole('dialog', { name: 'Help' })
+
+    window.dispatchEvent(new Event('axon:show-privacy'))
+
+    expect(
+      await findByRole('heading', { name: 'Axon Privacy Policy' }),
+    ).toBeTruthy()
+    expect(queryByRole('dialog', { name: 'Help' })).toBeNull()
+  })
+
+  it('is reachable before sign-in, in place, with a way back', async () => {
+    const services = testServices()
+    services.auth.clearToken()
+    const { findByRole, getByRole } = render(<App services={services} />)
+    await findByRole('button', { name: 'Sign in' })
+
+    fireEvent.click(getByRole('button', { name: 'Privacy policy' }))
+    expect(getByRole('heading', { name: 'Axon Privacy Policy' })).toBeTruthy()
+    fireEvent.click(getByRole('button', { name: '← Back' }))
+    expect(await findByRole('button', { name: 'Sign in' })).toBeTruthy()
+
+    // And from the menu, which can fire on this screen too.
+    window.dispatchEvent(new Event('axon:show-privacy'))
+    expect(
+      await findByRole('heading', { name: 'Axon Privacy Policy' }),
+    ).toBeTruthy()
+  })
+})
+
 describe('changing the server', () => {
   /** A packaged build: no same-origin API to fall back on. */
   const shellServices = () => {
