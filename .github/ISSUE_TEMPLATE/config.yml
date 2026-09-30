@@ -1,0 +1,13 @@
+# Point people with questions at the right place before they file an issue.
+# Blank issues stay enabled so existing bug-report habits keep working.
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a question or get help
+    url: https://github.com/matrix-axon/matrix-axon/discussions
+    about: How-to questions, setup help, and ideas belong in Discussions.
+  - name: Chat in the Axon support room
+    url: https://matrix.to/#/#axon-support:bostoncoop.net
+    about: Quick questions and community help on Matrix (#axon-support:bostoncoop.net).
+  - name: Support page
+    url: https://matrix-axon.github.io/matrix-axon/support/
+    about: All the ways to get help, including email.

@@ -5,6 +5,7 @@ name: Deploy API docs
 #
 #   https://matrix-axon.github.io/matrix-axon/          — homepage (README.md)
 #   https://matrix-axon.github.io/matrix-axon/api.html  — API reference
+#   https://matrix-axon.github.io/matrix-axon/support/  — support page (docs/support.md)
 #
 # Two things this has to get right:
 #
@@ -34,6 +35,7 @@ on:
       - 'openapi/openapi.json'
       - 'README.md'
       - 'demo.html'
+      - 'docs/support.md'
       - 'docs/img/**'
       - '.github/workflows/api-docs.yml'
   workflow_dispatch:
@@ -128,13 +130,14 @@ jobs:
             --pattern '*.mp4' \
             --dir _site/demo
 
-      - name: Check the site has both pages
+      - name: Check the site has the required pages
         # Cheap guard against the silent-success failure mode this workflow has
         # already hit twice: a deploy step that "succeeds" while publishing the
         # wrong thing. Fail here instead of shipping a broken site.
         run: |
           test -s _site/index.html || { echo "::error::_site/index.html missing — the homepage would 404"; exit 1; }
           test -s _site/api.html   || { echo "::error::_site/api.html missing — the API reference was not generated"; exit 1; }
+          test -s _site/support/index.html || { echo "::error::_site/support/index.html missing — the App Store support URL would 404"; exit 1; }
           test -s _site/demo.html  || { echo "::error::_site/demo.html missing — Jekyll swallowed it instead of copying it"; exit 1; }
           test -s _site/demo/tui-demo.mp4 || { echo "::error::_site/demo/tui-demo.mp4 missing — the release asset was not downloaded, so the demo page would show a broken player"; exit 1; }
           test -s _site/demo/web-demo-desktop.mp4 || { echo "::error::_site/demo/web-demo-desktop.mp4 missing — the release asset was not downloaded, so the demo page would show a broken player"; exit 1; }
