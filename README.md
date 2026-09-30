@@ -13,16 +13,16 @@ That one persistent brain also covers multiple Matrix accounts (personal and wor
 Start composing a message on the mobile web app and continue that same draft instantly via the TUI on desktop.
 No saving required.
 
-Two reference clients consume that same open, versioned `/v1/` API today — [`axon-tui`](clients/tui/README.md), a keyboard-first terminal client, and [`axon-web`](clients/web/README.md), a desktop/mobile browser and [Tauri desktop client](clients/web/src-tauri/README.md) — proof that building a third is a client-only project, not a fork.
+Two reference clients consume that same open, versioned `/v1/` API today — [`axon-tui`](clients/tui/README.md), a keyboard-first full-featured terminal client with support for media, threads, and spaces, and [`axon-web`](clients/web/README.md), a desktop/mobile browser and [Tauri desktop client](clients/web/src-tauri/README.md).
 Check out our [client parity](docs/client-parity.md) document for the current implementation status of these clients and future roadmap.
-And because Axon can be self-hosted on your own hardware or cloud instance rather than a SaaS holding your decrypted history, it's working toward a single-command setup that works painlessly on Linux, MacOS, or Windows: a Docker Compose stack that brings up Postgres, Axon, and the web client behind one front door, with Caddy handling TLS and a Tailscale profile for private remote access already built in.
+And because Axon can be self-hosted on your own hardware or cloud instance rather than a SaaS holding your decrypted history, it provides a single-command setup that works painlessly on Linux, MacOS, or Windows: a Docker Compose stack that brings up Postgres, Axon, and the web client behind one front door, with Caddy handling TLS and a Tailscale profile for private remote access already built in.
 
 ## Download
 
 - [Latest release](https://github.com/matrix-axon/matrix-axon/releases/latest): includes Linux, MacOS, and Windows builds for server and both clients (desktop and terminal)
 - [Full client/server Docker stack](#user-quick-start-with-docker)
 - Get an iOS TestFlight beta build by posting in [#axon-developer:bostoncoop.net](https://matrix.to/#/%23axon-developer%3Abostoncoop.net)
-- Android build coming soon
+- Android build coming soon (looking for testers!)
 - Server, terminal client, and desktop app for MacOS via homebrew:
 
 ```sh
@@ -265,6 +265,12 @@ Axon serves plain HTTP.
 For any non-local deployment, place a TLS-terminating reverse proxy (Caddy, nginx, etc.) in front of it and keep Axon bound to loopback (the default).
 Axon refuses to start on a non-loopback address over plain HTTP unless `AXON_SERVER__ALLOW_INSECURE_BIND=true` is explicitly set.
 The `caddy` profile in the full `deploy/` stack automates this — see [deploy/README.md](deploy/README.md).
+
+### Support
+
+Need help? Join [`#axon-support:bostoncoop.net`](https://matrix.to/#/#axon-support:bostoncoop.net) on Matrix, ask in [GitHub Discussions](https://github.com/matrix-axon/matrix-axon/discussions), or report a bug in [GitHub Issues](https://github.com/matrix-axon/matrix-axon/issues).
+Developer discussion happens in [`#axon-developer:bostoncoop.net`](https://matrix.to/#/#axon-developer:bostoncoop.net).
+The full list of options, including email, is on the [support page](https://matrix-axon.github.io/matrix-axon/support/).
 
 ### Privacy Policy
 
