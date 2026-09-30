@@ -12,6 +12,7 @@ import {
   afterAll,
   afterEach,
   beforeAll,
+  beforeEach,
   describe,
   expect,
   it,
@@ -1886,6 +1887,143 @@ describe('shell keyboard shortcuts (ADR 0078)', () => {
       'Hide rooms (Ctrl-B); drag or use arrow keys to resize',
     )
     expect(toggle.getAttribute('aria-keyshortcuts')).toBe('Control+B')
+  })
+})
+
+describe('native-shell keyboard shortcuts (ADR 0107)', () => {
+  const shell = window as unknown as Record<string, unknown>
+  beforeEach(() => {
+    shell.__TAURI_INTERNALS__ = {}
+  })
+  afterEach(() => {
+    delete shell.__TAURI_INTERNALS__
+  })
+
+  function onMac() {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)',
+    )
+  }
+
+  /** A focused text field, where the composer's chords have to work. */
+  function composer(): HTMLTextAreaElement {
+    const textarea = document.createElement('textarea')
+    document.body.append(textarea)
+    textarea.focus()
+    return textarea
+  }
+
+  it('Ctrl-F opens search from a text field, where a browser keeps its find bar', async () => {
+    const { findByRole } = render(<App services={testServices()} />)
+    const textarea = composer()
+
+    fireEvent.keyDown(textarea, { key: 'f', ctrlKey: true })
+
+    expect(await findByRole('dialog', { name: 'Search messages' })).toBeTruthy()
+    textarea.remove()
+  })
+
+  it('Ctrl-N starts a DM, Ctrl-, opens settings, F1 opens help', async () => {
+    const { findByRole } = render(<App services={testServices()} />)
+    await findByRole('heading', { name: 'Add a Room' })
+    const textarea = composer()
+
+    fireEvent.keyDown(textarea, { key: 'n', ctrlKey: true })
+    await waitFor(() => expect(window.location.pathname).toBe('/rooms/dm'))
+
+    fireEvent.keyDown(textarea, { key: ',', ctrlKey: true })
+    await waitFor(() => expect(window.location.pathname).toBe('/settings'))
+
+    fireEvent.keyDown(textarea, { key: 'F1' })
+    expect(await findByRole('dialog', { name: 'Help' })).toBeTruthy()
+    textarea.remove()
+  })
+
+  it('the help lists the platform chords, including the shell-only settings row', async () => {
+    const { findByRole } = render(<App services={testServices()} />)
+
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    const dialog = await findByRole('dialog', { name: 'Help' })
+
+    expect(dialog.textContent).toContain('/ or Ctrl-F')
+    expect(dialog.textContent).toContain('Ctrl-N')
+    expect(dialog.textContent).not.toContain('Ctrl-Alt-M')
+    expect(dialog.textContent).toContain('Open settings')
+    expect(dialog.textContent).toContain('Ctrl-,')
+    expect(dialog.textContent).toContain('? or F1')
+  })
+
+  it('the topbar advertises the shell chords', () => {
+    const { getByRole } = render(<App services={testServices()} />)
+
+    const search = getByRole('button', { name: 'Search messages' })
+    expect(search.getAttribute('title')).toBe(
+      'Search messages (/search; / or Ctrl-F)',
+    )
+    expect(search.getAttribute('aria-keyshortcuts')).toBe('/ Control+F')
+    const settings = getByRole('link', { name: 'Settings' })
+    expect(settings.getAttribute('title')).toBe('Settings (Ctrl-,)')
+    expect(settings.getAttribute('aria-keyshortcuts')).toBe('Control+,')
+  })
+
+  it('macOS uses Command, leaving Ctrl-F/Ctrl-N to the text field', async () => {
+    onMac()
+    const { findByRole, queryByRole } = render(
+      <App services={testServices()} />,
+    )
+    await findByRole('heading', { name: 'Add a Room' })
+    const textarea = composer()
+
+    // Emacs cursor keys in every Mac text field; the shell must not steal them.
+    fireEvent.keyDown(textarea, { key: 'f', ctrlKey: true })
+    fireEvent.keyDown(textarea, { key: 'n', ctrlKey: true })
+    // ⌘-G is Find Next in a native Mac app, not Find.
+    fireEvent.keyDown(textarea, { key: 'g', metaKey: true })
+    expect(queryByRole('dialog', { name: 'Search messages' })).toBeNull()
+    expect(window.location.pathname).toBe('/')
+
+    fireEvent.keyDown(textarea, { key: 'f', metaKey: true })
+    expect(await findByRole('dialog', { name: 'Search messages' })).toBeTruthy()
+    textarea.remove()
+  })
+
+  it('macOS help shows the Command chords', async () => {
+    onMac()
+    const { findByRole } = render(<App services={testServices()} />)
+
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    const dialog = await findByRole('dialog', { name: 'Help' })
+
+    expect(dialog.textContent).toContain('/ or ⌘-F')
+    expect(dialog.textContent).toContain('⌘-N')
+    expect(dialog.textContent).toContain('⌘-,')
+    expect(dialog.textContent).toContain('? or ⌘-?')
+  })
+})
+
+describe('the browser keeps its own platform chords (ADR 0107)', () => {
+  it('Ctrl-F, Ctrl-N and Ctrl-, are left to the browser', async () => {
+    const { findByRole, queryByRole } = render(
+      <App services={testServices()} />,
+    )
+    await findByRole('heading', { name: 'Add a Room' })
+
+    for (const key of ['f', 'n', ',']) {
+      const event = new KeyboardEvent('keydown', {
+        key,
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+      document.body.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+    }
+    expect(queryByRole('dialog', { name: 'Search messages' })).toBeNull()
+    expect(window.location.pathname).toBe('/')
+
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    const dialog = await findByRole('dialog', { name: 'Help' })
+    expect(dialog.textContent).not.toContain('Open settings')
   })
 })
 

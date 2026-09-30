@@ -1,0 +1,58 @@
+# ADR 0107 — Platform-standard keyboard shortcuts in the native shell
+
+## Context
+
+ADR 0078 chose the web client's chords to get around the browser, not to follow
+the platform. A page cannot have `Ctrl-N` (new window). Chrome shows its find
+bar on `Ctrl-F`, and `Ctrl-,`/`⌘-,` and `F1` open the browser's own settings
+and help. So search became `Ctrl-Shift-F`, or `⌘-G` on macOS (ADR 0066), and
+starting a DM became `Ctrl-Alt-M`. Help became `?` or `Ctrl-/`, and settings
+got no chord at all.
+
+The Tauri shell (ADR 0102) runs the same `dist` with no browser chrome around
+it, so none of those reservations apply. Users there expect a native app's
+keys, and `⌘-F` that does nothing looks like a bug.
+
+## Decision
+
+Inside the shell (`isTauriRuntime()`), the web client also binds the platform's
+standard chord for every action that ADR 0078 had to move:
+
+| Action          | Browser                     | Shell, Windows/Linux | Shell, macOS/iPadOS |
+| --------------- | --------------------------- | -------------------- | ------------------- |
+| Search messages | `/`, `Ctrl-Shift-F` / `⌘-G` | `/`, `Ctrl-F`        | `/`, `⌘-F`          |
+| Start a DM      | `Ctrl-Alt-M` / `⌘-Option-M` | `Ctrl-N`             | `⌘-N`               |
+| Open settings   | —                           | `Ctrl-,`             | `⌘-,`               |
+| Show help       | `?`, `Ctrl-/` / `⌘-/`       | `?`, `F1`            | `?`, `⌘-?`          |
+
+- **The browser chords stay bound in the shell**, so habits formed in the web
+  client still work. The one exception is `⌘-G`, which means Find Next in a
+  native Mac app, so the shell stops treating it as Find.
+- **Nothing changes in a browser.** The new chords are gated on the runtime,
+  so a browser still gets its own find bar, new window and settings.
+- **The platform chords check the modifier they actually mean.** `chordOf`
+  folds Ctrl and ⌘ into `mod`, but on macOS `Ctrl-F`/`Ctrl-N` are the Emacs
+  cursor keys every text field honours, and `Ctrl-⌘-F` is the menu's
+  full-screen toggle. `isPrimaryModifier` requires ⌘ alone on Apple platforms
+  and Ctrl alone elsewhere, so those keys still reach the composer and the
+  menu.
+- **Labels follow the runtime.** A `KEYS` entry can carry a `native` override,
+  and `keyLabel`/`keyAria` choose it inside the shell. The help popup,
+  tooltips and `aria-keyshortcuts` therefore advertise the chord that is really
+  bound, which keeps ADR 0078's anti-drift rule. A row that exists only in the
+  shell (settings) is marked `nativeOnly`, and `shortcutGroups()` leaves it out
+  of a browser's help.
+
+## Consequences
+
+- The shell and the browser advertise different chords for the same action.
+  This is deliberate: each one lists what works where it runs.
+- Room and space stepping, filter and sort cycling, the sidebar toggle and the
+  composer-height chords are unchanged. No platform convention exists for any
+  of them, or the browser never forced them off one.
+- WebView2 uses `Ctrl-F` for its own find bar unless the page cancels the
+  keydown. The search handler calls `preventDefault()`, but only a Windows
+  build can show that the page reliably wins this race. Check it there.
+- The shell still has no `Ctrl-+`/`Ctrl--`/`Ctrl-0` page zoom. A browser
+  provides zoom for free; Tauri's `zoomHotkeysEnabled` is off by default. That
+  is a shell configuration change and is out of scope here.

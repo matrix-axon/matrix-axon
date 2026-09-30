@@ -20,7 +20,7 @@ import { VerificationInboxPanel } from './components/VerificationInboxPanel'
 import { UpdateBanner } from './components/UpdateBanner'
 import { useModalFocus } from './components/use-modal-focus'
 import { layoutMode, SINGLE_PANE_QUERY, useMediaQuery } from './layout'
-import { isInstalledDisplay, type Platform } from './platform'
+import { isInstalledDisplay, isTauriRuntime, type Platform } from './platform'
 import {
   localRoomHref,
   parseMatrixRoomReference,
@@ -64,6 +64,7 @@ import { disconnectFromServer } from './server-url'
 import {
   hint,
   isApplePlatform,
+  isPrimaryModifier,
   keyAria,
   keyLabel,
   KEYS,
@@ -1254,6 +1255,10 @@ function ShellChrome() {
     '?': openHelp,
     '/': openSearch,
   })
+  // The native shell (ADR 0107) is not a browser, so it can take the
+  // platform's standard chords that a page never could. Only the primary
+  // modifier counts: on macOS `Ctrl-F`/`Ctrl-N` are text-field cursor keys.
+  const native = isTauriRuntime()
   useShortcuts(
     {
       // Search's modifier twin (ADR 0066), reachable from the composer.
@@ -1264,10 +1269,37 @@ function ShellChrome() {
         openSearch(event)
       },
       'mod+g': (event) => {
-        if (!isApplePlatform()) {
+        // In a native Mac app ⌘-G means Find Next, not Find; the shell has ⌘-F.
+        if (!isApplePlatform() || native) {
           return
         }
         openSearch(event)
+      },
+      'mod+f': (event) => {
+        if (!native || !isPrimaryModifier(event)) {
+          return
+        }
+        openSearch(event)
+      },
+      'mod+n': (event) => {
+        if (!native || !isPrimaryModifier(event)) {
+          return
+        }
+        event.preventDefault()
+        location.route('/rooms/dm')
+      },
+      'mod+,': (event) => {
+        if (!native || !isPrimaryModifier(event)) {
+          return
+        }
+        event.preventDefault()
+        location.route('/settings')
+      },
+      F1: (event) => {
+        if (!native) {
+          return
+        }
+        openHelp(event)
       },
       'mod+b': (event) => {
         if (mode === 'utility' || singlePane) {
@@ -1441,8 +1473,11 @@ function ShellChrome() {
             <a
               href="/settings"
               class="ghost topbar-icon-button"
-              title="Settings"
+              title={native ? hint('Settings', KEYS.openSettings) : 'Settings'}
               aria-label="Settings"
+              aria-keyshortcuts={
+                native ? keyAria(KEYS.openSettings) : undefined
+              }
             >
               <SettingsIcon />
               <span class="topbar-label">Settings</span>
