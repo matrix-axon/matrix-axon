@@ -4,6 +4,8 @@ import {
   shortcutLabel,
   useShortcuts,
 } from '../shortcuts'
+import { isTauriRuntime } from '../platform'
+import { useServices } from '../services'
 import { SLASH_COMMANDS } from '../slash-commands'
 import { useModalFocus } from './use-modal-focus'
 
@@ -65,10 +67,14 @@ export function ShortcutsHelp({
 }
 
 function KeyboardShortcutsHelp() {
+  const { platform } = useServices()
   return (
     <section class="shortcut-group">
       <h3>Keyboard shortcuts</h3>
-      {shortcutGroups().map(({ group, rows }) => (
+      {shortcutGroups({
+        native: isTauriRuntime(),
+        zoom: platform.setZoom !== null,
+      }).map(({ group, rows }) => (
         <section key={group} class="shortcut-subgroup">
           <h4>{group}</h4>
           <dl class="shortcut-list">

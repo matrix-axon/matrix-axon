@@ -124,6 +124,7 @@ describe('AppRoot wiring the transport into the app', () => {
       browserCanAdoptApp: false,
       secureStorage: null,
       appleSignIn: null,
+      setZoom: null,
     }
 
     // A token, so the shell mounts signed-in and actually issues requests.

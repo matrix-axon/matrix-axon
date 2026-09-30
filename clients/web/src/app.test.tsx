@@ -2001,6 +2001,98 @@ describe('native-shell keyboard shortcuts (ADR 0107)', () => {
   })
 })
 
+describe('native-shell page zoom (ADR 0107)', () => {
+  const shell = window as unknown as Record<string, unknown>
+  beforeEach(() => {
+    shell.__TAURI_INTERNALS__ = {}
+  })
+  afterEach(() => {
+    delete shell.__TAURI_INTERNALS__
+  })
+
+  function renderZoomable() {
+    const setZoom = vi.fn<(factor: number) => Promise<void>>(() =>
+      Promise.resolve(),
+    )
+    const services = testServices({ platform: { setZoom } })
+    const view = render(<App services={services} />)
+    return { ...view, services, setZoom }
+  }
+
+  it('applies the saved level on launch', async () => {
+    const setZoom = vi.fn<(factor: number) => Promise<void>>(() =>
+      Promise.resolve(),
+    )
+    const services = testServices({ platform: { setZoom } })
+    services.settings.zoom.value = 1.5
+    render(<App services={services} />)
+
+    await waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1.5))
+  })
+
+  it('Ctrl-= / Ctrl-- step the zoom and Ctrl-0 resets it, from a text field', async () => {
+    const { services, setZoom } = renderZoomable()
+    const textarea = document.createElement('textarea')
+    document.body.append(textarea)
+    textarea.focus()
+
+    fireEvent.keyDown(textarea, { key: '=', ctrlKey: true })
+    expect(services.settings.zoom.value).toBe(1.1)
+    fireEvent.keyDown(textarea, { key: '+', ctrlKey: true, shiftKey: true })
+    expect(services.settings.zoom.value).toBe(1.25)
+    await waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1.25))
+
+    fireEvent.keyDown(textarea, { key: '-', ctrlKey: true })
+    expect(services.settings.zoom.value).toBe(1.1)
+    fireEvent.keyDown(textarea, { key: '0', ctrlKey: true })
+    expect(services.settings.zoom.value).toBe(1)
+    await waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1))
+    textarea.remove()
+  })
+
+  it('macOS zooms on Command, not Ctrl', () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)',
+    )
+    const { services } = renderZoomable()
+
+    fireEvent.keyDown(document.body, { key: '=', ctrlKey: true })
+    expect(services.settings.zoom.value).toBe(1)
+    fireEvent.keyDown(document.body, { key: '=', metaKey: true })
+    expect(services.settings.zoom.value).toBe(1.1)
+  })
+
+  it('the help lists zoom only where the platform can set it', async () => {
+    const { findByRole } = renderZoomable()
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    const dialog = await findByRole('dialog', { name: 'Help' })
+    expect(dialog.textContent).toContain('Zoom in / out')
+    expect(dialog.textContent).toContain('Ctrl-0')
+
+    cleanup()
+    // A mobile shell: native, but `setZoom` is null.
+    const mobile = render(<App services={testServices()} />)
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    const bare = await mobile.findByRole('dialog', { name: 'Help' })
+    expect(bare.textContent).toContain('Open settings')
+    expect(bare.textContent).not.toContain('Zoom in / out')
+  })
+
+  it('leaves the keys alone when the platform cannot zoom', () => {
+    const services = testServices()
+    render(<App services={services} />)
+    const event = new KeyboardEvent('keydown', {
+      key: '=',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    document.body.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(services.settings.zoom.value).toBe(1)
+  })
+})
+
 describe('the browser keeps its own platform chords (ADR 0107)', () => {
   it('Ctrl-F, Ctrl-N and Ctrl-, are left to the browser', async () => {
     const { findByRole, queryByRole } = render(

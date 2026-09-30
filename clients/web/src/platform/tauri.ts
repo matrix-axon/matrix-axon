@@ -479,5 +479,24 @@ export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
     // This *is* the installed app. Nothing to add to a home screen, and the
     // scheme it handles is declared in the bundle, not asked for at runtime.
     browserCanAdoptApp: false,
+    // Desktop only: a phone or tablet zooms by pinching, and Tauri documents
+    // page zoom as unsupported on iOS and Android.
+    setZoom: isMobileShell()
+      ? null
+      : (factor) => getCurrentWebview().setZoom(factor),
   }
+}
+
+/**
+ * Whether this shell is the iOS or Android build. An iPad's webview may report
+ * a desktop Mac user agent, so a Mac with a touch screen counts as one.
+ */
+export function isMobileShell(
+  userAgent = navigator.userAgent,
+  touchPoints = navigator.maxTouchPoints ?? 0,
+): boolean {
+  return (
+    /Android|iPhone|iPad|iPod/.test(userAgent) ||
+    (/Macintosh/.test(userAgent) && touchPoints > 1)
+  )
 }
