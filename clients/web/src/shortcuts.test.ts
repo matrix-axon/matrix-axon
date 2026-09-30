@@ -3,11 +3,14 @@ import {
   chordOf,
   currentPlatform,
   hint,
+  isPrimaryModifier,
   isTypingTarget,
+  keyAria,
   keyLabel,
   KEYS,
   shortcutLabel,
   SHORTCUTS,
+  shortcutGroups,
 } from './shortcuts'
 
 afterEach(() => {
@@ -156,5 +159,42 @@ describe('hint', () => {
 
     expect(currentPlatform()).toBe('macOS')
     expect(shortcutLabel(KEYS.toggleSidebar.label)).toBe('⌘-B')
+  })
+})
+
+describe('native-shell chords (ADR 0107)', () => {
+  it('swaps in the platform-standard chord only inside the shell', () => {
+    expect(keyLabel(KEYS.search, 'Win32', false)).toBe('/ or Ctrl-Shift-F')
+    expect(keyLabel(KEYS.search, 'Win32', true)).toBe('/ or Ctrl-F')
+    expect(keyLabel(KEYS.search, 'MacIntel', false)).toBe('/ or ⌘-G')
+    expect(keyLabel(KEYS.search, 'MacIntel', true)).toBe('/ or ⌘-F')
+    expect(keyAria(KEYS.search, 'MacIntel', true)).toBe('/ Meta+F')
+    expect(keyLabel(KEYS.startDm, 'Linux x86_64', true)).toBe('Ctrl-N')
+    expect(keyLabel(KEYS.startDm, 'MacIntel', true)).toBe('⌘-N')
+    expect(keyLabel(KEYS.showHelp, 'Win32', true)).toBe('? or F1')
+    expect(keyLabel(KEYS.showHelp, 'MacIntel', true)).toBe('? or ⌘-?')
+    // No override: the shell binds the same chord the browser does.
+    expect(keyLabel(KEYS.toggleSidebar, 'MacIntel', true)).toBe('⌘-B')
+  })
+
+  it('hides shell-only rows from a browser', () => {
+    const rows = (native: boolean) =>
+      shortcutGroups(native).flatMap(({ rows }) => rows)
+    const settings = (native: boolean) =>
+      rows(native).filter((row) => row.keys === KEYS.openSettings)
+    expect(settings(true)).toHaveLength(1)
+    expect(settings(false)).toHaveLength(0)
+    expect(rows(true).length).toBe(rows(false).length + 1)
+  })
+
+  it('reads the primary modifier the platform actually means', () => {
+    const cmd = { ctrlKey: false, metaKey: true }
+    const ctrl = { ctrlKey: true, metaKey: false }
+    const both = { ctrlKey: true, metaKey: true }
+    expect(isPrimaryModifier(cmd, true)).toBe(true)
+    expect(isPrimaryModifier(ctrl, true)).toBe(false)
+    expect(isPrimaryModifier(both, true)).toBe(false)
+    expect(isPrimaryModifier(ctrl, false)).toBe(true)
+    expect(isPrimaryModifier(cmd, false)).toBe(false)
   })
 })

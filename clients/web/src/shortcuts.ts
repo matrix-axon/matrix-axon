@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'preact/hooks'
+import { isTauriRuntime } from './platform/index.ts'
 
 /**
  * Keyboard shortcuts (ADR 0078).
@@ -63,6 +64,25 @@ export function hasModifier(event: {
 }
 
 /**
+ * Is this keydown the platform's primary modifier alone — Command on Apple
+ * platforms, Ctrl elsewhere?
+ *
+ * `chordOf` folds both into `mod`, which is right for the browser-safe chords
+ * but wrong for the platform-standard ones the shell binds (ADR 0107): on macOS
+ * `Ctrl-F` and `Ctrl-N` are the Emacs cursor keys every text field honours, and
+ * `Ctrl-⌘-F` is the menu's full-screen toggle. Those must reach their owners,
+ * so a platform-standard chord checks the modifier it actually means.
+ */
+export function isPrimaryModifier(
+  event: { ctrlKey: boolean; metaKey: boolean },
+  apple = isApplePlatform(),
+): boolean {
+  return apple
+    ? event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey
+}
+
+/**
  * Is the event aimed at somewhere the user is typing? Bare-character chords
  * must not fire there, or `?` could never be typed into a message.
  */
@@ -96,6 +116,12 @@ export interface ShortcutKey {
   aria: string
   appleLabel?: string
   appleAria?: string
+  /**
+   * The chord inside the native shell (ADR 0107), where the browser no longer
+   * reserves the platform's standard keys. Absent when the shell binds the
+   * same chord as the browser.
+   */
+  native?: Omit<ShortcutKey, 'native'>
 }
 
 /** App-wide event used by composer commands to request the shell help dialog. */
@@ -146,6 +172,8 @@ export function useShortcuts(
 export interface ShortcutHelp {
   keys: string | ShortcutKey
   description: string
+  /** Bound only in the native shell (ADR 0107), so hidden in a browser. */
+  nativeOnly?: boolean
 }
 
 /**
@@ -159,11 +187,22 @@ export const KEYS = {
   filterRooms: { label: 'Ctrl-K', aria: 'Control+K' },
   cycleFilter: { label: 'Ctrl-Shift-Y', aria: 'Control+Shift+Y' },
   cycleSort: { label: 'Ctrl-Shift-S', aria: 'Control+Shift+S' },
+  /**
+   * `Ctrl-N`/`⌘-N` is the platform's "new" and what chat apps use for a new
+   * conversation, but a browser will not let a page have it (new window). The
+   * shell can, and keeps `Ctrl-Alt-M` bound as well.
+   */
   startDm: {
     label: 'Ctrl-Alt-M',
     aria: 'Control+Alt+M',
     appleLabel: '⌘-Option-M',
     appleAria: 'Meta+Alt+M',
+    native: {
+      label: 'Ctrl-N',
+      aria: 'Control+N',
+      appleLabel: '⌘-N',
+      appleAria: 'Meta+N',
+    },
   },
   toggleSidebar: { label: 'Ctrl-B', aria: 'Control+B' },
   toggleSpaces: {
@@ -205,19 +244,47 @@ export const KEYS = {
    * — and the composer is where focus usually is. So help also answers to
    * `Ctrl-/`, a modifier chord that survives a text field.
    */
-  showHelp: { label: '? or Ctrl-/', aria: '? Control+/' },
+  showHelp: {
+    label: '? or Ctrl-/',
+    aria: '? Control+/',
+    // The shell advertises the platform's help key instead — F1, or ⌘-? on
+    // macOS — which browsers keep for their own help. `Ctrl-/` stays bound.
+    native: {
+      label: '? or F1',
+      aria: '? F1',
+      appleLabel: '? or ⌘-?',
+      appleAria: '? Meta+Shift+?',
+    },
+  },
   /**
    * Search follows the same bare-plus-modifier-twin pattern (ADR 0066): `/`
    * is the GitHub/Zulip convention but can never fire from the composer, so
    * the modifier twin has to be browser-safe too. Windows/Linux can use
    * `Ctrl-Shift-F`; macOS keeps `Cmd-G` because `Cmd-Shift-F` is already
-   * claimed in modern browsers.
+   * claimed in modern browsers. The shell has no browser find bar to defer
+   * to, so there the twin is the platform's own Find (ADR 0107).
    */
   search: {
     label: '/ or Ctrl-Shift-F',
     aria: '/ Control+Shift+F',
     appleLabel: '/ or ⌘-G',
     appleAria: '/ Meta+G',
+    native: {
+      label: '/ or Ctrl-F',
+      aria: '/ Control+F',
+      appleLabel: '/ or ⌘-F',
+      appleAria: '/ Meta+F',
+    },
+  },
+  /**
+   * Shell only: `Ctrl-,`/`⌘-,` is the platform's Settings (Preferences) key,
+   * which a browser keeps for its own settings page.
+   */
+  openSettings: {
+    label: 'Ctrl-,',
+    aria: 'Control+,',
+    appleLabel: '⌘-,',
+    appleAria: 'Meta+,',
   },
   roomStep: {
     label: 'Ctrl-↑ / Ctrl-↓',
@@ -260,7 +327,11 @@ export function shortcutLabel(
 export function keyLabel(
   key: ShortcutKey,
   platform = currentPlatform(),
+  native = isTauriRuntime(),
 ): string {
+  if (native && key.native !== undefined) {
+    return keyLabel(key.native, platform, false)
+  }
   if (isApplePlatform(platform)) {
     return key.appleLabel ?? shortcutLabel(key.label, platform)
   }
@@ -270,7 +341,11 @@ export function keyLabel(
 export function keyAria(
   key: ShortcutKey,
   platform = currentPlatform(),
+  native = isTauriRuntime(),
 ): string {
+  if (native && key.native !== undefined) {
+    return keyAria(key.native, platform, false)
+  }
   if (isApplePlatform(platform)) {
     return key.appleAria ?? key.aria.replaceAll('Control', 'Meta')
   }
@@ -284,7 +359,7 @@ export function hint(text: string, key: ShortcutKey): string {
 
 /**
  * The canonical, user-facing shortcut list. `ShortcutsHelp` renders exactly
- * this, so the help popup cannot drift from what is bound — the web analogue
+ * this (less `nativeOnly` rows in a browser, via `shortcutGroups`), so the help popup cannot drift from what is bound — the web analogue
  * of the TUI's `popup_shortcuts_lines` (ui.rs), which has to be kept in sync
  * by hand.
  */
@@ -357,7 +432,22 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
         description: 'Close the open panel, then return to the composer',
       },
       { keys: KEYS.search, description: 'Search messages' },
+      {
+        keys: KEYS.openSettings,
+        description: 'Open settings',
+        nativeOnly: true,
+      },
       { keys: KEYS.showHelp, description: 'Show this list' },
     ],
   },
 ]
+
+/** `SHORTCUTS` as bound in this runtime: shell-only rows drop out of a browser. */
+export function shortcutGroups(
+  native = isTauriRuntime(),
+): { group: string; rows: ShortcutHelp[] }[] {
+  return SHORTCUTS.map(({ group, rows }) => ({
+    group,
+    rows: rows.filter((row) => native || row.nativeOnly !== true),
+  }))
+}
