@@ -410,7 +410,6 @@ export function MessageEventRow({
     eligible: gestureEligible,
     preferences: messageGestures,
     openControlSelector: '.media-open',
-    allowInlineLinks: true,
     onAction: runGestureAction,
     onSingleTap: onOpenActions,
     onTouchStart: cancelDesktopClick,
