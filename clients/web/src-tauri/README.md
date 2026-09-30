@@ -526,5 +526,11 @@ different mechanism from the hardened runtime — `Entitlements.plist` says whic
 keys are deliberately absent for that reason, and would need revisiting rather
 than extending.
 
+The store build has its own script, `scripts/package-macos-mas.sh`, with its own
+sandboxed `Entitlements.mas.plist`. It needs a Mac App Store Connect
+provisioning profile for `org.matrixaxon.axon` (`--profile`), the
+"3rd Party Mac Developer" application and installer certificates in the
+keychain, and, for `--upload`, `ASC_KEY_ID` / `ASC_ISSUER_ID` as for iOS.
+
 Windows Authenticode is **not** wired yet, so SmartScreen warnings are a
 separate piece of work.
