@@ -122,3 +122,24 @@ app, and a macOS user expects the app's help in the Help menu.
   Element on those platforms keep these links inside the app. The Settings
   footer and help dialog links are the Windows and Linux route, and they are
   also where the iOS build's reviewers will find the policy.
+
+## macOS text services
+
+Autocorrect did nothing in the macOS shell, although it works in Safari. The
+cause is one WebKit default, not the menu bar. WebKit's `TextCheckerMac.mm`
+takes autocorrect, smart quotes, smart dashes and text replacement from the
+system settings unless the app has its own `Web…Enabled` default. It takes
+spell checking while typing only from the app's `WebContinuousSpellCheckingEnabled`,
+which nothing had set, so it was off. Autocorrect runs as part of spell
+checking, so it was off with it.
+
+- **The shell registers `WebContinuousSpellCheckingEnabled = YES` at launch**,
+  before the webview exists. It uses `registerDefaults`, so the value sits in
+  the registration domain, below the app's own defaults, and the user's
+  choice wins once they make one.
+- **The Edit menu gains Spelling and Grammar and Substitutions**, with the
+  same items as Safari. Tauri's menu library has no such items, so they are
+  AppKit items with no target. The action goes to the focused webview, and
+  WKWebView implements each one, shows its checkmark state and saves a toggle
+  as the app's default. The menu lets users change these settings; the
+  defaults above are what make them work out of the box.
