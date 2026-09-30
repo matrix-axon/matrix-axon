@@ -20,7 +20,7 @@ vi.mock('@tauri-apps/plugin-deep-link', () => ({
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
-import { adapt, boundedSignal, tauriPlatform } from './tauri'
+import { adapt, boundedSignal, isMobileShell, tauriPlatform } from './tauri'
 
 /**
  * A stand-in for the websocket plugin's client. Only `addListener` and
@@ -353,5 +353,37 @@ describe('deep-link delivery', () => {
     emit!(['org.matrixaxon.axon:/oauth/callback?code=two&state=b'])
 
     expect(seen).toHaveLength(2)
+  })
+})
+
+describe('page zoom (ADR 0107)', () => {
+  it('is offered on the desktop and withheld from a phone or tablet', () => {
+    expect(isMobileShell('Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 0)).toBe(
+      false,
+    )
+    expect(
+      isMobileShell('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)', 0),
+    ).toBe(false)
+    expect(isMobileShell('Mozilla/5.0 (X11; Linux x86_64)', 0)).toBe(false)
+    expect(isMobileShell('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)', 5)).toBe(
+      true,
+    )
+    expect(isMobileShell('Mozilla/5.0 (Linux; Android 15)', 5)).toBe(true)
+    // An iPad's webview can claim to be a Mac; the touch screen gives it away.
+    expect(
+      isMobileShell('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)', 5),
+    ).toBe(true)
+  })
+
+  it('wires setZoom only where the shell is not mobile', () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+    )
+    expect(tauriPlatform().setZoom).toBeTypeOf('function')
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)',
+    )
+    expect(tauriPlatform().setZoom).toBeNull()
+    vi.restoreAllMocks()
   })
 })

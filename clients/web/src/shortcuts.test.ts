@@ -177,14 +177,19 @@ describe('native-shell chords (ADR 0107)', () => {
     expect(keyLabel(KEYS.toggleSidebar, 'MacIntel', true)).toBe('⌘-B')
   })
 
-  it('hides shell-only rows from a browser', () => {
-    const rows = (native: boolean) =>
-      shortcutGroups(native).flatMap(({ rows }) => rows)
-    const settings = (native: boolean) =>
-      rows(native).filter((row) => row.keys === KEYS.openSettings)
-    expect(settings(true)).toHaveLength(1)
-    expect(settings(false)).toHaveLength(0)
-    expect(rows(true).length).toBe(rows(false).length + 1)
+  it('hides rows the runtime cannot bind', () => {
+    const rows = (native: boolean, zoom: boolean) =>
+      shortcutGroups({ native, zoom }).flatMap(({ rows }) => rows)
+    const has = (key: object, native: boolean, zoom: boolean) =>
+      rows(native, zoom).some((row) => row.keys === key)
+    expect(has(KEYS.openSettings, true, true)).toBe(true)
+    expect(has(KEYS.openSettings, false, false)).toBe(false)
+    // A mobile shell: native, but no page zoom to set.
+    expect(has(KEYS.openSettings, true, false)).toBe(true)
+    expect(has(KEYS.zoom, true, false)).toBe(false)
+    expect(has(KEYS.zoomReset, true, false)).toBe(false)
+    expect(has(KEYS.zoom, true, true)).toBe(true)
+    expect(rows(true, true).length).toBe(rows(false, false).length + 3)
   })
 
   it('reads the primary modifier the platform actually means', () => {

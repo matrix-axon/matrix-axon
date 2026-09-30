@@ -172,8 +172,11 @@ export function useShortcuts(
 export interface ShortcutHelp {
   keys: string | ShortcutKey
   description: string
-  /** Bound only in the native shell (ADR 0107), so hidden in a browser. */
-  nativeOnly?: boolean
+  /**
+   * Bound only in the native shell (`native`), or only where the platform can
+   * set the page zoom (`zoom`: a desktop shell). Hidden elsewhere (ADR 0107).
+   */
+  requires?: 'native' | 'zoom'
 }
 
 /**
@@ -286,6 +289,22 @@ export const KEYS = {
     appleLabel: '⌘-,',
     appleAria: 'Meta+,',
   },
+  /**
+   * Desktop shell only: a browser already zooms on these, and its own zoom is
+   * the one a web user should get.
+   */
+  zoom: {
+    label: 'Ctrl-+ / Ctrl--',
+    aria: 'Control+= Control+-',
+    appleLabel: '⌘-+ / ⌘--',
+    appleAria: 'Meta+= Meta+-',
+  },
+  zoomReset: {
+    label: 'Ctrl-0',
+    aria: 'Control+0',
+    appleLabel: '⌘-0',
+    appleAria: 'Meta+0',
+  },
   roomStep: {
     label: 'Ctrl-↑ / Ctrl-↓',
     aria: 'Control+ArrowUp Control+ArrowDown',
@@ -359,7 +378,7 @@ export function hint(text: string, key: ShortcutKey): string {
 
 /**
  * The canonical, user-facing shortcut list. `ShortcutsHelp` renders exactly
- * this (less `nativeOnly` rows in a browser, via `shortcutGroups`), so the help popup cannot drift from what is bound — the web analogue
+ * this (less the rows a runtime cannot bind, via `shortcutGroups`), so the help popup cannot drift from what is bound — the web analogue
  * of the TUI's `popup_shortcuts_lines` (ui.rs), which has to be kept in sync
  * by hand.
  */
@@ -435,19 +454,27 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
       {
         keys: KEYS.openSettings,
         description: 'Open settings',
-        nativeOnly: true,
+        requires: 'native',
       },
+      { keys: KEYS.zoom, description: 'Zoom in / out', requires: 'zoom' },
+      { keys: KEYS.zoomReset, description: 'Reset zoom', requires: 'zoom' },
       { keys: KEYS.showHelp, description: 'Show this list' },
     ],
   },
 ]
 
-/** `SHORTCUTS` as bound in this runtime: shell-only rows drop out of a browser. */
+/** What this runtime can bind beyond a browser's chords (ADR 0107). */
+export interface ShortcutCapabilities {
+  native: boolean
+  zoom: boolean
+}
+
+/** `SHORTCUTS` as bound in this runtime: rows it cannot bind drop out. */
 export function shortcutGroups(
-  native = isTauriRuntime(),
+  can: ShortcutCapabilities,
 ): { group: string; rows: ShortcutHelp[] }[] {
   return SHORTCUTS.map(({ group, rows }) => ({
     group,
-    rows: rows.filter((row) => native || row.nativeOnly !== true),
+    rows: rows.filter((row) => row.requires === undefined || can[row.requires]),
   }))
 }

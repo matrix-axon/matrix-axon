@@ -51,8 +51,27 @@ standard chord for every action that ADR 0078 had to move:
   composer-height chords are unchanged. No platform convention exists for any
   of them, or the browser never forced them off one.
 - WebView2 uses `Ctrl-F` for its own find bar unless the page cancels the
-  keydown. The search handler calls `preventDefault()`, but only a Windows
-  build can show that the page reliably wins this race. Check it there.
-- The shell still has no `Ctrl-+`/`Ctrl--`/`Ctrl-0` page zoom. A browser
-  provides zoom for free; Tauri's `zoomHotkeysEnabled` is off by default. That
-  is a shell configuration change and is out of scope here.
+  keydown. The search handler calls `preventDefault()`, and a Windows build
+  confirms that the app's search opens, not WebView2's find bar.
+
+## Page zoom
+
+A browser zooms on `Ctrl-+`/`Ctrl--`/`Ctrl-0` without any help from the
+page. The shell's webview does not, so the desktop shell binds those chords
+itself (`⌘` on macOS). It steps through the browsers' own zoom levels, from
+50% to 300%, and stores the level in settings, so it survives a restart.
+
+- **Tauri's `zoomHotkeysEnabled` is not used.** On macOS and Linux it injects
+  a script that also zooms 20% for every Ctrl-wheel event. A trackpad pinch
+  arrives as a burst of exactly those events, so a single pinch would jump the
+  window to its 20% or 1000% limit. The script also starts from 100% on every
+  launch. The client calls `getCurrentWebview().setZoom()` through a new
+  `Platform.setZoom` instead, which needs the
+  `core:webview:allow-set-webview-zoom` capability.
+- **Desktop only.** `setZoom` is `null` in a browser, which keeps its own
+  per-site zoom, and in the iOS/Android shells, where pinch is the zoom and
+  Tauri documents page zoom as unsupported. Where it is `null`, the chords are
+  left alone and the help leaves out the zoom rows.
+- **Ctrl-scroll does not zoom.** The desktop shell has keyboard zoom only.
+  Wheel zoom would need a handler that can tell a mouse notch from a stream of
+  pinch events, and it can be added later if people miss it.

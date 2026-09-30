@@ -42,6 +42,10 @@
       ]
     },
     {
+      "identifier": "core:webview:allow-set-webview-zoom",
+      "comment": "Page zoom on Ctrl/Cmd +, - and 0 (ADR 0107). The client drives it through `Platform.setZoom` rather than Tauri's `zoomHotkeysEnabled`, whose macOS/Linux script also zooms 20% per Ctrl-wheel event and so turns one trackpad pinch into a jump to the 20% or 1000% limit."
+    },
+    {
       "identifier": "deep-link:default",
       "comment": "Receive the OAuth authorization code. Sign-in happens in the user's real browser (RFC 8252), which redirects to this app's registered scheme; without this the code has nowhere to land and the flow dead-ends in the browser."
     },

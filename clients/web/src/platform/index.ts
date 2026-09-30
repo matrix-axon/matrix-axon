@@ -284,6 +284,16 @@ export interface Platform {
    * have never heard of and must therefore ask before it can do anything.
    */
   defaultApiBaseUrl: string | null
+
+  /**
+   * Set the page zoom factor (1 is 100%), or `null` where the client must not.
+   *
+   * `null` in a browser, which already zooms on the standard keys and keeps
+   * the level per site; taking those keys over would only fight it. Also
+   * `null` in a mobile shell, where pinch is the zoom and the webview has no
+   * page zoom to set. Only a desktop shell gets a function (ADR 0107).
+   */
+  setZoom: ((factor: number) => Promise<void>) | null
 }
 
 /**
@@ -342,6 +352,8 @@ export function browserPlatform(): Platform {
     // A page in a browser: installable to a home screen, and able to offer
     // itself as a `matrix:` handler.
     browserCanAdoptApp: true,
+    // The browser's own zoom already answers the standard keys.
+    setZoom: null,
   }
 }
 
