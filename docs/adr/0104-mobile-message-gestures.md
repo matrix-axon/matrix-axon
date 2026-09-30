@@ -81,8 +81,9 @@ If double tap is Off, the single-tap behavior may run immediately.
 On desktop, double-clicking a message body runs the configured Double tap action and suppresses native word selection.
 Setting Double tap to Off restores native double-click word selection.
 
-When touch and hold is configured, the client suppresses native text selection and link preview on eligible message content.
-When it is Off, those native behaviors return.
+When touch and hold is configured, the client suppresses native text selection on eligible message content.
+When it is Off, that native behavior returns.
+Links are exempt either way (amended 2026-09-29): a gesture that starts on a link belongs to the OS, so touching and holding a link shows the platform's link preview or menu rather than running the row binding, and a link never starts a swipe.
 
 Tapping or clicking a confirmed event timestamp continues to copy its Matrix.to event link.
 Touching and holding the timestamp, or double-clicking it on desktop, copies the message body instead of invoking the row binding.

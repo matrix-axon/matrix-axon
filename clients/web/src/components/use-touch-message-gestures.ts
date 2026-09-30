@@ -28,10 +28,6 @@ function closestButton(
   return control instanceof HTMLButtonElement ? control : null
 }
 
-function isInlineLink(target: EventTarget | null): boolean {
-  return target instanceof Element && target.closest('a') !== null
-}
-
 function isTimestampControl(target: EventTarget | null): boolean {
   return (
     target instanceof Element && target.closest('.event-time-copy') !== null
@@ -49,7 +45,6 @@ export function useTouchMessageGestures<T extends HTMLElement>({
   eligible,
   preferences,
   openControlSelector,
-  allowInlineLinks = false,
   onAction,
   onSingleTap,
   onTouchStart,
@@ -58,7 +53,6 @@ export function useTouchMessageGestures<T extends HTMLElement>({
   preferences: MessageGesturePreferences | null
   /** A tap on this control is delayed so a second tap can claim the gesture. */
   openControlSelector: string | null
-  allowInlineLinks?: boolean
   onAction: (action: MessageGestureAction) => void
   onSingleTap: () => void
   onTouchStart?: () => void
@@ -70,7 +64,6 @@ export function useTouchMessageGestures<T extends HTMLElement>({
     startY: number
     direction: 'none' | 'left' | 'right' | 'vertical'
     held: boolean
-    linkOnly: boolean
     openControl: HTMLButtonElement | null
     swipeAction: MessageGestureAction | null
   } | null>(null)
@@ -228,19 +221,16 @@ export function useTouchMessageGestures<T extends HTMLElement>({
       pointer.current = null
       suppressNextClick.current = false
       clearSwipePresentation()
-      const linkOnly = allowInlineLinks && isInlineLink(pointerEvent.target)
       const openControl = closestButton(
         pointerEvent.target,
         openControlSelector,
       )
-      if (
-        isGestureControlTarget(pointerEvent.target) &&
-        !linkOnly &&
-        openControl === null
-      )
+      // Controls own their touches, links included: a long press on a link is
+      // the OS's (its preview and link menu), not the row's touch-and-hold,
+      // and a tap on one simply follows it.
+      if (isGestureControlTarget(pointerEvent.target) && openControl === null)
         return
       if (isHorizontallyScrollable(pointerEvent.target)) return
-      if (linkOnly && !touchHoldEnabled) return
       if (touchHoldEnabled) {
         surfaceRef.current?.classList.add('touch-gesture-active')
       }
@@ -250,12 +240,10 @@ export function useTouchMessageGestures<T extends HTMLElement>({
         startY: pointerEvent.clientY,
         direction: 'none',
         held: false,
-        linkOnly,
         openControl,
-        swipeAction:
-          eligible && !linkOnly
-            ? (preferences?.bindings.swipe_left ?? null)
-            : null,
+        swipeAction: eligible
+          ? (preferences?.bindings.swipe_left ?? null)
+          : null,
       }
       const holdAction = eligible
         ? (preferences?.bindings.touch_and_hold ?? null)
@@ -353,18 +341,6 @@ export function useTouchMessageGestures<T extends HTMLElement>({
       }
       if (gesture.held) {
         pointerEvent.preventDefault()
-        return
-      }
-      if (gesture.linkOnly) {
-        if (
-          gesture.direction !== 'none' ||
-          Math.hypot(
-            pointerEvent.clientX - gesture.startX,
-            pointerEvent.clientY - gesture.startY,
-          ) > ACTION_ROW_TAP_SLOP_PX
-        ) {
-          suppressNextClick.current = true
-        }
         return
       }
       if (gesture.direction === 'left' && eligible) {
