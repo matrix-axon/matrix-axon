@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
@@ -484,8 +485,25 @@ export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
     setZoom: isMobileShell()
       ? null
       : (factor) => getCurrentWebview().setZoom(factor),
+    // Only the macOS shell builds a menu (`app_menu` in src-tauri/src/lib.rs);
+    // elsewhere this subscription simply never fires.
+    onMenuCommand: (handler) => {
+      const ready = listen<string>(MENU_EVENT, (event) => {
+        if (event.payload === 'help' || event.payload === 'privacy') {
+          handler(event.payload)
+        }
+      })
+      // The subscription is established asynchronously, so unsubscribing has
+      // to wait for it rather than race it.
+      return () => {
+        void ready.then((unlisten) => unlisten()).catch(() => {})
+      }
+    },
   }
 }
+
+/** The event `forward_menu_command` in src-tauri/src/lib.rs emits. */
+const MENU_EVENT = 'axon://menu'
 
 /**
  * Whether this shell is the iOS or Android build. An iPad's webview may report

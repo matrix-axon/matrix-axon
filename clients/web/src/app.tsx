@@ -63,6 +63,11 @@ import {
 import { disconnectFromServer } from './server-url'
 import { DEFAULT_ZOOM, stepZoom } from './zoom'
 import {
+  PrivacyPage,
+  usePrivacyInPlace,
+  useShowPrivacyRequest,
+} from './pages/PrivacyPage'
+import {
   hint,
   isApplePlatform,
   isPrimaryModifier,
@@ -566,6 +571,11 @@ function isReloadOrRestoreNavigation(): boolean {
 /** The signed-out state: the auth provider's bootstrap UI. */
 function SignedOut({ error }: { error?: string | null }) {
   const { auth } = useServices()
+  const [privacyOpen, setPrivacyOpen] = useState(false)
+  const privacy = usePrivacyInPlace(privacyOpen, setPrivacyOpen)
+  if (privacy.page !== null) {
+    return privacy.page
+  }
   return (
     <main class="signin">
       <h1>axon</h1>
@@ -577,6 +587,7 @@ function SignedOut({ error }: { error?: string | null }) {
       )}
       <auth.LoginBootstrap />
       <ServerFooter />
+      {privacy.link}
     </main>
   )
 }
@@ -1032,6 +1043,10 @@ function ShellChrome() {
     window.addEventListener(SHOW_HELP_EVENT, onShowHelp)
     return () => window.removeEventListener(SHOW_HELP_EVENT, onShowHelp)
   }, [verification])
+  useShowPrivacyRequest(() => {
+    setHelpOpen(false)
+    location.route('/privacy')
+  })
   useEffect(() => {
     if (accountsLoading) {
       void accounts.refresh()
@@ -1603,6 +1618,7 @@ function ShellChrome() {
               <Route path="/accounts" component={AccountsPage} />
               <Route path="/settings" component={SettingsPage} />
               <Route path="/licenses" component={LicensesPage} />
+              <Route path="/privacy" component={PrivacyPage} />
               <Route path="/:accountId/rooms/:roomId" component={RoomPage} />
               <Route default component={NotFound} />
             </Router>

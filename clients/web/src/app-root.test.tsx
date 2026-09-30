@@ -71,6 +71,37 @@ describe('AppRoot', () => {
   })
 })
 
+describe('AppRoot relaying the native menu (ADR 0107)', () => {
+  it('turns menu commands into the page events every screen answers', async () => {
+    let send: ((command: 'help' | 'privacy') => void) | undefined
+    const unsubscribe = vi.fn()
+    const platform: Platform = {
+      ...shellPlatform(),
+      onMenuCommand: (handler) => {
+        send = handler
+        return unsubscribe
+      },
+    }
+    const help = vi.fn()
+    window.addEventListener('axon:show-help', help)
+    const view = render(
+      <AppRoot platform={platform} storage={memoryStorage()} />,
+    )
+
+    send!('help')
+    expect(help).toHaveBeenCalledTimes(1)
+    // The server-setup screen shows the policy in place.
+    send!('privacy')
+    expect(
+      await screen.findByRole('heading', { name: 'Axon Privacy Policy' }),
+    ).toBeTruthy()
+
+    view.unmount()
+    expect(unsubscribe).toHaveBeenCalled()
+    window.removeEventListener('axon:show-help', help)
+  })
+})
+
 describe('AppRoot wiring the transport into the app', () => {
   /**
    * The regression this exists for. `AppRoot` used the platform for the setup
@@ -125,6 +156,7 @@ describe('AppRoot wiring the transport into the app', () => {
       secureStorage: null,
       appleSignIn: null,
       setZoom: null,
+      onMenuCommand: null,
     }
 
     // A token, so the shell mounts signed-in and actually issues requests.

@@ -1,9 +1,11 @@
-import { useState } from 'preact/hooks'
+import { useEffect, useState } from 'preact/hooks'
 import { App } from './app'
 import { browserPlatform, type Platform } from './platform'
 import { resolveApiBaseUrl } from './services'
 import type { AppServices } from './services'
+import { SHOW_PRIVACY_EVENT } from './pages/PrivacyPage'
 import { ServerSetup } from './ServerSetup'
+import { SHOW_HELP_EVENT } from './shortcuts'
 
 /**
  * The mount point: the server gate in front of the app (ADR 0102 § 3).
@@ -34,6 +36,22 @@ export function AppRoot({
   const [baseUrl, setBaseUrl] = useState(() =>
     resolveApiBaseUrl(storage, platform),
   )
+
+  // The macOS Help menu (ADR 0107). Relayed as window events from here, above
+  // the server gate, because the menu is live on every screen and each screen
+  // answers for itself: the shell opens help or routes to `/privacy`, and the
+  // screens before sign-in show the policy in place.
+  useEffect(() => {
+    const subscribe = platform.onMenuCommand
+    if (subscribe === null) {
+      return
+    }
+    return subscribe((command) => {
+      window.dispatchEvent(
+        new Event(command === 'help' ? SHOW_HELP_EVENT : SHOW_PRIVACY_EVENT),
+      )
+    })
+  }, [platform])
 
   if (services === undefined && baseUrl === null) {
     return (

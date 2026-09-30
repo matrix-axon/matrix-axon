@@ -294,7 +294,20 @@ export interface Platform {
    * page zoom to set. Only a desktop shell gets a function (ADR 0107).
    */
   setZoom: ((factor: number) => Promise<void>) | null
+
+  /**
+   * Subscribe to commands from a native menu bar; returns an unsubscribe.
+   *
+   * `null` wherever there is no such menu: a browser, and every shell but
+   * macOS, whose Help menu carries "Axon Help" and "Privacy Policy" (ADR 0107).
+   * The menu only relays: the commands open what the page already has.
+   */
+  onMenuCommand:
+    ((handler: (command: MenuCommand) => void) => () => void) | null
 }
+
+/** What a native menu item asks the page to do. */
+export type MenuCommand = 'help' | 'privacy'
 
 /**
  * The web implementation: the page's own `fetch` and `WebSocket`.
@@ -354,6 +367,8 @@ export function browserPlatform(): Platform {
     browserCanAdoptApp: true,
     // The browser's own zoom already answers the standard keys.
     setZoom: null,
+    // The browser's menus are its own.
+    onMenuCommand: null,
   }
 }
 
