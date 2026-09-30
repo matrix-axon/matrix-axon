@@ -122,6 +122,35 @@ Dropping a file into the terminal window fills in its path directly (real
 bracketed-paste support, not just tolerated keystrokes), including a path the
 terminal wraps in quotes or backslash-escapes.
 
+## Spaces
+
+Joined Matrix spaces appear as expandable groups in the Rooms pane, followed by an Ungrouped section.
+Groups start expanded; focus a space header and press Enter or Space to toggle it for this session.
+The open timeline and its draft stay attached to the current room when a group is collapsed.
+Headers use `[+]` / `[-]`, child rooms are indented, and only room rows receive `/room` numbers.
+A `*` marks the open room while a space header has focus.
+
+Favorites sort first within each group, followed by the selected `/sort` order.
+`/filter fav` shows a flat favorites list.
+Name and unread filters temporarily reveal matching children without changing the session's collapse choices.
+A `/room` target by name, ID, or alias can open a collapsed child and reveal its parent; numeric targets name the visible room rows.
+Ctrl-N/P skips headers and follows visible room rows.
+
+Alt-Up/Down moves a focused space header.
+The order is saved to this Axon instance and shared with its other clients, including the web space picker.
+The `toggle_space`, `move_space_up`, and `move_space_down` shortcuts are configurable.
+An account filter limits which roots move while preserving other accounts' order.
+A failed save keeps the pending order visible and retries with backoff; the pane heading indicates an unsaved/unavailable order.
+An unset order uses space titles until the first explicit move.
+
+Space membership loads in the background for visible roots and a small lookahead.
+Until those reads complete, rooms remain accessible in the provisional Ungrouped section.
+Failed reads are marked on the root and retried; `/refresh` also retries them.
+Live `m.space.child` updates invalidate the affected group, and reconnect refreshes both membership and saved order.
+An account without joined spaces retains the flat room list.
+Only joined child rooms are displayed, and a room with multiple parents belongs to the first space in root order.
+Joined subspaces remain roots; recursive navigation, space creation, and cross-listing are deferred.
+
 ## Keyboard Shortcuts
 
 Defaults:

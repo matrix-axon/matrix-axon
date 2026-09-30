@@ -45,6 +45,7 @@ mod render;
 mod room_actions;
 mod rooms;
 mod search_flow;
+pub(crate) mod spaces;
 pub(crate) mod tags;
 mod timeline;
 mod typing;
@@ -767,6 +768,7 @@ pub(crate) struct App {
     pub(crate) colors: ColorScheme,
     pub(crate) display: DisplayOptions,
     pub(crate) rooms: RoomsState,
+    pub(crate) spaces: spaces::SpacesState,
     pub(crate) accounts: AccountsState,
     pub(crate) messages: MessagePane,
     /// This frame's resolved view model, rebuilt by `ui::prepare` before every
@@ -1187,6 +1189,7 @@ impl App {
             rooms: RoomsState::default(),
             accounts: AccountsState::default(),
             messages: MessagePane::default(),
+            spaces: spaces::SpacesState::default(),
             frame: frame::FrameState::default(),
             input: InputState::default(),
             live: LiveState::default(),
@@ -1679,15 +1682,15 @@ impl App {
     }
 
     pub(crate) fn visible_room_indices(&self) -> Vec<usize> {
-        let account = self.active_account_filter();
-        let selected = self.rooms.selected;
-        self.rooms
-            .rooms
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| account.is_none_or(|id| r.account_id == id))
-            .filter(|(i, r)| selected == Some(*i) || self.room_passes_filter(r))
-            .map(|(i, _)| i)
+        self.sidebar_rows(self.active_account_filter())
+            .into_iter()
+            .filter_map(|row| {
+                if let spaces::SidebarRow::Room { index, .. } = row {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
@@ -1972,7 +1975,10 @@ impl App {
             Command::Bundle(event_id) => self.show_verification_bundle(&event_id).await,
             Command::Help => self.open_popup(PopupKind::Help),
             Command::Shortcuts => self.open_popup(PopupKind::Shortcuts),
-            Command::Refresh => self.request_rooms_refresh(),
+            Command::Refresh => {
+                self.refresh_spaces();
+                self.request_rooms_refresh();
+            }
             Command::EditConfig => {
                 self.edit_config_requested = true;
             }

@@ -43,6 +43,10 @@ pub(crate) struct MembersOutcome {
 impl App {
     pub(crate) fn handle_live_frame(&mut self, frame: LiveFrame) -> LiveFrameAction {
         match frame {
+            LiveFrame::Preferences(frame) => {
+                self.apply_preferences_changed(frame);
+                LiveFrameAction::None
+            }
             LiveFrame::Connected => {
                 self.connection_state = ConnectionState::Connected;
                 if !self.is_mid_command() {
@@ -88,7 +92,10 @@ impl App {
                 self.status = Status::Debug(format!("ignored malformed live frame: {err}"));
                 LiveFrameAction::None
             }
-            LiveFrame::Timeline(event) => self.append_live_event(*event),
+            LiveFrame::Timeline(event) => {
+                self.queue_sidebar_live_event(&event);
+                self.append_live_event(*event)
+            }
             LiveFrame::Verification(frame) => self.handle_verification_frame(frame),
             LiveFrame::SenderTrustViolation {
                 account_id,
@@ -205,6 +212,9 @@ impl App {
             account_id: event.account_id,
             room_id: event.room_id.clone(),
         };
+        if event.event_type == "m.space.child" {
+            self.invalidate_space(&key);
+        }
         if let Some((target_id, new_body, new_content)) = event.edit_relation() {
             if let Some(events) = self.messages.events.get_mut(&key) {
                 if let Some(target) = events.iter_mut().find(|item| item.event_id == target_id) {
@@ -900,7 +910,7 @@ impl App {
         }
         let query_lower = query.to_ascii_lowercase();
         let all_matches: Vec<usize> = self
-            .visible_room_indices()
+            .eligible_room_indices(self.active_account_filter())
             .into_iter()
             .filter(|&i| room_matches_search(&self.rooms.rooms[i], &query_lower))
             .collect();
@@ -908,8 +918,7 @@ impl App {
         self.last_search = Some(query);
         match found {
             Some(index) => {
-                self.rooms.selected = Some(index);
-                self.load_selected_timeline().await;
+                self.select_room_index(index).await;
                 self.status = match_status(1, all_matches.len());
             }
             None => self.status = Status::Info("no match".to_owned()),
@@ -919,7 +928,7 @@ impl App {
     pub(crate) async fn search_adjacent_room(&mut self, query: &str, forward: bool) {
         let query = query.to_ascii_lowercase();
         let all_matches: Vec<usize> = self
-            .visible_room_indices()
+            .eligible_room_indices(self.active_account_filter())
             .into_iter()
             .filter(|&i| room_matches_search(&self.rooms.rooms[i], &query))
             .collect();
@@ -935,8 +944,7 @@ impl App {
         );
         match found {
             Some(index) => {
-                self.rooms.selected = Some(index);
-                self.load_selected_timeline().await;
+                self.select_room_index(index).await;
                 let match_num = all_matches.iter().position(|&i| i == index).unwrap_or(0) + 1;
                 self.status = match_status(match_num, all_matches.len());
             }

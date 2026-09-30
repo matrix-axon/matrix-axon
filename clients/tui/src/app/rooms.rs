@@ -30,6 +30,7 @@ impl App {
         let previous_keys: Vec<RoomKey> = self.rooms.rooms.iter().map(RoomKey::from).collect();
         let refreshed_keys: HashSet<RoomKey> = rooms.iter().map(RoomKey::from).collect();
         self.rooms.rooms = rooms;
+        self.reconcile_spaces();
         for key in previous_keys {
             if !refreshed_keys.contains(&key) {
                 self.prune_room_caches(&key);
@@ -53,12 +54,12 @@ impl App {
             if !self.is_mid_command() {
                 self.status = Status::from("no rooms returned by Axon".to_owned());
             }
-        } else if self
-            .rooms
-            .selected
-            .is_none_or(|selected| !self.visible_room_indices().contains(&selected))
-        {
-            let visible = self.visible_room_indices();
+        } else if self.rooms.selected.is_none_or(|selected| {
+            !self
+                .eligible_room_indices(self.active_account_filter())
+                .contains(&selected)
+        }) {
+            let visible = self.eligible_room_indices(self.active_account_filter());
             self.rooms.selected = visible.first().copied();
             if !self.is_mid_command() {
                 self.status = Status::from(format!("loaded {} rooms", self.rooms.rooms.len()));
@@ -98,24 +99,37 @@ impl App {
     /// Called after every room refresh and from the main loop's tick, so a
     /// scroll or a filter change pulls in the newly visible rooms.
     pub(crate) fn sweep_visible_room_titles(&mut self) {
-        let visible = self.visible_room_indices();
-        if visible.is_empty() {
+        let rows = self.sidebar_rows(self.active_account_filter());
+        if rows.is_empty() {
             return;
         }
-        // `ui::prepare` measures the panel at the top of every loop iteration,
-        // so this is the height of the window the user is actually looking at,
-        // already set before the first paint and before the first keystroke
-        // (#70). The floor covers only the room panel being hidden, where the
-        // last measurement stands and nothing re-measures it.
-        let page = self.rooms.page_size.max(1);
+        // Tree scroll offsets include headers/dividers; the flat view counts
+        // only rooms, retaining its established divider geometry.
+        let row_indices: Vec<Option<usize>> = if self.space_tree_enabled() {
+            rows.iter()
+                .map(|row| {
+                    if let super::spaces::SidebarRow::Room { index, .. } = row {
+                        Some(*index)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            self.visible_room_indices().into_iter().map(Some).collect()
+        };
         let start = self.rooms.scroll.saturating_sub(ROOM_TITLE_LOOKAHEAD);
         let end = self
             .rooms
             .scroll
-            .saturating_add(page)
+            .saturating_add(self.rooms.page_size.max(1))
             .saturating_add(ROOM_TITLE_LOOKAHEAD)
-            .min(visible.len());
-        let keys: Vec<RoomKey> = visible[start.min(end)..end]
+            .min(row_indices.len());
+        let window_indices: Vec<usize> = row_indices[start.min(end)..end]
+            .iter()
+            .filter_map(|index| *index)
+            .collect();
+        let keys: Vec<RoomKey> = window_indices
             .iter()
             .filter_map(|index| self.rooms.rooms.get(*index))
             .filter(|room| needs_derived_title(room))
@@ -203,55 +217,13 @@ impl App {
             .room_timeline(room.account_id, &room.room_id, None, None, TIMELINE_LIMIT)
             .await
         {
-            Ok(mut page) => {
-                page.events.reverse();
-                apply_edits(&mut page.events);
-                let has_more = page.next_cursor.is_some();
-                let key = RoomKey::from(&room);
-                match page.next_cursor {
-                    Some(c) => {
-                        self.messages.history_cursors.insert(key.clone(), c);
-                    }
-                    None => {
-                        self.messages.history_cursors.remove(&key);
-                    }
-                }
-                self.reseed_display_names(&room, &page.events).await;
-                // Thread replies newer than the read marker made this room
-                // unread while hidden behind their roots' badges — promote
-                // them so what caused the badge is visible (M12). Collected
-                // against the *pre-advance* marker, so this must precede
-                // note_room_read; the root fetches run after the page is
-                // installed so in-slice roots aren't re-fetched.
-                let unseen_thread_roots = self.collect_unseen_thread_promotions(&key, &page.events);
-                // Opening the room reads it up to its newest loaded event (M12).
-                // Two positions, two orders, one candidate set: the marker names
-                // the display-last event (`page.events` is ascending by
-                // `origin_ts`), the receipt the greatest `arrival_order` among
-                // the same displayed events (ADR 0089). The marker used to read
-                // the raw page here, so a trailing hidden state event advanced
-                // it past everything rendered (#167).
-                if let Some(targets) = super::read_markers::read_targets_for(
-                    &page.events,
-                    &self.display,
-                    &self.promoted_thread_events,
-                ) {
-                    self.note_room_read(key.clone(), targets.marker, Some(targets.receipt));
-                }
-                self.messages.events.insert(key.clone(), page.events);
-                for (account_id, root) in unseen_thread_roots {
-                    self.spawn_live_thread_root_fetch(account_id, &key, &root);
-                }
-                self.rooms.unread.remove(&key);
-                self.thread_panel = None;
-                self.spawn_relations_refresh(&room);
-                if !self.is_mid_command() {
-                    self.status = Status::Info(if has_more {
-                        format!("showing {} (older history available later)", room.title())
-                    } else {
-                        format!("showing {}", room.title())
-                    });
-                }
+            Ok(page) => {
+                let members = self
+                    .client
+                    .room_members(room.account_id, &room.room_id)
+                    .await
+                    .ok();
+                self.apply_timeline_page(&room, page, members.as_deref());
             }
             Err(err) => {
                 if !self.is_mid_command() {
@@ -263,6 +235,65 @@ impl App {
         // settling the previous room's pending draft first so a switch can't
         // drop it or misattribute it.
         self.sync_draft_on_room_change();
+    }
+
+    pub(crate) fn apply_timeline_page(
+        &mut self,
+        room: &RoomDto,
+        mut page: TimelinePage,
+        members: Option<&[MemberDto]>,
+    ) {
+        page.events.reverse();
+        apply_edits(&mut page.events);
+        let has_more = page.next_cursor.is_some();
+        let key = RoomKey::from(room);
+        match page.next_cursor {
+            Some(c) => {
+                self.messages.history_cursors.insert(key.clone(), c);
+            }
+            None => {
+                self.messages.history_cursors.remove(&key);
+            }
+        }
+        self.rebuild_display_names(room, &page.events);
+        if let Some(members) = members {
+            self.seed_display_names_from_members(room, members);
+        }
+        // Thread replies newer than the read marker made this room
+        // unread while hidden behind their roots' badges — promote
+        // them so what caused the badge is visible (M12). Collected
+        // against the *pre-advance* marker, so this must precede
+        // note_room_read; the root fetches run after the page is
+        // installed so in-slice roots aren't re-fetched.
+        let unseen_thread_roots = self.collect_unseen_thread_promotions(&key, &page.events);
+        // Opening the room reads it up to its newest loaded event (M12).
+        // Two positions, two orders, one candidate set: the marker names
+        // the display-last event (`page.events` is ascending by
+        // `origin_ts`), the receipt the greatest `arrival_order` among
+        // the same displayed events (ADR 0089). The marker used to read
+        // the raw page here, so a trailing hidden state event advanced
+        // it past everything rendered (#167).
+        if let Some(targets) = super::read_markers::read_targets_for(
+            &page.events,
+            &self.display,
+            &self.promoted_thread_events,
+        ) {
+            self.note_room_read(key.clone(), targets.marker, Some(targets.receipt));
+        }
+        self.messages.events.insert(key.clone(), page.events);
+        for (account_id, root) in unseen_thread_roots {
+            self.spawn_live_thread_root_fetch(account_id, &key, &root);
+        }
+        self.rooms.unread.remove(&key);
+        self.thread_panel = None;
+        self.spawn_relations_refresh(room);
+        if !self.is_mid_command() {
+            self.status = Status::Info(if has_more {
+                format!("showing {} (older history available later)", room.title())
+            } else {
+                format!("showing {}", room.title())
+            });
+        }
     }
 
     /// Fetch the next older page of history for the current room and prepend it
@@ -751,7 +782,16 @@ impl App {
                 return;
             }
         };
+        self.select_room_index(index).await;
+    }
+
+    pub(crate) async fn select_room_index(&mut self, index: usize) {
+        if self.space_tree_enabled() {
+            self.activate_sidebar_room(index);
+            return;
+        }
         self.rooms.selected = Some(index);
+        self.reveal_room_parent(index);
         self.load_selected_timeline().await;
     }
 
@@ -767,12 +807,12 @@ impl App {
             .and_then(|sel| visible.iter().position(|&i| i == sel))
             .unwrap_or(0);
         let next_vis = relative_room_index(current_vis, visible.len(), offset);
-        self.rooms.selected = Some(visible[next_vis]);
-        self.load_selected_timeline().await;
+        self.select_room_index(visible[next_vis]).await;
     }
 
     pub(crate) fn sync_room_selection_to_account_filter(&mut self) {
-        let visible = self.visible_room_indices();
+        self.reconcile_spaces();
+        let visible = self.eligible_room_indices(self.active_account_filter());
         let current_ok = self
             .rooms
             .selected

@@ -16,6 +16,7 @@ mod reactions;
 mod render;
 mod room_completion;
 mod rooms;
+mod spaces;
 mod status;
 mod support;
 mod threads;

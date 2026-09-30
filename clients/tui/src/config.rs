@@ -65,6 +65,9 @@ toggle_unread_filter = "alt-u"
 refresh = "ctrl-l"
 pin_room = "p"
 unpin_room = "shift-p"
+toggle_space = "space"
+move_space_up = "alt-up"
+move_space_down = "alt-down"
 jump_day_back = "shift-pageup"
 jump_day_forward = "shift-pagedown"
 room_filter_cycle = "alt-f"
@@ -362,6 +365,9 @@ pub struct Shortcuts {
     pub refresh: KeyBinding,
     pub pin_room: KeyBinding,
     pub unpin_room: KeyBinding,
+    pub toggle_space: KeyBinding,
+    pub move_space_up: KeyBinding,
+    pub move_space_down: KeyBinding,
     pub jump_day_back: KeyBinding,
     pub jump_day_forward: KeyBinding,
     // Room-list sort & filter (ADR 0042).
@@ -575,6 +581,9 @@ impl RawConfig {
                 refresh: "ctrl-l".to_owned(),
                 pin_room: "p".to_owned(),
                 unpin_room: "shift-p".to_owned(),
+                toggle_space: "space".to_owned(),
+                move_space_up: "alt-up".to_owned(),
+                move_space_down: "alt-down".to_owned(),
                 jump_day_back: "shift-pageup".to_owned(),
                 jump_day_forward: "shift-pagedown".to_owned(),
                 room_filter_cycle: "alt-f".to_owned(),
@@ -797,6 +806,9 @@ toggle_unread_filter = "{toggle_unread_filter}"
 refresh = "{refresh}"
 pin_room = "{pin_room}"
 unpin_room = "{unpin_room}"
+toggle_space = "{toggle_space}"
+move_space_up = "{move_space_up}"
+move_space_down = "{move_space_down}"
 jump_day_back = "{jump_day_back}"
 jump_day_forward = "{jump_day_forward}"
 room_filter_cycle = "{room_filter_cycle}"
@@ -937,6 +949,9 @@ accept_incoming_verification = {accept_incoming_verification}
             refresh = self.shortcuts.refresh,
             pin_room = self.shortcuts.pin_room,
             unpin_room = self.shortcuts.unpin_room,
+            toggle_space = self.shortcuts.toggle_space,
+            move_space_up = self.shortcuts.move_space_up,
+            move_space_down = self.shortcuts.move_space_down,
             jump_day_back = self.shortcuts.jump_day_back,
             jump_day_forward = self.shortcuts.jump_day_forward,
             room_filter_cycle = self.shortcuts.room_filter_cycle,
@@ -1131,6 +1146,9 @@ fn is_valid_option(section: Option<&str>, key: &str) -> bool {
                 | "refresh"
                 | "pin_room"
                 | "unpin_room"
+                | "toggle_space"
+                | "move_space_up"
+                | "move_space_down"
                 | "jump_day_back"
                 | "jump_day_forward"
                 | "room_filter_cycle"
@@ -1244,6 +1262,9 @@ struct RawShortcuts {
     refresh: String,
     pin_room: String,
     unpin_room: String,
+    toggle_space: String,
+    move_space_up: String,
+    move_space_down: String,
     jump_day_back: String,
     jump_day_forward: String,
     room_filter_cycle: String,
@@ -1339,6 +1360,13 @@ impl RawShortcuts {
         assign_or_flag(&mut self.refresh, partial.refresh, &mut missing);
         assign_or_flag(&mut self.pin_room, partial.pin_room, &mut missing);
         assign_or_flag(&mut self.unpin_room, partial.unpin_room, &mut missing);
+        assign_or_flag(&mut self.toggle_space, partial.toggle_space, &mut missing);
+        assign_or_flag(&mut self.move_space_up, partial.move_space_up, &mut missing);
+        assign_or_flag(
+            &mut self.move_space_down,
+            partial.move_space_down,
+            &mut missing,
+        );
         assign_or_flag(&mut self.jump_day_back, partial.jump_day_back, &mut missing);
         assign_or_flag(
             &mut self.jump_day_forward,
@@ -1450,6 +1478,9 @@ impl RawShortcuts {
             refresh: parse_key_binding("shortcuts.refresh", &self.refresh)?,
             pin_room: parse_key_binding("shortcuts.pin_room", &self.pin_room)?,
             unpin_room: parse_key_binding("shortcuts.unpin_room", &self.unpin_room)?,
+            toggle_space: parse_key_binding("shortcuts.toggle_space", &self.toggle_space)?,
+            move_space_up: parse_key_binding("shortcuts.move_space_up", &self.move_space_up)?,
+            move_space_down: parse_key_binding("shortcuts.move_space_down", &self.move_space_down)?,
             jump_day_back: parse_key_binding("shortcuts.jump_day_back", &self.jump_day_back)?,
             jump_day_forward: parse_key_binding(
                 "shortcuts.jump_day_forward",
@@ -1527,6 +1558,9 @@ struct PartialRawShortcuts {
     refresh: Option<String>,
     pin_room: Option<String>,
     unpin_room: Option<String>,
+    toggle_space: Option<String>,
+    move_space_up: Option<String>,
+    move_space_down: Option<String>,
     jump_day_back: Option<String>,
     jump_day_forward: Option<String>,
     room_filter_cycle: Option<String>,
@@ -2028,6 +2062,41 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_configs_gain_space_shortcuts_without_losing_comments_or_custom_keys() {
+        let path = std::env::temp_dir().join(format!(
+            "axon-tui-spaces-config-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        let original = DEFAULT_CONFIG
+            .replace("toggle_space = \"space\"\n", "")
+            .replace("move_space_up = \"alt-up\"\n", "")
+            .replace("move_space_down = \"alt-down\"\n", "")
+            .replace(
+                "next_room = \"ctrl-n\"",
+                "next_room = \"ctrl-q\" # keep my shortcut",
+            );
+        fs::write(&path, format!("# keep my comment\n{original}")).unwrap();
+        let config = TuiConfig::load_or_create_at(path.clone()).unwrap();
+        assert_eq!(config.shortcuts.toggle_space.label(), "Space");
+        assert!(config
+            .shortcuts
+            .move_space_up
+            .matches(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
+        assert!(config
+            .shortcuts
+            .move_space_down
+            .matches(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT)));
+        let repaired = fs::read_to_string(&path).unwrap();
+        assert!(repaired.contains("# keep my comment"));
+        assert!(repaired.contains("# keep my shortcut"));
+        assert!(config
+            .shortcuts
+            .next_room
+            .matches(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn creates_default_config_when_missing() {

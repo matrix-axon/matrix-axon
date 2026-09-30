@@ -478,6 +478,7 @@ async fn run_app(
     let (members_tx, mut members_rx) = mpsc::unbounded_channel();
     let (drafts_tx, mut drafts_rx) = mpsc::unbounded_channel();
     let (room_action_tx, mut room_action_rx) = mpsc::unbounded_channel();
+    let (space_tx, mut space_rx) = mpsc::unbounded_channel();
     let (tag_write_tx, mut tag_write_rx) = mpsc::unbounded_channel();
     let (bootstrap_tx, mut bootstrap_rx) = mpsc::unbounded_channel();
     let mut app = App::new(client, account_filter, config, picker);
@@ -489,6 +490,7 @@ async fn run_app(
     app.set_drafts_sender(drafts_tx);
     app.set_room_action_sender(room_action_tx);
     app.set_tag_write_sender(tag_write_tx);
+    app.spaces.tx = Some(space_tx);
     app.set_bootstrap_sender(bootstrap_tx);
     app.set_device_id(app::load_or_create_device_id(&app.config_path));
     // Startup runs as spawned stages drained below, so the loop paints and
@@ -531,6 +533,7 @@ async fn run_app(
                 // brought on screen. Bounded and idempotent — already-titled
                 // rooms are skipped (#189).
                 app.sweep_visible_room_titles();
+                app.sweep_spaces(now);
                 if inside_tmux()
                     && app.picker.protocol_type() == ProtocolType::Sixel
                     && now >= next_sixel_inline_refresh
@@ -631,6 +634,8 @@ async fn run_app(
                 // re-read exactly as much as later ones do (#210).
                 if reconnected && app.note_connected_frame() {
                     app.request_device_state();
+                    app.refresh_spaces();
+                    app.request_rooms_refresh();
                 }
             }
             Some(outcome) = bootstrap_rx.recv() => {
@@ -641,6 +646,9 @@ async fn run_app(
             }
             Some(outcome) = room_action_rx.recv() => {
                 app.handle_room_action_outcome(outcome).await;
+            }
+            Some(outcome) = space_rx.recv() => {
+                app.apply_space_outcome(outcome);
             }
             Some(outcome) = tag_write_rx.recv() => {
                 app.handle_tag_write_outcome(outcome).await;

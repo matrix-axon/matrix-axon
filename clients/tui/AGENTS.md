@@ -23,6 +23,23 @@
 - `/status` uses the cached `GET /v1/accounts` response and lists every client-visible account as `logged in` (`active`) or `logged out` (`deactivated`). Each account block also shows the live megolm-backup snapshot (`exists_on_server`, this-device uploading, `backup_state`, `recovery_state`). `recovery_state` is 4S completeness, not "history keys imported." Keep the account panel and `/account` navigation active-only.
 - Room switching should remain forgiving within the active account filter: visible-list number, room id, canonical alias, display name, and shortened Matrix alias forms should continue to work.
 
+## Spaces (ADR 0103)
+
+- Keep `app/spaces.rs` as the shared sidebar projection and freshness owner: space roots, leaf rooms, and nonselectable headings/dividers.
+  `rooms.selected` owns the open timeline; `spaces.focus` owns a focused header and must never become a message/draft target.
+- Joined spaces come from `RoomDto.room_type`; children come from `GET …/space/children` and are intersected with the same account's room list.
+  First parent in root order wins independently of collapse state; joined subspaces remain roots.
+  Favorites sort within each group, `/filter fav` flattens, and name/unread filters reveal matches temporarily.
+- Membership fetches acquire one of four permits before spawning, request only visible roots plus lookahead, retain cached membership on failure, and coalesce live invalidations.
+  A root removed during a read cancels its worker; a request invalidated while in flight cannot settle the cache.
+  Reconnect and `/refresh` invalidate membership and re-read instance order.
+- `space_order` is instance-scoped, including `preferences.changed` envelopes with a nil account UUID.
+  Preserve hidden/absent keys on reorder, suppress own-device echoes, serialize GET/PUT work, and retain unsaved edits across failures and older reads.
+  Do not upload an empty order just because GET returns 404; another client may still have a legacy migration to upload.
+- Sidebar room activation loads history off the input loop and applies only the current request for the current room.
+  Replay live frames observed during that read so an older HTTP snapshot cannot discard new messages, edits, or reaction patches.
+  The replay buffer is bounded; overflow leaves the live cache intact and requests a fresh snapshot.
+
 ## Event loop and async
 
 - **Reach the first frame before any network await (ADR 0093).** Startup runs

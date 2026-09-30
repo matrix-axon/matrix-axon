@@ -64,7 +64,7 @@ shows it.
 | Sending a message                                       | `send`                | `send`                                                                                                    | `send`          |
 | Deleting one's own message                              | **not covered**       | `send`                                                                                                    | `send`          |
 | Shortcuts and help popups                               | `shortcuts`           | `shortcuts`                                                                                               | **n/a**         |
-| Spaces: picker, filtering, hierarchy (ADR 0084)         | **n/a**               | `spaces`                                                                                                  | `rooms`         |
+| Spaces: picker, filtering, hierarchy (ADR 0084)         | **not covered**       | `spaces`                                                                                                  | `rooms`         |
 | Single-pane navigation and Back (ADR 0062)              | **n/a**               | **n/a**                                                                                                   | `rooms`         |
 | Room information panel                                  | **not covered**       | `rooms`                                                                                                   | `timeline`      |
 | Unread thread picker (Alt-T)                            | **not covered**       | **not covered**                                                                                           | **not covered** |
@@ -149,9 +149,10 @@ shows it.
   The reaction case is worth distinguishing from the two rows above it:
   `timeline` covers badges that were already in the aggregate at load, and `react` covers this client reacting to itself.
   Neither exercises an `m.reaction` frame arriving over the WS for someone else's reaction, which is a different code path — the frame patches the target message's aggregate rather than being rendered as a row of its own.
-- **Spaces and galleries in the TUI.** The TUI has neither (see
-  `docs/client-parity.md`); spaces appear in its room list as ordinary rooms.
-  These are `n/a` rather than gaps in the demo.
+- **Spaces in the TUI.** The client now renders a shallow space tree with session collapse/expand, per-group favorites, and instance root ordering (ADR 0103).
+  The existing `rooms` pilot does not exercise those interactions, so coverage remains a gap until the separate testing-silo follow-up (#385).
+  Root reordering must also be demonstrated changing the web picker through the shared preference.
+- **Galleries in the TUI.** The TUI has no gallery grouping, so this is `n/a` rather than a demo gap.
 - **Sort, filter, and the name filter on web mobile.** The controls are all
   there and all work; they are simply the same demonstration as the desktop
   take, on a third of the screen. The mobile scenes spend their budget on what

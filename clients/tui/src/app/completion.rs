@@ -711,7 +711,7 @@ impl App {
     fn visible_rooms_for_completion(&self) -> Vec<&RoomDto> {
         let mut seen: HashMap<&str, usize> = HashMap::new();
         let mut result: Vec<&RoomDto> = Vec::new();
-        for index in self.visible_room_indices() {
+        for index in self.eligible_room_indices(self.active_account_filter()) {
             let Some(room) = self.rooms.rooms.get(index) else {
                 continue;
             };
@@ -797,7 +797,17 @@ impl App {
     ) -> RoomTargetResolution {
         let target = target.trim();
         if let Ok(n) = target.parse::<usize>() {
-            let visible = self.visible_room_indices_for_account(account_filter);
+            let visible: Vec<_> = self
+                .sidebar_rows(account_filter)
+                .into_iter()
+                .filter_map(|row| {
+                    if let super::spaces::SidebarRow::Room { index, .. } = row {
+                        Some(index)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             return n
                 .checked_sub(1)
                 .and_then(|vis_pos| visible.get(vis_pos).copied())
@@ -857,18 +867,7 @@ impl App {
     }
 
     fn visible_room_indices_for_account(&self, account_filter: Option<uuid::Uuid>) -> Vec<usize> {
-        self.rooms
-            .rooms
-            .iter()
-            .enumerate()
-            .filter(|(_, room)| {
-                account_filter.is_none_or(|account_id| room.account_id == account_id)
-            })
-            .filter(|(index, room)| {
-                self.rooms.selected == Some(*index) || self.room_passes_filter(room)
-            })
-            .map(|(index, _)| index)
-            .collect()
+        self.eligible_room_indices(account_filter)
     }
 
     fn classify_room_matches(
