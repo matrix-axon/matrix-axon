@@ -2422,6 +2422,67 @@ describe('keyboard shortcuts (ADR 0078)', () => {
     expect(editing.value).toBe('my last words')
   })
 
+  it('ArrowUp in the thread composer edits your last message in that thread', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: {
+              events: [
+                // Older, and ours: Up must pass over it for the newer one.
+                event('$t-older', 150, {
+                  sender: OWN_USER,
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'older thread words',
+                  content: { msgtype: 'm.text', body: 'older thread words' },
+                }),
+                event('$t-mine', 200, {
+                  sender: OWN_USER,
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'thread words',
+                  content: { msgtype: 'm.text', body: 'thread words' },
+                }),
+                // Newer, but not ours.
+                event('$t-theirs', 250, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'their thread reply',
+                  content: { msgtype: 'm.text', body: 'their thread reply' },
+                }),
+              ],
+              next_cursor: null,
+            },
+          }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`, () =>
+        HttpResponse.json({ data: event('$root', 100) }),
+      ),
+    )
+    const { findByText, findByLabelText, getByLabelText } = renderRoom(
+      [
+        event('$root', 100),
+        // Ours and newer than anything in the thread, but in the room: the
+        // thread composer must not reach out of its thread for it.
+        event('$main-mine', 300, { sender: OWN_USER, body: 'room words' }),
+      ],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
+    )
+    await findByText('their thread reply')
+    // Who "you" are comes with the room entry, which names the room composer.
+    await findByLabelText('Message Ops')
+
+    fireEvent.keyDown(getByLabelText('Reply in thread'), { key: 'ArrowUp' })
+
+    expect(await findByText('Editing')).toBeTruthy()
+    const editing = (await findByLabelText(
+      'Reply in thread',
+    )) as HTMLTextAreaElement
+    expect(editing.value).toBe('thread words')
+    expect((getByLabelText('Message Ops') as HTMLTextAreaElement).value).toBe(
+      '',
+    )
+  })
+
   it('ArrowUp does nothing when the composer has text or a banner is up', async () => {
     const { findByLabelText, queryByText, findAllByRole } = renderRoom([
       event('$mine', 200, { sender: OWN_USER, body: 'my last words' }),
