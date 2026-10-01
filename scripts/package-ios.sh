@@ -178,9 +178,39 @@ if [ -n "${AXON_IOS_KEYCHAIN:-}" ]; then
   fi
   # Unlocking a keychain that is not in the search list does nothing useful:
   # xcodebuild never looks there.
-  if ! security list-keychains -d user | grep -qF "$keychain"; then
+  #
+  # Compared as resolved paths, not as text. `security list-keychains` prints
+  # absolute, quoted paths as it stored them, so a relative AXON_IOS_KEYCHAIN
+  # (`./build.keychain-db`) or one reached through a symlink (`/var` for
+  # `/private/var`, a symlinked $HOME) is listed and still never matches a
+  # substring test — and the error below would then be wrong. `pwd -P` resolves
+  # the directory, which is where a symlink in these paths lives; the keychain
+  # file itself is not one.
+  canon_path() {
+    (cd "$(dirname "$1")" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")")
+  }
+  keychain=$(canon_path "$keychain")
+  search_list=$(security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//')
+  in_search_list=0
+  while IFS= read -r listed; do
+    if [ -n "$listed" ] && [ "$(canon_path "$listed")" = "$keychain" ]; then
+      in_search_list=1
+    fi
+  done <<EOF
+$search_list
+EOF
+  if [ "$in_search_list" -eq 0 ]; then
+    # The suggested command keeps whatever is already listed. `-s` replaces the
+    # whole list, so naming only this keychain and login would silently drop
+    # every other one the developer has.
+    fix="security list-keychains -d user -s \"$keychain\""
+    while IFS= read -r listed; do
+      [ -n "$listed" ] && fix="$fix \"$listed\""
+    done <<EOF
+$search_list
+EOF
     echo "error: $keychain is unlocked but not in the keychain search list." >&2
-    echo "       security list-keychains -d user -s \"$keychain\" ~/Library/Keychains/login.keychain-db" >&2
+    echo "       $fix" >&2
     exit 1
   fi
   echo "==> signing keychain unlocked: $keychain"
