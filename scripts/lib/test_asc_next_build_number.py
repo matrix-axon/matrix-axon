@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import urllib.parse
 from pathlib import Path
 
 HELPER = Path(__file__).with_name("asc-next-build-number.py")
@@ -68,9 +69,10 @@ class Server:
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                path = self.path.split("?")[0]
+                path, _, raw = self.path.partition("?")
+                query = {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
                 outer.requests.append((self.path, self.headers.get("Authorization", "")))
-                status, body = routes.get(path, lambda: (404, {}))()
+                status, body = routes.get(path, lambda *_: (404, {}))(query)
                 payload = json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -156,7 +158,7 @@ class EndToEnd(unittest.TestCase):
             **(env_extra or {}),
         }
         return subprocess.run(
-            [sys.executable, str(HELPER), *(args or [BUNDLE])],
+            [sys.executable, str(HELPER), *(args or [BUNDLE, "ios"])],
             env=env,
             capture_output=True,
             text=True,
@@ -164,23 +166,23 @@ class EndToEnd(unittest.TestCase):
         )
 
     def apps(self, bundle=BUNDLE):
-        return lambda: (200, {"data": [{"id": "APP1", "attributes": {"bundleId": bundle}}]})
+        return lambda *_: (200, {"data": [{"id": "APP1", "attributes": {"bundleId": bundle}}]})
 
     def test_picks_the_highest_number_across_pages_and_adds_one(self):
-        def page1():
+        def page1(*_):
             return 200, {
                 "data": [{"attributes": {"version": "2"}}, {"attributes": {"version": "9"}}],
                 "links": {"next": f"{self.server.url}/v1/builds?cursor=2"},
             }
 
-        def page2():
+        def page2(*_):
             return 200, {"data": [{"attributes": {"version": "10"}}]}
 
         # Both pages are served from the same path; the second is told apart by
         # call order, which is what a cursor is.
         calls = []
 
-        def builds():
+        def builds(*_):
             calls.append(1)
             return page1() if len(calls) == 1 else page2()
 
@@ -188,13 +190,69 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "11")
 
+    def platform_aware_builds(self):
+        """A stand-in for an app with iOS builds up to 35 and Mac builds 1, 2.
+
+        It answers the way the real service does for `filter[preReleaseVersion.platform]`:
+        only that platform's builds, and every build when the filter is absent.
+        """
+        by_platform = {"IOS": ["33", "34", "35"], "MAC_OS": ["1", "2"]}
+
+        def builds(query):
+            wanted = query.get("filter[preReleaseVersion.platform]")
+            versions = (
+                by_platform.get(wanted, [])
+                if wanted
+                else [v for vs in by_platform.values() for v in vs]
+            )
+            return 200, {"data": [{"attributes": {"version": v}} for v in versions]}
+
+        return {"/v1/apps": self.apps(), "/v1/builds": builds}
+
+    def test_each_platform_has_its_own_sequence(self):
+        # The case that went wrong: Mac builds 1 and 2, iOS up to 35. The Mac
+        # number must follow the Mac builds, not the iOS ones.
+        mac = self.run_helper(self.platform_aware_builds(), args=[BUNDLE, "macos"])
+        self.assertEqual(mac.returncode, 0, mac.stderr)
+        self.assertEqual(mac.stdout.strip(), "3")
+        ios = self.run_helper(self.platform_aware_builds(), args=[BUNDLE, "ios"])
+        self.assertEqual(ios.returncode, 0, ios.stderr)
+        self.assertEqual(ios.stdout.strip(), "36")
+
+    def test_the_platform_is_sent_as_the_apis_own_name_for_it(self):
+        for given, sent in [("ios", "IOS"), ("macos", "MAC_OS"), ("tvos", "TV_OS"), ("visionos", "VISION_OS")]:
+            with self.subTest(platform=given):
+                result = self.run_helper(self.platform_aware_builds(), args=[BUNDLE, given])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                builds_request = next(path for path, _ in self.server.requests if path.startswith("/v1/builds"))
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(builds_request).query)
+                self.assertEqual(query["filter[preReleaseVersion.platform]"], [sent])
+                self.server.close()
+                self.server = None
+
+    def test_a_platform_with_no_builds_starts_at_one(self):
+        result = self.run_helper(self.platform_aware_builds(), args=[BUNDLE, "tvos"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "1")
+
+    def test_the_platform_is_required_and_checked_before_any_request(self):
+        for args in ([BUNDLE], [BUNDLE, "windows"], [BUNDLE, "IOS"], [BUNDLE, ""]):
+            with self.subTest(args=args):
+                result = self.run_helper({}, args=args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("platform is one of: ios, macos, tvos, visionos", result.stderr)
+                self.assertEqual(self.server.requests, [])
+                self.server.close()
+                self.server = None
+
     def test_an_app_with_no_builds_gets_one(self):
-        result = self.run_helper({"/v1/apps": self.apps(), "/v1/builds": lambda: (200, {"data": []})})
+        result = self.run_helper({"/v1/apps": self.apps(), "/v1/builds": lambda *_: (200, {"data": []})})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "1")
 
     def test_the_token_is_a_valid_es256_jwt_for_this_key(self):
-        result = self.run_helper({"/v1/apps": self.apps(), "/v1/builds": lambda: (200, {"data": []})})
+        result = self.run_helper({"/v1/apps": self.apps(), "/v1/builds": lambda *_: (200, {"data": []})})
         self.assertEqual(result.returncode, 0, result.stderr)
         auth = next(a for _, a in self.server.requests if a)
         self.assertTrue(auth.startswith("Bearer "))
@@ -214,7 +272,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
 
     def test_an_unknown_bundle_id_is_an_error_with_nothing_on_stdout(self):
-        result = self.run_helper({"/v1/apps": lambda: (200, {"data": []})})
+        result = self.run_helper({"/v1/apps": lambda *_: (200, {"data": []})})
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
         self.assertIn("no app with bundle ID", result.stderr)
@@ -225,19 +283,19 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(result.stdout, "")
 
     def test_a_401_names_the_credentials(self):
-        result = self.run_helper({"/v1/apps": lambda: (401, {})})
+        result = self.run_helper({"/v1/apps": lambda *_: (401, {})})
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
         self.assertIn("rejected the credentials", result.stderr)
 
     def test_a_403_names_the_role(self):
-        result = self.run_helper({"/v1/apps": self.apps(), "/v1/builds": lambda: (403, {})})
+        result = self.run_helper({"/v1/apps": self.apps(), "/v1/builds": lambda *_: (403, {})})
         self.assertEqual(result.returncode, 1)
         self.assertIn("App Manager", result.stderr)
 
     def test_a_missing_key_file_is_reported_before_any_request(self):
         self.key.unlink()
-        result = self.run_helper({}, args=[BUNDLE])
+        result = self.run_helper({}, args=[BUNDLE, "ios"])
         self.assertEqual(result.returncode, 2)
         self.assertIn("no key at", result.stderr)
         self.assertEqual(self.server.requests, [])

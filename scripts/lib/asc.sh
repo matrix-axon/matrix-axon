@@ -34,33 +34,38 @@ asc_require_credentials() {
   : "${ASC_ISSUER_ID:?set ASC_ISSUER_ID (App Store Connect > Users and Access > Integrations), in the environment or in .env at the repository root}"
 }
 
-# asc_next_build_number REPO_ROOT TAURI_CONF
+# asc_next_build_number REPO_ROOT TAURI_CONF PLATFORM
 #
 # Prints the next CFBundleVersion for the app whose bundle ID is TAURI_CONF's
-# `identifier`: the highest App Store Connect lists plus one. Progress goes to
-# stderr so the caller can capture the number alone:
+# `identifier`, on PLATFORM (ios, macos, tvos or visionos): the highest App Store
+# Connect lists for that platform plus one. Progress goes to stderr so the caller
+# can capture the number alone:
 #
-#   build_number=$(asc_next_build_number "$repo_root" "$tauri_dir/tauri.conf.json") || exit 1
+#   build_number=$(asc_next_build_number "$repo_root" "$tauri_dir/tauri.conf.json" ios) || exit 1
 #
 # Call it before the build, so a bad credential or an unreachable App Store
 # Connect costs seconds, and after asc_require_credentials.
 #
-# The bundle ID is the app, not the platform, so the same call serves iOS and the
-# Mac App Store: it takes the highest number across every build of the app, and
-# the next one is above all of them. Numbers can skip, since an iOS build and a
-# Mac build share the sequence; App Store Connect only requires that they rise.
+# PLATFORM is required, and each platform has its own sequence. One app holds iOS
+# and Mac builds under the same bundle ID, but App Store Connect numbers them
+# separately, so counting across both hands the first Mac upload the iOS number:
+# an app with Mac builds 1 and 2 and iOS builds up to 35 got a Mac build of 36.
 #
 # A build uploaded minutes ago and still processing may not be listed yet, so two
 # uploads close together can be handed the same number — and the second is then
 # rejected, which is loud, not silent.
 asc_next_build_number() {
-  local repo_root=$1 tauri_conf=$2 bundle_id number
+  local repo_root=$1 tauri_conf=$2 platform=${3:-} bundle_id number
+  if [ -z "$platform" ]; then
+    echo "error: asc_next_build_number needs a platform (ios, macos, tvos or visionos)." >&2
+    return 1
+  fi
   bundle_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["identifier"])' "$tauri_conf") || {
     echo "error: could not read the bundle identifier from $tauri_conf." >&2
     return 1
   }
-  echo "==> asking App Store Connect for the next build number ($bundle_id)" >&2
-  number=$(python3 "$repo_root/scripts/lib/asc-next-build-number.py" "$bundle_id") || {
+  echo "==> asking App Store Connect for the next $platform build number ($bundle_id)" >&2
+  number=$(python3 "$repo_root/scripts/lib/asc-next-build-number.py" "$bundle_id" "$platform") || {
     echo "error: could not work out the next build number; pass --build-number <n> instead." >&2
     return 1
   }

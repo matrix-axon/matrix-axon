@@ -36,7 +36,7 @@ Usage: scripts/package-macos-mas.sh --profile <file> [options]
 
   --profile <file>       Mac App Store .provisionprofile (or MAS_PROVISIONING_PROFILE)
   --build-number <n>     CFBundleVersion; App Store Connect rejects a reused one.
-                         `auto` asks App Store Connect for the highest it has and
+                         `auto` asks App Store Connect for the highest it has on macOS and
                          uses one more (needs the same credentials as --upload)
   --app-identity <name>  application signing identity (default: first "3rd Party
                          Mac Developer Application" or "Apple Distribution" found)
@@ -179,7 +179,7 @@ sed "s/TEAMID/$team_id/g" "$tauri_dir/Entitlements.mas.plist" > "$entitlements"
 # an ordinary number, and it is spliced into the JSON `--config` below, which is
 # why the regex above has already refused anything else. See lib/asc.sh.
 if [ "$build_number" = "auto" ]; then
-  build_number=$(asc_next_build_number "$repo_root" "$tauri_dir/tauri.conf.json") || exit 1
+  build_number=$(asc_next_build_number "$repo_root" "$tauri_dir/tauri.conf.json" macos) || exit 1
 fi
 
 # Overrides ride in as --config, as in package-ios.sh, so nothing tracked is

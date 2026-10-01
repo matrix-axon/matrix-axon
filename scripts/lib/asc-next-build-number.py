@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
-"""Print the next CFBundleVersion for a bundle ID, from App Store Connect.
+"""Print the next CFBundleVersion for a bundle ID and platform, from App Store Connect.
 
-App Store Connect rejects an upload whose build number it has already seen for
-the app, so `package-ios.sh --build-number auto` asks it what the highest one is
-instead of leaving the caller to remember.
+App Store Connect rejects an upload whose build number it has already seen for the
+app, so `--build-number auto` in the packaging scripts asks it what the highest one
+is instead of leaving the caller to remember.
 
-    asc-next-build-number.py <bundle-id>
+    asc-next-build-number.py <bundle-id> <platform>
+
+<platform> is ios, macos, tvos or visionos, and is required. Build numbers run
+separately per platform: an app with an iOS build 35 and a Mac build 2 has a next
+Mac build of 3. An earlier version of this took the highest across every platform,
+so the first Mac upload after thirty-odd iOS ones was handed 36; naming the platform
+makes that mistake impossible to make by leaving something out.
 
 Reads ASC_KEY_ID and ASC_ISSUER_ID from the environment and the key from
 ~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8 — the same three things
 `--upload` already needs, and where altool looks for the key. The key is read
 here only to sign a short-lived token; it is never printed or sent anywhere.
 
-The answer is the highest build number App Store Connect lists for the app, with
-its last component raised by one, or 1 when the app has no builds. Numbers are
+The answer is the highest build number App Store Connect lists for that platform,
+with its last component raised by one, or 1 when there are none. Numbers are
 compared as tuples of integers, not as text, so 10 follows 9 and 1.10 follows
 1.9. Two things it cannot see: a build that has been uploaded and is still being
 processed may not be listed yet, so two uploads minutes apart can be handed the
@@ -43,6 +49,9 @@ import urllib.request
 
 # Overridable so the tests can point it at a local server. Nothing else sets it.
 API = os.environ.get("ASC_API_BASE", "https://api.appstoreconnect.apple.com")
+
+# What App Store Connect calls each platform, for `filter[preReleaseVersion.platform]`.
+PLATFORMS = {"ios": "IOS", "macos": "MAC_OS", "tvos": "TV_OS", "visionos": "VISION_OS"}
 
 # A page is at most 200 builds. 25 pages is 5000 builds, far beyond anything
 # this app will have; the cap is there so a server that keeps returning a
@@ -171,9 +180,14 @@ def find_app_id(bundle_id: str, token: str) -> str:
     return exact[0]["id"]
 
 
-def build_versions(app_id: str, token: str) -> list[str]:
+def build_versions(app_id: str, platform: str, token: str) -> list[str]:
     query = urllib.parse.urlencode(
-        {"filter[app]": app_id, "fields[builds]": "version", "limit": "200"}
+        {
+            "filter[app]": app_id,
+            "filter[preReleaseVersion.platform]": PLATFORMS[platform],
+            "fields[builds]": "version",
+            "limit": "200",
+        }
     )
     url: str | None = f"{API}/v1/builds?{query}"
     versions: list[str] = []
@@ -212,8 +226,12 @@ def next_version(listed: list[str]) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: asc-next-build-number.py <bundle-id>", file=sys.stderr)
+    if len(argv) != 3 or argv[2] not in PLATFORMS:
+        print(
+            "usage: asc-next-build-number.py <bundle-id> <platform>\n"
+            f"       platform is one of: {', '.join(PLATFORMS)}",
+            file=sys.stderr,
+        )
         return 2
     key_id = os.environ.get("ASC_KEY_ID", "")
     issuer_id = os.environ.get("ASC_ISSUER_ID", "")
@@ -227,7 +245,7 @@ def main(argv: list[str]) -> int:
     try:
         token = make_token(key_id, issuer_id, key_path)
         app_id = find_app_id(argv[1], token)
-        print(next_version(build_versions(app_id, token)))
+        print(next_version(build_versions(app_id, argv[2], token)))
     except AscError as err:
         print(f"error: {err}", file=sys.stderr)
         return 1

@@ -58,7 +58,7 @@ Usage: scripts/package-ios.sh [options]
   --device <udid>      which device (default: the only connected one)
   --export-method <m>  debugging (default) | release-testing | app-store-connect
   --build-number <n>   CFBundleVersion; App Store Connect rejects a reused one.
-                       `auto` asks App Store Connect for the highest it has and
+                       `auto` asks App Store Connect for the highest it has on iOS and
                        uses one more (app-store-connect only; needs the same
                        credentials as --upload)
   --upload             upload the .ipa to App Store Connect / TestFlight
@@ -159,7 +159,7 @@ appiconset="$tauri_dir/gen/apple/Assets.xcassets/AppIcon.appiconset"
 # `build_number` is an ordinary number and everything below treats it as one,
 # including the regex that guards the JSON override. See lib/asc.sh.
 if [ "$build_number" = "auto" ]; then
-  build_number=$(asc_next_build_number "$repo_root" "$tauri_dir/tauri.conf.json") || exit 1
+  build_number=$(asc_next_build_number "$repo_root" "$tauri_dir/tauri.conf.json" ios) || exit 1
 fi
 
 # Put rustup's shims first rather than diagnosing the Homebrew shadow after the

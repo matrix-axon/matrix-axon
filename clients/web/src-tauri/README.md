@@ -228,7 +228,9 @@ and a value with `$(...)` or a stray quote in it should not be run as shell.
 Keep it unreadable by others, `chmod 600 .env`.
 
 App Store Connect rejects a build number it has already seen for the app, so
-`--build-number auto` asks it for the highest one and uses one more:
+`--build-number auto` asks it for the highest one on the platform being built and
+uses one more. iOS and Mac builds of one app are numbered separately, so a Mac
+build is not pushed up by the iOS count:
 
 ```sh
 scripts/package-ios.sh --export-method app-store-connect --build-number auto --upload
@@ -238,7 +240,7 @@ It takes the same three credentials as `--upload`, works only with
 `--export-method app-store-connect`, and resolves the number before the build
 starts, so a bad key costs seconds rather than a build. `scripts/package-macos-mas.sh`
 takes the same credentials, reads the same `.env` and accepts the same
-`--build-number auto`. An app with no builds
+`--build-number auto`, each counting its own platform. A platform with no builds
 gets `1`; an app that does not exist in App Store Connect is an error rather than
 a guess. One limit: a build uploaded minutes ago and still processing may not be
 listed yet, so two uploads close together can be given the same number, and the

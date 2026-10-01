@@ -74,31 +74,39 @@ mkdir -p "$fake/scripts/lib" "$fake/conf"
 printf '{"identifier":"org.example.app"}\n' >"$fake/conf/tauri.conf.json"
 stub() { printf '%s\n' "$1" >"$fake/scripts/lib/asc-next-build-number.py"; }
 
-stub 'import sys; print("42" if sys.argv[1] == "org.example.app" else "WRONG BUNDLE " + sys.argv[1])'
-out=$(run_asc -- "n=\$(asc_next_build_number '$fake' '$fake/conf/tauri.conf.json'); echo \"got=\$n\"")
-contains "$out" "got=42" && contains "$out" "rc=0" || fail "the bundle ID from tauri.conf.json is passed to the helper and its number returned" "$out"
-contains "$out" "asking App Store Connect for the next build number (org.example.app)" || fail "it says what it is doing, on stderr" "$out"
+# The stub plays an app with iOS builds up to 41 and Mac builds up to 2.
+stub 'import sys
+bundle, platform = sys.argv[1], sys.argv[2]
+print({"ios": "42", "macos": "3"}[platform] if bundle == "org.example.app" else "WRONG BUNDLE " + bundle)'
+out=$(run_asc -- "n=\$(asc_next_build_number '$fake' '$fake/conf/tauri.conf.json' ios); echo \"got=\$n\"")
+contains "$out" "got=42" && contains "$out" "rc=0" || fail "the bundle ID from tauri.conf.json and the platform are passed to the helper and its number returned" "$out"
+contains "$out" "asking App Store Connect for the next ios build number (org.example.app)" || fail "it says what it is doing, and for which platform, on stderr" "$out"
+out=$(run_asc -- "n=\$(asc_next_build_number '$fake' '$fake/conf/tauri.conf.json' macos); echo \"got=\$n\"")
+contains "$out" "got=3" || fail "the same app on another platform gets that platform's number, not the iOS one" "$out"
 
 # stdout carries the number and nothing else, so $(...) captures just it.
-out=$(env -i PATH="$PATH" HOME="$work" "$test_bash" --noprofile --norc -c 'set -euo pipefail; . "$1"; asc_next_build_number "$2" "$3" 2>/dev/null' _ "$here/asc.sh" "$fake" "$fake/conf/tauri.conf.json")
-[ "$out" = "42" ] || fail "stdout is the number alone" "got: <$out>"
+out=$(env -i PATH="$PATH" HOME="$work" "$test_bash" --noprofile --norc -c 'set -euo pipefail; . "$1"; asc_next_build_number "$2" "$3" macos 2>/dev/null' _ "$here/asc.sh" "$fake" "$fake/conf/tauri.conf.json")
+[ "$out" = "3" ] || fail "stdout is the number alone" "got: <$out>"
 
 for good in 1 7 1.2 1.2.3; do
   stub "print('$good')"
-  out=$(run_asc -- "asc_next_build_number '$fake' '$fake/conf/tauri.conf.json' 2>/dev/null")
+  out=$(run_asc -- "asc_next_build_number '$fake' '$fake/conf/tauri.conf.json' ios 2>/dev/null")
   contains "$out" "OUT<$good>" || fail "$good is accepted as a build number" "$out"
 done
 for bad in abc "1.2.3.4" "1 2" '1"}' "-1" ""; do
   stub "print('$bad')"
-  out=$(run_asc -- "asc_next_build_number '$fake' '$fake/conf/tauri.conf.json'; echo survived")
+  out=$(run_asc -- "asc_next_build_number '$fake' '$fake/conf/tauri.conf.json' ios; echo survived")
   contains "$out" "which is not a build number" && contains "$out" "rc=1" && ! contains "$out" "survived" || fail "'$bad' from the helper is refused, not passed to --config" "$out"
 done
 
-stub 'import sys; sys.exit(1)'
 out=$(run_asc -- "asc_next_build_number '$fake' '$fake/conf/tauri.conf.json'; echo survived")
+contains "$out" "needs a platform" && contains "$out" "rc=1" && ! contains "$out" "survived" || fail "a missing platform is an error, not a guess" "$out"
+
+stub 'import sys; sys.exit(1)'
+out=$(run_asc -- "asc_next_build_number '$fake' '$fake/conf/tauri.conf.json' ios; echo survived")
 contains "$out" "could not work out the next build number; pass --build-number <n> instead" && contains "$out" "rc=1" && ! contains "$out" "survived" || fail "a failing helper is an error that names the way out" "$out"
 
-out=$(run_asc -- "asc_next_build_number '$fake' '$fake/conf/missing.json'; echo survived")
+out=$(run_asc -- "asc_next_build_number '$fake' '$fake/conf/missing.json' ios; echo survived")
 contains "$out" "could not read the bundle identifier" && contains "$out" "rc=1" || fail "an unreadable tauri.conf.json is an error" "$out"
 
 if [ "$failures" -ne 0 ]; then
