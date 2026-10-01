@@ -211,7 +211,12 @@ generated once and then frozen, so it regenerates it every run and passes
 `bundle.iOS` settings as `--config` overrides; that `tauri icon`'s iOS set
 carries an alpha channel App Store Connect rejects, so it flattens it on the
 way in; and that a Homebrew `rust` on `PATH` shadows rustup and has no iOS
-`std`, so it puts `~/.cargo/bin` first and then checks.
+`std`, so it puts `~/.cargo/bin` first and then checks; and that an exported
+`FORCE_COLOR=1` (common in a shell rc) makes Xcode's Rust build phase read the
+`1` as an architecture and fail with
+`Arch specified by Xcode was invalid. {arch} isn't a known arch`, so it unsets
+it. If you call `pnpm tauri ios build` yourself from such a shell, `unset
+FORCE_COLOR` first.
 
 `--upload` needs `ASC_KEY_ID` and `ASC_ISSUER_ID`, and an
 `~/.appstoreconnect/private_keys/AuthKey_*.p8`. Both are checked before the
