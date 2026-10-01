@@ -56,13 +56,20 @@ Usage: scripts/package-ios.sh [options]
   --install            install the built .ipa to a connected device
   --device <udid>      which device (default: the only connected one)
   --export-method <m>  debugging (default) | release-testing | app-store-connect
-  --build-number <n>   CFBundleVersion; App Store Connect rejects a reused one
+  --build-number <n>   CFBundleVersion; App Store Connect rejects a reused one.
+                       `auto` asks App Store Connect for the highest it has and
+                       uses one more (app-store-connect only; needs the same
+                       credentials as --upload)
   --upload             upload the .ipa to App Store Connect / TestFlight
   -h, --help           this
+
+ASC_KEY_ID and ASC_ISSUER_ID, which --upload and `--build-number auto` need, are
+taken from the environment or, failing that, from .env at the repository root.
 
 Examples:
   scripts/package-ios.sh --install
   scripts/package-ios.sh --export-method app-store-connect --build-number 2 --upload
+  scripts/package-ios.sh --export-method app-store-connect --build-number auto --upload
 USAGE
 }
 
@@ -93,8 +100,31 @@ if [ "$upload" -eq 1 ]; then
     echo "error: --upload needs --export-method app-store-connect; got $export_method" >&2
     exit 2
   fi
-  : "${ASC_KEY_ID:?set ASC_KEY_ID (the A1B2C3D4E5 in ~/.appstoreconnect/private_keys/AuthKey_*.p8)}"
-  : "${ASC_ISSUER_ID:?set ASC_ISSUER_ID (App Store Connect > Users and Access > Integrations)}"
+fi
+# `--build-number auto` talks to App Store Connect, so it needs what `--upload`
+# does and only makes sense for a build that is going there.
+if [ "$build_number" = "auto" ] && [ "$export_method" != "app-store-connect" ]; then
+  echo "error: --build-number auto needs --export-method app-store-connect; got $export_method" >&2
+  exit 2
+fi
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+if [ "$upload" -eq 1 ] || [ "$build_number" = "auto" ]; then
+  # The two App Store Connect identifiers may live in the repository's `.env`
+  # (gitignored) rather than the environment. Those two names only: that file is
+  # the server's configuration, and nothing else in it belongs in a build. The
+  # environment still wins, and the values are never printed. See the header of
+  # lib/load-env-key.sh for why this is not `source .env`.
+  source "$repo_root/scripts/lib/load-env-key.sh"
+  for key in ASC_KEY_ID ASC_ISSUER_ID; do
+    rc=0
+    load_env_key "$key" "$repo_root/.env" || rc=$?
+    if [ "$rc" -eq 10 ]; then
+      echo "==> $key taken from $repo_root/.env"
+    fi
+  done
+  : "${ASC_KEY_ID:?set ASC_KEY_ID (the A1B2C3D4E5 in ~/.appstoreconnect/private_keys/AuthKey_*.p8), in the environment or in .env at the repository root}"
+  : "${ASC_ISSUER_ID:?set ASC_ISSUER_ID (App Store Connect > Users and Access > Integrations), in the environment or in .env at the repository root}"
 fi
 
 # Checked here for the same reason, and because this value is spliced into a
@@ -104,7 +134,7 @@ fi
 # already thrown the Xcode project away. `CFBundleVersion` is one to three
 # period-separated non-negative integers, so anything else is a typo, not a
 # version.
-if [ -n "$build_number" ] && ! [[ $build_number =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+if [ -n "$build_number" ] && [ "$build_number" != "auto" ] && ! [[ $build_number =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
   echo "error: --build-number must be one to three dot-separated numbers (CFBundleVersion); got '$build_number'" >&2
   exit 2
 fi
@@ -127,11 +157,33 @@ if [ "$install_app" -eq 1 ] && [ -z "$device" ]; then
   echo "==> resolved device $device"
 fi
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 web_dir="$repo_root/clients/web"
 tauri_dir="$web_dir/src-tauri"
 icon_src="$tauri_dir/icons/ios"
 appiconset="$tauri_dir/gen/apple/Assets.xcassets/AppIcon.appiconset"
+
+# Resolve `auto` now, before `rm -rf gen/apple` and a multi-minute build, so a
+# bad credential or an unreachable App Store Connect costs seconds. After this
+# `build_number` is an ordinary number and everything below treats it as one,
+# including the regex that guards the JSON override.
+#
+# The number is the highest App Store Connect lists plus one. A build uploaded
+# minutes ago and still processing may not be listed yet, so two uploads close
+# together can be handed the same number — and the second is then rejected, which
+# is loud, not silent.
+if [ "$build_number" = "auto" ]; then
+  bundle_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["identifier"])' "$tauri_dir/tauri.conf.json")
+  echo "==> asking App Store Connect for the next build number ($bundle_id)"
+  build_number=$(python3 "$repo_root/scripts/lib/asc-next-build-number.py" "$bundle_id") || {
+    echo "error: could not work out the next build number; pass --build-number <n> instead." >&2
+    exit 1
+  }
+  if ! [[ $build_number =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+    echo "error: App Store Connect lookup returned '$build_number', which is not a build number." >&2
+    exit 1
+  fi
+  echo "    build number: $build_number"
+fi
 
 # Put rustup's shims first rather than diagnosing the Homebrew shadow after the
 # fact. Harmless when they already are.

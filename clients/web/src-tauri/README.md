@@ -220,7 +220,27 @@ FORCE_COLOR` first.
 
 `--upload` needs `ASC_KEY_ID` and `ASC_ISSUER_ID`, and an
 `~/.appstoreconnect/private_keys/AuthKey_*.p8`. Both are checked before the
-build rather than after it.
+build rather than after it. The two identifiers can be exported, or put in the
+repository's gitignored `.env`; the environment wins when both are set. The
+script reads only those two names from that file, as data. It does not `source`
+it: `.env` is the server's configuration, nothing else in it belongs in a build,
+and a value with `$(...)` or a stray quote in it should not be run as shell.
+Keep it unreadable by others, `chmod 600 .env`.
+
+App Store Connect rejects a build number it has already seen for the app, so
+`--build-number auto` asks it for the highest one and uses one more:
+
+```sh
+scripts/package-ios.sh --export-method app-store-connect --build-number auto --upload
+```
+
+It takes the same three credentials as `--upload`, works only with
+`--export-method app-store-connect`, and resolves the number before the build
+starts, so a bad key costs seconds rather than a build. An app with no builds
+gets `1`; an app that does not exist in App Store Connect is an error rather than
+a guess. One limit: a build uploaded minutes ago and still processing may not be
+listed yet, so two uploads close together can be given the same number, and the
+second is then rejected.
 
 There is no CI lane — [#445](https://github.com/matrix-axon/matrix-axon/issues/445)
 tracks one, and this script is what it should be built from.
