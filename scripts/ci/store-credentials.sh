@@ -379,6 +379,7 @@ $(profile_dirs | tr ':' '\n')
 EOF
 
   local base found=0
+  saw_osx=0
   base=$(work_dir)
   plist="$base/list-profiles.plist"
   for t in "${targets[@]}"; do
@@ -393,8 +394,14 @@ EOF
   done
   if [ "$found" -eq 0 ]; then
     echo "no provisioning profiles found${bundle_id:+ for $bundle_id}" >&2
-    return 1
   fi
+  # The Mac App Store profile is a file downloaded from the developer portal, not
+  # one Xcode installs, so it is the profile most likely to be missing from this
+  # list for a reason that is not obvious.
+  if [ "$saw_osx" -eq 0 ]; then
+    echo "note: no macOS profile (.provisionprofile) found. A Mac App Store profile is a file downloaded from the developer portal, not one Xcode installs: name the folder or file you saved it in, e.g. list-profiles${bundle_id:+ --bundle-id $bundle_id} ~/Downloads" >&2
+  fi
+  [ "$found" -eq 1 ]
 }
 
 # One line for FILE, or nothing (and a failure) if it is not a profile for the
@@ -410,6 +417,7 @@ describe_profile() {
     case $appid in *".$bundle_id") ;; *) return 1 ;; esac
   fi
   platform=$(plutil -extract Platform.0 raw -o - "$plist" 2>/dev/null || echo "iOS")
+  if [ "$platform" = "OSX" ]; then saw_osx=1; fi
   expires=$(plutil -extract ExpirationDate raw -o - "$plist" 2>/dev/null || echo "?")
   gta=$(plutil -extract Entitlements.get-task-allow raw -o - "$plist" 2>/dev/null || echo "false")
   devices=$(plutil -extract ProvisionedDevices raw -o - "$plist" 2>/dev/null || true)

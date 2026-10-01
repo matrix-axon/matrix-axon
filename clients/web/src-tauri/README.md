@@ -543,10 +543,13 @@ base64 -i store.p12 | gh secret set APPLE_STORE_CERTIFICATES
 gh secret set APPLE_STORE_CERTIFICATES_PASSWORD       # paste the password at the prompt
 rm store.p12
 
-# 2. The profiles. This lists every one on this Mac with its kind and platform, so
-#    the right file goes into the right secret. Add a folder (~/Downloads) for a
-#    profile that has not been installed.
-scripts/ci/store-credentials.sh list-profiles --bundle-id org.matrixaxon.axon
+# 2. The profiles. Xcode installs the iOS profiles itself, so this finds them and
+#    shows each one's kind and platform, so the right file goes into the right
+#    secret. The Mac App Store profile is different: it is a file you downloaded
+#    from the developer portal (the one you pass to package-macos-mas.sh
+#    --profile) and was never installed anywhere, so name the folder you saved it
+#    in. Without that, no macOS profile is listed, and it says so.
+scripts/ci/store-credentials.sh list-profiles --bundle-id org.matrixaxon.axon ~/Downloads
 base64 -i '<the app-store iOS .mobileprovision>' | gh secret set IOS_APPSTORE_PROFILE
 base64 -i '<the development iOS .mobileprovision>' | gh secret set IOS_DEVELOPMENT_PROFILE
 base64 -i '<the app-store OSX .provisionprofile>' | gh secret set MAC_APPSTORE_PROFILE
@@ -572,10 +575,11 @@ Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
 - **The profiles** are checked when they are installed: it is an error for
   `IOS_APPSTORE_PROFILE` to hold a development or Ad Hoc profile, for a profile to
   be for another app or to have expired. That is the check for the two being
-  swapped, which otherwise fails inside `xcodebuild` as `No profiles for … were
-found`. A profile that has not been installed on this Mac, such as one
-  downloaded from the developer portal, is found by naming its folder to
-  `list-profiles`.
+  swapped, which otherwise fails inside `xcodebuild` as
+  `No profiles for … were found`. `list-profiles` finds the iOS profiles because
+  Xcode installs them. The Mac App Store profile is a file downloaded from the
+  developer portal and never installed, so it is found only when you name the
+  folder, or the file, it is in; when no macOS profile turns up it says so.
 - **The API key** needs the App Manager role or above (App Store Connect > Users
   and Access > Integrations > Team Keys). A key made for CI, rather than the one on
   your own machine, can be revoked without touching your builds. The key ID is the

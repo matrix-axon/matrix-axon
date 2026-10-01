@@ -289,6 +289,13 @@ out=$(run_real PROVISIONING_PROFILES_DIRS="$work/lp1:$work/lp2" -- list-profiles
 contains "$out" "rc=0" && contains "$out" "$work/lp1/store.mobileprovision" && contains "$out" "$work/lp2/mac.provisionprofile" || fail "list-profiles: finds profiles in every folder" "$out"
 contains "$out" "| app-store | iOS |" && contains "$out" "| development | iOS |" && contains "$out" "| app-store | OSX |" || fail "list-profiles: says the kind and the platform of each" "$out"
 contains "$out" "other.mobileprovision" && fail "list-profiles: --bundle-id leaves out a profile for another app" "$out"
+contains "$out" "no macOS profile" && fail "list-profiles: no hint about a missing macOS profile when one was listed" "$out"
+
+# A Mac App Store profile is a downloaded file, not one Xcode installs, so when the
+# folders searched hold only iOS profiles the output says where to look.
+out=$(run_real PROVISIONING_PROFILES_DIRS="$work/lp1" -- list-profiles --bundle-id org.example.app)
+contains "$out" "rc=0" && contains "$out" "note: no macOS profile (.provisionprofile) found" && contains "$out" "name the folder or file you saved it in" || fail "list-profiles: with only iOS profiles it says no macOS profile was found, and where to look" "$out"
+contains "$out" "$work/lp1/store.mobileprovision" || fail "list-profiles: ...and still lists the iOS ones" "$out"
 
 out=$(run_real PROVISIONING_PROFILES_DIRS="$work/lp1:$work/lp2" -- list-profiles)
 contains "$out" "other.mobileprovision" || fail "list-profiles: without --bundle-id, every profile is listed" "$out"
@@ -300,6 +307,7 @@ contains "$out" "rc=0" && contains "$out" "$work/lp1/store.mobileprovision" || f
 
 out=$(run_real PROVISIONING_PROFILES_DIRS="$work/lp-empty" -- list-profiles --bundle-id org.example.app)
 contains "$out" "rc=1" && contains "$out" "no provisioning profiles found for org.example.app" || fail "list-profiles: nothing found is an error that says so" "$out"
+contains "$out" "note: no macOS profile" || fail "list-profiles: nothing found also carries the hint about a downloaded Mac profile" "$out"
 
 # --- asc-key -----------------------------------------------------------------
 
