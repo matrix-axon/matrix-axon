@@ -273,10 +273,17 @@ export AXON_IOS_KEYCHAIN=build   # a name under ~/Library/Keychains, or a path
 The script then unlocks it before the build. Which identities it needs depends
 on `--export-method`:
 
-| `--export-method`                      | Identity             |
-| -------------------------------------- | -------------------- |
-| `debugging` (default)                  | `Apple Development`  |
-| `release-testing`, `app-store-connect` | `Apple Distribution` |
+| `--export-method`     | Identity             | Verified from the keychain alone |
+| --------------------- | -------------------- | -------------------------------- |
+| `debugging` (default) | `Apple Development`  | yes                              |
+| `app-store-connect`   | `Apple Distribution` | yes                              |
+| `release-testing`     | `Apple Distribution` | no — fails at export, see below  |
+
+`release-testing` builds and archives, then fails at export with
+`exportArchive No Accounts` and `No profiles for 'org.matrixaxon.axon' were
+found`. That is a provisioning-profile problem, not a keychain one: the same
+keychain completes `app-store-connect`. It is not yet diagnosed;
+[#529](https://github.com/matrix-axon/matrix-axon/issues/529) tracks it.
 
 Three things that are easy to get wrong:
 
@@ -284,7 +291,9 @@ Three things that are easy to get wrong:
   exists in both keychains is resolved to the login copy, which is locked, even
   when `build` is listed first. The same certificate signed with the login copy
   gone and failed with it present. Delete the certificate and its private key
-  together.
+  together. The script does not yet warn about a leftover copy
+  ([#528](https://github.com/matrix-axon/matrix-axon/issues/528)), so you find
+  out at the signing step.
 - **`set-key-partition-list` is not optional.** Without it macOS asks, through a
   dialog, whether `codesign` may use the key. Run it again after every import.
 - **An empty password is the point, not an oversight.** Anyone who can read the
@@ -297,11 +306,20 @@ Three things that are easy to get wrong:
 keychain, so none of this applies to it.
 
 To check the setup without a full build, sign a scratch file with the keychain
-alone in the search list:
+alone in the search list. With the login keychain also listed, a copy of the
+identity left there decides the result, which is the case this test exists to
+catch, so narrow the list first and put it back afterwards:
 
 ```sh
+security list-keychains -d user          # note what is listed; you restore it below
+security list-keychains -d user -s ~/Library/Keychains/build.keychain-db
+
 t=$(mktemp) && cp /bin/echo "$t"
 codesign -f -s "Apple Development: NAME (TEAMID)" "$t"; echo "exit $?"; rm -f "$t"
+
+# Restore every keychain the first command printed, in that order:
+security list-keychains -d user -s ~/Library/Keychains/login.keychain-db \
+  ~/Library/Keychains/build.keychain-db
 ```
 
 ## The bundle identifier is settled
