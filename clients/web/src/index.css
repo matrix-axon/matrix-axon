@@ -1110,6 +1110,25 @@ body {
   border-color: #000000;
   background: #000000;
   color: #ffffff;
+  /* Apple's guidelines ask for the system font on a custom Sign in with
+     Apple button, where the others use their own brand's. */
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+}
+
+/* The black style is for light backgrounds only; on a dark one Apple's
+   guidelines call for the white style. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .sso-apple {
+    border-color: #ffffff;
+    background: #ffffff;
+    color: #000000;
+  }
+}
+
+:root[data-theme='dark'] .sso-apple {
+  border-color: #ffffff;
+  background: #ffffff;
+  color: #000000;
 }
 
 .sso-generic {

@@ -1,4 +1,5 @@
 import { STORAGE_KEY as TOKEN_KEY } from './auth/token-paste'
+import type { SecureStorage } from './platform'
 import {
   PENDING_KEY as OAUTH_PENDING_KEY,
   SESSION_KEY as OAUTH_SESSION_KEY,
@@ -27,6 +28,13 @@ import {
 
 /** Its own key, not part of the `axon.settings` envelope — see above. */
 export const SERVER_URL_KEY = 'axon.server'
+
+/** Every key that holds a credential issued by the current server. */
+const CREDENTIAL_KEYS = [
+  TOKEN_KEY,
+  OAUTH_SESSION_KEY,
+  OAUTH_PENDING_KEY,
+] as const
 
 /**
  * Parse what a human typed into a base URL, or `null` if it cannot be one.
@@ -270,28 +278,34 @@ export function clearStoredServerUrl(storage: Storage): void {
  * M-W12 needs, and it is a persistence-schema change with a migration for
  * everyone who already has an `axon.token`. Deliberately not taken here — the
  * user switching servers expects to sign in again, and the copy says so.
+ *
+ * Resolves `true` once it has reloaded. Resolves `false`, having reloaded
+ * nothing and kept the server, when the Keychain would not delete a credential
+ * even on a second try: the token would otherwise survive into the next
+ * document and go to whichever server is chosen next.
  */
 export function disconnectFromServer(
   storage: Storage = window.localStorage,
   clearToken: () => void = () => {},
   reload: (url: string) => void = (url) => window.location.assign(url),
   sessionStorage: Storage = window.sessionStorage,
-): void {
+  secureStorage: SecureStorage | null = null,
+): Promise<boolean> {
   // In-memory first: the auth provider holds signals that outlive a storage
   // write, so clearing only the keys leaves a signed-in shell pointing at a
   // server it has no credential for.
   clearToken()
-  for (const store of [storage, sessionStorage]) {
-    for (const key of [
-      SERVER_URL_KEY,
-      TOKEN_KEY,
-      OAUTH_SESSION_KEY,
-      OAUTH_PENDING_KEY,
-    ]) {
-      try {
-        store.removeItem(key)
-      } catch {
-        // A store that refuses writes has nothing to forget.
+  // With a Keychain the server URL goes last, and only once the Keychain has
+  // let go of the credentials: the URL is what ties a credential to the server
+  // that issued it, so it must outlive any credential we could not delete.
+  const forget = (keys: readonly string[]) => {
+    for (const store of [storage, sessionStorage]) {
+      for (const key of keys) {
+        try {
+          store.removeItem(key)
+        } catch {
+          // A store that refuses writes has nothing to forget.
+        }
       }
     }
   }
@@ -299,5 +313,47 @@ export function disconnectFromServer(
   // into the service graph at construction (`createServices`), so nothing
   // short of rebuilding it can point the app somewhere else. `/` rather than
   // the current path, because the current path belongs to the old server.
-  reload('/')
+  if (secureStorage === null) {
+    forget([SERVER_URL_KEY, ...CREDENTIAL_KEYS])
+    reload('/')
+    return Promise.resolve(true)
+  }
+  forget(CREDENTIAL_KEYS)
+  // The Keychain is written behind `clearToken` (`Platform.secureStorage`).
+  // Reloading first could bring the next document up holding the old
+  // server's token, to send to whichever server is chosen next.
+  return keychainForgot(secureStorage).then((forgot) => {
+    if (!forgot) {
+      // Reloading anyway would do exactly that. The server URL is still set,
+      // so the app stays tied to the server the credentials belong to, and the
+      // caller can say so and let the user try again.
+      return false
+    }
+    forget([SERVER_URL_KEY])
+    reload('/')
+    return true
+  })
+}
+
+/**
+ * Wait for the Keychain to finish the deletes `clearToken` queued, and if one
+ * failed, delete again once. A second failure is a Keychain that is refusing
+ * us, not a blip, and is reported rather than retried forever.
+ */
+async function keychainForgot(secureStorage: SecureStorage): Promise<boolean> {
+  try {
+    await secureStorage.settled()
+    return true
+  } catch {
+    // Fall through to the one retry.
+  }
+  for (const key of CREDENTIAL_KEYS) {
+    secureStorage.removeItem(key)
+  }
+  try {
+    await secureStorage.settled()
+    return true
+  } catch {
+    return false
+  }
 }

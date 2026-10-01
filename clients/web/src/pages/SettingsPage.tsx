@@ -6,6 +6,7 @@ import {
   notificationPermissionAvailable,
   requestAppBadgeNotificationPermission,
 } from '../app-badge'
+import { LinkAppleSection } from '../auth/oauth'
 import { BUILD_INFO } from '../build-info'
 import { CopyableText } from '../components/CopyableText'
 import { ReactionPicker } from '../components/MessageEventRow'
@@ -301,6 +302,7 @@ function SettingsPageContents() {
         </a>
       </section>
       <ServerSettings />
+      <LinkAppleSection oauth={auth.oauth} bearer={() => auth.getToken()} />
       <DebugSettings />
       <section class="panel">
         <h2>Session</h2>
@@ -1058,6 +1060,7 @@ function ServerSettings() {
   // the browser's `'/'` default and hides this panel — including in the shell,
   // which is the only build that can reach it.
   const { auth, platform } = useServices()
+  const [failed, setFailed] = useState(false)
   if (platform.defaultApiBaseUrl !== null) {
     return null
   }
@@ -1077,12 +1080,25 @@ function ServerSettings() {
         // No navigation of its own: `disconnectFromServer` ends with
         // `reload('/')`, and assigning `/` again here was a second document
         // load racing the first.
-        onClick={() =>
-          disconnectFromServer(window.localStorage, () => auth.clearToken())
-        }
+        onClick={() => {
+          setFailed(false)
+          void disconnectFromServer(
+            window.localStorage,
+            () => auth.clearToken(),
+            undefined,
+            undefined,
+            platform.secureStorage,
+          ).then((reloaded) => setFailed(!reloaded))
+        }}
       >
         Change server
       </button>
+      {failed && (
+        <p class="error" role="alert">
+          Could not remove your sign-in from the Keychain, so the server was not
+          changed. Try again.
+        </p>
+      )}
       <p class="muted">
         Disconnect from this server and choose another. This signs you out:
         credentials belong to the server that issued them, so you will sign in

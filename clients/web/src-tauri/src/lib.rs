@@ -77,6 +77,10 @@ pub fn run() {
         // The OAuth callback. Sign-in happens in the user's real browser
         // (RFC 8252), which redirects to this app's registered scheme.
         .plugin(tauri_plugin_deep_link::init())
+        // Native Sign in with Apple and Keychain token storage, on iOS. Inert
+        // elsewhere: its `capabilities` command says so and the page never
+        // calls the rest. See `native-auth/src/lib.rs`.
+        .plugin(tauri_plugin_native_auth::init())
         // Serve the bundle ourselves, so an unknown path can fall back to the
         // app instead of 404ing. See `route`.
         .register_uri_scheme_protocol(APP_SCHEME, |ctx, request| {

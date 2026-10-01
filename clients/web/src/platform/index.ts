@@ -82,6 +82,32 @@ export type NativeDrag =
       files: () => Promise<readonly File[]>
     }
 
+/**
+ * Thrown by `Platform.appleSignIn` when the user dismissed the Apple sheet.
+ *
+ * A deliberate choice, not a failure: the sign-in screen goes back to how it
+ * was and shows nothing, rather than an error for someone who changed their
+ * mind.
+ */
+export class NativeSignInCancelled extends Error {
+  readonly name = 'NativeSignInCancelled'
+}
+
+/**
+ * Credential storage the OS protects (the iOS Keychain), presented as a
+ * synchronous `Storage` so `auth/persistence.ts` needs no second shape.
+ *
+ * Reads are served from a copy loaded once before the app renders; writes
+ * update that copy immediately and reach the OS store in order, afterwards.
+ * `settled` resolves once every write issued so far has landed, for the one
+ * caller that must not outrun them: a full document load straight after
+ * signing out, which would otherwise race the Keychain delete and could come
+ * back up still holding the token it was meant to forget.
+ */
+export interface SecureStorage extends Storage {
+  settled(): Promise<void>
+}
+
 export interface Platform {
   /**
    * The HTTP transport. Signature-compatible with the global, because
@@ -225,6 +251,30 @@ export interface Platform {
   browserCanAdoptApp: boolean
 
   /**
+   * Where auth credentials live when the platform has something better than
+   * `localStorage`, or `null` to use `localStorage` as a browser must.
+   *
+   * The iOS shell's Keychain (ADR 0054). Only credentials go here — Axon's own
+   * access and refresh tokens, never an upstream provider's — and only the
+   * persistent tier: "Remember me" off still means the session tier.
+   */
+  secureStorage: SecureStorage | null
+
+  /**
+   * Run the platform's own Sign in with Apple sheet with the Axon server's
+   * challenge `nonce`, resolving to Apple's identity token, or `null` where
+   * there is no native Apple sign-in and Apple (if offered) goes through the
+   * browser like any other provider.
+   *
+   * The nonce is passed to Apple exactly as the server issued it. It is already
+   * a digest of server randomness, and the server checks the signed claim
+   * against that exact string (`docs/apple-oauth-native.md`).
+   *
+   * Rejects with `NativeSignInCancelled` when the user dismisses the sheet.
+   */
+  appleSignIn: ((nonce: string) => Promise<string>) | null
+
+  /**
    * The API base to fall back on when the user has configured none and no
    * `VITE_AXON_SERVER_URL` was baked in (ADR 0102 § 3).
    *
@@ -280,6 +330,10 @@ export function browserPlatform(): Platform {
     // The page's own drag-and-drop events are the channel here, and they carry
     // the files. Nothing to add.
     onNativeFileDrop: null,
+    // A browser has no OS credential store it can reach, and no native Apple
+    // sheet; Apple, where offered, is a browser redirect like the others.
+    secureStorage: null,
+    appleSignIn: null,
     // Same-origin: the deployment that serves this bundle also proxies /v1.
     defaultApiBaseUrl: '/',
     // A deploy replaces what this origin serves, which is what makes the

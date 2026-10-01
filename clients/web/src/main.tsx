@@ -51,9 +51,14 @@ const root = document.getElementById('app')!
  * it was. Only the shell pays for its own plugins, and only it waits a tick.
  */
 if (isTauriRuntime()) {
-  void import('./platform/tauri.ts').then(({ tauriPlatform }) => {
-    render(<AppRoot platform={tauriPlatform()} />, root)
-  })
+  void import('./platform/tauri.ts').then(
+    async ({ tauriPlatform, loadNativeAuth }) => {
+      // The Keychain is read before the first render, because auth reads its
+      // tokens synchronously while the service graph is built. Never rejects;
+      // off iOS it is one IPC round trip that answers "nothing here".
+      render(<AppRoot platform={tauriPlatform(await loadNativeAuth())} />, root)
+    },
+  )
 } else {
   render(<AppRoot platform={browserPlatform()} />, root)
 }

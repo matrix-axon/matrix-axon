@@ -122,6 +122,8 @@ describe('AppRoot wiring the transport into the app', () => {
       // A packaged build, like the one this simulates.
       updatesFromOrigin: false,
       browserCanAdoptApp: false,
+      secureStorage: null,
+      appleSignIn: null,
     }
 
     // A token, so the shell mounts signed-in and actually issues requests.

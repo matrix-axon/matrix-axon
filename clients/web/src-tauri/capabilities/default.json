@@ -44,6 +44,10 @@
     {
       "identifier": "deep-link:default",
       "comment": "Receive the OAuth authorization code. Sign-in happens in the user's real browser (RFC 8252), which redirects to this app's registered scheme; without this the code has nowhere to land and the flow dead-ends in the browser."
+    },
+    {
+      "identifier": "native-auth:default",
+      "comment": "Sign in with Apple and Keychain storage for Axon's own tokens, implemented on iOS only (native-auth/src/lib.rs). Elsewhere `capabilities` answers false and the page calls nothing else. Apple's identity token passes through to the page once and is never stored; the Keychain holds only Axon-issued credentials."
     }
   ]
 }

@@ -254,6 +254,18 @@ echo "==> regenerating the iOS project"
 rm -rf "$tauri_dir/gen/apple"
 pnpm tauri ios init --ci ${config_args[@]+"${config_args[@]}"}
 
+echo "==> installing the iOS entitlements"
+# `tauri ios init` writes an empty entitlements file and has no setting to fill
+# it, so the committed one is copied over it on every regeneration. Without it
+# Sign in with Apple fails at run time, not at build time: see the file's own
+# comment.
+entitlements="$tauri_dir/gen/apple/axon_iOS/axon_iOS.entitlements"
+if [ ! -f "$entitlements" ]; then
+  echo "error: no generated entitlements file at $entitlements" >&2
+  exit 1
+fi
+cp "$tauri_dir/Entitlements.ios.plist" "$entitlements"
+
 echo "==> syncing the app icon from icons/ios"
 if [ ! -d "$appiconset" ]; then
   echo "error: no appiconset at $appiconset" >&2
@@ -285,21 +297,44 @@ if [ -z "$ipa" ]; then
 fi
 echo "==> built $ipa"
 
-# Say what actually shipped rather than what was meant to. Both of these have
-# been wrong in a bundle that built and signed cleanly.
-# Same, and it matters more here: this block is informational, but without
-# `|| true` a DerivedData path that does not match — a custom location, a
-# renamed product — would abort the script after a successful build and before
-# `--install` and `--upload` ever ran.
-app=$(ls -dt ~/Library/Developer/Xcode/DerivedData/axon-*/Build/Products/*-iphoneos/Axon.app 2>/dev/null | head -1 || true)
-if [ -n "$app" ] && [ -f "$app/Info.plist" ]; then
-  scheme=$(plutil -extract CFBundleURLTypes.0.CFBundleURLSchemes.0 raw -o - "$app/Info.plist" 2>/dev/null || echo "(none)")
-  echo "    url scheme:   $scheme"
-  echo "    version:      $(plutil -extract CFBundleShortVersionString raw -o - "$app/Info.plist" 2>/dev/null)"
-  echo "    build number: $(plutil -extract CFBundleVersion raw -o - "$app/Info.plist" 2>/dev/null)"
-  if [ "$scheme" = "(none)" ]; then
-    echo "warning: no URL scheme in the bundle — OAuth sign-in will not return" >&2
-  fi
+# Say what actually shipped rather than what was meant to, read from the .ipa
+# itself. Both the URL scheme and the version have been wrong in a bundle that
+# built and signed cleanly: TestFlight build 25 shipped with no URL scheme, so
+# every browser sign-in ended in "the application couldn't be opened".
+#
+# Not from DerivedData. That was read here once, by newest timestamp across
+# every `axon-*` directory, which is another workspace's app whenever two
+# workspaces build at once; and the archive step builds it with signing
+# disabled, so it never carries entitlements. Only the exported .ipa is what
+# ships.
+#
+# Fatal, not a warning: a line in thousands of lines of build output is not
+# read, and `--upload` would go on to ship the broken bundle.
+expected_scheme=org.matrixaxon.axon
+ipa_check=$(mktemp -d)
+unzip -q "$ipa" 'Payload/*' -d "$ipa_check"
+shipped_app=$(ls -d "$ipa_check"/Payload/*.app | head -1)
+shipped_plist="$shipped_app/Info.plist"
+scheme=$(plutil -extract CFBundleURLTypes.0.CFBundleURLSchemes.0 raw -o - "$shipped_plist" 2>/dev/null || echo "(none)")
+echo "    url scheme:   $scheme"
+echo "    version:      $(plutil -extract CFBundleShortVersionString raw -o - "$shipped_plist" 2>/dev/null)"
+echo "    build number: $(plutil -extract CFBundleVersion raw -o - "$shipped_plist" 2>/dev/null)"
+problems=0
+if [ "$scheme" != "$expected_scheme" ]; then
+  echo "error: the .ipa declares URL scheme '$scheme', not '$expected_scheme' — browser sign-in (Google, Microsoft) could not return to the app" >&2
+  echo "       the merged Info.plist is $tauri_dir/gen/apple/axon_iOS/Info.plist; its source is Info.ios.plist" >&2
+  problems=1
+fi
+if codesign -d --entitlements - --xml "$shipped_app" 2>/dev/null | grep -q com.apple.developer.applesignin; then
+  echo "    apple sign-in: entitled"
+else
+  echo "error: the signed app lacks com.apple.developer.applesignin — Sign in with Apple would fail with error 1000" >&2
+  problems=1
+fi
+rm -rf "$ipa_check"
+if [ "$problems" -ne 0 ]; then
+  echo "error: not installing or uploading this build" >&2
+  exit 1
 fi
 
 if [ "$install_app" -eq 1 ]; then

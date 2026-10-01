@@ -222,8 +222,9 @@ The callback is `oauth.external_base_url` (without trailing slashes) plus `/v1/o
 Register that exact return URL with Apple; if `redirect_uri` is also configured, it must match exactly.
 Use `axon-server oauth bind --provider apple` against the same configuration as the running server, or the explicitly armed first-run web bootstrap, to bind the owner before ordinary sign-in.
 Cancellation ends the current attempt; restart sign-in or rerun the binding command to retry.
-Native Apple server verification is enabled independently with `native_enabled = true` and explicit `native_audiences` under `[oauth.providers.apple]`; no project signing key is distributed to self-hosters.
-The [native server contract](docs/apple-oauth-native.md) provides single-use challenges, owner-authorized binding, and atomic redemption; native client integration and real-device acceptance remain separate work.
+The iOS app signs in with Apple natively, which is a separate switch: `native_enabled = true` with `native_audiences = ["org.matrixaxon.axon"]` under `[oauth.providers.apple]`, needing no Services ID or key; no project signing key is distributed to self-hosters.
+`enabled` is the browser flow only; for iOS-only Apple sign-in leave it `false`, since `enabled = true` without the browser credentials above stops startup.
+The [native server contract](docs/apple-oauth-native.md) provides single-use challenges, owner-authorized binding, and atomic redemption; link an Apple ID from the app's Settings after signing in some other way.
 See [ADR 0054's implementation addendum](docs/adr/0054-oauth-authorization-server.md#implementation-addendum-apple-rollout) for the remaining server and mobile work.
 The [Apple browser verification guide](docs/apple-oauth-browser.md) covers configuration, automated checks, and the required registered-deployment acceptance pass.
 

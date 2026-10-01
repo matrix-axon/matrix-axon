@@ -1,6 +1,10 @@
 import { computed, signal, type ReadonlySignal } from '@preact/signals'
-import { useEffect, useState } from 'preact/hooks'
-import { browserPlatform, type Platform } from '../platform'
+import { useEffect, useRef, useState } from 'preact/hooks'
+import {
+  browserPlatform,
+  NativeSignInCancelled,
+  type Platform,
+} from '../platform'
 import { apiUrl as buildApiUrl } from '../server-url'
 import {
   createAuthPersistence,
@@ -121,7 +125,20 @@ function tokenErrorMessage(body: unknown, status: number): string {
 export interface OAuthProviderConfig {
   provider: string
   label: string
+  /**
+   * Signed in through the platform's own SDK rather than a browser redirect.
+   * Only Apple, only where `Platform.appleSignIn` exists, and only when the
+   * server advertises it (`GET /v1/oauth/providers?flow=native`).
+   */
+  native?: boolean
 }
+
+/**
+ * How `startSignIn` ended. `handed-off`: the flow continues in the browser and
+ * comes back as a redirect or deep link. `signed-in`: a native flow finished
+ * in place and the session is already live.
+ */
+export type SignInOutcome = 'handed-off' | 'signed-in'
 
 interface OAuthSession {
   accessToken: string
@@ -175,8 +192,35 @@ export interface OAuthAuthProvider extends AuthProvider {
    * something it is waiting on.
    */
   signInLeavesTheApp: boolean
-  startSignIn(provider: string): Promise<void>
+  /**
+   * Rejects with `NativeSignInCancelled` when a native sheet was dismissed.
+   */
+  startSignIn(provider: string): Promise<SignInOutcome>
   completeRedirect(url: URL): Promise<OAuthCallbackResult>
+  /**
+   * Whether this platform can link an Apple ID to the signed-in owner in place
+   * (`bindApple`): it has a native Apple sheet and the server offers native
+   * Apple. Settles once `discoverProviders` has had an answer.
+   */
+  canBindApple: ReadonlySignal<boolean>
+  /**
+   * The provider the current OAuth session came from, or `null` when there is
+   * none (signed out, or signed in with a pasted token). `'apple'` proves the
+   * Apple ID is linked: the server issues an Apple session for linked Apple
+   * IDs only. The reverse is unknowable from here — no `/v1` route lists linked
+   * identities — so any other value says nothing either way.
+   */
+  sessionProvider: ReadonlySignal<string | null>
+  /**
+   * Bind the Apple ID the user picks to the owner `bearer` authenticates, and
+   * adopt the Apple session the server returns for it.
+   *
+   * This is how a self-hoster with no Apple web credentials makes Apple
+   * sign-in work: sign in once some other way, link here, and from then on
+   * Sign in with Apple finds that owner. Ownership comes from `bearer` alone,
+   * never from Apple's email (`docs/apple-oauth-native.md`).
+   */
+  bindApple(bearer: string): Promise<void>
 }
 
 export interface OAuthAuthOptions {
@@ -219,6 +263,11 @@ export interface OAuthAuthOptions {
    */
   platform?: Pick<Platform, 'fetch'>
   /**
+   * The platform's native Sign in with Apple sheet (`Platform.appleSignIn`),
+   * or absent to treat Apple as a browser provider like the others.
+   */
+  appleSignIn?: ((nonce: string) => Promise<string>) | null
+  /**
    * Deadline for the token exchange (see [`TOKEN_ENDPOINT_TIMEOUT_MS`]).
    * Injected so tests can drive the abandon path without waiting it out.
    */
@@ -253,10 +302,15 @@ export function parseOAuthProviders(
 async function fetchProviderNames(
   baseUrl: string,
   fetchImpl: typeof globalThis.fetch,
+  flow?: 'native',
 ): Promise<string[] | null> {
   let response: Response
+  const url = new URL(apiUrl('/v1/oauth/providers', baseUrl))
+  if (flow !== undefined) {
+    url.searchParams.set('flow', flow)
+  }
   try {
-    response = await fetchImpl(apiUrl('/v1/oauth/providers', baseUrl))
+    response = await fetchImpl(url.toString())
   } catch {
     return null
   }
@@ -314,6 +368,7 @@ export function createOAuthAuthProvider({
   pendingStorage = window.sessionStorage,
   navigate,
   platform = browserPlatform(),
+  appleSignIn = null,
   tokenTimeoutMs = TOKEN_ENDPOINT_TIMEOUT_MS,
 }: OAuthAuthOptions): OAuthAuthProvider {
   // An injected `navigate` is the shell handing off to another application;
@@ -333,6 +388,10 @@ export function createOAuthAuthProvider({
   // server's own answer once `discoverProviders` runs.
   const providerList = signal<readonly OAuthProviderConfig[]>(providers)
   let discovery: Promise<void> | null = null
+  // Tracked apart from the list: linking is offered to a signed-in owner, and
+  // the server may offer native Apple for binding while listing no browser
+  // providers at all.
+  const nativeAppleOffered = signal(false)
 
   const storedSession = persistence.read(SESSION_KEY)
   const session = signal<OAuthSession | null>(
@@ -357,12 +416,26 @@ export function createOAuthAuthProvider({
     session.value = next
   }
 
-  async function redeem(form: URLSearchParams): Promise<OAuthSession> {
+  /**
+   * POST a form to an OAuth endpoint, classifying failure the way `redeem`
+   * needs. Returns the parsed body of a success.
+   */
+  async function postForm(
+    path: string,
+    form: URLSearchParams,
+    bearer?: string,
+  ): Promise<unknown> {
+    const headers: Record<string, string> = {
+      'content-type': 'application/x-www-form-urlencoded',
+    }
+    if (bearer !== undefined) {
+      headers.authorization = `Bearer ${bearer}`
+    }
     let response: Response
     try {
-      response = await fetch(apiUrl('/v1/oauth/token', baseUrl), {
+      response = await fetch(apiUrl(path, baseUrl), {
         method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        headers,
         body: form,
         signal: AbortSignal.timeout(tokenTimeoutMs),
       })
@@ -379,9 +452,55 @@ export function createOAuthAuthProvider({
         ? new OAuthRejectedError(message)
         : new OAuthTransportError(message)
     }
+    return body
+  }
+
+  async function redeem(form: URLSearchParams): Promise<OAuthSession> {
     return sessionFromTokenBody(
-      body,
+      await postForm('/v1/oauth/token', form),
       form.get('provider') ?? session.value?.provider ?? '',
+    )
+  }
+
+  /**
+   * The native Apple flow (`docs/apple-oauth-native.md`): a server challenge,
+   * Apple's sheet with that challenge's nonce, then redemption.
+   *
+   * The challenge is a capability and stays in this function's scope: never
+   * stored, never sent to Apple. Any failure — cancellation included — simply
+   * abandons it; the next attempt asks for a fresh one, and the server expires
+   * this one on its own in five minutes.
+   */
+  async function nativeApple(
+    purpose: 'login' | 'bind',
+    bearer?: string,
+  ): Promise<OAuthSession> {
+    if (appleSignIn === null) {
+      throw new Error('native Sign in with Apple is not available here')
+    }
+    const issued = (await postForm(
+      '/v1/oauth/apple/native/challenge',
+      new URLSearchParams({ client_id: clientId, purpose }),
+      bearer,
+    )) as { challenge?: unknown; nonce?: unknown }
+    if (
+      typeof issued.challenge !== 'string' ||
+      typeof issued.nonce !== 'string'
+    ) {
+      throw new Error('the server returned an unusable sign-in challenge')
+    }
+    const identityToken = await appleSignIn(issued.nonce)
+    return sessionFromTokenBody(
+      await postForm(
+        '/v1/oauth/apple/native/token',
+        new URLSearchParams({
+          client_id: clientId,
+          challenge: issued.challenge,
+          identity_token: identityToken,
+        }),
+        bearer,
+      ),
+      'apple',
     )
   }
 
@@ -457,10 +576,19 @@ export function createOAuthAuthProvider({
     signedIn: computed(() => session.value !== null),
     providers: computed(() => providerList.value),
     signInLeavesTheApp,
+    canBindApple: computed(() => nativeAppleOffered.value),
+    sessionProvider: computed(() => session.value?.provider ?? null),
     discoverProviders() {
       discovery ??= (async () => {
-        const names = await fetchProviderNames(baseUrl, fetch)
-        if (names === null) {
+        const [names, nativeNames] = await Promise.all([
+          fetchProviderNames(baseUrl, fetch),
+          appleSignIn === null
+            ? Promise.resolve(null)
+            : fetchProviderNames(baseUrl, fetch, 'native'),
+        ])
+        const nativeApple = nativeNames?.includes('apple') ?? false
+        nativeAppleOffered.value = nativeApple
+        if (names === null && !nativeApple) {
           // The server is older than `GET /v1/oauth/providers`, unreachable, or
           // has OAuth off. Keep the configured list: for a browser deployment
           // that is the correct answer and always was, and replacing it with an
@@ -476,15 +604,48 @@ export function createOAuthAuthProvider({
           discovery = null
           return
         }
-        providerList.value = withLabels(names, providers)
+        // Native Apple replaces a browser Apple entry, or joins the list on
+        // a server that has Apple for native apps only. The browser list is
+        // otherwise kept as it is: Google and Microsoft have no native flow
+        // and continue through the browser.
+        const listed = names ?? providers.map(({ provider }) => provider)
+        const merged =
+          nativeApple && !listed.includes('apple')
+            ? [...listed, 'apple'].sort()
+            : listed
+        providerList.value = withLabels(merged, providers).map((entry) =>
+          nativeApple && entry.provider === 'apple'
+            ? { ...entry, native: true }
+            : entry,
+        )
+        if (names === null || (appleSignIn !== null && nativeNames === null)) {
+          // Not an answer about one of the lists: ask again next time. A
+          // native list that could not be fetched is not "no native Apple" —
+          // caching it left `nativeAppleOffered` false for the life of the
+          // process, so on iOS Apple fell back to the browser redirect and the
+          // link action in Settings never appeared.
+          discovery = null
+        }
       })()
       return discovery
     },
-    async startSignIn(providerName: string) {
-      if (
-        !providerList.value.some(({ provider }) => provider === providerName)
-      ) {
+    async bindApple(bearer: string) {
+      const next = await nativeApple('bind', bearer)
+      persist(next, persistence.rememberMe.value ? 'persistent' : 'session')
+    },
+    async startSignIn(providerName: string): Promise<SignInOutcome> {
+      const entry = providerList.value.find(
+        ({ provider }) => provider === providerName,
+      )
+      if (entry === undefined) {
         throw new Error('unknown OAuth provider')
+      }
+      if (entry.native === true) {
+        const storageMode = persistence.rememberMe.value
+          ? 'persistent'
+          : 'session'
+        persist(await nativeApple('login'), storageMode)
+        return 'signed-in'
       }
       const codeVerifier = randomBase64Url(32)
       const codeChallenge = await sha256Base64Url(codeVerifier)
@@ -518,6 +679,7 @@ export function createOAuthAuthProvider({
       // a denied capability scope, or no browser registered. Dropping that
       // rejection left the caller believing a sign-in had started.
       await goTo(authorize.toString())
+      return 'handed-off'
     },
     async completeRedirect(url: URL): Promise<OAuthCallbackResult> {
       const error = url.searchParams.get('error')
@@ -570,6 +732,10 @@ export function createOAuthAuthProvider({
 
 function OAuthButtons({ provider }: { provider: OAuthAuthProvider }) {
   const [busy, setBusy] = useState<string | null>(null)
+  // A native sheet runs *inside* this app, so the window losing and regaining
+  // focus around it says nothing about the sign-in being over. Kept out of
+  // state because the focus handler below reads it outside a render.
+  const nativeInFlight = useRef(false)
   const [handedOff, setHandedOff] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -597,8 +763,12 @@ function OAuthButtons({ provider }: { provider: OAuthAuthProvider }) {
     const onFocus = () => {
       void provider.discoverProviders()
       // Whatever the browser was doing with the sign-in, it is not something
-      // this window is waiting on any more.
-      setBusy(null)
+      // this window is waiting on any more. A native sheet is: its answer
+      // arrives through the promise, and re-enabling the buttons while it is
+      // still being redeemed would let a second tap start a second flow.
+      if (!nativeInFlight.current) {
+        setBusy(null)
+      }
     }
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
@@ -610,7 +780,7 @@ function OAuthButtons({ provider }: { provider: OAuthAuthProvider }) {
 
   return (
     <div class="sso-options">
-      {provider.providers.value.map(({ provider: id, label }) => {
+      {provider.providers.value.map(({ provider: id, label, native }) => {
         const brand = providerBrand(id, label)
         return (
           <button
@@ -622,9 +792,15 @@ function OAuthButtons({ provider }: { provider: OAuthAuthProvider }) {
               setBusy(id)
               setError(null)
               setHandedOff(false)
+              nativeInFlight.current = native === true
               void provider
                 .startSignIn(id)
-                .then(() => {
+                .then((outcome) => {
+                  nativeInFlight.current = false
+                  if (outcome === 'signed-in') {
+                    // Signed in; the app replaces this screen. Nothing to show.
+                    return
+                  }
                   // In a browser this is unobservable: the page is being
                   // replaced. In a shell it means the URL reached the user's
                   // real browser, and nothing here is pending any more — so
@@ -638,8 +814,13 @@ function OAuthButtons({ provider }: { provider: OAuthAuthProvider }) {
                   }
                 })
                 .catch((err: unknown) => {
+                  nativeInFlight.current = false
                   setBusy(null)
                   setHandedOff(false)
+                  // Dismissing Apple's sheet is a choice, not an error.
+                  if (err instanceof NativeSignInCancelled) {
+                    return
+                  }
                   setError(
                     err instanceof Error ? err.message : 'Sign-in failed',
                   )
@@ -649,7 +830,13 @@ function OAuthButtons({ provider }: { provider: OAuthAuthProvider }) {
             <span class="sso-icon" aria-hidden="true">
               {brand.icon}
             </span>
-            <span>{busy === id ? 'Opening...' : brand.text}</span>
+            <span>
+              {busy !== id
+                ? brand.text
+                : native === true
+                  ? 'Signing in...'
+                  : 'Opening...'}
+            </span>
           </button>
         )
       })}
@@ -661,6 +848,90 @@ function OAuthButtons({ provider }: { provider: OAuthAuthProvider }) {
       )}
       {error !== null && <p class="error">{error}</p>}
     </div>
+  )
+}
+
+/**
+ * Link an Apple ID to the signed-in owner (`OAuthAuthProvider.bindApple`), for
+ * Settings. Renders nothing unless this platform and server can do it.
+ *
+ * Signed in with Apple, there is nothing to do: that session is itself proof
+ * the Apple ID is linked, and linking it again would change nothing on the
+ * server (it binds idempotently) while looking like a button that does
+ * nothing. Signed in any other way, the server cannot be asked whether an
+ * Apple ID is already linked, so the action is offered and says what it does.
+ *
+ * A plain button rather than Apple's branded one: it names an Axon action,
+ * and Apple's guidelines only allow a branded button a fixed set of titles,
+ * none of which says "link". The branded part is Apple's own sheet.
+ */
+export function LinkAppleSection({
+  oauth,
+  bearer,
+}: {
+  oauth: OAuthAuthProvider
+  bearer: () => string | null | Promise<string | null>
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // The signed-out screen is the usual place this is asked; Settings is only
+  // reached signed in, so it asks for itself. Shared and idempotent.
+  useEffect(() => {
+    void oauth.discoverProviders()
+  }, [oauth])
+
+  if (!oauth.canBindApple.value) {
+    return null
+  }
+
+  if (oauth.sessionProvider.value === 'apple') {
+    return (
+      <section class="panel">
+        <h2>Sign in with Apple</h2>
+        <p class="muted" role="status">
+          You are signed in with Apple, so your Apple ID is linked to this
+          server. The link is to your Apple ID, not your email address.
+        </p>
+      </section>
+    )
+  }
+
+  const link = async () => {
+    const token = await bearer()
+    if (token === null) {
+      throw new Error('Sign in first, then link your Apple ID.')
+    }
+    await oauth.bindApple(token)
+  }
+
+  return (
+    <section class="panel">
+      <h2>Sign in with Apple</h2>
+      <p class="muted">
+        Link an Apple ID to this Axon server so you can sign in with Apple here
+        and on your other devices. Linking also signs you in with that Apple ID.
+        The link is to your Apple ID, not your email address.
+      </p>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => {
+          setBusy(true)
+          setError(null)
+          void link()
+            .catch((err: unknown) => {
+              if (!(err instanceof NativeSignInCancelled)) {
+                setError(err instanceof Error ? err.message : 'Linking failed')
+              }
+            })
+            .finally(() => setBusy(false))
+        }}
+      >
+        {busy ? 'Linking...' : 'Link an Apple ID'}
+      </button>
+      {error !== null && <p class="error">{error}</p>}
+    </section>
   )
 }
 

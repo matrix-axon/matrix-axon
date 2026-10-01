@@ -1,0 +1,26 @@
+# Sign in with Apple and Keychain token storage for the iOS shell (ADR 0054).
+#
+# A separate crate only because Tauri compiles a plugin's Swift through the
+# plugin's own build script (`tauri_plugin::Builder::ios_path`); the app crate
+# cannot carry Swift sources itself. It lives inside the shell's workspace
+# directory, so it is a member of that workspace implicitly and shares its
+# lockfile. Never published.
+[package]
+name = "tauri-plugin-native-auth"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+license = "Apache-2.0"
+publish = false
+# Required by `tauri-plugin`: the app's build script finds this plugin's
+# permission manifests through the `DEP_TAURI_PLUGIN_NATIVE_AUTH_*` variables
+# that `links` makes Cargo export.
+links = "tauri-plugin-native-auth"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

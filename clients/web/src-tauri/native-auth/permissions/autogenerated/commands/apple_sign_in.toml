@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-apple-sign-in"
+description = "Enables the apple_sign_in command without any pre-configured scope."
+commands.allow = ["apple_sign_in"]
+
+[[permission]]
+identifier = "deny-apple-sign-in"
+description = "Denies the apple_sign_in command without any pre-configured scope."
+commands.deny = ["apple_sign_in"]

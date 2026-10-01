@@ -220,6 +220,41 @@ build rather than after it.
 There is no CI lane — [#445](https://github.com/matrix-axon/matrix-axon/issues/445)
 tracks one, and this script is what it should be built from.
 
+### Sign in with Apple needs the entitlement and a matching profile
+
+The iOS app signs in with Apple natively (ADR 0054), through the in-repo
+`native-auth` plugin, which also keeps Axon's tokens in the Keychain. Two things
+have to agree before the Apple sheet will open:
+
+- **The App ID has the capability.** In the developer portal, under
+  Identifiers, `org.matrixaxon.axon` needs Sign in with Apple enabled, and
+  enabled as a primary App ID. Any Services ID used for browser sign-in should
+  be grouped under it (Services ID → Sign in with Apple → Configure → Primary
+  App ID), so the browser and the app see the same Apple subject.
+- **The build carries the entitlement.** Tauri has no iOS entitlements
+  setting and writes an empty file on every `tauri ios init`, so
+  `Entitlements.ios.plist` beside `tauri.conf.json` is copied over it by
+  `scripts/package-ios.sh`. For the dev loop, copy it once yourself after
+  `tauri ios init`:
+
+  ```sh
+  cp src-tauri/Entitlements.ios.plist src-tauri/gen/apple/axon_iOS/axon_iOS.entitlements
+  ```
+
+Signing is automatic, so no profile is made by hand. Xcode regenerates the team
+provisioning profile to match the entitlement, as long as it can reach the
+account: an Apple ID in Xcode → Settings → Accounts, or an App Store Connect
+API key exported as `APPLE_API_KEY`, `APPLE_API_ISSUER` and
+`APPLE_API_KEY_PATH`, which the Tauri CLI passes to `xcodebuild`. A profile made
+before the capability was enabled fails the build with "doesn't include the Sign
+In with Apple capability" until it is regenerated.
+
+An entitlement that is missing from the signed app does not fail the build: the
+sheet never appears and Apple reports error 1000, which the app surfaces as a
+pointer back here. `package-ios.sh` therefore checks the exported `.ipa` and
+refuses to install or upload a build that lacks the entitlement, or the
+`org.matrixaxon.axon` URL scheme that browser sign-in returns through.
+
 ### The signing team is not yours
 
 `bundle.iOS.developmentTeam` in `tauri.conf.json` is one developer's Apple
@@ -338,7 +373,17 @@ for this app (RFC 8252 § 8.4, § 8.6).
 ## Sign-in needs an entry on the server
 
 A build of this crate cannot sign in against a server that has not registered
-it. The shell identifies itself as `axon-desktop` with the callback
+it. On iOS, Sign in with Apple uses the same `axon-desktop` registration and
+additionally needs native Apple enabled on the server, with the app's bundle ID
+as its audience (`docs/apple-oauth-native.md`):
+
+```toml
+[oauth.providers.apple]
+native_enabled = true
+native_audiences = ["org.matrixaxon.axon"]
+```
+
+The shell identifies itself as `axon-desktop` with the callback
 `org.matrixaxon.axon:/oauth/callback`, and the server allow-lists that pair
 exactly — see "SSO sign-in" in `../README.md` for the `[[oauth.clients]]`
 entry and the three ways it is commonly wrong.
