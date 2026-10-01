@@ -236,7 +236,9 @@ scripts/package-ios.sh --export-method app-store-connect --build-number auto --u
 
 It takes the same three credentials as `--upload`, works only with
 `--export-method app-store-connect`, and resolves the number before the build
-starts, so a bad key costs seconds rather than a build. An app with no builds
+starts, so a bad key costs seconds rather than a build. `scripts/package-macos-mas.sh`
+takes the same credentials, reads the same `.env` and accepts the same
+`--build-number auto`. An app with no builds
 gets `1`; an app that does not exist in App Store Connect is an error rather than
 a guess. One limit: a build uploaded minutes ago and still processing may not be
 listed yet, so two uploads close together can be given the same number, and the
@@ -295,93 +297,6 @@ project instead does not survive.
 [#456](https://github.com/matrix-axon/matrix-axon/issues/456) tracks taking
 the committed default out.
 
-### Signing without a password prompt
-
-Signing happens inside `xcodebuild`, which uses the login keychain. That
-keychain is locked in an SSH session and after a reboot, so an unattended
-`scripts/package-ios.sh` stops at a password dialog, or fails with:
-
-```
-errSecInternalComponent
-```
-
-That error reads like a bad certificate. It is a locked keychain with nobody
-there to unlock it.
-
-Skip this section if you build at your own desk with the login keychain
-unlocked. It is for a build box, or for anyone tired of the prompt.
-
-Put the signing identities in a keychain of their own with an empty password,
-and point the script at it:
-
-```sh
-security create-keychain -p "" build
-security set-keychain-settings ~/Library/Keychains/build.keychain-db   # never auto-lock
-security list-keychains -d user -s \
-  ~/Library/Keychains/login.keychain-db ~/Library/Keychains/build.keychain-db
-
-# Export each identity from Keychain Access as a .p12 (needs your login
-# password once), then import it from the command line:
-security import dev.p12 -k ~/Library/Keychains/build.keychain-db -P '<p12 password>' \
-  -T /usr/bin/codesign -T /usr/bin/security
-security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" \
-  ~/Library/Keychains/build.keychain-db
-
-export AXON_IOS_KEYCHAIN=build   # a name under ~/Library/Keychains, or a path
-```
-
-The script then unlocks it before the build. Which identities it needs depends
-on `--export-method`:
-
-| `--export-method`     | Identity             | Verified from the keychain alone |
-| --------------------- | -------------------- | -------------------------------- |
-| `debugging` (default) | `Apple Development`  | yes                              |
-| `app-store-connect`   | `Apple Distribution` | yes                              |
-| `release-testing`     | `Apple Distribution` | no — fails at export, see below  |
-
-`release-testing` builds and archives, then fails at export with
-`exportArchive No Accounts` and `No profiles for 'org.matrixaxon.axon' were
-found`. That is a provisioning-profile problem, not a keychain one: the same
-keychain completes `app-store-connect`. It is not yet diagnosed;
-[#529](https://github.com/matrix-axon/matrix-axon/issues/529) tracks it.
-
-Three things that are easy to get wrong:
-
-- **Remove the identities from the login keychain afterwards.** An identity that
-  exists in both keychains is resolved to the login copy, which is locked, even
-  when `build` is listed first. The same certificate signed with the login copy
-  gone and failed with it present. Delete the certificate and its private key
-  together. The script does not yet warn about a leftover copy
-  ([#528](https://github.com/matrix-axon/matrix-axon/issues/528)), so you find
-  out at the signing step.
-- **`set-key-partition-list` is not optional.** Without it macOS asks, through a
-  dialog, whether `codesign` may use the key. Run it again after every import.
-- **An empty password is the point, not an oversight.** Anyone who can read the
-  keychain file can sign as you, which is why this belongs on a machine you
-  already trust with the login keychain. If yours has a password, the script
-  reads `AXON_IOS_KEYCHAIN_PASSWORD`; that puts it on a command line where `ps`
-  shows it.
-
-`--upload` authenticates through an App Store Connect API key, not the
-keychain, so none of this applies to it.
-
-To check the setup without a full build, sign a scratch file with the keychain
-alone in the search list. With the login keychain also listed, a copy of the
-identity left there decides the result, which is the case this test exists to
-catch, so narrow the list first and put it back afterwards:
-
-```sh
-security list-keychains -d user          # note what is listed; you restore it below
-security list-keychains -d user -s ~/Library/Keychains/build.keychain-db
-
-t=$(mktemp) && cp /bin/echo "$t"
-codesign -f -s "Apple Development: NAME (TEAMID)" "$t"; echo "exit $?"; rm -f "$t"
-
-# Restore every keychain the first command printed, in that order:
-security list-keychains -d user -s ~/Library/Keychains/login.keychain-db \
-  ~/Library/Keychains/build.keychain-db
-```
-
 ### Building from the Xcode GUI
 
 Use `scripts/package-ios.sh` to build. Opening `gen/apple` in Xcode and pressing
@@ -426,6 +341,125 @@ To see why a build failed, read Xcode's log rather than the on-screen summary:
 `~/Library/Developer/Xcode/DerivedData/axon-*/Logs/Build/*.xcactivitylog`, gzip.
 A build started by `tauri ios dev` lands in a different `axon-*` folder from one
 started in the GUI.
+
+## Signing without a password prompt
+
+`scripts/package-ios.sh` and `scripts/package-macos-mas.sh` sign through
+`xcodebuild`, `codesign`, `productbuild` and `productsign`, which use the login
+keychain. That keychain is locked in an SSH session and after a reboot, so an
+unattended build stops at a password dialog, or fails with one of:
+
+```
+errSecInternalComponent                 (codesign, xcodebuild)
+errKCInteractionNotAllowed              (productsign, productbuild)
+```
+
+Neither reads like a locked keychain. The first looks like a bad certificate.
+
+Skip this section if you build at your own desk with the login keychain
+unlocked. It is for a build box, or for anyone tired of the prompt.
+
+Put the signing identities in a keychain of their own with an empty password,
+and point the scripts at it:
+
+```sh
+security create-keychain -p "" build
+security set-keychain-settings ~/Library/Keychains/build.keychain-db   # never auto-lock
+security list-keychains -d user -s \
+  ~/Library/Keychains/login.keychain-db ~/Library/Keychains/build.keychain-db
+
+# Export each identity from Keychain Access as a .p12 (needs your login
+# password once), then import it from the command line. Trust every tool that
+# will use the key, not only codesign:
+security import app.p12 -k ~/Library/Keychains/build.keychain-db -P '<p12 password>' \
+  -T /usr/bin/codesign -T /usr/bin/security
+security import installer.p12 -k ~/Library/Keychains/build.keychain-db -P '<p12 password>' \
+  -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productsign -T /usr/bin/productbuild
+security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" \
+  ~/Library/Keychains/build.keychain-db
+
+export AXON_SIGNING_KEYCHAIN=build   # a name under ~/Library/Keychains, or a path
+```
+
+Both scripts then unlock it before they build. `AXON_IOS_KEYCHAIN`, the name this
+had while only the iOS script used it, still works and prints a note. The
+password variable is `AXON_SIGNING_KEYCHAIN_PASSWORD`, likewise.
+
+Which identities are needed:
+
+| Script and mode                        | Identity                                                                                                       |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `package-ios.sh` `debugging` (default) | `Apple Development`                                                                                            |
+| `package-ios.sh` `app-store-connect`   | `Apple Distribution`                                                                                           |
+| `package-ios.sh` `release-testing`     | `Apple Distribution`, and an Ad Hoc profile; see [#529](https://github.com/matrix-axon/matrix-axon/issues/529) |
+| `package-macos-mas.sh`, the app        | `3rd Party Mac Developer Application`, or `Apple Distribution`                                                 |
+| `package-macos-mas.sh`, the `.pkg`     | `3rd Party Mac Developer Installer`, or `Mac Installer Distribution`                                           |
+
+`release-testing` builds and archives, then fails at export with
+`exportArchive No Accounts` and `No profiles for 'org.matrixaxon.axon' were
+found`. That is a missing Ad Hoc provisioning profile, not a keychain problem:
+the same keychain completes `app-store-connect`.
+
+Things that are easy to get wrong:
+
+- **Remove the identities from the login keychain afterwards.** An identity that
+  exists in both keychains is resolved to the login copy, which is locked, even
+  when `build` is listed first. The same certificate signed with the login copy
+  gone and failed with it present. Delete the certificate and its private key
+  together. The scripts do not yet warn about a leftover copy
+  ([#528](https://github.com/matrix-axon/matrix-axon/issues/528)), so you find
+  out at the signing step.
+- **A certificate in one keychain and its key in another is an identity only
+  while both are listed.** Apple can issue several certificates for one key, and
+  Keychain Access shows them as separate identities. Here the
+  `3rd Party Mac Developer Application` certificate and the `Apple Development`
+  one share a key. Move the key to `build` and leave that certificate in login,
+  and `security find-identity -v` still lists the identity, so it looks fine,
+  but with `build` alone in the search list `codesign` says `no identity found`.
+  Import the certificate into `build` as well (`security find-certificate -c
+'<name>' -p login.keychain-db > c.pem`, then `security import c.pem -k
+build.keychain-db`; it is public, no `.p12` needed) and delete it from login.
+- **Every tool that signs must be trusted by the key, not only `codesign`.** A key
+  imported with just `-T /usr/bin/codesign` signs apps and then fails on the
+  installer, from `productsign` and `productbuild` alike, with
+  `errKCInteractionNotAllowed`. We saw exactly that, with every key in the
+  keychain trusting only `codesign`. Re-running `set-key-partition-list` did not
+  change it: the trusted-application list is separate from the partition list.
+  Re-importing the installer identity with `-T /usr/bin/productsign -T
+/usr/bin/productbuild` fixed it, and `productbuild --sign` then produced a
+  package signed by the installer certificate with only `build` in the search
+  list. (`security dump-keychain -a` shows each key's trusted applications.)
+- **`set-key-partition-list` is not optional.** Without it macOS asks, through a
+  dialog, whether the tool may use the key. Run it again after every import.
+- **An empty password is the point, not an oversight.** Anyone who can read the
+  keychain file can sign as you, which is why this belongs on a machine you
+  already trust with the login keychain. If yours has a password, the scripts
+  read `AXON_SIGNING_KEYCHAIN_PASSWORD`; that puts it on a command line where `ps`
+  shows it.
+
+`--upload` authenticates through an App Store Connect API key, not the
+keychain, so none of this applies to it.
+
+To check the setup without a full build, sign a scratch file with the keychain
+alone in the search list. With the login keychain also listed, a copy of the
+identity left there decides the result, which is the case this test exists to
+catch, so narrow the list first and put it back afterwards:
+
+```sh
+security list-keychains -d user          # note what is listed; you restore it below
+security list-keychains -d user -s ~/Library/Keychains/build.keychain-db
+
+t=$(mktemp) && cp /bin/echo "$t"
+codesign -f -s "Apple Development: NAME (TEAMID)" "$t"; echo "exit $?"; rm -f "$t"
+
+# For the Mac App Store build, the installer identity too:
+pkgbuild --nopayload --identifier test --version 1 /tmp/plain.pkg
+productsign --sign "3rd Party Mac Developer Installer: NAME (TEAMID)" /tmp/plain.pkg /tmp/signed.pkg
+
+# Restore every keychain the first command printed, in that order:
+security list-keychains -d user -s ~/Library/Keychains/login.keychain-db \
+  ~/Library/Keychains/build.keychain-db
+```
 
 ## The bundle identifier is settled
 
@@ -550,7 +584,9 @@ The store build has its own script, `scripts/package-macos-mas.sh`, with its own
 sandboxed `Entitlements.mas.plist`. It needs a Mac App Store Connect
 provisioning profile for `org.matrixaxon.axon` (`--profile`), the
 "3rd Party Mac Developer" application and installer certificates in the
-keychain, and, for `--upload`, `ASC_KEY_ID` / `ASC_ISSUER_ID` as for iOS.
+keychain, and, for `--upload` or `--build-number auto`, `ASC_KEY_ID` /
+`ASC_ISSUER_ID` from the environment or `.env`, as for iOS. For an unattended
+build, see [Signing without a password prompt](#signing-without-a-password-prompt).
 
 Windows Authenticode is **not** wired yet, so SmartScreen warnings are a
 separate piece of work.

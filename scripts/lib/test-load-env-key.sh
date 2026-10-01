@@ -19,7 +19,7 @@ check() {
   shift 3
   printf '%b' "$contents" >"$work/.env"
   local got
-  got=$(env -i PATH="$PATH" HOME="$work" "$@" bash -c '
+  got=$(env -i PATH="$PATH" HOME="$work" "$@" bash --noprofile --norc -c '
     set -euo pipefail
     . "$1"
     rc=0; load_env_key "$2" "$3" || rc=$?
@@ -52,7 +52,7 @@ check "a longer name is not matched"     'UNSET|0'     'XASC_KEY_ID=nope\nASC_KE
 check "another key is not loaded"        'UNSET|0'     'DATABASE_URL=postgres://x\n'
 check "missing file is fine"             'UNSET|0'     ''
 rm -f "$work/.env"
-got=$(env -i PATH="$PATH" HOME="$work" bash -c '. "$1"; rc=0; load_env_key ASC_KEY_ID "$2" || rc=$?; echo "${ASC_KEY_ID-UNSET}|$rc"' _ "$here/load-env-key.sh" "$work/does-not-exist")
+got=$(env -i PATH="$PATH" HOME="$work" bash --noprofile --norc -c '. "$1"; rc=0; load_env_key ASC_KEY_ID "$2" || rc=$?; echo "${ASC_KEY_ID-UNSET}|$rc"' _ "$here/load-env-key.sh" "$work/does-not-exist")
 [ "$got" = 'UNSET|0' ] || { echo "FAIL: nonexistent file: $got" >&2; failures=$((failures + 1)); }
 
 # The environment wins, and the file is not consulted for it.
@@ -72,7 +72,7 @@ fi
 
 # Under `set -e` a caller that does not guard the return code dies on the 10.
 printf 'ASC_KEY_ID=ABC123\n' >"$work/.env"
-if env -i PATH="$PATH" bash -c 'set -e; . "$1"; load_env_key ASC_KEY_ID "$2"; echo survived' _ "$here/load-env-key.sh" "$work/.env" >/dev/null 2>&1; then
+if env -i PATH="$PATH" bash --noprofile --norc -c 'set -e; . "$1"; load_env_key ASC_KEY_ID "$2"; echo survived' _ "$here/load-env-key.sh" "$work/.env" >/dev/null 2>&1; then
   echo "FAIL: expected an unguarded call to end a set -e caller (the header says it does)" >&2
   failures=$((failures + 1))
 fi

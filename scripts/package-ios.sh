@@ -33,11 +33,12 @@
 #   * The signing keychain. Signing runs inside xcodebuild, which reads the
 #     login keychain, and that one is locked in an SSH session and after a
 #     reboot. The failure is `errSecInternalComponent` from codesign, or a
-#     password dialog nobody is there to answer. Set AXON_IOS_KEYCHAIN to a
+#     password dialog nobody is there to answer. Set AXON_SIGNING_KEYCHAIN to a
 #     keychain that holds only the signing identities and has an empty
 #     password, and this unlocks it first. Off unless set: it is one
-#     developer's setup, not a requirement. See "Signing without a password
-#     prompt" in clients/web/src-tauri/README.md for how to build that keychain.
+#     developer's setup, not a requirement. Shared with package-macos-mas.sh;
+#     see "Signing without a password prompt" in clients/web/src-tauri/README.md
+#     for how to build that keychain.
 #
 #   * FORCE_COLOR. An exported `FORCE_COLOR=1` ends up as a stray argument to
 #     the Rust build phase, which reads it as an architecture; the failure is
@@ -109,22 +110,13 @@ if [ "$build_number" = "auto" ] && [ "$export_method" != "app-store-connect" ]; 
 fi
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
+# The App Store Connect and signing-keychain logic is shared with
+# package-macos-mas.sh, so the two cannot drift apart.
+. "$repo_root/scripts/lib/asc.sh"
+. "$repo_root/scripts/lib/signing-keychain.sh"
+
 if [ "$upload" -eq 1 ] || [ "$build_number" = "auto" ]; then
-  # The two App Store Connect identifiers may live in the repository's `.env`
-  # (gitignored) rather than the environment. Those two names only: that file is
-  # the server's configuration, and nothing else in it belongs in a build. The
-  # environment still wins, and the values are never printed. See the header of
-  # lib/load-env-key.sh for why this is not `source .env`.
-  source "$repo_root/scripts/lib/load-env-key.sh"
-  for key in ASC_KEY_ID ASC_ISSUER_ID; do
-    rc=0
-    load_env_key "$key" "$repo_root/.env" || rc=$?
-    if [ "$rc" -eq 10 ]; then
-      echo "==> $key taken from $repo_root/.env"
-    fi
-  done
-  : "${ASC_KEY_ID:?set ASC_KEY_ID (the A1B2C3D4E5 in ~/.appstoreconnect/private_keys/AuthKey_*.p8), in the environment or in .env at the repository root}"
-  : "${ASC_ISSUER_ID:?set ASC_ISSUER_ID (App Store Connect > Users and Access > Integrations), in the environment or in .env at the repository root}"
+  asc_require_credentials "$repo_root"
 fi
 
 # Checked here for the same reason, and because this value is spliced into a
@@ -165,24 +157,9 @@ appiconset="$tauri_dir/gen/apple/Assets.xcassets/AppIcon.appiconset"
 # Resolve `auto` now, before `rm -rf gen/apple` and a multi-minute build, so a
 # bad credential or an unreachable App Store Connect costs seconds. After this
 # `build_number` is an ordinary number and everything below treats it as one,
-# including the regex that guards the JSON override.
-#
-# The number is the highest App Store Connect lists plus one. A build uploaded
-# minutes ago and still processing may not be listed yet, so two uploads close
-# together can be handed the same number — and the second is then rejected, which
-# is loud, not silent.
+# including the regex that guards the JSON override. See lib/asc.sh.
 if [ "$build_number" = "auto" ]; then
-  bundle_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["identifier"])' "$tauri_dir/tauri.conf.json")
-  echo "==> asking App Store Connect for the next build number ($bundle_id)"
-  build_number=$(python3 "$repo_root/scripts/lib/asc-next-build-number.py" "$bundle_id") || {
-    echo "error: could not work out the next build number; pass --build-number <n> instead." >&2
-    exit 1
-  }
-  if ! [[ $build_number =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
-    echo "error: App Store Connect lookup returned '$build_number', which is not a build number." >&2
-    exit 1
-  fi
-  echo "    build number: $build_number"
+  build_number=$(asc_next_build_number "$repo_root" "$tauri_dir/tauri.conf.json") || exit 1
 fi
 
 # Put rustup's shims first rather than diagnosing the Homebrew shadow after the
@@ -225,72 +202,9 @@ EOF
 fi
 
 # Unlock the signing keychain before the build rather than discovering it is
-# locked at the codesign step, minutes in. `codesign` failing with
-# errSecInternalComponent here looks like a bad certificate and is not: it is
-# what a locked keychain reports when there is nobody to ask for a password.
-#
-# The keychain must also be the only place the identities live. An identity
-# that exists in both this keychain and a locked login keychain is resolved to
-# the locked copy even when this one is listed first — the same certificate
-# signed cleanly with the login copy removed and failed with it present.
-#
-# `-p` puts the password on the command line, so it is visible to `ps` for the
-# duration of the call. That is acceptable only because the intended password
-# is empty; AXON_IOS_KEYCHAIN_PASSWORD exists for a keychain that has one, and
-# the one-time setup in the README explains why an empty one is the point.
-if [ -n "${AXON_IOS_KEYCHAIN:-}" ]; then
-  case "$AXON_IOS_KEYCHAIN" in
-    */*) keychain="$AXON_IOS_KEYCHAIN" ;;
-    *)   keychain="$HOME/Library/Keychains/${AXON_IOS_KEYCHAIN%.keychain-db}.keychain-db" ;;
-  esac
-  if [ ! -f "$keychain" ]; then
-    echo "error: AXON_IOS_KEYCHAIN is set but $keychain does not exist." >&2
-    exit 1
-  fi
-  if ! security unlock-keychain -p "${AXON_IOS_KEYCHAIN_PASSWORD:-}" "$keychain"; then
-    echo "error: could not unlock $keychain." >&2
-    echo "       An empty password is expected; set AXON_IOS_KEYCHAIN_PASSWORD if it has one." >&2
-    exit 1
-  fi
-  # Unlocking a keychain that is not in the search list does nothing useful:
-  # xcodebuild never looks there.
-  #
-  # Compared as resolved paths, not as text. `security list-keychains` prints
-  # absolute, quoted paths as it stored them, so a relative AXON_IOS_KEYCHAIN
-  # (`./build.keychain-db`) or one reached through a symlink (`/var` for
-  # `/private/var`, a symlinked $HOME) is listed and still never matches a
-  # substring test — and the error below would then be wrong. `pwd -P` resolves
-  # the directory, which is where a symlink in these paths lives; the keychain
-  # file itself is not one.
-  canon_path() {
-    (cd "$(dirname "$1")" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")")
-  }
-  keychain=$(canon_path "$keychain")
-  search_list=$(security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//')
-  in_search_list=0
-  while IFS= read -r listed; do
-    if [ -n "$listed" ] && [ "$(canon_path "$listed")" = "$keychain" ]; then
-      in_search_list=1
-    fi
-  done <<EOF
-$search_list
-EOF
-  if [ "$in_search_list" -eq 0 ]; then
-    # The suggested command keeps whatever is already listed. `-s` replaces the
-    # whole list, so naming only this keychain and login would silently drop
-    # every other one the developer has.
-    fix="security list-keychains -d user -s \"$keychain\""
-    while IFS= read -r listed; do
-      [ -n "$listed" ] && fix="$fix \"$listed\""
-    done <<EOF
-$search_list
-EOF
-    echo "error: $keychain is unlocked but not in the keychain search list." >&2
-    echo "       $fix" >&2
-    exit 1
-  fi
-  echo "==> signing keychain unlocked: $keychain"
-fi
+# locked at the codesign step, minutes in. A no-op unless AXON_SIGNING_KEYCHAIN
+# is set; see lib/signing-keychain.sh.
+unlock_signing_keychain || exit 1
 
 cd "$web_dir"
 
