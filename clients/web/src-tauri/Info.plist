@@ -19,5 +19,7 @@
   -->
   <key>NSCameraUsageDescription</key>
   <string>Axon uses the camera to scan a Matrix sign-in QR code.</string>
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <false/>
 </dict>
 </plist>
