@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Source this; it defines unlock_signing_keychain and the helpers under it.
 #
 #   unlock_signing_keychain || exit 1

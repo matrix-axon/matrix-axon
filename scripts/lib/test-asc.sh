@@ -8,6 +8,9 @@
 # This covers the shell around it: where the credentials come from, and how the
 # number it prints is validated and passed on. The helper is replaced by a stub
 # in a throwaway repository root, so nothing here touches the network.
+# `A && B || fail` is meant: fail when the conjunction does not hold. SC2015 warns that
+# `fail` could also run if B itself fails, which for these `contains` checks is the same event.
+# shellcheck disable=SC2015
 set -euo pipefail
 
 here=$(CDPATH="" cd -- "$(dirname "$0")" && pwd)

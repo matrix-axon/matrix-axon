@@ -5,6 +5,9 @@
 #
 # Each case writes a throwaway .env, runs load_env_key in a fresh bash, and
 # compares what it exported. Nothing here reads a real .env.
+# `A && B || fail` is meant: fail when the conjunction does not hold. SC2015 warns that
+# `fail` could also run if B itself fails, which for these `contains` checks is the same event.
+# shellcheck disable=SC2015
 set -euo pipefail
 
 here=$(CDPATH="" cd -- "$(dirname "$0")" && pwd)
