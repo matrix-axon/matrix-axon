@@ -105,14 +105,11 @@ impl App {
     /// Called after every room refresh and from the main loop's tick, so a
     /// scroll or a filter change pulls in the newly visible rooms.
     pub(crate) fn sweep_visible_room_titles(&mut self) {
-        let rows = self.sidebar_rows(self.active_account_filter());
-        if rows.is_empty() {
-            return;
-        }
         // Tree scroll offsets include headers/dividers; the flat view counts
         // only rooms, retaining its established divider geometry.
         let row_indices: Vec<Option<usize>> = if self.space_tree_enabled() {
-            rows.iter()
+            self.sidebar_rows(self.active_account_filter())
+                .iter()
                 .map(|row| {
                     if let super::spaces::SidebarRow::Room { index, .. } = row {
                         Some(*index)
@@ -124,6 +121,9 @@ impl App {
         } else {
             self.visible_room_indices().into_iter().map(Some).collect()
         };
+        if row_indices.is_empty() {
+            return;
+        }
         let start = self.rooms.scroll.saturating_sub(ROOM_TITLE_LOOKAHEAD);
         let end = self
             .rooms
@@ -154,7 +154,11 @@ impl App {
     /// migrated local pin. Used by the renderer to draw the separator.
     /// Callers already hold the `RoomDto`; do not look it up again (issue #189).
     pub(crate) fn is_room_pinned(&self, room: &RoomDto) -> bool {
-        room.is_favourite() || self.pinned_rooms.contains(&RoomKey::from(room))
+        room.is_favourite()
+            || self
+                .pinned_rooms
+                .iter()
+                .any(|key| key.account_id == room.account_id && key.room_id == room.room_id)
     }
 
     /// Re-sort the loaded rooms in place after a pin/unpin or sort-mode change,
@@ -813,9 +817,24 @@ impl App {
         let current_vis = self
             .rooms
             .selected
-            .and_then(|sel| visible.iter().position(|&i| i == sel))
-            .unwrap_or(0);
-        let next_vis = relative_room_index(current_vis, visible.len(), offset);
+            .and_then(|sel| visible.iter().position(|&i| i == sel));
+        let next_vis = if let Some(current) = current_vis {
+            relative_room_index(current, visible.len(), offset)
+        } else if self.space_tree_enabled() && self.rooms.selected.is_some() {
+            let rows = self.sidebar_rows(self.active_account_filter());
+            let anchor = self.sidebar_anchor(&rows);
+            let preceding = rows[..anchor]
+                .iter()
+                .filter(|row| matches!(row, super::spaces::SidebarRow::Room { .. }))
+                .count();
+            relative_room_index(
+                preceding,
+                visible.len(),
+                if offset > 0 { offset - 1 } else { offset },
+            )
+        } else {
+            relative_room_index(0, visible.len(), offset)
+        };
         self.select_room_index(visible[next_vis]).await;
     }
 

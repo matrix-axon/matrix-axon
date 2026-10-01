@@ -298,18 +298,16 @@ fn prepare_rooms(app: &mut App, areas: &PaneAreas) {
 /// occupy one line, ordinary rooms two in the narrow layout.
 fn prepare_space_rows(app: &mut App, area: Rect, wide: bool) {
     let rows = app.sidebar_rows(app.active_account_filter());
-    let focused = app.focused_sidebar_index();
-    let selected = rows.iter().position(|row| row.index() == focused && focused.is_some())
-        .or_else(|| rows.iter().position(|row| matches!(row, SidebarRow::Room { index, .. } if Some(*index) == app.rooms.selected)))
-        .or_else(|| app.rooms.selected.and_then(|index| app.room_parent_key(index)).and_then(|parent| rows.iter().position(|row| {
-            matches!(row, SidebarRow::Space { index, .. } if RoomKey::from(&app.rooms.rooms[*index]) == parent)
-        }))).unwrap_or(0);
-    match rows.get(selected) {
-        Some(SidebarRow::Space { index, .. }) => {
-            app.spaces.focus = Some(RoomKey::from(&app.rooms.rooms[*index]))
-        }
-        _ => app.spaces.focus = None,
+    if app.spaces.focus.as_ref().is_some_and(|focus| {
+        !rows.iter().any(|row| {
+            matches!(row, SidebarRow::Space { index, .. }
+            if app.rooms.rooms[*index].account_id == focus.account_id
+                && app.rooms.rooms[*index].room_id == focus.room_id)
+        })
+    }) {
+        app.spaces.focus = None;
     }
+    let selected = app.sidebar_anchor(&rows);
     let budget = usize::from(area.height.saturating_sub(2)).max(1);
     // A contextual heading must not consume the selected room's only lines
     // in a tiny terminal. Normal viewports reserve one line for that heading.
@@ -763,7 +761,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                         };
                         let suffix = match app.spaces.children.get(&key) {
                             Some(state) if state.error.is_some() => " (load failed; retrying)",
-                            Some(state) if state.children.is_some() => "",
+                            Some(state) if !state.is_pending() => "",
                             _ => " (loading…)",
                         };
                         ListItem::new(Line::from(format!(

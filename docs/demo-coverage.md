@@ -153,6 +153,7 @@ shows it.
   The existing `rooms` pilot does not exercise those interactions, so coverage remains a gap until the separate testing-silo follow-up (#385).
   That follow-up should also show the containing space header remaining visible while scrolling through a large group.
   Exercise top-room startup, Left/Right group navigation, and pinning a focused space to the shared first position.
+  Also show confirmed empty spaces disappearing while loading and failed roots remain available.
   Root reordering must also be demonstrated changing the web picker through the shared preference.
 - **Galleries in the TUI.** The TUI has no gallery grouping, so this is `n/a` rather than a demo gap.
 - **Sort, filter, and the name filter on web mobile.** The controls are all

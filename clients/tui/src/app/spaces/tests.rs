@@ -310,7 +310,11 @@ fn explicit_filter_collapse_hides_matches_and_no_following_room_keeps_header_foc
     app.rooms.selected = Some(2);
     app.room_filter = RoomFilter::Name("alpha".to_owned());
     app.handle_space_list_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-    assert!(app.spaces.collapsed.contains(&key("!work:srv")));
+    assert_eq!(
+        app.spaces.filter_expanded.get(&key("!work:srv")),
+        Some(&false)
+    );
+    assert!(!app.spaces.collapsed.contains(&key("!work:srv")));
     assert!(leaves(&app).is_empty());
     assert_eq!(app.spaces.focus, Some(key("!work:srv")));
     assert_eq!(app.selected_room().unwrap().room_id, "!a:srv");
@@ -608,6 +612,10 @@ fn filtered_reorder_preserves_other_accounts_and_absent_keys() {
 #[test]
 fn move_during_put_stays_pending_after_the_older_put_finishes() {
     let mut app = app();
+    app.rooms
+        .rooms
+        .push(room(Uuid::nil(), "!club-only:srv", "Club only", false));
+    seed(&mut app, "!club:srv", &["!b:srv", "!club-only:srv"]);
     app.spaces.order_ready = true;
     app.spaces.focus = Some(key("!club:srv"));
     app.move_focused_space(1);
@@ -977,4 +985,336 @@ async fn live_replay_buffer_is_bounded_and_overflow_never_installs_an_old_snapsh
     let outcome = timeline_result(&app, 7, Vec::new());
     app.apply_space_outcome(outcome);
     assert_eq!(app.messages.events[&key("!a:srv")].len(), 1);
+}
+
+#[test]
+fn removed_relationships_do_not_own_rooms_and_confirmed_empty_roots_are_hidden() {
+    let mut app = app();
+    app.spaces
+        .children
+        .get_mut(&key("!work:srv"))
+        .unwrap()
+        .inflight = Some(7);
+    let removed =
+        serde_json::from_value(serde_json::json!({"room_id": "!a:srv", "via": []})).unwrap();
+    let missing_via = serde_json::from_value(serde_json::json!({"room_id": "!b:srv"})).unwrap();
+    app.apply_space_outcome(SpaceOutcome::Children {
+        key: key("!work:srv"),
+        request: 7,
+        result: Ok(vec![removed, missing_via]),
+    });
+    assert!(!app
+        .sidebar_rows(None)
+        .iter()
+        .any(|r| matches!(r, SidebarRow::Space { index: 0, .. })));
+    assert!(app.sidebar_rows(None).iter().any(|r| matches!(
+        r,
+        SidebarRow::Room {
+            index: 2,
+            indented: false,
+            ..
+        }
+    )));
+    // Only joined, navigable leaves count, not unjoined children or subspaces.
+    seed(&mut app, "!work:srv", &["!absent:srv", "!club:srv"]);
+    assert!(!app
+        .sidebar_rows(None)
+        .iter()
+        .any(|r| matches!(r, SidebarRow::Space { index: 0, .. })));
+    app.spaces
+        .children
+        .get_mut(&key("!work:srv"))
+        .unwrap()
+        .error = Some("offline".to_owned());
+    assert!(app
+        .sidebar_rows(None)
+        .iter()
+        .any(|r| matches!(r, SidebarRow::Space { index: 0, .. })));
+    app.spaces.children.remove(&key("!work:srv"));
+    assert!(app
+        .sidebar_rows(None)
+        .iter()
+        .any(|r| matches!(r, SidebarRow::Space { index: 0, .. })));
+}
+
+#[test]
+fn filtering_and_collapse_do_not_turn_nonempty_membership_into_empty_membership() {
+    let mut app = app();
+    app.spaces.collapsed.insert(key("!work:srv"));
+    assert!(app.sidebar_rows(None).iter().any(|r| matches!(
+        r,
+        SidebarRow::Space {
+            index: 0,
+            expanded: false
+        }
+    )));
+    app.set_room_filter(RoomFilter::Name("work".to_owned()));
+    assert!(app
+        .sidebar_rows(None)
+        .iter()
+        .any(|r| matches!(r, SidebarRow::Space { index: 0, .. })));
+}
+
+#[tokio::test]
+async fn hidden_room_navigation_starts_at_its_group_and_wraps_at_the_ends() {
+    let mut app = app();
+    app.spaces.collapsed.insert(key("!work:srv"));
+    app.rooms.selected = Some(2);
+    app.switch_relative_room(1).await;
+    assert_eq!(app.selected_room().unwrap().room_id, "!c:srv");
+    app.rooms.selected = Some(2);
+    app.switch_relative_room(-1).await;
+    assert_eq!(app.selected_room().unwrap().room_id, "!b:srv");
+    app.spaces.collapsed.insert(key("!club:srv"));
+    app.spaces.collapsed.remove(&key("!work:srv"));
+    app.rooms.selected = Some(3);
+    app.switch_relative_room(1).await;
+    assert_eq!(app.selected_room().unwrap().room_id, "!a:srv");
+    app.rooms.selected = Some(3);
+    app.switch_relative_room(-1).await;
+    assert_eq!(app.selected_room().unwrap().room_id, "!c:srv");
+}
+
+#[test]
+fn preparing_a_hidden_active_room_does_not_grant_header_command_focus() {
+    let mut app = app();
+    app.mode = Mode::RoomList;
+    app.rooms.selected = Some(2);
+    app.spaces.collapsed.insert(key("!work:srv"));
+    render(&mut app, 120, 20);
+    assert!(app.spaces.focus.is_none());
+    assert!(!app.handle_space_list_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+    assert!(!app.handle_space_list_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    app.handle_space_list_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.selected_room().unwrap().room_id, "!b:srv");
+}
+
+#[test]
+fn filter_choices_preserve_both_previously_open_and_previously_closed_groups() {
+    let mut app = app();
+    app.spaces.collapsed.insert(key("!work:srv"));
+    app.set_room_filter(RoomFilter::Name("alpha".to_owned()));
+    app.spaces.focus = Some(key("!work:srv"));
+    app.set_space_expanded(&key("!work:srv"), true);
+    assert!(app.spaces.collapsed.contains(&key("!work:srv")));
+    app.set_room_filter(RoomFilter::All);
+    assert!(!app.space_is_expanded(&key("!work:srv")));
+    app.set_room_filter(RoomFilter::Unread);
+    app.set_space_expanded(&key("!club:srv"), false);
+    assert!(!app.spaces.collapsed.contains(&key("!club:srv")));
+    app.set_room_filter(RoomFilter::All);
+    assert!(app.space_is_expanded(&key("!club:srv")));
+}
+
+#[tokio::test]
+async fn replayed_membership_departures_schedule_coalesced_room_refreshes() {
+    let mut app = app();
+    app.rooms.rooms[2].account_user_id = Some("@alice:srv".to_owned());
+    pending_timeline(&mut app, 7);
+    let mut departure = live_message("$leave", "");
+    departure.event_type = "m.room.member".to_owned();
+    departure.state_key = Some("@alice:srv".to_owned());
+    departure.content = Some(serde_json::json!({"membership": "leave"}));
+    app.queue_sidebar_live_event(&departure);
+    app.queue_sidebar_live_event(&departure);
+    let outcome = timeline_result(&app, 7, Vec::new());
+    app.apply_space_outcome(outcome);
+    assert!(app.rooms_fetch_inflight);
+    assert!(app.rooms_fetch_again);
+}
+
+#[tokio::test]
+async fn offscreen_invalidated_membership_settles_and_empty_roots_can_reappear() {
+    let mut app = app();
+    app.rooms.rooms.extend((0..30).map(|i| {
+        room(
+            Uuid::nil(),
+            &format!("!s{i}:srv"),
+            &format!("A{i:02}"),
+            true,
+        )
+    }));
+    for i in 0..30 {
+        seed(&mut app, &format!("!s{i}:srv"), &[]);
+    }
+    // A large earlier group keeps Work beyond the viewport/lookahead.
+    let mut club_children = vec!["!b:srv".to_owned()];
+    for i in 0..30 {
+        let id = format!("!club-child{i}:srv");
+        app.rooms
+            .rooms
+            .push(room(Uuid::nil(), &id, "Club child", false));
+        club_children.push(id);
+    }
+    app.spaces
+        .children
+        .get_mut(&key("!club:srv"))
+        .unwrap()
+        .children = Some(club_children);
+    seed(&mut app, "!work:srv", &[]);
+    assert!(!app
+        .sidebar_rows(None)
+        .iter()
+        .any(|r| matches!(r, SidebarRow::Space { index: 0, .. })));
+    app.invalidate_space(&key("!work:srv"));
+    app.rooms.page_size = 1;
+    let work_position = app
+        .sidebar_rows(None)
+        .iter()
+        .position(|row| matches!(row, SidebarRow::Space { index: 0, .. }))
+        .unwrap();
+    assert!(work_position > app.rooms.page_size + LOOKAHEAD);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    app.spaces.tx = Some(tx);
+    app.spaces.order_ready = true;
+    app.spaces.order_read_again = false;
+    app.sweep_spaces(Instant::now());
+    let request = app.spaces.children[&key("!work:srv")].inflight.unwrap();
+    assert!(app
+        .sidebar_rows(None)
+        .iter()
+        .any(|r| matches!(r, SidebarRow::Ungrouped { provisional: true })));
+    let child =
+        serde_json::from_value(serde_json::json!({"room_id": "!a:srv", "via": ["srv"]})).unwrap();
+    app.apply_space_outcome(SpaceOutcome::Children {
+        key: key("!work:srv"),
+        request,
+        result: Ok(vec![child]),
+    });
+    assert!(app
+        .sidebar_rows(None)
+        .iter()
+        .any(|r| matches!(r, SidebarRow::Space { index: 0, .. })));
+    assert!(!app
+        .sidebar_rows(None)
+        .iter()
+        .any(|r| matches!(r, SidebarRow::Ungrouped { provisional: true })));
+    // Invalidation of an offscreen populated root also gets pool capacity.
+    app.invalidate_space(&key("!work:srv"));
+    app.sweep_spaces(Instant::now());
+    assert!(app.spaces.children[&key("!work:srv")].inflight.is_some());
+}
+
+#[tokio::test]
+async fn removing_a_pending_destination_cancels_navigation_and_cannot_recreate_cache() {
+    let mut app = app();
+    app.spaces.focus = Some(key("!work:srv"));
+    app.spaces.navigation = Some(SpaceNavigation {
+        key: key("!work:srv"),
+        advance_if_empty: true,
+    });
+    app.rooms.rooms.remove(0);
+    app.reconcile_spaces();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    app.spaces.tx = Some(tx);
+    app.sweep_spaces(Instant::now());
+    assert!(app.spaces.navigation.is_none());
+    assert!(!app.spaces.children.contains_key(&key("!work:srv")));
+    // Even a stale intent supplied after reconciliation cannot recreate it.
+    app.spaces.focus = Some(key("!work:srv"));
+    app.spaces.navigation = Some(SpaceNavigation {
+        key: key("!work:srv"),
+        advance_if_empty: false,
+    });
+    app.sweep_spaces(Instant::now());
+    assert!(app.spaces.navigation.is_none());
+    assert!(!app.spaces.children.contains_key(&key("!work:srv")));
+}
+
+// Measure the draw-adjacent flat projection, where ADR 0093 permits a linear
+// index scan but not per-room key/String allocations. Counting is thread-local
+// and enabled only around the measured call, so parallel tests do not interfere.
+mod allocations {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! { static COUNT: Cell<Option<usize>> = const { Cell::new(None) }; }
+    struct CountingSystem;
+    #[global_allocator]
+    static ALLOCATOR: CountingSystem = CountingSystem;
+
+    fn record() {
+        let _ = COUNT.try_with(|count| {
+            if let Some(value) = count.get() {
+                count.set(Some(value + 1));
+            }
+        });
+    }
+
+    // SAFETY: Every operation delegates unchanged to System; counters neither
+    // allocate nor inspect or alter the allocated memory.
+    unsafe impl GlobalAlloc for CountingSystem {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record();
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record();
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            record();
+            unsafe { System.realloc(ptr, layout, size) }
+        }
+    }
+
+    pub(super) fn measure<T>(call: impl FnOnce() -> T) -> (T, usize) {
+        COUNT.with(|count| count.set(Some(0)));
+        let result = call();
+        let count = COUNT.with(|count| count.replace(None).unwrap());
+        (result, count)
+    }
+}
+
+#[test]
+fn flat_projection_does_not_allocate_keys_or_rows_for_each_room() {
+    let mut app = app();
+    app.rooms.rooms = (0..2000)
+        .map(|i| room(Uuid::nil(), &format!("!r{i}:srv"), "Room", false))
+        .collect();
+    let (visible, allocations) = allocations::measure(|| app.visible_room_indices());
+    assert_eq!(visible, (0..2000).collect::<Vec<_>>());
+    assert!(
+        allocations <= 16,
+        "2000-room flat projection made {allocations} allocations"
+    );
+}
+
+#[test]
+fn moves_skip_hidden_empty_roots_without_discarding_their_saved_rank() {
+    let mut app = app();
+    app.rooms
+        .rooms
+        .push(room(Uuid::nil(), "!empty:srv", "Empty", true));
+    seed(&mut app, "!empty:srv", &[]);
+    app.spaces.order = vec![key("!club:srv"), key("!empty:srv"), key("!work:srv")];
+    app.spaces.order_ready = true;
+    app.spaces.focus = Some(key("!club:srv"));
+    app.move_focused_space(1);
+    assert_eq!(
+        app.spaces.order,
+        [key("!work:srv"), key("!empty:srv"), key("!club:srv")]
+    );
+}
+
+#[test]
+fn refreshing_an_empty_root_explains_its_visibility_until_membership_settles() {
+    let mut app = app();
+    seed(&mut app, "!work:srv", &[]);
+    app.invalidate_space(&key("!work:srv"));
+    let buffer = render(&mut app, 120, 20);
+    assert!(room_text(&app, &buffer).contains("Work (loading…)"));
+    let state = app.spaces.children.get_mut(&key("!work:srv")).unwrap();
+    state.dirty = false;
+    state.inflight = Some(7);
+    app.apply_space_outcome(SpaceOutcome::Children {
+        key: key("!work:srv"),
+        request: 7,
+        result: Ok(Vec::new()),
+    });
+    let buffer = render(&mut app, 120, 20);
+    assert!(!room_text(&app, &buffer).contains("Work"));
 }

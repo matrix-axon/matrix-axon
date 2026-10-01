@@ -1607,7 +1607,7 @@ impl App {
     /// Surfaces the active filter in the status line so key-chord shortcuts give
     /// the same feedback as the `/filter` command.
     pub(crate) fn set_room_filter(&mut self, filter: RoomFilter) {
-        self.spaces.filter_collapsed.clear();
+        self.spaces.filter_expanded.clear();
         self.room_filter = filter;
         self.sync_room_selection_to_account_filter();
         self.status = Status::from(format!("filter: {}", self.room_filter.label()));
@@ -1656,14 +1656,14 @@ impl App {
     /// Live-update the name filter as the user types. Does not persist (a name
     /// filter is session-only — it saves as `all`).
     pub(crate) fn update_room_name_filter(&mut self, query: String) {
-        self.spaces.filter_collapsed.clear();
+        self.spaces.filter_expanded.clear();
         self.room_filter = RoomFilter::Name(query.to_lowercase());
         self.sync_room_selection_to_account_filter();
     }
 
     /// Abandon name-filter input: restore the pre-input filter (default `All`).
     pub(crate) fn cancel_room_name_filter(&mut self) {
-        self.spaces.filter_collapsed.clear();
+        self.spaces.filter_expanded.clear();
         let restored = self
             .room_filter_before_input
             .take()
@@ -1685,16 +1685,7 @@ impl App {
     }
 
     pub(crate) fn visible_room_indices(&self) -> Vec<usize> {
-        self.sidebar_rows(self.active_account_filter())
-            .into_iter()
-            .filter_map(|row| {
-                if let spaces::SidebarRow::Room { index, .. } = row {
-                    Some(index)
-                } else {
-                    None
-                }
-            })
-            .collect()
+        self.visible_sidebar_room_indices(self.active_account_filter())
     }
 
     /// Whether a room satisfies the active [`RoomFilter`]. The account filter and

@@ -1160,6 +1160,9 @@ pub enum LiveFrame {
 #[derive(Debug, Deserialize)]
 pub struct SpaceChildDto {
     pub room_id: String,
+    /// Empty/missing routing servers mean the relationship has been removed.
+    #[serde(default)]
+    pub via: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

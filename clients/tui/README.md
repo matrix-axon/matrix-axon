@@ -139,6 +139,7 @@ Favorites sort first within each group, followed by the selected `/sort` order.
 `/filter fav` shows a flat favorites list.
 Name and unread filters temporarily reveal matching children without changing the session's collapse choices.
 An explicit collapse hides that group even under those filters, until the filter changes or the group is expanded again.
+Collapse and expand choices made under a name or unread filter are temporary; clearing it restores the session choices.
 A `/room` target by name, ID, or alias can open a collapsed child and reveal its parent; numeric targets name the visible room rows.
 Ctrl-N/P skips headers and follows visible room rows.
 
@@ -152,6 +153,7 @@ A failed save keeps the pending order visible and retries with backoff; the pane
 An unset order uses space titles until the first explicit move.
 
 Space membership loads in the background for visible roots and a small lookahead.
+Previously loaded membership invalidated by live updates is refreshed through the same bounded pool, even off screen.
 Startup waits for saved root order and the first group's membership before opening the top room, after loading its read markers and drafts.
 Empty or failed groups are skipped; a 30-second selection deadline falls back to the first currently available room rather than leaving startup stuck.
 Explicit room navigation during startup takes precedence over that automatic choice.
@@ -159,7 +161,9 @@ Until those reads complete, rooms remain accessible in the provisional Ungrouped
 Failed reads are marked on the root and retried; `/refresh` also retries them.
 Live `m.space.child` updates invalidate the affected group, and reconnect refreshes both membership and saved order.
 An account without joined spaces retains the flat room list.
-Only joined child rooms are displayed, and a room with multiple parents belongs to the first space in root order.
+Only joined child rooms with an active relationship are displayed, and a room with multiple parents belongs to the first space in root order.
+Spaces with confirmed membership and no joined rooms assigned to them are hidden.
+Loading or failed spaces remain visible; filters and collapse do not make a space empty.
 Joined subspaces remain roots; recursive navigation, space creation, and cross-listing are deferred.
 
 ## Keyboard Shortcuts
