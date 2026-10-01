@@ -389,18 +389,30 @@ password variable is `AXON_SIGNING_KEYCHAIN_PASSWORD`, likewise.
 
 Which identities are needed:
 
-| Script and mode                        | Identity                                                                                                       |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `package-ios.sh` `debugging` (default) | `Apple Development`                                                                                            |
-| `package-ios.sh` `app-store-connect`   | `Apple Distribution`                                                                                           |
-| `package-ios.sh` `release-testing`     | `Apple Distribution`, and an Ad Hoc profile; see [#529](https://github.com/matrix-axon/matrix-axon/issues/529) |
-| `package-macos-mas.sh`, the app        | `3rd Party Mac Developer Application`, or `Apple Distribution`                                                 |
-| `package-macos-mas.sh`, the `.pkg`     | `3rd Party Mac Developer Installer`, or `Mac Installer Distribution`                                           |
+| Script and mode                        | Identity                                                             |
+| -------------------------------------- | -------------------------------------------------------------------- |
+| `package-ios.sh` `debugging` (default) | `Apple Development`                                                  |
+| `package-ios.sh` `app-store-connect`   | `Apple Distribution`                                                 |
+| `package-ios.sh` `release-testing`     | `Apple Distribution`, and an Ad Hoc provisioning profile (below)     |
+| `package-macos-mas.sh`, the app        | `3rd Party Mac Developer Application`, or `Apple Distribution`       |
+| `package-macos-mas.sh`, the `.pkg`     | `3rd Party Mac Developer Installer`, or `Mac Installer Distribution` |
 
-`release-testing` builds and archives, then fails at export with
-`exportArchive No Accounts` and `No profiles for 'org.matrixaxon.axon' were
-found`. That is a missing Ad Hoc provisioning profile, not a keychain problem:
-the same keychain completes `app-store-connect`.
+`release-testing` also needs an **Ad Hoc provisioning profile** for the bundle
+ID, which lists the devices the build may be installed on. Without one it builds
+and archives, then fails at export with `exportArchive No Accounts` and
+`No profiles for 'org.matrixaxon.axon' were found`; Xcode's distribution log says
+`Xcode couldn't find any iOS Ad Hoc provisioning profiles`. That is a
+provisioning problem, not a keychain one: the same keychain completes
+`app-store-connect`, which only needs the Store profile.
+
+What fixed it here: an Apple ID signed into Xcode (Settings > Accounts) and Xcode
+generating an `iOS Team Ad Hoc Provisioning Profile` for the bundle ID. Until then
+Xcode had no account to create one with, and `xcodebuild -allowProvisioningUpdates`
+had nothing to authenticate as. With the profile installed, `release-testing`
+produced an `.ipa` signed by `Apple Distribution` with `get-task-allow` false and
+the registered devices embedded. Creating the profile in the developer portal and
+installing it should work too; that was not tried. Devices have to be registered,
+and the profile remade when the list changes.
 
 Things that are easy to get wrong:
 
