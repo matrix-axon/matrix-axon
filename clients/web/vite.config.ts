@@ -460,6 +460,10 @@ export default defineConfig({
     setupFiles: ['./src/test/setup.ts'],
     // Unit tests live in src; the Playwright e2e specs in e2e/ are run by
     // `pnpm test:e2e`, not vitest (both use the `.spec.ts` suffix).
-    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    // `e2e/**/*.vitest.ts` are unit tests *of* the e2e harness (the flaky
+    // policy reporter). The suffix keeps Playwright, which collects
+    // `*.spec.ts`/`*.test.ts` under `e2e/`, from picking them up as browser
+    // tests.
+    include: ['src/**/*.{test,spec}.{ts,tsx}', 'e2e/**/*.vitest.ts'],
   },
 })
