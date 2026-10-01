@@ -19,6 +19,10 @@ import type { ConsoleMessage, Page } from '@playwright/test'
 export const WEBKIT_INFRA_FAILURE =
   /WebKit encountered an internal error|WebKit network process crashed/
 
+/** How `withWebKitCrashSignature` names the crash; matched by the above. */
+export const CRASH_SIGNATURE =
+  'WebKit network process crashed during this navigation'
+
 /** What the page's console says when WebKit's network process goes down. */
 const CRASH_CONSOLE =
   /Network process crashed|WebKit encountered an internal error/
@@ -46,10 +50,9 @@ export async function withWebKitCrashSignature<T>(
       throw error
     }
     const cause = error instanceof Error ? error.message : String(error)
-    throw new Error(
-      `WebKit network process crashed during this navigation (console: ${seen[0]})\n${cause}`,
-      { cause: error },
-    )
+    throw new Error(`${CRASH_SIGNATURE} (console: ${seen[0]})\n${cause}`, {
+      cause: error,
+    })
   } finally {
     page.off('console', onConsole)
   }

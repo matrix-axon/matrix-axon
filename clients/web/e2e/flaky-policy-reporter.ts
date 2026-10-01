@@ -18,6 +18,14 @@ import { WEBKIT_INFRA_FAILURE } from './webkit-infra'
  * summary so a rising rate stays visible. A test that fails every attempt
  * fails the job whatever its error said; this only decides what a *passing*
  * retry is worth.
+ *
+ * It fails closed. It is the only thing between a flaky test and a green run,
+ * so anything unexpected inside it, whether an exception or a suite it never
+ * received, fails the run rather than letting it through. A reporter that fails
+ * to load already fails the run before any test starts. What it cannot catch
+ * itself, a Playwright change in `outcome()` or in how `onEnd`'s status is
+ * honoured, is pinned by `flaky-policy-reporter.vitest.ts`, which drives the
+ * real runner.
  */
 export default class FlakyPolicyReporter implements Reporter {
   private suite: Suite | undefined
@@ -31,9 +39,26 @@ export default class FlakyPolicyReporter implements Reporter {
   async onEnd(
     result: FullResult,
   ): Promise<{ status: FullResult['status'] } | undefined> {
-    const flaky = (this.suite?.allTests() ?? []).filter(
-      (test) => test.outcome() === 'flaky',
-    )
+    try {
+      return this.decide(result)
+    } catch (error) {
+      console.error('flaky-policy reporter failed; failing the run', error)
+      return { status: 'failed' }
+    }
+  }
+
+  private decide(
+    result: FullResult,
+  ): { status: FullResult['status'] } | undefined {
+    if (this.suite === undefined) {
+      console.error(
+        'flaky-policy reporter never saw the suite; failing the run',
+      )
+      return { status: 'failed' }
+    }
+    const flaky = this.suite
+      .allTests()
+      .filter((test) => test.outcome() === 'flaky')
     const tolerated = flaky.filter(isWebKitInfraFlake)
     const blocking = flaky.filter((test) => !tolerated.includes(test))
 
