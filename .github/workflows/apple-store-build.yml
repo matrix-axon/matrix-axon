@@ -1,0 +1,11 @@
+name: Apple store build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  empty-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Do nothing
+        run: ':' 
