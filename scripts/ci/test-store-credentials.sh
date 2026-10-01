@@ -123,12 +123,12 @@ all_asc="ASC_KEY_ID=x ASC_ISSUER_ID=x ASC_PRIVATE_KEY=x"
 out=$(run $all_ios -- check-secrets ios)
 contains "$out" "rc=0" && contains "$out" "all required secrets for the ios build are set" || fail "ios: everything set passes" "$out"
 
-for missing in APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE APPLE_TEAM_ID; do
+for missing in APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE APPLE_TEAM_ID; do
   set_vars=$(printf '%s' "$all_ios" | tr ' ' '\n' | grep -v "^$missing=" | tr '\n' ' ')
   # shellcheck disable=SC2086
   out=$(run $set_vars -- check-secrets ios)
   contains "$out" "rc=1" && contains "$out" "$missing" || fail "ios: $missing missing is an error naming it" "$out"
-  for other in APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE APPLE_TEAM_ID; do
+  for other in APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE APPLE_TEAM_ID; do
     [ "$other" = "$missing" ] && continue
     contains "$out" "secrets for the ios build: $other" && fail "ios: only the missing secret is named" "$out"
   done
@@ -139,9 +139,8 @@ done
 out=$(run $all_ios IOS_APPSTORE_PROFILE= -- check-secrets ios)
 contains "$out" "rc=1" && contains "$out" "IOS_APPSTORE_PROFILE" || fail "an empty secret counts as missing" "$out"
 
-# shellcheck disable=SC2086
 out=$(run APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=x IOS_APPSTORE_PROFILE=x APPLE_TEAM_ID=x -- check-secrets ios)
-contains "$out" "rc=0" && contains "$out" "optional secrets not set: IOS_DEVELOPMENT_PROFILE" || fail "ios: the development profile is optional and says so" "$out"
+contains "$out" "rc=1" && contains "$out" "IOS_DEVELOPMENT_PROFILE" || fail "ios: the development profile is required, since the archive step looks for one" "$out"
 
 # shellcheck disable=SC2086
 out=$(run $all_macos -- check-secrets macos)
@@ -267,6 +266,8 @@ appstore=$(make_profile appstore.mobileprovision)
 out=$(run_real RUNNER_TEMP="$work/pr" GITHUB_ENV="$work/penv" IOS_APPSTORE_PROFILE="$appstore" PROVISIONING_PROFILES_DIRS="$profiles" -- \
   profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store --bundle-id org.example.app --install --export-path SOME_PATH)
 contains "$out" "rc=0" && contains "$out" "(app-store)" && contains "$out" "installed as 11111111-2222-3333-4444-555555555555.mobileprovision" || fail "profile: a good App Store profile is accepted and installed" "$out"
+contains "$out" "warning:" && fail "profile: a hand-made App Store profile is not warned about (only the development case was observed)" "$out"
+
 for d in pd1 pd2; do
   [ -f "$work/$d/11111111-2222-3333-4444-555555555555.mobileprovision" ] || fail "profile: it is installed in every folder Xcode might read ($d), named by UUID"
 done
@@ -279,6 +280,14 @@ contains "$out" "rc=1" && contains "$out" "is a ad-hoc profile" && contains "$ou
 dev=$(make_profile dev.mobileprovision 'Entitlements.get-task-allow=True' 'ProvisionedDevices=["A"]')
 out=$(run_real RUNNER_TEMP="$work/pr" IOS_DEVELOPMENT_PROFILE="$dev" -- profile IOS_DEVELOPMENT_PROFILE --ext mobileprovision --expect development)
 contains "$out" "rc=0" && contains "$out" "(development)" || fail "profile: a development profile is recognised" "$out"
+contains "$out" "warning:" && contains "$out" "not Xcode-managed" && contains "$out" "Test Profile" || fail "profile: a development profile made by hand gets a warning that names it" "$out"
+contains "$out" 'iOS Team Provisioning Profile: <bundle id>' || fail "profile: with no --bundle-id the warning says <bundle id>, not an empty name" "$out"
+out=$(run_real RUNNER_TEMP="$work/pr" IOS_DEVELOPMENT_PROFILE="$dev" -- profile IOS_DEVELOPMENT_PROFILE --ext mobileprovision --expect development --bundle-id org.example.app)
+contains "$out" "iOS Team Provisioning Profile: org.example.app" || fail "profile: with --bundle-id the warning says which profile name to use" "$out"
+dev_managed=$(make_profile devmanaged.mobileprovision 'Entitlements.get-task-allow=True' 'ProvisionedDevices=["A"]' 'IsXcodeManaged=True')
+out=$(run_real RUNNER_TEMP="$work/pr" IOS_DEVELOPMENT_PROFILE="$dev_managed" -- profile IOS_DEVELOPMENT_PROFILE --ext mobileprovision --expect development --bundle-id org.example.app)
+contains "$out" "rc=0" && contains "$out" "(development)" && ! contains "$out" "warning:" || fail "profile: an Xcode-managed development profile gets no warning" "$out"
+
 out=$(run_real RUNNER_TEMP="$work/pr" IOS_APPSTORE_PROFILE="$dev" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --expect app-store)
 contains "$out" "rc=1" && contains "$out" "is a development profile" || fail "profile: a development profile in the App Store slot is refused" "$out"
 
@@ -295,6 +304,8 @@ contains "$out" "rc=1" && contains "$out" "is not a provisioning profile" || fai
 mac=$(make_profile mac.provisionprofile 'Entitlements.com.apple.application-identifier="TEAM123456.org.example.app"' 'Platform=["OSX"]')
 out=$(run_real RUNNER_TEMP="$work/pr" MAC_APPSTORE_PROFILE="$mac" -- profile MAC_APPSTORE_PROFILE --ext provisionprofile --expect app-store --bundle-id org.example.app)
 contains "$out" "rc=0" && contains "$out" "(app-store)" || fail "profile: a macOS profile (com.apple.application-identifier) is read too" "$out"
+contains "$out" "warning:" && fail "profile: a macOS profile is not warned about" "$out"
+
 
 out=$(run_real RUNNER_TEMP="$work/pr" -- profile NOT_SET_AT_ALL --ext mobileprovision)
 contains "$out" "rc=1" && contains "$out" "NOT_SET_AT_ALL is not set" || fail "profile: an unset variable is refused by name" "$out"
@@ -306,6 +317,8 @@ contains "$out" "rc=1" && contains "$out" "--ext must be" || fail "profile: an u
 mkdir -p "$work/lp1" "$work/lp2" "$work/lp-empty" "$work/extra"
 printf '%s' "$appstore" | $ossl base64 -d -A >"$work/lp1/store.mobileprovision"
 printf '%s' "$dev" | $ossl base64 -d -A >"$work/lp1/dev.mobileprovision"
+devm=$(make_profile devm.mobileprovision 'Entitlements.get-task-allow=True' 'ProvisionedDevices=["A"]' 'IsXcodeManaged=True')
+printf '%s' "$devm" | $ossl base64 -d -A >"$work/lp1/devm.mobileprovision"
 printf '%s' "$mac" | $ossl base64 -d -A >"$work/lp2/mac.provisionprofile"
 other=$(make_profile other.mobileprovision 'Entitlements.application-identifier="TEAM123456.org.other.app"')
 printf '%s' "$other" | $ossl base64 -d -A >"$work/lp2/other.mobileprovision"
@@ -314,6 +327,9 @@ printf '%s' "$adhoc" | $ossl base64 -d -A >"$work/extra/adhoc.mobileprovision"
 out=$(run_real PROVISIONING_PROFILES_DIRS="$work/lp1:$work/lp2" -- list-profiles --bundle-id org.example.app)
 contains "$out" "rc=0" && contains "$out" "$work/lp1/store.mobileprovision" && contains "$out" "$work/lp2/mac.provisionprofile" || fail "list-profiles: finds profiles in every folder" "$out"
 contains "$out" "| app-store | iOS |" && contains "$out" "| development | iOS |" && contains "$out" "| app-store | OSX |" || fail "list-profiles: says the kind and the platform of each" "$out"
+contains "$out" "| development | iOS | manual |" || fail "list-profiles: a profile made by hand is marked manual" "$out"
+contains "$out" "| development | iOS | Xcode-managed |" || fail "list-profiles: an Xcode-managed profile is marked as such" "$out"
+
 contains "$out" "other.mobileprovision" && fail "list-profiles: --bundle-id leaves out a profile for another app" "$out"
 contains "$out" "no macOS profile" && fail "list-profiles: no hint about a missing macOS profile when one was listed" "$out"
 

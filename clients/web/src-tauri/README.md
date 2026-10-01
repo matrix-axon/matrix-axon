@@ -517,16 +517,16 @@ Developer ID certificate and notarization login for the `.dmg`, a different
 certificate type from a store build's, and a store upload authenticates with an API
 key rather than an Apple ID.
 
-| Secret                              | What it is                                                                                  |
-| ----------------------------------- | ------------------------------------------------------------------------------------------- |
-| `APPLE_STORE_CERTIFICATES`          | Base64 of one `.p12` holding the store signing identities (certificate **and** private key) |
-| `APPLE_STORE_CERTIFICATES_PASSWORD` | The password that `.p12` was exported with                                                  |
-| `IOS_APPSTORE_PROFILE`              | Base64 of the iOS **App Store** provisioning profile for the bundle ID                      |
-| `IOS_DEVELOPMENT_PROFILE`           | Optional. Base64 of the iOS **development** profile                                         |
-| `MAC_APPSTORE_PROFILE`              | Base64 of the **Mac App Store** provisioning profile (`.provisionprofile`)                  |
-| `ASC_KEY_ID`                        | The 10-character key ID of an App Store Connect API key                                     |
-| `ASC_ISSUER_ID`                     | The issuer ID, a UUID, shown above the keys list                                            |
-| `ASC_PRIVATE_KEY`                   | The full contents of that key's `AuthKey_<ID>.p8` file                                      |
+| Secret                              | What it is                                                                                             |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `APPLE_STORE_CERTIFICATES`          | Base64 of one `.p12` holding the store signing identities (certificate **and** private key)            |
+| `APPLE_STORE_CERTIFICATES_PASSWORD` | The password that `.p12` was exported with                                                             |
+| `IOS_APPSTORE_PROFILE`              | Base64 of the iOS **App Store** provisioning profile for the bundle ID                                 |
+| `IOS_DEVELOPMENT_PROFILE`           | Base64 of the **Xcode-managed** iOS development profile (`iOS Team Provisioning Profile: <bundle id>`) |
+| `MAC_APPSTORE_PROFILE`              | Base64 of the **Mac App Store** provisioning profile (`.provisionprofile`)                             |
+| `ASC_KEY_ID`                        | The 10-character key ID of an App Store Connect API key                                                |
+| `ASC_ISSUER_ID`                     | The issuer ID, a UUID, shown above the keys list                                                       |
+| `ASC_PRIVATE_KEY`                   | The full contents of that key's `AuthKey_<ID>.p8` file                                                 |
 
 `ASC_*` are needed only for a run that uploads or uses `auto`. There is also one
 optional **variable** (not a secret): `MAS_APP_IDENTITY`, below.
@@ -551,7 +551,7 @@ rm store.p12
 #    in. Without that, no macOS profile is listed, and it says so.
 scripts/ci/store-credentials.sh list-profiles --bundle-id org.matrixaxon.axon ~/Downloads
 base64 -i '<the app-store iOS .mobileprovision>' | gh secret set IOS_APPSTORE_PROFILE
-base64 -i '<the development iOS .mobileprovision>' | gh secret set IOS_DEVELOPMENT_PROFILE
+base64 -i '<the Xcode-managed development iOS .mobileprovision>' | gh secret set IOS_DEVELOPMENT_PROFILE
 base64 -i '<the app-store OSX .provisionprofile>' | gh secret set MAC_APPSTORE_PROFILE
 
 # 3. The App Store Connect key.
@@ -581,9 +581,22 @@ Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
   be for another app or to have expired. That is the check for the two being
   swapped, which otherwise fails inside `xcodebuild` as
   `No profiles for … were found`. `list-profiles` finds the iOS profiles because
-  Xcode installs them. The Mac App Store profile is a file downloaded from the
+  Xcode installs them, and marks each `Xcode-managed` or `manual`. The development
+  profile must be an Xcode-managed one. The Xcode project signs automatically, and
+  as far as we can tell automatic signing does not pick up a profile made by hand in
+  the developer portal. That is an inference. A run with the manual `Matrix-axon`
+  profile in `IOS_DEVELOPMENT_PROFILE` failed with this error:
+
+  ```
+  Xcode couldn't find any iOS App Development provisioning profiles matching '<bundle id>'
+  ```
+
+  and that profile differed from the one that works on the Mac this was developed
+  on only in not being Xcode-managed (both list the same certificate and carry the
+  same entitlements). The job warns when it is given a manual one. The Mac App Store profile is a file downloaded from the
   developer portal and never installed, so it is found only when you name the
   folder, or the file, it is in; when no macOS profile turns up it says so.
+
 - **The API key** needs the App Manager role or above (App Store Connect > Users
   and Access > Integrations > Team Keys). A key made for CI, rather than the one on
   your own machine, can be revoked without touching your builds. The key ID is the
@@ -606,10 +619,6 @@ Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
 Everything above has been exercised on a Mac; none of it on a runner. These are the
 open questions, and each is cheap to answer once there is a run to read:
 
-- **Whether the iOS archive needs the development profile.** On the Mac this was
-  developed on, an App Store build archived and exported with a development
-  profile installed. `IOS_DEVELOPMENT_PROFILE` is optional for that reason; if the
-  archive fails with `No profiles for … were found`, add it.
 - **Whether a clean runner has the Xcode and tooling expected.** The job selects an
   Xcode with the iOS 26 SDK or fails and says so, and installs `xcodegen`,
   `cocoapods` and `libimobiledevice` with Homebrew, which is what `tauri ios init`

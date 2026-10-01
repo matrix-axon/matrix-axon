@@ -29,12 +29,11 @@
 set -euo pipefail
 
 # What each lane needs, as environment variable names.
-ios_required="APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE APPLE_TEAM_ID"
-# Not required: this Mac archived and exported an App Store build with a
-# development profile installed, so the archive step may want one, but that has
-# not been confirmed on a clean machine. Installed when present; the first run
-# says whether it was needed.
-ios_optional="IOS_DEVELOPMENT_PROFILE"
+# The development profile is required, not optional: the archive step looks for
+# one. A run on a clean runner without it failed with "Xcode couldn't find any iOS
+# App Development provisioning profiles matching <bundle id>", after the keychain,
+# the profiles and the API key had all installed without complaint.
+ios_required="APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD IOS_APPSTORE_PROFILE IOS_DEVELOPMENT_PROFILE APPLE_TEAM_ID"
 macos_required="APPLE_STORE_CERTIFICATES APPLE_STORE_CERTIFICATES_PASSWORD MAC_APPSTORE_PROFILE"
 asc_required="ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY"
 
@@ -45,6 +44,14 @@ die() {
     echo "error: $*" >&2
   fi
   exit 1
+}
+
+warn() {
+  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    echo "::warning::$*"
+  else
+    echo "warning: $*" >&2
+  fi
 }
 
 # Writes NAME=VALUE for a later workflow step, if there is one to write to.
@@ -98,26 +105,20 @@ cmd_check_secrets() {
     esac
     shift
   done
-  local required optional
+  local required
   case $lane in
-    ios) required=$ios_required; optional=$ios_optional ;;
-    macos) required=$macos_required; optional="" ;;
+    ios) required=$ios_required ;;
+    macos) required=$macos_required ;;
     *) die "check-secrets: lane must be ios or macos, not '$lane'" ;;
   esac
   if [ "$need_asc" -eq 1 ]; then
     required="$required $asc_required"
   fi
 
-  local name missing="" warn=""
+  local name missing=""
   for name in $required; do
     if [ -z "${!name:-}" ]; then missing="$missing $name"; fi
   done
-  for name in $optional; do
-    if [ -z "${!name:-}" ]; then warn="$warn $name"; fi
-  done
-  if [ -n "$warn" ]; then
-    echo "note: optional secrets not set:$warn (the build may not need them)"
-  fi
   if [ -n "$missing" ]; then
     die "missing repository secrets for the $lane build:$missing. See the README's \"Store builds from GitHub Actions\" for what each is and how to make it."
   fi
@@ -354,6 +355,18 @@ cmd_profile() {
   fi
   echo "$var: \"$name\" ($kind), app id $appid, expires $expires"
 
+  # The generated Xcode project signs automatically, and automatic signing picks up
+  # Xcode-managed profiles ("iOS Team Provisioning Profile: <bundle id>") and not one
+  # made by hand in the developer portal, even when that one lists the same
+  # certificate and entitlements. A run with such a profile in IOS_DEVELOPMENT_PROFILE
+  # failed with "Xcode couldn't find any iOS App Development provisioning profiles".
+  # A warning and not an error: that rests on how Xcode behaves, not on a check here.
+  # Development only, because that is the case that was observed.
+  if [ "$kind" = "development" ] && [ "$ext" = "mobileprovision" ] \
+      && [ "$(plutil -extract IsXcodeManaged raw -o - "$plist" 2>/dev/null || echo false)" != "true" ]; then
+    warn "$var holds \"$name\", a development profile that is not Xcode-managed. The Xcode project signs automatically, and automatic signing appears to pick up only Xcode-managed profiles (named \"iOS Team Provisioning Profile: ${bundle_id:-<bundle id>}\"), not one made by hand in the developer portal; the build then fails with \"No profiles for ... were found\". Use the Xcode-managed one: \`store-credentials.sh list-profiles\` marks it."
+  fi
+
   if [ -n "$expires" ]; then
     if ! python3 - "$expires" <<'PY'
 import sys, datetime
@@ -465,7 +478,7 @@ EOF
 describe_profile() {
   local file=$1 plist=$2 bundle_id=$3
   security cms -D -i "$file" >"$plist" 2>/dev/null || return 1
-  local name appid platform expires gta devices all kind
+  local name appid platform expires gta devices all kind managed
   name=$(plutil -extract Name raw -o - "$plist" 2>/dev/null || echo "?")
   appid=$(plutil -extract Entitlements.application-identifier raw -o - "$plist" 2>/dev/null \
     || plutil -extract Entitlements.com\\.apple\\.application-identifier raw -o - "$plist" 2>/dev/null || true)
@@ -483,8 +496,15 @@ describe_profile() {
   elif [ -n "$devices" ]; then kind="ad-hoc"
   else kind="app-store"
   fi
+  # Xcode-managed profiles are the ones automatic signing will pick up; one made by
+  # hand in the developer portal is "manual" and, for development, is ignored by it.
+  if [ "$(plutil -extract IsXcodeManaged raw -o - "$plist" 2>/dev/null || echo false)" = "true" ]; then
+    managed="Xcode-managed"
+  else
+    managed="manual"
+  fi
   printf '%s\n' "$file"
-  printf '    %s | %s | %s | expires %s\n' "$name" "$kind" "$platform" "$expires"
+  printf '    %s | %s | %s | %s | expires %s\n' "$name" "$kind" "$platform" "$managed" "$expires"
 }
 
 # --- cleanup -----------------------------------------------------------------

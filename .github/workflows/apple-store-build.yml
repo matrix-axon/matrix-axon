@@ -160,13 +160,10 @@ jobs:
           scripts/ci/store-credentials.sh keychain --require "Apple Distribution"
           scripts/ci/store-credentials.sh profile IOS_APPSTORE_PROFILE \
             --ext mobileprovision --expect app-store --bundle-id "$bundle_id" --install
-          # Installed when given. This Mac archived and exported with a
-          # development profile present; whether a clean runner needs one is
-          # what the first run shows.
-          if [ -n "${IOS_DEVELOPMENT_PROFILE:-}" ]; then
-            scripts/ci/store-credentials.sh profile IOS_DEVELOPMENT_PROFILE \
-              --ext mobileprovision --expect development --bundle-id "$bundle_id" --install
-          fi
+          # Required: the archive step looks for a development profile, and a run
+          # without one failed there. It must be the Xcode-managed one.
+          scripts/ci/store-credentials.sh profile IOS_DEVELOPMENT_PROFILE \
+            --ext mobileprovision --expect development --bundle-id "$bundle_id" --install
           if [ "$NEED_ASC" = "yes" ]; then
             scripts/ci/store-credentials.sh asc-key
           fi
