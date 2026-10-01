@@ -1,7 +1,15 @@
 import { signal } from '@preact/signals'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { createApiClient } from '../api/client'
 import { TIMELINE_EVENT, type LiveFrame } from '../api/frames'
 import type { LiveConnection } from './live-connection'
@@ -39,6 +47,8 @@ const plainRoom = (roomId: string): RoomDto =>
  *  reachable from it. */
 function harness() {
   const rooms = signal<RoomDto[]>([space()])
+  const stale = signal(false)
+  const error = signal<string | null>(null)
   const reconnects = signal(0)
   const listeners = new Set<(frame: LiveFrame) => void>()
   const api = createApiClient(
@@ -56,10 +66,16 @@ function harness() {
       return () => listeners.delete(listener)
     },
   } as unknown as LiveConnection
-  const store = createSpacesStore(api, { rooms } as unknown as RoomsStore, live)
+  const store = createSpacesStore(
+    api,
+    { rooms, stale, error } as unknown as RoomsStore,
+    live,
+  )
   return {
     store,
     rooms,
+    stale,
+    error,
     reconnects,
     emit: (frame: LiveFrame) => listeners.forEach((listen) => listen(frame)),
   }
@@ -147,4 +163,117 @@ describe('createSpacesStore', () => {
     )
     expect(store.loading.value.has(`${ACCOUNT}/${SPACE}`)).toBe(false)
   })
+})
+
+it('hides successful empty membership and returns a selected empty space to All', async () => {
+  server.use(http.get(childrenUrl, () => HttpResponse.json({ data: [] })))
+  const { store } = harness()
+  expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
+  store.selected.value = `${ACCOUNT}/${SPACE}`
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  expect(store.visible.value).toEqual([])
+  expect(store.selected.value).toBeNull()
+})
+
+it('ignores removed relationships, unjoined children, and other accounts when testing emptiness', async () => {
+  server.use(
+    http.get(childrenUrl, () =>
+      HttpResponse.json({
+        data: [
+          { room_id: '!removed:hs', via: [], suggested: false },
+          { room_id: '!foreign:hs', via: ['hs'], suggested: false },
+          { room_id: '!absent:hs', via: ['hs'], suggested: false },
+          { room_id: SPACE, via: ['hs'], suggested: false },
+        ],
+      }),
+    ),
+  )
+  const { store, rooms } = harness()
+  rooms.value = [
+    space(),
+    plainRoom('!removed:hs'),
+    { ...plainRoom('!foreign:hs'), account_id: 'other-account' },
+  ]
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  expect(
+    store.children.value
+      .get(`${ACCOUNT}/${SPACE}`)
+      ?.map((child) => child.room_id),
+  ).not.toContain('!removed:hs')
+  expect(store.visible.value).toEqual([])
+  rooms.value = [space(), plainRoom('!foreign:hs')]
+  expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
+})
+
+it('keeps loading and failed membership visible even after an empty successful read', async () => {
+  let fail = false
+  let release: (() => void) | undefined
+  server.use(
+    http.get(childrenUrl, async () => {
+      if (fail) {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return HttpResponse.json(
+          { error: { code: 'offline', message: 'unavailable' } },
+          { status: 503 },
+        )
+      }
+      return HttpResponse.json({ data: [] })
+    }),
+  )
+  const { store } = harness()
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  expect(store.visible.value).toEqual([])
+  fail = true
+  store.refresh(space())
+  expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
+  store.selected.value = `${ACCOUNT}/${SPACE}`
+  await vi.waitFor(() => expect(release).toBeDefined())
+  release?.()
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
+  expect(store.selected.value).toBe(`${ACCOUNT}/${SPACE}`)
+})
+
+it('refetches hidden roots after child updates and restores them when joined children appear', async () => {
+  let data: Array<{ room_id: string; via: string[]; suggested: boolean }> = []
+  server.use(http.get(childrenUrl, () => HttpResponse.json({ data })))
+  const { store, rooms, emit } = harness()
+  rooms.value = [space(), plainRoom('!child:hs')]
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  expect(store.visible.value).toEqual([])
+  data = [{ room_id: '!child:hs', via: ['hs'], suggested: false }]
+  emit({
+    type: TIMELINE_EVENT,
+    accountId: ACCOUNT,
+    payload: {
+      account_id: ACCOUNT,
+      room_id: SPACE,
+      type: 'm.space.child',
+    },
+  } as unknown as LiveFrame)
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
+})
+
+it('does not infer empty membership from a stale or failed room catalog', async () => {
+  server.use(
+    http.get(childrenUrl, () =>
+      HttpResponse.json({
+        data: [{ room_id: '!child:hs', via: ['hs'], suggested: false }],
+      }),
+    ),
+  )
+  const { store, rooms, stale, error } = harness()
+  stale.value = true
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
+  stale.value = false
+  expect(store.visible.value).toEqual([])
+  error.value = 'Could not load rooms'
+  expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
+  rooms.value = [space(), plainRoom('!child:hs')]
+  error.value = null
+  expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
 })

@@ -33,6 +33,9 @@ before starting a milestone.
   stores, built once in `createServices()`, provided via context
   (`useServices()`). Tests build the same graph over msw + in-memory
   storage via `src/test/services.ts` — components never construct services.
+- **Space visibility** comes from `spaces.visible`, independent of room filters and sort.
+  Hide only confirmed empty joined-child projections; keep loading and failed roots available.
+  Continue fetching hidden roots on child updates and reconnect so they can reappear.
 - **State is @preact/signals** in plain store factories
   (`src/stores/*.ts`), unit-testable without rendering. Direct
   `signal.value = x` writes are the idiom; the `react-hooks/immutability`
