@@ -6,6 +6,7 @@ name: Deploy API docs
 #   https://matrix-axon.github.io/matrix-axon/          — homepage (README.md)
 #   https://matrix-axon.github.io/matrix-axon/api.html  — API reference
 #   https://matrix-axon.github.io/matrix-axon/support/  — support page (docs/support.md)
+#   https://matrix-axon.github.io/matrix-axon/privacy/  — privacy policy (docs/PRIVACY_POLICY.md)
 #
 # Two things this has to get right:
 #
@@ -36,6 +37,7 @@ on:
       - 'README.md'
       - 'demo.html'
       - 'docs/support.md'
+      - 'docs/PRIVACY_POLICY.md'
       - 'docs/img/**'
       - '.github/workflows/api-docs.yml'
   workflow_dispatch:
@@ -137,7 +139,13 @@ jobs:
         run: |
           test -s _site/index.html || { echo "::error::_site/index.html missing — the homepage would 404"; exit 1; }
           test -s _site/api.html   || { echo "::error::_site/api.html missing — the API reference was not generated"; exit 1; }
+          # These two are the App Store metadata URLs, so check they are the rendered
+          # pages and not merely non-empty: grep for each page's own heading, which
+          # Jekyll only emits when it processed the file's front matter.
           test -s _site/support/index.html || { echo "::error::_site/support/index.html missing — the App Store support URL would 404"; exit 1; }
+          grep -q 'Axon Support' _site/support/index.html || { echo "::error::_site/support/index.html does not contain the rendered support page"; exit 1; }
+          test -s _site/privacy/index.html || { echo "::error::_site/privacy/index.html missing — the App Store privacy policy URL would 404"; exit 1; }
+          grep -q 'Axon Privacy Policy' _site/privacy/index.html || { echo "::error::_site/privacy/index.html does not contain the rendered privacy policy"; exit 1; }
           test -s _site/demo.html  || { echo "::error::_site/demo.html missing — Jekyll swallowed it instead of copying it"; exit 1; }
           test -s _site/demo/tui-demo.mp4 || { echo "::error::_site/demo/tui-demo.mp4 missing — the release asset was not downloaded, so the demo page would show a broken player"; exit 1; }
           test -s _site/demo/web-demo-desktop.mp4 || { echo "::error::_site/demo/web-demo-desktop.mp4 missing — the release asset was not downloaded, so the demo page would show a broken player"; exit 1; }

@@ -48,4 +48,4 @@ If you are using a server that someone else runs, problems with your account, lo
 ## More information
 
 - [Project homepage and documentation](https://matrix-axon.github.io/matrix-axon/)
-- [Privacy policy](https://github.com/matrix-axon/matrix-axon/blob/main/docs/PRIVACY_POLICY.md)
+- [Privacy policy](https://matrix-axon.github.io/matrix-axon/privacy/)
