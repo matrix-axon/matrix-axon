@@ -75,9 +75,15 @@ profiles="$work/pd1:$work/pd2"
 # --- the throwaway identity --------------------------------------------------
 
 (cd "$work" && $ossl req -x509 -newkey rsa:2048 -nodes -keyout k.pem -out c.pem \
-  -subj "/CN=Test Store Identity" -days 2 -addext "extendedKeyUsage=codeSigning" 2>/dev/null \
+  -subj "/CN=Test Store Identity: Primary (TEAM1)" -days 2 -addext "extendedKeyUsage=codeSigning" 2>/dev/null \
   && $ossl pkcs12 -export -inkey k.pem -in c.pem -out t.p12 -passout pass:testpw)
 p12_b64=$(base64 -i "$work/t.p12")
+# The same identity plus a certificate whose private key is not in the file: what a
+# .p12 made from certificates alone, or from the wrong keychain, looks like.
+(cd "$work" && $ossl req -x509 -newkey rsa:2048 -nodes -keyout /dev/null -out orphan.pem \
+  -subj "/CN=Test Orphan: Certificate (TEAM1)" -days 2 -addext "extendedKeyUsage=codeSigning" 2>/dev/null \
+  && $ossl pkcs12 -export -inkey k.pem -in c.pem -certfile orphan.pem -out t-orphan.p12 -passout pass:testpw)
+p12_orphan_b64=$(base64 -i "$work/t-orphan.p12")
 
 # A provisioning profile is a CMS-signed plist. `security cms -S` refuses an
 # untrusted identity, so these are signed with openssl, which `security cms -D`
@@ -192,11 +198,31 @@ for i in "${!saved_list[@]}"; do
   [ "${now[$((i + 1))]:-}" = "${saved_list[$i]}" ] || fail "keychain: existing search-list entry $i is kept, in order" "want: ${saved_list[$i]}" "got:  ${now[$((i + 1))]:-}"
 done
 
+# What the keychain holds is reported in a way that explains a missing identity: a
+# self-signed test identity is not trusted, and the log says so, with the reason.
+contains "$out" "identities in the signing keychain (certificate with its private key):" && contains "$out" '"Test Store Identity: Primary (TEAM1)"  NOT VALID (CSSMERR_TP_NOT_TRUSTED)' || fail "keychain: each identity is listed with whether it is valid, and why not" "$out"
+contains "$out" "with no private key" && fail "keychain: no 'no private key' section when every certificate has its key" "$out"
+
 # The trusted-application list of the imported key: every tool that signs.
 trusted=$(security dump-keychain -a "$kc" 2>/dev/null | grep -o '/usr/bin/[a-z]*' | sort -u | tr '\n' ' ')
 for tool in codesign productsign productbuild security; do
   contains "$trusted" "/usr/bin/$tool" || fail "keychain: the key trusts $tool" "trusted: $trusted"
 done
+restore_list
+
+# A certificate that arrived without its private key is called out apart from the
+# identities, because "present but cannot sign" has a different fix from "absent".
+out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_orphan_b64" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain --require "Test Store Identity")
+contains "$out" "certificates in the signing keychain with no private key (they cannot sign):" && contains "$out" '"Test Orphan: Certificate (TEAM1)"' || fail "keychain: a certificate with no private key is listed as one" "$out"
+orphan_section=${out#*"with no private key"}
+contains "${out%%"with no private key"*}" "Test Orphan" && fail "keychain: the certificate without a key is not listed among the identities" "$out"
+contains "$orphan_section" "Test Store Identity" && fail "keychain: an identity that has its key is not listed as lacking one" "$out"
+restore_list
+
+# The listing is printed before the check that can fail, so a missing identity is
+# explained in the same log.
+out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_orphan_b64" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain --require "Test Orphan: Certificate")
+contains "$out" "rc=1" && contains "$out" "OUT<identities in the signing keychain" && contains "$out" '"Test Orphan: Certificate (TEAM1)"' && contains "$out" "no valid identity named 'Test Orphan: Certificate" || fail "keychain: when a required identity is a certificate with no key, the same log shows that" "$out"
 restore_list
 
 out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain --require "No Such Identity|Test Store Identity")

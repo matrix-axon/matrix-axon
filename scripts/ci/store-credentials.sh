@@ -161,6 +161,64 @@ cmd_xcode() {
   export_env DEVELOPER_DIR "$best"
 }
 
+# --- what is in a keychain ----------------------------------------------------
+
+# Says what the signing keychain holds, in terms that explain a missing identity:
+#
+#   * identities (a certificate with its private key), each marked valid or, if
+#     not, NOT VALID with the reason `security` gives (expired, chain not trusted);
+#   * certificates that have no private key, which cannot sign.
+#
+# The bare list of valid identities that this replaces could not tell "the .p12
+# did not contain it" from "it is there but expired" from "it is there without its
+# key", and those have three different fixes. Names only; nothing secret.
+describe_keychain() {
+  local kc=$1 valid_hashes line hash name status verdict shown_names=""
+  valid_hashes=$(security find-identity -v "$kc" 2>/dev/null | awk '/^ +[0-9]+\) [0-9A-F]+ "/ { print $2 }')
+
+  echo "identities in the signing keychain (certificate with its private key):"
+  local any=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    any=1
+    hash=$(printf '%s\n' "$line" | awk '{ print $2 }')
+    name=$(printf '%s\n' "$line" | sed -E 's/^ +[0-9]+\) [0-9A-F]+ "([^"]*)".*$/\1/')
+    status=$(printf '%s\n' "$line" | sed -nE 's/^.*" \((.*)\)$/\1/p')
+    if printf '%s\n' "$valid_hashes" | grep -qx "$hash"; then
+      verdict="valid"
+    else
+      verdict="NOT VALID${status:+ ($status)}"
+    fi
+    printf '  "%s"  %s\n' "$name" "$verdict"
+    shown_names="$shown_names|$name"
+  done <<EOF
+$(security find-identity "$kc" 2>/dev/null | awk '
+  /^ +[0-9]+\) [0-9A-F]+ "/ {
+    h = $2
+    # A valid identity is listed twice (matching, then valid-only); an invalid one
+    # once, with its reason. Keep the line that carries a reason when there is one.
+    if (!(h in line) || $0 ~ /\(CSSM/) line[h] = $0
+  }
+  END { for (h in line) print line[h] }')
+EOF
+  if [ "$any" -eq 0 ]; then echo "  (none)"; fi
+
+  # Signing certificates are labelled "<type>: <name> (<team>)"; the CA
+  # certificates that come with a .p12 are not, so the ": " keeps them out.
+  local orphans=""
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    case "$shown_names|" in *"|$name|"*) continue ;; esac
+    orphans="$orphans$name\n"
+  done <<EOF
+$(security find-certificate -a "$kc" 2>/dev/null | sed -nE 's/^ *"labl"<blob>="([^"]*: [^"]*)"$/\1/p' | sort -u)
+EOF
+  if [ -n "$orphans" ]; then
+    echo "certificates in the signing keychain with no private key (they cannot sign):"
+    printf '%b' "$orphans" | sed 's/^/  "/; s/$/"/'
+  fi
+}
+
 # --- keychain ----------------------------------------------------------------
 
 cmd_keychain() {
@@ -221,9 +279,7 @@ EOF
   # self-signed test identity is neither, hence the escape hatch the tests use.
   local flags="-v" name
   if [ "${SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED:-}" = "1" ]; then flags=""; fi
-  echo "identities in the signing keychain:"
-  # shellcheck disable=SC2086
-  security find-identity $flags "$kc" | grep '"' | sed -E 's/^ +[0-9]+\) [0-9A-F]+ /  /' || true
+  describe_keychain "$kc"
   local listing alt found
   # shellcheck disable=SC2086
   listing=$(security find-identity $flags "$kc")

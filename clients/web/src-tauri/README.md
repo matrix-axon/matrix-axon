@@ -571,7 +571,11 @@ Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
   sign with. `security export` takes everything in the keychain, including the
   `Developer ID Application` identity, which these builds do not use; to leave it
   out, select just the identities you want in Keychain Access and choose File >
-  Export Items.
+  Export Items. When an identity you expect is missing on the runner, the job's
+  log says why: it lists what the keychain holds, each identity as `valid` or
+  `NOT VALID` with the reason (expired, chain not trusted), and separately any
+  certificate that arrived without its private key, which cannot sign. Those three
+  cases (absent, invalid, no key) have different fixes.
 - **The profiles** are checked when they are installed: it is an error for
   `IOS_APPSTORE_PROFILE` to hold a development or Ad Hoc profile, for a profile to
   be for another app or to have expired. That is the check for the two being
