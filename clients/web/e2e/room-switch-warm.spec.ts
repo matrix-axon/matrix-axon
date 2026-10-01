@@ -21,6 +21,14 @@ const SECOND_ROOM_MESSAGE = 'only in the second room'
 const HELD = 'held'
 /** Short enough that anything it catches cannot have waited on the hold. */
 const BEFORE_RESPONSE = { timeout: 1000 }
+/**
+ * How long a request this spec waits for may take to be *sent*. CI sends the
+ * re-entry refetch 55–90ms after the paint, and the reload's GET follows the
+ * bundle load. 5s is generous against both, and well inside the test timeout,
+ * so a request that never goes out fails here, naming the wait, rather than as
+ * a bare test timeout.
+ */
+const REQUEST_SENT = { timeout: 5_000 }
 
 /**
  * The second room's own timeline GET. Every wait on it is armed before the
@@ -62,16 +70,19 @@ test('a re-entered room paints its timeline before the refetch settles', async (
   await expect(page.locator('.media-figure').first()).toBeVisible()
 
   await setTimelineHold(page, HELD)
-  const gapFill = page.waitForRequest(isSecondRoomTimeline)
-  await page.locator(`a[href="${SECOND_ROOM_URL}"]`).click()
-  // The re-entry's own refetch, consumed here for two reasons. The warm
+  // Wait and action together, so whichever fails first is the error reported
+  // and the other's rejection is handled, not left to surface later.
+  await Promise.all([
+    page.waitForRequest(isSecondRoomTimeline, REQUEST_SENT),
+    page.locator(`a[href="${SECOND_ROOM_URL}"]`).click(),
+  ])
+  // The re-entry's own refetch, consumed above for two reasons. The warm
   // assertions below then run while it is actually held, which is the claim
   // they make. And the reload's wait further down cannot pick it up: the room
   // paints from the store first and only then sends this, 55–90ms later in CI.
   // That was late enough to land after the reload's wait was armed. The reload
   // then aborted it, so its "response" came back within milliseconds and the
   // outstanding-answer check failed.
-  await gapFill
 
   // The warm store, painted while the gap-fill request is still open.
   await expect(page.getByText(SECOND_ROOM_MESSAGE)).toBeVisible(BEFORE_RESPONSE)
@@ -92,9 +103,10 @@ test('a re-entered room paints its timeline before the refetch settles', async (
   // that flash more often than not. So the answer must also still be
   // outstanding once the placeholder has been seen — which only the hold can
   // make true.
-  const request = page.waitForRequest(isSecondRoomTimeline)
-  await page.reload({ waitUntil: 'commit' })
-  const held = await request
+  const [held] = await Promise.all([
+    page.waitForRequest(isSecondRoomTimeline, REQUEST_SENT),
+    page.reload({ waitUntil: 'commit' }),
+  ])
   await expect(page.getByText('Loading messages…')).toBeVisible(BEFORE_RESPONSE)
   const seenAt = Date.now()
   await held.response()
