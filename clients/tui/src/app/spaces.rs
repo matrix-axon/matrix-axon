@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::AbortHandle;
 
-use super::{App, RoomFilter, RoomKey, Status};
+use super::{App, BootstrapStage, RoomFilter, RoomKey, Status};
 use crate::api::{
     ApiError, EventDto, MemberDto, PreferenceDto, PreferencesChangedDto, RoomDto, SpaceChildDto,
     TimelinePage,
@@ -18,6 +18,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 const WORKERS: usize = 4;
 const LOOKAHEAD: usize = 8;
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SidebarRow {
@@ -81,6 +82,8 @@ pub(crate) struct SpacesState {
     /// A header can have focus while `rooms.selected` keeps the open timeline.
     pub(crate) focus: Option<RoomKey>,
     pub(crate) collapsed: HashSet<RoomKey>,
+    /// Explicit collapse choices made while a filter is revealing matches.
+    pub(crate) filter_collapsed: HashSet<RoomKey>,
     pub(crate) children: HashMap<RoomKey, ChildrenState>,
     pub(crate) order: Vec<RoomKey>,
     pub(crate) order_error: Option<String>,
@@ -95,6 +98,9 @@ pub(crate) struct SpacesState {
     order_read_again: bool,
     order_retry_at: Option<Instant>,
     order_failures: u32,
+    launch_deadline: Option<Instant>,
+    launch_started: bool,
+    navigation: Option<SpaceNavigation>,
 }
 
 impl Default for SpacesState {
@@ -102,6 +108,7 @@ impl Default for SpacesState {
         Self {
             focus: None,
             collapsed: HashSet::new(),
+            filter_collapsed: HashSet::new(),
             children: HashMap::new(),
             order: Vec::new(),
             order_error: None,
@@ -116,8 +123,22 @@ impl Default for SpacesState {
             order_read_again: true,
             order_retry_at: None,
             order_failures: 0,
+            launch_deadline: None,
+            launch_started: false,
+            navigation: None,
         }
     }
+}
+
+enum LaunchSelection {
+    Waiting(Option<RoomKey>),
+    Ready(Option<usize>),
+}
+
+#[derive(Clone)]
+struct SpaceNavigation {
+    key: RoomKey,
+    advance_if_empty: bool,
 }
 
 struct PendingTimeline {
@@ -194,6 +215,86 @@ fn parse_order(value: serde_json::Value) -> Result<Vec<RoomKey>, String> {
 }
 
 impl App {
+    pub(crate) fn space_launch_pending(&self) -> bool {
+        self.spaces.launch_deadline.is_some()
+    }
+
+    pub(crate) fn begin_space_launch(&mut self) {
+        if self.spaces.launch_started || !self.space_tree_enabled() {
+            return;
+        }
+        self.spaces.launch_started = true;
+        self.spaces.launch_deadline = Some(Instant::now() + LAUNCH_TIMEOUT);
+        self.rooms.selected = None;
+        self.rooms.scroll = 0;
+        self.spaces.focus = self
+            .ordered_space_indices(self.active_account_filter())
+            .first()
+            .map(|&index| RoomKey::from(&self.rooms.rooms[index]));
+    }
+
+    fn launch_selection(&self) -> LaunchSelection {
+        if self
+            .eligible_room_indices(self.active_account_filter())
+            .is_empty()
+        {
+            return LaunchSelection::Ready(None);
+        }
+        if self.space_tree_enabled()
+            && !self.spaces.order_ready
+            && self.spaces.order_error.is_none()
+        {
+            return LaunchSelection::Waiting(None);
+        }
+        for row in self.sidebar_rows(self.active_account_filter()) {
+            match row {
+                SidebarRow::Space { index, .. } => {
+                    let key = RoomKey::from(&self.rooms.rooms[index]);
+                    if self
+                        .spaces
+                        .children
+                        .get(&key)
+                        .is_none_or(|state| state.children.is_none() && state.error.is_none())
+                    {
+                        return LaunchSelection::Waiting(Some(key));
+                    }
+                }
+                SidebarRow::Room { index, .. } => return LaunchSelection::Ready(Some(index)),
+                _ => {}
+            }
+        }
+        LaunchSelection::Ready(None)
+    }
+
+    fn cancel_space_launch(&mut self) {
+        self.spaces.launch_started = true;
+        self.spaces.launch_deadline = None;
+        if self.bootstrap == BootstrapStage::Spaces {
+            self.note_stage_elapsed("space selection");
+            self.bootstrap = BootstrapStage::Done;
+        }
+    }
+
+    pub(crate) fn finish_space_launch(&mut self, now: Instant) {
+        if self.bootstrap != BootstrapStage::Spaces {
+            return;
+        }
+        let Some(deadline) = self.spaces.launch_deadline else {
+            return;
+        };
+        let index = match self.launch_selection() {
+            LaunchSelection::Ready(index) => index,
+            LaunchSelection::Waiting(_) if now >= deadline => {
+                self.visible_room_indices().first().copied()
+            }
+            LaunchSelection::Waiting(_) => return,
+        };
+        self.cancel_space_launch();
+        if let Some(index) = index {
+            self.activate_sidebar_room(index);
+        }
+    }
+
     pub(crate) fn ordered_space_indices(&self, account: Option<uuid::Uuid>) -> Vec<usize> {
         let ranks: HashMap<&RoomKey, usize> = self
             .spaces
@@ -297,7 +398,8 @@ impl App {
                 continue;
             }
             let reveal = matches!(self.room_filter, RoomFilter::Name(_) | RoomFilter::Unread)
-                && !children.is_empty();
+                && !children.is_empty()
+                && !self.spaces.filter_collapsed.contains(&key);
             let expanded = reveal || !self.spaces.collapsed.contains(&key);
             rows.push(SidebarRow::Space { index, expanded });
             if expanded {
@@ -350,6 +452,12 @@ impl App {
     }
 
     pub(crate) fn activate_sidebar_room(&mut self, index: usize) {
+        let defer_until_markers = matches!(
+            self.bootstrap,
+            BootstrapStage::Rooms | BootstrapStage::DeviceState
+        );
+        self.cancel_space_launch();
+        self.spaces.navigation = None;
         self.rooms.selected = Some(index);
         self.reveal_room_parent(index);
         self.messages.selection = None;
@@ -357,10 +465,13 @@ impl App {
         self.last_jump_ts = None;
         self.force_terminal_clear = true;
         self.thread_panel = None;
-        self.sync_draft_on_room_change();
         if let Some(pending) = self.spaces.timeline.take() {
             pending.abort.abort();
         }
+        if defer_until_markers {
+            return;
+        }
+        self.sync_draft_on_room_change();
         let Some(tx) = self.spaces.tx.clone() else {
             return;
         };
@@ -429,14 +540,40 @@ impl App {
         {
             return true;
         }
-        if self.spaces.focus.is_some()
-            && (self.shortcuts.pin_room.matches(key) || self.shortcuts.unpin_room.matches(key))
-        {
-            self.status = Status::from("select a room to pin or unpin");
-            return true;
+        if self.spaces.focus.is_some() {
+            if self.shortcuts.pin_room.matches(key) {
+                self.pin_focused_space();
+                return true;
+            }
+            if self.shortcuts.unpin_room.matches(key) {
+                self.status = Status::from(format!(
+                    "spaces use ordering; move them with {} / {}",
+                    self.shortcuts.move_space_up.label(),
+                    self.shortcuts.move_space_down.label()
+                ));
+                return true;
+            }
         }
         if key.modifiers != KeyModifiers::NONE {
             return false;
+        }
+        if matches!(key.code, KeyCode::Left | KeyCode::Right) {
+            self.cancel_space_launch();
+            self.spaces.navigation = None;
+            let parent = self.spaces.focus.clone().or_else(|| {
+                self.rooms
+                    .selected
+                    .and_then(|index| self.room_parent_key(index))
+            });
+            if let Some(parent) = parent {
+                if key.code == KeyCode::Left {
+                    self.set_space_expanded(&parent, false);
+                    self.navigate_after_space(&parent);
+                } else if self.spaces.focus.is_some() || self.spaces.collapsed.contains(&parent) {
+                    self.open_space_first_room(parent, false);
+                }
+            }
+            return true;
         }
         let offset = match key.code {
             KeyCode::Up => -1,
@@ -447,6 +584,8 @@ impl App {
             KeyCode::End => isize::MAX,
             _ => return false,
         };
+        self.cancel_space_launch();
+        self.spaces.navigation = None;
         let rows = self.sidebar_rows(self.active_account_filter());
         let mut line = 0;
         let selectable: Vec<_> = rows
@@ -499,10 +638,117 @@ impl App {
         let Some(key) = self.spaces.focus.clone() else {
             return false;
         };
-        if !self.spaces.collapsed.remove(&key) {
-            self.spaces.collapsed.insert(key);
+        self.cancel_space_launch();
+        self.spaces.navigation = None;
+        let expanded = self.sidebar_rows(self.active_account_filter()).iter().any(|row| {
+            matches!(row, SidebarRow::Space { index, expanded: true } if RoomKey::from(&self.rooms.rooms[*index]) == key)
+        });
+        self.set_space_expanded(&key, !expanded);
+        true
+    }
+
+    fn set_space_expanded(&mut self, key: &RoomKey, expanded: bool) {
+        if expanded {
+            self.spaces.collapsed.remove(key);
+            self.spaces.filter_collapsed.remove(key);
+        } else {
+            self.spaces.collapsed.insert(key.clone());
+            if matches!(self.room_filter, RoomFilter::Name(_) | RoomFilter::Unread) {
+                self.spaces.filter_collapsed.insert(key.clone());
+            }
+        }
+    }
+
+    fn first_space_room(&self, key: &RoomKey) -> Option<usize> {
+        let rows = self.sidebar_rows(self.active_account_filter());
+        let start = rows.iter().position(|row| {
+            matches!(row, SidebarRow::Space { index, .. } if RoomKey::from(&self.rooms.rooms[*index]) == *key)
+        })?;
+        rows[start + 1..]
+            .iter()
+            .take_while(|row| {
+                !matches!(row, SidebarRow::Space { .. } | SidebarRow::Ungrouped { .. })
+            })
+            .find_map(|row| match row {
+                SidebarRow::Room { index, .. } => Some(*index),
+                _ => None,
+            })
+    }
+
+    /// Returns false for an empty/failed group. An unloaded group retains a
+    /// keyed navigation intent, canceled by the next explicit navigation.
+    fn open_space_first_room(&mut self, key: RoomKey, advance_if_empty: bool) -> bool {
+        self.set_space_expanded(&key, true);
+        self.spaces.focus = Some(key.clone());
+        if let Some(index) = self.first_space_room(&key) {
+            self.activate_sidebar_room(index);
+        } else if self
+            .spaces
+            .children
+            .get(&key)
+            .is_none_or(|state| state.children.is_none() && state.error.is_none())
+        {
+            self.spaces.navigation = Some(SpaceNavigation {
+                key,
+                advance_if_empty,
+            });
+        } else {
+            return false;
         }
         true
+    }
+
+    fn navigate_after_space(&mut self, key: &RoomKey) {
+        let rows = self.sidebar_rows(self.active_account_filter());
+        let Some(start) = rows.iter().position(|row| {
+            matches!(row, SidebarRow::Space { index, .. } if RoomKey::from(&self.rooms.rooms[*index]) == *key)
+        }) else {
+            return;
+        };
+        for row in &rows[start + 1..] {
+            match row {
+                SidebarRow::Space { index, .. } => {
+                    if self.open_space_first_room(RoomKey::from(&self.rooms.rooms[*index]), true) {
+                        return;
+                    }
+                }
+                SidebarRow::Room { index, .. } => {
+                    self.activate_sidebar_room(*index);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.spaces.focus = Some(key.clone());
+        self.status = Status::from("space collapsed; no following room");
+    }
+
+    fn finish_space_navigation(&mut self) {
+        let Some(navigation) = self.spaces.navigation.clone() else {
+            return;
+        };
+        if self.spaces.focus.as_ref() != Some(&navigation.key) || !self.space_tree_enabled() {
+            self.spaces.navigation = None;
+            return;
+        }
+        if self
+            .spaces
+            .children
+            .get(&navigation.key)
+            .is_none_or(|state| state.children.is_none() && state.error.is_none())
+        {
+            return;
+        }
+        self.spaces.navigation = None;
+        if let Some(index) = self.first_space_room(&navigation.key) {
+            self.activate_sidebar_room(index);
+        } else if navigation.advance_if_empty {
+            self.navigate_after_space(&navigation.key);
+        }
+    }
+
+    pub(crate) fn cancel_space_navigation(&mut self) {
+        self.spaces.navigation = None;
     }
 
     pub(crate) fn room_parent_key(&self, index: usize) -> Option<RoomKey> {
@@ -524,7 +770,7 @@ impl App {
     pub(crate) fn reveal_room_parent(&mut self, index: usize) {
         self.spaces.focus = None;
         if let Some(key) = self.room_parent_key(index) {
-            self.spaces.collapsed.remove(&key);
+            self.set_space_expanded(&key, true);
         }
     }
 
@@ -545,6 +791,9 @@ impl App {
             }
         });
         self.spaces.collapsed.retain(|key| present.contains(key));
+        self.spaces
+            .filter_collapsed
+            .retain(|key| present.contains(key));
         if self.spaces.focus.as_ref().is_some_and(|key| {
             !present.contains(key)
                 || self
@@ -574,8 +823,12 @@ impl App {
     /// Only roots on screen plus lookahead acquire worker permits. No task is
     /// spawned to wait for a permit, keeping both active work and queues bounded.
     pub(crate) fn sweep_spaces(&mut self, now: Instant) {
+        self.finish_space_launch(now);
+        self.finish_space_navigation();
         self.sweep_space_order(now);
-        if !self.space_tree_enabled() || !self.rooms_panel_visible() {
+        if !self.space_tree_enabled()
+            || (!self.rooms_panel_visible() && !self.space_launch_pending())
+        {
             return;
         }
         let Some(tx) = self.spaces.tx.clone() else {
@@ -592,17 +845,35 @@ impl App {
         // The containing root can be above the lookahead window while its
         // children remain visible. Keep its membership fresh as well.
         let header = sidebar_section_header(&rows, self.rooms.scroll);
-        let keys: Vec<_> = header
-            .map(|index| &rows[index])
+        let launch_root = if self.space_launch_pending() {
+            match self.launch_selection() {
+                LaunchSelection::Waiting(root) => root,
+                LaunchSelection::Ready(_) => None,
+            }
+        } else {
+            None
+        };
+        let navigation_root = self
+            .spaces
+            .navigation
+            .as_ref()
+            .map(|navigation| navigation.key.clone());
+        let keys: Vec<_> = launch_root
             .into_iter()
-            .chain(rows[start.min(end)..end].iter())
-            .filter_map(|row| {
-                if let SidebarRow::Space { index, .. } = row {
-                    Some(RoomKey::from(&self.rooms.rooms[*index]))
-                } else {
-                    None
-                }
-            })
+            .chain(navigation_root)
+            .chain(
+                header
+                    .map(|index| &rows[index])
+                    .into_iter()
+                    .chain(rows[start.min(end)..end].iter())
+                    .filter_map(|row| {
+                        if let SidebarRow::Space { index, .. } = row {
+                            Some(RoomKey::from(&self.rooms.rooms[*index]))
+                        } else {
+                            None
+                        }
+                    }),
+            )
             .collect();
         for key in keys {
             let state = self.spaces.children.entry(key.clone()).or_default();
@@ -711,10 +982,41 @@ impl App {
         }
         order.extend(replacements.cloned());
         self.spaces.order = order;
+        self.space_order_edited();
+    }
+
+    fn space_order_edited(&mut self) {
         self.spaces.order_revision += 1;
         self.spaces.order_dirty = true;
         self.spaces.order_retry_at = None;
         self.status = Status::from("saving space order…");
+    }
+
+    fn pin_focused_space(&mut self) {
+        let Some(key) = self.spaces.focus.clone() else {
+            return;
+        };
+        if !self.spaces.order_ready {
+            self.status = Status::from("space order is still loading; try again");
+            return;
+        }
+        self.cancel_space_launch();
+        let roots: Vec<_> = self
+            .ordered_space_indices(None)
+            .into_iter()
+            .map(|index| RoomKey::from(&self.rooms.rooms[index]))
+            .collect();
+        if !roots.contains(&key) {
+            return;
+        }
+        let mut order = vec![key.clone()];
+        order.extend(self.spaces.order.iter().filter(|old| **old != key).cloned());
+        let mut seen: HashSet<_> = order.iter().cloned().collect();
+        order.extend(roots.into_iter().filter(|root| seen.insert(root.clone())));
+        if order != self.spaces.order {
+            self.spaces.order = order;
+            self.space_order_edited();
+        }
     }
 
     pub(crate) fn apply_preferences_changed(&mut self, frame: PreferencesChangedDto) {

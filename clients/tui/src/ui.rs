@@ -3083,12 +3083,20 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
         Row::Dim("Room list:"),
         Row::Kv(
             shortcuts.pin_room.label(),
-            "pin / re-pin selected room to top (/pin)",
+            "pin room (/pin), or move focused space to top",
         ),
         Row::Kv(shortcuts.unpin_room.label(), "unpin selected room (/unpin)"),
         Row::Kv(
             shortcuts.toggle_space.label(),
             "expand/collapse focused space (also Enter)",
+        ),
+        Row::Kv(
+            "Left".to_owned(),
+            "collapse current space and open the next group's first room",
+        ),
+        Row::Kv(
+            "Right".to_owned(),
+            "expand current space; enter its first room from a header",
         ),
         Row::Kv(
             shortcuts.move_space_up.label(),

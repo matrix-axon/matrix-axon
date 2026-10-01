@@ -16,14 +16,16 @@
 //! 2. **Rooms.** Needs the account list to drop rooms belonging to logged-out
 //!    accounts, and it is what picks the launch room.
 //! 3. **Device state** (read markers *and* drafts, one concurrent batch).
-//! 4. **The launch room's timeline**, awaited on the main task once markers are
-//!    applied.
+//! 4. **Space selection**, when there are joined spaces: hydrate their order
+//!    and the first group's membership before choosing the first leaf.
+//! 5. **The launch room's timeline**, once markers are applied.
 //!
-//! Step 4 stays an await deliberately. Read markers must be in place *before*
-//! the first `load_selected_timeline`, or the marker that call fabricates wins
+//! The flat launch stays an await. The space launch uses the sidebar worker.
+//! Read markers must be in place before either launch installs its timeline,
+//! or the marker that installation fabricates wins
 //! the monotonic merge and permanently discards the real one (ADR 0048/0089).
-//! It is one bounded request for one room's page — it does not grow with the
-//! room count, and it is the same await every room switch already performs.
+//! A launch loads one bounded timeline page; membership reads use the bounded
+//! space worker pool.
 //!
 //! The [`BootstrapOutcome::Rooms`] stage doubles as the post-startup room
 //! refresh: a live frame for an unknown room asks for one, and requests are
@@ -60,6 +62,7 @@ pub(crate) enum BootstrapStage {
     Accounts,
     Rooms,
     DeviceState,
+    Spaces,
     Done,
 }
 
@@ -70,6 +73,7 @@ impl BootstrapStage {
             Self::Accounts => Some("connecting"),
             Self::Rooms => Some("loading rooms"),
             Self::DeviceState => Some("loading read state"),
+            Self::Spaces => Some("loading spaces"),
             Self::Done => None,
         }
     }
@@ -120,7 +124,7 @@ impl App {
 
     /// Record how long the stage that just finished took, and start the clock
     /// for the next one.
-    fn note_stage_elapsed(&mut self, stage: &'static str) {
+    pub(super) fn note_stage_elapsed(&mut self, stage: &'static str) {
         let now = std::time::Instant::now();
         let elapsed = now.saturating_duration_since(self.bootstrap_stage_started);
         self.bootstrap_stage_started = now;
@@ -277,9 +281,14 @@ impl App {
                 }
                 if self.bootstrap == BootstrapStage::DeviceState {
                     self.note_stage_elapsed("device state");
-                    self.bootstrap = BootstrapStage::Done;
-                    self.load_selected_timeline().await;
-                    self.note_stage_elapsed("first timeline");
+                    if self.space_launch_pending() {
+                        self.bootstrap = BootstrapStage::Spaces;
+                        self.finish_space_launch(std::time::Instant::now());
+                    } else {
+                        self.bootstrap = BootstrapStage::Done;
+                        self.load_selected_timeline().await;
+                        self.note_stage_elapsed("first timeline");
+                    }
                 }
             }
         }

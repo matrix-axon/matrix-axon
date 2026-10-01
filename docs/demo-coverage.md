@@ -152,6 +152,7 @@ shows it.
 - **Spaces in the TUI.** The client now renders a shallow space tree with session collapse/expand, per-group favorites, and instance root ordering (ADR 0103).
   The existing `rooms` pilot does not exercise those interactions, so coverage remains a gap until the separate testing-silo follow-up (#385).
   That follow-up should also show the containing space header remaining visible while scrolling through a large group.
+  Exercise top-room startup, Left/Right group navigation, and pinning a focused space to the shared first position.
   Root reordering must also be demonstrated changing the web picker through the shared preference.
 - **Galleries in the TUI.** The TUI has no gallery grouping, so this is `n/a` rather than a demo gap.
 - **Sort, filter, and the name filter on web mobile.** The controls are all

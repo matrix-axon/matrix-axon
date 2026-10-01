@@ -65,6 +65,268 @@ fn change(spaces: &[&str], device_id: Uuid) -> PreferencesChangedDto {
     }
 }
 
+#[tokio::test]
+async fn launch_waits_for_order_membership_and_device_state_before_opening_top_room() {
+    use crate::app::bootstrap::BootstrapOutcome;
+    let mut app = app();
+    let mut rooms = app.rooms.rooms.clone();
+    // The globally most active room is Ungrouped and must not become the
+    // launch room merely because the tree's membership has not landed yet.
+    rooms[4].last_activity_ts = 100;
+    app.rooms.rooms.clear();
+    app.spaces.children.clear();
+    // A reconnect can reveal rooms before the accounts stage advances to
+    // Rooms. That automatic provisional choice must not suppress launch.
+    app.apply_room_refresh(rooms.clone());
+    assert_eq!(app.selected_room().unwrap().room_id, "!c:srv");
+    app.bootstrap = BootstrapStage::Rooms;
+    app.handle_bootstrap_outcome(BootstrapOutcome::Rooms(Ok(rooms)))
+        .await;
+    assert!(app.selected_room().is_none());
+    assert!(app.space_launch_pending());
+    assert_eq!(app.rooms.scroll, 0);
+    app.apply_preferences_changed(change(&["!work:srv", "!club:srv"], Uuid::new_v4()));
+    seed(&mut app, "!work:srv", &["!a:srv", "!b:srv"]);
+    app.finish_space_launch(Instant::now());
+    assert!(app.selected_room().is_none(), "markers have not landed");
+    // The selected room's draft must hydrate before compose ownership is set.
+    app.handle_bootstrap_outcome(BootstrapOutcome::DeviceState {
+        markers: vec![(
+            Uuid::nil(),
+            Ok(serde_json::from_value(serde_json::json!({
+                "entries": { "!a:srv": { "value": { "event_id": "$read", "origin_ts": 123 } } }
+            }))
+            .unwrap()),
+        )],
+        drafts: vec![(
+            Uuid::nil(),
+            Ok(serde_json::from_value(serde_json::json!({
+                "entries": { "!a:srv": { "value": { "text": "saved Alpha draft" } } }
+            }))
+            .unwrap()),
+        )],
+    })
+    .await;
+    assert!(app.bootstrap.is_done());
+    assert_eq!(app.selected_room().unwrap().room_id, "!a:srv");
+    assert_eq!(
+        app.rooms.selected,
+        app.visible_room_indices().first().copied()
+    );
+    assert_eq!(app.input.buffer, "saved Alpha draft");
+    assert_eq!(app.read_markers[&key("!a:srv")].event_id, "$read");
+    // Later metadata cannot move a settled launch selection.
+    seed(&mut app, "!club:srv", &["!b:srv"]);
+    app.finish_space_launch(Instant::now());
+    assert_eq!(app.selected_room().unwrap().room_id, "!a:srv");
+}
+
+#[tokio::test]
+async fn launch_does_not_choose_a_later_group_before_the_first_group_is_known() {
+    let mut app = app();
+    app.spaces.children.remove(&key("!club:srv"));
+    app.spaces.order_ready = true;
+    app.begin_space_launch();
+    app.bootstrap = BootstrapStage::Spaces;
+    app.finish_space_launch(Instant::now());
+    assert!(app.selected_room().is_none());
+    // Successful empty membership permits the next group; a failed root also
+    // permits best-effort progress instead of blocking startup indefinitely.
+    seed(&mut app, "!club:srv", &[]);
+    app.finish_space_launch(Instant::now());
+    assert_eq!(app.selected_room().unwrap().room_id, "!a:srv");
+
+    app = self::app();
+    app.spaces.order_ready = true;
+    app.begin_space_launch();
+    app.bootstrap = BootstrapStage::Spaces;
+    app.spaces.children.clear();
+    app.spaces.children.insert(
+        key("!club:srv"),
+        ChildrenState {
+            error: Some("offline".to_owned()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(app.launch_selection(), LaunchSelection::Waiting(Some(root)) if root == key("!work:srv"))
+    );
+    let deadline = app.spaces.launch_deadline.unwrap();
+    app.finish_space_launch(deadline);
+    assert!(app.bootstrap.is_done());
+    assert!(app.selected_room().is_some());
+}
+
+#[tokio::test]
+async fn explicit_startup_room_selection_wins_and_preserves_unhydrated_drafts() {
+    use crate::app::bootstrap::BootstrapOutcome;
+    let mut app = app();
+    app.begin_space_launch();
+    app.bootstrap = BootstrapStage::DeviceState;
+    app.activate_sidebar_room(4);
+    assert!(!app.space_launch_pending());
+    assert!(app.compose_room.is_none());
+    assert!(app.spaces.timeline.is_none(), "wait for read markers");
+    app.handle_bootstrap_outcome(BootstrapOutcome::DeviceState {
+        markers: Vec::new(),
+        drafts: vec![(
+            Uuid::nil(),
+            Ok(serde_json::from_value(serde_json::json!({
+                "entries": { "!c:srv": { "value": { "text": "saved Other draft" } } }
+            }))
+            .unwrap()),
+        )],
+    })
+    .await;
+    app.spaces.order_ready = true;
+    app.finish_space_launch(Instant::now());
+    assert_eq!(app.selected_room().unwrap().room_id, "!c:srv");
+    assert_eq!(app.input.buffer, "saved Other draft");
+}
+
+#[test]
+fn pinning_a_space_moves_it_to_the_shared_front_without_room_tag_writes() {
+    let mut app = app();
+    let hidden = RoomKey {
+        account_id: Uuid::new_v4(),
+        room_id: "!hidden:srv".to_owned(),
+    };
+    app.accounts.accounts = vec![crate::api::AccountDto {
+        account_id: Uuid::nil(),
+        user_id: "@me:srv".to_owned(),
+        state: crate::api::AccountState::Active,
+        device_id: None,
+        verified: None,
+        backup: Default::default(),
+    }];
+    app.accounts.selected = crate::app::AccountSelection::Account(0);
+    app.rooms
+        .rooms
+        .push(room(hidden.account_id, "!hidden:srv", "Hidden", true));
+    app.rooms
+        .rooms
+        .push(room(Uuid::nil(), "!third:srv", "Third", true));
+    app.spaces.order = vec![
+        key("!club:srv"),
+        hidden.clone(),
+        key("!work:srv"),
+        key("!absent:srv"),
+        key("!third:srv"),
+    ];
+    app.spaces.order_ready = true;
+    app.spaces.focus = Some(key("!third:srv"));
+    app.rooms.selected = Some(2);
+    app.handle_space_list_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    assert_eq!(
+        app.spaces.order,
+        [
+            key("!third:srv"),
+            key("!club:srv"),
+            hidden,
+            key("!work:srv"),
+            key("!absent:srv")
+        ]
+    );
+    assert!(app.spaces.order_dirty);
+    assert!(app.rooms.rooms.iter().all(|room| room.tags.is_empty()));
+    assert!(app.pinned_rooms.is_empty());
+    assert_eq!(app.selected_room().unwrap().room_id, "!a:srv");
+    let revision = app.spaces.order_revision;
+    app.handle_space_list_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    assert_eq!(
+        app.spaces.order_revision, revision,
+        "pinning first is idempotent"
+    );
+}
+
+#[test]
+fn left_collapses_and_opens_the_next_group_while_right_enters_a_header() {
+    let mut app = app();
+    app.mode = Mode::Compose;
+    app.rooms.selected = Some(3);
+    app.sync_draft_on_room_change();
+    app.input.buffer = "Beta draft".to_owned();
+    app.note_draft_activity();
+    app.mode = Mode::RoomList;
+    app.drafts.insert(key("!a:srv"), "Alpha draft".to_owned());
+    app.spaces.collapsed.insert(key("!work:srv"));
+    app.handle_space_list_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert!(app.spaces.collapsed.contains(&key("!club:srv")));
+    assert!(!app.spaces.collapsed.contains(&key("!work:srv")));
+    assert_eq!(app.selected_room().unwrap().room_id, "!a:srv");
+    assert_eq!(app.drafts[&key("!b:srv")], "Beta draft");
+    assert_eq!(app.input.buffer, "Alpha draft");
+    assert!(!leaves(&app).contains(&"!b:srv".to_owned()));
+    app.handle_space_list_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(app.selected_room().unwrap().room_id, "!c:srv");
+    app.spaces.focus = Some(key("!club:srv"));
+    app.handle_space_list_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(app.selected_room().unwrap().room_id, "!b:srv");
+    assert_eq!(app.input.buffer, "Beta draft");
+    assert!(!app.spaces.collapsed.contains(&key("!club:srv")));
+    let selected = app.rooms.selected;
+    app.handle_space_list_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(
+        app.rooms.selected, selected,
+        "expanded child navigation is idempotent"
+    );
+    assert!(
+        !app.handle_space_list_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)),
+        "Alt-Left still adjusts width"
+    );
+}
+
+#[test]
+fn deferred_group_navigation_is_canceled_and_empty_destinations_are_skipped() {
+    let mut app = app();
+    app.rooms.selected = Some(3);
+    app.spaces.children.remove(&key("!work:srv"));
+    app.handle_space_list_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(app.spaces.focus, Some(key("!work:srv")));
+    assert!(app.spaces.navigation.is_some());
+    assert_eq!(app.selected_room().unwrap().room_id, "!b:srv");
+    app.handle_space_list_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    seed(&mut app, "!work:srv", &["!a:srv"]);
+    app.finish_space_navigation();
+    assert_eq!(app.selected_room().unwrap().room_id, "!b:srv");
+    assert!(app.spaces.navigation.is_none());
+
+    app.spaces.focus = None;
+    app.spaces.children.remove(&key("!work:srv"));
+    app.handle_space_list_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    seed(&mut app, "!work:srv", &[]);
+    app.finish_space_navigation();
+    assert_eq!(
+        app.selected_room().unwrap().room_id,
+        "!a:srv",
+        "empty next group falls through to Ungrouped"
+    );
+}
+
+#[test]
+fn explicit_filter_collapse_hides_matches_and_no_following_room_keeps_header_focus() {
+    let mut app = app();
+    app.rooms.rooms.truncate(4);
+    app.rooms.selected = Some(2);
+    app.room_filter = RoomFilter::Name("alpha".to_owned());
+    app.handle_space_list_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert!(app.spaces.collapsed.contains(&key("!work:srv")));
+    assert!(leaves(&app).is_empty());
+    assert_eq!(app.spaces.focus, Some(key("!work:srv")));
+    assert_eq!(app.selected_room().unwrap().room_id, "!a:srv");
+    app.handle_space_list_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(leaves(&app), ["!a:srv"]);
+    app.spaces.focus = Some(key("!work:srv"));
+    app.toggle_focused_space();
+    assert!(leaves(&app).is_empty());
+    app.update_room_name_filter("alpha".to_owned());
+    assert_eq!(
+        leaves(&app),
+        ["!a:srv"],
+        "a new filter reveals matches again"
+    );
+}
+
 #[test]
 fn first_parent_is_root_ordered_and_collapsing_never_cross_lists() {
     let mut app = app();

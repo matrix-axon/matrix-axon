@@ -126,7 +126,11 @@ terminal wraps in quotes or backslash-escapes.
 
 Joined Matrix spaces appear as expandable groups in the Rooms pane, followed by an Ungrouped section.
 Groups start expanded; focus a space header and press Enter or Space to toggle it for this session.
-The open timeline and its draft stay attached to the current room when a group is collapsed.
+Enter/Space keeps the open timeline and draft attached to the current room when a group is collapsed.
+While navigating the Rooms pane, Left collapses the space containing the selected room or focused header, expands the next nonempty group, and opens its first room.
+After the last space it opens the first Ungrouped room; if no room follows, focus stays on the collapsed header.
+Right expands the current space; from a header it also enters that group's first room.
+If membership is still loading, focus stays on the destination header until its first room is known; further navigation cancels that pending switch.
 Headers use `[+]` / `[-]`, child rooms are indented, and only room rows receive `/room` numbers.
 The containing space header stays above scrolled children when the pane has room for both the header and selected row.
 A `*` marks the open room while a space header has focus.
@@ -134,17 +138,23 @@ A `*` marks the open room while a space header has focus.
 Favorites sort first within each group, followed by the selected `/sort` order.
 `/filter fav` shows a flat favorites list.
 Name and unread filters temporarily reveal matching children without changing the session's collapse choices.
+An explicit collapse hides that group even under those filters, until the filter changes or the group is expanded again.
 A `/room` target by name, ID, or alias can open a collapsed child and reveal its parent; numeric targets name the visible room rows.
 Ctrl-N/P skips headers and follows visible room rows.
 
 Alt-Up/Down moves a focused space header.
+The pin shortcut (`p` by default) on a header moves that space to the top of the instance's complete space order, including when an account filter is active.
+Space pinning changes order rather than setting a Matrix favorite tag; move it down again with Alt-Down.
 The order is saved to this Axon instance and shared with its other clients, including the web space picker.
 The `toggle_space`, `move_space_up`, and `move_space_down` shortcuts are configurable.
-An account filter limits which roots move while preserving other accounts' order.
+An account filter limits Alt-Up/Down moves while preserving other accounts' order.
 A failed save keeps the pending order visible and retries with backoff; the pane heading indicates an unsaved/unavailable order.
 An unset order uses space titles until the first explicit move.
 
 Space membership loads in the background for visible roots and a small lookahead.
+Startup waits for saved root order and the first group's membership before opening the top room, after loading its read markers and drafts.
+Empty or failed groups are skipped; a 30-second selection deadline falls back to the first currently available room rather than leaving startup stuck.
+Explicit room navigation during startup takes precedence over that automatic choice.
 Until those reads complete, rooms remain accessible in the provisional Ungrouped section.
 Failed reads are marked on the root and retried; `/refresh` also retries them.
 Live `m.space.child` updates invalidate the affected group, and reconnect refreshes both membership and saved order.

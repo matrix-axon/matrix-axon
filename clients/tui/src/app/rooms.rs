@@ -59,13 +59,19 @@ impl App {
                 .eligible_room_indices(self.active_account_filter())
                 .contains(&selected)
         }) {
-            let visible = self.eligible_room_indices(self.active_account_filter());
+            let visible = self.visible_room_indices();
             self.rooms.selected = visible.first().copied();
             if !self.is_mid_command() {
                 self.status = Status::from(format!("loaded {} rooms", self.rooms.rooms.len()));
             }
         } else if !self.is_mid_command() {
             self.status = Status::from(format!("refreshed {} rooms", self.rooms.rooms.len()));
+        }
+        if self.bootstrap == super::BootstrapStage::Rooms {
+            self.begin_space_launch();
+        }
+        if self.space_launch_pending() {
+            self.rooms.selected = None;
         }
         self.sweep_visible_room_titles();
         self.maybe_start_pin_migration();
@@ -786,7 +792,10 @@ impl App {
     }
 
     pub(crate) async fn select_room_index(&mut self, index: usize) {
-        if self.space_tree_enabled() {
+        if self.space_tree_enabled()
+            || self.space_launch_pending()
+            || self.bootstrap == super::BootstrapStage::DeviceState
+        {
             self.activate_sidebar_room(index);
             return;
         }
@@ -811,6 +820,7 @@ impl App {
     }
 
     pub(crate) fn sync_room_selection_to_account_filter(&mut self) {
+        self.cancel_space_navigation();
         self.reconcile_spaces();
         let visible = self.eligible_room_indices(self.active_account_filter());
         let current_ok = self

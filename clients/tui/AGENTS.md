@@ -31,12 +31,19 @@
 - Joined spaces come from `RoomDto.room_type`; children come from `GET …/space/children` and are intersected with the same account's room list.
   First parent in root order wins independently of collapse state; joined subspaces remain roots.
   Favorites sort within each group, `/filter fav` flattens, and name/unread filters reveal matches temporarily.
+  Explicit collapse overrides filter reveal until the filter changes.
+  Left collapses the current group and enters the next nonempty group (then Ungrouped); Right expands and enters a focused header's first child.
+  Unknown destination membership keeps a keyed navigation intent, canceled by later navigation or filter/account changes.
 - Membership fetches acquire one of four permits before spawning, request only visible roots plus lookahead, retain cached membership on failure, and coalesce live invalidations.
+  Startup and pending navigation also prioritize their destination root through the same pool.
   A root removed during a read cancels its worker; a request invalidated while in flight cannot settle the cache.
   Reconnect and `/refresh` invalidate membership and re-read instance order.
 - `space_order` is instance-scoped, including `preferences.changed` envelopes with a nil account UUID.
   Preserve hidden/absent keys on reorder, suppress own-device echoes, serialize GET/PUT work, and retain unsaved edits across failures and older reads.
   Do not upload an empty order just because GET returns 404; another client may still have a legacy migration to upload.
+  The pin shortcut on a header moves it to the front of the complete instance order, retaining hidden/absent keys and other roots' relative order; it never writes `m.favourite` on a space.
+- Launch selection waits for root order and membership, then opens the first projected leaf after the device-state stage applies read markers and drafts.
+  A selection deadline or failed read permits a best-effort fallback; explicit navigation cancels the automatic choice.
 - Sidebar room activation loads history off the input loop and applies only the current request for the current room.
   Replay live frames observed during that read so an older HTTP snapshot cannot discard new messages, edits, or reaction patches.
   The replay buffer is bounded; overflow leaves the live cache intact and requests a fresh snapshot.
@@ -48,7 +55,7 @@
   paints and accepts keys immediately; a blank terminal during a slow load
   reads as a hang, not a load. Any new startup work joins that chain rather
   than adding a sixth await ahead of the loop. The one deliberate exception is
-  the launch room's timeline, which is bounded and must follow read-marker
+  the flat-list launch room's timeline, which is bounded and must follow read-marker
   hydration (ADR 0048/0089).
 - **Per-room background work is demand-driven and semaphore-bounded (ADR
   0093).** Anything that costs one request per room — member reads for list
