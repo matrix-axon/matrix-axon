@@ -111,6 +111,39 @@ describe('native Sign in with Apple', () => {
     expect(auth.canBindApple.value).toBe(true)
   })
 
+  it('asks again after the native list could not be fetched', async () => {
+    let nativeRequests = 0
+    // Ahead of the shared routes: msw serves the first handler that matches.
+    server.use(
+      http.get(PROVIDERS_URL, ({ request }) => {
+        if (new URL(request.url).searchParams.get('flow') !== 'native') {
+          return undefined
+        }
+        nativeRequests += 1
+        return nativeRequests === 1
+          ? HttpResponse.json({ data: [] }, { status: 503 })
+          : undefined
+      }),
+      providerRoutes(['apple', 'google'], ['apple']),
+    )
+    const auth = createOAuthAuthProvider({
+      providers: [],
+      baseUrl: BASE_URL,
+      storage: memoryStorage(),
+      appleSignIn: vi.fn(),
+    })
+
+    await auth.discoverProviders()
+    expect(auth.canBindApple.value).toBe(false)
+
+    await auth.discoverProviders()
+    expect(nativeRequests).toBe(2)
+    expect(auth.canBindApple.value).toBe(true)
+    expect(
+      auth.providers.value.find(({ provider }) => provider === 'apple'),
+    ).toMatchObject({ native: true })
+  })
+
   it('adds Apple on a server that offers it to native apps only', async () => {
     server.use(providerRoutes(['google'], ['apple']))
     const auth = createOAuthAuthProvider({

@@ -618,8 +618,12 @@ export function createOAuthAuthProvider({
             ? { ...entry, native: true }
             : entry,
         )
-        if (names === null) {
-          // Not an answer about the browser providers; ask again next time.
+        if (names === null || (appleSignIn !== null && nativeNames === null)) {
+          // Not an answer about one of the lists: ask again next time. A
+          // native list that could not be fetched is not "no native Apple" —
+          // caching it left `nativeAppleOffered` false for the life of the
+          // process, so on iOS Apple fell back to the browser redirect and the
+          // link action in Settings never appeared.
           discovery = null
         }
       })()

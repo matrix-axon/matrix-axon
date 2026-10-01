@@ -101,11 +101,13 @@ async function loadKeychain(
   call: Invoke,
 ): Promise<SecureStorage> {
   let entries: Record<string, string> = {}
+  let loaded = true
   try {
     ;({ entries } = await call<{ entries: Record<string, string> }>(
       'secret_load',
     ))
   } catch (error) {
+    loaded = false
     // Whatever the Keychain held is out of reach this launch, so the app
     // starts signed out. Still hand back a Keychain-backed store rather than
     // falling back to `localStorage`: a sign-in now should land where the
@@ -113,6 +115,14 @@ async function loadKeychain(
     console.warn('could not read the Keychain', describe(error))
   }
   const storage = new KeychainStorage(new Map(Object.entries(entries)), call)
+  if (!loaded) {
+    // Not migrated: an empty map here means "could not read", not "holds
+    // nothing", so a leftover `localStorage` copy (kept by an earlier failed
+    // delete) cannot be told from a newer Keychain entry, and writing it would
+    // overwrite the real token with a stale one. It stays where it is, and the
+    // next launch that can read the Keychain decides.
+    return storage
+  }
   for (const key of MIGRATED_KEYS) {
     const value = readLegacy(legacy, key)
     if (value === null) {

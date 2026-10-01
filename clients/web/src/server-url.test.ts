@@ -233,20 +233,81 @@ describe('disconnectFromServer with a Keychain', () => {
     await vi.waitFor(() => expect(reload).toHaveBeenCalledWith('/'))
   })
 
-  it('still reloads when a Keychain write failed', async () => {
-    const secure: SecureStorage = Object.assign(memoryStorage(), {
-      settled: () => Promise.reject(new Error('a Keychain write failed')),
-    })
+  it('deletes the credentials once more when a Keychain write failed, then reloads', async () => {
+    const settled = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error('a Keychain write failed'))
+      .mockResolvedValue(undefined)
+    const secure: SecureStorage = Object.assign(memoryStorage(), { settled })
+    const removeItem = vi.spyOn(secure, 'removeItem')
+    const storage = memoryStorage({ [SERVER_URL_KEY]: 'https://old.example' })
     const reload = vi.fn()
 
-    disconnectFromServer(
-      memoryStorage(),
+    const reloaded = await disconnectFromServer(
+      storage,
       () => {},
       reload,
       memoryStorage(),
       secure,
     )
 
-    await vi.waitFor(() => expect(reload).toHaveBeenCalledWith('/'))
+    expect(reloaded).toBe(true)
+    expect(removeItem.mock.calls.map(([key]) => key)).toEqual([
+      'axon.token',
+      'axon.oauth.session',
+      'axon.oauth.pending',
+    ])
+    expect(reload).toHaveBeenCalledWith('/')
+    expect(storage.getItem(SERVER_URL_KEY)).toBeNull()
+  })
+
+  it('does not reload, and keeps the server, when the Keychain keeps refusing', async () => {
+    const secure: SecureStorage = Object.assign(memoryStorage(), {
+      settled: () => Promise.reject(new Error('a Keychain write failed')),
+    })
+    const storage = memoryStorage({
+      [SERVER_URL_KEY]: 'https://old.example',
+      'axon.token': 'legacy',
+    })
+    const reload = vi.fn()
+
+    const reloaded = await disconnectFromServer(
+      storage,
+      () => {},
+      reload,
+      memoryStorage(),
+      secure,
+    )
+
+    expect(reloaded).toBe(false)
+    expect(reload).not.toHaveBeenCalled()
+    // The URL is what ties a surviving credential to the server that issued
+    // it; plaintext copies are gone either way.
+    expect(storage.getItem(SERVER_URL_KEY)).toBe('https://old.example')
+    expect(storage.getItem('axon.token')).toBeNull()
+  })
+
+  it('forgets the server only after the Keychain has let go', async () => {
+    let finishWrites!: () => void
+    const secure: SecureStorage = Object.assign(memoryStorage(), {
+      settled: () =>
+        new Promise<void>((resolve) => {
+          finishWrites = resolve
+        }),
+    })
+    const storage = memoryStorage({ [SERVER_URL_KEY]: 'https://old.example' })
+
+    void disconnectFromServer(
+      storage,
+      () => {},
+      vi.fn(),
+      memoryStorage(),
+      secure,
+    )
+
+    await Promise.resolve()
+    expect(storage.getItem(SERVER_URL_KEY)).toBe('https://old.example')
+    finishWrites()
+    await vi.waitFor(() => expect(storage.getItem(SERVER_URL_KEY)).toBeNull())
   })
 })

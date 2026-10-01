@@ -592,6 +592,7 @@ function SignedOut({ error }: { error?: string | null }) {
  */
 function ServerFooter() {
   const { auth, platform } = useServices()
+  const [failed, setFailed] = useState(false)
   if (platform.defaultApiBaseUrl !== null) {
     return null
   }
@@ -605,18 +606,26 @@ function ServerFooter() {
       <button
         type="button"
         class="link-button"
-        onClick={() =>
-          disconnectFromServer(
+        onClick={() => {
+          setFailed(false)
+          void disconnectFromServer(
             window.localStorage,
             () => auth.clearToken(),
             undefined,
             undefined,
             platform.secureStorage,
-          )
-        }
+          ).then((reloaded) => setFailed(!reloaded))
+        }}
       >
         Use a different server
       </button>
+      {failed && (
+        <span class="error" role="alert">
+          {' '}
+          Could not remove your sign-in from the Keychain, so the server was not
+          changed. Try again.
+        </span>
+      )}
     </p>
   )
 }

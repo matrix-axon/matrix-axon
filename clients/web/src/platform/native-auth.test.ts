@@ -11,6 +11,7 @@ function plugin({
   keychain = {} as Record<string, string>,
   apple = (): Promise<unknown> => Promise.resolve({ identityToken: 'id-tok' }),
   failWrites = false,
+  failLoad = false,
 } = {}) {
   const writes: string[] = []
   const call = vi.fn((command: string, args?: Record<string, unknown>) => {
@@ -18,6 +19,9 @@ function plugin({
       case 'capabilities':
         return Promise.resolve({ appleSignIn: ios, secureStorage: ios })
       case 'secret_load':
+        if (failLoad) {
+          return Promise.reject({ kind: 'failed', message: 'OSStatus -25308' })
+        }
         return Promise.resolve({ entries: { ...keychain } })
       case 'secret_set':
         writes.push(`set ${String(args?.key)}`)
@@ -95,6 +99,24 @@ describe('loadNativeAuth', () => {
 
     expect(native.secureStorage?.getItem('axon.token')).toBe('current')
     expect(legacy.getItem('axon.token')).toBeNull()
+  })
+
+  it('leaves the localStorage copy alone when the Keychain cannot be read', async () => {
+    // An unreadable Keychain looks empty, so a stale legacy copy would look
+    // newer than the real entry and be written over it.
+    const legacy = memoryStorage({ 'axon.token': 'stale' })
+    const { call, keychain, writes } = plugin({
+      keychain: { 'axon.token': 'current' },
+      failLoad: true,
+    })
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const native = await loadNativeAuth(legacy, call)
+
+    expect(writes).toEqual([])
+    expect(keychain['axon.token']).toBe('current')
+    expect(legacy.getItem('axon.token')).toBe('stale')
+    expect(native.secureStorage?.getItem('axon.token')).toBeNull()
   })
 
   it('passes the nonce through and returns the identity token', async () => {
