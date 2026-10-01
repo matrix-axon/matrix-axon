@@ -39,6 +39,11 @@
 #     developer's setup, not a requirement. See "Signing without a password
 #     prompt" in clients/web/src-tauri/README.md for how to build that keychain.
 #
+#   * FORCE_COLOR. An exported `FORCE_COLOR=1` ends up as a stray argument to
+#     the Rust build phase, which reads it as an architecture; the failure is
+#     `Arch specified by Xcode was invalid. {arch} isn't a known arch` and
+#     names neither. This unsets it — see the block below `export PATH`.
+#
 # Not a gate and not run by CI; #445 tracks a lane that would, and this script
 # is what it should be built from. `--upload` needs App Store Connect
 # credentials this repo does not carry; see the block above that flag below.
@@ -131,6 +136,25 @@ appiconset="$tauri_dir/gen/apple/Assets.xcassets/AppIcon.appiconset"
 # Put rustup's shims first rather than diagnosing the Homebrew shadow after the
 # fact. Harmless when they already are.
 export PATH="$HOME/.cargo/bin:$PATH"
+
+# Clear FORCE_COLOR, which a shell rc commonly exports (`export FORCE_COLOR=1`)
+# so that node tools colour their output through a pipe.
+#
+# The generated Xcode project's "Build Rust Code" phase runs
+# `pnpm tauri ios xcode-script … --configuration $CONFIGURATION ${FORCE_COLOR}
+# ${ARCHS}`, and Xcode fills `${FORCE_COLOR}` in from the environment. With it
+# set to 1 the command ends `release 1 arm64`, the CLI reads the 1 as an
+# architecture, and the build dies in that phase with
+#
+#   Arch specified by Xcode was invalid. {arch} isn't a known arch
+#
+# — which names no architecture (the `{arch}` is printed literally, a
+# formatting bug in the CLI) and says nothing about colour, so nothing in it
+# points here. It only happens in a session that sourced the rc file: the same
+# build passed over SSH and failed from a terminal, with identical Xcode
+# build settings in both. Unset, the placeholder expands to nothing, which is
+# what the template expects. The cost is uncoloured Tauri output.
+unset FORCE_COLOR
 
 # Then check, because prepending only helps if rustup is what is installed.
 sysroot=$(rustc --print sysroot)
