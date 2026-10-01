@@ -614,6 +614,12 @@ Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
   checks the profile against the identity it picks, so naming the right one avoids
   a mismatch error.
 
+  When they do disagree, the error lists the certificates the profile lists and
+  says where each stands in the keychain: in it with its private key (and then
+  names the `--app-identity` to use), in it with no private key so it cannot sign,
+  or not in it at all. The second and third mean the `.p12` secret lacks that
+  identity, which is a different fix from naming another one.
+
 ### What the first run will tell us
 
 Everything above has been exercised on a Mac; none of it on a runner. These are the
