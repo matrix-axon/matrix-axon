@@ -27,6 +27,7 @@
 
 - Keep `app/spaces.rs` as the shared sidebar projection and freshness owner: space roots, leaf rooms, and nonselectable headings/dividers.
   `rooms.selected` owns the open timeline; `spaces.focus` owns a focused header and must never become a message/draft target.
+  Reserve a contextual section header above scrolled children when it fits, and keep that root's membership fresh even when the original header is above the viewport.
 - Joined spaces come from `RoomDto.room_type`; children come from `GET …/space/children` and are intersected with the same account's room list.
   First parent in root order wins independently of collapse state; joined subspaces remain roots.
   Favorites sort within each group, `/filter fav` flattens, and name/unread filters reveal matches temporarily.

@@ -250,6 +250,7 @@ fn prepare_accounts(app: &mut App, areas: &PaneAreas) {
 /// Room pane: which rooms it shows, how many rows it has for them, and the
 /// scroll offset that keeps the selected room on screen.
 fn prepare_rooms(app: &mut App, areas: &PaneAreas) {
+    app.frame.sidebar_header = None;
     let Some(rooms_area) = areas.rooms else {
         // See `prepare_accounts` — focus has already left `RoomList`.
         app.frame.rooms.clear();
@@ -310,6 +311,13 @@ fn prepare_space_rows(app: &mut App, area: Rect, wide: bool) {
         _ => app.spaces.focus = None,
     }
     let budget = usize::from(area.height.saturating_sub(2)).max(1);
+    // A contextual heading must not consume the selected room's only lines
+    // in a tiny terminal. Normal viewports reserve one line for that heading.
+    let header_for = |start| {
+        (budget > rows.get(selected).map(|row| row.height(wide)).unwrap_or(1))
+            .then(|| crate::app::spaces::sidebar_section_header(&rows, start))
+            .flatten()
+    };
     let mut start = app
         .rooms
         .scroll
@@ -325,14 +333,22 @@ fn prepare_space_rows(app: &mut App, area: Rect, wide: bool) {
         distance = distance.saturating_sub(rows[start].height(wide));
         start += 1;
     }
+    let mut header = header_for(start);
+    if start < selected && distance + usize::from(header.is_some()) > budget {
+        // The heading needs at most one more line. Advancing one row makes
+        // room without repeatedly scanning back through a large group.
+        start += 1;
+        header = header_for(start);
+    }
     let mut end = start;
-    let mut used = 0;
+    let header_height = usize::from(header.is_some());
+    let mut used = header_height;
     while end < rows.len() && used < budget {
         used += rows[end].height(wide);
         end += 1;
     }
     app.rooms.scroll = start;
-    app.rooms.page_size = budget;
+    app.rooms.page_size = budget.saturating_sub(header_height).max(1);
     app.frame.pinned_rooms = 0;
     app.frame.rooms = rows
         .iter()
@@ -345,6 +361,7 @@ fn prepare_space_rows(app: &mut App, area: Rect, wide: bool) {
         })
         .collect();
     app.frame.sidebar_end = end;
+    app.frame.sidebar_header = header.map(|index| rows[index].clone());
     app.frame.sidebar = rows;
 }
 
@@ -711,7 +728,12 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 room_items.push(item);
             }
         } else {
-            for row in &app.frame.sidebar[rooms_scroll..app.frame.sidebar_end] {
+            for row in app
+                .frame
+                .sidebar_header
+                .iter()
+                .chain(app.frame.sidebar[rooms_scroll..app.frame.sidebar_end].iter())
+            {
                 let item = match row {
                     SidebarRow::Room {
                         index,

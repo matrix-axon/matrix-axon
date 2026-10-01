@@ -53,6 +53,8 @@ pub(crate) struct FrameState {
     pub(crate) rooms: Vec<usize>,
     /// Tree rows measured by prepare, including nonselectable headings.
     pub(crate) sidebar: Vec<super::spaces::SidebarRow>,
+    /// The containing section repeated above scrolled children, when it fits.
+    pub(crate) sidebar_header: Option<super::spaces::SidebarRow>,
     pub(crate) sidebar_end: usize,
     /// Length of the leading run of pinned rooms in [`Self::rooms`] — where
     /// the pinned/unpinned divider goes (ADR 0038). Zero when none are pinned.

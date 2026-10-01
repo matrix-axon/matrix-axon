@@ -128,6 +128,7 @@ Joined Matrix spaces appear as expandable groups in the Rooms pane, followed by 
 Groups start expanded; focus a space header and press Enter or Space to toggle it for this session.
 The open timeline and its draft stay attached to the current room when a group is collapsed.
 Headers use `[+]` / `[-]`, child rooms are indented, and only room rows receive `/room` numbers.
+The containing space header stays above scrolled children when the pane has room for both the header and selected row.
 A `*` marks the open room while a space header has focus.
 
 Favorites sort first within each group, followed by the selected `/sort` order.

@@ -53,6 +53,20 @@ impl SidebarRow {
     }
 }
 
+/// The section containing the first visible child or divider. A section
+/// heading already in the viewport does not need another copy above it.
+pub(crate) fn sidebar_section_header(rows: &[SidebarRow], start: usize) -> Option<usize> {
+    if !matches!(
+        rows.get(start),
+        Some(SidebarRow::Room { .. } | SidebarRow::Divider)
+    ) {
+        return None;
+    }
+    rows[..start]
+        .iter()
+        .rposition(|row| matches!(row, SidebarRow::Space { .. } | SidebarRow::Ungrouped { .. }))
+}
+
 #[derive(Default)]
 pub(crate) struct ChildrenState {
     pub(crate) children: Option<Vec<String>>,
@@ -575,8 +589,13 @@ impl App {
             .saturating_add(self.rooms.page_size)
             .saturating_add(LOOKAHEAD)
             .min(rows.len());
-        let keys: Vec<_> = rows[start.min(end)..end]
-            .iter()
+        // The containing root can be above the lookahead window while its
+        // children remain visible. Keep its membership fresh as well.
+        let header = sidebar_section_header(&rows, self.rooms.scroll);
+        let keys: Vec<_> = header
+            .map(|index| &rows[index])
+            .into_iter()
+            .chain(rows[start.min(end)..end].iter())
             .filter_map(|row| {
                 if let SidebarRow::Space { index, .. } = row {
                     Some(RoomKey::from(&self.rooms.rooms[*index]))

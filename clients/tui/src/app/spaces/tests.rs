@@ -529,6 +529,60 @@ fn rendered_tree_has_headers_indentation_leaf_numbers_and_collapse_markers() {
     assert_eq!(app.selected_room().unwrap().room_id, "!a:srv");
 }
 
+#[tokio::test]
+async fn scrolled_children_keep_their_space_name_visible() {
+    let mut app = app();
+    // Reproduce an inherited scroll offset that starts at the first child,
+    // even though there is enough room to show both spaces.
+    app.rooms.selected = Some(3);
+    app.rooms.scroll = 1;
+    let buffer = render(&mut app, 140, 30);
+    let text = room_text(&app, &buffer);
+    assert!(text.contains("[-] Club"));
+    assert!(text.contains("[-] Work"));
+
+    // A large group must retain its label even when the actual header is
+    // well above the viewport, without scrolling the selected room away.
+    app.rooms.rooms.extend((0..30).map(|i| {
+        room(
+            Uuid::nil(),
+            &format!("!child{i}:srv"),
+            &format!("Child{i:02}"),
+            false,
+        )
+    }));
+    let children: Vec<_> = (0..30).map(|i| format!("!child{i}:srv")).collect();
+    seed(
+        &mut app,
+        "!work:srv",
+        &children.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    app.rooms.selected = Some(app.rooms.rooms.len() - 1);
+    app.rooms.scroll = 0;
+    for width in [80, 140] {
+        let buffer = render(&mut app, width, 12);
+        let text = room_text(&app, &buffer);
+        assert!(text.contains("[-] Work"), "width={width}");
+        assert!(text.contains("Child29"), "width={width}");
+        assert_eq!(text.matches("[-] Work").count(), 1);
+    }
+    assert!(app.rooms.scroll > LOOKAHEAD);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    app.spaces.tx = Some(tx);
+    app.invalidate_space(&key("!work:srv"));
+    app.sweep_spaces(Instant::now());
+    assert!(app.spaces.children[&key("!work:srv")].inflight.is_some());
+
+    app.spaces.focus = Some(key("!work:srv"));
+    let buffer = render(&mut app, 140, 12);
+    let text = room_text(&app, &buffer);
+    assert_eq!(text.matches("[-] Work").count(), 1);
+    assert!(app.frame.sidebar_header.is_none());
+    app.set_room_filter(RoomFilter::Favorites);
+    render(&mut app, 140, 12);
+    assert!(app.frame.sidebar_header.is_none());
+}
+
 #[test]
 fn tree_geometry_handles_empty_filters_tiny_terminals_and_narrow_room_rows() {
     let mut app = app();
@@ -537,6 +591,19 @@ fn tree_geometry_handles_empty_filters_tiny_terminals_and_narrow_room_rows() {
         render(&mut app, width, height);
         assert!(app.rooms.scroll <= app.frame.sidebar.len());
         assert!(app.frame.sidebar_end <= app.frame.sidebar.len());
+        if let Some(selected) = app.rooms.selected {
+            // Where a room's full height consumes the available pane, a
+            // contextual heading must not displace it.
+            if let Some(area) = app.frame.areas.rooms {
+                let row_height = if app.frame.areas.rooms_wide { 1 } else { 2 };
+                if usize::from(area.height.saturating_sub(2)) <= row_height {
+                    assert!(app.frame.sidebar_header.is_none());
+                    assert!(app.frame.sidebar[app.rooms.scroll..app.frame.sidebar_end]
+                        .iter()
+                        .any(|row| row.index() == Some(selected)));
+                }
+            }
+        }
     }
     app.rooms.selected = None;
     app.room_filter = RoomFilter::Dms;
