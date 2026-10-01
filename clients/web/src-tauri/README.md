@@ -475,6 +475,143 @@ security list-keychains -d user -s ~/Library/Keychains/login.keychain-db \
   ~/Library/Keychains/build.keychain-db
 ```
 
+## Store builds from GitHub Actions
+
+`.github/workflows/apple-store-build.yml` builds the iOS app and the Mac App Store
+package on a hosted macOS runner and, if asked, uploads them to App Store Connect
+(TestFlight). It runs `scripts/package-ios.sh` and `scripts/package-macos-mas.sh`,
+so everything those scripts know applies, and `scripts/ci/store-credentials.sh`
+does the credential plumbing: it builds a temporary signing keychain, installs the
+provisioning profiles and writes the App Store Connect key. Each of those is tested
+on a Mac (`scripts/ci/test-store-credentials.sh`); the workflow around them has not
+been run on a runner yet.
+
+It is **manual only**: `workflow_dispatch` and nothing else, because an upload
+publishes a build. When it should trigger is a later decision.
+
+```sh
+gh workflow run apple-store-build.yml -f platform=ios -f upload=false
+gh run watch
+```
+
+| Input          | Default | Meaning                                                                                                         |
+| -------------- | ------- | --------------------------------------------------------------------------------------------------------------- |
+| `platform`     | `both`  | `ios`, `macos` or `both`                                                                                        |
+| `upload`       | `false` | Send the build to TestFlight. Left off, it builds and signs and keeps the package as an artifact for seven days |
+| `build_number` | `auto`  | A number, or `auto` for one more than App Store Connect has **on that platform**                                |
+
+Two things about running it. GitHub only offers a `workflow_dispatch` workflow
+that exists on the default branch, so the first run has to wait for the merge;
+after that you can pick any branch to run it from. And it runs one at a time: a
+build uploaded minutes ago may not be listed by App Store Connect yet, so two runs
+choosing `auto` together could be given the same number.
+
+A store build has no unsigned form, so unlike `desktop-build.yml` this does not
+sign "by presence". Its first step names the secrets that are missing and stops.
+
+### The secrets
+
+`APPLE_TEAM_ID` is reused. `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+`APPLE_SIGNING_IDENTITY`, `APPLE_ID` and `APPLE_PASSWORD` are not: they are the
+Developer ID certificate and notarization login for the `.dmg`, a different
+certificate type from a store build's, and a store upload authenticates with an API
+key rather than an Apple ID.
+
+| Secret                              | What it is                                                                                  |
+| ----------------------------------- | ------------------------------------------------------------------------------------------- |
+| `APPLE_STORE_CERTIFICATES`          | Base64 of one `.p12` holding the store signing identities (certificate **and** private key) |
+| `APPLE_STORE_CERTIFICATES_PASSWORD` | The password that `.p12` was exported with                                                  |
+| `IOS_APPSTORE_PROFILE`              | Base64 of the iOS **App Store** provisioning profile for the bundle ID                      |
+| `IOS_DEVELOPMENT_PROFILE`           | Optional. Base64 of the iOS **development** profile                                         |
+| `MAC_APPSTORE_PROFILE`              | Base64 of the **Mac App Store** provisioning profile (`.provisionprofile`)                  |
+| `ASC_KEY_ID`                        | The 10-character key ID of an App Store Connect API key                                     |
+| `ASC_ISSUER_ID`                     | The issuer ID, a UUID, shown above the keys list                                            |
+| `ASC_PRIVATE_KEY`                   | The full contents of that key's `AuthKey_<ID>.p8` file                                      |
+
+`ASC_*` are needed only for a run that uploads or uses `auto`. There is also one
+optional **variable** (not a secret): `MAS_APP_IDENTITY`, below.
+
+Set them with the `gh` CLI, which reads a value from standard input so it never
+touches the clipboard or a shell history:
+
+```sh
+# 1. The signing identities. Export from the keychain that holds them; this takes
+#    every identity in it, and may ask permission for each key.
+security export -k ~/Library/Keychains/build.keychain-db -t identities \
+  -f pkcs12 -P '<choose a password>' -o store.p12
+base64 -i store.p12 | gh secret set APPLE_STORE_CERTIFICATES
+gh secret set APPLE_STORE_CERTIFICATES_PASSWORD       # paste the password at the prompt
+rm store.p12
+
+# 2. The profiles. This lists every one on this Mac with its kind and platform, so
+#    the right file goes into the right secret. Add a folder (~/Downloads) for a
+#    profile that has not been installed.
+scripts/ci/store-credentials.sh list-profiles --bundle-id org.matrixaxon.axon
+base64 -i '<the app-store iOS .mobileprovision>' | gh secret set IOS_APPSTORE_PROFILE
+base64 -i '<the development iOS .mobileprovision>' | gh secret set IOS_DEVELOPMENT_PROFILE
+base64 -i '<the app-store OSX .provisionprofile>' | gh secret set MAC_APPSTORE_PROFILE
+
+# 3. The App Store Connect key.
+gh secret set ASC_KEY_ID --body '<the ten characters>'
+gh secret set ASC_ISSUER_ID --body '<the UUID>'
+gh secret set ASC_PRIVATE_KEY < ~/.appstoreconnect/private_keys/AuthKey_<ID>.p8
+```
+
+What goes in each:
+
+- **The `.p12`** needs `Apple Distribution` (the iOS export, and the Mac app if it
+  is signed with that), `3rd Party Mac Developer Installer` or `Mac Installer
+Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
+  Mac profile lists that certificate, and `Apple Development` (the iOS archive,
+  see below). The workflow checks the ones it must have before it builds. Export
+  identities, not bare certificates: without the private key there is nothing to
+  sign with. `security export` takes everything in the keychain, including the
+  `Developer ID Application` identity, which these builds do not use; to leave it
+  out, select just the identities you want in Keychain Access and choose File >
+  Export Items.
+- **The profiles** are checked when they are installed: it is an error for
+  `IOS_APPSTORE_PROFILE` to hold a development or Ad Hoc profile, for a profile to
+  be for another app or to have expired. That is the check for the two being
+  swapped, which otherwise fails inside `xcodebuild` as `No profiles for … were
+found`. A profile that has not been installed on this Mac, such as one
+  downloaded from the developer portal, is found by naming its folder to
+  `list-profiles`.
+- **The API key** needs the App Manager role or above (App Store Connect > Users
+  and Access > Integrations > Team Keys). A key made for CI, rather than the one on
+  your own machine, can be revoked without touching your builds. The key ID is the
+  `<ID>` in the file name, and the file can only be downloaded once.
+- **`MAS_APP_IDENTITY`** is a repository variable (Settings > Secrets and variables
+
+  > Actions > Variables), not a secret, because a certificate's name is not secret:
+
+  ```sh
+  gh variable set MAS_APP_IDENTITY --body '3rd Party Mac Developer Application: NAME (TEAMID)'
+  ```
+
+  Set it when the `.p12` holds more than one identity the Mac app could be signed
+  with, which it usually does. The Mac profile lists one certificate and the script
+  checks the profile against the identity it picks, so naming the right one avoids
+  a mismatch error.
+
+### What the first run will tell us
+
+Everything above has been exercised on a Mac; none of it on a runner. These are the
+open questions, and each is cheap to answer once there is a run to read:
+
+- **Whether the iOS archive needs the development profile.** On the Mac this was
+  developed on, an App Store build archived and exported with a development
+  profile installed. `IOS_DEVELOPMENT_PROFILE` is optional for that reason; if the
+  archive fails with `No profiles for … were found`, add it.
+- **Whether a clean runner has the Xcode and tooling expected.** The job selects an
+  Xcode with the iOS 26 SDK or fails and says so, and installs `xcodegen`,
+  `cocoapods` and `libimobiledevice` with Homebrew, which is what `tauri ios init`
+  looks for.
+- **Which provisioning-profile folder `xcodebuild` reads.** Profiles are installed
+  into both the old `~/Library/MobileDevice/Provisioning Profiles` and the one
+  Xcode 16 and later writes to, so this does not matter yet.
+- **How long it takes.** The timeouts are 60 minutes for iOS and 90 for the Mac
+  build, which are guesses.
+
 ## The bundle identifier is settled
 
 `org.matrixaxon.axon`, confirmed for ADR 0102 § 4. It is a permanent store
