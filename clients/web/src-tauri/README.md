@@ -362,6 +362,51 @@ security list-keychains -d user -s ~/Library/Keychains/login.keychain-db \
   ~/Library/Keychains/build.keychain-db
 ```
 
+### Building from the Xcode GUI
+
+Use `scripts/package-ios.sh` to build. Opening `gen/apple` in Xcode and pressing
+Build fails, for reasons that are worth knowing if you do want Xcode, to attach
+a debugger, say.
+
+**Nothing is answering the build phase.** The project's "Build Rust Code" phase
+runs `pnpm tauri ios xcode-script`, which does not know its own options. It asks
+the running `tauri ios dev` or `tauri ios build` over a local socket, and finds
+the address in `$TMPDIR/org.matrixaxon.axon-server-addr`. With no such command
+running that file is left over from the last one, and the build dies:
+
+```
+thread '<unnamed>' panicked at crates/tauri-cli/src/mobile/mod.rs:403:6:
+failed to read CLI options: ... Connection refused
+```
+
+**The environment is whichever process started the build.** Xcode opened from
+the Dock, Finder or Spotlight is started by launchd, which has none of your
+shell's setup: no `~/.cargo/bin`, no nvm node. (We saw pnpm fail to switch to
+the version `package.json` pins, `ERR_PNPM_PNPM_ENGINE_NO_NATIVE_BINARY`; not
+diagnosed further.) A build that `pnpm tauri ios dev` starts inherits your shell
+instead, including a Homebrew `rust` ahead of rustup, and fails with
+
+```
+error[E0463]: can't find crate for `std`
+  = note: the `aarch64-apple-ios` target may not be installed
+```
+
+straight after `component rust-std for target aarch64-apple-ios is up to date`.
+That is the shadowing `package-ios.sh` guards against; put `~/.cargo/bin` first
+in `PATH` before starting the command.
+
+**What you change in Xcode does not last.** The script deletes and regenerates
+`gen/apple` on every run.
+
+If you want Xcode anyway, start `pnpm tauri ios dev --open` from a shell whose
+`PATH` is right and leave it running while you build; it is the command that
+answers the phase. We have not built a release that way.
+
+To see why a build failed, read Xcode's log rather than the on-screen summary:
+`~/Library/Developer/Xcode/DerivedData/axon-*/Logs/Build/*.xcactivitylog`, gzip.
+A build started by `tauri ios dev` lands in a different `axon-*` folder from one
+started in the GUI.
+
 ## The bundle identifier is settled
 
 `org.matrixaxon.axon`, confirmed for ADR 0102 § 4. It is a permanent store
