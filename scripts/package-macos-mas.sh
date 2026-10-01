@@ -16,8 +16,12 @@
 #   * It ships as a .pkg signed with the "3rd Party Mac Developer Installer"
 #     certificate, made by productbuild.
 #
-# Not a gate and not run by CI. `--upload` needs App Store Connect credentials
-# this repo does not carry; the .p8 stays in ~/.appstoreconnect/private_keys.
+# Not a gate and not run by CI. `--upload` and `--build-number auto` need App
+# Store Connect credentials this repo does not carry: ASC_KEY_ID and
+# ASC_ISSUER_ID from the environment or .env, and the .p8 in
+# ~/.appstoreconnect/private_keys. For an unattended build, AXON_SIGNING_KEYCHAIN
+# names a passwordless keychain holding the signing identities; the README's
+# "Signing without a password prompt" says how to make one.
 set -euo pipefail
 
 # A restrictive umask (027 here) leaves every file in the bundle unreadable to
@@ -31,7 +35,9 @@ usage() {
 Usage: scripts/package-macos-mas.sh --profile <file> [options]
 
   --profile <file>       Mac App Store .provisionprofile (or MAS_PROVISIONING_PROFILE)
-  --build-number <n>     CFBundleVersion; App Store Connect rejects a reused one
+  --build-number <n>     CFBundleVersion; App Store Connect rejects a reused one.
+                         `auto` asks App Store Connect for the highest it has and
+                         uses one more (needs the same credentials as --upload)
   --app-identity <name>  application signing identity (default: first "3rd Party
                          Mac Developer Application" or "Apple Distribution" found)
   --pkg-identity <name>  installer signing identity (default: first "3rd Party
@@ -40,9 +46,13 @@ Usage: scripts/package-macos-mas.sh --profile <file> [options]
   --upload               upload the .pkg to App Store Connect / TestFlight
   -h, --help             this
 
+ASC_KEY_ID and ASC_ISSUER_ID, which --upload and `--build-number auto` need, are
+taken from the environment or, failing that, from .env at the repository root.
+AXON_SIGNING_KEYCHAIN names a keychain to unlock first, for a headless build.
+
 Example:
   scripts/package-macos-mas.sh --profile ~/Downloads/Axon_MAS.provisionprofile \
-    --build-number 2 --upload
+    --build-number auto --upload
 USAGE
 }
 
@@ -67,19 +77,31 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+# The App Store Connect and signing-keychain logic is shared with
+# package-ios.sh, so the two cannot drift apart.
+. "$repo_root/scripts/lib/asc.sh"
+. "$repo_root/scripts/lib/signing-keychain.sh"
+
 # Everything below that can be checked cheaply is checked before the build.
 if [ -z "$profile" ] || [ ! -f "$profile" ]; then
   echo "error: --profile must name a Mac App Store .provisionprofile; got '${profile}'" >&2
   exit 2
 fi
-if [ -n "$build_number" ] && ! [[ $build_number =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+if [ -n "$build_number" ] && [ "$build_number" != "auto" ] && ! [[ $build_number =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
   echo "error: --build-number must be one to three dot-separated numbers (CFBundleVersion); got '$build_number'" >&2
   exit 2
 fi
-if [ "$upload" -eq 1 ]; then
-  : "${ASC_KEY_ID:?set ASC_KEY_ID (the A1B2C3D4E5 in ~/.appstoreconnect/private_keys/AuthKey_*.p8)}"
-  : "${ASC_ISSUER_ID:?set ASC_ISSUER_ID (App Store Connect > Users and Access > Integrations)}"
+if [ "$upload" -eq 1 ] || [ "$build_number" = "auto" ]; then
+  asc_require_credentials "$repo_root"
 fi
+
+# Before the identities are looked for, and well before anything signs: a locked
+# keychain fails at the codesign or productbuild step, minutes in, with an error
+# that does not say "locked". A no-op unless AXON_SIGNING_KEYCHAIN is set; see
+# lib/signing-keychain.sh.
+unlock_signing_keychain || exit 1
 
 # `|| true`: grep finding nothing must reach the diagnostic, not abort here.
 find_identity() {
@@ -133,7 +155,6 @@ if [ "$profile_match" -ne 1 ]; then
   exit 1
 fi
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 web_dir="$repo_root/clients/web"
 tauri_dir="$web_dir/src-tauri"
 
@@ -152,6 +173,14 @@ done
 out_dir=$(mktemp -d "${TMPDIR:-/tmp}/axon-mas.XXXXXX")
 entitlements="$out_dir/Entitlements.mas.plist"
 sed "s/TEAMID/$team_id/g" "$tauri_dir/Entitlements.mas.plist" > "$entitlements"
+
+# Resolve `auto` now, before a multi-minute universal build, so a bad credential
+# or an unreachable App Store Connect costs seconds. After this `build_number` is
+# an ordinary number, and it is spliced into the JSON `--config` below, which is
+# why the regex above has already refused anything else. See lib/asc.sh.
+if [ "$build_number" = "auto" ]; then
+  build_number=$(asc_next_build_number "$repo_root" "$tauri_dir/tauri.conf.json") || exit 1
+fi
 
 # Overrides ride in as --config, as in package-ios.sh, so nothing tracked is
 # edited. `files` is relative to Contents/, which is where the store expects
