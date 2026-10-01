@@ -1,3 +1,8 @@
+---
+title: Axon Privacy Policy
+permalink: /privacy/
+---
+
 # Axon Privacy Policy
 
 **Effective date:** 2026-09-23

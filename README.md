@@ -276,7 +276,7 @@ The full list of options, including email, is on the [support page](https://matr
 
 Axon does not collect, store, transmit, or share any personal information, usage data, or analytics on behalf of its developer. This app is a client for a self-hosted Axon server that you (or someone you trust) run and control. All of your data — messages, media, contacts, and account credentials — is exchanged directly between this app and the Axon server address you configure. The developer of this app has no server, database, or analytics service that receives your data, and no ability to access it.
 
-Read the full [privacy policy](https://github.com/matrix-axon/matrix-axon/blob/main/docs/PRIVACY_POLICY.md).
+Read the full [privacy policy](https://matrix-axon.github.io/matrix-axon/privacy/).
 
 ### Third-Party Open Source Components
 
