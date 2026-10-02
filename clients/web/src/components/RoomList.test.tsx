@@ -207,7 +207,13 @@ it('filters the room list to selected space children without overriding its sort
     last_activity_ts: 200,
   })
   const { findByRole, getByRole, queryByRole } = renderPage(
-    [OPS, space, first, second],
+    [
+      OPS,
+      space,
+      first,
+      second,
+      makeRoom({ room_id: '!removed:hs', name: 'Removed' }),
+    ],
     undefined,
     {
       withSpaces: true,
@@ -215,6 +221,7 @@ it('filters the room list to selected space children without overriding its sort
         '!whatsapp:hs': [
           { room_id: '!family:hs', via: ['hs'], suggested: false },
           { room_id: '!friends:hs', via: ['hs'], suggested: false },
+          { room_id: '!removed:hs', via: [], suggested: false },
         ],
       },
     },
@@ -223,6 +230,7 @@ it('filters the room list to selected space children without overriding its sort
   fireEvent.click(getByRole('button', { name: 'WhatsApp' }))
   await waitFor(() => expect(queryByRole('link', { name: /Ops/ })).toBeNull())
   expect(await findByRole('link', { name: /Friends/ })).toBeTruthy()
+  expect(queryByRole('link', { name: /Removed/ })).toBeNull()
   const links = [...document.querySelectorAll('.room-link')]
   expect(links.map((link) => link.textContent)).toEqual([
     expect.stringContaining('Friends'),
@@ -238,6 +246,9 @@ it('keeps joined spaces in the picker rather than the all-rooms list', async () 
   })
   const { findByRole, queryByRole } = renderPage([OPS, space], undefined, {
     withSpaces: true,
+    spaceChildren: {
+      '!whatsapp:hs': [{ room_id: OPS.room_id, via: ['hs'], suggested: false }],
+    },
   })
 
   expect(await findByRole('button', { name: 'WhatsApp' })).toBeTruthy()
@@ -274,6 +285,9 @@ it('keeps a selected space room reachable from the room list', async () => {
   })
   const { findByRole, getByRole } = renderPage([OPS, space], undefined, {
     withSpaces: true,
+    spaceChildren: {
+      '!whatsapp:hs': [{ room_id: OPS.room_id, via: ['hs'], suggested: false }],
+    },
   })
   await findByRole('button', { name: 'WhatsApp' })
   fireEvent.click(getByRole('button', { name: 'WhatsApp' }))
@@ -298,7 +312,13 @@ it('reveals space move controls only once reordering is turned on', async () => 
   const { services, findByRole, getByRole, queryByRole } = renderPage(
     [OPS, one, two],
     undefined,
-    { withSpaces: true },
+    {
+      withSpaces: true,
+      spaceChildren: {
+        '!one:hs': [{ room_id: OPS.room_id, via: ['hs'], suggested: false }],
+        '!two:hs': [{ room_id: OPS.room_id, via: ['hs'], suggested: false }],
+      },
+    },
   )
   await findByRole('button', { name: 'Space One' })
   expect(queryByRole('button', { name: 'Move Space One down' })).toBeNull()
@@ -325,6 +345,10 @@ it('moves a focused space with Alt-arrow keys without any visible chrome', async
   })
   const { services, findByRole } = renderPage([OPS, one, two], undefined, {
     withSpaces: true,
+    spaceChildren: {
+      '!one:hs': [{ room_id: OPS.room_id, via: ['hs'], suggested: false }],
+      '!two:hs': [{ room_id: OPS.room_id, via: ['hs'], suggested: false }],
+    },
   })
   const first = await findByRole('button', { name: 'Space One' })
   fireEvent.keyDown(first, { key: 'ArrowDown', altKey: true })
@@ -1397,4 +1421,35 @@ it('shows an Invites row only while invites are pending', async () => {
   await waitFor(() =>
     expect(queryByRole('link', { name: /Invites/ })).toBeNull(),
   )
+})
+
+it('removes a confirmed empty space from the picker and restores All rooms', async () => {
+  const empty = makeRoom({
+    room_id: '!empty:hs',
+    name: 'Empty',
+    room_type: 'm.space',
+  })
+  const populated = makeRoom({
+    room_id: '!full:hs',
+    name: 'Populated',
+    room_type: 'm.space',
+  })
+  const { services, findByRole, queryByRole } = renderPage(
+    [OPS, empty, populated],
+    (services) => {
+      services.spaces.selected.value = `${ACCOUNT}/!empty:hs`
+    },
+    {
+      withSpaces: true,
+      spaceChildren: {
+        '!full:hs': [{ room_id: OPS.room_id, via: ['hs'], suggested: false }],
+      },
+    },
+  )
+  await findByRole('button', { name: 'Populated' })
+  await waitFor(() => expect(services.spaces.loading.value.size).toBe(0))
+  expect(queryByRole('button', { name: 'Empty' })).toBeNull()
+  expect(services.spaces.selected.value).toBeNull()
+  expect(await findByRole('link', { name: /Ops/ })).toBeTruthy()
+  expect(services.settings.spaceOrder.value).toEqual([])
 })

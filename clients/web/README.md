@@ -59,7 +59,7 @@ encryption, pinned messages, space relationships, and upgrade links), editing
 the room's name, topic and avatar (M19-W6/ADR 0100: an Edit button beside
 Close, offered only when your power level allows it, with avatar images staged
 through the existing upload flow), and a
-browser-local Spaces picker that filters the room list, TUI-parity keyboard
+Spaces picker that filters the room list, TUI-parity keyboard
 shortcuts with a `/shortcuts` help overlay (ADR 0078, web keyboard shortcuts),
 live WebSocket updates for timelines/room previews/unread state, live
 ephemeral overlays for typing indicators plus public read receipts, and an
@@ -96,6 +96,14 @@ Note for deployment: history routing means the host must rewrite unknown
 paths to `index.html` (the Vite dev server already does). ADR 0030's
 `sync_state` is rendered when present, but the server does not emit it yet —
 see the note in `src/stores/accounts.ts`.
+
+The Spaces picker hides spaces once a successful membership read confirms they have no joined child rooms.
+Spaces with unknown membership and failed reads remain visible, and Retry remains available for failed reads.
+Confirmed empty spaces stay hidden during background refreshes.
+The picker checks direct child rooms only; a parent containing only subspaces is hidden, while each populated joined subspace appears independently.
+A stale or failed room-list read also keeps spaces visible until joined membership can be confirmed.
+If the selected space becomes empty, the picker returns to All rooms.
+Hidden spaces retain their saved order and can reappear after membership updates.
 
 ## Prerequisites
 

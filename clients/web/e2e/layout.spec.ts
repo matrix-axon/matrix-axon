@@ -115,6 +115,10 @@ test('wide: space icons stay fully inside their rail at Windows scaling', async 
     page.getByRole('button', { name: 'E2E Space One' }),
   ).toBeVisible()
 
+  // All plus the one populated space; wait for the empty fixture to settle.
+  await expect(page.getByRole('button', { name: 'E2E Space Two' })).toHaveCount(
+    0,
+  )
   const geometry = await page.evaluate(() => {
     const rail = document.querySelector<HTMLElement>('.space-picker')!
     const railBox = rail.getBoundingClientRect()
@@ -130,7 +134,7 @@ test('wide: space icons stay fully inside their rail at Windows scaling', async 
     )
   })
 
-  expect(geometry.length).toBeGreaterThan(2)
+  expect(geometry).toHaveLength(2)
   for (const entry of geometry) {
     expect(entry.left).toBeGreaterThanOrEqual(0)
     expect(entry.right).toBeGreaterThanOrEqual(0)
@@ -824,12 +828,26 @@ test('narrow: a collapsed spaces pane is never stranded', async ({ page }) => {
 })
 
 test('narrow: spaces can be reordered without a keyboard', async ({ page }) => {
+  // Reordering needs two populated roots; the normal second fixture is empty.
+  await page.route('**/space/children', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (decodeURIComponent(path.split('/').at(-3)!) !== '!space-two:hs') {
+      await route.continue()
+      return
+    }
+    await route.fulfill({
+      json: { data: [{ room_id: ROOM_ID, via: ['hs'], suggested: false }] },
+    })
+  })
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/')
 
   // A phone has no Ctrl-Alt-R, and touch drag-and-drop is uneven across
   // engines, so the toggle has to be reachable at this width.
+  await expect(
+    page.getByRole('button', { name: 'E2E Space Two' }),
+  ).toBeVisible()
   const toggle = page.getByRole('button', { name: 'Reorder spaces' })
   await expect(toggle).toBeVisible()
   const box = await toggle.boundingBox()

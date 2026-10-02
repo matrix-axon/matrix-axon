@@ -63,13 +63,17 @@ test('space shortcuts toggle the rail and cycle the visible space order', async 
   await page.keyboard.press('Control+Alt+S')
   await expect(rail).toBeVisible()
 
+  // Space Two has no joined children and must not be a keyboard destination.
+  await expect(page.getByRole('button', { name: 'E2E Space Two' })).toHaveCount(
+    0,
+  )
   await page.keyboard.press('Control+Alt+]')
   await expect(
     page.getByRole('button', { name: 'E2E Space One' }),
   ).toHaveAttribute('aria-pressed', 'true')
   await page.keyboard.press('Control+Alt+]')
   await expect(
-    page.getByRole('button', { name: 'E2E Space Two' }),
+    page.getByRole('button', { name: 'E2E Space One' }),
   ).toHaveAttribute('aria-pressed', 'true')
   await page.keyboard.press('Control+Alt+[')
   await expect(

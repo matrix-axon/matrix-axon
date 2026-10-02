@@ -15,11 +15,11 @@ export function SpaceList() {
   const entries = useMemo(
     () =>
       orderedSpaces(
-        rooms.rooms.value.filter((room) => room.room_type === 'm.space'),
+        spaces.visible.value,
         settings.spaceOrder.value,
         rooms.titles.value,
       ),
-    [rooms.rooms.value, settings.spaceOrder.value, rooms.titles.value],
+    [spaces.visible.value, settings.spaceOrder.value, rooms.titles.value],
   )
   // The order the user sees, which is what a move target indexes into.
   const order = useMemo(() => entries.map(roomKey), [entries])

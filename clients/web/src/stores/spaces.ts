@@ -1,4 +1,5 @@
 import {
+  computed,
   effect,
   signal,
   untracked,
@@ -16,6 +17,7 @@ export type SpaceChildDto = components['schemas']['SpaceChildDto']
 
 export interface SpacesStore {
   selected: Signal<string | null>
+  visible: ReadonlySignal<readonly RoomDto[]>
   children: ReadonlySignal<ReadonlyMap<string, readonly SpaceChildDto[]>>
   loading: ReadonlySignal<ReadonlySet<string>>
   errors: ReadonlySignal<ReadonlyMap<string, string>>
@@ -72,6 +74,33 @@ export function createSpacesStore(
   const joinedSpaces = () =>
     rooms.rooms.value.filter((room) => room.room_type === 'm.space')
 
+  // Keep unknown/failed roots available. A cached successful projection stays
+  // authoritative during a background refetch, avoiding hidden-root flicker.
+  // Only a successful projection with no direct joined child room confirms emptiness.
+  // Filtering and room sort do not participate in this decision.
+  const visible = computed(() => {
+    // Cached/unconfirmed room summaries cannot establish joined membership.
+    if (rooms.stale.value || rooms.error.value !== null) return joinedSpaces()
+    const joined = new Set(
+      rooms.rooms.value
+        .filter((room) => room.room_type !== 'm.space')
+        .map(roomKey),
+    )
+    return joinedSpaces().filter((space) => {
+      const key = roomKey(space)
+      const members = children.value.get(key)
+      return (
+        members === undefined ||
+        errors.value.has(key) ||
+        members.some((child) =>
+          joined.has(
+            roomKey({ account_id: space.account_id, room_id: child.room_id }),
+          ),
+        )
+      )
+    })
+  })
+
   const runNext = () => {
     if (activeRequests >= 6) return
     const space = queue.shift()
@@ -89,7 +118,10 @@ export function createSpacesStore(
         if (data === undefined) {
           nextErrors.set(key, `Could not load space: ${apiErrorMessage(error)}`)
         } else {
-          children.value = new Map(children.value).set(key, data.data)
+          children.value = new Map(children.value).set(
+            key,
+            data.data.filter((child) => child.via.length > 0),
+          )
           nextErrors.delete(key)
         }
         errors.value = nextErrors
@@ -144,6 +176,16 @@ export function createSpacesStore(
       selected.value = null
   })
 
+  effect(() => {
+    const key = selected.value
+    if (
+      key !== null &&
+      !visible.value.some((space) => roomKey(space) === key)
+    ) {
+      selected.value = null
+    }
+  })
+
   live.subscribe((frame) => {
     const event = timelineEvent(frame)
     if (event === null || event.type !== 'm.space.child') return
@@ -167,5 +209,5 @@ export function createSpacesStore(
     for (const space of untracked(joinedSpaces)) refresh(space)
   })
 
-  return { selected, children, loading, errors, reordering, refresh }
+  return { selected, visible, children, loading, errors, reordering, refresh }
 }
