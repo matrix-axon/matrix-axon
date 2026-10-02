@@ -21,6 +21,8 @@ on:
       - "Cargo.lock"
       - "scripts/release-version.sh"
       - "scripts/release-version-test.sh"
+      - "scripts/release-notes.sh"
+      - "scripts/release-notes-test.sh"
   push:
     tags:
       - "v*"
@@ -55,6 +57,11 @@ jobs:
         run: |
           shellcheck scripts/release-version.sh scripts/release-version-test.sh
           scripts/release-version-test.sh
+
+      - name: Release notes script
+        run: |
+          shellcheck scripts/release-notes.sh scripts/release-notes-test.sh
+          scripts/release-notes-test.sh
 
   packages:
     name: .deb and .rpm (${{ matrix.arch }})

@@ -260,6 +260,12 @@ A `v*` tag pushed by hand must equal `v` plus the Cargo version, or `cross-build
 Check one before pushing it with `scripts/release-version.sh check vX.Y.Z`.
 `beta-*` and `alpha-*` tags are not checked.
 
+Release notes are generated from the PRs merged since the last tag, grouped by PR label (ADR 0108, `.github/release.yml`).
+Label each PR before merging: `breaking-change`, `security`, `enhancement`, `bug`, `performance`, `documentation`, `dependencies`, `build` or `ci`.
+An unlabelled PR is listed under "Other Changes", and `skip-changelog` leaves a PR out.
+While the release PR is open, `release-notes.yml` keeps a draft GitHub Release with those notes; edit it before you merge the release PR, and it is not overwritten once edited.
+The tag publishes the draft, and a follow-up PR adds the notes to `CHANGELOG.md`.
+
 A PR that adds a workspace crate which ships in no release (a test or smoke crate) must also add it to `release-plz.toml`, next to `axon-test-support`.
 Without that entry, release-plz fails on `main` until the next release tag includes the crate.
 
