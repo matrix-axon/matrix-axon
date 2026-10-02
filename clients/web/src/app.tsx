@@ -1287,9 +1287,7 @@ function ShellChrome() {
     // From the signal, not the render's `zoom`: two presses before the next
     // render (key repeat) must step twice, not land on the same level.
     settings.zoom.value =
-      direction === 0
-        ? DEFAULT_ZOOM
-        : stepZoom(settings.zoom.value, direction)
+      direction === 0 ? DEFAULT_ZOOM : stepZoom(settings.zoom.value, direction)
   }
 
   // The native shell (ADR 0107) is not a browser, so it can take the
