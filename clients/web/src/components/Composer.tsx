@@ -64,6 +64,46 @@ function escapeMarkdownLinkDestination(value: string): string {
   return value.replace(/([\\)])/g, '\\$1')
 }
 
+const ICON_STROKE = {
+  fill: 'none',
+  stroke: 'currentColor',
+  'stroke-linecap': 'round',
+  'stroke-linejoin': 'round',
+  'stroke-width': '2',
+} as const
+
+function PaperclipIcon(): JSX.Element {
+  return (
+    <svg class="composer-attach-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M21.44 11.05 12.25 20.24a6 6 0 1 1-8.49-8.48l10.6-10.61a4 4 0 0 1 5.66 5.66L9.4 17.43a2 2 0 0 1-2.83-2.83l9.9-9.9"
+        {...ICON_STROKE}
+      />
+    </svg>
+  )
+}
+
+function CameraIcon(): JSX.Element {
+  return (
+    <svg class="composer-attach-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"
+        {...ICON_STROKE}
+      />
+      <circle cx="12" cy="13" r="4" {...ICON_STROKE} />
+    </svg>
+  )
+}
+
+function VideoIcon(): JSX.Element {
+  return (
+    <svg class="composer-attach-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m23 7-7 5 7 5V7z" {...ICON_STROKE} />
+      <rect x="1" y="5" width="15" height="14" rx="2" ry="2" {...ICON_STROKE} />
+    </svg>
+  )
+}
+
 /**
  * Hand a file input's selection to `onAttach`, then clear it so choosing the
  * same file twice in a row still fires `change` the second time.
@@ -1078,20 +1118,7 @@ export function Composer({
                   fileInput.current?.click()
                 }}
               >
-                <svg
-                  class="composer-attach-icon"
-                  viewBox="0 0 24 24"
-                  aria-hidden="true"
-                >
-                  <path
-                    d="M21.44 11.05 12.25 20.24a6 6 0 1 1-8.49-8.48l10.6-10.61a4 4 0 0 1 5.66 5.66L9.4 17.43a2 2 0 0 1-2.83-2.83l9.9-9.9"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                  />
-                </svg>
+                <PaperclipIcon />
               </button>
               {/* The packaged Android app only (`needsCameraCaptureButtons`):
                   its chooser has no camera entry, and `capture` goes straight
@@ -1109,32 +1136,38 @@ export function Composer({
                   <button
                     type="button"
                     role="menuitem"
+                    aria-label="Attach a file"
+                    title="Attach a file"
                     onClick={() => {
                       setAttachMenuOpen(false)
                       fileInput.current?.click()
                     }}
                   >
-                    Attach a file
+                    <PaperclipIcon />
                   </button>
                   <button
                     type="button"
                     role="menuitem"
+                    aria-label="Take a photo"
+                    title="Take a photo"
                     onClick={() => {
                       setAttachMenuOpen(false)
                       photoInput.current?.click()
                     }}
                   >
-                    Take a photo
+                    <CameraIcon />
                   </button>
                   <button
                     type="button"
                     role="menuitem"
+                    aria-label="Record a video"
+                    title="Record a video"
                     onClick={() => {
                       setAttachMenuOpen(false)
                       videoInput.current?.click()
                     }}
                   >
-                    Record a video
+                    <VideoIcon />
                   </button>
                 </div>
               )}

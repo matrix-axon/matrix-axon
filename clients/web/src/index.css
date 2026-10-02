@@ -3367,16 +3367,17 @@ span.composer-attachment-thumb {
   display: inline-flex;
 }
 
-/* Android shell only: "Attach a file / Take a photo / Record a video", opened
-   by a long press on the paperclip. Same look as the room actions popover. */
+/* Android shell only: three icons (attach, photo, video) in a row, opened by a
+   long press on the paperclip. Same look as the room actions popover.
+   Anchored to the paperclip's right edge: it sits at the right of the composer
+   row, so growing rightward ran off the screen. */
 .composer-attach-menu {
   position: absolute;
   bottom: calc(100% + 0.4rem);
-  left: 0;
+  right: 0;
   z-index: 40;
-  display: grid;
+  display: flex;
   gap: 0.25rem;
-  min-width: 11rem;
   padding: 0.35rem;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -3385,21 +3386,25 @@ span.composer-attachment-thumb {
 }
 
 .composer-attach-menu button {
-  display: block;
-  width: 100%;
-  min-height: 2.5rem;
-  padding: 0.35rem 0.7rem;
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: var(--fg);
-  font: inherit;
-  text-align: left;
 }
 
 .composer-attach-menu button:hover,
 .composer-attach-menu button:focus-visible {
   background: var(--bg-raised);
+}
+
+.composer-attach-menu .composer-attach-icon {
+  width: 1.4rem;
+  height: 1.4rem;
 }
 
 .composer-attach-icon {
