@@ -940,7 +940,9 @@ describe('Composer attachments (M-W8.5, ADR 0065; multi-image ADR 0081)', () => 
     expect([...onAttach.mock.calls[0][0]]).toEqual([file])
   })
 
-  describe('camera buttons (packaged Android app)', () => {
+  describe('attach menu (packaged Android app)', () => {
+    const HOLD = 600 // past MESSAGE_TOUCH_HOLD_MS
+
     function inAndroidShell(): void {
       vi.stubGlobal('navigator', {
         userAgent:
@@ -949,16 +951,32 @@ describe('Composer attachments (M-W8.5, ADR 0065; multi-image ADR 0081)', () => 
       ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
     }
     afterEach(() => {
+      vi.useRealTimers()
       delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
     })
 
-    it('adds none outside it, so iOS and the browser keep their own sheet', () => {
-      const { queryByLabelText } = renderComposer({ onAttach: vi.fn() })
+    function paperclip(container: Element): HTMLElement {
+      return container.querySelector<HTMLElement>('button.composer-attach')!
+    }
+    function holdPaperclip(container: Element): void {
+      fireEvent.touchStart(paperclip(container))
+      act(() => {
+        vi.advanceTimersByTime(HOLD)
+      })
+    }
+
+    it('adds nothing outside the shell, so iOS and the browser keep their own sheet', () => {
+      vi.useFakeTimers()
+      const { queryByLabelText, queryByRole, container } = renderComposer({
+        onAttach: vi.fn(),
+      })
       expect(queryByLabelText('Take a photo')).toBeNull()
       expect(queryByLabelText('Record a video')).toBeNull()
+      holdPaperclip(container)
+      expect(queryByRole('menu')).toBeNull()
     })
 
-    it('adds a photo and a video input that go straight to the camera', () => {
+    it('has a photo and a video input that go straight to the camera', () => {
       inAndroidShell()
       const { getByLabelText } = renderComposer({ onAttach: vi.fn() })
       const photo = getByLabelText('Take a photo') as HTMLInputElement
@@ -993,28 +1011,118 @@ describe('Composer attachments (M-W8.5, ADR 0065; multi-image ADR 0081)', () => 
       expect([...onAttach.mock.calls[1][0]]).toEqual([clip])
     })
 
-    it('proxies each button to its own input', () => {
+    it('a plain tap still opens the file picker, with no menu', () => {
+      vi.useFakeTimers()
       inAndroidShell()
-      const { getByLabelText, container } = renderComposer({
+      const { getByLabelText, queryByRole, container } = renderComposer({
         onAttach: vi.fn(),
       })
-      const photoClick = vi.spyOn(
-        getByLabelText('Take a photo') as HTMLInputElement,
-        'click',
-      )
-      const videoClick = vi.spyOn(
-        getByLabelText('Record a video') as HTMLInputElement,
+      const picker = vi.spyOn(
+        getByLabelText('Attach a file') as HTMLInputElement,
         'click',
       )
 
-      fireEvent.click(container.querySelector('button[title="Take a photo"]')!)
-      expect(photoClick).toHaveBeenCalledTimes(1)
-      expect(videoClick).not.toHaveBeenCalled()
+      fireEvent.touchStart(paperclip(container))
+      fireEvent.touchEnd(paperclip(container))
+      fireEvent.click(paperclip(container))
 
-      fireEvent.click(
-        container.querySelector('button[title="Record a video"]')!,
+      expect(picker).toHaveBeenCalledTimes(1)
+      expect(queryByRole('menu')).toBeNull()
+    })
+
+    it('a long press opens the menu, and the release does not also open the picker', () => {
+      vi.useFakeTimers()
+      inAndroidShell()
+      const { getByLabelText, getAllByRole, queryByRole, container } =
+        renderComposer({ onAttach: vi.fn() })
+      const picker = vi.spyOn(
+        getByLabelText('Attach a file') as HTMLInputElement,
+        'click',
       )
-      expect(videoClick).toHaveBeenCalledTimes(1)
+
+      holdPaperclip(container)
+      expect(queryByRole('menu')).not.toBeNull()
+      expect(getAllByRole('menuitem').map((i) => i.textContent)).toEqual([
+        'Attach a file',
+        'Take a photo',
+        'Record a video',
+      ])
+
+      // Lifting the finger ends the gesture with a click on the same button.
+      fireEvent.touchEnd(paperclip(container))
+      fireEvent.click(paperclip(container))
+      expect(picker).not.toHaveBeenCalled()
+    })
+
+    it('moving the finger before the hold elapses cancels it', () => {
+      vi.useFakeTimers()
+      inAndroidShell()
+      const { queryByRole, container } = renderComposer({
+        onAttach: vi.fn(),
+      })
+
+      fireEvent.touchStart(paperclip(container))
+      fireEvent.touchMove(paperclip(container))
+      act(() => {
+        vi.advanceTimersByTime(HOLD)
+      })
+
+      expect(queryByRole('menu')).toBeNull()
+    })
+
+    it('each item opens its own input and closes the menu', () => {
+      vi.useFakeTimers()
+      inAndroidShell()
+      const { getByLabelText, getByRole, queryByRole, container } =
+        renderComposer({ onAttach: vi.fn() })
+      const clicks = {
+        file: vi.spyOn(
+          getByLabelText('Attach a file') as HTMLInputElement,
+          'click',
+        ),
+        photo: vi.spyOn(
+          getByLabelText('Take a photo') as HTMLInputElement,
+          'click',
+        ),
+        video: vi.spyOn(
+          getByLabelText('Record a video') as HTMLInputElement,
+          'click',
+        ),
+      }
+
+      holdPaperclip(container)
+      fireEvent.click(getByRole('menuitem', { name: 'Take a photo' }))
+      expect(clicks.photo).toHaveBeenCalledTimes(1)
+      expect(clicks.video).not.toHaveBeenCalled()
+      expect(clicks.file).not.toHaveBeenCalled()
+      expect(queryByRole('menu')).toBeNull()
+
+      holdPaperclip(container)
+      fireEvent.click(getByRole('menuitem', { name: 'Record a video' }))
+      expect(clicks.video).toHaveBeenCalledTimes(1)
+
+      holdPaperclip(container)
+      fireEvent.click(getByRole('menuitem', { name: 'Attach a file' }))
+      expect(clicks.file).toHaveBeenCalledTimes(1)
+    })
+
+    it('closes on Escape and on a touch outside, but not on a touch inside', () => {
+      vi.useFakeTimers()
+      inAndroidShell()
+      const { getByRole, queryByRole, container } = renderComposer({
+        onAttach: vi.fn(),
+      })
+
+      holdPaperclip(container)
+      fireEvent.pointerDown(getByRole('menuitem', { name: 'Take a photo' }))
+      expect(queryByRole('menu')).not.toBeNull()
+
+      fireEvent.pointerDown(document.body)
+      expect(queryByRole('menu')).toBeNull()
+
+      holdPaperclip(container)
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(queryByRole('menu')).toBeNull()
     })
   })
 

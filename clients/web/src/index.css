@@ -3361,6 +3361,47 @@ span.composer-attachment-thumb {
   padding: 0.4rem 0.5rem;
 }
 
+/* The attach button's wrapper, so the long-press menu can sit above it. */
+.composer-attach-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+/* Android shell only: "Attach a file / Take a photo / Record a video", opened
+   by a long press on the paperclip. Same look as the room actions popover. */
+.composer-attach-menu {
+  position: absolute;
+  bottom: calc(100% + 0.4rem);
+  left: 0;
+  z-index: 40;
+  display: grid;
+  gap: 0.25rem;
+  min-width: 11rem;
+  padding: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+}
+
+.composer-attach-menu button {
+  display: block;
+  width: 100%;
+  min-height: 2.5rem;
+  padding: 0.35rem 0.7rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+}
+
+.composer-attach-menu button:hover,
+.composer-attach-menu button:focus-visible {
+  background: var(--bg-raised);
+}
+
 .composer-attach-icon {
   display: block;
   width: 1.1rem;
