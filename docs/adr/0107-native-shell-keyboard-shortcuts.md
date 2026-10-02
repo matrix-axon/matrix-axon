@@ -76,6 +76,14 @@ itself (`⌘` on macOS). It steps through the browsers' own zoom levels, from
   Wheel zoom would need a handler that can tell a mouse notch from a stream of
   pinch events, and it can be added later if people miss it.
 
+- **macOS also has View → Zoom In, Zoom Out and Actual Size** (⌘=, ⌘-, ⌘0).
+  These are the Mac's standard place for zoom, and they back up the keys: if
+  the webview ever stops handing ⌘= to the page, the menu still gets the
+  press. Each item replays its own key press in the page, so it does exactly
+  what that key would have done there, including zooming the image while the
+  viewer is open. A key the page handles never reaches the menu, and a
+  replayed key never reaches the OS, so the two cannot both fire.
+
 ### The image viewer zooms its own image
 
 Page zoom does not enlarge a photo in the viewer, which caps the image at the
