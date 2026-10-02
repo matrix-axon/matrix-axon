@@ -30,7 +30,7 @@
     "@tauri-apps/plugin-websocket": "^2.4.2",
     "brace-expansion": "2.1.7",
     "browserslist": "4.28.9",
-    "dompurify": "^3.4.13",
+    "dompurify": "^3.4.16",
     "emoji-picker-element": "1.29.1",
     "emoji-picker-element-data": "1.8.0",
     "highlight.js": "^11.11.1",
