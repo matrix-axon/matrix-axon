@@ -1042,11 +1042,9 @@ describe('Composer attachments (M-W8.5, ADR 0065; multi-image ADR 0081)', () => 
 
       holdPaperclip(container)
       expect(queryByRole('menu')).not.toBeNull()
-      expect(getAllByRole('menuitem').map((i) => i.textContent)).toEqual([
-        'Attach a file',
-        'Take a photo',
-        'Record a video',
-      ])
+      expect(
+        getAllByRole('menuitem').map((i) => i.getAttribute('aria-label')),
+      ).toEqual(['Attach a file', 'Take a photo', 'Record a video'])
 
       // Lifting the finger ends the gesture with a click on the same button.
       fireEvent.touchEnd(paperclip(container))
