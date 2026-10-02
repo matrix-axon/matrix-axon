@@ -6,6 +6,9 @@
 # macOS only: it needs `security`. The unlock tests use a throwaway keychain with
 # an empty password that is created and deleted here and never added to the
 # search list, so the user's real keychains are only ever read.
+# `A && B || fail` is meant: fail when the conjunction does not hold. SC2015 warns that
+# `fail` could also run if B itself fails, which for these `contains` checks is the same event.
+# shellcheck disable=SC2015
 set -euo pipefail
 
 if ! command -v security >/dev/null 2>&1; then

@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Source this; it defines load_env_key.
 #
 #   load_env_key NAME FILE

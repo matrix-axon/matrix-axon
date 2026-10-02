@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Source this; it defines asc_require_credentials and asc_next_build_number.
 #
 # The App Store Connect half of the packaging scripts, shared by package-ios.sh

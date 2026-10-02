@@ -83,6 +83,7 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # package-ios.sh, so the two cannot drift apart.
 . "$repo_root/scripts/lib/asc.sh"
 . "$repo_root/scripts/lib/signing-keychain.sh"
+. "$repo_root/scripts/lib/profile-certs.sh"
 
 # Everything below that can be checked cheaply is checked before the build.
 if [ -z "$profile" ] || [ ! -f "$profile" ]; then
@@ -147,24 +148,11 @@ if [ "$(plutil -extract ProvisionsAllDevices raw -o - "$profile_plist" 2>/dev/nu
   exit 1
 fi
 
-# The profile must also list the certificate that will sign. The portal shows
-# several certificates with identical names and near-identical expiry dates, so
-# picking the wrong one is easy, and the mismatch surfaces only when the upload
-# is rejected. Any keychain certificate with the identity's name may be the
-# signer, so a match against any of them passes.
-keychain_hashes=$(security find-certificate -a -c "$app_identity" -Z | awk '/^SHA-1 hash:/{print $3}')
-profile_match=0
-i=0
-while cert_b64=$(plutil -extract "DeveloperCertificates.$i" raw -o - "$profile_plist" 2>/dev/null); do
-  h=$(printf '%s' "$cert_b64" | base64 -d | openssl x509 -inform der -noout -fingerprint -sha1 | sed 's/.*=//; s/://g')
-  if printf '%s\n' "$keychain_hashes" | grep -qix "$h"; then profile_match=1; break; fi
-  i=$((i + 1))
-done
-if [ "$profile_match" -ne 1 ]; then
-  echo "error: the profile does not include any '$app_identity' certificate in this keychain" >&2
-  echo "       regenerate it selecting the certificate that expires on the same date as the keychain one" >&2
-  exit 1
-fi
+# The profile must also list the certificate that will sign, or App Store Connect
+# rejects the upload after the build and the signing. When it does not, the report
+# says what the profile lists and where each of those certificates stands in the
+# keychain; see lib/profile-certs.sh.
+check_profile_certificates "$profile_plist" "$app_identity" || exit 1
 
 web_dir="$repo_root/clients/web"
 tauri_dir="$web_dir/src-tauri"

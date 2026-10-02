@@ -1,11 +1,381 @@
+# Builds, and optionally uploads, the iOS and Mac App Store builds to App Store
+# Connect / TestFlight (#445). The CI form of scripts/package-ios.sh and
+# scripts/package-macos-mas.sh, which it runs; they carry the lessons about
+# regenerating the Xcode project, build numbers and icons, and this file does not
+# repeat them.
+#
+# **Manual only, on purpose.** Uploading to TestFlight publishes a build, so this
+# is `workflow_dispatch` and nothing else. When and how it should trigger (a tag,
+# an approval `environment:`) is a decision for later; none of that needs this
+# file to change shape.
+#
+# **Not "signing by presence".** desktop-build.yml signs when its secrets exist and
+# produces working unsigned artifacts when they do not. A store build has no
+# unsigned form: an App Store Connect upload that is not signed is not a build. So
+# the first step says which secrets are missing and stops, which is cheaper than
+# finding out from `xcodebuild` ten minutes in. The README's "Store builds from
+# GitHub Actions" says what each secret is and how to make it.
+#
+# `upload` defaults to false: the run builds and signs, leaves the package as a
+# workflow artifact for one day, and publishes nothing. The artifact is a signed
+# build that anyone who can read the repository can download, so it is kept only
+# as long as it takes to look at. Turn it on to send the build to
+# TestFlight. Nothing stops a run from a branch uploading, because the person who
+# can dispatch it can also push to main; the run's summary says which ref it was.
+#
+# Runs one at a time. A build uploaded minutes ago may not be listed by App Store
+# Connect yet, so two runs choosing `auto` build numbers at once could be given
+# the same one.
+
 name: Apple store build
 
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: "Which build"
+        type: choice
+        options:
+          - both
+          - ios
+          - macos
+        default: both
+      upload:
+        description: "Upload to App Store Connect / TestFlight (publishes the build)"
+        type: boolean
+        default: false
+      build_number:
+        description: "CFBundleVersion, or 'auto' for one more than App Store Connect has on that platform"
+        type: string
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-store-build
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
 
 jobs:
-  empty-job:
-    runs-on: ubuntu-latest
+  ios:
+    name: Build for iOS (App Store)
+    if: ${{ inputs.platform == 'ios' || inputs.platform == 'both' }}
+    # macOS 26 for its Xcode 26 and iOS 26 SDK: App Store Connect rejects uploads
+    # made with an older one, after the build and the upload have succeeded. The
+    # Xcode step below checks it rather than trusting the image.
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      BUILD_NUMBER: ${{ inputs.build_number }}
+      UPLOAD: ${{ inputs.upload }}
+      # An `auto` number or an upload talks to App Store Connect, so needs its key.
+      NEED_ASC: ${{ (inputs.upload || inputs.build_number == 'auto') && 'yes' || 'no' }}
     steps:
-      - name: Do nothing
-        run: ':' 
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # So temp files land somewhere a later step can find them. Not job-level
+      # `env:`, where the `runner` context is not available.
+      - name: Keep temporary files under the runner's temp directory
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      # The scripts run under macOS's /bin/bash, which is 3.2, not the bash 5 they were
+      # written and tried under. A `case` inside `$( )` in package-macos-mas.sh did not
+      # parse there and was found by a run that had already installed everything.
+      - name: Check the scripts parse under this runner's bash
+        run: scripts/ci/check-bash-syntax.sh
+
+      - name: Check the repository secrets are set
+        env:
+          APPLE_STORE_CERTIFICATES: ${{ secrets.APPLE_STORE_CERTIFICATES }}
+          APPLE_STORE_CERTIFICATES_PASSWORD: ${{ secrets.APPLE_STORE_CERTIFICATES_PASSWORD }}
+          IOS_APPSTORE_PROFILE: ${{ secrets.IOS_APPSTORE_PROFILE }}
+          IOS_DEVELOPMENT_PROFILE: ${{ secrets.IOS_DEVELOPMENT_PROFILE }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          args=()
+          if [ "$NEED_ASC" = "yes" ]; then args+=(--asc); fi
+          scripts/ci/store-credentials.sh check-secrets ios ${args[@]+"${args[@]}"}
+
+      - name: Select an Xcode with the iOS 26 SDK
+        run: scripts/ci/store-credentials.sh xcode --min-sdk 26
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      # See desktop-build.yml: the action's `targets:` input has been seen to
+      # leave a target out, and an idempotent `target add` costs nothing.
+      - name: Ensure the iOS target is present
+        run: |
+          rustup target add aarch64-apple-ios
+          rustup target list --installed
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: clients/web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            clients/web/src-tauri/target
+          key: store-ios-cargo-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
+          restore-keys: store-ios-cargo-
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: clients/web
+
+      # Stops pnpm checking, before every run, whether node_modules is up to date, in
+      # this job's checkout only. It is not committed.
+      #
+      # The "Build Rust Code" phase of the Xcode project runs `pnpm tauri ...` in an
+      # environment Xcode has scrubbed: none of the workflow's variables reach it. pnpm
+      # runs a dependency-status check first, judges the install stale, tries to
+      # reinstall, and with no terminal to confirm purging node_modules fails with
+      # ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY. Two runs that got past signing died
+      # there, after about 24 minutes of build each. The install a step earlier has just
+      # run, so the check has nothing to find.
+      #
+      # This is a file setting because no environment variable can reach the phase.
+      # Two attempts at fixing it through the install failed: `env -u CI` and `CI=false`
+      # each left it failing on a runner. pnpm's idea of "CI" comes from several
+      # variables (GITHUB_ACTIONS, BUILD_NUMBER, RUN_ID as well as CI) and the install
+      # state it records differs with them. Locally, with this project's manifests:
+      # an install under runner-style CI signals, then a run with none as the phase has,
+      # fails with that error; with this setting in pnpm-workspace.yaml the same run
+      # passes from that same failing state. It has to be camelCase: the kebab-case
+      # spelling in the workspace file is ignored.
+      - name: Stop pnpm re-checking dependencies inside the Xcode build phase
+        run: |
+          printf '\nverifyDepsBeforeRun: false\n' >> pnpm-workspace.yaml
+        working-directory: clients/web
+
+      # What `tauri ios init` looks for. It can install them itself through
+      # Homebrew; doing it here makes a failure to install one a failure of this
+      # step, not of an init further down.
+      - name: Install the iOS build tooling
+        run: brew install xcodegen cocoapods libimobiledevice
+
+      - name: Install the signing credentials
+        env:
+          APPLE_STORE_CERTIFICATES: ${{ secrets.APPLE_STORE_CERTIFICATES }}
+          APPLE_STORE_CERTIFICATES_PASSWORD: ${{ secrets.APPLE_STORE_CERTIFICATES_PASSWORD }}
+          IOS_APPSTORE_PROFILE: ${{ secrets.IOS_APPSTORE_PROFILE }}
+          IOS_DEVELOPMENT_PROFILE: ${{ secrets.IOS_DEVELOPMENT_PROFILE }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_id=$(python3 -c 'import json; print(json.load(open("clients/web/src-tauri/tauri.conf.json"))["identifier"])')
+          scripts/ci/store-credentials.sh keychain --require "Apple Distribution"
+          scripts/ci/store-credentials.sh profile IOS_APPSTORE_PROFILE \
+            --ext mobileprovision --expect app-store --bundle-id "$bundle_id" --install
+          # Required: the archive step looks for a development profile, and a run
+          # without one failed there. It must be the Xcode-managed one.
+          scripts/ci/store-credentials.sh profile IOS_DEVELOPMENT_PROFILE \
+            --ext mobileprovision --expect development --bundle-id "$bundle_id" --install
+          if [ "$NEED_ASC" = "yes" ]; then
+            scripts/ci/store-credentials.sh asc-key
+          fi
+
+      - name: Build the iOS app
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--export-method app-store-connect --build-number "$BUILD_NUMBER")
+          if [ "$UPLOAD" = "true" ]; then args+=(--upload); fi
+          scripts/package-ios.sh "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/ios-build.log"
+
+      - name: Summarise
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            echo "### iOS App Store build"
+            echo "- ref: \`$GITHUB_REF_NAME\` at \`${GITHUB_SHA:0:8}\`"
+            echo "- upload requested: $UPLOAD"
+            number=$(grep -E '^ +build number:' "$RUNNER_TEMP/ios-build.log" 2>/dev/null | tail -1 | sed -E 's/^ +build number: *//' || true)
+            echo "- build number: ${number:-unknown}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the .ipa
+        uses: actions/upload-artifact@v7
+        with:
+          name: axon-ios-appstore
+          path: clients/web/src-tauri/gen/apple/build/*/*.ipa
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Remove the credentials
+        if: ${{ always() }}
+        run: scripts/ci/store-credentials.sh cleanup
+
+  macos:
+    name: Build for the Mac App Store
+    if: ${{ inputs.platform == 'macos' || inputs.platform == 'both' }}
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      BUILD_NUMBER: ${{ inputs.build_number }}
+      UPLOAD: ${{ inputs.upload }}
+      NEED_ASC: ${{ (inputs.upload || inputs.build_number == 'auto') && 'yes' || 'no' }}
+      # Set when the .p12 holds more than one identity the app could be signed
+      # with, which it usually does (`Apple Distribution` and
+      # `3rd Party Mac Developer Application`): the profile lists one of them,
+      # and the script would otherwise take whichever it finds first.
+      MAS_APP_IDENTITY: ${{ vars.MAS_APP_IDENTITY }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # `package-macos-mas.sh` writes the .pkg under $TMPDIR; this puts it where
+      # the artifact step below looks.
+      - name: Keep temporary files under the runner's temp directory
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      # The scripts run under macOS's /bin/bash, which is 3.2, not the bash 5 they were
+      # written and tried under. A `case` inside `$( )` in package-macos-mas.sh did not
+      # parse there and was found by a run that had already installed everything.
+      - name: Check the scripts parse under this runner's bash
+        run: scripts/ci/check-bash-syntax.sh
+
+      - name: Check the repository secrets are set
+        env:
+          APPLE_STORE_CERTIFICATES: ${{ secrets.APPLE_STORE_CERTIFICATES }}
+          APPLE_STORE_CERTIFICATES_PASSWORD: ${{ secrets.APPLE_STORE_CERTIFICATES_PASSWORD }}
+          MAC_APPSTORE_PROFILE: ${{ secrets.MAC_APPSTORE_PROFILE }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          args=()
+          if [ "$NEED_ASC" = "yes" ]; then args+=(--asc); fi
+          scripts/ci/store-credentials.sh check-secrets macos ${args[@]+"${args[@]}"}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      # See desktop-build.yml, which found the action's `targets:` leaving one
+      # out on a run that was also updating the toolchain.
+      - name: Ensure both macOS targets are present
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustup target list --installed
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: clients/web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            clients/web/src-tauri/target
+          key: store-macos-cargo-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
+          restore-keys: store-macos-cargo-
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: clients/web
+
+      - name: Install the signing credentials
+        env:
+          APPLE_STORE_CERTIFICATES: ${{ secrets.APPLE_STORE_CERTIFICATES }}
+          APPLE_STORE_CERTIFICATES_PASSWORD: ${{ secrets.APPLE_STORE_CERTIFICATES_PASSWORD }}
+          MAC_APPSTORE_PROFILE: ${{ secrets.MAC_APPSTORE_PROFILE }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_id=$(python3 -c 'import json; print(json.load(open("clients/web/src-tauri/tauri.conf.json"))["identifier"])')
+          # The app may be signed with either certificate type, the package with
+          # either installer type; the script's profile check says if the profile
+          # lists none of what it picked.
+          scripts/ci/store-credentials.sh keychain \
+            --require "3rd Party Mac Developer Application|Apple Distribution" \
+            --require "3rd Party Mac Developer Installer|Mac Installer Distribution"
+          # Exports MAS_PROVISIONING_PROFILE, which package-macos-mas.sh reads.
+          scripts/ci/store-credentials.sh profile MAC_APPSTORE_PROFILE \
+            --ext provisionprofile --expect app-store --bundle-id "$bundle_id" \
+            --export-path MAS_PROVISIONING_PROFILE
+          if [ "$NEED_ASC" = "yes" ]; then
+            scripts/ci/store-credentials.sh asc-key
+          fi
+
+      - name: Build the Mac App Store package
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--build-number "$BUILD_NUMBER")
+          if [ -n "${MAS_APP_IDENTITY:-}" ]; then args+=(--app-identity "$MAS_APP_IDENTITY"); fi
+          if [ "$UPLOAD" = "true" ]; then args+=(--upload); fi
+          scripts/package-macos-mas.sh "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/macos-build.log"
+
+      - name: Summarise
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            echo "### Mac App Store build"
+            echo "- ref: \`$GITHUB_REF_NAME\` at \`${GITHUB_SHA:0:8}\`"
+            echo "- upload requested: $UPLOAD"
+            number=$(grep -E '^ +build number:' "$RUNNER_TEMP/macos-build.log" 2>/dev/null | tail -1 | sed -E 's/^ +build number: *//' || true)
+            echo "- build number: ${number:-unknown}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the .pkg
+        uses: actions/upload-artifact@v7
+        with:
+          name: axon-macos-appstore
+          path: ${{ runner.temp }}/axon-mas.*/Axon.pkg
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Remove the credentials
+        if: ${{ always() }}
+        run: scripts/ci/store-credentials.sh cleanup
