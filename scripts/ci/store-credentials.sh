@@ -220,6 +220,48 @@ EOF
   fi
 }
 
+# --- importing a .p12 ---------------------------------------------------------
+
+# Imports every certificate in the .p12 a second time, each on its own as a
+# certificate with no key.
+#
+# Apple issues several certificate types for one private key (Apple Development and
+# 3rd Party Mac Developer Application here), and `security export` writes that key
+# into the .p12 once per identity. `security import` accepts the key the first time
+# and, on seeing it again, skips the second identity entirely, certificate included,
+# with no error and no mention in the log. The keychain then has one identity too
+# few and nothing says so: a Mac build failed for want of an identity that was in the
+# .p12 the whole time. Reproduced locally with a real export, and with throwaway
+# certificates sharing one key; the one dropped is not predictable.
+#
+# A certificate imported by itself pairs with the private key already in the keychain,
+# which restores the identity. Certificates that are already there are reported as
+# "already exists", which is the normal case and is ignored. Best effort: if
+# the .p12 cannot be listed, the first import has still happened, and the keychain
+# listing that follows says what is missing.
+reimport_certificates() {
+  local p12=$1 kc=$2 base dir f out ossl=/usr/bin/openssl
+  # macOS's own openssl, not Homebrew's: OpenSSL 3 cannot read the MAC that `security
+  # export` writes without legacy flags.
+  [ -x "$ossl" ] || ossl=openssl
+  base=$(work_dir)
+  dir=$(mktemp -d "$base/p12-certificates.XXXXXX")
+  "$ossl" pkcs12 -in "$p12" -nokeys -passin env:APPLE_STORE_CERTIFICATES_PASSWORD 2>/dev/null \
+    | awk -v d="$dir" 'BEGIN { n = 0 } /BEGIN CERTIFICATE/ { n++; f = sprintf("%s/c%d.pem", d, n) } n { print > f }' || true
+  if ! ls "$dir"/c*.pem >/dev/null 2>&1; then
+    echo "note: could not list the certificates in the .p12 to import them again; an identity that shares a private key with another may be missing"
+    rm -rf "$dir"
+    return 0
+  fi
+  for f in "$dir"/c*.pem; do
+    out=$(security import "$f" -f openssl -k "$kc" 2>&1) || case $out in
+      *"already exists"*) ;;
+      *) echo "note: importing a certificate from the .p12 on its own failed: $out" ;;
+    esac
+  done
+  rm -rf "$dir"
+}
+
 # --- keychain ----------------------------------------------------------------
 
 cmd_keychain() {
@@ -264,6 +306,7 @@ cmd_keychain() {
       -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productsign -T /usr/bin/productbuild >/dev/null; then
     die "could not import APPLE_STORE_CERTIFICATES (wrong APPLE_STORE_CERTIFICATES_PASSWORD, or not a .p12?)"
   fi
+  reimport_certificates "$p12" "$kc"
   security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$pw" "$kc" >/dev/null
 
   # Put it first in the search list and keep everything already there:

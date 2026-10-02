@@ -576,6 +576,16 @@ Distribution` (the Mac package), `3rd Party Mac Developer Application` if the
   `NOT VALID` with the reason (expired, chain not trusted), and separately any
   certificate that arrived without its private key, which cannot sign. Those three
   cases (absent, invalid, no key) have different fixes.
+
+  One trap is handled for you. Apple issues several certificate types for one
+  private key (here `Apple Development` and `3rd Party Mac Developer Application`),
+  `security export` writes that key into the `.p12` once per identity, and
+  `security import` then silently keeps only one of those identities, certificate
+  included, with no error. The Mac build failed for want of an identity that was in
+  the `.p12` the whole time. The keychain step imports the `.p12`'s certificates a
+  second time, one by one, which restores the missing identity, so the `.p12` needs
+  no special treatment.
+
 - **The profiles** are checked when they are installed: it is an error for
   `IOS_APPSTORE_PROFILE` to hold a development or Ad Hoc profile, for a profile to
   be for another app or to have expired. That is the check for the two being

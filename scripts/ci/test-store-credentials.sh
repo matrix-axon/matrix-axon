@@ -84,6 +84,22 @@ p12_b64=$(base64 -i "$work/t.p12")
   -subj "/CN=Test Orphan: Certificate (TEAM1)" -days 2 -addext "extendedKeyUsage=codeSigning" 2>/dev/null \
   && $ossl pkcs12 -export -inkey k.pem -in c.pem -certfile orphan.pem -out t-orphan.p12 -passout pass:testpw)
 p12_orphan_b64=$(base64 -i "$work/t-orphan.p12")
+# Two certificates for one private key, exported the way `security export` does it. The
+# export writes the key once per identity, and `security import` of the result keeps only
+# one of the two identities, certificate and all, without an error. That is what dropped
+# `3rd Party Mac Developer Application` (it shares a key with `Apple Development`) on a
+# runner. Building the .p12 with openssl would not reproduce it: it stores the second
+# certificate as a plain certificate, which imports fine.
+(cd "$work" && $ossl genrsa -out shared.key 2048 2>/dev/null \
+  && $ossl req -x509 -new -key shared.key -subj "/CN=Shared Dev: One (TEAM1)" -days 2 -addext "extendedKeyUsage=codeSigning" -out shared-dev.pem 2>/dev/null \
+  && $ossl req -x509 -new -key shared.key -subj "/CN=Shared App: Two (TEAM1)" -days 2 -addext "extendedKeyUsage=codeSigning" -out shared-app.pem 2>/dev/null \
+  && $ossl pkcs12 -export -inkey shared.key -in shared-dev.pem -out shared-dev.p12 -passout pass:testpw)
+security create-keychain -p "" "$work/shared-src.keychain-db"
+security unlock-keychain -p "" "$work/shared-src.keychain-db"
+security import "$work/shared-dev.p12" -f pkcs12 -k "$work/shared-src.keychain-db" -P testpw -T /usr/bin/security >/dev/null 2>&1
+security import "$work/shared-app.pem" -k "$work/shared-src.keychain-db" >/dev/null 2>&1
+security export -k "$work/shared-src.keychain-db" -t identities -f pkcs12 -P testpw -o "$work/shared.p12" >/dev/null 2>&1
+p12_shared_b64=$(base64 -i "$work/shared.p12")
 
 # A provisioning profile is a CMS-signed plist. `security cms -S` refuses an
 # untrusted identity, so these are signed with openssl, which `security cms -D`
@@ -207,6 +223,19 @@ trusted=$(security dump-keychain -a "$kc" 2>/dev/null | grep -o '/usr/bin/[a-z]*
 for tool in codesign productsign productbuild security; do
   contains "$trusted" "/usr/bin/$tool" || fail "keychain: the key trusts $tool" "trusted: $trusted"
 done
+restore_list
+
+# An identity that shares its private key with another is not lost on import. First, that a
+# plain import of this .p12 really does lose one, so the check below means something; if a
+# future macOS stops doing that, say so and carry on.
+security create-keychain -p "" "$work/plain.keychain-db" && security unlock-keychain -p "" "$work/plain.keychain-db"
+security import "$work/shared.p12" -f pkcs12 -k "$work/plain.keychain-db" -P testpw -T /usr/bin/security >/dev/null 2>&1
+plain_count=$(security find-identity "$work/plain.keychain-db" 2>/dev/null | grep -o '"[^"]*"' | sort -u | wc -l | tr -d ' ')
+if [ "$plain_count" -ge 2 ]; then
+  echo "note: this macOS keeps both identities on a plain import, so the second import pass is not exercised here" >&2
+fi
+out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_shared_b64" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain --require "Shared Dev" --require "Shared App")
+contains "$out" "rc=0" && contains "$out" '"Shared Dev: One (TEAM1)"' && contains "$out" '"Shared App: Two (TEAM1)"' || fail "keychain: two identities that share a private key both survive the import (a plain import keeps $plain_count of 2)" "$out"
 restore_list
 
 # A certificate that arrived without its private key is called out apart from the
