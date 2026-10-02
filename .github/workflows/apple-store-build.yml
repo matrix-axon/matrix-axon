@@ -17,7 +17,9 @@
 # GitHub Actions" says what each secret is and how to make it.
 #
 # `upload` defaults to false: the run builds and signs, leaves the package as a
-# workflow artifact, and publishes nothing. Turn it on to send the build to
+# workflow artifact for one day, and publishes nothing. The artifact is a signed
+# build that anyone who can read the repository can download, so it is kept only
+# as long as it takes to look at. Turn it on to send the build to
 # TestFlight. Nothing stops a run from a branch uploading, because the person who
 # can dispatch it can also push to main; the run's summary says which ref it was.
 #
@@ -228,7 +230,7 @@ jobs:
         with:
           name: axon-ios-appstore
           path: clients/web/src-tauri/gen/apple/build/*/*.ipa
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
 
       - name: Remove the credentials
@@ -371,7 +373,7 @@ jobs:
         with:
           name: axon-macos-appstore
           path: ${{ runner.temp }}/axon-mas.*/Axon.pkg
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
 
       - name: Remove the credentials

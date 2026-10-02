@@ -494,11 +494,11 @@ gh workflow run apple-store-build.yml -f platform=ios -f upload=false
 gh run watch
 ```
 
-| Input          | Default | Meaning                                                                                                         |
-| -------------- | ------- | --------------------------------------------------------------------------------------------------------------- |
-| `platform`     | `both`  | `ios`, `macos` or `both`                                                                                        |
-| `upload`       | `false` | Send the build to TestFlight. Left off, it builds and signs and keeps the package as an artifact for seven days |
-| `build_number` | `auto`  | A number, or `auto` for one more than App Store Connect has **on that platform**                                |
+| Input          | Default | Meaning                                                                                                      |
+| -------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
+| `platform`     | `both`  | `ios`, `macos` or `both`                                                                                     |
+| `upload`       | `false` | Send the build to TestFlight. Left off, it builds and signs and keeps the package as an artifact for one day |
+| `build_number` | `auto`  | A number, or `auto` for one more than App Store Connect has **on that platform**                             |
 
 Two things about running it. GitHub only offers a `workflow_dispatch` workflow
 that exists on the default branch, so the first run has to wait for the merge;
