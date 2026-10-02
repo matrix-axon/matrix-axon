@@ -942,7 +942,7 @@ function ShellChrome() {
   const stepSpace = useCallback(
     (direction: -1 | 1) => {
       const ordered = orderedSpaces(
-        rooms.rooms.value.filter((room) => room.room_type === 'm.space'),
+        spaces.visible.value,
         settings.spaceOrder.value,
         rooms.titles.value,
       )
