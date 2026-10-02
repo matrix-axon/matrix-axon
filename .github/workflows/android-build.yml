@@ -86,9 +86,18 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          targets: aarch64-linux-android
+
+      # `rust-toolchain.toml` at the repo root pins the toolchain (and its
+      # clippy), and it applies inside `clients/web/src-tauri` too. The action
+      # above installs `stable`, which is not what cargo then runs; a target
+      # added to `stable` is invisible to the pinned one, and the first build
+      # fails with `can't find crate for std`. Adding the target from inside the
+      # repo puts it on the toolchain that will use it, installing that
+      # toolchain if the runner does not have it yet (as `cross-build.yml` does
+      # for its targets).
+      - name: Add the Android target to the pinned toolchain
+        run: rustup target add aarch64-linux-android
+        working-directory: clients/web/src-tauri
 
       - uses: pnpm/action-setup@v6
         with:
