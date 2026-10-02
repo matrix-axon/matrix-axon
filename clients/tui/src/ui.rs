@@ -20,6 +20,7 @@ use crate::app::{
 use ratatui_image::picker::ProtocolType;
 
 use crate::api::RoomDto;
+use crate::app::spaces::SidebarRow;
 use crate::command::{HELP_COMMANDS, HELP_COMMAND_GROUPS};
 use crate::config::Shortcuts;
 use crate::geometry::{
@@ -249,12 +250,20 @@ fn prepare_accounts(app: &mut App, areas: &PaneAreas) {
 /// Room pane: which rooms it shows, how many rows it has for them, and the
 /// scroll offset that keeps the selected room on screen.
 fn prepare_rooms(app: &mut App, areas: &PaneAreas) {
+    app.frame.sidebar_header = None;
     let Some(rooms_area) = areas.rooms else {
         // See `prepare_accounts` — focus has already left `RoomList`.
         app.frame.rooms.clear();
+        app.frame.sidebar.clear();
         app.frame.pinned_rooms = 0;
         return;
     };
+    if app.space_tree_enabled() {
+        prepare_space_rows(app, rooms_area, areas.rooms_wide);
+        return;
+    }
+    app.frame.sidebar.clear();
+    app.spaces.focus = None;
     let visible_indices = app.visible_room_indices();
     let rooms_selected_vis = app
         .rooms
@@ -283,6 +292,164 @@ fn prepare_rooms(app: &mut App, areas: &PaneAreas) {
     );
     app.frame.pinned_rooms = pinned_visible_count;
     app.frame.rooms = visible_indices;
+}
+
+/// Scroll tree rows by their actual terminal height; headings and dividers
+/// occupy one line, ordinary rooms two in the narrow layout.
+fn prepare_space_rows(app: &mut App, area: Rect, wide: bool) {
+    let rows = app.sidebar_rows(app.active_account_filter());
+    if app.spaces.focus.as_ref().is_some_and(|focus| {
+        !rows.iter().any(|row| {
+            matches!(row, SidebarRow::Space { index, .. }
+            if app.rooms.rooms[*index].account_id == focus.account_id
+                && app.rooms.rooms[*index].room_id == focus.room_id)
+        })
+    }) {
+        app.spaces.focus = None;
+    }
+    let selected = app.sidebar_anchor(&rows);
+    let budget = usize::from(area.height.saturating_sub(2)).max(1);
+    // A contextual heading must not consume the selected room's only lines
+    // in a tiny terminal. Normal viewports reserve one line for that heading.
+    let header_for = |start| {
+        (budget > rows.get(selected).map(|row| row.height(wide)).unwrap_or(1))
+            .then(|| crate::app::spaces::sidebar_section_header(&rows, start))
+            .flatten()
+    };
+    let mut start = app
+        .rooms
+        .scroll
+        .min(rows.len().saturating_sub(1))
+        .min(selected);
+    let mut distance: usize = rows
+        .iter()
+        .skip(start)
+        .take(selected.saturating_sub(start) + 1)
+        .map(|r| r.height(wide))
+        .sum();
+    while start < selected && distance > budget {
+        distance = distance.saturating_sub(rows[start].height(wide));
+        start += 1;
+    }
+    let mut header = header_for(start);
+    if start < selected && distance + usize::from(header.is_some()) > budget {
+        // The heading needs at most one more line. Advancing one row makes
+        // room without repeatedly scanning back through a large group.
+        start += 1;
+        header = header_for(start);
+    }
+    let mut end = start;
+    let header_height = usize::from(header.is_some());
+    let mut used = header_height;
+    while end < rows.len() && used < budget {
+        used += rows[end].height(wide);
+        end += 1;
+    }
+    app.rooms.scroll = start;
+    app.rooms.page_size = budget.saturating_sub(header_height).max(1);
+    app.frame.pinned_rooms = 0;
+    app.frame.rooms = rows
+        .iter()
+        .filter_map(|row| {
+            if let SidebarRow::Room { index, .. } = row {
+                Some(*index)
+            } else {
+                None
+            }
+        })
+        .collect();
+    app.frame.sidebar_end = end;
+    app.frame.sidebar_header = header.map(|index| rows[index].clone());
+    app.frame.sidebar = rows;
+}
+
+fn room_list_item(
+    app: &App,
+    full_index: usize,
+    vis_pos: usize,
+    indented: bool,
+    show_account_label: bool,
+    rooms_wide: bool,
+) -> ListItem<'static> {
+    let room = &app.rooms.rooms[full_index];
+    let key = RoomKey::from(room);
+    let unread_count = app.rooms.unread.get(&key).copied().unwrap_or_default();
+    let is_selected = Some(full_index) == app.rooms.selected && app.spaces.focus.is_none();
+    let marker = if is_selected {
+        ">"
+    } else if Some(full_index) == app.rooms.selected {
+        "*"
+    } else {
+        " "
+    };
+    let indent = if indented { "  " } else { "" };
+    let unread_str = if unread_count > 0 {
+        format!(" ({unread_count})")
+    } else {
+        String::new()
+    };
+    let latest = room
+        .last_event_id
+        .as_deref()
+        .map(|_| {
+            format!(
+                " {}",
+                format_time(room.last_activity_ts, app.display.time_format)
+            )
+        })
+        .unwrap_or_default();
+    let alias = room
+        .canonical_alias
+        .as_deref()
+        .or(room.topic.as_deref())
+        .map(|value| format!(" {value}"))
+        .unwrap_or_default();
+    let account_tag = if show_account_label {
+        room.account_user_id
+            .as_deref()
+            .map(|uid| {
+                let localpart = account_localpart(uid).unwrap_or(uid);
+                format!(" [{localpart}]")
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let title_style = if is_selected {
+        Style::default()
+            .fg(app.colors.selected_room)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
+    if rooms_wide {
+        ListItem::new(Line::from(vec![
+            Span::raw(format!("{indent}{marker}{} ", room_display_number(vis_pos))),
+            Span::styled(app.room_list_title(room), title_style),
+            Span::raw(account_tag),
+            Span::styled(unread_str, Style::default().fg(app.colors.unread_count)),
+            Span::raw(latest),
+            Span::raw(alias),
+        ]))
+    } else {
+        ListItem::new(vec![
+            Line::from(vec![
+                Span::raw(format!("{indent}{marker}{} ", room_display_number(vis_pos))),
+                Span::styled(app.room_list_title(room), title_style),
+                Span::raw(account_tag),
+            ]),
+            Line::from(vec![
+                Span::raw("    "),
+                Span::styled(unread_str, Style::default().fg(app.colors.unread_count)),
+                Span::raw(format!("{latest}{alias}")),
+            ]),
+        ])
+    }
+    .style(selected_line_style(
+        &app.colors,
+        is_selected,
+        app.display.highlight_selected_line,
+    ))
 }
 
 /// Message pane: the viewport the timeline is measured against, and the layout
@@ -527,99 +694,102 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
         let separator_width = usize::from(rooms_area.width.saturating_sub(2)).max(1);
         let mut room_items: Vec<ListItem> = Vec::new();
-        for (vis_pos, &full_index) in app.frame.rooms.iter().enumerate().skip(rooms_scroll) {
-            if room_items.len() >= rooms_page_size {
-                break;
-            }
-            // Draw the pinned/unpinned divider only when this viewport shows the
-            // first unpinned room with at least one pinned room above it.
-            if vis_pos == pinned_visible_count && pinned_visible_count > 0 && vis_pos > rooms_scroll
-            {
-                room_items.push(ListItem::new(Line::from(Span::styled(
-                    "─".repeat(separator_width),
-                    Style::default()
-                        .fg(app.colors.border)
-                        .add_modifier(Modifier::DIM),
-                ))));
-            }
-            if room_items.len() >= rooms_page_size {
-                break;
-            }
-            let item = {
-                let room = &app.rooms.rooms[full_index];
-                let key = RoomKey::from(room);
-                let unread_count = app.rooms.unread.get(&key).copied().unwrap_or_default();
-                let is_selected = Some(full_index) == app.rooms.selected;
-                let marker = if is_selected { ">" } else { " " };
-                let unread_str = if unread_count > 0 {
-                    format!(" ({unread_count})")
-                } else {
-                    String::new()
-                };
-                let latest = room
-                    .last_event_id
-                    .as_deref()
-                    .map(|_| {
-                        format!(
-                            " {}",
-                            format_time(room.last_activity_ts, app.display.time_format)
-                        )
-                    })
-                    .unwrap_or_default();
-                let alias = room
-                    .canonical_alias
-                    .as_deref()
-                    .or(room.topic.as_deref())
-                    .map(|value| format!(" {value}"))
-                    .unwrap_or_default();
-                let account_tag = if show_account_label {
-                    room.account_user_id
-                        .as_deref()
-                        .map(|uid| {
-                            let localpart = account_localpart(uid).unwrap_or(uid);
-                            format!(" [{localpart}]")
-                        })
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                let title_style = if is_selected {
-                    Style::default()
-                        .fg(app.colors.selected_room)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().add_modifier(Modifier::BOLD)
-                };
-                if rooms_wide {
-                    ListItem::new(Line::from(vec![
-                        Span::raw(format!("{marker}{} ", room_display_number(vis_pos))),
-                        Span::styled(app.room_list_title(room), title_style),
-                        Span::raw(account_tag),
-                        Span::styled(unread_str, Style::default().fg(app.colors.unread_count)),
-                        Span::raw(latest),
-                        Span::raw(alias),
-                    ]))
-                } else {
-                    ListItem::new(vec![
-                        Line::from(vec![
-                            Span::raw(format!("{marker}{} ", room_display_number(vis_pos))),
-                            Span::styled(app.room_list_title(room), title_style),
-                            Span::raw(account_tag),
-                        ]),
-                        Line::from(vec![
-                            Span::raw("    "),
-                            Span::styled(unread_str, Style::default().fg(app.colors.unread_count)),
-                            Span::raw(format!("{latest}{alias}")),
-                        ]),
-                    ])
+        if app.frame.sidebar.is_empty() {
+            for (vis_pos, &full_index) in app.frame.rooms.iter().enumerate().skip(rooms_scroll) {
+                if room_items.len() >= rooms_page_size {
+                    break;
                 }
-                .style(selected_line_style(
-                    &app.colors,
-                    is_selected,
-                    app.display.highlight_selected_line,
-                ))
-            };
-            room_items.push(item);
+                // Draw the pinned/unpinned divider only when this viewport shows the
+                // first unpinned room with at least one pinned room above it.
+                if vis_pos == pinned_visible_count
+                    && pinned_visible_count > 0
+                    && vis_pos > rooms_scroll
+                {
+                    room_items.push(ListItem::new(Line::from(Span::styled(
+                        "─".repeat(separator_width),
+                        Style::default()
+                            .fg(app.colors.border)
+                            .add_modifier(Modifier::DIM),
+                    ))));
+                }
+                if room_items.len() >= rooms_page_size {
+                    break;
+                }
+                let item = room_list_item(
+                    app,
+                    full_index,
+                    vis_pos,
+                    false,
+                    show_account_label,
+                    rooms_wide,
+                );
+                room_items.push(item);
+            }
+        } else {
+            for row in app
+                .frame
+                .sidebar_header
+                .iter()
+                .chain(app.frame.sidebar[rooms_scroll..app.frame.sidebar_end].iter())
+            {
+                let item = match row {
+                    SidebarRow::Room {
+                        index,
+                        indented,
+                        number,
+                    } => room_list_item(
+                        app,
+                        *index,
+                        number - 1,
+                        *indented,
+                        show_account_label,
+                        rooms_wide,
+                    ),
+                    SidebarRow::Space { index, expanded } => {
+                        let room = &app.rooms.rooms[*index];
+                        let key = RoomKey::from(room);
+                        let focused = app.spaces.focus.as_ref() == Some(&key);
+                        let marker = if focused { ">" } else { " " };
+                        let toggle = if *expanded { "[-]" } else { "[+]" };
+                        let account_tag = if show_account_label {
+                            room.account_user_id
+                                .as_deref()
+                                .map(|uid| format!(" [{}]", account_localpart(uid).unwrap_or(uid)))
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        let suffix = match app.spaces.children.get(&key) {
+                            Some(state) if state.error.is_some() => " (load failed; retrying)",
+                            Some(state) if !state.is_pending() => "",
+                            _ => " (loading…)",
+                        };
+                        ListItem::new(Line::from(format!(
+                            "{marker}{toggle} {}{account_tag}{suffix}",
+                            app.room_list_title(room)
+                        )))
+                        .style(if focused {
+                            Style::default()
+                                .fg(app.colors.selected_room)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().add_modifier(Modifier::BOLD)
+                        })
+                    }
+                    SidebarRow::Ungrouped { provisional } => ListItem::new(if *provisional {
+                        "Ungrouped (membership loading)"
+                    } else {
+                        "Ungrouped"
+                    })
+                    .style(Style::default().fg(app.colors.border)),
+                    SidebarRow::Divider => ListItem::new("─".repeat(separator_width)).style(
+                        Style::default()
+                            .fg(app.colors.border)
+                            .add_modifier(Modifier::DIM),
+                    ),
+                };
+                room_items.push(item);
+            }
         }
         let rooms_active = app.mode == Mode::RoomList;
         let rooms_border = if rooms_active {
@@ -629,7 +799,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         } else {
             Style::default().fg(app.colors.border)
         };
-        let rooms_title = if let Some(stage) = app.bootstrap.label() {
+        let mut rooms_title = if let Some(stage) = app.bootstrap.label() {
             // Startup is still fetching. Say so, or an empty panel reads as
             // "this account has no rooms" (#189).
             format!("Rooms — {stage}…")
@@ -644,6 +814,9 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 other => format!("Rooms — {} · {}", other.label(), app.room_sort.label()),
             }
         };
+        if app.spaces.order_error.is_some() {
+            rooms_title.push_str(" — order unsaved/unavailable");
+        }
         let rooms = List::new(room_items).block(
             Block::default()
                 .style(
@@ -2908,9 +3081,29 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
         Row::Dim("Room list:"),
         Row::Kv(
             shortcuts.pin_room.label(),
-            "pin / re-pin selected room to top (/pin)",
+            "pin room (/pin), or move focused space to top",
         ),
         Row::Kv(shortcuts.unpin_room.label(), "unpin selected room (/unpin)"),
+        Row::Kv(
+            shortcuts.toggle_space.label(),
+            "expand/collapse focused space (also Enter)",
+        ),
+        Row::Kv(
+            "Left".to_owned(),
+            "collapse current space and open the next group's first room",
+        ),
+        Row::Kv(
+            "Right".to_owned(),
+            "expand current space; enter its first room from a header",
+        ),
+        Row::Kv(
+            shortcuts.move_space_up.label(),
+            "move focused space up (saved across clients)",
+        ),
+        Row::Kv(
+            shortcuts.move_space_down.label(),
+            "move focused space down (saved across clients)",
+        ),
         Row::Blank,
         Row::Section("Message actions (select a message first with Ctrl-J/K):"),
         Row::Kv(shortcuts.edit_message.label(), "edit message"),

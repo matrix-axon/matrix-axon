@@ -45,6 +45,7 @@ mod render;
 mod room_actions;
 mod rooms;
 mod search_flow;
+pub(crate) mod spaces;
 pub(crate) mod tags;
 mod timeline;
 mod typing;
@@ -767,6 +768,7 @@ pub(crate) struct App {
     pub(crate) colors: ColorScheme,
     pub(crate) display: DisplayOptions,
     pub(crate) rooms: RoomsState,
+    pub(crate) spaces: spaces::SpacesState,
     pub(crate) accounts: AccountsState,
     pub(crate) messages: MessagePane,
     /// This frame's resolved view model, rebuilt by `ui::prepare` before every
@@ -1187,6 +1189,7 @@ impl App {
             rooms: RoomsState::default(),
             accounts: AccountsState::default(),
             messages: MessagePane::default(),
+            spaces: spaces::SpacesState::default(),
             frame: frame::FrameState::default(),
             input: InputState::default(),
             live: LiveState::default(),
@@ -1604,6 +1607,7 @@ impl App {
     /// Surfaces the active filter in the status line so key-chord shortcuts give
     /// the same feedback as the `/filter` command.
     pub(crate) fn set_room_filter(&mut self, filter: RoomFilter) {
+        self.spaces.filter_expanded.clear();
         self.room_filter = filter;
         self.sync_room_selection_to_account_filter();
         self.status = Status::from(format!("filter: {}", self.room_filter.label()));
@@ -1652,12 +1656,14 @@ impl App {
     /// Live-update the name filter as the user types. Does not persist (a name
     /// filter is session-only — it saves as `all`).
     pub(crate) fn update_room_name_filter(&mut self, query: String) {
+        self.spaces.filter_expanded.clear();
         self.room_filter = RoomFilter::Name(query.to_lowercase());
         self.sync_room_selection_to_account_filter();
     }
 
     /// Abandon name-filter input: restore the pre-input filter (default `All`).
     pub(crate) fn cancel_room_name_filter(&mut self) {
+        self.spaces.filter_expanded.clear();
         let restored = self
             .room_filter_before_input
             .take()
@@ -1679,16 +1685,7 @@ impl App {
     }
 
     pub(crate) fn visible_room_indices(&self) -> Vec<usize> {
-        let account = self.active_account_filter();
-        let selected = self.rooms.selected;
-        self.rooms
-            .rooms
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| account.is_none_or(|id| r.account_id == id))
-            .filter(|(i, r)| selected == Some(*i) || self.room_passes_filter(r))
-            .map(|(i, _)| i)
-            .collect()
+        self.visible_sidebar_room_indices(self.active_account_filter())
     }
 
     /// Whether a room satisfies the active [`RoomFilter`]. The account filter and
@@ -1972,7 +1969,10 @@ impl App {
             Command::Bundle(event_id) => self.show_verification_bundle(&event_id).await,
             Command::Help => self.open_popup(PopupKind::Help),
             Command::Shortcuts => self.open_popup(PopupKind::Shortcuts),
-            Command::Refresh => self.request_rooms_refresh(),
+            Command::Refresh => {
+                self.refresh_spaces();
+                self.request_rooms_refresh();
+            }
             Command::EditConfig => {
                 self.edit_config_requested = true;
             }

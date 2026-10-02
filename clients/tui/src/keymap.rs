@@ -87,6 +87,7 @@ impl App {
         } else if self.shortcuts.unread_threads.matches(key) && !self.is_mid_command() {
             self.open_unread_threads_picker();
         } else if self.shortcuts.refresh.matches(key) && !self.is_mid_command() {
+            self.refresh_spaces();
             self.request_rooms_refresh();
         } else {
             match self.mode.clone() {
@@ -398,6 +399,9 @@ impl App {
     }
 
     async fn handle_room_list_key(&mut self, key: KeyEvent) {
+        if self.space_tree_enabled() && self.handle_space_list_key(key) {
+            return;
+        }
         if key.code == KeyCode::Left && key.modifiers == KeyModifiers::ALT {
             self.adjust_rooms_width(-2);
         } else if key.code == KeyCode::Right && key.modifiers == KeyModifiers::ALT {

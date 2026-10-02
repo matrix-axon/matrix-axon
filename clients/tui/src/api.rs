@@ -85,6 +85,52 @@ impl AxonClient {
         self.send(read_request(request)).await
     }
 
+    pub async fn space_children(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<Vec<SpaceChildDto>, ApiError> {
+        let request = self.http.get(format!(
+            "{}/v1/accounts/{}/rooms/{}/space/children",
+            self.base_url,
+            account_id,
+            path_segment(room_id)
+        ));
+        let children: Vec<SpaceChildDto> = self
+            .send_bounded(read_request(request), 1024 * 1024)
+            .await?;
+        if children.len() > 1000 {
+            return Err(ApiError::Request(
+                "space has more than 1000 children".to_owned(),
+            ));
+        }
+        Ok(children)
+    }
+
+    pub async fn space_order(&self) -> Result<PreferenceDto, ApiError> {
+        let request = self
+            .http
+            .get(format!("{}/v1/preferences/space_order", self.base_url));
+        self.send_bounded(read_request(request), 128 * 1024).await
+    }
+
+    pub async fn put_space_order(
+        &self,
+        device_id: Uuid,
+        spaces: &[String],
+    ) -> Result<(), ApiError> {
+        let value = serde_json::json!({ "spaces": spaces });
+        if serde_json::to_vec(&value)?.len() > 64 * 1024 {
+            return Err(ApiError::Request("space order exceeds 64 KiB".to_owned()));
+        }
+        let request = self
+            .http
+            .put(format!("{}/v1/preferences/space_order", self.base_url))
+            .json(&serde_json::json!({ "device_id": device_id, "value": value }));
+        let _: Value = self.send_bounded(read_request(request), 128 * 1024).await?;
+        Ok(())
+    }
+
     /// Log a Matrix account in through Axon. `homeserver_url` is sent only when
     /// the caller supplies an override (the inline `/login` third argument);
     /// otherwise it is omitted and Axon resolves the canonical homeserver from
@@ -810,6 +856,44 @@ impl AxonClient {
         self.send(read_request(request)).await
     }
 
+    /// Bound new list/preference reads before allocating from the response.
+    async fn send_bounded<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+        limit: usize,
+    ) -> Result<T, ApiError> {
+        let response = request.send().await?;
+        let status = response.status();
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if chunk.len() > limit.saturating_sub(bytes.len()) {
+                return Err(ApiError::Request(
+                    "API response exceeds size limit".to_owned(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Self::decode_response(status, &bytes, || "invalid API error response".to_owned())
+    }
+
+    fn decode_response<T: DeserializeOwned>(
+        status: reqwest::StatusCode,
+        bytes: &[u8],
+        fallback: impl FnOnce() -> String,
+    ) -> Result<T, ApiError> {
+        if status.is_success() {
+            let envelope: ApiResponse<T> = serde_json::from_slice(bytes)?;
+            Ok(envelope.data)
+        } else {
+            let message = serde_json::from_slice::<ErrorResponse>(bytes)
+                .map(|body| format!("{}: {}", body.error.code, body.error.message))
+                .unwrap_or_else(|_| fallback());
+            Err(ApiError::Status { status, message })
+        }
+    }
+
     async fn send<T: DeserializeOwned>(
         &self,
         request: reqwest::RequestBuilder,
@@ -817,15 +901,7 @@ impl AxonClient {
         let response = request.send().await?;
         let status = response.status();
         let text = response.text().await?;
-        if status.is_success() {
-            let envelope: ApiResponse<T> = serde_json::from_str(&text)?;
-            Ok(envelope.data)
-        } else {
-            let message = serde_json::from_str::<ErrorResponse>(&text)
-                .map(|body| format!("{}: {}", body.error.code, body.error.message))
-                .unwrap_or_else(|_| text);
-            Err(ApiError::Status { status, message })
-        }
+        Self::decode_response(status, text.as_bytes(), || text.clone())
     }
 
     async fn send_no_body(&self, request: reqwest::RequestBuilder) -> Result<(), ApiError> {
@@ -1026,6 +1102,10 @@ fn decode_ws_frame(text: &str) -> Option<LiveFrame> {
                 payload,
             })
         }
+        "preferences.changed" => match serde_json::from_value(envelope.payload) {
+            Ok(payload) => Some(LiveFrame::Preferences(payload)),
+            Err(err) => Some(LiveFrame::ProtocolError(err.to_string())),
+        },
         _ => None,
     }
 }
@@ -1036,6 +1116,8 @@ fn next_live_reconnect_backoff(current: Duration) -> Duration {
 
 #[derive(Debug)]
 pub enum LiveFrame {
+    /// Instance-scoped, including when the envelope account is the nil UUID.
+    Preferences(PreferencesChangedDto),
     Connected,
     Reconnecting {
         reason: String,
@@ -1073,6 +1155,26 @@ pub enum LiveFrame {
         account_id: Uuid,
         payload: AccountDataChangedDto,
     },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SpaceChildDto {
+    pub room_id: String,
+    /// Empty/missing routing servers mean the relationship has been removed.
+    #[serde(default)]
+    pub via: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PreferenceDto {
+    pub value: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PreferencesChangedDto {
+    pub key: String,
+    pub value: Value,
+    pub device_id: Uuid,
 }
 
 /// Which `verification.*` frame this is. Mirrors the server's frame-kind tags.
@@ -1424,17 +1526,8 @@ pub struct RoomDto {
     pub topic: Option<String>,
     pub avatar_url: Option<String>,
     pub canonical_alias: Option<String>,
-    /// `m.room.create` `type`, if any (for example `m.space`). Deserialized
-    /// so the TUI spaces PR can use it; this PR still treats spaces as
-    /// ordinary rooms (issue #369 / #370).
+    /// `m.room.create` `type`, if any (for example `m.space`).
     #[serde(default)]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "stored for the TUI spaces PR (#370); unused until then"
-        )
-    )]
     pub room_type: Option<String>,
     pub last_activity_ts: i64,
     pub last_event_id: Option<String>,
@@ -1919,6 +2012,18 @@ impl fmt::Display for Escaped<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preference_frame_with_nil_account_is_instance_scoped() {
+        let frame = serde_json::json!({
+            "type": "preferences.changed", "account_id": Uuid::nil(),
+            "payload": { "key": "space_order", "device_id": Uuid::new_v4(), "value": { "spaces": [] } }
+        });
+        assert!(matches!(
+            decode_ws_frame(&frame.to_string()),
+            Some(LiveFrame::Preferences(_))
+        ));
+    }
 
     #[test]
     fn deserializes_room_response() {
