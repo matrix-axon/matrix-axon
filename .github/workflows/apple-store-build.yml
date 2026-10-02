@@ -135,20 +135,27 @@ jobs:
           key: store-ios-cargo-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
           restore-keys: store-ios-cargo-
 
-      # `env -u CI`, not the runner's default of CI=true, and only in this job.
+      # `CI=false`, and only in this job.
       #
       # pnpm records different install state in CI mode. The "Build Rust Code" phase
       # of the Xcode project runs `pnpm tauri ...` in an environment Xcode has
-      # scrubbed, with no CI in it, where pnpm judges that state stale, tries to
-      # reinstall, and with no terminal to confirm purging node_modules fails with
-      # ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY: the first run that got past
-      # signing died there. Reproduced on a Mac with this project's manifests: an
-      # install with CI=true followed by a run without it fails with that error, and
-      # an install without CI passes. A later pnpm run *with* CI=true, which is what
-      # package-ios.sh does before Xcode starts, does not undo it. `--frozen-lockfile`
-      # stays explicit, since CI mode would have implied it.
+      # scrubbed, with no CI signal in it, where pnpm judges that state stale, tries
+      # to reinstall, and with no terminal to confirm purging node_modules fails with
+      # ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY. Runs that got past signing died there.
+      #
+      # It has to be `CI=false`, not unsetting CI. pnpm decides it is in CI with the
+      # ci-info library, which counts GITHUB_ACTIONS, BUILD_NUMBER and RUN_ID as well as
+      # CI: `env -u CI` left GITHUB_ACTIONS, and this workflow's own job-level
+      # BUILD_NUMBER, and a run with that fix failed identically. Reproduced on a Mac
+      # with this project's manifests, installing and then running without any CI
+      # signal as the phase does: CI=true fails; CI unset with GITHUB_ACTIONS,
+      # BUILD_NUMBER or RUN_ID set fails; CI=false with GITHUB_ACTIONS and BUILD_NUMBER
+      # still set passes; nothing set passes. A later pnpm run *with* CI=true, which
+      # package-ios.sh does before Xcode starts, does not undo it.
+      #
+      # `--frozen-lockfile` stays explicit, since CI mode would have implied it.
       - name: Install web dependencies
-        run: env -u CI pnpm install --frozen-lockfile
+        run: CI=false pnpm install --frozen-lockfile
         working-directory: clients/web
 
       # What `tauri ios init` looks for. It can install them itself through
