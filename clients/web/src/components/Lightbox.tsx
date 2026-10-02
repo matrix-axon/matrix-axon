@@ -1,5 +1,21 @@
-import type { ComponentChildren } from 'preact'
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { createContext, type ComponentChildren } from 'preact'
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from 'preact/hooks'
+import {
+  FIT,
+  MIN_SCALE,
+  panBy,
+  ZOOM_STEP,
+  zoomAt,
+  zoomTransform,
+  type Point,
+  type ZoomState,
+} from '../media/image-zoom'
 import { useMediaBlob } from '../media/use-media-blob'
 import type { SniffedFormat } from '../media/media-service'
 import type { ParsedMedia } from '../media/parse-media'
@@ -33,6 +49,41 @@ const DISMISS_EXEMPT =
  * because touch does not set a click count the way a mouse does.
  */
 const TOGGLE_GRACE_MS = 300
+
+/**
+ * How long after a pan or pinch a click on the image is still taken as part
+ * of it. A drag still ends in a synthesised click, which would otherwise also
+ * toggle immersive mode.
+ */
+const ZOOM_CLICK_GRACE_MS = 400
+
+/** Travel, in CSS pixels, before a press on a zoomed image counts as a drag. */
+const ZOOM_DRAG_SLOP_PX = 4
+
+/**
+ * The viewer's image zoom (`media/image-zoom.ts`), shared with
+ * `LightboxImage`. The overlay owns the gestures, because a pinch can start
+ * anywhere on the image and the chrome around it has to know; the image only
+ * applies the transform, and registers itself, which is what offers zoom at
+ * all. A video or a PDF never registers, so it gets no zoom controls.
+ */
+interface LightboxZoom {
+  transform: string | undefined
+  register: (image: HTMLImageElement | null) => void
+  reset: () => void
+}
+
+const LightboxZoomContext = createContext<LightboxZoom | null>(null)
+
+/** A WebKit `GestureEvent`: a trackpad pinch in Safari and the macOS shell. */
+type GestureEvent = UIEvent & {
+  scale: number
+  clientX: number
+  clientY: number
+}
+
+/** `Ctrl`/`⌘` zoom keys, every spelling `chordOf` can produce for them. */
+const ZOOM_IN_CHORDS = ['mod+=', 'mod++', 'mod+shift+=', 'mod+shift++']
 
 /**
  * Paging across a sequence of images (ADR 0081). Optional: without it the
@@ -110,10 +161,95 @@ export function Lightbox({
     initialFocus: () => closeRef.current,
     restoreTo,
   })
+  const [zoom, setZoom] = useState<ZoomState>(FIT)
+  const zoomRef = useRef(zoom)
+  const imageRef = useRef<HTMLImageElement | null>(null)
+  const [hasImage, setHasImage] = useState(false)
+  const pointers = useRef(new Map<number, Point>())
+  const gesture = useRef<
+    | { kind: 'pan'; start: Point; from: ZoomState }
+    | { kind: 'pinch'; distance: number; middle: Point; from: ZoomState }
+    | null
+  >(null)
+  const gestureStart = useRef(0)
+  const zoomedAt = useRef(0)
+  const trackpadPinch = useRef<ZoomState | null>(null)
+
+  const applyZoom = (next: ZoomState) => {
+    zoomRef.current = next
+    setZoom(next)
+  }
+  const resetZoom = useCallback(() => {
+    zoomRef.current = FIT
+    setZoom(FIT)
+  }, [])
+  const register = useCallback((image: HTMLImageElement | null) => {
+    imageRef.current = image
+    setHasImage(image !== null)
+    if (image === null) {
+      zoomRef.current = FIT
+      setZoom(FIT)
+    }
+  }, [])
+
+  /**
+   * The image's untransformed size, and its untransformed centre on screen.
+   * The transform scales about the centre, so the rendered centre has only
+   * moved by the translation.
+   */
+  const imageGeometry = () => {
+    const image = imageRef.current
+    if (image === null) {
+      return null
+    }
+    const rect = image.getBoundingClientRect()
+    const { x, y } = zoomRef.current
+    return {
+      size: { width: image.offsetWidth, height: image.offsetHeight },
+      centre: {
+        x: rect.left + rect.width / 2 - x,
+        y: rect.top + rect.height / 2 - y,
+      },
+    }
+  }
+
+  /** Zoom to `scale` about a screen point, or about what is in view now. */
+  const zoomTo = (scale: number, at?: Point) => {
+    const geometry = imageGeometry()
+    if (geometry === null) {
+      return
+    }
+    const anchor =
+      at === undefined
+        ? { x: zoomRef.current.x, y: zoomRef.current.y }
+        : { x: at.x - geometry.centre.x, y: at.y - geometry.centre.y }
+    applyZoom(zoomAt(zoomRef.current, scale, anchor, geometry.size))
+  }
+
+  /** Start a pan or pinch from whatever pointers are down now. */
+  const beginGesture = () => {
+    const down = [...pointers.current.values()]
+    if (down.length >= 2) {
+      const [a, b] = down
+      gesture.current = {
+        kind: 'pinch',
+        distance: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+        middle: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+        from: zoomRef.current,
+      }
+    } else if (down.length === 1 && zoomRef.current.scale > MIN_SCALE) {
+      gesture.current = { kind: 'pan', start: down[0], from: zoomRef.current }
+    } else {
+      gesture.current = null
+    }
+  }
+
   const swipe = useSwipePaging({
     onOlder: () => paging?.onPrev(),
     onNewer: () => paging?.onNext(),
     onDismiss: onClose,
+    // A zoomed image pans with one finger, and a pinch is two.
+    blocked: () => zoomRef.current.scale > MIN_SCALE,
   })
   /**
    * Immersive mode: a tap on the image itself hides the overlay chrome so the
@@ -159,6 +295,93 @@ export function Lightbox({
     return () => container.removeEventListener('focusin', reveal)
   }, [containerRef])
 
+  // Ctrl/⌘-scroll zooms at the pointer, which is also how Chromium and Firefox
+  // report a trackpad pinch; a plain scroll pans a zoomed image. Bound
+  // imperatively because a wheel listener has to be non-passive to cancel the
+  // page zoom, and Preact's `onWheel` makes no such promise.
+  //
+  // WebKit reports a trackpad pinch as `gesture*` events instead (Safari, and
+  // the macOS shell's WKWebView), so those are taken too. iOS sends them for a
+  // touch pinch as well; that one is the pointer handlers' to apply, so here it
+  // is only cancelled, to keep the page itself from zooming.
+  useEffect(() => {
+    const container = containerRef.current
+    if (container === null) {
+      return
+    }
+    const onWheel = (event: WheelEvent) => {
+      if (imageRef.current === null) {
+        return
+      }
+      const unit =
+        event.deltaMode === 1
+          ? 16
+          : event.deltaMode === 2
+            ? window.innerHeight
+            : 1
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault()
+        zoomedAt.current = Date.now()
+        zoomTo(zoomRef.current.scale * Math.exp(-event.deltaY * unit * 0.01), {
+          x: event.clientX,
+          y: event.clientY,
+        })
+        return
+      }
+      const geometry = imageGeometry()
+      if (zoomRef.current.scale > MIN_SCALE && geometry !== null) {
+        event.preventDefault()
+        applyZoom(
+          panBy(
+            zoomRef.current,
+            { x: -event.deltaX * unit, y: -event.deltaY * unit },
+            geometry.size,
+          ),
+        )
+      }
+    }
+    const onGestureStart = (event: Event) => {
+      if (imageRef.current === null) {
+        return
+      }
+      event.preventDefault()
+      trackpadPinch.current =
+        pointers.current.size === 0 ? zoomRef.current : null
+    }
+    const onGestureChange = (event: Event) => {
+      if (imageRef.current === null) {
+        return
+      }
+      event.preventDefault()
+      const from = trackpadPinch.current
+      if (from === null) {
+        return
+      }
+      const pinch = event as GestureEvent
+      zoomedAt.current = Date.now()
+      zoomRef.current = from
+      zoomTo(from.scale * pinch.scale, { x: pinch.clientX, y: pinch.clientY })
+    }
+    const onGestureEnd = (event: Event) => {
+      if (imageRef.current !== null) {
+        event.preventDefault()
+      }
+      trackpadPinch.current = null
+    }
+    container.addEventListener('wheel', onWheel, { passive: false })
+    container.addEventListener('gesturestart', onGestureStart)
+    container.addEventListener('gesturechange', onGestureChange)
+    container.addEventListener('gestureend', onGestureEnd)
+    return () => {
+      container.removeEventListener('wheel', onWheel)
+      container.removeEventListener('gesturestart', onGestureStart)
+      container.removeEventListener('gesturechange', onGestureChange)
+      container.removeEventListener('gestureend', onGestureEnd)
+    }
+    // The handlers read the zoom through refs, so one subscription serves.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [containerRef])
+
   // Topmost surface: claim Escape first via capture, like the other modals.
   // Arrows page when there is a sequence; there are no competing
   // document-level arrow bindings (the reaction picker's are element-scoped).
@@ -166,7 +389,36 @@ export function Lightbox({
     {
       Escape: (event) => {
         event.preventDefault()
+        // Staged, like the app's other Escapes: a zoomed image first goes
+        // back to fitting the screen.
+        if (zoomRef.current.scale > MIN_SCALE) {
+          resetZoom()
+          return
+        }
         onClose()
+      },
+      // The image's zoom, not the page's: inside the viewer, the shell's own
+      // Ctrl/⌘ zoom (ADR 0107) would only enlarge the chrome around a picture
+      // that stays capped at the viewport.
+      ...Object.fromEntries(
+        ZOOM_IN_CHORDS.map((chord) => [
+          chord,
+          (event: KeyboardEvent) => {
+            if (!hasImage) return
+            event.preventDefault()
+            zoomTo(zoomRef.current.scale * ZOOM_STEP)
+          },
+        ]),
+      ),
+      'mod+-': (event) => {
+        if (!hasImage) return
+        event.preventDefault()
+        zoomTo(zoomRef.current.scale / ZOOM_STEP)
+      },
+      'mod+0': (event) => {
+        if (!hasImage) return
+        event.preventDefault()
+        resetZoom()
       },
       ArrowLeft: (event) => {
         if (paging === undefined) {
@@ -185,14 +437,130 @@ export function Lightbox({
     },
     { whileTyping: true, capture: true },
   )
+  // The bare keys, as in an image viewer. Not while typing: a reaction search
+  // in the toolbar must still be able to take a `-` or a `0`.
+  useShortcuts(
+    {
+      '+': (event) => {
+        if (!hasImage) return
+        event.preventDefault()
+        zoomTo(zoomRef.current.scale * ZOOM_STEP)
+      },
+      '=': (event) => {
+        if (!hasImage) return
+        event.preventDefault()
+        zoomTo(zoomRef.current.scale * ZOOM_STEP)
+      },
+      '-': (event) => {
+        if (!hasImage) return
+        event.preventDefault()
+        zoomTo(zoomRef.current.scale / ZOOM_STEP)
+      },
+      '0': (event) => {
+        if (!hasImage) return
+        event.preventDefault()
+        resetZoom()
+      },
+    },
+    { capture: true },
+  )
+
+  const zoomed = zoom.scale > MIN_SCALE
+  const zoomContext: LightboxZoom = {
+    transform: zoomTransform(zoom),
+    register,
+    reset: resetZoom,
+  }
 
   return (
     <BodyPortal>
       <div
         ref={containerRef}
         tabIndex={-1}
-        class={`overlay lightbox${chromeHidden ? ' lightbox-immersive' : ''}`}
+        class={`overlay lightbox${chromeHidden ? ' lightbox-immersive' : ''}${zoomed ? ' lightbox-zoomed' : ''}`}
         {...swipe}
+        onPointerDown={(event) => {
+          if (
+            !hasImage ||
+            !(event.target instanceof Element) ||
+            event.target.closest('.lightbox-image img') === null ||
+            (event.pointerType === 'mouse' && event.button !== 0)
+          ) {
+            return
+          }
+          pointers.current.set(event.pointerId, {
+            x: event.clientX,
+            y: event.clientY,
+          })
+          try {
+            event.target.setPointerCapture(event.pointerId)
+          } catch {
+            // A synthetic or already-released pointer; the drag still works
+            // for as long as it stays over the image.
+          }
+          gestureStart.current = Date.now()
+          beginGesture()
+        }}
+        onPointerMove={(event) => {
+          if (!pointers.current.has(event.pointerId)) {
+            return
+          }
+          pointers.current.set(event.pointerId, {
+            x: event.clientX,
+            y: event.clientY,
+          })
+          const current = gesture.current
+          const geometry = imageGeometry()
+          if (current === null || geometry === null) {
+            return
+          }
+          if (current.kind === 'pan') {
+            const point = pointers.current.get(event.pointerId)!
+            const delta = {
+              x: point.x - current.start.x,
+              y: point.y - current.start.y,
+            }
+            if (Math.hypot(delta.x, delta.y) > ZOOM_DRAG_SLOP_PX) {
+              zoomedAt.current = Date.now()
+            }
+            applyZoom(panBy(current.from, delta, geometry.size))
+            return
+          }
+          const [a, b] = [...pointers.current.values()]
+          const middle = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+          const distance = Math.hypot(a.x - b.x, a.y - b.y)
+          zoomedAt.current = Date.now()
+          const scaled = zoomAt(
+            current.from,
+            (current.from.scale * distance) / current.distance,
+            {
+              x: current.middle.x - geometry.centre.x,
+              y: current.middle.y - geometry.centre.y,
+            },
+            geometry.size,
+          )
+          // Two fingers that move together also pan.
+          applyZoom(
+            panBy(
+              scaled,
+              {
+                x: middle.x - current.middle.x,
+                y: middle.y - current.middle.y,
+              },
+              geometry.size,
+            ),
+          )
+        }}
+        onPointerUp={(event) => {
+          if (pointers.current.delete(event.pointerId)) {
+            beginGesture()
+          }
+        }}
+        onPointerCancel={(event) => {
+          if (pointers.current.delete(event.pointerId)) {
+            beginGesture()
+          }
+        }}
         role="dialog"
         aria-modal="true"
         aria-label={label}
@@ -216,6 +584,7 @@ export function Lightbox({
             // not a tap, and must not also toggle the chrome.
             if (
               !swipe.swipedRecently() &&
+              Date.now() - zoomedAt.current >= ZOOM_CLICK_GRACE_MS &&
               Date.now() - lastToggleAt.current >= TOGGLE_GRACE_MS
             ) {
               lastToggleAt.current = Date.now()
@@ -245,6 +614,33 @@ export function Lightbox({
       >
         <div class="lightbox-toolbar">
           {actions}
+          {hasImage && (
+            <>
+              {/*
+                Never disabled at the limits: a disabled button drops focus to
+                the body, out of the dialog's focus trap. A press at a limit is
+                simply a no-op.
+              */}
+              <button
+                type="button"
+                class="ghost lightbox-action lightbox-zoom-out"
+                aria-label="Zoom out"
+                title="Zoom out (-)"
+                onClick={() => zoomTo(zoomRef.current.scale / ZOOM_STEP)}
+              >
+                −
+              </button>
+              <button
+                type="button"
+                class="ghost lightbox-action lightbox-zoom-in"
+                aria-label="Zoom in"
+                title="Zoom in (+)"
+                onClick={() => zoomTo(zoomRef.current.scale * ZOOM_STEP)}
+              >
+                +
+              </button>
+            </>
+          )}
           {onSave !== undefined && (
             <button
               type="button"
@@ -294,7 +690,9 @@ export function Lightbox({
           </button>
         )}
         <figure class="lightbox-figure">
-          {children}
+          <LightboxZoomContext.Provider value={zoomContext}>
+            {children}
+          </LightboxZoomContext.Provider>
           {caption ? (
             <figcaption class="lightbox-caption">{caption}</figcaption>
           ) : null}
@@ -400,6 +798,11 @@ export function LightboxImage({
   useEffect(() => {
     onOutcomeRef.current = onOutcome
   })
+  const zoom = useContext(LightboxZoomContext)
+  const zoomRef = useRef(zoom)
+  useEffect(() => {
+    zoomRef.current = zoom
+  })
 
   const alt = media.caption ?? media.filename
 
@@ -419,6 +822,8 @@ export function LightboxImage({
     setFailure(null)
     setAttempt(0)
     onOutcomeRef.current?.('pending')
+    // Paging to the next image starts it at fit, not at the last one's zoom.
+    zoomRef.current?.reset()
   }, [media.url])
 
   return (
@@ -451,8 +856,16 @@ export function LightboxImage({
         </div>
       ) : state.status === 'ready' && state.url !== undefined ? (
         <img
+          // Registering is what offers zoom: only a displayed image gets it.
+          ref={zoom?.register}
           src={state.url}
           alt={alt}
+          draggable={false}
+          style={
+            zoom?.transform === undefined
+              ? undefined
+              : { transform: zoom.transform }
+          }
           onLoad={() => onOutcomeRef.current?.('displayed')}
           onError={() => {
             // Drop the failed bytes from the cache first — see `MediaImage`,

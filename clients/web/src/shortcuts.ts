@@ -444,6 +444,21 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
     ],
   },
   {
+    group: 'Image viewer',
+    rows: [
+      { keys: '← / →', description: 'Previous / next image' },
+      { keys: '+ / - / 0', description: 'Zoom in, zoom out, fit to screen' },
+      {
+        keys: 'Ctrl-scroll or pinch',
+        description: 'Zoom where you point; drag or scroll to pan',
+      },
+      {
+        keys: 'Escape',
+        description: 'Fit a zoomed image, then close the viewer',
+      },
+    ],
+  },
+  {
     group: 'Everywhere',
     rows: [
       {
