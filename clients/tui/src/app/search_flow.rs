@@ -672,14 +672,8 @@ impl App {
             self.status = Status::from("search result room is not visible".to_owned());
             return;
         };
+        self.select_room_account(room_index);
         self.prepare_room_selection(room_index);
-        self.accounts.selected = self
-            .accounts
-            .accounts
-            .iter()
-            .position(|account| account.account_id == hit.account_id)
-            .map(super::AccountSelection::Account)
-            .unwrap_or(super::AccountSelection::All);
         self.apply_timeline_around_search_event(hit, result, thread_load);
         self.search_results = None;
         self.mode = Mode::MessageList;

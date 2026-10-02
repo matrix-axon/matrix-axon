@@ -858,6 +858,17 @@ impl App {
             })
     }
 
+    pub(crate) fn select_room_account(&mut self, index: usize) {
+        let account_id = self.rooms.rooms[index].account_id;
+        self.accounts.selected = self
+            .accounts
+            .accounts
+            .iter()
+            .position(|account| account.account_id == account_id)
+            .map(super::AccountSelection::Account)
+            .unwrap_or(super::AccountSelection::All);
+    }
+
     /// Share selection cleanup with historical jumps without starting a competing timeline read.
     pub(crate) fn prepare_room_selection(&mut self, index: usize) {
         self.cancel_space_launch();
@@ -866,6 +877,12 @@ impl App {
             pending.abort.abort();
         }
         self.rooms.selected = Some(index);
+        if self
+            .active_account_filter()
+            .is_some_and(|account| account != self.rooms.rooms[index].account_id)
+        {
+            self.select_room_account(index);
+        }
         self.reveal_room_parent(index);
     }
 

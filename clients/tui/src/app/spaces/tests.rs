@@ -1319,6 +1319,22 @@ fn refreshing_an_empty_root_explains_its_visibility_until_membership_settles() {
     assert!(!room_text(&app, &buffer).contains("Work"));
 }
 
+fn select_other_account(app: &mut App) {
+    let other = Uuid::new_v4();
+    app.accounts.accounts = [other, Uuid::nil()]
+        .into_iter()
+        .map(|account_id| crate::api::AccountDto {
+            account_id,
+            user_id: "@me:srv".to_owned(),
+            state: crate::api::AccountState::Active,
+            device_id: None,
+            verified: None,
+            backup: Default::default(),
+        })
+        .collect();
+    app.accounts.selected = crate::app::AccountSelection::Account(0);
+}
+
 #[tokio::test]
 async fn historical_search_jump_reveals_parent_and_cancels_sidebar_read() {
     use crate::app::search_flow::{SearchJumpAction, SearchOutcome};
@@ -1330,6 +1346,7 @@ async fn historical_search_jump_reveals_parent_and_cancels_sidebar_read() {
     assert!(app.spaces.timeline.is_some());
     app.spaces.collapsed.insert(key("!work:srv"));
     app.spaces.focus = Some(key("!club:srv"));
+    select_other_account(&mut app);
     let hit: EventDto = serde_json::from_value(serde_json::json!({
         "account_id": Uuid::nil(), "room_id": "!a:srv", "event_id": "$hit:srv",
         "sender": "@me:srv", "type": "m.room.message", "origin_ts": 1,
@@ -1350,6 +1367,7 @@ async fn historical_search_jump_reveals_parent_and_cancels_sidebar_read() {
     assert_eq!(app.selected_room().unwrap().room_id, "!a:srv");
     assert_eq!(app.messages.selection.as_deref(), Some("$hit:srv"));
     assert!(app.spaces.focus.is_none());
+    assert_eq!(app.active_account_filter(), Some(Uuid::nil()));
     assert!(!app.spaces.collapsed.contains(&key("!work:srv")));
     assert!(app.spaces.timeline.is_none());
 }
@@ -1361,6 +1379,7 @@ async fn unread_thread_jump_reveals_already_selected_collapsed_room() {
     app.rooms.selected = Some(2);
     app.spaces.collapsed.insert(key("!work:srv"));
     app.spaces.focus = Some(key("!club:srv"));
+    select_other_account(&mut app);
     app.unread_threads.insert(
         key("!a:srv"),
         HashMap::from([(
@@ -1380,6 +1399,7 @@ async fn unread_thread_jump_reveals_already_selected_collapsed_room() {
     app.open_selected_unread_thread().await;
     assert_eq!(app.rooms.selected, Some(2));
     assert!(app.spaces.focus.is_none());
+    assert_eq!(app.active_account_filter(), Some(Uuid::nil()));
     assert!(!app.spaces.collapsed.contains(&key("!work:srv")));
 }
 
