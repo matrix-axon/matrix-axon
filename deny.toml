@@ -55,4 +55,7 @@ ignore = [
   { id = "RUSTSEC-2024-0436", reason = "paste, via sqlx-core" },
   # RustSec's own entry says "No safe upgrade is available".
   { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile, via sqlx-core; no upgrade exists" },
+  # matrix-sdk depends on anymap2, need to wait for new sdk release that updates to anymap3
+  # tracked in https://github.com/matrix-org/matrix-rust-sdk/issues/7184
+  { id = "RUSTSEC-2026-0319", reason = "matrix-sdk; no upgrade exists" },
 ]
