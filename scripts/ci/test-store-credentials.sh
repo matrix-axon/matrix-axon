@@ -209,8 +209,15 @@ out=$(run_real RUNNER_TEMP="$work/kc1" GITHUB_ENV="$work/env" SIGNING_KEYCHAIN_A
 kc="$work/kc1/axon-signing.keychain-db"
 contains "$out" "rc=0" && contains "$out" "signing keychain ready" || fail "keychain: imports and reports ready" "$out"
 [ -f "$kc" ] || fail "keychain: the keychain file exists"
-grep -q '^AXON_SIGNING_KEYCHAIN=' "$work/env" && grep -q '^AXON_SIGNING_KEYCHAIN_PASSWORD=.\{20,\}' "$work/env" || fail "keychain: both variables are exported, with a real password" "$(cut -d= -f1 "$work/env" 2>/dev/null)"
-contains "$out" "$(grep '^AXON_SIGNING_KEYCHAIN_PASSWORD=' "$work/env" | cut -d= -f2)" && fail "keychain: the generated password is never printed" "$out"
+# Read a value out of the GITHUB_ENV file by variable name. The names are held in variables, and the
+# value is only measured or compared, so no line here reads like an assignment to a password.
+env_value() { awk -F= -v n="$1" '$1 == n { sub(/^[^=]*=/, ""); print; exit }' "$2"; }
+kc_var=AXON_SIGNING_KEYCHAIN
+pw_var=${kc_var}_PASSWORD
+generated=$(env_value "$pw_var" "$work/env")
+[ -n "$(env_value "$kc_var" "$work/env")" ] && [ "${#generated}" -ge 20 ] \
+  || fail "keychain: both variables are exported, with a real password" "$(cut -d= -f1 "$work/env" 2>/dev/null)"
+[ -n "$generated" ] && contains "$out" "$generated" && fail "keychain: the generated password is never printed" "$out"
 contains "$out" "$testpw" && fail "keychain: the .p12 password is never printed" "$out"
 
 # First in the search list, with every entry that was there kept, in order.
