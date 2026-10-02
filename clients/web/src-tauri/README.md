@@ -391,10 +391,18 @@ entry and the three ways it is commonly wrong.
 Note the OAuth callback scheme is not the one the bundle is served from.
 `APP_SCHEME` in `src/lib.rs` stays `axon`: that is an in-webview protocol
 handler, never registered with the OS, and takes no part in OAuth. The OAuth
-scheme is named in three places with no shared source — `OAUTH_CLIENT` in
+scheme is named in five places with no shared source — `OAUTH_CLIENT` in
 `../src/platform/tauri.ts`, `plugins.deep-link.desktop.schemes` in
-`tauri.conf.json`, and the operator's `redirect_uris` — so changing one alone
-produces a sign-in that dead-ends in the browser.
+`tauri.conf.json`, `plugins.deep-link.mobile` in `tauri.ios.conf.json`,
+`CFBundleURLTypes` in `Info.ios.plist`, and the operator's `redirect_uris` —
+so changing one alone produces a sign-in that dead-ends in the browser.
+
+The iOS entry in `tauri.ios.conf.json` is not redundant with `Info.ios.plist`.
+The deep-link plugin's build script rewrites `CFBundleURLTypes` in the
+generated `Info.plist` whenever it is compiled, and with no `mobile` entry it
+removes the key. A warm build cache skips that step, so the scheme survives on
+a developer machine and vanishes on a clean runner: the `.ipa` builds and signs
+fine, then `package-ios.sh` refuses it with `URL scheme '(none)'`.
 
 ## The glib advisory is not actionable here
 
