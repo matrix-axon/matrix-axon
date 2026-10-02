@@ -5431,6 +5431,19 @@ audio.media-player {
   gap: 0.25rem;
 }
 
+/* Image zoom: a vertical pair on the right edge, below the toolbar row. Kept
+   out of the toolbar so a phone's single row of up to six 44px controls does
+   not overflow (see `Lightbox`). Same offsets as the toolbar, plus its row. */
+.lightbox-zoom {
+  position: absolute;
+  top: calc(1rem + var(--safe-top) + 2.75rem + 0.5rem);
+  right: calc(1rem + var(--safe-right));
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
 .lightbox button.lightbox-close,
 .lightbox button.lightbox-save,
 .lightbox button.lightbox-action,
