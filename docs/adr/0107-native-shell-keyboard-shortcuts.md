@@ -75,3 +75,24 @@ itself (`⌘` on macOS). It steps through the browsers' own zoom levels, from
 - **Ctrl-scroll does not zoom.** The desktop shell has keyboard zoom only.
   Wheel zoom would need a handler that can tell a mouse notch from a stream of
   pinch events, and it can be added later if people miss it.
+
+### The image viewer zooms its own image
+
+Page zoom does not enlarge a photo in the viewer, which caps the image at the
+viewport, and on a phone a pinch in the viewer had nothing to act on. So the
+viewer has its own zoom (`media/image-zoom.ts`), in the browser and the shell
+alike:
+
+- **Pinch, or Ctrl/⌘-scroll, zooms where you point.** Ctrl-scroll is also how
+  Chromium and Firefox report a trackpad pinch. WebKit reports one as
+  `gesture*` events, which the viewer handles too, for Safari and the macOS
+  shell.
+- **A zoomed image pans** with one finger, a mouse drag or a plain scroll.
+  While zoomed, swipe paging and swipe-down-to-dismiss are off, and a drag
+  does not also toggle the immersive mode.
+- **Keys and buttons.** `+`/`-`/`0` work, and so do the Ctrl/⌘ chords. The
+  viewer claims those before the shell's page zoom sees them. Zoom-in and
+  zoom-out buttons sit in the toolbar. Escape returns a zoomed image to fit
+  before it closes the viewer. Paging to the next image starts at fit.
+- **Images only.** The image registers itself with the viewer through a
+  context, so a video or a PDF gets no zoom controls.

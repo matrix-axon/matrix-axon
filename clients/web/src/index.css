@@ -5734,6 +5734,24 @@ audio.media-player {
   object-fit: contain;
 }
 
+/* The viewer's own zoom (media/image-zoom.ts). The image takes its own touches
+   so a pinch zooms the photo rather than the page; the swipe paging listens to
+   touch events, which `touch-action` does not suppress. */
+.lightbox-image img {
+  touch-action: none;
+  transform-origin: center;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.lightbox-zoomed .lightbox-image img {
+  cursor: grab;
+}
+
+.lightbox-zoomed .lightbox-image img:active {
+  cursor: grabbing;
+}
+
 /* The viewer's own decode-failure placeholder. Not `.media-undisplayable`:
    that one is shaped for the timeline's reserved aspect-ratio box, and its
    border reads as a stray rectangle against the lightbox backdrop. */
