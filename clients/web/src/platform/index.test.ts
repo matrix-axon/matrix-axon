@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
-import { browserPlatform } from './index'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { browserPlatform, needsCameraCaptureButtons } from './index'
 
 describe('browserPlatform', () => {
   it('calls the global fetch, with the right receiver', async () => {
@@ -121,5 +121,50 @@ describe('browserPlatform saving a file', () => {
     // `null` is the statement that the browser default is already correct.
     // Anything else would break middle-click and modifier-click.
     expect(browserPlatform().openExternal).toBeNull()
+  })
+})
+
+describe('needsCameraCaptureButtons', () => {
+  const ANDROID_WEBVIEW =
+    'Mozilla/5.0 (Linux; Android 13; SM-G781U1 Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/155.0.8059.30 Mobile Safari/537.36'
+  const IOS_WEBVIEW =
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148'
+  const ANDROID_CHROME =
+    'Mozilla/5.0 (Linux; Android 13; SM-G781U1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Mobile Safari/537.36'
+
+  function as(userAgent: string, tauri: boolean): void {
+    vi.stubGlobal('navigator', { userAgent })
+    if (tauri) {
+      vi.stubGlobal('__TAURI_INTERNALS__', {})
+      ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    }
+  }
+
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    vi.unstubAllGlobals()
+  })
+
+  it('is true in the packaged Android app', () => {
+    as(ANDROID_WEBVIEW, true)
+    expect(needsCameraCaptureButtons()).toBe(true)
+  })
+
+  it('is false on iOS, whose chooser already has a camera entry', () => {
+    as(IOS_WEBVIEW, true)
+    expect(needsCameraCaptureButtons()).toBe(false)
+  })
+
+  it('is false in Chrome on Android, whose own chooser adds a camera', () => {
+    as(ANDROID_CHROME, false)
+    expect(needsCameraCaptureButtons()).toBe(false)
+  })
+
+  it('is false on desktop', () => {
+    as(
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/155.0.0.0',
+      true,
+    )
+    expect(needsCameraCaptureButtons()).toBe(false)
   })
 })

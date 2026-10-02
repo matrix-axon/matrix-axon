@@ -940,6 +940,84 @@ describe('Composer attachments (M-W8.5, ADR 0065; multi-image ADR 0081)', () => 
     expect([...onAttach.mock.calls[0][0]]).toEqual([file])
   })
 
+  describe('camera buttons (packaged Android app)', () => {
+    function inAndroidShell(): void {
+      vi.stubGlobal('navigator', {
+        userAgent:
+          'Mozilla/5.0 (Linux; Android 13; SM-G781U1; wv) AppleWebKit/537.36 Chrome/155.0.0.0 Mobile Safari/537.36',
+      })
+      ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    }
+    afterEach(() => {
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    })
+
+    it('adds none outside it, so iOS and the browser keep their own sheet', () => {
+      const { queryByLabelText } = renderComposer({ onAttach: vi.fn() })
+      expect(queryByLabelText('Take a photo')).toBeNull()
+      expect(queryByLabelText('Record a video')).toBeNull()
+    })
+
+    it('adds a photo and a video input that go straight to the camera', () => {
+      inAndroidShell()
+      const { getByLabelText } = renderComposer({ onAttach: vi.fn() })
+      const photo = getByLabelText('Take a photo') as HTMLInputElement
+      const video = getByLabelText('Record a video') as HTMLInputElement
+      // One input each: the Android chooser records video whenever `accept`
+      // allows it, so a single input could never take a photo.
+      expect(photo.accept).toBe('image/*')
+      expect(video.accept).toBe('video/*')
+      expect(photo.getAttribute('capture')).toBe('environment')
+      expect(video.getAttribute('capture')).toBe('environment')
+      // The ordinary attach input is untouched: no `capture`, so it still
+      // opens the document picker.
+      const attach = getByLabelText('Attach a file') as HTMLInputElement
+      expect(attach.hasAttribute('capture')).toBe(false)
+    })
+
+    it('reports a captured photo and a captured video', () => {
+      inAndroidShell()
+      const onAttach = vi.fn()
+      const { getByLabelText } = renderComposer({ onAttach })
+      const photo = png('shot.png')
+      const clip = new File(['v'], 'clip.mp4', { type: 'video/mp4' })
+
+      fireEvent.change(getByLabelText('Take a photo'), {
+        target: { files: [photo] },
+      })
+      fireEvent.change(getByLabelText('Record a video'), {
+        target: { files: [clip] },
+      })
+
+      expect([...onAttach.mock.calls[0][0]]).toEqual([photo])
+      expect([...onAttach.mock.calls[1][0]]).toEqual([clip])
+    })
+
+    it('proxies each button to its own input', () => {
+      inAndroidShell()
+      const { getByLabelText, container } = renderComposer({
+        onAttach: vi.fn(),
+      })
+      const photoClick = vi.spyOn(
+        getByLabelText('Take a photo') as HTMLInputElement,
+        'click',
+      )
+      const videoClick = vi.spyOn(
+        getByLabelText('Record a video') as HTMLInputElement,
+        'click',
+      )
+
+      fireEvent.click(container.querySelector('button[title="Take a photo"]')!)
+      expect(photoClick).toHaveBeenCalledTimes(1)
+      expect(videoClick).not.toHaveBeenCalled()
+
+      fireEvent.click(
+        container.querySelector('button[title="Record a video"]')!,
+      )
+      expect(videoClick).toHaveBeenCalledTimes(1)
+    })
+  })
+
   it('accepts a multi-select from the picker', () => {
     const onAttach = vi.fn()
     const { getByLabelText } = renderComposer({ onAttach })
