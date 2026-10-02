@@ -143,8 +143,21 @@ jobs:
 
       # The Android half of the crate, linted. `desktop-build.yml` lints the
       # host half and cannot see this one.
+      #
+      # The Tauri CLI sets the NDK's compiler variables for the builds it
+      # drives; a bare `cargo clippy` does not, and C build scripts (`ring`)
+      # then fail with `failed to find tool "aarch64-linux-android-clang"`. The
+      # NDK ships its compiler only under an API-level-suffixed name, so the
+      # variables are set here, at the shell's minSdk (24, in the generated
+      # project's build.gradle.kts).
       - name: clippy for Android
-        run: cargo clippy --lib --target aarch64-linux-android -- -D warnings
+        run: |
+          bin="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export PATH="$bin:$PATH"
+          export CC_aarch64_linux_android="$bin/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$bin/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$bin/aarch64-linux-android24-clang"
+          cargo clippy --lib --target aarch64-linux-android -- -D warnings
         working-directory: clients/web/src-tauri
 
       # The release bundle, unsigned. The script picks the JDK (the image's
