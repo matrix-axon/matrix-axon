@@ -1,5 +1,6 @@
 import type { JSX } from 'preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
+import { MESSAGE_TOUCH_HOLD_MS } from '../gestures'
 import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
 import { needsCameraCaptureButtons } from '../platform'
 import { humanSize } from '../media/human-size'
@@ -188,6 +189,59 @@ export function Composer({
   const photoInput = useRef<HTMLInputElement>(null)
   const videoInput = useRef<HTMLInputElement>(null)
   const cameraButtons = needsCameraCaptureButtons()
+  // The attach menu (Android shell only): long-press the paperclip for
+  // "Attach a file / Take a photo / Record a video". Same hold-and-suppress
+  // pattern as the message action buttons in MessageEventRow.
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false)
+  const attachHoldTimer = useRef<number | null>(null)
+  const suppressAttachClick = useRef(false)
+  const attachMenu = useRef<HTMLDivElement>(null)
+
+  const clearAttachHold = () => {
+    if (attachHoldTimer.current !== null) {
+      window.clearTimeout(attachHoldTimer.current)
+      attachHoldTimer.current = null
+    }
+  }
+
+  useEffect(
+    () => () => {
+      clearAttachHold()
+    },
+    [],
+  )
+
+  useEffect(() => {
+    if (!attachMenuOpen) {
+      return
+    }
+    // Opened by a finger that is still down, so only a *later* touch outside the
+    // menu counts as dismissing it; a touch inside is an item being chosen.
+    const close = (event: Event) => {
+      if (
+        event.target instanceof Node &&
+        attachMenu.current?.contains(event.target)
+      ) {
+        return
+      }
+      setAttachMenuOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setAttachMenuOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('touchstart', close)
+    document.addEventListener('scroll', close, true)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', close)
+      document.removeEventListener('touchstart', close)
+      document.removeEventListener('scroll', close, true)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [attachMenuOpen])
   const singlePane = useMediaQuery(SINGLE_PANE_QUERY)
   /** Only a composer with a command handler treats a leading `/` as a command. */
   const commandsEnabled = onCommand !== undefined
@@ -983,34 +1037,108 @@ export function Composer({
                 which is the real, labelled control, and the one a keyboard or
                 screen reader reaches. Hidden from the a11y tree so "Attach a
                 file" names exactly one thing. */}
-            <button
-              type="button"
-              class="ghost composer-attach"
-              title="Attach a file"
-              aria-hidden="true"
-              tabIndex={-1}
-              onClick={() => fileInput.current?.click()}
-            >
-              <svg
-                class="composer-attach-icon"
-                viewBox="0 0 24 24"
+            <span class="composer-attach-wrap">
+              <button
+                type="button"
+                class="ghost composer-attach"
+                title={
+                  cameraButtons
+                    ? 'Attach a file (hold for photo or video)'
+                    : 'Attach a file'
+                }
                 aria-hidden="true"
+                tabIndex={-1}
+                onTouchStart={
+                  cameraButtons
+                    ? () => {
+                        clearAttachHold()
+                        suppressAttachClick.current = false
+                        attachHoldTimer.current = window.setTimeout(() => {
+                          suppressAttachClick.current = true
+                          setAttachMenuOpen(true)
+                        }, MESSAGE_TOUCH_HOLD_MS)
+                      }
+                    : undefined
+                }
+                onTouchMove={cameraButtons ? clearAttachHold : undefined}
+                onTouchEnd={cameraButtons ? clearAttachHold : undefined}
+                onTouchCancel={cameraButtons ? clearAttachHold : undefined}
+                // Android raises its own context menu on a long press; this
+                // one is ours.
+                onContextMenu={
+                  cameraButtons ? (event) => event.preventDefault() : undefined
+                }
+                onClick={(event) => {
+                  if (suppressAttachClick.current) {
+                    // The release that ends a long press, not a tap.
+                    event.preventDefault()
+                    suppressAttachClick.current = false
+                    return
+                  }
+                  fileInput.current?.click()
+                }}
               >
-                <path
-                  d="M21.44 11.05 12.25 20.24a6 6 0 1 1-8.49-8.48l10.6-10.61a4 4 0 0 1 5.66 5.66L9.4 17.43a2 2 0 0 1-2.83-2.83l9.9-9.9"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                />
-              </svg>
-            </button>
-            {/* The packaged Android app only (`needsCameraCaptureButtons`): its
-                chooser has no camera entry, and `capture` goes straight to the
-                camera, so photo and video are one input each. Same shape as the
-                attach control above — a labelled input a keyboard or screen
-                reader reaches, and a mouse-and-touch button proxying to it. */}
+                <svg
+                  class="composer-attach-icon"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M21.44 11.05 12.25 20.24a6 6 0 1 1-8.49-8.48l10.6-10.61a4 4 0 0 1 5.66 5.66L9.4 17.43a2 2 0 0 1-2.83-2.83l9.9-9.9"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                  />
+                </svg>
+              </button>
+              {/* The packaged Android app only (`needsCameraCaptureButtons`):
+                  its chooser has no camera entry, and `capture` goes straight
+                  to the camera, so photo and video are one input each, behind
+                  this menu rather than two more buttons in a row that is already
+                  tight on a phone. Each item proxies to a labelled input, the
+                  same shape as the attach control. */}
+              {cameraButtons && attachMenuOpen && (
+                <div
+                  ref={attachMenu}
+                  class="composer-attach-menu"
+                  role="menu"
+                  aria-label="Attach"
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setAttachMenuOpen(false)
+                      fileInput.current?.click()
+                    }}
+                  >
+                    Attach a file
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setAttachMenuOpen(false)
+                      photoInput.current?.click()
+                    }}
+                  >
+                    Take a photo
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setAttachMenuOpen(false)
+                      videoInput.current?.click()
+                    }}
+                  >
+                    Record a video
+                  </button>
+                </div>
+              )}
+            </span>
             {cameraButtons && (
               <>
                 <input
@@ -1022,37 +1150,6 @@ export function Composer({
                   aria-label="Take a photo"
                   onChange={(event) => pickFiles(event.currentTarget, onAttach)}
                 />
-                <button
-                  type="button"
-                  class="ghost composer-attach"
-                  title="Take a photo"
-                  aria-hidden="true"
-                  tabIndex={-1}
-                  onClick={() => photoInput.current?.click()}
-                >
-                  <svg
-                    class="composer-attach-icon"
-                    viewBox="0 0 24 24"
-                    aria-hidden="true"
-                  >
-                    <path
-                      d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                    />
-                    <circle
-                      cx="12"
-                      cy="13"
-                      r="4"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2"
-                    />
-                  </svg>
-                </button>
                 <input
                   ref={videoInput}
                   type="file"
@@ -1062,40 +1159,6 @@ export function Composer({
                   aria-label="Record a video"
                   onChange={(event) => pickFiles(event.currentTarget, onAttach)}
                 />
-                <button
-                  type="button"
-                  class="ghost composer-attach"
-                  title="Record a video"
-                  aria-hidden="true"
-                  tabIndex={-1}
-                  onClick={() => videoInput.current?.click()}
-                >
-                  <svg
-                    class="composer-attach-icon"
-                    viewBox="0 0 24 24"
-                    aria-hidden="true"
-                  >
-                    <path
-                      d="m23 7-7 5 7 5V7z"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                    />
-                    <rect
-                      x="1"
-                      y="5"
-                      width="15"
-                      height="14"
-                      rx="2"
-                      ry="2"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2"
-                    />
-                  </svg>
-                </button>
               </>
             )}
           </>
