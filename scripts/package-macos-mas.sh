@@ -89,6 +89,10 @@ if [ -z "$profile" ] || [ ! -f "$profile" ]; then
   echo "error: --profile must name a Mac App Store .provisionprofile; got '${profile}'" >&2
   exit 2
 fi
+# Absolute, because `pnpm tauri build` runs after a cd into the web client and Tauri resolves the
+# profile named in --config from there: a relative path passes the checks above and the profile
+# validation below, then fails at bundle time, minutes into a universal build.
+profile=$(cd "$(dirname "$profile")" && pwd)/$(basename "$profile")
 if [ -n "$build_number" ] && [ "$build_number" != "auto" ] && ! [[ $build_number =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
   echo "error: --build-number must be one to three dot-separated numbers (CFBundleVersion); got '$build_number'" >&2
   exit 2
@@ -115,6 +119,13 @@ if [ -z "$app_identity" ] || [ -z "$pkg_identity" ]; then
   exit 1
 fi
 team_id=$(printf '%s' "$app_identity" | sed -E 's/.*\(([A-Z0-9]{10})\)$/\1/')
+# An identity given with --app-identity as a bare hash or a custom name has no "(TEAMID)" suffix; the
+# sed leaves it unchanged, and the profile check below would then blame the profile for it.
+if ! [[ $team_id =~ ^[A-Z0-9]{10}$ ]]; then
+  echo "error: cannot read a team ID from the application identity '$app_identity'" >&2
+  echo "       it must end in the team ID in parentheses, like 'Apple Distribution: Name (ABCDE12345)'" >&2
+  exit 2
+fi
 
 # The profile must be for this app, this team and this platform, and unexpired;
 # App Store Connect reports a mismatch only after the upload, in an email.
@@ -163,7 +174,15 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # A universal build needs both Apple targets; check rather than let cargo say
 # "can't find crate for 'std'" halfway through.
 sysroot=$(rustc --print sysroot)
-for t in $(case "$target" in universal-apple-darwin) echo aarch64-apple-darwin x86_64-apple-darwin ;; *) echo "$target" ;; esac); do
+# A `case` inside `$( )` does not parse under bash 3.2, which is macOS's /bin/bash and
+# what a runner's `#!/usr/bin/env bash` finds: "syntax error near unexpected token `;;'".
+# It parsed everywhere it had been run, since that was Homebrew's bash 5, so it was
+# found by the first CI run. The case is outside the substitution for that reason.
+case "$target" in
+  universal-apple-darwin) rust_targets="aarch64-apple-darwin x86_64-apple-darwin" ;;
+  *) rust_targets=$target ;;
+esac
+for t in $rust_targets; do
   if [ ! -d "$sysroot/lib/rustlib/$t" ]; then
     echo "error: Rust target $t is not installed: rustup target add $t" >&2
     exit 1
