@@ -33,11 +33,17 @@
 #   * The signing keychain. Signing runs inside xcodebuild, which reads the
 #     login keychain, and that one is locked in an SSH session and after a
 #     reboot. The failure is `errSecInternalComponent` from codesign, or a
-#     password dialog nobody is there to answer. Set AXON_IOS_KEYCHAIN to a
+#     password dialog nobody is there to answer. Set AXON_SIGNING_KEYCHAIN to a
 #     keychain that holds only the signing identities and has an empty
 #     password, and this unlocks it first. Off unless set: it is one
-#     developer's setup, not a requirement. See "Signing without a password
-#     prompt" in clients/web/src-tauri/README.md for how to build that keychain.
+#     developer's setup, not a requirement. Shared with package-macos-mas.sh;
+#     see "Signing without a password prompt" in clients/web/src-tauri/README.md
+#     for how to build that keychain.
+#
+#   * FORCE_COLOR. An exported `FORCE_COLOR=1` ends up as a stray argument to
+#     the Rust build phase, which reads it as an architecture; the failure is
+#     `Arch specified by Xcode was invalid. {arch} isn't a known arch` and
+#     names neither. This unsets it — see the block below `export PATH`.
 #
 # Not a gate and not run by CI; #445 tracks a lane that would, and this script
 # is what it should be built from. `--upload` needs App Store Connect
@@ -51,13 +57,20 @@ Usage: scripts/package-ios.sh [options]
   --install            install the built .ipa to a connected device
   --device <udid>      which device (default: the only connected one)
   --export-method <m>  debugging (default) | release-testing | app-store-connect
-  --build-number <n>   CFBundleVersion; App Store Connect rejects a reused one
+  --build-number <n>   CFBundleVersion; App Store Connect rejects a reused one.
+                       `auto` asks App Store Connect for the highest it has on iOS and
+                       uses one more (app-store-connect only; needs the same
+                       credentials as --upload)
   --upload             upload the .ipa to App Store Connect / TestFlight
   -h, --help           this
+
+ASC_KEY_ID and ASC_ISSUER_ID, which --upload and `--build-number auto` need, are
+taken from the environment or, failing that, from .env at the repository root.
 
 Examples:
   scripts/package-ios.sh --install
   scripts/package-ios.sh --export-method app-store-connect --build-number 2 --upload
+  scripts/package-ios.sh --export-method app-store-connect --build-number auto --upload
 USAGE
 }
 
@@ -88,8 +101,22 @@ if [ "$upload" -eq 1 ]; then
     echo "error: --upload needs --export-method app-store-connect; got $export_method" >&2
     exit 2
   fi
-  : "${ASC_KEY_ID:?set ASC_KEY_ID (the A1B2C3D4E5 in ~/.appstoreconnect/private_keys/AuthKey_*.p8)}"
-  : "${ASC_ISSUER_ID:?set ASC_ISSUER_ID (App Store Connect > Users and Access > Integrations)}"
+fi
+# `--build-number auto` talks to App Store Connect, so it needs what `--upload`
+# does and only makes sense for a build that is going there.
+if [ "$build_number" = "auto" ] && [ "$export_method" != "app-store-connect" ]; then
+  echo "error: --build-number auto needs --export-method app-store-connect; got $export_method" >&2
+  exit 2
+fi
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+# The App Store Connect and signing-keychain logic is shared with
+# package-macos-mas.sh, so the two cannot drift apart.
+. "$repo_root/scripts/lib/asc.sh"
+. "$repo_root/scripts/lib/signing-keychain.sh"
+
+if [ "$upload" -eq 1 ] || [ "$build_number" = "auto" ]; then
+  asc_require_credentials "$repo_root"
 fi
 
 # Checked here for the same reason, and because this value is spliced into a
@@ -99,7 +126,7 @@ fi
 # already thrown the Xcode project away. `CFBundleVersion` is one to three
 # period-separated non-negative integers, so anything else is a typo, not a
 # version.
-if [ -n "$build_number" ] && ! [[ $build_number =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+if [ -n "$build_number" ] && [ "$build_number" != "auto" ] && ! [[ $build_number =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
   echo "error: --build-number must be one to three dot-separated numbers (CFBundleVersion); got '$build_number'" >&2
   exit 2
 fi
@@ -122,15 +149,41 @@ if [ "$install_app" -eq 1 ] && [ -z "$device" ]; then
   echo "==> resolved device $device"
 fi
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 web_dir="$repo_root/clients/web"
 tauri_dir="$web_dir/src-tauri"
 icon_src="$tauri_dir/icons/ios"
 appiconset="$tauri_dir/gen/apple/Assets.xcassets/AppIcon.appiconset"
 
+# Resolve `auto` now, before `rm -rf gen/apple` and a multi-minute build, so a
+# bad credential or an unreachable App Store Connect costs seconds. After this
+# `build_number` is an ordinary number and everything below treats it as one,
+# including the regex that guards the JSON override. See lib/asc.sh.
+if [ "$build_number" = "auto" ]; then
+  build_number=$(asc_next_build_number "$repo_root" "$tauri_dir/tauri.conf.json" ios) || exit 1
+fi
+
 # Put rustup's shims first rather than diagnosing the Homebrew shadow after the
 # fact. Harmless when they already are.
 export PATH="$HOME/.cargo/bin:$PATH"
+
+# Clear FORCE_COLOR, which a shell rc commonly exports (`export FORCE_COLOR=1`)
+# so that node tools colour their output through a pipe.
+#
+# The generated Xcode project's "Build Rust Code" phase runs
+# `pnpm tauri ios xcode-script … --configuration $CONFIGURATION ${FORCE_COLOR}
+# ${ARCHS}`, and Xcode fills `${FORCE_COLOR}` in from the environment. With it
+# set to 1 the command ends `release 1 arm64`, the CLI reads the 1 as an
+# architecture, and the build dies in that phase with
+#
+#   Arch specified by Xcode was invalid. {arch} isn't a known arch
+#
+# — which names no architecture (the `{arch}` is printed literally, a
+# formatting bug in the CLI) and says nothing about colour, so nothing in it
+# points here. It only happens in a session that sourced the rc file: the same
+# build passed over SSH and failed from a terminal, with identical Xcode
+# build settings in both. Unset, the placeholder expands to nothing, which is
+# what the template expects. The cost is uncoloured Tauri output.
+unset FORCE_COLOR
 
 # Then check, because prepending only helps if rustup is what is installed.
 sysroot=$(rustc --print sysroot)
@@ -149,72 +202,9 @@ EOF
 fi
 
 # Unlock the signing keychain before the build rather than discovering it is
-# locked at the codesign step, minutes in. `codesign` failing with
-# errSecInternalComponent here looks like a bad certificate and is not: it is
-# what a locked keychain reports when there is nobody to ask for a password.
-#
-# The keychain must also be the only place the identities live. An identity
-# that exists in both this keychain and a locked login keychain is resolved to
-# the locked copy even when this one is listed first — the same certificate
-# signed cleanly with the login copy removed and failed with it present.
-#
-# `-p` puts the password on the command line, so it is visible to `ps` for the
-# duration of the call. That is acceptable only because the intended password
-# is empty; AXON_IOS_KEYCHAIN_PASSWORD exists for a keychain that has one, and
-# the one-time setup in the README explains why an empty one is the point.
-if [ -n "${AXON_IOS_KEYCHAIN:-}" ]; then
-  case "$AXON_IOS_KEYCHAIN" in
-    */*) keychain="$AXON_IOS_KEYCHAIN" ;;
-    *)   keychain="$HOME/Library/Keychains/${AXON_IOS_KEYCHAIN%.keychain-db}.keychain-db" ;;
-  esac
-  if [ ! -f "$keychain" ]; then
-    echo "error: AXON_IOS_KEYCHAIN is set but $keychain does not exist." >&2
-    exit 1
-  fi
-  if ! security unlock-keychain -p "${AXON_IOS_KEYCHAIN_PASSWORD:-}" "$keychain"; then
-    echo "error: could not unlock $keychain." >&2
-    echo "       An empty password is expected; set AXON_IOS_KEYCHAIN_PASSWORD if it has one." >&2
-    exit 1
-  fi
-  # Unlocking a keychain that is not in the search list does nothing useful:
-  # xcodebuild never looks there.
-  #
-  # Compared as resolved paths, not as text. `security list-keychains` prints
-  # absolute, quoted paths as it stored them, so a relative AXON_IOS_KEYCHAIN
-  # (`./build.keychain-db`) or one reached through a symlink (`/var` for
-  # `/private/var`, a symlinked $HOME) is listed and still never matches a
-  # substring test — and the error below would then be wrong. `pwd -P` resolves
-  # the directory, which is where a symlink in these paths lives; the keychain
-  # file itself is not one.
-  canon_path() {
-    (cd "$(dirname "$1")" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")")
-  }
-  keychain=$(canon_path "$keychain")
-  search_list=$(security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//')
-  in_search_list=0
-  while IFS= read -r listed; do
-    if [ -n "$listed" ] && [ "$(canon_path "$listed")" = "$keychain" ]; then
-      in_search_list=1
-    fi
-  done <<EOF
-$search_list
-EOF
-  if [ "$in_search_list" -eq 0 ]; then
-    # The suggested command keeps whatever is already listed. `-s` replaces the
-    # whole list, so naming only this keychain and login would silently drop
-    # every other one the developer has.
-    fix="security list-keychains -d user -s \"$keychain\""
-    while IFS= read -r listed; do
-      [ -n "$listed" ] && fix="$fix \"$listed\""
-    done <<EOF
-$search_list
-EOF
-    echo "error: $keychain is unlocked but not in the keychain search list." >&2
-    echo "       $fix" >&2
-    exit 1
-  fi
-  echo "==> signing keychain unlocked: $keychain"
-fi
+# locked at the codesign step, minutes in. A no-op unless AXON_SIGNING_KEYCHAIN
+# is set; see lib/signing-keychain.sh.
+unlock_signing_keychain || exit 1
 
 cd "$web_dir"
 

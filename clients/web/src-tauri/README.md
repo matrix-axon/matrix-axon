@@ -211,11 +211,40 @@ generated once and then frozen, so it regenerates it every run and passes
 `bundle.iOS` settings as `--config` overrides; that `tauri icon`'s iOS set
 carries an alpha channel App Store Connect rejects, so it flattens it on the
 way in; and that a Homebrew `rust` on `PATH` shadows rustup and has no iOS
-`std`, so it puts `~/.cargo/bin` first and then checks.
+`std`, so it puts `~/.cargo/bin` first and then checks; and that an exported
+`FORCE_COLOR=1` (common in a shell rc) makes Xcode's Rust build phase read the
+`1` as an architecture and fail with
+`Arch specified by Xcode was invalid. {arch} isn't a known arch`, so it unsets
+it. If you call `pnpm tauri ios build` yourself from such a shell, `unset
+FORCE_COLOR` first.
 
 `--upload` needs `ASC_KEY_ID` and `ASC_ISSUER_ID`, and an
 `~/.appstoreconnect/private_keys/AuthKey_*.p8`. Both are checked before the
-build rather than after it.
+build rather than after it. The two identifiers can be exported, or put in the
+repository's gitignored `.env`; the environment wins when both are set. The
+script reads only those two names from that file, as data. It does not `source`
+it: `.env` is the server's configuration, nothing else in it belongs in a build,
+and a value with `$(...)` or a stray quote in it should not be run as shell.
+Keep it unreadable by others, `chmod 600 .env`.
+
+App Store Connect rejects a build number it has already seen for the app, so
+`--build-number auto` asks it for the highest one on the platform being built and
+uses one more. iOS and Mac builds of one app are numbered separately, so a Mac
+build is not pushed up by the iOS count:
+
+```sh
+scripts/package-ios.sh --export-method app-store-connect --build-number auto --upload
+```
+
+It takes the same three credentials as `--upload`, works only with
+`--export-method app-store-connect`, and resolves the number before the build
+starts, so a bad key costs seconds rather than a build. `scripts/package-macos-mas.sh`
+takes the same credentials, reads the same `.env` and accepts the same
+`--build-number auto`, each counting its own platform. A platform with no builds
+gets `1`; an app that does not exist in App Store Connect is an error rather than
+a guess. One limit: a build uploaded minutes ago and still processing may not be
+listed yet, so two uploads close together can be given the same number, and the
+second is then rejected.
 
 There is no CI lane — [#445](https://github.com/matrix-axon/matrix-axon/issues/445)
 tracks one, and this script is what it should be built from.
@@ -270,24 +299,70 @@ project instead does not survive.
 [#456](https://github.com/matrix-axon/matrix-axon/issues/456) tracks taking
 the committed default out.
 
-### Signing without a password prompt
+### Building from the Xcode GUI
 
-Signing happens inside `xcodebuild`, which uses the login keychain. That
-keychain is locked in an SSH session and after a reboot, so an unattended
-`scripts/package-ios.sh` stops at a password dialog, or fails with:
+Use `scripts/package-ios.sh` to build. Opening `gen/apple` in Xcode and pressing
+Build fails, for reasons that are worth knowing if you do want Xcode, to attach
+a debugger, say.
+
+**Nothing is answering the build phase.** The project's "Build Rust Code" phase
+runs `pnpm tauri ios xcode-script`, which does not know its own options. It asks
+the running `tauri ios dev` or `tauri ios build` over a local socket, and finds
+the address in `$TMPDIR/org.matrixaxon.axon-server-addr`. With no such command
+running that file is left over from the last one, and the build dies:
 
 ```
-errSecInternalComponent
+thread '<unnamed>' panicked at crates/tauri-cli/src/mobile/mod.rs:403:6:
+failed to read CLI options: ... Connection refused
 ```
 
-That error reads like a bad certificate. It is a locked keychain with nobody
-there to unlock it.
+**The environment is whichever process started the build.** Xcode opened from
+the Dock, Finder or Spotlight is started by launchd, which has none of your
+shell's setup: no `~/.cargo/bin`, no nvm node. (We saw pnpm fail to switch to
+the version `package.json` pins, `ERR_PNPM_PNPM_ENGINE_NO_NATIVE_BINARY`; not
+diagnosed further.) A build that `pnpm tauri ios dev` starts inherits your shell
+instead, including a Homebrew `rust` ahead of rustup, and fails with
+
+```
+error[E0463]: can't find crate for `std`
+  = note: the `aarch64-apple-ios` target may not be installed
+```
+
+straight after `component rust-std for target aarch64-apple-ios is up to date`.
+That is the shadowing `package-ios.sh` guards against; put `~/.cargo/bin` first
+in `PATH` before starting the command.
+
+**What you change in Xcode does not last.** The script deletes and regenerates
+`gen/apple` on every run.
+
+If you want Xcode anyway, start `pnpm tauri ios dev --open` from a shell whose
+`PATH` is right and leave it running while you build; it is the command that
+answers the phase. We have not built a release that way.
+
+To see why a build failed, read Xcode's log rather than the on-screen summary:
+`~/Library/Developer/Xcode/DerivedData/axon-*/Logs/Build/*.xcactivitylog`, gzip.
+A build started by `tauri ios dev` lands in a different `axon-*` folder from one
+started in the GUI.
+
+## Signing without a password prompt
+
+`scripts/package-ios.sh` and `scripts/package-macos-mas.sh` sign through
+`xcodebuild`, `codesign`, `productbuild` and `productsign`, which use the login
+keychain. That keychain is locked in an SSH session and after a reboot, so an
+unattended build stops at a password dialog, or fails with one of:
+
+```
+errSecInternalComponent                 (codesign, xcodebuild)
+errKCInteractionNotAllowed              (productsign, productbuild)
+```
+
+Neither reads like a locked keychain. The first looks like a bad certificate.
 
 Skip this section if you build at your own desk with the login keychain
 unlocked. It is for a build box, or for anyone tired of the prompt.
 
 Put the signing identities in a keychain of their own with an empty password,
-and point the script at it:
+and point the scripts at it:
 
 ```sh
 security create-keychain -p "" build
@@ -296,45 +371,84 @@ security list-keychains -d user -s \
   ~/Library/Keychains/login.keychain-db ~/Library/Keychains/build.keychain-db
 
 # Export each identity from Keychain Access as a .p12 (needs your login
-# password once), then import it from the command line:
-security import dev.p12 -k ~/Library/Keychains/build.keychain-db -P '<p12 password>' \
+# password once), then import it from the command line. Trust every tool that
+# will use the key, not only codesign:
+security import app.p12 -k ~/Library/Keychains/build.keychain-db -P '<p12 password>' \
   -T /usr/bin/codesign -T /usr/bin/security
+security import installer.p12 -k ~/Library/Keychains/build.keychain-db -P '<p12 password>' \
+  -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productsign -T /usr/bin/productbuild
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" \
   ~/Library/Keychains/build.keychain-db
 
-export AXON_IOS_KEYCHAIN=build   # a name under ~/Library/Keychains, or a path
+export AXON_SIGNING_KEYCHAIN=build   # a name under ~/Library/Keychains, or a path
 ```
 
-The script then unlocks it before the build. Which identities it needs depends
-on `--export-method`:
+Both scripts then unlock it before they build. `AXON_IOS_KEYCHAIN`, the name this
+had while only the iOS script used it, still works and prints a note. The
+password variable is `AXON_SIGNING_KEYCHAIN_PASSWORD`, likewise.
 
-| `--export-method`     | Identity             | Verified from the keychain alone |
-| --------------------- | -------------------- | -------------------------------- |
-| `debugging` (default) | `Apple Development`  | yes                              |
-| `app-store-connect`   | `Apple Distribution` | yes                              |
-| `release-testing`     | `Apple Distribution` | no — fails at export, see below  |
+Which identities are needed:
 
-`release-testing` builds and archives, then fails at export with
-`exportArchive No Accounts` and `No profiles for 'org.matrixaxon.axon' were
-found`. That is a provisioning-profile problem, not a keychain one: the same
-keychain completes `app-store-connect`. It is not yet diagnosed;
-[#529](https://github.com/matrix-axon/matrix-axon/issues/529) tracks it.
+| Script and mode                        | Identity                                                             |
+| -------------------------------------- | -------------------------------------------------------------------- |
+| `package-ios.sh` `debugging` (default) | `Apple Development`                                                  |
+| `package-ios.sh` `app-store-connect`   | `Apple Distribution`                                                 |
+| `package-ios.sh` `release-testing`     | `Apple Distribution`, and an Ad Hoc provisioning profile (below)     |
+| `package-macos-mas.sh`, the app        | `3rd Party Mac Developer Application`, or `Apple Distribution`       |
+| `package-macos-mas.sh`, the `.pkg`     | `3rd Party Mac Developer Installer`, or `Mac Installer Distribution` |
 
-Three things that are easy to get wrong:
+`release-testing` also needs an **Ad Hoc provisioning profile** for the bundle
+ID, which lists the devices the build may be installed on. Without one it builds
+and archives, then fails at export with `exportArchive No Accounts` and
+`No profiles for 'org.matrixaxon.axon' were found`; Xcode's distribution log says
+`Xcode couldn't find any iOS Ad Hoc provisioning profiles`. That is a
+provisioning problem, not a keychain one: the same keychain completes
+`app-store-connect`, which only needs the Store profile.
+
+What fixed it here: an Apple ID signed into Xcode (Settings > Accounts) and Xcode
+generating an `iOS Team Ad Hoc Provisioning Profile` for the bundle ID. Until then
+Xcode had no account to create one with, and `xcodebuild -allowProvisioningUpdates`
+had nothing to authenticate as. With the profile installed, `release-testing`
+produced an `.ipa` signed by `Apple Distribution` with `get-task-allow` false and
+the registered devices embedded. Creating the profile in the developer portal and
+installing it should work too; that was not tried. Devices have to be registered,
+and the profile remade when the list changes.
+
+Things that are easy to get wrong:
 
 - **Remove the identities from the login keychain afterwards.** An identity that
   exists in both keychains is resolved to the login copy, which is locked, even
   when `build` is listed first. The same certificate signed with the login copy
   gone and failed with it present. Delete the certificate and its private key
-  together. The script does not yet warn about a leftover copy
+  together. The scripts do not yet warn about a leftover copy
   ([#528](https://github.com/matrix-axon/matrix-axon/issues/528)), so you find
   out at the signing step.
+- **A certificate in one keychain and its key in another is an identity only
+  while both are listed.** Apple can issue several certificates for one key, and
+  Keychain Access shows them as separate identities. Here the
+  `3rd Party Mac Developer Application` certificate and the `Apple Development`
+  one share a key. Move the key to `build` and leave that certificate in login,
+  and `security find-identity -v` still lists the identity, so it looks fine,
+  but with `build` alone in the search list `codesign` says `no identity found`.
+  Import the certificate into `build` as well (`security find-certificate -c
+'<name>' -p login.keychain-db > c.pem`, then `security import c.pem -k
+build.keychain-db`; it is public, no `.p12` needed) and delete it from login.
+- **Every tool that signs must be trusted by the key, not only `codesign`.** A key
+  imported with just `-T /usr/bin/codesign` signs apps and then fails on the
+  installer, from `productsign` and `productbuild` alike, with
+  `errKCInteractionNotAllowed`. We saw exactly that, with every key in the
+  keychain trusting only `codesign`. Re-running `set-key-partition-list` did not
+  change it: the trusted-application list is separate from the partition list.
+  Re-importing the installer identity with `-T /usr/bin/productsign -T
+/usr/bin/productbuild` fixed it, and `productbuild --sign` then produced a
+  package signed by the installer certificate with only `build` in the search
+  list. (`security dump-keychain -a` shows each key's trusted applications.)
 - **`set-key-partition-list` is not optional.** Without it macOS asks, through a
-  dialog, whether `codesign` may use the key. Run it again after every import.
+  dialog, whether the tool may use the key. Run it again after every import.
 - **An empty password is the point, not an oversight.** Anyone who can read the
   keychain file can sign as you, which is why this belongs on a machine you
-  already trust with the login keychain. If yours has a password, the script
-  reads `AXON_IOS_KEYCHAIN_PASSWORD`; that puts it on a command line where `ps`
+  already trust with the login keychain. If yours has a password, the scripts
+  read `AXON_SIGNING_KEYCHAIN_PASSWORD`; that puts it on a command line where `ps`
   shows it.
 
 `--upload` authenticates through an App Store Connect API key, not the
@@ -351,6 +465,10 @@ security list-keychains -d user -s ~/Library/Keychains/build.keychain-db
 
 t=$(mktemp) && cp /bin/echo "$t"
 codesign -f -s "Apple Development: NAME (TEAMID)" "$t"; echo "exit $?"; rm -f "$t"
+
+# For the Mac App Store build, the installer identity too:
+pkgbuild --nopayload --identifier test --version 1 /tmp/plain.pkg
+productsign --sign "3rd Party Mac Developer Installer: NAME (TEAMID)" /tmp/plain.pkg /tmp/signed.pkg
 
 # Restore every keychain the first command printed, in that order:
 security list-keychains -d user -s ~/Library/Keychains/login.keychain-db \
@@ -483,6 +601,14 @@ what this lane builds. A store build (M-W13) is sandboxed, and the sandbox is a
 different mechanism from the hardened runtime — `Entitlements.plist` says which
 keys are deliberately absent for that reason, and would need revisiting rather
 than extending.
+
+The store build has its own script, `scripts/package-macos-mas.sh`, with its own
+sandboxed `Entitlements.mas.plist`. It needs a Mac App Store Connect
+provisioning profile for `org.matrixaxon.axon` (`--profile`), the
+"3rd Party Mac Developer" application and installer certificates in the
+keychain, and, for `--upload` or `--build-number auto`, `ASC_KEY_ID` /
+`ASC_ISSUER_ID` from the environment or `.env`, as for iOS. For an unattended
+build, see [Signing without a password prompt](#signing-without-a-password-prompt).
 
 Windows Authenticode is **not** wired yet, so SmartScreen warnings are a
 separate piece of work.
