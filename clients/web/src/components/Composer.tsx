@@ -1,6 +1,7 @@
 import type { JSX } from 'preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
+import { needsCameraCaptureButtons } from '../platform'
 import { humanSize } from '../media/human-size'
 import { hasModifier, isApplePlatform } from '../shortcuts'
 import {
@@ -60,6 +61,21 @@ function escapeMarkdownLinkLabel(value: string): string {
 
 function escapeMarkdownLinkDestination(value: string): string {
   return value.replace(/([\\)])/g, '\\$1')
+}
+
+/**
+ * Hand a file input's selection to `onAttach`, then clear it so choosing the
+ * same file twice in a row still fires `change` the second time.
+ */
+function pickFiles(
+  input: HTMLInputElement,
+  onAttach: (files: FileList) => void,
+): void {
+  const picked = input.files
+  if (picked !== null && picked.length > 0) {
+    onAttach(picked)
+  }
+  input.value = ''
 }
 
 /**
@@ -169,6 +185,9 @@ export function Composer({
   const synced = useRef(initialValue)
   const textarea = useRef<HTMLTextAreaElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const photoInput = useRef<HTMLInputElement>(null)
+  const videoInput = useRef<HTMLInputElement>(null)
+  const cameraButtons = needsCameraCaptureButtons()
   const singlePane = useMediaQuery(SINGLE_PANE_QUERY)
   /** Only a composer with a command handler treats a leading `/` as a command. */
   const commandsEnabled = onCommand !== undefined
@@ -958,15 +977,7 @@ export function Composer({
               multiple
               class="composer-file-input"
               aria-label="Attach a file"
-              onChange={(event) => {
-                const picked = event.currentTarget.files
-                if (picked !== null && picked.length > 0) {
-                  onAttach(picked)
-                }
-                // Clear the input, so picking the same file twice in a row
-                // still fires `change` the second time.
-                event.currentTarget.value = ''
-              }}
+              onChange={(event) => pickFiles(event.currentTarget, onAttach)}
             />
             {/* A mouse affordance that proxies clicks to the input above —
                 which is the real, labelled control, and the one a keyboard or
@@ -995,6 +1006,98 @@ export function Composer({
                 />
               </svg>
             </button>
+            {/* The packaged Android app only (`needsCameraCaptureButtons`): its
+                chooser has no camera entry, and `capture` goes straight to the
+                camera, so photo and video are one input each. Same shape as the
+                attach control above — a labelled input a keyboard or screen
+                reader reaches, and a mouse-and-touch button proxying to it. */}
+            {cameraButtons && (
+              <>
+                <input
+                  ref={photoInput}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  class="composer-file-input"
+                  aria-label="Take a photo"
+                  onChange={(event) => pickFiles(event.currentTarget, onAttach)}
+                />
+                <button
+                  type="button"
+                  class="ghost composer-attach"
+                  title="Take a photo"
+                  aria-hidden="true"
+                  tabIndex={-1}
+                  onClick={() => photoInput.current?.click()}
+                >
+                  <svg
+                    class="composer-attach-icon"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                    />
+                    <circle
+                      cx="12"
+                      cy="13"
+                      r="4"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                    />
+                  </svg>
+                </button>
+                <input
+                  ref={videoInput}
+                  type="file"
+                  accept="video/*"
+                  capture="environment"
+                  class="composer-file-input"
+                  aria-label="Record a video"
+                  onChange={(event) => pickFiles(event.currentTarget, onAttach)}
+                />
+                <button
+                  type="button"
+                  class="ghost composer-attach"
+                  title="Record a video"
+                  aria-hidden="true"
+                  tabIndex={-1}
+                  onClick={() => videoInput.current?.click()}
+                >
+                  <svg
+                    class="composer-attach-icon"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="m23 7-7 5 7 5V7z"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                    />
+                    <rect
+                      x="1"
+                      y="5"
+                      width="15"
+                      height="14"
+                      rx="2"
+                      ry="2"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                    />
+                  </svg>
+                </button>
+              </>
+            )}
           </>
         )}
         <button
