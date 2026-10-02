@@ -74,8 +74,9 @@ export function createSpacesStore(
   const joinedSpaces = () =>
     rooms.rooms.value.filter((room) => room.room_type === 'm.space')
 
-  // Keep unknown/loading/failed roots available. Only a successful settled
-  // projection with no joined child room confirms that a space is empty.
+  // Keep unknown/failed roots available. A cached successful projection stays
+  // authoritative during a background refetch, avoiding hidden-root flicker.
+  // Only a successful projection with no direct joined child room confirms emptiness.
   // Filtering and room sort do not participate in this decision.
   const visible = computed(() => {
     // Cached/unconfirmed room summaries cannot establish joined membership.
@@ -90,7 +91,6 @@ export function createSpacesStore(
       const members = children.value.get(key)
       return (
         members === undefined ||
-        loading.value.has(key) ||
         errors.value.has(key) ||
         members.some((child) =>
           joined.has(

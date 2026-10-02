@@ -98,7 +98,9 @@ paths to `index.html` (the Vite dev server already does). ADR 0030's
 see the note in `src/stores/accounts.ts`.
 
 The Spaces picker hides spaces once a successful membership read confirms they have no joined child rooms.
-Loading and failed spaces remain visible, and Retry remains available for failed reads.
+Spaces with unknown membership and failed reads remain visible, and Retry remains available for failed reads.
+Confirmed empty spaces stay hidden during background refreshes.
+The picker checks direct child rooms only; a parent containing only subspaces is hidden, while each populated joined subspace appears independently.
 A stale or failed room-list read also keeps spaces visible until joined membership can be confirmed.
 If the selected space becomes empty, the picker returns to All rooms.
 Hidden spaces retain their saved order and can reappear after membership updates.

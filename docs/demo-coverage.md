@@ -102,7 +102,7 @@ shows it.
   and its assertions stay honest on a second run — a react-only scene passes
   vacuously the second time, on the badge the first run left behind.
 - **Empty spaces in the web picker.**
-  Confirmed empty roots are hidden, while loading and failed roots remain available.
+  Confirmed empty roots stay hidden during background refreshes, while unknown and failed roots remain available.
   The `spaces` scene demonstrates populated spaces but does not exercise empty-root hiding or restoration after a membership update.
 - **Favourite reorder and space order.**
   Durable `m.favourite` reorder and the instance `space_order` rail are not shown in a scene.

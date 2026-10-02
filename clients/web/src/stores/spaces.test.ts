@@ -205,7 +205,7 @@ it('ignores removed relationships, unjoined children, and other accounts when te
   expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
 })
 
-it('keeps loading and failed membership visible even after an empty successful read', async () => {
+it('keeps confirmed empty membership hidden during refetch but reveals failures', async () => {
   let fail = false
   let release: (() => void) | undefined
   server.use(
@@ -227,12 +227,13 @@ it('keeps loading and failed membership visible even after an empty successful r
   expect(store.visible.value).toEqual([])
   fail = true
   store.refresh(space())
-  expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
-  store.selected.value = `${ACCOUNT}/${SPACE}`
+  expect(store.visible.value).toEqual([])
   await vi.waitFor(() => expect(release).toBeDefined())
+  expect(store.visible.value).toEqual([])
   release?.()
   await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
   expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
+  store.selected.value = `${ACCOUNT}/${SPACE}`
   expect(store.selected.value).toBe(`${ACCOUNT}/${SPACE}`)
 })
 
@@ -276,4 +277,27 @@ it('does not infer empty membership from a stale or failed room catalog', async 
   rooms.value = [space(), plainRoom('!child:hs')]
   error.value = null
   expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
+})
+
+it('treats subspace-only parents as empty in the shallow room picker', async () => {
+  server.use(
+    http.get(
+      `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/space/children`,
+      ({ params }) =>
+        HttpResponse.json({
+          data:
+            String(params.roomId) === SPACE
+              ? [{ room_id: '!nested:hs', via: ['hs'], suggested: false }]
+              : [{ room_id: '!child:hs', via: ['hs'], suggested: false }],
+        }),
+    ),
+  )
+  const { store, rooms } = harness()
+  rooms.value = [space(), space('!nested:hs'), plainRoom('!child:hs')]
+  store.selected.value = `${ACCOUNT}/${SPACE}`
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  expect(store.visible.value.map((room) => room.room_id)).toEqual([
+    '!nested:hs',
+  ])
+  expect(store.selected.value).toBeNull()
 })

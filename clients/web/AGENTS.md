@@ -34,7 +34,8 @@ before starting a milestone.
   (`useServices()`). Tests build the same graph over msw + in-memory
   storage via `src/test/services.ts` — components never construct services.
 - **Space visibility** comes from `spaces.visible`, independent of room filters and sort.
-  Hide only confirmed empty joined-child projections; keep loading and failed roots available.
+  Hide only confirmed empty direct joined-room projections; keep unknown and failed roots available.
+  Keep cached empty roots hidden during background refetches; joined subspaces are independent picker roots, not recursive membership.
   Continue fetching hidden roots on child updates and reconnect so they can reappear.
 - **State is @preact/signals** in plain store factories
   (`src/stores/*.ts`), unit-testable without rendering. Direct

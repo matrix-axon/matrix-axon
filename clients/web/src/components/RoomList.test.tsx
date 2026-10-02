@@ -207,7 +207,13 @@ it('filters the room list to selected space children without overriding its sort
     last_activity_ts: 200,
   })
   const { findByRole, getByRole, queryByRole } = renderPage(
-    [OPS, space, first, second],
+    [
+      OPS,
+      space,
+      first,
+      second,
+      makeRoom({ room_id: '!removed:hs', name: 'Removed' }),
+    ],
     undefined,
     {
       withSpaces: true,
@@ -215,6 +221,7 @@ it('filters the room list to selected space children without overriding its sort
         '!whatsapp:hs': [
           { room_id: '!family:hs', via: ['hs'], suggested: false },
           { room_id: '!friends:hs', via: ['hs'], suggested: false },
+          { room_id: '!removed:hs', via: [], suggested: false },
         ],
       },
     },
@@ -223,6 +230,7 @@ it('filters the room list to selected space children without overriding its sort
   fireEvent.click(getByRole('button', { name: 'WhatsApp' }))
   await waitFor(() => expect(queryByRole('link', { name: /Ops/ })).toBeNull())
   expect(await findByRole('link', { name: /Friends/ })).toBeTruthy()
+  expect(queryByRole('link', { name: /Removed/ })).toBeNull()
   const links = [...document.querySelectorAll('.room-link')]
   expect(links.map((link) => link.textContent)).toEqual([
     expect.stringContaining('Friends'),

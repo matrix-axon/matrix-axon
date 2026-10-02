@@ -1116,3 +1116,56 @@ it('does not carry a saved-status banner into another room', async () => {
   // Nothing was saved in this room; claiming otherwise misattributes it.
   await waitFor(() => expect(view.queryByText(/Saved name\./)).toBeNull())
 })
+
+it('does not infer a parent from a removed cached space relationship', async () => {
+  const parent = '!parent:hs'
+  const activeParent = '!active-parent:hs'
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/space/children`,
+      ({ params }) =>
+        HttpResponse.json({
+          data:
+            String(params.roomId) === parent
+              ? [{ room_id: FIRST, via: [], suggested: false }]
+              : String(params.roomId) === activeParent
+                ? [{ room_id: FIRST, via: ['hs'], suggested: false }]
+                : [],
+        }),
+    ),
+    ...handlers(),
+  )
+  const services = testServices()
+  server.use(
+    http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+      HttpResponse.json({
+        data: [
+          room(FIRST, 'First'),
+          room(parent, 'Removed Parent', { room_type: 'm.space' }),
+          room(activeParent, 'Active Parent', { room_type: 'm.space' }),
+        ],
+      }),
+    ),
+  )
+  await services.rooms.refresh()
+  const members = createMembersStore(services.api, ACCOUNT, FIRST)
+  const view = render(
+    <ServicesContext.Provider value={services}>
+      <LocationProvider>
+        <RoomInfoPanel
+          accountId={ACCOUNT}
+          roomId={FIRST}
+          room={room(FIRST, 'First')}
+          roomTitles={new Map()}
+          members={members}
+          onClose={() => {}}
+        />
+      </LocationProvider>
+    </ServicesContext.Provider>,
+  )
+  await view.findByRole('button', { name: 'Parent: Active Parent' })
+  await waitFor(() => expect(services.spaces.loading.value.size).toBe(0))
+  expect(
+    view.queryByRole('button', { name: 'Parent: Removed Parent' }),
+  ).toBeNull()
+})
