@@ -57,7 +57,6 @@ struct Config {
     homeserver: String,
     mas_base: Url,
     database_url: String,
-    compatibility_token: String,
     matrix_password: String,
     user_id: OwnedUserId,
     trusted_device_id: String,
@@ -82,7 +81,6 @@ impl Config {
             mas_base: Url::parse(&required("MATRIX_OAUTH_MAS_BASE")?)
                 .context("parse MATRIX_OAUTH_MAS_BASE")?,
             database_url: required("MATRIX_OAUTH_DATABASE_URL")?,
-            compatibility_token: required("MATRIX_OAUTH_COMPATIBILITY_TOKEN")?,
             matrix_password: required("MATRIX_OAUTH_MATRIX_PASSWORD")?,
             user_id,
             trusted_device_id: required("MATRIX_OAUTH_TRUSTED_DEVICE_ID")?,
@@ -150,7 +148,6 @@ impl AxonProcess {
         let log_path = config.run_dir.join("axon.log");
         let store_key = format!("matrix-oauth-smoke-{}", Uuid::new_v4());
         let bearer_token = issue_axon_token(&config, &store_key)?;
-        secrets.remember(config.compatibility_token.clone());
         secrets.remember(config.matrix_password.clone());
         secrets.remember(store_key.clone());
         secrets.remember(bearer_token.clone());
@@ -378,9 +375,8 @@ impl Api {
         if status != expected {
             bail!("Axon API {operation} returned HTTP {status}; expected {expected}");
         }
-        let envelope: Envelope<T> = serde_json::from_str(&text)
-            .map_err(|_| anyhow!("Axon API {operation} returned an invalid success envelope"))?;
-        Ok(envelope.data)
+        decode_envelope(&text)
+            .map_err(|_| anyhow!("Axon API {operation} returned an invalid success envelope"))
     }
 
     async fn create_acquire(&self) -> Result<AcquireFlow> {
@@ -527,22 +523,34 @@ impl Api {
         .await
     }
 
-    async fn timeline(&self, account_id: Uuid, room_id: &str) -> Result<Timeline> {
+    async fn timeline(&self, account_id: Uuid, room_id: &str) -> TimelinePoll {
         let encoded: String = url::form_urlencoded::byte_serialize(room_id.as_bytes()).collect();
-        self.envelope(
-            "timeline lookup",
-            Method::GET,
-            &format!("/v1/accounts/{account_id}/rooms/{encoded}/timeline?limit=20"),
-            None,
-            StatusCode::OK,
-        )
-        .await
+        let response = self
+            .raw(
+                Method::GET,
+                &format!("/v1/accounts/{account_id}/rooms/{encoded}/timeline?limit=20"),
+                None,
+                true,
+            )
+            .await;
+        match response {
+            Err(_) => TimelinePoll::RequestFailed,
+            Ok((status, _)) if status != StatusCode::OK => TimelinePoll::HttpStatus(status),
+            Ok((_, text)) => match decode_envelope(&text) {
+                Ok(timeline) => TimelinePoll::Timeline(timeline),
+                Err(_) => TimelinePoll::InvalidResponse,
+            },
+        }
     }
 }
 
 #[derive(Deserialize)]
 struct Envelope<T> {
     data: T,
+}
+
+fn decode_envelope<T: DeserializeOwned>(text: &str) -> serde_json::Result<T> {
+    serde_json::from_str::<Envelope<T>>(text).map(|envelope| envelope.data)
 }
 
 #[derive(Clone, Deserialize)]
@@ -611,7 +619,76 @@ struct Timeline {
 
 #[derive(Deserialize)]
 struct TimelineEvent {
+    event_id: String,
+    #[serde(rename = "type")]
+    event_type: String,
+    redacted: bool,
     body: Option<String>,
+}
+
+enum TimelinePoll {
+    RequestFailed,
+    HttpStatus(StatusCode),
+    InvalidResponse,
+    Timeline(Timeline),
+}
+
+/// Only these classifications reach diagnostics, never response text or event data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryObservation {
+    RequestFailed,
+    HttpStatus(u16),
+    InvalidResponse,
+    MissingEvent,
+    EncryptedEvent,
+    RedactedEvent,
+    UnexpectedEventType,
+    BodyMismatch,
+    Decrypted,
+}
+
+impl std::fmt::Display for HistoryObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequestFailed => f.write_str("request_failed"),
+            Self::HttpStatus(status) => write!(f, "http_{status}"),
+            Self::InvalidResponse => f.write_str("invalid_response"),
+            Self::MissingEvent => f.write_str("missing_event"),
+            Self::EncryptedEvent => f.write_str("encrypted_event"),
+            Self::RedactedEvent => f.write_str("redacted_event"),
+            Self::UnexpectedEventType => f.write_str("unexpected_event_type"),
+            Self::BodyMismatch => f.write_str("body_mismatch"),
+            Self::Decrypted => f.write_str("decrypted"),
+        }
+    }
+}
+
+fn observe_history(poll: TimelinePoll, event_id: &str, marker: &str) -> HistoryObservation {
+    match poll {
+        TimelinePoll::RequestFailed => HistoryObservation::RequestFailed,
+        TimelinePoll::HttpStatus(status) => HistoryObservation::HttpStatus(status.as_u16()),
+        TimelinePoll::InvalidResponse => HistoryObservation::InvalidResponse,
+        TimelinePoll::Timeline(timeline) => {
+            let Some(event) = timeline
+                .events
+                .iter()
+                .find(|event| event.event_id == event_id)
+            else {
+                return HistoryObservation::MissingEvent;
+            };
+            if event.redacted {
+                HistoryObservation::RedactedEvent
+            } else if event.event_type == "m.room.encrypted" {
+                HistoryObservation::EncryptedEvent
+            } else if event.event_type != "m.room.message" {
+                HistoryObservation::UnexpectedEventType
+            } else if event.body.as_deref() != Some(marker) {
+                HistoryObservation::BodyMismatch
+            } else {
+                HistoryObservation::Decrypted
+            }
+        }
+    }
 }
 
 struct SeededPeer {
@@ -619,6 +696,71 @@ struct SeededPeer {
     room_id: OwnedRoomId,
     history_event_id: OwnedEventId,
     history_marker: String,
+}
+
+#[derive(Deserialize)]
+struct TrustedLogin {
+    access_token: String,
+    user_id: String,
+    device_id: String,
+}
+
+async fn trusted_session(config: &Config, secrets: &SecretTracker) -> Result<MatrixSession> {
+    // Synapse's delegated-auth listener does not serve password login. MAS's
+    // compatibility endpoint holds the user sync lock and commits the session
+    // before upserting the Synapse device. Its issue-compatibility-token CLI
+    // reverses that order, allowing provisioning to delete the new device.
+    let http = reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| anyhow!("build trusted-device login client failed"))?;
+    let url = config
+        .mas_base
+        .join("_matrix/client/v3/login")
+        .map_err(|_| anyhow!("build trusted-device login endpoint failed"))?;
+    let response = http
+        .post(url)
+        .json(&json!({
+            "type": "m.login.password",
+            "identifier": { "type": "m.id.user", "user": config.user_id.as_str() },
+            "password": config.matrix_password,
+            "device_id": config.trusted_device_id,
+        }))
+        .send()
+        .await
+        .map_err(|_| anyhow!("trusted-device password login request failed"))?;
+    if response.status() != StatusCode::OK {
+        bail!(
+            "trusted-device password login returned HTTP {}",
+            response.status().as_u16()
+        );
+    }
+    let body = bounded_body(
+        response,
+        "read trusted-device login response failed",
+        "trusted-device login response exceeded the harness limit",
+    )
+    .await?;
+    let login: TrustedLogin = serde_json::from_slice(&body)
+        .map_err(|_| anyhow!("trusted-device login returned an invalid response"))?;
+    secrets.remember(login.access_token.clone());
+    if login.user_id != config.user_id.as_str()
+        || login.device_id != config.trusted_device_id
+        || login.access_token.is_empty()
+    {
+        bail!("trusted-device login returned an unexpected identity or empty token");
+    }
+    Ok(MatrixSession {
+        meta: SessionMeta {
+            user_id: config.user_id.clone(),
+            device_id: login.device_id.as_str().into(),
+        },
+        tokens: SessionTokens {
+            access_token: login.access_token,
+            refresh_token: None,
+        },
+    })
 }
 
 async fn seed_trusted_peer(config: &Config, secrets: &SecretTracker) -> Result<SeededPeer> {
@@ -633,21 +775,10 @@ async fn seed_trusted_peer(config: &Config, secrets: &SecretTracker) -> Result<S
         .build()
         .await
         .map_err(|_| anyhow!("build trusted SDK client failed"))?;
+    let session = trusted_session(config, secrets).await?;
     client
         .matrix_auth()
-        .restore_session(
-            MatrixSession {
-                meta: SessionMeta {
-                    user_id: config.user_id.clone(),
-                    device_id: config.trusted_device_id.as_str().into(),
-                },
-                tokens: SessionTokens {
-                    access_token: config.compatibility_token.clone(),
-                    refresh_token: None,
-                },
-            },
-            RoomLoadSettings::default(),
-        )
+        .restore_session(session, RoomLoadSettings::default())
         .await
         .map_err(|_| anyhow!("restore trusted SDK session failed"))?;
     client
@@ -1182,21 +1313,35 @@ async fn wait_account_ready(api: &Api, account_id: Uuid) -> Result<()> {
 
 async fn wait_axon_decrypts(api: &Api, account_id: Uuid, peer: &SeededPeer) -> Result<()> {
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+    let mut last = None;
+    let mut polls = 0;
+    let mut api_failures = 0;
+    let mut event_seen = false;
+    let mut encrypted_seen = false;
     loop {
-        if api
-            .timeline(account_id, peer.room_id.as_str())
-            .await
-            .is_ok_and(|timeline| {
-                timeline
-                    .events
-                    .iter()
-                    .any(|event| event.body.as_deref() == Some(peer.history_marker.as_str()))
-            })
-        {
+        let observation = observe_history(
+            api.timeline(account_id, peer.room_id.as_str()).await,
+            peer.history_event_id.as_str(),
+            &peer.history_marker,
+        );
+        polls += 1;
+        match observation {
+            HistoryObservation::RequestFailed
+            | HistoryObservation::HttpStatus(_)
+            | HistoryObservation::InvalidResponse => api_failures += 1,
+            HistoryObservation::MissingEvent => {}
+            _ => event_seen = true,
+        }
+        encrypted_seen |= observation == HistoryObservation::EncryptedEvent;
+        if last != Some(observation) {
+            eprintln!("matrix-oauth: history observation {observation}");
+            last = Some(observation);
+        }
+        if observation == HistoryObservation::Decrypted {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            bail!("Axon did not decrypt the pre-login encrypted history");
+            bail!("Axon did not decrypt the pre-login encrypted history (polls={polls}, api_failures={api_failures}, event_seen={event_seen}, encrypted_seen={encrypted_seen}, last={observation})");
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
@@ -1614,9 +1759,195 @@ mod tests {
     use anyhow::anyhow;
 
     use super::{
-        assert_mas_decision, bounded_body, combine_run_outcomes, wait_for_health, Approval,
-        BODY_LIMIT,
+        assert_mas_decision, bounded_body, combine_run_outcomes, observe_history, trusted_session,
+        wait_for_health, Api, Approval, Config, HistoryObservation, SecretTracker, Timeline,
+        TimelineEvent, TimelinePoll, BODY_LIMIT,
     };
+
+    #[tokio::test]
+    async fn trusted_login_validates_identity_and_redacts_errors_and_redirects() {
+        let token = "opaque-runtime-protocol-material";
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("read test server address");
+        let server = thread::spawn(move || {
+            let valid = serde_json::json!({
+                "access_token": token, "user_id": "@alice:localhost", "device_id": "TRUSTED"
+            })
+            .to_string();
+            let wrong = serde_json::json!({
+                "access_token": token, "user_id": "@other:localhost", "device_id": "TRUSTED"
+            })
+            .to_string();
+            for (status, body) in [
+                ("200 OK", valid.as_str()),
+                ("200 OK", wrong.as_str()),
+                ("401 Unauthorized", token),
+                ("302 Found", token),
+            ] {
+                let (mut stream, _) = listener.accept().expect("accept login request");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("bound login request read");
+                let mut request = [0_u8; 4096];
+                let size = stream.read(&mut request).expect("read login request");
+                assert!(request[..size].starts_with(b"POST /_matrix/client/v3/login "));
+                write!(stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nLocation: http://127.0.0.1:9/\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ).expect("write login response");
+            }
+        });
+        let config = Config {
+            mode: "api".into(),
+            homeserver: "http://127.0.0.1:9".into(),
+            mas_base: reqwest::Url::parse(&format!("http://{address}/"))
+                .expect("parse test MAS endpoint"),
+            database_url: String::new(),
+            matrix_password: token.into(),
+            user_id: "@alice:localhost".try_into().expect("parse test user"),
+            trusted_device_id: "TRUSTED".into(),
+            run_dir: Default::default(),
+            axon_bin: Default::default(),
+            axon_port: 0,
+        };
+        let secrets = SecretTracker::default();
+        let session = trusted_session(&config, &secrets)
+            .await
+            .expect("valid login succeeds");
+        assert_eq!(session.meta.user_id, config.user_id);
+        assert_eq!(session.meta.device_id.as_str(), config.trusted_device_id);
+        assert!(secrets
+            .0
+            .lock()
+            .expect("secret tracker lock")
+            .iter()
+            .any(|value| value == token));
+        for expected in [
+            "trusted-device login returned an unexpected identity or empty token",
+            "trusted-device password login returned HTTP 401",
+            "trusted-device password login returned HTTP 302",
+        ] {
+            let Err(error) = trusted_session(&config, &secrets).await else {
+                panic!("invalid login unexpectedly succeeded");
+            };
+            let error = error.to_string();
+            assert_eq!(error, expected);
+            assert!(!error.contains(token));
+        }
+        server.join().expect("join test server");
+    }
+
+    #[tokio::test]
+    async fn history_poll_classifies_http_and_schema_failures_without_response_text() {
+        // Treat the same opaque sentinel as an access token, body, and schema
+        // error input. None of them may be incorporated into diagnostics.
+        let opaque = "opaque-runtime-protocol-material";
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("read test server address");
+        let server = thread::spawn(move || {
+            for (status, body) in [("401 Unauthorized", opaque), ("200 OK", opaque)] {
+                let (mut stream, _) = listener.accept().expect("accept test request");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("bound test request read");
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request);
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .expect("write test response");
+            }
+        });
+        let api = Api::new(
+            format!("http://{address}"),
+            opaque.into(),
+            "@alice:localhost".into(),
+        )
+        .expect("build test API");
+        let account_id = uuid::Uuid::new_v4();
+        for expected in [
+            HistoryObservation::HttpStatus(401),
+            HistoryObservation::InvalidResponse,
+        ] {
+            let observation = observe_history(
+                api.timeline(account_id, "!room:localhost").await,
+                opaque,
+                opaque,
+            );
+            assert_eq!(observation, expected);
+            assert!(!observation.to_string().contains(opaque));
+        }
+        server.join().expect("join test server");
+    }
+
+    #[test]
+    fn history_requires_the_seeded_event_and_distinguishes_stalled_decryption() {
+        let event_id = "$expected:localhost";
+        let marker = "opaque-runtime-protocol-material";
+        let cases = [
+            (
+                "$other:localhost",
+                "m.room.message",
+                false,
+                Some(marker),
+                HistoryObservation::MissingEvent,
+            ),
+            (
+                event_id,
+                "m.room.encrypted",
+                false,
+                None,
+                HistoryObservation::EncryptedEvent,
+            ),
+            (
+                event_id,
+                "m.room.message",
+                true,
+                None,
+                HistoryObservation::RedactedEvent,
+            ),
+            (
+                event_id,
+                marker,
+                false,
+                Some(marker),
+                HistoryObservation::UnexpectedEventType,
+            ),
+            (
+                event_id,
+                "m.room.message",
+                false,
+                Some("wrong body"),
+                HistoryObservation::BodyMismatch,
+            ),
+            (
+                event_id,
+                "m.room.message",
+                false,
+                Some(marker),
+                HistoryObservation::Decrypted,
+            ),
+        ];
+        for (actual_id, event_type, redacted, body, expected) in cases {
+            let observation = observe_history(
+                TimelinePoll::Timeline(Timeline {
+                    events: vec![TimelineEvent {
+                        event_id: actual_id.into(),
+                        event_type: event_type.into(),
+                        redacted,
+                        body: body.map(str::to_owned),
+                    }],
+                }),
+                event_id,
+                marker,
+            );
+            assert_eq!(observation, expected);
+            assert!(!observation.to_string().contains(marker));
+            assert!(!observation.to_string().contains(event_id));
+        }
+    }
 
     #[tokio::test]
     async fn bounded_body_rejects_an_unfinished_chunked_response() {
