@@ -10,6 +10,7 @@ import WebSocketClient from '@tauri-apps/plugin-websocket'
 import { fileFromPath } from '../media/dropped-file'
 import { MAX_UPLOAD_BYTES } from '../media/media-service'
 import { basename } from '../media/filename'
+import { isMenuCommand } from './index'
 import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 import { NO_NATIVE_AUTH, type NativeAuth } from './native-auth'
 
@@ -489,7 +490,7 @@ export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
     // elsewhere this subscription simply never fires.
     onMenuCommand: (handler) => {
       const ready = listen<string>(MENU_EVENT, (event) => {
-        if (event.payload === 'help' || event.payload === 'privacy') {
+        if (isMenuCommand(event.payload)) {
           handler(event.payload)
         }
       })

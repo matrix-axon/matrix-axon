@@ -402,8 +402,17 @@ describe('native menu commands (ADR 0107)', () => {
     const deliver = callback as (event: { payload: string }) => void
     deliver({ payload: 'help' })
     deliver({ payload: 'privacy' })
+    deliver({ payload: 'zoom-in' })
+    deliver({ payload: 'zoom-out' })
+    deliver({ payload: 'zoom-reset' })
     deliver({ payload: 'quit' })
-    expect(handler.mock.calls).toEqual([['help'], ['privacy']])
+    expect(handler.mock.calls).toEqual([
+      ['help'],
+      ['privacy'],
+      ['zoom-in'],
+      ['zoom-out'],
+      ['zoom-reset'],
+    ])
     unsubscribe()
   })
 })

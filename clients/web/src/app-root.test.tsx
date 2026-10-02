@@ -1,7 +1,7 @@
 import { cleanup, render, screen } from '@testing-library/preact'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AppRoot } from './app-root'
-import { browserPlatform, type Platform } from './platform'
+import { browserPlatform, type MenuCommand, type Platform } from './platform'
 import { resolveApiBaseUrl } from './services'
 import { SERVER_URL_KEY } from './server-url'
 import type { LiveSocket } from './platform'
@@ -99,6 +99,46 @@ describe('AppRoot relaying the native menu (ADR 0107)', () => {
     view.unmount()
     expect(unsubscribe).toHaveBeenCalled()
     window.removeEventListener('axon:show-help', help)
+  })
+})
+
+describe('AppRoot answering the View menu (ADR 0107)', () => {
+  it('zooms as the key press would, on the platform modifier', async () => {
+    // A Mac: the replayed chord must carry ⌘, which is all the page's own
+    // zoom handler accepts there.
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)',
+    )
+    let send: ((command: MenuCommand) => void) | undefined
+    const setZoom = vi.fn<(factor: number) => Promise<void>>(() =>
+      Promise.resolve(),
+    )
+    const services = testServices({ platform: { setZoom } })
+    const platform: Platform = {
+      ...shellPlatform(),
+      onMenuCommand: (handler) => {
+        send = handler
+        return () => {}
+      },
+    }
+    render(
+      <AppRoot
+        services={services}
+        platform={platform}
+        storage={memoryStorage()}
+      />,
+    )
+
+    send!('zoom-in')
+    expect(services.settings.zoom.value).toBe(1.1)
+    send!('zoom-in')
+    expect(services.settings.zoom.value).toBe(1.25)
+    send!('zoom-out')
+    expect(services.settings.zoom.value).toBe(1.1)
+    send!('zoom-reset')
+    expect(services.settings.zoom.value).toBe(1)
+    await vi.waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1))
+    vi.restoreAllMocks()
   })
 })
 

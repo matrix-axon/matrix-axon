@@ -299,7 +299,8 @@ export interface Platform {
    * Subscribe to commands from a native menu bar; returns an unsubscribe.
    *
    * `null` wherever there is no such menu: a browser, and every shell but
-   * macOS, whose Help menu carries "Axon Help" and "Privacy Policy" (ADR 0107).
+   * macOS, whose View menu carries the zoom items and whose Help menu carries
+   * "Axon Help" and "Privacy Policy" (ADR 0107).
    * The menu only relays: the commands open what the page already has.
    */
   onMenuCommand:
@@ -307,7 +308,18 @@ export interface Platform {
 }
 
 /** What a native menu item asks the page to do. */
-export type MenuCommand = 'help' | 'privacy'
+export const MENU_COMMANDS = [
+  'help',
+  'privacy',
+  'zoom-in',
+  'zoom-out',
+  'zoom-reset',
+] as const
+export type MenuCommand = (typeof MENU_COMMANDS)[number]
+
+export function isMenuCommand(value: unknown): value is MenuCommand {
+  return (MENU_COMMANDS as readonly unknown[]).includes(value)
+}
 
 /**
  * The web implementation: the page's own `fetch` and `WebSocket`.

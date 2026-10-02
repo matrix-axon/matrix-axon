@@ -291,8 +291,23 @@ const MENU_EVENT: &str = "axon://menu";
 const MENU_HELP: &str = "help";
 #[cfg(target_os = "macos")]
 const MENU_PRIVACY: &str = "privacy";
+#[cfg(target_os = "macos")]
+const MENU_ZOOM_IN: &str = "zoom-in";
+#[cfg(target_os = "macos")]
+const MENU_ZOOM_OUT: &str = "zoom-out";
+#[cfg(target_os = "macos")]
+const MENU_ZOOM_RESET: &str = "zoom-reset";
+#[cfg(target_os = "macos")]
+const MENU_COMMANDS: [&str; 5] = [
+    MENU_HELP,
+    MENU_PRIVACY,
+    MENU_ZOOM_IN,
+    MENU_ZOOM_OUT,
+    MENU_ZOOM_RESET,
+];
 
-/// The macOS menu bar: Tauri's default, with the app's own entries in Help.
+/// The macOS menu bar: Tauri's default, with zoom in View and the app's own
+/// entries in Help.
 ///
 /// macOS apps are expected to put their help, and App Store apps their privacy
 /// policy, in the Help menu, which Tauri's default leaves empty (the system
@@ -304,6 +319,33 @@ fn app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tauri
     use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, HELP_SUBMENU_ID};
 
     let menu = Menu::default(app)?;
+    // Zoom at the top of View, as every Mac app with zoom has it. The page binds
+    // the same keys, and a key the page handles never reaches the menu, so the
+    // two cannot both fire; this is the route that still works if the webview
+    // ever stops handing ⌘= and friends to the page (ADR 0107).
+    let view = menu.items()?.into_iter().find_map(|item| match item {
+        MenuItemKind::Submenu(submenu) if submenu.text().ok().as_deref() == Some("View") => {
+            Some(submenu)
+        }
+        _ => None,
+    });
+    if let Some(view) = view {
+        view.insert_items(
+            &[
+                &MenuItem::with_id(app, MENU_ZOOM_IN, "Zoom In", true, Some("CmdOrCtrl+="))?,
+                &MenuItem::with_id(app, MENU_ZOOM_OUT, "Zoom Out", true, Some("CmdOrCtrl+-"))?,
+                &MenuItem::with_id(
+                    app,
+                    MENU_ZOOM_RESET,
+                    "Actual Size",
+                    true,
+                    Some("CmdOrCtrl+0"),
+                )?,
+                &PredefinedMenuItem::separator(app)?,
+            ],
+            0,
+        )?;
+    }
     if let Some(MenuItemKind::Submenu(help)) = menu.get(HELP_SUBMENU_ID) {
         help.append_items(&[
             // ⇧⌘/ is ⌘? — the Mac's help key, which the page binds as well.
@@ -321,7 +363,7 @@ fn app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tauri
 fn forward_menu_command<R: tauri::Runtime>(app: &tauri::AppHandle<R>, id: &str) {
     use tauri::Emitter as _;
 
-    if id != MENU_HELP && id != MENU_PRIVACY {
+    if !MENU_COMMANDS.contains(&id) {
         return;
     }
     if let Err(error) = app.emit_to("main", MENU_EVENT, id) {
