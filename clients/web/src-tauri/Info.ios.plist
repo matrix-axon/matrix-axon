@@ -69,5 +69,22 @@
       </array>
     </dict>
   </array>
+
+  <!--
+    For the "Video" mode of the composer's camera picker ("Take Photo or
+    Video"), which records audio. iOS does not refuse the microphone when this
+    key is missing: it terminates the app the moment the picker asks, so
+    choosing "Video" crashed the shell while "Photo" (camera only) worked. The
+    camera string is in the shared Info.plist.
+
+    iOS-only because macOS records no audio: Entitlements.plist omits
+    `com.apple.security.device.audio-input` on purpose, and a purpose string
+    there would claim a use the app does not have. If the macOS shell ever
+    records audio, it needs both the entitlement and this key in Info.plist.
+
+    package-ios.sh refuses an .ipa that lacks it.
+  -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Axon uses the microphone to record audio when you capture a video to send.</string>
 </dict>
 </plist>

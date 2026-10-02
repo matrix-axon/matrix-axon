@@ -315,6 +315,16 @@ if [ "$scheme" != "$expected_scheme" ]; then
   echo "       the merged Info.plist is $tauri_dir/gen/apple/axon_iOS/Info.plist; its source is Info.ios.plist" >&2
   problems=1
 fi
+# iOS does not refuse a privacy-sensitive API whose purpose string is missing;
+# it terminates the app the moment it asks. Without the microphone string,
+# choosing "Video" in the composer's camera picker crashed the shell (#541).
+for usage_key in NSCameraUsageDescription NSMicrophoneUsageDescription; do
+  if ! plutil -extract "$usage_key" raw -o - "$shipped_plist" >/dev/null 2>&1; then
+    echo "error: the .ipa lacks $usage_key — iOS would kill the app when the composer's camera picker asks for it" >&2
+    echo "       the merged Info.plist is $tauri_dir/gen/apple/axon_iOS/Info.plist; its sources are Info.plist and Info.ios.plist" >&2
+    problems=1
+  fi
+done
 if codesign -d --entitlements - --xml "$shipped_app" 2>/dev/null | grep -q com.apple.developer.applesignin; then
   echo "    apple sign-in: entitled"
 else
