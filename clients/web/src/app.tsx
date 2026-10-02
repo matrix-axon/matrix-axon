@@ -62,6 +62,7 @@ import {
 } from './services'
 import { disconnectFromServer } from './server-url'
 import { DEFAULT_ZOOM, stepZoom } from './zoom'
+import { useExternalLinks } from './external-links'
 import {
   PrivacyPage,
   usePrivacyInPlace,
@@ -182,6 +183,9 @@ export function App({
   )
 
   useEffect(() => applyTheme(svc.settings, document.documentElement), [svc])
+  // Above the sign-in gate, so the signed-out screen's links (the privacy
+  // policy's) open in the browser too, not only the shell's.
+  useExternalLinks(svc.platform)
   useEffect(() => applyAppBadge(svc.settings, svc.rooms), [svc])
   // The stored preference drives instrumentation; `?perf=1` still wins for a
   // single session, since `perfEnabled` latches it before this runs.
@@ -797,27 +801,6 @@ function SidebarPaneHandle({
  * it on a room switch would throw away its scroll position and the room list's
  * session-only name/account filters.
  */
-/**
- * Whether this href leaves the app.
- *
- * Same-origin links are the client's own routes and must stay in-window; a
- * `matrix:` link is handled by the caller before this is reached. Anything
- * http(s) elsewhere is a link to the web, which in a packaged build has to be
- * handed to the user's real browser.
- */
-function isExternalHref(href: string): boolean {
-  let url: URL
-  try {
-    url = new URL(href, window.location.href)
-  } catch {
-    return false
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return false
-  }
-  return url.origin !== window.location.origin
-}
-
 function ShellChrome() {
   const location = useLocation()
   const { path, query } = location
@@ -1205,25 +1188,8 @@ function ShellChrome() {
       }
       const reference = parseMatrixRoomReference(anchor.href)
       if (reference === null) {
-        // Not a room link. In a browser the anchor's own `target="_blank"` is
-        // already right and this must not interfere; in a packaged build there
-        // is no tab to open into, so an untouched external link navigates the
-        // *app window* to that page and the app is gone until restarted.
-        // `openExternal` is null exactly when the default is correct.
-        const openExternal = svcPlatform.openExternal
-        if (openExternal !== null && isExternalHref(anchor.href)) {
-          event.preventDefault()
-          // Logged, not swallowed. There is nothing to show the user — the
-          // click is already prevented, so no fallback remains and no advice
-          // would help — but a denied capability scope or an absent handler
-          // presents exactly as a link that does nothing, and that needs a
-          // trace somewhere. `openExternal` builds this message to be safe to
-          // record: an origin, never the query, which can carry a signed media
-          // URL or credentials.
-          void openExternal(anchor.href).catch((err: unknown) => {
-            console.error(err)
-          })
-        }
+        // Not a room link: `useExternalLinks`, mounted above every screen,
+        // owns the rest.
         return
       }
       const accountId = accountIdForRoomEntry(
