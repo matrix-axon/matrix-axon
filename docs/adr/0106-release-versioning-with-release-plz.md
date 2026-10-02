@@ -51,7 +51,7 @@ Configuration (`release-plz.toml`):
 - `git_tag_name = "v{{ version }}"`, the existing tag format.
 - Every crate inherits the workspace version, so only `axon-server` creates the tag; with tagging on for all fourteen, every crate would try to create the same one.
 - `git_release_enable = false`: the tag workflows already create and fill the GitHub Release, and a second writer would race them.
-- `changelog_update = false`: commit subjects here are only partly conventional, so a generated changelog would be mostly noise. Revisit if they become consistent.
+- `changelog_update = false`: commit subjects here are only partly conventional, so a generated changelog would be mostly noise. ADR 0108 generates the notes and `CHANGELOG.md` from PR labels instead.
 - `semver_check = false`: these are binaries; there is no library API for cargo-semver-checks to compare.
 - Crates that ship in no artifact (`axon-itest`, `axon-test-support`, the four `axon-smoke-*`) get `release = false` and a tag template no tag uses, `{{ package }}-v{{ version }}`.
   See "New crates" below for why the template is the part that matters.

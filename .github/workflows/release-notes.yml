@@ -1,0 +1,209 @@
+name: Release notes
+
+# Release notes and CHANGELOG.md, grouped by PR label (ADR 0108,
+# .github/release.yml, scripts/release-notes.sh).
+#
+#   draft      After each Release-plz run on main: keeps a draft GitHub
+#              Release for the pending release PR's version, filled with the
+#              PRs merged since the last tag. Edit that draft before merging
+#              the release PR; it is not overwritten once edited.
+#   publish    On the vX.Y.Z tag: publishes the draft (or generates notes if
+#              there is none) as the GitHub Release. The build workflows
+#              then attach their files to it.
+#   changelog  Opens a PR that adds the published notes to CHANGELOG.md.
+
+on:
+  workflow_run:
+    workflows: [Release-plz]
+    types: [completed]
+    branches: [main]
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: >-
+          Regenerate the draft even if its notes were edited by hand,
+          discarding those edits.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  draft:
+    name: Update the draft release notes
+    if: >-
+      github.repository == 'matrix-axon/matrix-axon' &&
+      github.event_name != 'push' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Two Release-plz runs close together must not both write the draft.
+    concurrency:
+      group: release-notes-draft
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      FORCE: ${{ inputs.force }}
+    steps:
+      # Full history: the notes start from the last v* tag.
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Find the pending release
+        id: pending
+        run: |
+          # release-plz's branches start with release-plz- (its default).
+          # With none open there is nothing to draft; the merge of a release
+          # PR lands here too, and the publish job owns that release.
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" \
+            --jq '[.[] | select(.head.ref | startswith("release-plz-"))][0].head.sha // empty')
+          if [ -z "$sha" ]; then
+            echo "::notice::No open release PR; nothing to draft."
+            exit 0
+          fi
+          version=$(gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/$GITHUB_REPOSITORY/contents/Cargo.toml?ref=$sha" |
+            python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["workspace"]["package"]["version"])')
+          echo "tag=v$version" >>"$GITHUB_OUTPUT"
+
+      - name: Create or update the draft
+        if: steps.pending.outputs.tag != ''
+        env:
+          TAG: ${{ steps.pending.outputs.tag }}
+        run: |
+          scripts/release-notes.sh generate "$TAG" | scripts/release-notes.sh stamp >generated.md
+
+          # Our draft: the one for this tag, or one an earlier version of the
+          # release PR left behind (its notes carry the marker).
+          draft=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq \
+            "[.[] | select(.draft and (.tag_name == \"$TAG\" or ((.body // \"\") | contains(\"release-notes-sha256\"))))][0] // empty")
+
+          if [ -z "$draft" ]; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$TAG" -f name="$TAG" -f target_commitish=main \
+              -F draft=true -F body=@generated.md >/dev/null
+            echo "::notice::Created draft release $TAG."
+            exit 0
+          fi
+
+          id=$(jq -r .id <<<"$draft")
+          jq -r '.body // ""' <<<"$draft" >current.md
+          args=(-f tag_name="$TAG" -f name="$TAG")
+          if [ "$FORCE" = true ] || ! scripts/release-notes.sh edited current.md; then
+            args+=(-F body=@generated.md)
+          else
+            echo "::warning::The notes for $TAG were edited by hand, so new PRs were not added. Rerun this workflow with force to regenerate them."
+          fi
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$id" "${args[@]}" >/dev/null
+          echo "::notice::Updated draft release $TAG."
+
+  publish:
+    name: Publish the GitHub Release
+    if: ${{ github.repository == 'matrix-axon/matrix-axon' && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Serialize with the build workflows' first-time Release creates (same
+    # group as their release jobs). This job needs no build, so it runs first.
+    concurrency:
+      group: github-release-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Publish the release
+        run: |
+          draft_id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq "[.[] | select(.draft and .tag_name == \"$TAG\")][0].id // empty")
+          if [ -n "$draft_id" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/releases/$draft_id" --jq '.body // ""' |
+              scripts/release-notes.sh strip >notes.md
+          else
+            scripts/release-notes.sh generate "$TAG" >notes.md
+          fi
+
+          # Publishing a draft in place keeps one release per tag. A
+          # published release already here (a hand-made tag, or a build
+          # workflow that got in first) only gets notes if it has none.
+          published=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id 2>/dev/null || true)
+          if [ -n "$published" ]; then
+            body=$(gh api "repos/$GITHUB_REPOSITORY/releases/$published" --jq '.body // ""')
+            if [ -z "$body" ]; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$published" -F body=@notes.md >/dev/null
+            fi
+            if [ -n "$draft_id" ]; then
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$draft_id"
+            fi
+          elif [ -n "$draft_id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$draft_id" \
+              -f tag_name="$TAG" -f name="$TAG" -F draft=false -F body=@notes.md >/dev/null
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file notes.md
+          fi
+
+  changelog:
+    name: Open the CHANGELOG.md PR
+    needs: publish
+    runs-on: ubuntu-latest
+    # A PR from GITHUB_TOKEN would get none of the required checks, so this
+    # uses the same PAT as release-plz.yml. contents/pull-requests write
+    # comes from that token, not from this block.
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Require RELEASE_PLZ_TOKEN
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::RELEASE_PLZ_TOKEN is not set. The CHANGELOG.md PR would start no workflows with GITHUB_TOKEN."
+            exit 1
+          fi
+
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - name: Add the release to CHANGELOG.md
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.body // ""' >notes.md
+          scripts/release-notes.sh changelog "$TAG" notes.md
+          if git diff --quiet -- CHANGELOG.md && [ -z "$(git ls-files --others --exclude-standard CHANGELOG.md)" ]; then
+            echo "::notice::CHANGELOG.md already has $TAG."
+            exit 0
+          fi
+          branch="changelog/$TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add CHANGELOG.md
+          git commit -m "docs: add $TAG to CHANGELOG.md"
+          git push --force origin "$branch"
+          # release.yml leaves this label out of the next release's notes.
+          gh label create skip-changelog --color ededed \
+            --description "Left out of the generated release notes" 2>/dev/null || true
+          gh pr create --base main --head "$branch" \
+            --title "docs: add $TAG to CHANGELOG.md" \
+            --label skip-changelog \
+            --body "Adds the published notes for $TAG to CHANGELOG.md. Opened by release-notes.yml (ADR 0108)."

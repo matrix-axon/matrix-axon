@@ -1,0 +1,43 @@
+# Groups GitHub's generated release notes by PR label (ADR 0108).
+#
+# scripts/release-notes.sh asks the generate-notes API for the notes, and the
+# API reads this file from the default branch. A PR lands in the first
+# category that has one of its labels, so a PR labelled both `bug` and
+# `security` is listed under Breaking Changes, Security, or Bug Fixes by
+# whichever comes first below. Unlabelled PRs fall into Other Changes.
+changelog:
+  exclude:
+    labels:
+      # The release PR and the PR that records a release in CHANGELOG.md.
+      - skip-changelog
+  categories:
+    - title: Breaking Changes
+      labels:
+        - breaking-change
+    - title: Security
+      labels:
+        - security
+    - title: Features
+      labels:
+        - enhancement
+        - feature
+    - title: Bug Fixes
+      labels:
+        - bug
+        - fix
+    - title: Performance
+      labels:
+        - performance
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Build and CI
+      labels:
+        - build
+        - ci
+    - title: Other Changes
+      labels:
+        - "*"
