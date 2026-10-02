@@ -803,8 +803,7 @@ impl App {
             self.activate_sidebar_room(index);
             return;
         }
-        self.rooms.selected = Some(index);
-        self.reveal_room_parent(index);
+        self.prepare_room_selection(index);
         self.load_selected_timeline().await;
     }
 

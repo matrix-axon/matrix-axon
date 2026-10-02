@@ -107,6 +107,7 @@ pub(crate) struct SpacesState {
     launch_deadline: Option<Instant>,
     launch_started: bool,
     navigation: Option<SpaceNavigation>,
+    reconnect_refresh_at: Option<Instant>,
 }
 
 impl Default for SpacesState {
@@ -132,6 +133,7 @@ impl Default for SpacesState {
             launch_deadline: None,
             launch_started: false,
             navigation: None,
+            reconnect_refresh_at: None,
         }
     }
 }
@@ -502,18 +504,12 @@ impl App {
             self.bootstrap,
             BootstrapStage::Rooms | BootstrapStage::DeviceState
         );
-        self.cancel_space_launch();
-        self.spaces.navigation = None;
-        self.rooms.selected = Some(index);
-        self.reveal_room_parent(index);
+        self.prepare_room_selection(index);
         self.messages.selection = None;
         self.messages.scroll = usize::MAX;
         self.last_jump_ts = None;
         self.force_terminal_clear = true;
         self.thread_panel = None;
-        if let Some(pending) = self.spaces.timeline.take() {
-            pending.abort.abort();
-        }
         if defer_until_markers {
             return;
         }
@@ -862,6 +858,17 @@ impl App {
             })
     }
 
+    /// Share selection cleanup with historical jumps without starting a competing timeline read.
+    pub(crate) fn prepare_room_selection(&mut self, index: usize) {
+        self.cancel_space_launch();
+        self.spaces.navigation = None;
+        if let Some(pending) = self.spaces.timeline.take() {
+            pending.abort.abort();
+        }
+        self.rooms.selected = Some(index);
+        self.reveal_room_parent(index);
+    }
+
     pub(crate) fn reveal_room_parent(&mut self, index: usize) {
         self.spaces.focus = None;
         if let Some(key) = self.room_parent_key(index) {
@@ -923,9 +930,28 @@ impl App {
         self.spaces.order_retry_at = None;
     }
 
+    /// Wait for the connection to settle before reconciling missed room and space changes.
+    /// Reconnects preserve failed reads' retry deadlines; explicit refresh can still retry immediately.
+    pub(crate) fn request_space_reconnect_refresh(&mut self, now: Instant) {
+        self.spaces.reconnect_refresh_at = Some(now + Duration::from_secs(1));
+    }
+
+    fn sweep_space_reconnect_refresh(&mut self, now: Instant) {
+        if self.spaces.reconnect_refresh_at.is_none_or(|at| now < at) {
+            return;
+        }
+        self.spaces.reconnect_refresh_at = None;
+        for state in self.spaces.children.values_mut() {
+            state.dirty = true;
+        }
+        self.spaces.order_read_again = true;
+        self.request_rooms_refresh();
+    }
+
     /// Visible roots and invalidated caches acquire worker permits. No task is
     /// spawned to wait for a permit, keeping both active work and queues bounded.
     pub(crate) fn sweep_spaces(&mut self, now: Instant) {
+        self.sweep_space_reconnect_refresh(now);
         self.finish_space_launch(now);
         self.finish_space_navigation();
         self.sweep_space_order(now);

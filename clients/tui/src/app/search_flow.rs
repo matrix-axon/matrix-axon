@@ -672,7 +672,7 @@ impl App {
             self.status = Status::from("search result room is not visible".to_owned());
             return;
         };
-        self.rooms.selected = Some(room_index);
+        self.prepare_room_selection(room_index);
         self.accounts.selected = self
             .accounts
             .accounts

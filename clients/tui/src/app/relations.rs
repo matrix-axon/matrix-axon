@@ -95,7 +95,7 @@ impl App {
         self.popup_scroll = 0;
         self.unread_thread_selection = 0;
         self.unread_thread_selected = None;
-        self.rooms.selected = Some(room_index);
+        self.prepare_room_selection(room_index);
         if !already_selected {
             self.load_selected_timeline().await;
         }

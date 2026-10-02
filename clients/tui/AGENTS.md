@@ -64,6 +64,8 @@
   negative answer so it stops asking. A per-room cooldown bounds repeats of one
   room; it does not bound how many rooms are in flight, which is the property
   that matters on a server with thousands of them.
+  Reconnect room/membership reconciliation waits for one second of connection stability and preserves failed reads' retry deadlines.
+  Explicit refresh still retries immediately.
   Space membership is also refreshed off screen when an already loaded cache is invalidated: that cache governs ownership and whether an empty root stays hidden.
   These refreshes share the same pool and never queue tasks waiting for permits.
 - **Never `await` an API call from key handling or a draw-adjacent path.** Spawn the work as a task and apply its result through the main-loop outcome channel (the lifecycle verbs under _Mutations_ are the model). Blocking the loop freezes input and redraw.

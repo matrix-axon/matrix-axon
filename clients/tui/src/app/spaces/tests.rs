@@ -1318,3 +1318,94 @@ fn refreshing_an_empty_root_explains_its_visibility_until_membership_settles() {
     let buffer = render(&mut app, 120, 20);
     assert!(!room_text(&app, &buffer).contains("Work"));
 }
+
+#[tokio::test]
+async fn historical_search_jump_reveals_parent_and_cancels_sidebar_read() {
+    use crate::app::search_flow::{SearchJumpAction, SearchOutcome};
+    let mut app = app();
+    app.bootstrap = BootstrapStage::Done;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    app.spaces.tx = Some(tx);
+    app.activate_sidebar_room(2);
+    assert!(app.spaces.timeline.is_some());
+    app.spaces.collapsed.insert(key("!work:srv"));
+    app.spaces.focus = Some(key("!club:srv"));
+    let hit: EventDto = serde_json::from_value(serde_json::json!({
+        "account_id": Uuid::nil(), "room_id": "!a:srv", "event_id": "$hit:srv",
+        "sender": "@me:srv", "type": "m.room.message", "origin_ts": 1,
+        "content": {"msgtype": "m.text", "body": "hit"}, "body": "hit",
+        "redacted": false, "arrival_order": 1
+    }))
+    .unwrap();
+    app.handle_search_outcome(SearchOutcome::Jump {
+        hit: hit.clone(),
+        action: SearchJumpAction::View,
+        room_refresh: None,
+        result: Ok(TimelinePage {
+            events: vec![hit],
+            next_cursor: None,
+        }),
+        thread_load: None,
+    });
+    assert_eq!(app.selected_room().unwrap().room_id, "!a:srv");
+    assert_eq!(app.messages.selection.as_deref(), Some("$hit:srv"));
+    assert!(app.spaces.focus.is_none());
+    assert!(!app.spaces.collapsed.contains(&key("!work:srv")));
+    assert!(app.spaces.timeline.is_none());
+}
+
+#[tokio::test]
+async fn unread_thread_jump_reveals_already_selected_collapsed_room() {
+    use crate::app::UnreadThread;
+    let mut app = app();
+    app.rooms.selected = Some(2);
+    app.spaces.collapsed.insert(key("!work:srv"));
+    app.spaces.focus = Some(key("!club:srv"));
+    app.unread_threads.insert(
+        key("!a:srv"),
+        HashMap::from([(
+            "$root:srv".to_owned(),
+            UnreadThread {
+                root_event_id: "$root:srv".to_owned(),
+                unread_count: 1,
+                latest_event_id: "$reply:srv".to_owned(),
+                latest_ts: 2,
+                latest_sender: "@me:srv".to_owned(),
+                latest_body: "reply".to_owned(),
+                counted: HashSet::from(["$reply:srv".to_owned()]),
+                recent: vec![],
+            },
+        )]),
+    );
+    app.open_selected_unread_thread().await;
+    assert_eq!(app.rooms.selected, Some(2));
+    assert!(app.spaces.focus.is_none());
+    assert!(!app.spaces.collapsed.contains(&key("!work:srv")));
+}
+
+#[test]
+fn flapping_reconnects_coalesce_refresh_and_preserve_failed_read_backoff() {
+    let mut app = app();
+    let now = Instant::now();
+    let retry = now + Duration::from_secs(30);
+    app.spaces
+        .children
+        .get_mut(&key("!work:srv"))
+        .unwrap()
+        .retry_at = Some(retry);
+    app.spaces.order_retry_at = Some(retry);
+    app.spaces.order_read_again = false;
+    app.request_space_reconnect_refresh(now);
+    app.request_space_reconnect_refresh(now + Duration::from_millis(500));
+    app.sweep_space_reconnect_refresh(now + Duration::from_secs(1));
+    assert!(!app.rooms_fetch_inflight);
+    assert!(!app.spaces.children[&key("!work:srv")].dirty);
+    app.sweep_space_reconnect_refresh(now + Duration::from_millis(1500));
+    assert!(app.rooms_fetch_inflight);
+    assert!(app.spaces.children[&key("!work:srv")].dirty);
+    assert_eq!(app.spaces.children[&key("!work:srv")].retry_at, Some(retry));
+    assert_eq!(app.spaces.order_retry_at, Some(retry));
+    assert!(app.spaces.order_read_again);
+    app.sweep_space_reconnect_refresh(now + Duration::from_secs(2));
+    assert!(!app.rooms_fetch_again);
+}

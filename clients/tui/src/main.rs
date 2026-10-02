@@ -634,8 +634,7 @@ async fn run_app(
                 // re-read exactly as much as later ones do (#210).
                 if reconnected && app.note_connected_frame() {
                     app.request_device_state();
-                    app.refresh_spaces();
-                    app.request_rooms_refresh();
+                    app.request_space_reconnect_refresh(std::time::Instant::now());
                 }
             }
             Some(outcome) = bootstrap_rx.recv() => {
