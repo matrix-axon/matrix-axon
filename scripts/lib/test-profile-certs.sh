@@ -25,6 +25,8 @@ kc="$work/pc.keychain-db"
 # macOS's openssl: a .p12 made by OpenSSL 3 uses a MAC that `security import` rejects.
 ossl=/usr/bin/openssl
 failures=0
+# Made up when the test runs, not written into the source; see test-store-credentials.sh.
+pw=$(openssl rand -hex 12)
 cleanup() {
   security delete-keychain "$kc" >/dev/null 2>&1 || true
   rm -rf "$work"
@@ -52,12 +54,12 @@ cert B "Test Distribution: Beta (TEAM1)"
 cert O "Test Application: Orphan (TEAM1)"
 cert X "Test Application: Absent (TEAM1)"
 
-$ossl pkcs12 -export -inkey "$work/A.key" -in "$work/A.pem" -certfile "$work/O.pem" -out "$work/a.p12" -passout pass:pw
-$ossl pkcs12 -export -inkey "$work/B.key" -in "$work/B.pem" -out "$work/b.p12" -passout pass:pw
+$ossl pkcs12 -export -inkey "$work/A.key" -in "$work/A.pem" -certfile "$work/O.pem" -out "$work/a.p12" -passout pass:$pw
+$ossl pkcs12 -export -inkey "$work/B.key" -in "$work/B.pem" -out "$work/b.p12" -passout pass:$pw
 security create-keychain -p "" "$kc"
 security unlock-keychain -p "" "$kc"
 for f in a b; do
-  security import "$work/$f.p12" -f pkcs12 -k "$kc" -P pw -T /usr/bin/security >/dev/null
+  security import "$work/$f.p12" -f pkcs12 -k "$kc" -P "$pw" -T /usr/bin/security >/dev/null
 done
 
 # A profile is a plist whose DeveloperCertificates are DER certificates.

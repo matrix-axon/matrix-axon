@@ -27,6 +27,14 @@ work=$(mktemp -d)
 # `security import` rejects.
 ossl=/usr/bin/openssl
 failures=0
+# Passwords and canary values are made up when the test runs, never written into the source:
+# a password-shaped literal assigned to a *_PASSWORD variable is what secret scanners flag,
+# even in a test whose "secrets" protect nothing.
+testpw=$(openssl rand -hex 12)
+wrongpw=$(openssl rand -hex 12)
+canary_cert=$(openssl rand -hex 12)
+canary_pw=$(openssl rand -hex 12)
+canary_team=$(openssl rand -hex 12)
 
 saved_list=()
 while IFS= read -r l; do
@@ -76,13 +84,13 @@ profiles="$work/pd1:$work/pd2"
 
 (cd "$work" && $ossl req -x509 -newkey rsa:2048 -nodes -keyout k.pem -out c.pem \
   -subj "/CN=Test Store Identity: Primary (TEAM1)" -days 2 -addext "extendedKeyUsage=codeSigning" 2>/dev/null \
-  && $ossl pkcs12 -export -inkey k.pem -in c.pem -out t.p12 -passout pass:testpw)
+  && $ossl pkcs12 -export -inkey k.pem -in c.pem -out t.p12 -passout pass:$testpw)
 p12_b64=$(base64 -i "$work/t.p12")
 # The same identity plus a certificate whose private key is not in the file: what a
 # .p12 made from certificates alone, or from the wrong keychain, looks like.
 (cd "$work" && $ossl req -x509 -newkey rsa:2048 -nodes -keyout /dev/null -out orphan.pem \
   -subj "/CN=Test Orphan: Certificate (TEAM1)" -days 2 -addext "extendedKeyUsage=codeSigning" 2>/dev/null \
-  && $ossl pkcs12 -export -inkey k.pem -in c.pem -certfile orphan.pem -out t-orphan.p12 -passout pass:testpw)
+  && $ossl pkcs12 -export -inkey k.pem -in c.pem -certfile orphan.pem -out t-orphan.p12 -passout pass:$testpw)
 p12_orphan_b64=$(base64 -i "$work/t-orphan.p12")
 # Two certificates for one private key, exported the way `security export` does it. The
 # export writes the key once per identity, and `security import` of the result keeps only
@@ -93,12 +101,12 @@ p12_orphan_b64=$(base64 -i "$work/t-orphan.p12")
 (cd "$work" && $ossl genrsa -out shared.key 2048 2>/dev/null \
   && $ossl req -x509 -new -key shared.key -subj "/CN=Shared Dev: One (TEAM1)" -days 2 -addext "extendedKeyUsage=codeSigning" -out shared-dev.pem 2>/dev/null \
   && $ossl req -x509 -new -key shared.key -subj "/CN=Shared App: Two (TEAM1)" -days 2 -addext "extendedKeyUsage=codeSigning" -out shared-app.pem 2>/dev/null \
-  && $ossl pkcs12 -export -inkey shared.key -in shared-dev.pem -out shared-dev.p12 -passout pass:testpw)
+  && $ossl pkcs12 -export -inkey shared.key -in shared-dev.pem -out shared-dev.p12 -passout pass:$testpw)
 security create-keychain -p "" "$work/shared-src.keychain-db"
 security unlock-keychain -p "" "$work/shared-src.keychain-db"
-security import "$work/shared-dev.p12" -f pkcs12 -k "$work/shared-src.keychain-db" -P testpw -T /usr/bin/security >/dev/null 2>&1
+security import "$work/shared-dev.p12" -f pkcs12 -k "$work/shared-src.keychain-db" -P "$testpw" -T /usr/bin/security >/dev/null 2>&1
 security import "$work/shared-app.pem" -k "$work/shared-src.keychain-db" >/dev/null 2>&1
-security export -k "$work/shared-src.keychain-db" -t identities -f pkcs12 -P testpw -o "$work/shared.p12" >/dev/null 2>&1
+security export -k "$work/shared-src.keychain-db" -t identities -f pkcs12 -P "$testpw" -o "$work/shared.p12" >/dev/null 2>&1
 p12_shared_b64=$(base64 -i "$work/shared.p12")
 
 # A provisioning profile is a CMS-signed plist. `security cms -S` refuses an
@@ -132,8 +140,8 @@ PY
 
 # --- check-secrets -----------------------------------------------------------
 
-all_ios="APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=x IOS_APPSTORE_PROFILE=x APPLE_TEAM_ID=x IOS_DEVELOPMENT_PROFILE=x"
-all_macos="APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=x MAC_APPSTORE_PROFILE=x"
+all_ios="APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=set IOS_APPSTORE_PROFILE=x APPLE_TEAM_ID=x IOS_DEVELOPMENT_PROFILE=x"
+all_macos="APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=set MAC_APPSTORE_PROFILE=x"
 all_asc="ASC_KEY_ID=x ASC_ISSUER_ID=x ASC_PRIVATE_KEY=x"
 # shellcheck disable=SC2086
 out=$(run $all_ios -- check-secrets ios)
@@ -155,13 +163,13 @@ done
 out=$(run $all_ios IOS_APPSTORE_PROFILE= -- check-secrets ios)
 contains "$out" "rc=1" && contains "$out" "IOS_APPSTORE_PROFILE" || fail "an empty secret counts as missing" "$out"
 
-out=$(run APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=x IOS_APPSTORE_PROFILE=x APPLE_TEAM_ID=x -- check-secrets ios)
+out=$(run APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=set IOS_APPSTORE_PROFILE=x APPLE_TEAM_ID=x -- check-secrets ios)
 contains "$out" "rc=1" && contains "$out" "IOS_DEVELOPMENT_PROFILE" || fail "ios: the development profile is required, since the archive step looks for one" "$out"
 
 # shellcheck disable=SC2086
 out=$(run $all_macos -- check-secrets macos)
 contains "$out" "rc=0" || fail "macos: everything set passes" "$out"
-out=$(run APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=x -- check-secrets macos)
+out=$(run APPLE_STORE_CERTIFICATES=x APPLE_STORE_CERTIFICATES_PASSWORD=set -- check-secrets macos)
 contains "$out" "rc=1" && contains "$out" "MAC_APPSTORE_PROFILE" || fail "macos: the profile is required" "$out"
 
 # shellcheck disable=SC2086
@@ -178,8 +186,10 @@ contains "$out" "rc=1" || fail "a missing lane is refused" "$out"
 
 # A secret's value must never reach the output, even on the path that is about secrets.
 # shellcheck disable=SC2086
-out=$(run APPLE_STORE_CERTIFICATES=SECRETVALUE111 APPLE_STORE_CERTIFICATES_PASSWORD=SECRETVALUE222 APPLE_TEAM_ID=SECRETVALUE333 -- check-secrets ios)
-contains "$out" "SECRETVALUE" && fail "check-secrets does not print secret values" "$out"
+out=$(run APPLE_STORE_CERTIFICATES="$canary_cert" APPLE_STORE_CERTIFICATES_PASSWORD="$canary_pw" APPLE_TEAM_ID="$canary_team" -- check-secrets ios)
+for canary in "$canary_cert" "$canary_pw" "$canary_team"; do
+  contains "$out" "$canary" && fail "check-secrets does not print secret values" "$out"
+done
 
 # --- xcode -------------------------------------------------------------------
 
@@ -195,13 +205,13 @@ contains "$out" "rc=1" && contains "$out" "no installed Xcode has an iOS SDK of 
 mkdir -p "$work/kc1"
 rm -f "$work/env"
 out=$(run_real RUNNER_TEMP="$work/kc1" GITHUB_ENV="$work/env" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 \
-  APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain --require "Test Store Identity")
+  APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD="$testpw" -- keychain --require "Test Store Identity")
 kc="$work/kc1/axon-signing.keychain-db"
 contains "$out" "rc=0" && contains "$out" "signing keychain ready" || fail "keychain: imports and reports ready" "$out"
 [ -f "$kc" ] || fail "keychain: the keychain file exists"
 grep -q '^AXON_SIGNING_KEYCHAIN=' "$work/env" && grep -q '^AXON_SIGNING_KEYCHAIN_PASSWORD=.\{20,\}' "$work/env" || fail "keychain: both variables are exported, with a real password" "$(cut -d= -f1 "$work/env" 2>/dev/null)"
 contains "$out" "$(grep '^AXON_SIGNING_KEYCHAIN_PASSWORD=' "$work/env" | cut -d= -f2)" && fail "keychain: the generated password is never printed" "$out"
-contains "$out" "testpw" && fail "keychain: the .p12 password is never printed" "$out"
+contains "$out" "$testpw" && fail "keychain: the .p12 password is never printed" "$out"
 
 # First in the search list, with every entry that was there kept, in order.
 now=()
@@ -229,18 +239,18 @@ restore_list
 # plain import of this .p12 really does lose one, so the check below means something; if a
 # future macOS stops doing that, say so and carry on.
 security create-keychain -p "" "$work/plain.keychain-db" && security unlock-keychain -p "" "$work/plain.keychain-db"
-security import "$work/shared.p12" -f pkcs12 -k "$work/plain.keychain-db" -P testpw -T /usr/bin/security >/dev/null 2>&1
+security import "$work/shared.p12" -f pkcs12 -k "$work/plain.keychain-db" -P "$testpw" -T /usr/bin/security >/dev/null 2>&1
 plain_count=$(security find-identity "$work/plain.keychain-db" 2>/dev/null | grep -o '"[^"]*"' | sort -u | wc -l | tr -d ' ')
 if [ "$plain_count" -ge 2 ]; then
   echo "note: this macOS keeps both identities on a plain import, so the second import pass is not exercised here" >&2
 fi
-out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_shared_b64" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain --require "Shared Dev" --require "Shared App")
+out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_shared_b64" APPLE_STORE_CERTIFICATES_PASSWORD="$testpw" -- keychain --require "Shared Dev" --require "Shared App")
 contains "$out" "rc=0" && contains "$out" '"Shared Dev: One (TEAM1)"' && contains "$out" '"Shared App: Two (TEAM1)"' || fail "keychain: two identities that share a private key both survive the import (a plain import keeps $plain_count of 2)" "$out"
 restore_list
 
 # A certificate that arrived without its private key is called out apart from the
 # identities, because "present but cannot sign" has a different fix from "absent".
-out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_orphan_b64" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain --require "Test Store Identity")
+out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_orphan_b64" APPLE_STORE_CERTIFICATES_PASSWORD="$testpw" -- keychain --require "Test Store Identity")
 contains "$out" "certificates in the signing keychain with no private key (they cannot sign):" && contains "$out" '"Test Orphan: Certificate (TEAM1)"' || fail "keychain: a certificate with no private key is listed as one" "$out"
 orphan_section=${out#*"with no private key"}
 contains "${out%%"with no private key"*}" "Test Orphan" && fail "keychain: the certificate without a key is not listed among the identities" "$out"
@@ -249,42 +259,42 @@ restore_list
 
 # The listing is printed before the check that can fail, so a missing identity is
 # explained in the same log.
-out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_orphan_b64" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain --require "Test Orphan: Certificate")
+out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_orphan_b64" APPLE_STORE_CERTIFICATES_PASSWORD="$testpw" -- keychain --require "Test Orphan: Certificate")
 contains "$out" "rc=1" && contains "$out" "OUT<identities in the signing keychain" && contains "$out" '"Test Orphan: Certificate (TEAM1)"' && contains "$out" "no valid identity named 'Test Orphan: Certificate" || fail "keychain: when a required identity is a certificate with no key, the same log shows that" "$out"
 restore_list
 
-out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain --require "No Such Identity|Test Store Identity")
+out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD="$testpw" -- keychain --require "No Such Identity|Test Store Identity")
 contains "$out" "rc=0" || fail "keychain: --require accepts the alternative that is present" "$out"
 restore_list
-out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain --require "No Such Identity|Nor This One")
+out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD="$testpw" -- keychain --require "No Such Identity|Nor This One")
 contains "$out" "rc=1" && contains "$out" "no valid identity named 'No Such Identity|Nor This One" || fail "keychain: --require with no alternative present is an error naming them all" "$out"
 restore_list
-out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain --require "Test Store Identity" --require "Also Missing")
+out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD="$testpw" -- keychain --require "Test Store Identity" --require "Also Missing")
 contains "$out" "rc=1" && contains "$out" "'Also Missing" || fail "keychain: every --require must be met, not just the first" "$out"
 restore_list
 
-out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain --require "No Such Identity")
+out=$(run_real RUNNER_TEMP="$work/kc1" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD="$testpw" -- keychain --require "No Such Identity")
 contains "$out" "rc=1" && contains "$out" "no valid identity named 'No Such Identity" || fail "keychain: a required identity that is absent is an error naming it" "$out"
 restore_list
 
-out=$(run_real RUNNER_TEMP="$work/kc1" APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD=wrong -- keychain)
+out=$(run_real RUNNER_TEMP="$work/kc1" APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD="$wrongpw" -- keychain)
 contains "$out" "rc=1" && contains "$out" "APPLE_STORE_CERTIFICATES_PASSWORD" || fail "keychain: a wrong password names the secret to check" "$out"
-contains "$out" "wrong" && ! contains "$out" "wrong APPLE_STORE" && fail "keychain: the wrong password is not echoed" "$out"
+contains "$out" "$wrongpw" && fail "keychain: the wrong password is not echoed" "$out"
 restore_list
 
 garbage=$(printf 'this is not a p12' | base64)
-out=$(run_real RUNNER_TEMP="$work/kc1" APPLE_STORE_CERTIFICATES="$garbage" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain)
+out=$(run_real RUNNER_TEMP="$work/kc1" APPLE_STORE_CERTIFICATES="$garbage" APPLE_STORE_CERTIFICATES_PASSWORD="$testpw" -- keychain)
 contains "$out" "rc=1" && contains "$out" "could not import" || fail "keychain: something that is not a .p12 is refused" "$out"
 restore_list
 
-out=$(run_real RUNNER_TEMP="$work/kc1" APPLE_STORE_CERTIFICATES="$(printf '\n')" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain)
+out=$(run_real RUNNER_TEMP="$work/kc1" APPLE_STORE_CERTIFICATES="$(printf '\n')" APPLE_STORE_CERTIFICATES_PASSWORD="$testpw" -- keychain)
 contains "$out" "rc=1" || fail "keychain: an empty secret is refused" "$out"
 restore_list
 
 # A secret pasted from a base64 that wraps lines must work the same.
 wrapped=$(base64 -i "$work/t.p12" | fold -w 64)
 rm -f "$work/env"
-out=$(run_real RUNNER_TEMP="$work/kc1" GITHUB_ENV="$work/env" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$wrapped" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain --require "Test Store Identity")
+out=$(run_real RUNNER_TEMP="$work/kc1" GITHUB_ENV="$work/env" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 APPLE_STORE_CERTIFICATES="$wrapped" APPLE_STORE_CERTIFICATES_PASSWORD="$testpw" -- keychain --require "Test Store Identity")
 contains "$out" "rc=0" || fail "keychain: wrapped base64 works" "$out"
 restore_list
 
@@ -402,7 +412,7 @@ done
 # --- cleanup -----------------------------------------------------------------
 
 rm -rf "$work/kc2"; mkdir -p "$work/kc2"
-run_real RUNNER_TEMP="$work/kc2" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 GITHUB_ENV="$work/env2" APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD=testpw -- keychain >/dev/null
+run_real RUNNER_TEMP="$work/kc2" SIGNING_KEYCHAIN_ACCEPT_UNTRUSTED=1 GITHUB_ENV="$work/env2" APPLE_STORE_CERTIFICATES="$p12_b64" APPLE_STORE_CERTIFICATES_PASSWORD="$testpw" -- keychain >/dev/null
 restore_list
 run_real RUNNER_TEMP="$work/kc2" IOS_APPSTORE_PROFILE="$appstore" PROVISIONING_PROFILES_DIRS="$profiles" -- profile IOS_APPSTORE_PROFILE --ext mobileprovision --install >/dev/null
 run RUNNER_TEMP="$work/kc2" ASC_KEY_ID=CLEAN12345 ASC_PRIVATE_KEY="$key_text" -- asc-key >/dev/null
