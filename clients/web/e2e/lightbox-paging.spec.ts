@@ -201,6 +201,35 @@ test('tabbing reveals hidden chrome instead of stranding focus', async ({
 test.describe('message actions on a phone', () => {
   test.use({ viewport: { width: 320, height: 640 }, hasTouch: true })
 
+  /**
+   * The image zoom pair sits below the toolbar row on the right edge, not in
+   * the toolbar: two more 44px buttons in that one row overflowed a 320px
+   * phone and clipped Reply. Assert it stays on screen, clear of the toolbar,
+   * with full-size targets.
+   */
+  async function expectZoomControlsClear(page: Page) {
+    const zoom = page.getByRole('group', { name: 'Zoom' })
+    await expect(zoom.getByRole('button', { name: 'Zoom in' })).toBeVisible()
+    await expect(zoom.getByRole('button', { name: 'Zoom out' })).toBeVisible()
+    const layout = await zoom.evaluate((element) => ({
+      box: element.getBoundingClientRect(),
+      toolbar: document
+        .querySelector('.lightbox-toolbar')!
+        .getBoundingClientRect(),
+      viewportWidth: window.innerWidth,
+      buttons: [...element.querySelectorAll('button')].map((button) =>
+        button.getBoundingClientRect(),
+      ),
+    }))
+    expect(layout.box.left).toBeGreaterThanOrEqual(0)
+    expect(layout.box.right).toBeLessThanOrEqual(layout.viewportWidth)
+    expect(layout.box.top).toBeGreaterThanOrEqual(layout.toolbar.bottom)
+    for (const button of layout.buttons) {
+      expect(button.width).toBeGreaterThanOrEqual(44)
+      expect(button.height).toBeGreaterThanOrEqual(44)
+    }
+  }
+
   test('keeps the contextual action toolbar within the viewport', async ({
     page,
   }) => {
@@ -255,6 +284,7 @@ test.describe('message actions on a phone', () => {
       expect(button.width).toBeGreaterThanOrEqual(44)
       expect(button.height).toBeGreaterThanOrEqual(44)
     }
+    await expectZoomControlsClear(page)
 
     // The real browser hit-test closes the viewer and leaves the target row's
     // established reaction picker usable, rather than leaving a fixed overlay
@@ -311,6 +341,7 @@ test.describe('message actions on a phone', () => {
         expect(button.width).toBeGreaterThanOrEqual(44)
         expect(button.height).toBeGreaterThanOrEqual(44)
       }
+      await expectZoomControlsClear(page)
     } finally {
       await page.request.post('/__e2e/lightbox-own-image?enabled=false')
     }

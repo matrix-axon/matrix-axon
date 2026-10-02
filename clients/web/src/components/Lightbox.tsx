@@ -614,33 +614,6 @@ export function Lightbox({
       >
         <div class="lightbox-toolbar">
           {actions}
-          {hasImage && (
-            <>
-              {/*
-                Never disabled at the limits: a disabled button drops focus to
-                the body, out of the dialog's focus trap. A press at a limit is
-                simply a no-op.
-              */}
-              <button
-                type="button"
-                class="ghost lightbox-action lightbox-zoom-out"
-                aria-label="Zoom out"
-                title="Zoom out (-)"
-                onClick={() => zoomTo(zoomRef.current.scale / ZOOM_STEP)}
-              >
-                −
-              </button>
-              <button
-                type="button"
-                class="ghost lightbox-action lightbox-zoom-in"
-                aria-label="Zoom in"
-                title="Zoom in (+)"
-                onClick={() => zoomTo(zoomRef.current.scale * ZOOM_STEP)}
-              >
-                +
-              </button>
-            </>
-          )}
           {onSave !== undefined && (
             <button
               type="button"
@@ -662,6 +635,39 @@ export function Lightbox({
             ✕
           </button>
         </div>
+        {hasImage && (
+          /*
+            Its own group under the toolbar, not more toolbar buttons: the
+            toolbar is one row across the top, and on a 320px phone it already
+            holds up to six 44px controls. Two more pushed it off the left edge
+            and clipped Reply. A vertical pair on the right edge, as maps put
+            their zoom, keeps every target 44px at any width.
+
+            Never disabled at the limits: a disabled button drops focus to the
+            body, out of the dialog's focus trap. A press at a limit is simply
+            a no-op.
+          */
+          <div class="lightbox-zoom" role="group" aria-label="Zoom">
+            <button
+              type="button"
+              class="ghost lightbox-action lightbox-zoom-in"
+              aria-label="Zoom in"
+              title="Zoom in (+)"
+              onClick={() => zoomTo(zoomRef.current.scale * ZOOM_STEP)}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              class="ghost lightbox-action lightbox-zoom-out"
+              aria-label="Zoom out"
+              title="Zoom out (-)"
+              onClick={() => zoomTo(zoomRef.current.scale / ZOOM_STEP)}
+            >
+              −
+            </button>
+          </div>
+        )}
         {saveError !== null && saveError !== undefined && (
           // `alert`, not the polite paging status: this is the outcome of
           // something the reader just did, and it must not wait its turn
