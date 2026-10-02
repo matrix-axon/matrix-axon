@@ -2163,6 +2163,28 @@ describe('privacy policy (ADR 0107)', () => {
     expect(queryByRole('dialog', { name: 'Help' })).toBeNull()
   })
 
+  it("opens the policy's contact link before sign-in through the opener", async () => {
+    const openExternal = vi.fn(() => Promise.resolve())
+    const services = {
+      ...testServices(),
+      platform: { ...testServices().platform, openExternal },
+    }
+    services.auth.clearToken()
+    const { findByRole, getByRole } = render(<App services={services} />)
+    await findByRole('button', { name: 'Sign in' })
+
+    fireEvent.click(getByRole('button', { name: 'Privacy policy' }))
+    fireEvent.click(
+      getByRole('link', {
+        name: 'https://github.com/matrix-axon/matrix-axon/issues',
+      }),
+    )
+
+    expect(openExternal).toHaveBeenCalledWith(
+      'https://github.com/matrix-axon/matrix-axon/issues',
+    )
+  })
+
   it('is reachable before sign-in, in place, with a way back', async () => {
     const services = testServices()
     services.auth.clearToken()
