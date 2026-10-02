@@ -141,27 +141,33 @@ jobs:
           key: store-ios-cargo-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
           restore-keys: store-ios-cargo-
 
-      # `CI=false`, and only in this job.
-      #
-      # pnpm records different install state in CI mode. The "Build Rust Code" phase
-      # of the Xcode project runs `pnpm tauri ...` in an environment Xcode has
-      # scrubbed, with no CI signal in it, where pnpm judges that state stale, tries
-      # to reinstall, and with no terminal to confirm purging node_modules fails with
-      # ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY. Runs that got past signing died there.
-      #
-      # It has to be `CI=false`, not unsetting CI. pnpm decides it is in CI with the
-      # ci-info library, which counts GITHUB_ACTIONS, BUILD_NUMBER and RUN_ID as well as
-      # CI: `env -u CI` left GITHUB_ACTIONS, and this workflow's own job-level
-      # BUILD_NUMBER, and a run with that fix failed identically. Reproduced on a Mac
-      # with this project's manifests, installing and then running without any CI
-      # signal as the phase does: CI=true fails; CI unset with GITHUB_ACTIONS,
-      # BUILD_NUMBER or RUN_ID set fails; CI=false with GITHUB_ACTIONS and BUILD_NUMBER
-      # still set passes; nothing set passes. A later pnpm run *with* CI=true, which
-      # package-ios.sh does before Xcode starts, does not undo it.
-      #
-      # `--frozen-lockfile` stays explicit, since CI mode would have implied it.
       - name: Install web dependencies
-        run: CI=false pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
+        working-directory: clients/web
+
+      # Stops pnpm checking, before every run, whether node_modules is up to date, in
+      # this job's checkout only. It is not committed.
+      #
+      # The "Build Rust Code" phase of the Xcode project runs `pnpm tauri ...` in an
+      # environment Xcode has scrubbed: none of the workflow's variables reach it. pnpm
+      # runs a dependency-status check first, judges the install stale, tries to
+      # reinstall, and with no terminal to confirm purging node_modules fails with
+      # ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY. Two runs that got past signing died
+      # there, after about 24 minutes of build each. The install a step earlier has just
+      # run, so the check has nothing to find.
+      #
+      # This is a file setting because no environment variable can reach the phase.
+      # Two attempts at fixing it through the install failed: `env -u CI` and `CI=false`
+      # each left it failing on a runner. pnpm's idea of "CI" comes from several
+      # variables (GITHUB_ACTIONS, BUILD_NUMBER, RUN_ID as well as CI) and the install
+      # state it records differs with them. Locally, with this project's manifests:
+      # an install under runner-style CI signals, then a run with none as the phase has,
+      # fails with that error; with this setting in pnpm-workspace.yaml the same run
+      # passes from that same failing state. It has to be camelCase: the kebab-case
+      # spelling in the workspace file is ignored.
+      - name: Stop pnpm re-checking dependencies inside the Xcode build phase
+        run: |
+          printf '\nverifyDepsBeforeRun: false\n' >> pnpm-workspace.yaml
         working-directory: clients/web
 
       # What `tauri ios init` looks for. It can install them itself through
