@@ -84,6 +84,12 @@ jobs:
       - name: check-environment
         uses: ./.github/actions/check-environment
 
+      # The scripts run under macOS's /bin/bash, which is 3.2, not the bash 5 they were
+      # written and tried under. A `case` inside `$( )` in package-macos-mas.sh did not
+      # parse there and was found by a run that had already installed everything.
+      - name: Check the scripts parse under this runner's bash
+        run: scripts/ci/check-bash-syntax.sh
+
       - name: Check the repository secrets are set
         env:
           APPLE_STORE_CERTIFICATES: ${{ secrets.APPLE_STORE_CERTIFICATES }}
@@ -248,6 +254,12 @@ jobs:
 
       - name: check-environment
         uses: ./.github/actions/check-environment
+
+      # The scripts run under macOS's /bin/bash, which is 3.2, not the bash 5 they were
+      # written and tried under. A `case` inside `$( )` in package-macos-mas.sh did not
+      # parse there and was found by a run that had already installed everything.
+      - name: Check the scripts parse under this runner's bash
+        run: scripts/ci/check-bash-syntax.sh
 
       - name: Check the repository secrets are set
         env:
