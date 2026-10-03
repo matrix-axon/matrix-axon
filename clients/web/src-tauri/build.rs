@@ -1,6 +1,25 @@
 fn main() {
     tauri_build::build();
     patch_android_manifest();
+    give_android_library_a_build_id();
+}
+
+/// Link the Android library with a GNU build ID.
+///
+/// Play matches the native debug symbols it was given to a crash by the
+/// library's build ID, which is how a native stack trace in Android vitals
+/// becomes readable function names. Rust's Android build does not add one by
+/// itself: the library had a `.note.android.ident` and no `.note.gnu.build-id`,
+/// so even a symbols file would have had nothing to match.
+///
+/// A link argument from the build script rather than `rustflags` in
+/// `.cargo/config.toml`: the Tauri CLI passes its own through
+/// `CARGO_TARGET_*_RUSTFLAGS`, and an environment variable replaces the config
+/// file's value instead of adding to it. `-cdylib` limits it to the library.
+fn give_android_library_a_build_id() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        println!("cargo:rustc-link-arg-cdylib=-Wl,--build-id=sha1");
+    }
 }
 
 /// Edit the manifest `tauri android init` generated: declare the camera, and
