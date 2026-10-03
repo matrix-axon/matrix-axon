@@ -757,11 +757,16 @@ pub async fn true_local_react(ctx: &Ctx) -> ScenarioOutcome {
         switch_room(&mut driver, &stack.rooms.general.name, ctx.timeout)?;
         driver.type_text(&marker)?;
         driver.press_enter()?;
-        wait_for_text(&driver, &marker, ctx.timeout)?;
+        driver.wait_for_screen("reaction target send to complete", ctx.timeout, |screen| {
+            screen.contains(&marker) && screen.contains("sent")
+        })?;
 
         submit_command(&mut driver, "/react 🚀")?;
         driver.wait_for_screen("reaction command to complete", ctx.timeout, |screen| {
-            screen.contains("sent") || screen.contains('🚀')
+            // This fresh process has not reacted before. Neither the previous
+            // send's status nor the emoji while it is still in the input proves
+            // that the reaction request completed.
+            screen.contains("reacted")
         })?;
 
         driver.terminate();
