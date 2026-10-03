@@ -122,6 +122,14 @@ if [ "$sign" -eq 1 ]; then
   fi
 fi
 
+# The cargo target and the ABI directory Android and Play name it by.
+case "$target" in
+  aarch64) rust_triple=aarch64-linux-android;    abi=arm64-v8a ;;
+  armv7)   rust_triple=armv7-linux-androideabi;  abi=armeabi-v7a ;;
+  x86_64)  rust_triple=x86_64-linux-android;     abi=x86_64 ;;
+  i686)    rust_triple=i686-linux-android;       abi=x86 ;;
+esac
+
 # Major version of the JDK at $1, or nothing if it has no javac. `javac
 # -version` prints "javac 21.0.5"; Java 8 prints "javac 1.8.0_x".
 jdk_major() {
@@ -252,6 +260,42 @@ fi
 mkdir -p "$tauri_target" && printf '%s\n' "$ndk_revision" > "$ndk_stamp"
 
 echo "==> built $artifact"
+
+# Native debug symbols, for a bundle. Play warns that "you've not uploaded debug
+# symbols" for any bundle with native code, and without them a crash in the Rust
+# library arrives as raw addresses. The unstripped library cargo just linked is
+# what Play needs: it is byte-for-byte the one inside the bundle (the Android
+# Gradle Plugin does not strip it), and Play matches it to a crash by build ID,
+# which `build.rs` adds. Android Gradle Plugin's own extraction was tried and
+# declares the library "already stripped", so this packages it directly: a zip
+# with the ABI directory at its root, the layout Play's upload takes. It is
+# uploaded separately from the bundle (Play Console, or the developer API as a
+# `nativeCode` deobfuscation file) and must come from the same build as the
+# bundle it describes, which is why it is written beside it.
+if [ "$aab" -eq 1 ]; then
+  unstripped="$tauri_dir/target/$rust_triple/release/libaxon_lib.so"
+  symbols="$(dirname "$artifact")/native-debug-symbols.zip"
+  if [ ! -f "$unstripped" ]; then
+    echo "error: no unstripped library at $unstripped to package as debug symbols" >&2
+    exit 1
+  fi
+  readelf_bin=$(ls "$NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-readelf 2>/dev/null | head -1 || true)
+  build_id=""
+  if [ -n "$readelf_bin" ]; then
+    build_id=$("$readelf_bin" -n "$unstripped" | sed -n 's/^ *Build ID: *//p' | head -1)
+  fi
+  if [ -z "$build_id" ]; then
+    echo "error: the Android library has no GNU build ID, so Play could not match symbols to it (build.rs adds one)" >&2
+    exit 1
+  fi
+  stage=$(mktemp -d)
+  mkdir -p "$stage/$abi"
+  cp "$unstripped" "$stage/$abi/libaxon_lib.so.dbg"
+  rm -f "$symbols"
+  (cd "$stage" && zip -q -r "$symbols" "$abi")
+  rm -rf "$stage"
+  echo "==> native debug symbols $symbols (build ID $build_id)"
+fi
 
 if [ "$sign" -eq 1 ]; then
   base="${artifact%.$ext}"
