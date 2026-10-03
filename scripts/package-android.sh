@@ -51,15 +51,24 @@ Usage: scripts/package-android.sh [options]
                        number to upload the same version twice. `auto` asks
                        Google Play for the highest it has seen and adds one
                        (needs --aab and the environment below)
+  --upload <mode>      after signing, send the bundle and its native debug
+                       symbols to the Play internal track; needs --aab --sign.
+                       check    upload and let Play validate it, then discard the
+                                edit: nothing is published and the versionCode
+                                stays free (what to try first)
+                       draft    leave it as a DRAFT release; testers see nothing
+                                until it is completed in Play Console
+                       release  roll it out to the track
   --install            adb install the built APK (uses ANDROID_SERIAL or the
                        only connected device/emulator). Needs --debug or
                        --sign: an unsigned release APK is refused.
   -h, --help           this
 
-Environment for --version-code auto:
+Environment for --version-code auto and --upload:
   PLAY_SERVICE_ACCOUNT_JSON   path to a Google Cloud service-account key (JSON)
                               invited in Play Console with permission to view
-                              the app and its releases; never in the repo
+                              the app and its releases (and, for --upload, to
+                              release to testing tracks); never in the repo
 
 Environment for --sign:
   ANDROID_KEYSTORE            path to the upload keystore (never in the repo)
@@ -71,6 +80,7 @@ Examples:
   scripts/package-android.sh --target x86_64 --debug --install
   scripts/package-android.sh --target aarch64 --aab --sign --version-code 1004
   scripts/package-android.sh --target aarch64 --aab --sign --version-code auto
+  scripts/package-android.sh --target aarch64 --aab --sign --version-code auto --upload check
 USAGE
 }
 
@@ -79,6 +89,7 @@ debug=0
 aab=0
 sign=0
 version_code=""
+upload_mode=""
 install_app=0
 
 while [ $# -gt 0 ]; do
@@ -88,6 +99,7 @@ while [ $# -gt 0 ]; do
     --aab) aab=1 ;;
     --sign) sign=1 ;;
     --version-code) version_code="${2:?--version-code needs a value}"; shift ;;
+    --upload) upload_mode="${2:?--upload needs check, draft or release}"; shift ;;
     --install) install_app=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -149,6 +161,27 @@ if [ "$version_code" = "auto" ]; then
   for tool in python3 openssl; do
     if ! command -v "$tool" >/dev/null 2>&1; then
       echo "error: --version-code auto needs $tool" >&2
+      exit 2
+    fi
+  done
+fi
+if [ -n "$upload_mode" ]; then
+  case "$upload_mode" in
+    check|draft|release) ;;
+    *) echo "error: --upload takes check, draft or release; got '$upload_mode'" >&2; exit 2 ;;
+  esac
+  if [ "$aab" -ne 1 ] || [ "$sign" -ne 1 ]; then
+    echo "error: --upload sends a signed bundle to Play, so it needs --aab and --sign" >&2
+    exit 2
+  fi
+  : "${PLAY_SERVICE_ACCOUNT_JSON:?set PLAY_SERVICE_ACCOUNT_JSON to the path of a Play service-account key (JSON); see scripts/lib/play-upload.py}"
+  if [ ! -f "$PLAY_SERVICE_ACCOUNT_JSON" ]; then
+    echo "error: PLAY_SERVICE_ACCOUNT_JSON '$PLAY_SERVICE_ACCOUNT_JSON' does not exist" >&2
+    exit 2
+  fi
+  for tool in python3 openssl; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "error: --upload needs $tool" >&2
       exit 2
     fi
   done
@@ -261,8 +294,10 @@ cd "$web_dir"
 # is an ordinary number, spliced into the JSON override below, so it is checked
 # again: whatever the helper printed must be digits and nothing else. The
 # package is read from tauri.conf.json so it cannot drift from the app's own.
-if [ "$version_code" = "auto" ]; then
+if [ "$version_code" = "auto" ] || [ -n "$upload_mode" ]; then
   package=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["identifier"])' "$tauri_dir/tauri.conf.json")
+fi
+if [ "$version_code" = "auto" ]; then
   version_code=$(python3 "$repo_root/scripts/lib/play-next-version-code.py" "$package") || exit 1
   if ! [[ $version_code =~ ^[1-9][0-9]{0,9}$ ]]; then
     echo "error: the Play helper returned '$version_code', which is not a versionCode" >&2
@@ -409,6 +444,25 @@ if [ "$sign" -eq 1 ]; then
   fi
 elif [ "$debug" -eq 0 ] && [ "$aab" -eq 0 ]; then
   echo "warning: a release APK without --sign is unsigned and will not install" >&2
+fi
+
+# Upload. After signing, so what Play receives is exactly the file that was just
+# verified, and with the symbols zip from the same build, because Play matches
+# them to the bundle by build ID. `check` is the safe first run: Play inspects the
+# bundle on upload and the edit is then discarded. The release is named after the
+# version so it is recognisable in Play Console.
+if [ -n "$upload_mode" ]; then
+  props="$tauri_dir/gen/android/app/tauri.properties"
+  built_code=$(sed -n 's/^tauri.android.versionCode=//p' "$props")
+  built_name=$(sed -n 's/^tauri.android.versionName=//p' "$props")
+  echo "==> uploading to Google Play (internal track, mode: $upload_mode)"
+  uploaded_code=$(python3 "$repo_root/scripts/lib/play-upload.py" \
+    --package "$package" --bundle "$artifact" --symbols "$symbols" \
+    --track internal --mode "$upload_mode" --name "$built_name ($built_code)") || exit 1
+  if [ "$uploaded_code" != "$built_code" ]; then
+    echo "warning: Play reports versionCode $uploaded_code but the build was $built_code" >&2
+  fi
+  echo "==> Play accepted versionCode $uploaded_code ($upload_mode)"
 fi
 
 if [ "$install_app" -eq 1 ]; then
