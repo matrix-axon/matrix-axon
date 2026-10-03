@@ -69,3 +69,11 @@ demo-artifacts/
 # them would check in a build product that rewrites itself on every init, and
 # `project.pbxproj` carries this machine's signing team.
 clients/web/src-tauri/gen/
+
+# Android signing material (ADR 0107): the upload keystore lives outside the
+# repo, and these are here only so one dropped into the tree by accident cannot
+# be committed.
+*.jks
+*.keystore
+*.p12
+keystore.properties
