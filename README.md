@@ -21,8 +21,8 @@ And because Axon can be self-hosted on your own hardware or cloud instance rathe
 
 - [Latest release](https://github.com/matrix-axon/matrix-axon/releases/latest): includes Linux, MacOS, and Windows builds for server and both clients (desktop and terminal)
 - [Full client/server Docker stack](#user-quick-start-with-docker)
-- Get an iOS TestFlight beta build by posting in [#axon-developer:bostoncoop.net](https://matrix.to/#/%23axon-developer%3Abostoncoop.net) (Apple App Store build coming soon)
-- [Android build](https://github.com/matrix-axon/matrix-axon/releases/latest/download/axon-android-unsigned-aab.zip) (unsigned--signed and Play Store build coming soon)
+- Get an iOS TestFlight beta build by posting in [#axon-developer:bostoncoop.net](https://matrix.to/#/%23axon-developer%3Abostoncoop.net) (Apple App Store awaiting Apple approval)
+- [Android build](https://github.com/matrix-axon/matrix-axon/releases/latest/download/app-universal-release-signed.apk) (Play Store build coming soon, but we need testers for approval)
 - Server, terminal client, and desktop app for MacOS via homebrew:
 
 ```sh
