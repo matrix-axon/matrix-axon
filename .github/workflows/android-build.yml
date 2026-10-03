@@ -1,0 +1,187 @@
+# The Android shell (ADR 0102, M-W13).
+#
+# Its own workflow, for the reason `desktop-build.yml` gives: `clients/web/
+# src-tauri` is a separate cargo workspace, and a webview toolchain does not
+# belong on the critical path of lanes that build the server. This one needs an
+# Android SDK, an NDK and a JDK, none of which the others want.
+#
+# What it guards: the Android-only half of the shell. `cfg(target_os =
+# "android")` code is not compiled by any other lane (the root workspace
+# excludes the shell, and `desktop-build.yml` builds for the runner), so a
+# change that only breaks Android passes everything else. That is not
+# hypothetical: `DeepLink::register_all` exists on desktop and iOS and not on
+# Android, and the first Android build failed on it to the line. The job
+# lints the shell for the Android target, and then builds the release bundle
+# end to end, which is also the first thing that exercises Gradle, R8 and the
+# generated project (`scripts/package-android.sh` regenerates it every run).
+#
+# **Unsigned, on purpose.** The bundle is built the way Play takes it but not
+# signed: the upload key (ADR 0107) does not belong in a lane that runs on
+# pull requests, and a job that signs only when a secret exists is a signing
+# path nothing has exercised. Signing and the version-from-tag step that
+# `.github/actions/tauri-build` does for the desktop are the release wiring,
+# which is its own change. For that reason there is no tag trigger here either:
+# a tag build from this file would ship the committed version, the
+# misreporting that action's header describes.
+#
+# The runner's pre-installed NDK is not the one this repo builds with, so the
+# pinned one is installed with the SDK's own `sdkmanager`. No third-party
+# action is involved: adding one to a pipeline that will build releases is a
+# supply-chain decision worth making deliberately rather than for a few
+# minutes of download.
+
+name: Android build
+
+on:
+  pull_request:
+    paths:
+      - 'clients/web/src-tauri/**'
+      # The JS half of the shell (`@tauri-apps/*`, including the CLI that
+      # generates the Android project) is an input to the build.
+      - 'clients/web/package.json'
+      - 'clients/web/pnpm-lock.yaml'
+      - 'scripts/package-android.sh'
+      - '.github/workflows/android-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+  # The NDK the repo builds with. `scripts/package-android.sh` reports the one
+  # it uses and refuses to ship from a prerelease; keep this stable and in step
+  # with the one developers install, because Cargo does not rebuild C objects
+  # when the NDK changes (the script clears them when it notices).
+  ANDROID_NDK_VERSION: '30.0.16248370'
+
+jobs:
+  build:
+    name: Lint and build the Android bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      # ANDROID_HOME is set on GitHub's Ubuntu images. The licenses are
+      # accepted without a pipe failing the step: `yes` is killed by SIGPIPE
+      # when sdkmanager has read enough, which `pipefail` would report.
+      - name: Install the pinned NDK
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          set +o pipefail
+          yes | "$sdkmanager" --licenses > /dev/null
+          set -o pipefail
+          "$sdkmanager" "ndk;${ANDROID_NDK_VERSION}"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # `rust-toolchain.toml` at the repo root pins the toolchain (and its
+      # clippy), and it applies inside `clients/web/src-tauri` too. The action
+      # above installs `stable`, which is not what cargo then runs; a target
+      # added to `stable` is invisible to the pinned one, and the first build
+      # fails with `can't find crate for std`. Adding the target from inside the
+      # repo puts it on the toolchain that will use it, installing that
+      # toolchain if the runner does not have it yet (as `cross-build.yml` does
+      # for its targets).
+      - name: Add the Android target to the pinned toolchain
+        run: rustup target add aarch64-linux-android
+        working-directory: clients/web/src-tauri
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: clients/web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      - name: Cache the shell's cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            clients/web/src-tauri/target
+          key: android-cargo-${{ env.ANDROID_NDK_VERSION }}-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
+          restore-keys: android-cargo-${{ env.ANDROID_NDK_VERSION }}-
+
+      # The generated project's Gradle distribution and dependencies, downloaded
+      # on every run otherwise. Keyed on the lockfile because the Gradle version
+      # and the plugin versions come from the Tauri CLI's template.
+      - name: Cache Gradle
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: android-gradle-${{ hashFiles('clients/web/pnpm-lock.yaml') }}
+          restore-keys: android-gradle-
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: clients/web
+
+      # `generate_context!()` embeds `../dist` at compile time, so the frontend
+      # has to exist before the crate will compile, including for clippy.
+      - name: Build the frontend the crate embeds
+        run: pnpm build
+        working-directory: clients/web
+
+      # The Android half of the crate, linted. `desktop-build.yml` lints the
+      # host half and cannot see this one.
+      #
+      # The Tauri CLI sets the NDK's compiler variables for the builds it
+      # drives; a bare `cargo clippy` does not, and C build scripts (`ring`)
+      # then fail with `failed to find tool "aarch64-linux-android-clang"`. The
+      # NDK ships its compiler only under an API-level-suffixed name, so the
+      # variables are set here, at the shell's minSdk (24, in the generated
+      # project's build.gradle.kts).
+      - name: clippy for Android
+        run: |
+          bin="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export PATH="$bin:$PATH"
+          export CC_aarch64_linux_android="$bin/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$bin/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$bin/aarch64-linux-android24-clang"
+          cargo clippy --lib --target aarch64-linux-android -- -D warnings
+        working-directory: clients/web/src-tauri
+
+      # The release bundle, unsigned. The script picks the JDK (the image's
+      # default is within the range Gradle 8.14 runs on), regenerates the
+      # project, and prints the NDK it used.
+      - name: Build the release bundle
+        run: scripts/package-android.sh --target aarch64 --aab
+
+      - name: Collect the bundle
+        run: |
+          bundle="$(find clients/web/src-tauri/gen/android/app/build/outputs/bundle -name '*.aab' | head -n 1)"
+          if [ -z "$bundle" ]; then
+            echo "::error::the build reported success but produced no .aab"
+            exit 1
+          fi
+          cp "$bundle" axon-android-unsigned.aab
+          ls -l axon-android-unsigned.aab
+
+      # Unsigned, so it cannot be installed or uploaded to Play as is. Kept
+      # briefly so a reviewer can inspect what was built.
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: axon-android-unsigned-aab
+          path: axon-android-unsigned.aab
+          if-no-files-found: error
+          retention-days: 5
