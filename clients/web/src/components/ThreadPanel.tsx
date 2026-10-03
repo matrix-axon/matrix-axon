@@ -32,7 +32,7 @@ import { sameLocalDay } from '../calendar-day'
 import { DaySeparator } from './DaySeparator'
 import { groupMediaRuns, rowTs } from '../timeline/group-media-runs'
 import { EventBody } from './EventBody'
-import { MessageEventRow } from './MessageEventRow'
+import { isEditable, MessageEventRow } from './MessageEventRow'
 import { UserAvatar } from './UserAvatar'
 import { useMessageComposer, type ComposerAction } from './use-message-composer'
 
@@ -493,6 +493,23 @@ export function ThreadPanel({
     !hideRedacted || !event.redacted
 
   /**
+   * `ArrowUp` on an empty thread composer edits the newest message we can edit
+   * *in this thread* (ADR 0078), as the room composer does for the room.
+   *
+   * Newest by arrival order, not by position: the thread store does not keep
+   * the room timeline's oldest-first order, so "the last element" would be the
+   * oldest message here.
+   */
+  const editLast = () => {
+    const newest = maxByArrivalOrder(
+      thread.events.value.filter((event) => isEditable(event, ownUserId)),
+    )
+    if (newest !== null) {
+      setAction({ kind: 'edit', event: newest })
+    }
+  }
+
+  /**
    * Threads group images exactly as the room timeline does — the same
    * function, so "must not regress" is "provably one code path" (ADR 0081).
    */
@@ -737,6 +754,7 @@ export function ThreadPanel({
             : `send:${accountId}:${roomId}:${rootId}`
         }
         banner={composerBanner}
+        onEditLast={editLast}
         initialValue={
           action?.kind === 'edit'
             ? (action.draft ?? action.event.body ?? '')

@@ -181,3 +181,7 @@ So literal chord parity is not available. Semantic parity is.
 - Deferred: a timeline cursor and the TUI's select-then-act message keys
   (`r`/`e`/`d`/`t`), `Ctrl-F` search (the search UI is M-W10), pin/unpin from
   the keyboard, and next/prev-unread (which the TUI does not have either).
+
+- The Tauri shell additionally binds the platform-standard chords this ADR
+  had to avoid (`Ctrl-F`/`⌘-F`, `Ctrl-N`/`⌘-N`, `Ctrl-,`/`⌘-,`, `F1`/`⌘-?`);
+  see ADR 0107.

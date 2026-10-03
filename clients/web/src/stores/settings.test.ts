@@ -25,6 +25,7 @@ describe('createSettingsStore', () => {
       hideRedactedEvents: false,
       previewRoom: true,
       messageComposerHeight: null,
+      zoom: 1,
       matrixProtocolHandler: false,
       recentReactions: [],
       developerMode: false,
@@ -299,6 +300,22 @@ describe('room-list settings (ADRs 0038/0042)', () => {
         }),
       ).appBadgeEnabled.value,
     ).toBe(true)
+  })
+
+  it('zoom round-trips, and an out-of-range or malformed value resets to 100%', () => {
+    const storage = memoryStorage()
+    createSettingsStore(storage).zoom.value = 1.25
+    expect(createSettingsStore(storage).zoom.value).toBe(1.25)
+
+    for (const value of ['1.5', Number.NaN, 0.1, 9, null]) {
+      expect(
+        createSettingsStore(
+          memoryStorage({
+            'axon.settings': JSON.stringify({ version: 1, zoom: value }),
+          }),
+        ).zoom.value,
+      ).toBe(1)
+    }
   })
 
   it('messageComposerHeight defaults, validates, rounds, and round-trips', () => {

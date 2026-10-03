@@ -27,6 +27,8 @@ deploy/.env
 # break `cargo build -p axon-server` (the whole workspace must parse), so they
 # stay in the context even though the server image never runs them.
 docs/
+# ...except the privacy policy, which the web image's build bundles.
+!docs/PRIVACY_POLICY.md
 docker/
 
 # Agent worktrees hold full duplicate source checkouts — never build inputs.

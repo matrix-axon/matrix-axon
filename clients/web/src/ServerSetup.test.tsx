@@ -197,3 +197,45 @@ describe('ServerSetup', () => {
     }
   })
 })
+
+describe('ServerSetup privacy policy (ADR 0107)', () => {
+  it('shows the policy in place, before any server is known', () => {
+    setup(ok)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Privacy policy' }))
+    expect(
+      screen.getByRole('heading', { name: 'Axon Privacy Policy' }),
+    ).toBeTruthy()
+    expect(screen.queryByLabelText('Server address')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: '← Back' }))
+    expect(screen.getByLabelText('Server address')).toBeTruthy()
+  })
+})
+
+describe('ServerSetup external links (ADR 0107)', () => {
+  it("opens the policy's contact link through the shell's opener", () => {
+    // Before sign-in there is no signed-in shell to catch the link, and the
+    // shell's webview drops a `target="_blank"` new-window request outright.
+    const openExternal = vi.fn(() => Promise.resolve())
+    render(
+      <ServerSetup
+        onConnected={vi.fn()}
+        platform={{ fetch: ok, openExternal }}
+        storage={memoryStorage()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Privacy policy' }))
+
+    const contact = screen.getByRole('link', {
+      name: 'https://github.com/matrix-axon/matrix-axon/issues',
+    })
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+    contact.dispatchEvent(click)
+
+    expect(openExternal).toHaveBeenCalledWith(
+      'https://github.com/matrix-axon/matrix-axon/issues',
+    )
+    expect(click.defaultPrevented).toBe(true)
+  })
+})

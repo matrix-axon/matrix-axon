@@ -1,10 +1,17 @@
-import { keyLabel, shortcutLabel, SHORTCUTS, useShortcuts } from '../shortcuts'
+import {
+  keyLabel,
+  shortcutGroups,
+  shortcutLabel,
+  useShortcuts,
+} from '../shortcuts'
+import { isTauriRuntime } from '../platform'
+import { useServices } from '../services'
 import { SLASH_COMMANDS } from '../slash-commands'
 import { useModalFocus } from './use-modal-focus'
 
 /**
  * The help popup, opened with `?` or `/help`. Keyboard shortcuts are rendered
- * from `SHORTCUTS`; slash commands are rendered from `SLASH_COMMANDS`, keeping
+ * from `SHORTCUTS` (via `shortcutGroups`); slash commands are rendered from `SLASH_COMMANDS`, keeping
  * both lists single-sourced without mixing commands into shortcut rows.
  */
 export function ShortcutsHelp({
@@ -54,16 +61,25 @@ export function ShortcutsHelp({
             <CommandsHelp />
           </>
         )}
+        <p class="muted">
+          <a href="/privacy" onClick={onClose}>
+            Privacy policy
+          </a>
+        </p>
       </div>
     </div>
   )
 }
 
 function KeyboardShortcutsHelp() {
+  const { platform } = useServices()
   return (
     <section class="shortcut-group">
       <h3>Keyboard shortcuts</h3>
-      {SHORTCUTS.map(({ group, rows }) => (
+      {shortcutGroups({
+        native: isTauriRuntime(),
+        zoom: platform.setZoom !== null,
+      }).map(({ group, rows }) => (
         <section key={group} class="shortcut-subgroup">
           <h4>{group}</h4>
           <dl class="shortcut-list">

@@ -284,6 +284,41 @@ export interface Platform {
    * have never heard of and must therefore ask before it can do anything.
    */
   defaultApiBaseUrl: string | null
+
+  /**
+   * Set the page zoom factor (1 is 100%), or `null` where the client must not.
+   *
+   * `null` in a browser, which already zooms on the standard keys and keeps
+   * the level per site; taking those keys over would only fight it. Also
+   * `null` in a mobile shell, where pinch is the zoom and the webview has no
+   * page zoom to set. Only a desktop shell gets a function (ADR 0107).
+   */
+  setZoom: ((factor: number) => Promise<void>) | null
+
+  /**
+   * Subscribe to commands from a native menu bar; returns an unsubscribe.
+   *
+   * `null` wherever there is no such menu: a browser, and every shell but
+   * macOS, whose View menu carries the zoom items and whose Help menu carries
+   * "Axon Help" and "Privacy Policy" (ADR 0107).
+   * The menu only relays: the commands open what the page already has.
+   */
+  onMenuCommand:
+    ((handler: (command: MenuCommand) => void) => () => void) | null
+}
+
+/** What a native menu item asks the page to do. */
+export const MENU_COMMANDS = [
+  'help',
+  'privacy',
+  'zoom-in',
+  'zoom-out',
+  'zoom-reset',
+] as const
+export type MenuCommand = (typeof MENU_COMMANDS)[number]
+
+export function isMenuCommand(value: unknown): value is MenuCommand {
+  return (MENU_COMMANDS as readonly unknown[]).includes(value)
 }
 
 /**
@@ -342,6 +377,10 @@ export function browserPlatform(): Platform {
     // A page in a browser: installable to a home screen, and able to offer
     // itself as a `matrix:` handler.
     browserCanAdoptApp: true,
+    // The browser's own zoom already answers the standard keys.
+    setZoom: null,
+    // The browser's menus are its own.
+    onMenuCommand: null,
   }
 }
 

@@ -12,6 +12,7 @@ import {
   afterAll,
   afterEach,
   beforeAll,
+  beforeEach,
   describe,
   expect,
   it,
@@ -1886,6 +1887,320 @@ describe('shell keyboard shortcuts (ADR 0078)', () => {
       'Hide rooms (Ctrl-B); drag or use arrow keys to resize',
     )
     expect(toggle.getAttribute('aria-keyshortcuts')).toBe('Control+B')
+  })
+})
+
+describe('native-shell keyboard shortcuts (ADR 0107)', () => {
+  const shell = window as unknown as Record<string, unknown>
+  beforeEach(() => {
+    shell.__TAURI_INTERNALS__ = {}
+  })
+  afterEach(() => {
+    delete shell.__TAURI_INTERNALS__
+  })
+
+  function onMac() {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)',
+    )
+  }
+
+  /** A focused text field, where the composer's chords have to work. */
+  function composer(): HTMLTextAreaElement {
+    const textarea = document.createElement('textarea')
+    document.body.append(textarea)
+    textarea.focus()
+    return textarea
+  }
+
+  it('Ctrl-F opens search from a text field, where a browser keeps its find bar', async () => {
+    const { findByRole } = render(<App services={testServices()} />)
+    const textarea = composer()
+
+    fireEvent.keyDown(textarea, { key: 'f', ctrlKey: true })
+
+    expect(await findByRole('dialog', { name: 'Search messages' })).toBeTruthy()
+    textarea.remove()
+  })
+
+  it('Ctrl-N starts a DM, Ctrl-, opens settings, F1 opens help', async () => {
+    const { findByRole } = render(<App services={testServices()} />)
+    await findByRole('heading', { name: 'Add a Room' })
+    const textarea = composer()
+
+    fireEvent.keyDown(textarea, { key: 'n', ctrlKey: true })
+    await waitFor(() => expect(window.location.pathname).toBe('/rooms/dm'))
+
+    fireEvent.keyDown(textarea, { key: ',', ctrlKey: true })
+    await waitFor(() => expect(window.location.pathname).toBe('/settings'))
+
+    fireEvent.keyDown(textarea, { key: 'F1' })
+    expect(await findByRole('dialog', { name: 'Help' })).toBeTruthy()
+    textarea.remove()
+  })
+
+  it('the help lists the platform chords, including the shell-only settings row', async () => {
+    const { findByRole } = render(<App services={testServices()} />)
+
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    const dialog = await findByRole('dialog', { name: 'Help' })
+
+    expect(dialog.textContent).toContain('/ or Ctrl-F')
+    expect(dialog.textContent).toContain('Ctrl-N')
+    expect(dialog.textContent).not.toContain('Ctrl-Alt-M')
+    expect(dialog.textContent).toContain('Open settings')
+    expect(dialog.textContent).toContain('Ctrl-,')
+    expect(dialog.textContent).toContain('? or F1')
+  })
+
+  it('the topbar advertises the shell chords', () => {
+    const { getByRole } = render(<App services={testServices()} />)
+
+    const search = getByRole('button', { name: 'Search messages' })
+    expect(search.getAttribute('title')).toBe(
+      'Search messages (/search; / or Ctrl-F)',
+    )
+    expect(search.getAttribute('aria-keyshortcuts')).toBe('/ Control+F')
+    const settings = getByRole('link', { name: 'Settings' })
+    expect(settings.getAttribute('title')).toBe('Settings (Ctrl-,)')
+    expect(settings.getAttribute('aria-keyshortcuts')).toBe('Control+,')
+  })
+
+  it('macOS uses Command, leaving Ctrl-F/Ctrl-N to the text field', async () => {
+    onMac()
+    const { findByRole, queryByRole } = render(
+      <App services={testServices()} />,
+    )
+    await findByRole('heading', { name: 'Add a Room' })
+    const textarea = composer()
+
+    // Emacs cursor keys in every Mac text field; the shell must not steal them.
+    fireEvent.keyDown(textarea, { key: 'f', ctrlKey: true })
+    fireEvent.keyDown(textarea, { key: 'n', ctrlKey: true })
+    // ⌘-G is Find Next in a native Mac app, not Find.
+    fireEvent.keyDown(textarea, { key: 'g', metaKey: true })
+    expect(queryByRole('dialog', { name: 'Search messages' })).toBeNull()
+    expect(window.location.pathname).toBe('/')
+
+    fireEvent.keyDown(textarea, { key: 'f', metaKey: true })
+    expect(await findByRole('dialog', { name: 'Search messages' })).toBeTruthy()
+    textarea.remove()
+  })
+
+  it('macOS help shows the Command chords', async () => {
+    onMac()
+    const { findByRole } = render(<App services={testServices()} />)
+
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    const dialog = await findByRole('dialog', { name: 'Help' })
+
+    expect(dialog.textContent).toContain('/ or ⌘-F')
+    expect(dialog.textContent).toContain('⌘-N')
+    expect(dialog.textContent).toContain('⌘-,')
+    expect(dialog.textContent).toContain('? or ⌘-?')
+  })
+})
+
+describe('native-shell page zoom (ADR 0107)', () => {
+  const shell = window as unknown as Record<string, unknown>
+  beforeEach(() => {
+    shell.__TAURI_INTERNALS__ = {}
+  })
+  afterEach(() => {
+    delete shell.__TAURI_INTERNALS__
+  })
+
+  function renderZoomable() {
+    const setZoom = vi.fn<(factor: number) => Promise<void>>(() =>
+      Promise.resolve(),
+    )
+    const services = testServices({ platform: { setZoom } })
+    const view = render(<App services={services} />)
+    return { ...view, services, setZoom }
+  }
+
+  it('applies the saved level on launch', async () => {
+    const setZoom = vi.fn<(factor: number) => Promise<void>>(() =>
+      Promise.resolve(),
+    )
+    const services = testServices({ platform: { setZoom } })
+    services.settings.zoom.value = 1.5
+    render(<App services={services} />)
+
+    await waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1.5))
+  })
+
+  it('Ctrl-= / Ctrl-- step the zoom and Ctrl-0 resets it, from a text field', async () => {
+    const { services, setZoom } = renderZoomable()
+    const textarea = document.createElement('textarea')
+    document.body.append(textarea)
+    textarea.focus()
+
+    fireEvent.keyDown(textarea, { key: '=', ctrlKey: true })
+    expect(services.settings.zoom.value).toBe(1.1)
+    fireEvent.keyDown(textarea, { key: '+', ctrlKey: true, shiftKey: true })
+    expect(services.settings.zoom.value).toBe(1.25)
+    await waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1.25))
+
+    fireEvent.keyDown(textarea, { key: '-', ctrlKey: true })
+    expect(services.settings.zoom.value).toBe(1.1)
+    fireEvent.keyDown(textarea, { key: '0', ctrlKey: true })
+    expect(services.settings.zoom.value).toBe(1)
+    await waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1))
+    textarea.remove()
+  })
+
+  it('macOS zooms on Command, not Ctrl', () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)',
+    )
+    const { services } = renderZoomable()
+
+    fireEvent.keyDown(document.body, { key: '=', ctrlKey: true })
+    expect(services.settings.zoom.value).toBe(1)
+    fireEvent.keyDown(document.body, { key: '=', metaKey: true })
+    expect(services.settings.zoom.value).toBe(1.1)
+  })
+
+  it('the help lists zoom only where the platform can set it', async () => {
+    const { findByRole } = renderZoomable()
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    const dialog = await findByRole('dialog', { name: 'Help' })
+    expect(dialog.textContent).toContain('Zoom in / out')
+    expect(dialog.textContent).toContain('Ctrl-0')
+
+    cleanup()
+    // A mobile shell: native, but `setZoom` is null.
+    const mobile = render(<App services={testServices()} />)
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    const bare = await mobile.findByRole('dialog', { name: 'Help' })
+    expect(bare.textContent).toContain('Open settings')
+    expect(bare.textContent).not.toContain('Zoom in / out')
+  })
+
+  it('leaves the keys alone when the platform cannot zoom', () => {
+    const services = testServices()
+    render(<App services={services} />)
+    const event = new KeyboardEvent('keydown', {
+      key: '=',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    document.body.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(services.settings.zoom.value).toBe(1)
+  })
+})
+
+describe('the browser keeps its own platform chords (ADR 0107)', () => {
+  it('Ctrl-F, Ctrl-N and Ctrl-, are left to the browser', async () => {
+    const { findByRole, queryByRole } = render(
+      <App services={testServices()} />,
+    )
+    await findByRole('heading', { name: 'Add a Room' })
+
+    for (const key of ['f', 'n', ',']) {
+      const event = new KeyboardEvent('keydown', {
+        key,
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+      document.body.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+    }
+    expect(queryByRole('dialog', { name: 'Search messages' })).toBeNull()
+    expect(window.location.pathname).toBe('/')
+
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    const dialog = await findByRole('dialog', { name: 'Help' })
+    expect(dialog.textContent).not.toContain('Open settings')
+  })
+})
+
+describe('privacy policy (ADR 0107)', () => {
+  it('is linked from the Settings footer', async () => {
+    history.replaceState(null, '', '/settings')
+    const { findByRole } = render(<App services={testServices()} />)
+
+    const link = await findByRole('link', { name: 'Privacy policy' })
+    fireEvent.click(link)
+
+    expect(
+      await findByRole('heading', { name: 'Axon Privacy Policy' }),
+    ).toBeTruthy()
+    expect(window.location.pathname).toBe('/privacy')
+  })
+
+  it('is linked from the help dialog, which closes on the way', async () => {
+    const { findByRole, queryByRole } = render(
+      <App services={testServices()} />,
+    )
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    const dialog = await findByRole('dialog', { name: 'Help' })
+
+    fireEvent.click(
+      within(dialog).getByRole('link', { name: 'Privacy policy' }),
+    )
+
+    await waitFor(() => expect(window.location.pathname).toBe('/privacy'))
+    expect(queryByRole('dialog', { name: 'Help' })).toBeNull()
+  })
+
+  it('opens when the menu asks, closing the help dialog first', async () => {
+    const { findByRole, queryByRole } = render(
+      <App services={testServices()} />,
+    )
+    fireEvent.keyDown(document.body, { key: '?', shiftKey: true })
+    await findByRole('dialog', { name: 'Help' })
+
+    window.dispatchEvent(new Event('axon:show-privacy'))
+
+    expect(
+      await findByRole('heading', { name: 'Axon Privacy Policy' }),
+    ).toBeTruthy()
+    expect(queryByRole('dialog', { name: 'Help' })).toBeNull()
+  })
+
+  it("opens the policy's contact link before sign-in through the opener", async () => {
+    const openExternal = vi.fn(() => Promise.resolve())
+    const services = {
+      ...testServices(),
+      platform: { ...testServices().platform, openExternal },
+    }
+    services.auth.clearToken()
+    const { findByRole, getByRole } = render(<App services={services} />)
+    await findByRole('button', { name: 'Sign in' })
+
+    fireEvent.click(getByRole('button', { name: 'Privacy policy' }))
+    fireEvent.click(
+      getByRole('link', {
+        name: 'https://github.com/matrix-axon/matrix-axon/issues',
+      }),
+    )
+
+    expect(openExternal).toHaveBeenCalledWith(
+      'https://github.com/matrix-axon/matrix-axon/issues',
+    )
+  })
+
+  it('is reachable before sign-in, in place, with a way back', async () => {
+    const services = testServices()
+    services.auth.clearToken()
+    const { findByRole, getByRole } = render(<App services={services} />)
+    await findByRole('button', { name: 'Sign in' })
+
+    fireEvent.click(getByRole('button', { name: 'Privacy policy' }))
+    expect(getByRole('heading', { name: 'Axon Privacy Policy' })).toBeTruthy()
+    fireEvent.click(getByRole('button', { name: '← Back' }))
+    expect(await findByRole('button', { name: 'Sign in' })).toBeTruthy()
+
+    // And from the menu, which can fire on this screen too.
+    window.dispatchEvent(new Event('axon:show-privacy'))
+    expect(
+      await findByRole('heading', { name: 'Axon Privacy Policy' }),
+    ).toBeTruthy()
   })
 })
 

@@ -1,4 +1,6 @@
 import { useState } from 'preact/hooks'
+import { useExternalLinks } from './external-links'
+import { usePrivacyInPlace } from './pages/PrivacyPage'
 import { browserPlatform, type Platform } from './platform'
 import {
   httpFallbackFor,
@@ -39,11 +41,16 @@ export function ServerSetup({
   storage = window.localStorage,
 }: {
   onConnected: (baseUrl: string) => void
-  platform?: Pick<Platform, 'fetch'>
+  platform?: Pick<Platform, 'fetch'> & Partial<Pick<Platform, 'openExternal'>>
   storage?: Storage
 }) {
   const [draft, setDraft] = useState('')
   const [status, setStatus] = useState<Status>({ state: 'idle' })
+  const [privacyOpen, setPrivacyOpen] = useState(false)
+  const privacy = usePrivacyInPlace(privacyOpen, setPrivacyOpen)
+  // `App` is not mounted yet, so this screen opens its own external links
+  // (the privacy policy's), or the shell would drop them.
+  useExternalLinks(platform)
 
   const normalized = normalizeServerUrl(draft)
   const probing = status.state === 'probing'
@@ -109,6 +116,9 @@ export function ServerSetup({
     }
   }
 
+  if (privacy.page !== null) {
+    return privacy.page
+  }
   return (
     <main class="signin">
       <h1>axon</h1>
@@ -162,6 +172,7 @@ export function ServerSetup({
           </p>
         )}
       </form>
+      {privacy.link}
     </main>
   )
 }

@@ -28,6 +28,10 @@ RUN --mount=type=cache,target=/pnpm-store \
 # context, so vite's git-based version stamp can't run; pass the commit in as
 # GIT_HASH (mirrors the server image) to show a real build id in Settings.
 COPY clients/web/ ./
+# The build bundles the privacy policy from docs/ (the `axon-privacy-policy`
+# plugin in vite.config.ts reads ../../docs/PRIVACY_POLICY.md, which from
+# /web resolves to /docs) and fails without it.
+COPY docs/PRIVACY_POLICY.md /docs/PRIVACY_POLICY.md
 ARG GIT_HASH=unknown
 ENV VITE_AXON_WEB_VERSION=${GIT_HASH}
 RUN pnpm build

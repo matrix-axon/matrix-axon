@@ -1,7 +1,7 @@
 import { cleanup, render, screen } from '@testing-library/preact'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AppRoot } from './app-root'
-import { browserPlatform, type Platform } from './platform'
+import { browserPlatform, type MenuCommand, type Platform } from './platform'
 import { resolveApiBaseUrl } from './services'
 import { SERVER_URL_KEY } from './server-url'
 import type { LiveSocket } from './platform'
@@ -71,6 +71,77 @@ describe('AppRoot', () => {
   })
 })
 
+describe('AppRoot relaying the native menu (ADR 0107)', () => {
+  it('turns menu commands into the page events every screen answers', async () => {
+    let send: ((command: 'help' | 'privacy') => void) | undefined
+    const unsubscribe = vi.fn()
+    const platform: Platform = {
+      ...shellPlatform(),
+      onMenuCommand: (handler) => {
+        send = handler
+        return unsubscribe
+      },
+    }
+    const help = vi.fn()
+    window.addEventListener('axon:show-help', help)
+    const view = render(
+      <AppRoot platform={platform} storage={memoryStorage()} />,
+    )
+
+    send!('help')
+    expect(help).toHaveBeenCalledTimes(1)
+    // The server-setup screen shows the policy in place.
+    send!('privacy')
+    expect(
+      await screen.findByRole('heading', { name: 'Axon Privacy Policy' }),
+    ).toBeTruthy()
+
+    view.unmount()
+    expect(unsubscribe).toHaveBeenCalled()
+    window.removeEventListener('axon:show-help', help)
+  })
+})
+
+describe('AppRoot answering the View menu (ADR 0107)', () => {
+  it('zooms as the key press would, on the platform modifier', async () => {
+    // A Mac: the replayed chord must carry ⌘, which is all the page's own
+    // zoom handler accepts there.
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)',
+    )
+    let send: ((command: MenuCommand) => void) | undefined
+    const setZoom = vi.fn<(factor: number) => Promise<void>>(() =>
+      Promise.resolve(),
+    )
+    const services = testServices({ platform: { setZoom } })
+    const platform: Platform = {
+      ...shellPlatform(),
+      onMenuCommand: (handler) => {
+        send = handler
+        return () => {}
+      },
+    }
+    render(
+      <AppRoot
+        services={services}
+        platform={platform}
+        storage={memoryStorage()}
+      />,
+    )
+
+    send!('zoom-in')
+    expect(services.settings.zoom.value).toBe(1.1)
+    send!('zoom-in')
+    expect(services.settings.zoom.value).toBe(1.25)
+    send!('zoom-out')
+    expect(services.settings.zoom.value).toBe(1.1)
+    send!('zoom-reset')
+    expect(services.settings.zoom.value).toBe(1)
+    await vi.waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1))
+    vi.restoreAllMocks()
+  })
+})
+
 describe('AppRoot wiring the transport into the app', () => {
   /**
    * The regression this exists for. `AppRoot` used the platform for the setup
@@ -124,6 +195,8 @@ describe('AppRoot wiring the transport into the app', () => {
       browserCanAdoptApp: false,
       secureStorage: null,
       appleSignIn: null,
+      setZoom: null,
+      onMenuCommand: null,
     }
 
     // A token, so the shell mounts signed-in and actually issues requests.

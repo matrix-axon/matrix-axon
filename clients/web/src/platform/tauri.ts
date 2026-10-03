@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
@@ -9,6 +10,7 @@ import WebSocketClient from '@tauri-apps/plugin-websocket'
 import { fileFromPath } from '../media/dropped-file'
 import { MAX_UPLOAD_BYTES } from '../media/media-service'
 import { basename } from '../media/filename'
+import { isMenuCommand } from './index'
 import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 import { NO_NATIVE_AUTH, type NativeAuth } from './native-auth'
 
@@ -479,5 +481,41 @@ export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
     // This *is* the installed app. Nothing to add to a home screen, and the
     // scheme it handles is declared in the bundle, not asked for at runtime.
     browserCanAdoptApp: false,
+    // Desktop only: a phone or tablet zooms by pinching, and Tauri documents
+    // page zoom as unsupported on iOS and Android.
+    setZoom: isMobileShell()
+      ? null
+      : (factor) => getCurrentWebview().setZoom(factor),
+    // Only the macOS shell builds a menu (`app_menu` in src-tauri/src/lib.rs);
+    // elsewhere this subscription simply never fires.
+    onMenuCommand: (handler) => {
+      const ready = listen<string>(MENU_EVENT, (event) => {
+        if (isMenuCommand(event.payload)) {
+          handler(event.payload)
+        }
+      })
+      // The subscription is established asynchronously, so unsubscribing has
+      // to wait for it rather than race it.
+      return () => {
+        void ready.then((unlisten) => unlisten()).catch(() => {})
+      }
+    },
   }
+}
+
+/** The event `forward_menu_command` in src-tauri/src/lib.rs emits. */
+const MENU_EVENT = 'axon://menu'
+
+/**
+ * Whether this shell is the iOS or Android build. An iPad's webview may report
+ * a desktop Mac user agent, so a Mac with a touch screen counts as one.
+ */
+export function isMobileShell(
+  userAgent = navigator.userAgent,
+  touchPoints = navigator.maxTouchPoints ?? 0,
+): boolean {
+  return (
+    /Android|iPhone|iPad|iPod/.test(userAgent) ||
+    (/Macintosh/.test(userAgent) && touchPoints > 1)
+  )
 }
