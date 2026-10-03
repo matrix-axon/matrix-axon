@@ -1,0 +1,12 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "plugins": {
+    "deep-link": {
+      "mobile": [
+        {
+          "scheme": ["org.matrixaxon.axon"]
+        }
+      ]
+    }
+  }
+}
