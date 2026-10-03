@@ -126,12 +126,19 @@ def make_assertion(account: dict, now: int | None = None) -> str:
     return signing_input + "." + b64url(signed.stdout)
 
 
-def request(method: str, url: str, *, headers: dict | None = None, body: bytes | None = None) -> tuple[int, dict]:
+def request(
+    method: str,
+    url: str,
+    *,
+    headers: dict | None = None,
+    body: bytes | None = None,
+    timeout: int = TIMEOUT_SECONDS,
+) -> tuple[int, dict]:
     """One bounded HTTP request, returning (status, parsed JSON or {})."""
     req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
     context = ssl.create_default_context()
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS, context=context) as response:
+        with urllib.request.urlopen(req, timeout=timeout, context=context) as response:
             status, raw = response.status, response.read()
     except urllib.error.HTTPError as err:
         status, raw = err.code, err.read()
