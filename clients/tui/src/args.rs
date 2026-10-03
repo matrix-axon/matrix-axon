@@ -35,9 +35,13 @@ impl Args {
                             .ok_or_else(|| anyhow::anyhow!("--token requires a value"))?,
                     ));
                 }
+                "--version" | "-V" => {
+                    println!("axon-tui {}", env!("CARGO_PKG_VERSION"));
+                    std::process::exit(0);
+                }
                 "--help" | "-h" => {
                     println!(
-                        "Usage: axon-tui [--base-url URL] [--account-id UUID] [--token TOKEN]"
+                        "Usage: axon-tui [--base-url URL] [--account-id UUID] [--token TOKEN] [--version]"
                     );
                     println!("  AXON_BASE_URL env var sets the default base URL (overrides built-in default).");
                     std::process::exit(0);
