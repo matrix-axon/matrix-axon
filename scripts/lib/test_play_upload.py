@@ -22,7 +22,6 @@ import os
 import subprocess
 import tempfile
 import unittest
-import urllib.parse
 from pathlib import Path
 
 import test_play_next_version_code as base
