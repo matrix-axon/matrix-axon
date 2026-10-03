@@ -277,10 +277,12 @@ echo "==> built $artifact"
 # Gradle Plugin does not strip it), and Play matches it to a crash by build ID,
 # which `build.rs` adds. Android Gradle Plugin's own extraction was tried and
 # declares the library "already stripped", so this packages it directly: a zip
-# with the ABI directory at its root, the layout Play's upload takes. It is
-# uploaded separately from the bundle (Play Console, or the developer API as a
-# `nativeCode` deobfuscation file) and must come from the same build as the
-# bundle it describes, which is why it is written beside it.
+# with the ABI directory at its root and the unstripped .so inside, the layout
+# Play's help page describes. It is uploaded separately from the bundle (Play
+# Console: Test and release > App bundle explorer > the version > Downloads >
+# Assets; or the developer API as a `nativeCode` deobfuscation file) and must
+# come from the same build as the bundle it describes, which is why it is
+# written beside it.
 if [ "$aab" -eq 1 ]; then
   unstripped="$tauri_dir/target/$rust_triple/release/libaxon_lib.so"
   symbols="$(dirname "$artifact")/native-debug-symbols.zip"
@@ -299,7 +301,7 @@ if [ "$aab" -eq 1 ]; then
   fi
   stage=$(mktemp -d)
   mkdir -p "$stage/$abi"
-  cp "$unstripped" "$stage/$abi/libaxon_lib.so.dbg"
+  cp "$unstripped" "$stage/$abi/libaxon_lib.so"
   rm -f "$symbols"
   (cd "$stage" && zip -q -r "$symbols" "$abi")
   rm -rf "$stage"
