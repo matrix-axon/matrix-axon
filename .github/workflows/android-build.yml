@@ -184,4 +184,4 @@ jobs:
           name: axon-android-unsigned-aab
           path: axon-android-unsigned.aab
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 5
