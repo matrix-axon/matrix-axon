@@ -124,6 +124,14 @@ echo "==> regenerating the Android project"
 rm -rf "$tauri_dir/gen/android"
 pnpm tauri android init --ci
 
+# `init` writes a MainActivity that turns on edge-to-edge and never handles the
+# insets that implies; ours does (see the header of the file). Copied rather
+# than generated for the same reason the iOS icons are: `gen/` is regenerated
+# and gitignored, so nothing edited there survives.
+echo "==> installing android/MainActivity.kt"
+cp "$tauri_dir/android/MainActivity.kt" \
+  "$tauri_dir/gen/android/app/src/main/java/org/matrixaxon/axon/MainActivity.kt"
+
 build_args=(tauri android build --apk --target "$target")
 if [ "$debug" -eq 1 ]; then build_args+=(--debug); fi
 
