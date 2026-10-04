@@ -66,6 +66,8 @@ Everything happens inside one Play "edit", which is how the API is shaped: nothi
 Nothing is published and the `versionCode` stays free, so it is the mode for a first run of the pipeline, and a cheap way to learn that Play would accept a bundle.
 `draft` commits the bundle as a draft release, keeping the track's existing releases, and refuses if the track already has a draft rather than replace someone's work; testers see nothing until it is completed in Play Console.
 `release` commits a completed release, which replaces what the track had, because that is what completing one means.
+It prints each release it replaces, and refuses when one is a draft or a rollout that is in progress or halted: finishing or discarding that is a decision for Play Console, not for a script.
+The track is read before the build starts (`play-upload.py --preflight`, read-only), so a refusal costs seconds rather than a finished build.
 It needs `--aab --sign`, and uses the symbols zip from the same build, since Play matches symbols to a bundle by build ID.
 
 The service account needs permission to release to testing tracks, beyond the read access `--version-code auto` needs.

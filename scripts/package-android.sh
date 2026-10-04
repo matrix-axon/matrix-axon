@@ -297,6 +297,14 @@ cd "$web_dir"
 if [ "$version_code" = "auto" ] || [ -n "$upload_mode" ]; then
   package=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["identifier"])' "$tauri_dir/tauri.conf.json")
 fi
+# A track that would refuse the upload (a draft waiting in Play Console, or for
+# `release` a rollout in progress) says so now, in seconds, not after the build.
+# Read-only: it opens an edit, reads the track, and discards the edit.
+if [ -n "$upload_mode" ]; then
+  echo "==> checking the Play track before the build"
+  python3 "$repo_root/scripts/lib/play-upload.py" \
+    --package "$package" --track internal --mode "$upload_mode" --preflight || exit 1
+fi
 if [ "$version_code" = "auto" ]; then
   version_code=$(python3 "$repo_root/scripts/lib/play-next-version-code.py" "$package") || exit 1
   if ! [[ $version_code =~ ^[1-9][0-9]{0,9}$ ]]; then

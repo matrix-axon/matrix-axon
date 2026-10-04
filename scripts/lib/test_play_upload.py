@@ -88,11 +88,13 @@ class UploadTest(base.HelperTest):
         (directory / "symbols.zip").write_bytes(SYMBOLS_BYTES)
         return directory / "app.aab", directory / "symbols.zip"
 
-    def run_upload(self, server, *extra, symbols=True, bundle=None, env=None):
+    def run_upload(self, server, *extra, symbols=True, bundle=None, env=None, no_files=False):
         aab, zipped = self.files()
-        args = ["--package", PACKAGE, "--bundle", str(bundle or aab)]
-        if symbols:
-            args += ["--symbols", str(zipped)]
+        args = ["--package", PACKAGE]
+        if not no_files:
+            args += ["--bundle", str(bundle or aab)]
+            if symbols:
+                args += ["--symbols", str(zipped)]
         args += list(extra)
         directory = Path(tempfile.mkdtemp(dir=self.dir))
         key = directory / "sa.json"
@@ -256,6 +258,68 @@ class UploadTest(base.HelperTest):
         with base.Server(self.routes(track=track)) as server:
             result = self.run_upload(server, "--mode", "release")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    # -- the preflight fails before the build, not after it -------------------
+
+    def preflight(self, server, *extra):
+        return self.run_upload(server, "--preflight", *extra, no_files=True)
+
+    def assertNothingSent(self, server):
+        sent = [p for m, p, _, _ in server.requests if m in ("POST", "PUT") and "/edits/edit-1" in p]
+        self.assertEqual(sent, [], "a preflight uploads, puts and commits nothing")
+
+    def test_preflight_passes_on_a_track_with_only_finished_releases(self):
+        track = {"track": "internal", "releases": [
+            {"name": "1000", "versionCodes": ["1000"], "status": "completed"},
+        ]}
+        for mode in ("check", "draft", "release"):
+            with self.subTest(mode=mode):
+                with base.Server(self.routes(track=track)) as server:
+                    result = self.preflight(server, "--mode", mode)
+                    self.assertNothingSent(server)
+                    self.assertEditDeleted(server)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_preflight_refuses_a_draft_in_every_mode(self):
+        track = {"track": "internal", "releases": [
+            {"name": "0.1.0 (1002)", "versionCodes": ["1002"], "status": "draft"},
+        ]}
+        for mode in ("check", "draft", "release"):
+            with self.subTest(mode=mode):
+                with base.Server(self.routes(track=track)) as server:
+                    result = self.preflight(server, "--mode", mode)
+                    self.assertNothingSent(server)
+                    self.assertEditDeleted(server)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("0.1.0 (1002)", result.stderr)
+                self.assertIn("Play Console", result.stderr)
+
+    def test_preflight_refuses_a_rollout_for_release_only(self):
+        track = {"track": "internal", "releases": [
+            {"name": "rolling", "versionCodes": ["1001"], "status": "inProgress"},
+        ]}
+        with base.Server(self.routes(track=track)) as server:
+            refused = self.preflight(server, "--mode", "release")
+        with base.Server(self.routes(track=track)) as server:
+            allowed = self.preflight(server, "--mode", "draft")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("inProgress", refused.stderr)
+        # A draft is added beside a rollout; only `release` replaces it.
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_preflight_needs_no_bundle_but_an_upload_does(self):
+        with base.Server(self.routes()) as server:
+            missing = self.run_upload(server, "--mode", "draft", no_files=True)
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("--bundle", missing.stderr)
+
+    def test_preflight_names_a_permission_failure(self):
+        with base.Server(self.routes(track_status=403)) as server:
+            result = self.preflight(server)
+            self.assertEditDeleted(server)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(base.EMAIL, result.stderr)
 
     # -- the versionCode is checked before anything is committed --------------
 

@@ -3,7 +3,7 @@
 
     play-upload.py --package <name> --bundle <file.aab> [--symbols <zip>]
                    [--track internal] [--mode check|draft|release] [--name <release name>]
-                   [--expect-version-code <n>]
+                   [--expect-version-code <n>] [--preflight]
 
 Uses the same service account as `play-next-version-code.py` (PLAY_SERVICE_ACCOUNT_JSON),
 which now also needs permission to release to testing tracks. Everything happens inside
@@ -23,6 +23,12 @@ one Play "edit", which is how the API is shaped: nothing is visible until it is 
 
 The existing releases on the track are kept when a draft is added to them. A completed
 release replaces what the track had, because that is what completing one means.
+
+--preflight      Do not upload. Open an edit, read the track, and apply the same refusals as
+                 above (an existing draft; for release, also an in-progress or halted
+                 rollout), then discard the edit. `package-android.sh` runs this before the
+                 build, so a track that would refuse the upload says so in seconds, not after
+                 the build. Needs no --bundle.
 
 --expect-version-code N   Stop, before anything is attached or committed, if Play gives the
                  uploaded bundle a different versionCode than the build said it would have.
@@ -92,6 +98,61 @@ def describe(release: dict) -> str:
     return str(release.get("name") or release.get("versionCodes"))
 
 
+def refuse_in_flight(existing: list[dict], track: str, mode: str, version_code: int | None = None) -> None:
+    """Raise if committing in `mode` would throw away someone's work on the track.
+
+    `draft` keeps what is there and only refuses another draft. `release` replaces the
+    track, so it refuses anything unfinished. A release of the same versionCode is not
+    in the way (`version_code` is unknown before the upload, so then nothing is exempt)."""
+    mine = [str(version_code)] if version_code is not None else None
+    other = [r for r in existing if [str(v) for v in r.get("versionCodes", [])] != mine]
+    if mode == "release":
+        blocking = [r for r in other if r.get("status") in IN_FLIGHT]
+        if blocking:
+            raise PlayError(
+                f"the {track} track has "
+                + ", ".join(f"a {r.get('status')} release ({describe(r)})" for r in blocking)
+                + "; a completed release would replace it. Complete or discard it in Play Console first"
+            )
+    else:
+        for r in other:
+            if r.get("status") == "draft":
+                raise PlayError(
+                    f"the {track} track already has a draft release ({describe(r)}); complete or discard it in "
+                    "Play Console first, so it is not overwritten"
+                )
+
+
+def read_track(package: str, edit_id: str, track: str, token: str, name: str, account: dict) -> list[dict]:
+    """The releases on `track` in this edit; a track that does not exist yet has none."""
+    status, current = play_api.play("GET", f"{package}/edits/{edit_id}/tracks/{track}", token)
+    if status == 404:
+        return []
+    if status != 200:
+        raise play_api.explain(status, current, f"read the {track} track", name, account)
+    return [r for r in current.get("releases", []) if isinstance(r, dict)]
+
+
+def preflight(args: argparse.Namespace) -> int:
+    """Read the track and say whether this mode would be refused. Changes nothing."""
+    account = play_api.load_service_account(os.path.expanduser(os.environ["PLAY_SERVICE_ACCOUNT_JSON"]))
+    token = play_api.fetch_token(account)
+    package = urllib.parse.quote(args.package, safe="")
+    status, edit = play_api.play("POST", f"{package}/edits", token, b"{}")
+    edit_id = edit.get("id")
+    if status != 200 or not isinstance(edit_id, str) or not edit_id:
+        raise play_api.explain(status, edit, "open an edit", args.package, account)
+    try:
+        refuse_in_flight(read_track(package, edit_id, args.track, token, args.package, account), args.track, args.mode)
+    finally:
+        try:
+            play_api.play("DELETE", f"{package}/edits/{edit_id}", token)
+        except PlayError as err:
+            print(f"warning: could not delete the read-only edit: {err}", file=sys.stderr)
+    print(f"the {args.track} track has nothing a {args.mode} upload would overwrite", file=sys.stderr)
+    return 0
+
+
 def run(args: argparse.Namespace) -> int:
     bundle = read_file(args.bundle, "bundle")
     symbols = read_file(args.symbols, "symbols zip") if args.symbols else None
@@ -133,39 +194,16 @@ def run(args: argparse.Namespace) -> int:
             print("uploaded the native debug symbols", file=sys.stderr)
 
         # What the track holds now.
-        status, current = play_api.play("GET", f"{package}/edits/{edit_id}/tracks/{args.track}", token)
-        if status == 404:
-            current = {}
-        elif status != 200:
-            raise play_api.explain(status, current, f"read the {args.track} track", args.package, account)
-        existing = [r for r in current.get("releases", []) if isinstance(r, dict)]
+        existing = read_track(package, edit_id, args.track, token, args.package, account)
 
         wanted = "completed" if args.mode == "release" else "draft"
         release = release_for(version_code, args.name, wanted)
+        refuse_in_flight(existing, args.track, args.mode, version_code)
         if wanted == "draft":
-            # Keep what is there. Replacing a draft would throw someone's work
-            # away, so that is refused, not done.
-            for other in existing:
-                if other.get("status") == "draft" and [str(v) for v in other.get("versionCodes", [])] != [str(version_code)]:
-                    raise PlayError(
-                        f"the {args.track} track already has a draft release "
-                        f"({other.get('name') or other.get('versionCodes')}); complete or discard it in "
-                        "Play Console first, so it is not overwritten"
-                    )
+            # Keep what is there.
             releases = [r for r in existing if r.get("status") != "draft"] + [release]
         else:
-            # Replaced by design, but never silently, and never someone's draft
-            # or a rollout in progress (the same care `draft` mode takes).
-            in_flight = [
-                r for r in existing
-                if r.get("status") in IN_FLIGHT and [str(v) for v in r.get("versionCodes", [])] != [str(version_code)]
-            ]
-            if in_flight:
-                raise PlayError(
-                    f"the {args.track} track has "
-                    + ", ".join(f"a {r.get('status')} release ({describe(r)})" for r in in_flight)
-                    + "; a completed release would replace it. Complete or discard it in Play Console first"
-                )
+            # Replaced by design, but never silently.
             for other in existing:
                 print(f"replacing the {other.get('status')} release {describe(other)} on the {args.track} track", file=sys.stderr)
             releases = [release]
@@ -211,18 +249,21 @@ def run(args: argparse.Namespace) -> int:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], add_help=True)
     parser.add_argument("--package", required=True)
-    parser.add_argument("--bundle", required=True)
+    parser.add_argument("--bundle")
     parser.add_argument("--symbols")
     parser.add_argument("--track", choices=TRACKS, default="internal")
     parser.add_argument("--mode", choices=MODES, default="check")
     parser.add_argument("--name")
     parser.add_argument("--expect-version-code", type=int)
+    parser.add_argument("--preflight", action="store_true")
     args = parser.parse_args(argv[1:])
+    if not args.preflight and not args.bundle:
+        parser.error("--bundle is required unless --preflight is given")
     if not os.environ.get("PLAY_SERVICE_ACCOUNT_JSON"):
         print("error: set PLAY_SERVICE_ACCOUNT_JSON to the path of the service-account key (JSON)", file=sys.stderr)
         return 2
     try:
-        return run(args)
+        return preflight(args) if args.preflight else run(args)
     except PlayError as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
