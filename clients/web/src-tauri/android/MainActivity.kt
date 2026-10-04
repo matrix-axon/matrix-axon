@@ -77,6 +77,7 @@ class MainActivity : TauriActivity() {
     }
     ViewCompat.requestApplyInsets(webView)
   }
+
   // The WebView's `prefers-color-scheme` goes stale. Axon keeps `uiMode` in
   // `configChanges` (recreating the activity would rebuild a window that the
   // Rust side creates once), so a dark/light switch reaches the activity as
@@ -101,6 +102,8 @@ class MainActivity : TauriActivity() {
   private fun resyncWebViewConfiguration() {
     // Posted, so it runs after the framework and AppCompat have finished
     // applying the new configuration to the activity's resources and theme.
-    webView?.post { webView?.dispatchConfigurationChanged(resources.configuration) }
+    // The field is read once: it is the same view for the post and the dispatch.
+    val view = webView ?: return
+    view.post { view.dispatchConfigurationChanged(resources.configuration) }
   }
 }
