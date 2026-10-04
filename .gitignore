@@ -49,6 +49,13 @@ clients/web/dist/
 # gets pointed at a demo stack (smoke/tui/README.md), so this is easy to hit.
 .vite/
 
+# Python bytecode. Running a script that loads a sibling (the Play upload helper
+# loads play-next-version-code.py) or importing a test module (`python3 -m
+# unittest`) writes a `__pycache__` next to it, and jj would snapshot it into
+# the working copy.
+__pycache__/
+*.pyc
+
 # sqlx offline query cache (checked in only when intentional)
 .sqlx/
 
