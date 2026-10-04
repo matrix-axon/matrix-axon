@@ -184,7 +184,9 @@ jobs:
             if [ -z "$body" ]; then
               gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$published" -F body=@notes.md >/dev/null
             fi
-            if [ -n "$draft_id" ]; then
+            # A build workflow can publish the draft itself between the two
+            # lookups above, making it the published release: never delete that.
+            if [ -n "$draft_id" ] && [ "$draft_id" != "$published" ]; then
               gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$draft_id"
             fi
           elif [ -n "$draft_id" ]; then
