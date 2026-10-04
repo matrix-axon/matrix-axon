@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { marked } from 'marked'
 import { defineConfig, type Plugin } from 'vite'
 import preact from '@preact/preset-vite'
 import {
@@ -268,6 +269,57 @@ function thirdPartyLicenses(): Plugin {
 }
 
 /**
+ * The privacy policy, packaged into the client so the app can show it offline
+ * (app stores require it to be reachable from inside the app).
+ * `docs/PRIVACY_POLICY.md` stays the one copy; the README and the store
+ * listings link to it on GitHub.
+ *
+ * Rendered to HTML here rather than in the page, because the source is ours
+ * and fixed at build time. A missing file fails the build: an app store build
+ * without its policy would be a rejection or a silent compliance gap.
+ * `deploy/web/Dockerfile` copies the file in for that reason.
+ */
+const PRIVACY_POLICY_PATH = join(
+  webClientDir,
+  '..',
+  '..',
+  'docs',
+  'PRIVACY_POLICY.md',
+)
+
+const VIRTUAL_PRIVACY_POLICY_ID = 'virtual:privacy-policy'
+
+function renderPrivacyPolicy(markdown: string): string {
+  const html = marked.parse(markdown, { async: false })
+  // External links leave the app: a new tab in a browser, the system browser
+  // in the shell (whose click handler in app.tsx takes any external anchor).
+  return html.replaceAll(
+    '<a href="http',
+    '<a target="_blank" rel="noopener noreferrer" href="http',
+  )
+}
+
+function privacyPolicy(): Plugin {
+  const resolvedId = `\0${VIRTUAL_PRIVACY_POLICY_ID}`
+  return {
+    name: 'axon-privacy-policy',
+    resolveId(id) {
+      return id === VIRTUAL_PRIVACY_POLICY_ID ? resolvedId : null
+    },
+    load(id) {
+      if (id !== resolvedId) {
+        return null
+      }
+      this.addWatchFile(PRIVACY_POLICY_PATH)
+      const html = renderPrivacyPolicy(
+        readFileSync(PRIVACY_POLICY_PATH, 'utf8'),
+      )
+      return `export default ${JSON.stringify(html)}`
+    },
+  }
+}
+
+/**
  * Exit when whatever started this dev server goes away.
  *
  * `tauri ios dev` runs the dev server as its `beforeDevCommand` child and
@@ -395,6 +447,7 @@ export default defineConfig({
   plugins: [
     preact(),
     thirdPartyLicenses(),
+    privacyPolicy(),
     versionManifestPlugin(),
     exitWhenOrphaned(),
   ],

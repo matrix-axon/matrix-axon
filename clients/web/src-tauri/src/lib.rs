@@ -34,6 +34,10 @@ pub fn run() {
     // its DMA-BUF renderer, or it draws nothing where a `<canvas>` should be.
     #[cfg(target_os = "linux")]
     keep_canvas_content();
+    // Before the webview exists, too: WebKit reads its text-checking defaults
+    // once, the first time it needs them.
+    #[cfg(target_os = "macos")]
+    macos_text::enable_spell_checking_by_default();
 
     let builder = tauri::Builder::default();
 
@@ -60,7 +64,7 @@ pub fn run() {
         }
     }));
 
-    builder
+    let builder = builder
         .manage(DroppedPaths::default())
         .invoke_handler(tauri::generate_handler![read_dropped_file])
         // Transport. Both are configured by capability files under
@@ -85,16 +89,286 @@ pub fn run() {
         // app instead of 404ing. See `route`.
         .register_uri_scheme_protocol(APP_SCHEME, |ctx, request| {
             serve(ctx.app_handle(), request.uri().path())
-        })
+        });
+
+    // The macOS menu bar: Tauri's default, plus the app's own Help items.
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .menu(app_menu)
+        .on_menu_event(|app, event| forward_menu_command(app, event.id().as_ref()));
+
+    builder
         .setup(|app| {
             let window = main_window(app.handle())?;
             allow_camera_capture(&window);
             watch_dropped_paths(&window);
             claim_deep_link_schemes(app.handle());
+            // The menu bar is already installed by now: Tauri sets it while
+            // building the app, before this hook runs.
+            #[cfg(target_os = "macos")]
+            macos_text::add_text_service_menus();
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running the Axon shell");
+}
+
+/// The text services a Mac user expects in a text field, which a WKWebView app
+/// has to switch on for itself (ADR 0107).
+///
+/// WebKit takes most of them from the system settings already: autocorrect,
+/// smart quotes and dashes, and text replacement each follow System Settings →
+/// Keyboard until the app overrides them (`TextCheckerMac.mm`). The exception
+/// is spell checking while typing, which it reads only from the app's own
+/// `WebContinuousSpellCheckingEnabled` default and which is therefore off in any
+/// app that never sets it. Autocorrect works through the spell checker, so it
+/// was off too, even with "Correct spelling automatically" on. Safari sets that
+/// default; this shell now does the same.
+#[cfg(target_os = "macos")]
+mod macos_text {
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, Sel};
+    use objc2::{sel, MainThreadMarker, MainThreadOnly as _};
+    use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
+    use objc2_foundation::{ns_string, NSDictionary, NSNumber, NSString, NSUserDefaults};
+
+    /// Turn on spell checking while typing, unless the user has turned it off.
+    ///
+    /// Registered, not written: the registration domain sits below the app's
+    /// own defaults, so once the user toggles "Check Spelling While Typing" in
+    /// the Edit menu (WebKit saves that choice), their choice wins.
+    pub(super) fn enable_spell_checking_by_default() {
+        let on = NSNumber::new_bool(true);
+        let value: &AnyObject = &on;
+        let defaults =
+            NSDictionary::from_slices(&[ns_string!("WebContinuousSpellCheckingEnabled")], &[value]);
+        // SAFETY: `registerDefaults` wants property-list values, and a boolean
+        // `NSNumber` is one.
+        unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
+    }
+
+    /// Add Spelling and Grammar and Substitutions to the Edit menu, as Safari and
+    /// every AppKit text app have them.
+    ///
+    /// Tauri's menu library has no such items, so they are AppKit items with no
+    /// target: the action goes to the first responder, which is the webview when
+    /// a text field has focus. WKWebView implements every one of these actions,
+    /// ticks the items to match its current state, and saves a toggle as the
+    /// app's own default.
+    pub(super) fn add_text_service_menus() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        let Some(edit) = app
+            .mainMenu()
+            .and_then(|bar| bar.itemWithTitle(ns_string!("Edit")))
+            .and_then(|item| item.submenu())
+        else {
+            return;
+        };
+
+        edit.addItem(&NSMenuItem::separatorItem(mtm));
+        edit.addItem(&submenu(
+            mtm,
+            "Spelling and Grammar",
+            &[
+                Some(("Show Spelling and Grammar", sel!(showGuessPanel:), ":")),
+                Some(("Check Document Now", sel!(checkSpelling:), ";")),
+                None,
+                Some((
+                    "Check Spelling While Typing",
+                    sel!(toggleContinuousSpellChecking:),
+                    "",
+                )),
+                Some((
+                    "Check Grammar With Spelling",
+                    sel!(toggleGrammarChecking:),
+                    "",
+                )),
+                Some((
+                    "Correct Spelling Automatically",
+                    sel!(toggleAutomaticSpellingCorrection:),
+                    "",
+                )),
+            ],
+        ));
+        edit.addItem(&submenu(
+            mtm,
+            "Substitutions",
+            &[
+                Some((
+                    "Show Substitutions",
+                    sel!(orderFrontSubstitutionsPanel:),
+                    "",
+                )),
+                None,
+                Some(("Smart Copy/Paste", sel!(toggleSmartInsertDelete:), "")),
+                Some(("Smart Quotes", sel!(toggleAutomaticQuoteSubstitution:), "")),
+                Some(("Smart Dashes", sel!(toggleAutomaticDashSubstitution:), "")),
+                Some(("Smart Links", sel!(toggleAutomaticLinkDetection:), "")),
+                Some((
+                    "Text Replacement",
+                    sel!(toggleAutomaticTextReplacement:),
+                    "",
+                )),
+            ],
+        ));
+    }
+
+    /// A menu item holding a submenu of `items`, where `None` is a separator.
+    fn submenu(
+        mtm: MainThreadMarker,
+        title: &str,
+        items: &[Option<(&str, Sel, &str)>],
+    ) -> Retained<NSMenuItem> {
+        let title = NSString::from_str(title);
+        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &title);
+        for item in items {
+            match item {
+                Some((label, action, key)) => menu.addItem(&action_item(mtm, label, *action, key)),
+                None => menu.addItem(&NSMenuItem::separatorItem(mtm)),
+            }
+        }
+        let holder = NSMenuItem::new(mtm);
+        holder.setTitle(&title);
+        holder.setSubmenu(Some(&menu));
+        holder
+    }
+
+    /// An item that sends `action` down the responder chain. `key` is its ⌘
+    /// key equivalent, or empty for none.
+    fn action_item(
+        mtm: MainThreadMarker,
+        label: &str,
+        action: Sel,
+        key: &str,
+    ) -> Retained<NSMenuItem> {
+        // SAFETY: `action` names a standard AppKit editing action, and a nil
+        // target sends it to whichever responder implements it; a responder
+        // that does not simply leaves the item disabled.
+        unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(label),
+                Some(action),
+                &NSString::from_str(key),
+            )
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use objc2_foundation::{ns_string, NSUserDefaults};
+
+        #[test]
+        fn spell_checking_defaults_on_but_yields_to_the_users_choice() {
+            let defaults = NSUserDefaults::standardUserDefaults();
+            let key = ns_string!("WebContinuousSpellCheckingEnabled");
+            // The test binary's own domain; nothing else in it sets this key.
+            defaults.removeObjectForKey(key);
+
+            super::enable_spell_checking_by_default();
+            assert!(defaults.boolForKey(key));
+
+            // A choice the user saved (WebKit writes one when the Edit menu
+            // item is toggled) sits above the registration domain.
+            defaults.setBool_forKey(false, key);
+            assert!(!defaults.boolForKey(key));
+            defaults.removeObjectForKey(key);
+        }
+    }
+}
+
+/// The event the page listens on for menu commands (`platform/tauri.ts`).
+#[cfg(target_os = "macos")]
+const MENU_EVENT: &str = "axon://menu";
+
+/// Menu item ids. Each one is forwarded to the page as the payload of
+/// [`MENU_EVENT`], which is where the action lives: the page already has help
+/// and the privacy policy, and the menu is only another way to reach them.
+#[cfg(target_os = "macos")]
+const MENU_HELP: &str = "help";
+#[cfg(target_os = "macos")]
+const MENU_PRIVACY: &str = "privacy";
+#[cfg(target_os = "macos")]
+const MENU_ZOOM_IN: &str = "zoom-in";
+#[cfg(target_os = "macos")]
+const MENU_ZOOM_OUT: &str = "zoom-out";
+#[cfg(target_os = "macos")]
+const MENU_ZOOM_RESET: &str = "zoom-reset";
+#[cfg(target_os = "macos")]
+const MENU_COMMANDS: [&str; 5] = [
+    MENU_HELP,
+    MENU_PRIVACY,
+    MENU_ZOOM_IN,
+    MENU_ZOOM_OUT,
+    MENU_ZOOM_RESET,
+];
+
+/// The macOS menu bar: Tauri's default, with zoom in View and the app's own
+/// entries in Help.
+///
+/// macOS apps are expected to put their help, and App Store apps their privacy
+/// policy, in the Help menu, which Tauri's default leaves empty (the system
+/// adds only its search field). Windows and Linux get no menu bar at all from
+/// Tauri, and adding one only for this would be an odd look for a chat app, so
+/// there the page's own Settings footer and help dialog link to both.
+#[cfg(target_os = "macos")]
+fn app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, HELP_SUBMENU_ID};
+
+    let menu = Menu::default(app)?;
+    // Zoom at the top of View, as every Mac app with zoom has it. The page binds
+    // the same keys, and a key the page handles never reaches the menu, so the
+    // two cannot both fire; this is the route that still works if the webview
+    // ever stops handing ⌘= and friends to the page (ADR 0107).
+    let view = menu.items()?.into_iter().find_map(|item| match item {
+        MenuItemKind::Submenu(submenu) if submenu.text().ok().as_deref() == Some("View") => {
+            Some(submenu)
+        }
+        _ => None,
+    });
+    if let Some(view) = view {
+        view.insert_items(
+            &[
+                &MenuItem::with_id(app, MENU_ZOOM_IN, "Zoom In", true, Some("CmdOrCtrl+="))?,
+                &MenuItem::with_id(app, MENU_ZOOM_OUT, "Zoom Out", true, Some("CmdOrCtrl+-"))?,
+                &MenuItem::with_id(
+                    app,
+                    MENU_ZOOM_RESET,
+                    "Actual Size",
+                    true,
+                    Some("CmdOrCtrl+0"),
+                )?,
+                &PredefinedMenuItem::separator(app)?,
+            ],
+            0,
+        )?;
+    }
+    if let Some(MenuItemKind::Submenu(help)) = menu.get(HELP_SUBMENU_ID) {
+        help.append_items(&[
+            // ⇧⌘/ is ⌘? — the Mac's help key, which the page binds as well.
+            &MenuItem::with_id(app, MENU_HELP, "Axon Help", true, Some("CmdOrCtrl+Shift+/"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, MENU_PRIVACY, "Privacy Policy", true, None::<&str>)?,
+        ])?;
+    }
+    Ok(menu)
+}
+
+/// Hand a menu command to the page. Ids that are not ours (the predefined
+/// items handle themselves) are ignored.
+#[cfg(target_os = "macos")]
+fn forward_menu_command<R: tauri::Runtime>(app: &tauri::AppHandle<R>, id: &str) {
+    use tauri::Emitter as _;
+
+    if !MENU_COMMANDS.contains(&id) {
+        return;
+    }
+    if let Err(error) = app.emit_to("main", MENU_EVENT, id) {
+        eprintln!("could not forward the {id} menu command: {error}");
+    }
 }
 
 /// Claim the OAuth deep-link scheme with the OS — in development builds only.

@@ -12,15 +12,19 @@ vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }))
 vi.mock('@tauri-apps/plugin-websocket', () => ({
   default: { connect: vi.fn() },
 }))
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(() => Promise.resolve(() => {})),
+}))
 vi.mock('@tauri-apps/plugin-deep-link', () => ({
   getCurrent: vi.fn(() => Promise.resolve(null)),
   onOpenUrl: vi.fn(() => Promise.resolve(() => {})),
 }))
 
+import { listen } from '@tauri-apps/api/event'
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
-import { adapt, boundedSignal, tauriPlatform } from './tauri'
+import { adapt, boundedSignal, isMobileShell, tauriPlatform } from './tauri'
 
 /**
  * A stand-in for the websocket plugin's client. Only `addListener` and
@@ -353,5 +357,62 @@ describe('deep-link delivery', () => {
     emit!(['org.matrixaxon.axon:/oauth/callback?code=two&state=b'])
 
     expect(seen).toHaveLength(2)
+  })
+})
+
+describe('page zoom (ADR 0107)', () => {
+  it('is offered on the desktop and withheld from a phone or tablet', () => {
+    expect(isMobileShell('Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 0)).toBe(
+      false,
+    )
+    expect(
+      isMobileShell('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)', 0),
+    ).toBe(false)
+    expect(isMobileShell('Mozilla/5.0 (X11; Linux x86_64)', 0)).toBe(false)
+    expect(isMobileShell('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)', 5)).toBe(
+      true,
+    )
+    expect(isMobileShell('Mozilla/5.0 (Linux; Android 15)', 5)).toBe(true)
+    // An iPad's webview can claim to be a Mac; the touch screen gives it away.
+    expect(
+      isMobileShell('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)', 5),
+    ).toBe(true)
+  })
+
+  it('wires setZoom only where the shell is not mobile', () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+    )
+    expect(tauriPlatform().setZoom).toBeTypeOf('function')
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)',
+    )
+    expect(tauriPlatform().setZoom).toBeNull()
+    vi.restoreAllMocks()
+  })
+})
+
+describe('native menu commands (ADR 0107)', () => {
+  it('passes on our commands and drops anything else', async () => {
+    const handler = vi.fn()
+    const unsubscribe = tauriPlatform().onMenuCommand!(handler)
+    const [event, callback] = vi.mocked(listen).mock.calls.at(-1)!
+    expect(event).toBe('axon://menu')
+
+    const deliver = callback as (event: { payload: string }) => void
+    deliver({ payload: 'help' })
+    deliver({ payload: 'privacy' })
+    deliver({ payload: 'zoom-in' })
+    deliver({ payload: 'zoom-out' })
+    deliver({ payload: 'zoom-reset' })
+    deliver({ payload: 'quit' })
+    expect(handler.mock.calls).toEqual([
+      ['help'],
+      ['privacy'],
+      ['zoom-in'],
+      ['zoom-out'],
+      ['zoom-reset'],
+    ])
+    unsubscribe()
   })
 })

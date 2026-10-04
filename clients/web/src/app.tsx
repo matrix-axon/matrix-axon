@@ -20,7 +20,7 @@ import { VerificationInboxPanel } from './components/VerificationInboxPanel'
 import { UpdateBanner } from './components/UpdateBanner'
 import { useModalFocus } from './components/use-modal-focus'
 import { layoutMode, SINGLE_PANE_QUERY, useMediaQuery } from './layout'
-import { isInstalledDisplay, type Platform } from './platform'
+import { isInstalledDisplay, isTauriRuntime, type Platform } from './platform'
 import {
   localRoomHref,
   parseMatrixRoomReference,
@@ -61,9 +61,17 @@ import {
   type AppServices,
 } from './services'
 import { disconnectFromServer } from './server-url'
+import { usePageZoom } from './page-zoom'
+import { useExternalLinks } from './external-links'
+import {
+  PrivacyPage,
+  usePrivacyInPlace,
+  useShowPrivacyRequest,
+} from './pages/PrivacyPage'
 import {
   hint,
   isApplePlatform,
+  isPrimaryModifier,
   keyAria,
   keyLabel,
   KEYS,
@@ -175,6 +183,17 @@ export function App({
   )
 
   useEffect(() => applyTheme(svc.settings, document.documentElement), [svc])
+  // Above the sign-in gate, so the signed-out screen's links (the privacy
+  // policy's) open in the browser too, not only the shell's.
+  useExternalLinks(svc.platform)
+  // Likewise page zoom (ADR 0107): applied and bound on the sign-in screen too.
+  usePageZoom(svc.platform.setZoom, {
+    level: svc.settings.zoom.value,
+    get: () => svc.settings.zoom.value,
+    set: (level) => {
+      svc.settings.zoom.value = level
+    },
+  })
   useEffect(() => applyAppBadge(svc.settings, svc.rooms), [svc])
   // The stored preference drives instrumentation; `?perf=1` still wins for a
   // single session, since `perfEnabled` latches it before this runs.
@@ -564,18 +583,26 @@ function isReloadOrRestoreNavigation(): boolean {
 /** The signed-out state: the auth provider's bootstrap UI. */
 function SignedOut({ error }: { error?: string | null }) {
   const { auth } = useServices()
+  const [privacyOpen, setPrivacyOpen] = useState(false)
+  const privacy = usePrivacyInPlace(privacyOpen, setPrivacyOpen)
+  // The form stays mounted under the policy, only hidden: unmounting it lost
+  // a half-typed token, an SSO choice or an error the user came back for.
   return (
-    <main class="signin">
-      <h1>axon</h1>
-      <p>Sign in with SSO or a server-issued access token.</p>
-      {error != null && (
-        <p class="server-setup-error" role="alert">
-          {error}
-        </p>
-      )}
-      <auth.LoginBootstrap />
-      <ServerFooter />
-    </main>
+    <>
+      {privacy.page}
+      <main class="signin" hidden={privacy.page !== null}>
+        <h1>axon</h1>
+        <p>Sign in with SSO or a server-issued access token.</p>
+        {error != null && (
+          <p class="server-setup-error" role="alert">
+            {error}
+          </p>
+        )}
+        <auth.LoginBootstrap />
+        <ServerFooter />
+        {privacy.link}
+      </main>
+    </>
   )
 }
 
@@ -784,27 +811,6 @@ function SidebarPaneHandle({
  * it on a room switch would throw away its scroll position and the room list's
  * session-only name/account filters.
  */
-/**
- * Whether this href leaves the app.
- *
- * Same-origin links are the client's own routes and must stay in-window; a
- * `matrix:` link is handled by the caller before this is reached. Anything
- * http(s) elsewhere is a link to the web, which in a packaged build has to be
- * handed to the user's real browser.
- */
-function isExternalHref(href: string): boolean {
-  let url: URL
-  try {
-    url = new URL(href, window.location.href)
-  } catch {
-    return false
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return false
-  }
-  return url.origin !== window.location.origin
-}
-
 function ShellChrome() {
   const location = useLocation()
   const { path, query } = location
@@ -1029,6 +1035,10 @@ function ShellChrome() {
     window.addEventListener(SHOW_HELP_EVENT, onShowHelp)
     return () => window.removeEventListener(SHOW_HELP_EVENT, onShowHelp)
   }, [verification])
+  useShowPrivacyRequest(() => {
+    setHelpOpen(false)
+    location.route('/privacy')
+  })
   useEffect(() => {
     if (accountsLoading) {
       void accounts.refresh()
@@ -1187,25 +1197,8 @@ function ShellChrome() {
       }
       const reference = parseMatrixRoomReference(anchor.href)
       if (reference === null) {
-        // Not a room link. In a browser the anchor's own `target="_blank"` is
-        // already right and this must not interfere; in a packaged build there
-        // is no tab to open into, so an untouched external link navigates the
-        // *app window* to that page and the app is gone until restarted.
-        // `openExternal` is null exactly when the default is correct.
-        const openExternal = svcPlatform.openExternal
-        if (openExternal !== null && isExternalHref(anchor.href)) {
-          event.preventDefault()
-          // Logged, not swallowed. There is nothing to show the user — the
-          // click is already prevented, so no fallback remains and no advice
-          // would help — but a denied capability scope or an absent handler
-          // presents exactly as a link that does nothing, and that needs a
-          // trace somewhere. `openExternal` builds this message to be safe to
-          // record: an origin, never the query, which can carry a signed media
-          // URL or credentials.
-          void openExternal(anchor.href).catch((err: unknown) => {
-            console.error(err)
-          })
-        }
+        // Not a room link: `useExternalLinks`, mounted above every screen,
+        // owns the rest.
         return
       }
       const accountId = accountIdForRoomEntry(
@@ -1254,6 +1247,10 @@ function ShellChrome() {
     '?': openHelp,
     '/': openSearch,
   })
+  // The native shell (ADR 0107) is not a browser, so it can take the
+  // platform's standard chords that a page never could. Only the primary
+  // modifier counts: on macOS `Ctrl-F`/`Ctrl-N` are text-field cursor keys.
+  const native = isTauriRuntime()
   useShortcuts(
     {
       // Search's modifier twin (ADR 0066), reachable from the composer.
@@ -1264,10 +1261,37 @@ function ShellChrome() {
         openSearch(event)
       },
       'mod+g': (event) => {
-        if (!isApplePlatform()) {
+        // In a native Mac app ⌘-G means Find Next, not Find; the shell has ⌘-F.
+        if (!isApplePlatform() || native) {
           return
         }
         openSearch(event)
+      },
+      'mod+f': (event) => {
+        if (!native || !isPrimaryModifier(event)) {
+          return
+        }
+        openSearch(event)
+      },
+      'mod+n': (event) => {
+        if (!native || !isPrimaryModifier(event)) {
+          return
+        }
+        event.preventDefault()
+        location.route('/rooms/dm')
+      },
+      'mod+,': (event) => {
+        if (!native || !isPrimaryModifier(event)) {
+          return
+        }
+        event.preventDefault()
+        location.route('/settings')
+      },
+      F1: (event) => {
+        if (!native) {
+          return
+        }
+        openHelp(event)
       },
       'mod+b': (event) => {
         if (mode === 'utility' || singlePane) {
@@ -1441,8 +1465,11 @@ function ShellChrome() {
             <a
               href="/settings"
               class="ghost topbar-icon-button"
-              title="Settings"
+              title={native ? hint('Settings', KEYS.openSettings) : 'Settings'}
               aria-label="Settings"
+              aria-keyshortcuts={
+                native ? keyAria(KEYS.openSettings) : undefined
+              }
             >
               <SettingsIcon />
               <span class="topbar-label">Settings</span>
@@ -1538,6 +1565,7 @@ function ShellChrome() {
               <Route path="/accounts" component={AccountsPage} />
               <Route path="/settings" component={SettingsPage} />
               <Route path="/licenses" component={LicensesPage} />
+              <Route path="/privacy" component={PrivacyPage} />
               <Route path="/:accountId/rooms/:roomId" component={RoomPage} />
               <Route default component={NotFound} />
             </Router>

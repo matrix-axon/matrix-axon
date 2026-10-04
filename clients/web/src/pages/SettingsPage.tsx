@@ -332,6 +332,8 @@ function SettingsPageContents() {
         <time dateTime={BUILD_INFO.builtAt}>{BUILD_INFO.builtAtLabel}</time>
         {' · '}
         <a href="/licenses">Open-source licenses</a>
+        {' · '}
+        <a href="/privacy">Privacy policy</a>
         <br />
         <UpdateCheckControl />
       </footer>

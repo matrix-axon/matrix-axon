@@ -14,6 +14,7 @@ import { ServicesContext } from '../services'
 import type { TimelineEvent } from '../stores/timeline'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { EventBody } from '../components/EventBody'
+import { Lightbox } from '../components/Lightbox'
 import {
   AUTO_PAGE_LIMIT,
   MediaViewerProvider,
@@ -1430,5 +1431,254 @@ describe('MediaViewerProvider', () => {
     ].find((el) => el.getAttribute('data-event-id') === '$2')!
     expect(document.activeElement).toBe(row2.querySelector('.media-open'))
     expect(document.activeElement).not.toBe(opener)
+  })
+})
+
+describe('image zoom in the viewer', () => {
+  /** Open `$2` of two images and return its `<img>`, with a layout size. */
+  async function openZoomable(): Promise<HTMLImageElement> {
+    serveBytes()
+    const { container } = render(
+      <Surface events={[image('$1', 10), image('$2', 20)]} atStart />,
+    )
+    await openAt(container, '$2')
+    const img = await waitFor(() => {
+      const found = document.querySelector<HTMLImageElement>(
+        '.lightbox-image img',
+      )
+      expect(found).not.toBeNull()
+      return found!
+    })
+    // jsdom lays nothing out; the pan bounds need a size to work against.
+    Object.defineProperty(img, 'offsetWidth', { value: 400 })
+    Object.defineProperty(img, 'offsetHeight', { value: 300 })
+    return img
+  }
+
+  const scaleOf = (img: HTMLImageElement): number => {
+    const match = /scale\(([\d.]+)\)/.exec(img.style.transform)
+    return match === null ? 1 : Number(match[1])
+  }
+
+  const touch = (
+    kind: 'down' | 'move' | 'up',
+    target: Element,
+    pointerId: number,
+    x: number,
+    y: number,
+  ) => {
+    const init = { pointerType: 'touch', pointerId, clientX: x, clientY: y }
+    if (kind === 'down') fireEvent.pointerDown(target, init)
+    else if (kind === 'move') fireEvent.pointerMove(target, init)
+    else fireEvent.pointerUp(target, init)
+  }
+
+  it('zooms with the toolbar buttons, and only for an image', async () => {
+    const img = await openZoomable()
+
+    fireEvent.click(document.querySelector('.lightbox-zoom-in')!)
+    expect(scaleOf(img)).toBe(1.5)
+    fireEvent.click(document.querySelector('.lightbox-zoom-in')!)
+    expect(scaleOf(img)).toBe(2.25)
+    fireEvent.click(document.querySelector('.lightbox-zoom-out')!)
+    expect(scaleOf(img)).toBe(1.5)
+    fireEvent.click(document.querySelector('.lightbox-zoom-out')!)
+    expect(img.style.transform).toBe('')
+  })
+
+  it('zooms with + and -, resets with 0, and takes Ctrl/⌘ zoom from the page', async () => {
+    const img = await openZoomable()
+
+    fireEvent.keyDown(document.body, { key: '+' })
+    expect(scaleOf(img)).toBe(1.5)
+    fireEvent.keyDown(document.body, { key: '0' })
+    expect(img.style.transform).toBe('')
+
+    // The shell binds these chords to page zoom (ADR 0107); the viewer claims
+    // them first, so the app's handler sees them already handled.
+    const chord = new KeyboardEvent('keydown', {
+      key: '=',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    document.body.dispatchEvent(chord)
+    expect(chord.defaultPrevented).toBe(true)
+    await waitFor(() => expect(scaleOf(img)).toBe(1.5))
+    fireEvent.keyDown(document.body, { key: '-', metaKey: true })
+    expect(img.style.transform).toBe('')
+  })
+
+  it('Escape first returns a zoomed image to fit, then closes', async () => {
+    const img = await openZoomable()
+    fireEvent.keyDown(document.body, { key: '+' })
+
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(img.style.transform).toBe('')
+    expect(dialog()).not.toBeNull()
+
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    await waitFor(() => expect(dialog()).toBeNull())
+  })
+
+  it('zooms on Ctrl-scroll (and a trackpad pinch), and leaves a plain scroll at fit alone', async () => {
+    const img = await openZoomable()
+
+    const plain = new WheelEvent('wheel', {
+      deltaY: 40,
+      bubbles: true,
+      cancelable: true,
+    })
+    img.dispatchEvent(plain)
+    expect(plain.defaultPrevented).toBe(false)
+
+    const pinch = new WheelEvent('wheel', {
+      deltaY: -50,
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    img.dispatchEvent(pinch)
+    expect(pinch.defaultPrevented).toBe(true)
+    await waitFor(() => expect(scaleOf(img)).toBeGreaterThan(1))
+  })
+
+  it('keeps a trackpad pinch pinned under the pointer across renders', async () => {
+    const img = await openZoomable()
+    // Lay the image out at (0, 0), 400×300, and move its box with its own
+    // transform, as a browser does; jsdom does no layout of its own.
+    img.getBoundingClientRect = () => {
+      const match =
+        /translate\(([-\d.]+)px, ([-\d.]+)px\) scale\(([\d.]+)\)/.exec(
+          img.style.transform,
+        )
+      const [x, y, s] =
+        match === null
+          ? [0, 0, 1]
+          : [Number(match[1]), Number(match[2]), Number(match[3])]
+      const width = 400 * s
+      const height = 300 * s
+      const left = 200 + x - width / 2
+      const top = 150 + y - height / 2
+      return {
+        left,
+        top,
+        width,
+        height,
+        right: left + width,
+        bottom: top + height,
+        x: left,
+        y: top,
+        toJSON: () => ({}),
+      } as DOMRect
+    }
+    // WebKit's GestureEvent: a trackpad pinch in Safari and the macOS shell.
+    const gesture = (type: string, scale: number) => {
+      const event = new Event(type, { bubbles: true, cancelable: true })
+      Object.assign(event, { scale, clientX: 300, clientY: 150 })
+      img.dispatchEvent(event)
+    }
+
+    gesture('gesturestart', 1)
+    gesture('gesturechange', 2)
+    // Let the first change render, so the box the next change measures
+    // carries its transform.
+    await waitFor(() => expect(scaleOf(img)).toBe(2))
+    gesture('gesturechange', 3)
+    await waitFor(() => expect(scaleOf(img)).toBe(3))
+    gesture('gestureend', 3)
+
+    // The pointer is 100px right of the centre. The image point under it at
+    // fit must still be under it at 3x: 100 = x + 3 * 100, so x = -200.
+    expect(img.style.transform).toBe('translate(-200px, 0px) scale(3)')
+  })
+
+  it('pinches to zoom and pans with one finger once zoomed', async () => {
+    const img = await openZoomable()
+
+    touch('down', img, 1, 100, 100)
+    touch('down', img, 2, 140, 100)
+    touch('move', img, 2, 180, 100)
+    expect(scaleOf(img)).toBe(2)
+    touch('up', img, 2, 180, 100)
+
+    // One finger left on the glass now pans rather than doing nothing.
+    const before = img.style.transform
+    touch('move', img, 1, 130, 110)
+    expect(img.style.transform).not.toBe(before)
+    expect(scaleOf(img)).toBe(2)
+    touch('up', img, 1, 130, 110)
+  })
+
+  it('does not page or dismiss on a swipe while zoomed, and pages reset zoom', async () => {
+    const img = await openZoomable()
+    fireEvent.keyDown(document.body, { key: '+' })
+
+    const overlay = dialog()!
+    fireEvent.touchStart(overlay, {
+      touches: [{ clientX: 200, clientY: 300, target: img }],
+    })
+    fireEvent.touchEnd(overlay, {
+      changedTouches: [{ clientX: 300, clientY: 305 }],
+    })
+    fireEvent.touchStart(overlay, {
+      touches: [{ clientX: 200, clientY: 200, target: img }],
+    })
+    fireEvent.touchEnd(overlay, {
+      changedTouches: [{ clientX: 205, clientY: 360 }],
+    })
+    expect(shownImage()).toBe('$2.png')
+    expect(dialog()).not.toBeNull()
+
+    // Paging by key still works, and the next image opens at fit.
+    fireEvent.keyDown(document.body, { key: 'ArrowLeft' })
+    await waitFor(() => expect(shownImage()).toBe('$1.png'))
+    const next = await waitFor(() => {
+      const found = document.querySelector<HTMLImageElement>(
+        '.lightbox-image img',
+      )
+      expect(found?.style.transform).toBe('')
+      return found
+    })
+    expect(next).not.toBeNull()
+  })
+
+  it('a drag that pans does not also toggle immersive mode', async () => {
+    const img = await openZoomable()
+    fireEvent.keyDown(document.body, { key: '+' })
+
+    fireEvent.pointerDown(img, {
+      pointerType: 'mouse',
+      button: 0,
+      pointerId: 1,
+      clientX: 100,
+      clientY: 100,
+    })
+    fireEvent.pointerMove(img, {
+      pointerType: 'mouse',
+      pointerId: 1,
+      clientX: 150,
+      clientY: 120,
+    })
+    fireEvent.pointerUp(img, {
+      pointerType: 'mouse',
+      pointerId: 1,
+      clientX: 150,
+      clientY: 120,
+    })
+    fireEvent.click(img)
+
+    expect(dialog()!.classList.contains('lightbox-immersive')).toBe(false)
+  })
+
+  it('offers no zoom for media that is not an image', async () => {
+    const { container } = render(
+      <Lightbox label="clip" caption={null} onClose={() => {}}>
+        <video />
+      </Lightbox>,
+    )
+    expect(
+      container.ownerDocument.querySelector('.lightbox-zoom-in'),
+    ).toBeNull()
   })
 })

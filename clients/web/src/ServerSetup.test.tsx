@@ -197,3 +197,97 @@ describe('ServerSetup', () => {
     }
   })
 })
+
+describe('ServerSetup privacy policy (ADR 0107)', () => {
+  it('shows the policy in place, before any server is known', () => {
+    setup(ok)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Privacy policy' }))
+    expect(
+      screen.getByRole('heading', { name: 'Axon Privacy Policy' }),
+    ).toBeTruthy()
+    // Hidden, not unmounted (it keeps what was typed), so out of the
+    // accessibility tree.
+    expect(screen.queryByRole('textbox', { name: 'Server address' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: '← Back' }))
+    expect(screen.getByLabelText('Server address')).toBeTruthy()
+  })
+})
+
+describe('ServerSetup keeps its form under the policy', () => {
+  it('returns from the policy to the address that was typed', () => {
+    const { input } = setup(ok)
+    fireEvent.input(input, { target: { value: 'axon.example.org' } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Privacy policy' }))
+    expect(screen.queryByRole('button', { name: /^Connect/ })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '← Back' }))
+
+    expect(
+      (screen.getByLabelText('Server address') as HTMLInputElement).value,
+    ).toBe('axon.example.org')
+  })
+})
+
+describe('ServerSetup external links (ADR 0107)', () => {
+  it("opens the policy's contact link through the shell's opener", () => {
+    // Before sign-in there is no signed-in shell to catch the link, and the
+    // shell's webview drops a `target="_blank"` new-window request outright.
+    const openExternal = vi.fn(() => Promise.resolve())
+    render(
+      <ServerSetup
+        onConnected={vi.fn()}
+        platform={{ fetch: ok, openExternal }}
+        storage={memoryStorage()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Privacy policy' }))
+
+    const contact = screen.getByRole('link', {
+      name: 'https://github.com/matrix-axon/matrix-axon/issues',
+    })
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+    contact.dispatchEvent(click)
+
+    expect(openExternal).toHaveBeenCalledWith(
+      'https://github.com/matrix-axon/matrix-axon/issues',
+    )
+    expect(click.defaultPrevented).toBe(true)
+  })
+})
+
+describe('ServerSetup page zoom (ADR 0107)', () => {
+  it('applies the saved zoom and saves a change for the app to pick up', async () => {
+    const storage = memoryStorage({
+      'axon.settings': JSON.stringify({
+        version: 1,
+        theme: 'dark',
+        zoom: 1.25,
+      }),
+    })
+    const setZoom = vi.fn<(factor: number) => Promise<void>>(() =>
+      Promise.resolve(),
+    )
+    render(
+      <ServerSetup
+        onConnected={vi.fn()}
+        platform={{ fetch: ok, setZoom }}
+        storage={storage}
+      />,
+    )
+    await waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1.25))
+
+    fireEvent.keyDown(screen.getByLabelText('Server address'), {
+      key: '-',
+      ctrlKey: true,
+    })
+    await waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1.1))
+    // Saved into the settings the app reads once connected, keeping the rest.
+    expect(JSON.parse(storage.getItem('axon.settings')!)).toEqual({
+      version: 1,
+      theme: 'dark',
+      zoom: 1.1,
+    })
+  })
+})

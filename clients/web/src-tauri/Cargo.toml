@@ -72,6 +72,15 @@ tauri = { version = "2", features = ["test"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = { version = "2", features = ["v2_40"] }
 
+# Reaching AppKit, for the text services a WKWebView app has to switch on
+# itself: spell checking while typing (which autocorrect depends on), and the
+# Edit menu's Spelling and Substitutions items. Versions match what tauri and
+# wry already depend on, so no second copy is built.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSDictionary", "NSString", "NSUserDefaults", "NSValue"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder"] }
+
 [target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 

@@ -1,4 +1,5 @@
 import { effect, signal, type Signal } from '@preact/signals'
+import { DEFAULT_ZOOM, parseZoom } from '../zoom'
 
 /**
  * Schema-versioned client settings over `localStorage` (ADR 0046, M-W3).
@@ -99,6 +100,12 @@ export interface SettingsV1 {
   /** User-sized message composer height in CSS pixels; null means default. */
   messageComposerHeight: number | null
   /**
+   * Page zoom factor in the native shell (ADR 0107); 1 is 100%. A browser
+   * keeps its own zoom per site, so this is only applied where the platform
+   * can set one.
+   */
+  zoom: number
+  /**
    * Whether this browser has opted into registering Axon as a `matrix:`
    * protocol handler. The browser owns actual registration permission; this
    * only records the user's preference after a successful registration call.
@@ -189,6 +196,7 @@ const DEFAULTS: SettingsV1 = {
   previewRoom: true,
   timeFormat: '12h',
   messageComposerHeight: null,
+  zoom: DEFAULT_ZOOM,
   matrixProtocolHandler: false,
   recentReactions: [],
   developerMode: false,
@@ -247,6 +255,33 @@ function oneOf<T extends string>(
 }
 
 /** Parse a stored envelope, falling back to defaults on any irregularity. */
+/**
+ * The saved page zoom, read straight from storage. For the server-setup
+ * screen, which comes before the services graph (and so this store) exists.
+ */
+export function readStoredZoom(storage: Storage): number {
+  return parse(storage.getItem(STORAGE_KEY)).zoom
+}
+
+/**
+ * Save a page zoom straight into the stored settings, keeping every other
+ * field. Only for the server-setup screen: it never runs alongside a settings
+ * store, whose own writes replace the whole envelope.
+ */
+export function writeStoredZoom(storage: Storage, zoom: number): void {
+  try {
+    const raw = storage.getItem(STORAGE_KEY)
+    const envelope: unknown = raw === null ? null : JSON.parse(raw)
+    const base =
+      typeof envelope === 'object' && envelope !== null
+        ? envelope
+        : { version: 1 }
+    storage.setItem(STORAGE_KEY, JSON.stringify({ ...base, zoom }))
+  } catch {
+    // A preference: a failed save must not break the screen.
+  }
+}
+
 function parse(raw: string | null): SettingsV1 {
   if (raw === null) {
     return DEFAULTS
@@ -325,6 +360,7 @@ function parse(raw: string | null): SettingsV1 {
       v1.messageComposerHeight >= 38
         ? Math.round(v1.messageComposerHeight)
         : DEFAULTS.messageComposerHeight,
+    zoom: parseZoom(v1.zoom),
     matrixProtocolHandler:
       typeof v1.matrixProtocolHandler === 'boolean'
         ? v1.matrixProtocolHandler
@@ -380,6 +416,7 @@ export interface SettingsStore {
   previewRoom: Signal<boolean>
   timeFormat: Signal<TimeFormat>
   messageComposerHeight: Signal<number | null>
+  zoom: Signal<number>
   matrixProtocolHandler: Signal<boolean>
   recentReactions: Signal<string[]>
   developerMode: Signal<boolean>
@@ -435,6 +472,7 @@ export function createSettingsStore(
   const messageComposerHeight = signal<number | null>(
     initial.messageComposerHeight,
   )
+  const zoom = signal<number>(initial.zoom)
   const matrixProtocolHandler = signal<boolean>(initial.matrixProtocolHandler)
   const recentReactions = signal<string[]>(initial.recentReactions)
   const developerMode = signal<boolean>(initial.developerMode)
@@ -463,6 +501,7 @@ export function createSettingsStore(
       previewRoom: previewRoom.value,
       timeFormat: timeFormat.value,
       messageComposerHeight: messageComposerHeight.value,
+      zoom: zoom.value,
       matrixProtocolHandler: matrixProtocolHandler.value,
       recentReactions: recentReactions.value,
       developerMode: developerMode.value,
@@ -497,6 +536,7 @@ export function createSettingsStore(
     previewRoom,
     timeFormat,
     messageComposerHeight,
+    zoom,
     matrixProtocolHandler,
     recentReactions,
     developerMode,

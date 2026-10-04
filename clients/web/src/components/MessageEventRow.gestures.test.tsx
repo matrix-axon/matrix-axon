@@ -380,6 +380,38 @@ describe('MessageEventRow gestures', () => {
     expect(view.onOpenThread).not.toHaveBeenCalled()
   })
 
+  it('leaves a long press on a link to the OS', () => {
+    vi.useFakeTimers()
+    const rowEvent = event({
+      body: 'https://example.com',
+      content: {
+        msgtype: 'm.text',
+        body: 'https://example.com',
+      } as unknown as TimelineEvent['content'],
+    })
+    const view = renderRow({ rowEvent })
+    const link = view.row.querySelector('a')!
+
+    pointer(link, 'down', 40)
+    // No callout or selection lock: the OS link preview must be allowed.
+    expect(view.row.classList.contains('touch-gesture-active')).toBe(false)
+    const contextMenu = new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+    })
+    link.dispatchEvent(contextMenu)
+    expect(contextMenu.defaultPrevented).toBe(false)
+
+    act(() => {
+      vi.advanceTimersByTime(600)
+    })
+    pointer(link, 'up', 40)
+
+    // The hold binding (open thread) does not run, and neither does the tap.
+    expect(view.onOpenThread).not.toHaveBeenCalled()
+    expect(view.onOpenActions).not.toHaveBeenCalled()
+  })
+
   it('tracks a swipe left, signals the threshold, and replies on release', () => {
     const view = renderRow()
 

@@ -33,6 +33,11 @@ export function useSwipePaging(handlers: {
    * scrolling would otherwise close the viewer under the reader.
    */
   onDismiss?: () => void
+  /**
+   * Whether to leave this touch alone. A zoomed image (`image-zoom.ts`) uses a
+   * one-finger drag to pan, so it must not also page or dismiss.
+   */
+  blocked?: () => boolean
 }): {
   onTouchStart: JSX.TouchEventHandler<HTMLElement>
   onTouchEnd: JSX.TouchEventHandler<HTMLElement>
@@ -62,7 +67,8 @@ export function useSwipePaging(handlers: {
       if (
         event.touches.length !== 1 ||
         touch === undefined ||
-        touch.clientX < nativeBackEdgePx()
+        touch.clientX < nativeBackEdgePx() ||
+        handlersRef.current.blocked?.() === true
       ) {
         start.current = null
         return
