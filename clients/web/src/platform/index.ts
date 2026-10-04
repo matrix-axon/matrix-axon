@@ -384,6 +384,32 @@ export function isTauriRuntime(): boolean {
 }
 
 /**
+ * Whether the composer has to supply its own camera buttons: the packaged
+ * Android app, and nowhere else.
+ *
+ * The attach button opens a file input, and what a platform adds to that
+ * chooser is its own business. iOS builds a Photo Library / Take Photo / Choose
+ * Files sheet from a bare `<input type="file">`; Chrome on Android adds a camera
+ * entry. Android System WebView, which is what a Tauri shell runs on, offers
+ * only the document picker, and offers the camera solely for an input with
+ * `capture`, in which case it goes straight to the camera and skips the files.
+ * Measured on a Galaxy S20 FE (WebView 155): the paperclip opened the picker
+ * and nothing else. So the shell needs a second, `capture`, input; this says
+ * when.
+ *
+ * Keyed on the shell plus `Android` in the user agent (`Linux; Android 13;
+ * SM-G781U1 ...; wv`, same on the emulator's WebView 109) and not on the
+ * `capture` feature, which every browser accepts and ignores.
+ */
+export function needsCameraCaptureButtons(): boolean {
+  return (
+    isTauriRuntime() &&
+    typeof navigator !== 'undefined' &&
+    /\bAndroid\b/.test(navigator.userAgent)
+  )
+}
+
+/**
  * How long the object URL is held after the anchor is clicked. Revoking
  * immediately races the browser's own read of the blob, and the download then
  * silently produces an empty file.
