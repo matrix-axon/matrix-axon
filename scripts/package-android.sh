@@ -33,7 +33,8 @@ Usage: scripts/package-android.sh [options]
                        armv7 | i686
   --debug              build a debug APK (default: release)
   --install            adb install the built APK (uses ANDROID_SERIAL or the
-                       only connected device/emulator)
+                       only connected device/emulator). Needs --debug: a
+                       release APK is unsigned and the device refuses it.
   -h, --help           this
 
 Examples:
@@ -55,6 +56,11 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+if [ "$install_app" -eq 1 ] && [ "$debug" -eq 0 ]; then
+  echo "error: --install needs --debug; a release APK is unsigned and fails with INSTALL_PARSE_FAILED_NO_CERTIFICATES" >&2
+  exit 2
+fi
 
 case "$target" in
   aarch64|x86_64|armv7|i686) ;;
@@ -131,9 +137,11 @@ echo "==> building ($target)"
 pnpm "${build_args[@]}"
 
 # `|| true`: under pipefail a missing APK would abort here silently, before
-# the diagnostic written for exactly that case.
-apk=$(find "$tauri_dir/gen/android/app/build/outputs/apk" -name '*.apk' -print0 2>/dev/null \
-  | xargs -0 ls -t 2>/dev/null | head -1 || true)
+# the diagnostic written for exactly that case. `find -exec ... +` rather than
+# `| xargs ls -t`: with no match xargs still runs `ls` once with no arguments,
+# which lists the current directory and "finds" a file that is not an APK.
+apk=$(find "$tauri_dir/gen/android/app/build/outputs/apk" -name '*.apk' -exec ls -t -- {} + 2>/dev/null \
+  | head -1 || true)
 if [ -z "$apk" ]; then
   echo "error: the build reported success but produced no .apk" >&2
   exit 1
