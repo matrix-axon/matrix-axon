@@ -260,8 +260,16 @@ if [ "$sign" -eq 1 ]; then
   echo "==> signed $artifact"
   # What Play Console asks for when the upload key is registered, and what to
   # compare if an upload is refused for a signature mismatch.
-  keytool -list -keystore "$ANDROID_KEYSTORE" -alias "$ANDROID_KEY_ALIAS" \
-    -storepass:env ANDROID_KEYSTORE_PASSWORD 2>/dev/null | sed -n 's/^Certificate fingerprint (SHA-256): /    upload key SHA-256: /p; s/^Certificate fingerprint (SHA256): /    upload key SHA-256: /p'
+  fingerprint=$(keytool -list -keystore "$ANDROID_KEYSTORE" -alias "$ANDROID_KEY_ALIAS" \
+    -storepass:env ANDROID_KEYSTORE_PASSWORD 2>/dev/null \
+    | sed -n 's/^Certificate fingerprint (SHA-256): /    upload key SHA-256: /p; s/^Certificate fingerprint (SHA256): /    upload key SHA-256: /p' || true)
+  if [ -n "$fingerprint" ]; then
+    echo "$fingerprint"
+  else
+    # Silent here would read as "nothing to compare". keytool failed (the
+    # alias, the password) or labels the line differently on this JDK.
+    echo "warning: could not read the upload key's SHA-256 fingerprint; run keytool -list -v -keystore \"\$ANDROID_KEYSTORE\" -alias \"\$ANDROID_KEY_ALIAS\" to compare it with Play Console" >&2
+  fi
 elif [ "$debug" -eq 0 ] && [ "$aab" -eq 0 ]; then
   echo "warning: a release APK without --sign is unsigned and will not install" >&2
 fi
