@@ -758,7 +758,7 @@ pub async fn true_local_react(ctx: &Ctx) -> ScenarioOutcome {
         driver.type_text(&marker)?;
         driver.press_enter()?;
         driver.wait_for_screen("reaction target send to complete", ctx.timeout, |screen| {
-            screen.contains(&marker) && screen.contains("sent")
+            screen.contains(&marker) && screen.split_whitespace().any(|word| word == "sent")
         })?;
 
         submit_command(&mut driver, "/react 🚀")?;
