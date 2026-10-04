@@ -75,8 +75,9 @@ avatar = "media/avatars/tomas.png"
 # Spaces
 # ---------------------------------------------------------------------------
 # Two spaces so the web Spaces picker has a real choice to filter by, and so
-# "All rooms" is meaningfully different from either one. axon-tui has no space
-# support (docs/client-parity.md), so these are web-only in the demo.
+# "All rooms" is meaningfully different from either one. axon-tui renders them
+# as groups in its room list, with the DM left under Ungrouped; no TUI scene
+# exercises the groups themselves yet (docs/demo-coverage.md).
 
 [[space]]
 id = "ridgeline"
