@@ -58,14 +58,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      # shell: bash on every step below that pipes: the default shell has no
+      # pipefail, so a failed first command in a pipeline would go unnoticed.
       - name: Find the pending release
         id: pending
+        shell: bash
         run: |
           # release-plz's branches start with release-plz- (its default).
-          # With none open there is nothing to draft; the merge of a release
-          # PR lands here too, and the publish job owns that release.
+          # Only a branch in this repository counts: a fork can name its
+          # branch anything. With none open there is nothing to draft; the
+          # merge of a release PR lands here too, and the publish job owns
+          # that release.
           sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" \
-            --jq '[.[] | select(.head.ref | startswith("release-plz-"))][0].head.sha // empty')
+            --jq '[.[] | select((.head.ref | startswith("release-plz-")) and .head.repo.full_name == env.GITHUB_REPOSITORY)][0].head.sha // empty')
           if [ -z "$sha" ]; then
             echo "::notice::No open release PR; nothing to draft."
             exit 0
@@ -73,19 +78,38 @@ jobs:
           version=$(gh api -H 'Accept: application/vnd.github.raw+json' \
             "repos/$GITHUB_REPOSITORY/contents/Cargo.toml?ref=$sha" |
             python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["workspace"]["package"]["version"])')
+          if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The release PR's version '$version' is not X.Y.Z, so no draft was made for it."
+            exit 1
+          fi
           echo "tag=v$version" >>"$GITHUB_OUTPUT"
 
       - name: Create or update the draft
         if: steps.pending.outputs.tag != ''
+        shell: bash
         env:
           TAG: ${{ steps.pending.outputs.tag }}
         run: |
-          scripts/release-notes.sh generate "$TAG" | scripts/release-notes.sh stamp >generated.md
+          # Two steps, so that a failed generate stops the job. stamp also
+          # refuses empty input, so notes can never be just a marker.
+          scripts/release-notes.sh generate "$TAG" >raw.md
+          scripts/release-notes.sh stamp <raw.md >generated.md
 
           # Our draft: the one for this tag, or one an earlier version of the
-          # release PR left behind (its notes carry the marker).
-          draft=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq \
-            "[.[] | select(.draft and (.tag_name == \"$TAG\" or ((.body // \"\") | contains(\"release-notes-sha256\"))))][0] // empty")
+          # release PR left behind (its notes carry the marker). A draft whose
+          # tag already exists in git is a release that has been tagged but
+          # not published yet; the publish job owns it, so it is not reused.
+          drafts=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '[.[] | select(.draft)]')
+          draft=$(jq -c '[.[] | select(.tag_name == env.TAG)][0] // empty' <<<"$drafts")
+          if [ -z "$draft" ]; then
+            while IFS= read -r row; do
+              name=$(jq -r .tag_name <<<"$row")
+              if ! git rev-parse -q --verify "refs/tags/$name" >/dev/null; then
+                draft=$row
+                break
+              fi
+            done < <(jq -c '.[] | select((.body // "") | contains("release-notes-sha256"))' <<<"$drafts")
+          fi
 
           if [ -z "$draft" ]; then
             gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
@@ -112,10 +136,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    # Serialize with the build workflows' first-time Release creates (same
-    # group as their release jobs). This job needs no build, so it runs first.
+    # Its own group, not the build workflows' github-release-<ref>: GitHub
+    # cancels all but the newest pending run in a group, and this job's
+    # cancellation would skip the changelog job and leave the Release
+    # without notes. It needs no build, so it normally runs before they
+    # create the Release; if one gets in first, the step below fills in an
+    # empty body instead of creating a second Release.
     concurrency:
-      group: github-release-${{ github.ref }}
+      group: release-notes-publish-${{ github.ref }}
       cancel-in-progress: false
     env:
       GH_TOKEN: ${{ github.token }}
@@ -128,14 +156,23 @@ jobs:
           fetch-depth: 0
 
       - name: Publish the release
+        shell: bash
         run: |
           draft_id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            --jq "[.[] | select(.draft and .tag_name == \"$TAG\")][0].id // empty")
+            --jq '[.[] | select(.draft and .tag_name == env.TAG)][0].id // empty')
+          : >notes.md
           if [ -n "$draft_id" ]; then
-            gh api "repos/$GITHUB_REPOSITORY/releases/$draft_id" --jq '.body // ""' |
-              scripts/release-notes.sh strip >notes.md
-          else
+            gh api "repos/$GITHUB_REPOSITORY/releases/$draft_id" --jq '.body // ""' >draft.md
+            scripts/release-notes.sh strip <draft.md >notes.md
+          fi
+          # No draft, or its notes were emptied by hand: generate them now.
+          if ! grep -q '[^[:space:]]' notes.md; then
             scripts/release-notes.sh generate "$TAG" >notes.md
+          fi
+          # Never publish a Release with an empty body.
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::No release notes for $TAG."
+            exit 1
           fi
 
           # Publishing a draft in place keeps one release per tag. A
@@ -186,8 +223,13 @@ jobs:
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
       - name: Add the release to CHANGELOG.md
+        shell: bash
         run: |
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.body // ""' >notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::The Release for $TAG has no notes to add."
+            exit 1
+          fi
           scripts/release-notes.sh changelog "$TAG" notes.md
           if git diff --quiet -- CHANGELOG.md && [ -z "$(git ls-files --others --exclude-standard CHANGELOG.md)" ]; then
             echo "::notice::CHANGELOG.md already has $TAG."
@@ -203,6 +245,12 @@ jobs:
           # release.yml leaves this label out of the next release's notes.
           gh label create skip-changelog --color ededed \
             --description "Left out of the generated release notes" 2>/dev/null || true
+          # A re-run after the PR was opened must not fail on creating it again.
+          open_prs=$(gh pr list --head "$branch" --state open --json number --jq length)
+          if [ "$open_prs" != 0 ]; then
+            echo "::notice::A PR for $branch is already open."
+            exit 0
+          fi
           gh pr create --base main --head "$branch" \
             --title "docs: add $TAG to CHANGELOG.md" \
             --label skip-changelog \

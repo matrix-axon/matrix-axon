@@ -40,6 +40,8 @@ check "rejects a non-release tag" rejected "$got"
 # stamp / edited / strip
 printf '## Features\n* Add spaces by @a in #540\n' >"$work/notes"
 "$script" stamp <"$work/notes" >"$work/stamped"
+if printf '\n \n' | "$script" stamp >/dev/null 2>&1; then got=stamped; else got=refused; fi
+check "stamp refuses empty notes" refused "$got"
 if "$script" edited "$work/stamped"; then got=edited; else got=untouched; fi
 check "fresh stamp is untouched" untouched "$got"
 { sed 's/$/\r/' "$work/stamped"; printf '\r\n\r\n'; } >"$work/crlf"

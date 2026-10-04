@@ -15,7 +15,7 @@
 #
 #   scripts/release-notes.sh stamp
 #       Append a marker recording a hash of stdin, so `edited` can tell
-#       later whether a person changed the notes.
+#       later whether a person changed the notes. Fails on empty input.
 #
 #   scripts/release-notes.sh edited FILE
 #       Exit 0 if FILE's notes differ from what `stamp` recorded, or carry
@@ -35,7 +35,7 @@ marker='<!-- release-notes-sha256:'
 release_tag_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
 
 usage() {
-	sed -n '2,29p' "$0" >&2
+	sed -n '2,30p' "$0" >&2
 }
 
 # Hash the notes without the marker, line endings or trailing blank lines,
@@ -83,6 +83,10 @@ generate)
 	;;
 stamp)
 	text=$(strip_marker)
+	if ! printf '%s' "$text" | grep -q '[^[:space:]]'; then
+		echo "error: refusing to stamp empty notes" >&2
+		exit 1
+	fi
 	hash=$(printf '%s' "$text" | body_hash)
 	printf '%s\n\n%s %s -->\n' "$text" "$marker" "$hash"
 	;;

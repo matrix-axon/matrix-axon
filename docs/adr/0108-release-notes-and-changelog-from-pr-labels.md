@@ -26,8 +26,11 @@ release-plz keeps `changelog_update = false`.
 ### A draft release is the place to edit
 
 After every Release-plz run on `main`, the `draft` job finds the open release PR, reads the version from its `Cargo.toml`, and creates or updates a draft GitHub Release for that tag.
+Only a branch in this repository counts as the release PR, since a fork can name its branch `release-plz-anything`, and the version must be `X.Y.Z`.
 Its notes cover the PRs merged since the previous `vX.Y.Z` tag.
 A person edits the draft on GitHub before merging the release PR.
+
+Every step that pipes sets `shell: bash`, because the default shell has no `pipefail` and a failed `generate` would otherwise leave notes that are only a marker; `stamp` also refuses empty input.
 
 The job must not overwrite those edits.
 It ends the notes with a hidden marker holding a hash of the generated text.
@@ -35,6 +38,8 @@ If the draft's text no longer matches its marker, or the marker is gone, the job
 PRs merged after that point are not added.
 Running the workflow by hand with `force` regenerates the notes and discards the edits.
 Line endings and trailing blank lines are ignored when comparing, since editing on github.com changes them.
+
+A draft whose tag already exists in git has been tagged but not published, so the job does not reuse it for a newer release PR; `publish` owns it.
 
 A draft is used rather than a file in the release PR for the reason above: a draft is not touched by release-plz.
 
@@ -45,14 +50,17 @@ With no draft (a hand-made tag, or a release PR that never got one), it generate
 If a Release for the tag already exists, it only fills in an empty body.
 The build workflows then attach their files to that Release as before.
 
-The job joins the `github-release-<ref>` concurrency group that the build workflows' release jobs use to serialize first-time creates.
-It has no `needs`, so it runs before them.
-GitHub keeps one running and one pending run per group and cancels further pending ones; this job is short enough to have finished before the other two become ready.
+The job has its own concurrency group, not the `github-release-<ref>` group the build workflows' release jobs share.
+GitHub keeps one running and one pending run per group and cancels the rest, so a cancelled `publish` would skip the `changelog` job and leave the Release without notes.
+`publish` has no `needs`, so it normally runs before the build workflows create the Release.
+If one gets in first, `publish` fills in the empty body instead of creating a second Release.
+It never publishes empty notes: it generates them when the draft's are blank, and fails if they are still blank.
 
 ### CHANGELOG.md is a follow-up PR
 
 After publishing, the `changelog` job adds the published notes to `CHANGELOG.md` as `## vX.Y.Z - date` and opens a PR with `RELEASE_PLZ_TOKEN`.
 A PR from `GITHUB_TOKEN` would get none of the required checks, and `main` takes changes through PRs.
+The job can be re-run: it skips opening the PR when one is already open for the branch.
 `CHANGELOG.md` therefore trails each release by one merge, and it carries the notes as finally edited.
 
 ### Labels
