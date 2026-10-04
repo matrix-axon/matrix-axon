@@ -1,3 +1,6 @@
+#[path = "build_support/android_manifest.rs"]
+mod android_manifest;
+
 fn main() {
     tauri_build::build();
     declare_android_camera();
@@ -40,37 +43,9 @@ fn declare_android_camera() {
     let Ok(manifest) = std::fs::read_to_string(&path) else {
         return;
     };
-    let rewritten = with_camera_block(&manifest);
+    let rewritten =
+        android_manifest::with_camera_block(&manifest).unwrap_or_else(|why| panic!("{why}"));
     if rewritten != manifest {
         std::fs::write(&path, rewritten).expect("failed to update AndroidManifest.xml");
     }
-}
-
-const MARKER: &str = "<!-- CAMERA. AUTO-GENERATED. DO NOT REMOVE. -->";
-
-/// `manifest` with the camera block placed just before `</manifest>`, and any
-/// earlier copy of it removed.
-fn with_camera_block(manifest: &str) -> String {
-    let mut out = Vec::new();
-    let mut inside = false;
-    for line in manifest.split('\n') {
-        if line.contains(MARKER) {
-            inside = !inside;
-            continue;
-        }
-        if inside {
-            continue;
-        }
-        if line.contains("</manifest>") {
-            out.push(format!("    {MARKER}"));
-            out.push(r#"    <uses-permission android:name="android.permission.CAMERA" />"#.into());
-            out.push(
-                r#"    <uses-feature android:name="android.hardware.camera" android:required="false" />"#
-                    .into(),
-            );
-            out.push(format!("    {MARKER}"));
-        }
-        out.push(line.to_string());
-    }
-    out.join("\n")
 }
