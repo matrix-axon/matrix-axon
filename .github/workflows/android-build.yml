@@ -168,7 +168,9 @@ jobs:
 
       - name: Collect the bundle
         run: |
-          bundle="$(find clients/web/src-tauri/gen/android/app/build/outputs/bundle -name '*.aab' | head -n 1)"
+          # Newest first, as `package-android.sh` picks it. `sed`, not `head`,
+          # so a long list cannot SIGPIPE the pipeline under `pipefail`.
+          bundle="$(find clients/web/src-tauri/gen/android/app/build/outputs/bundle -name '*.aab' -exec ls -t -- {} + | sed -n 1p)"
           if [ -z "$bundle" ]; then
             echo "::error::the build reported success but produced no .aab"
             exit 1
