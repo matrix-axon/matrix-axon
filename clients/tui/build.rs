@@ -28,10 +28,11 @@ fn main() {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_owned())
         .unwrap_or_else(|| "unknown".to_owned());
-    let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
 
     let build_time = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let build_info = format!("{version}-{hash}-{profile}-{build_time} / {rust}");
+    // The release version is printed separately (CARGO_PKG_VERSION), so this
+    // carries only what distinguishes one build of that version from another.
+    let build_details = format!("{hash}-{profile}-{build_time} / {rust}");
 
-    println!("cargo:rustc-env=BUILD_INFO={build_info}");
+    println!("cargo:rustc-env=BUILD_DETAILS={build_details}");
 }

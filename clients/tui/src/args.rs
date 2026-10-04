@@ -36,7 +36,7 @@ impl Args {
                     ));
                 }
                 "--version" | "-V" => {
-                    println!("axon-tui {}", env!("CARGO_PKG_VERSION"));
+                    println!("{}", version_line());
                     std::process::exit(0);
                 }
                 "--help" | "-h" => {
@@ -57,6 +57,10 @@ impl Args {
     }
 }
 
+fn version_line() -> String {
+    format!("axon-tui {}", env!("CARGO_PKG_VERSION"))
+}
+
 pub(crate) fn normalize_token(token: Option<String>) -> Option<String> {
     token.and_then(|token| {
         let token = token.trim();
@@ -66,7 +70,7 @@ pub(crate) fn normalize_token(token: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_token;
+    use super::{normalize_token, version_line};
 
     #[test]
     fn empty_tokens_are_absent() {
@@ -76,6 +80,15 @@ mod tests {
         assert_eq!(
             normalize_token(Some("  secret-token  ".to_owned())).as_deref(),
             Some("secret-token")
+        );
+    }
+
+    #[test]
+    fn version_line_names_the_cargo_version() {
+        let line = version_line();
+        assert_eq!(
+            line.strip_prefix("axon-tui "),
+            Some(env!("CARGO_PKG_VERSION"))
         );
     }
 }

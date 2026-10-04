@@ -2803,11 +2803,11 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
     };
 
     // The release version equals the git tag (scripts/release-version.sh
-    // enforces it); BUILD_INFO adds the commit and build details after it.
+    // enforces it); BUILD_DETAILS adds the commit and build details after it.
     let version = format!(
-        "Version: v{}  (build {})",
+        "Version: v{} (build {})",
         env!("CARGO_PKG_VERSION"),
-        env!("BUILD_INFO")
+        env!("BUILD_DETAILS")
     );
 
     let graphics_line = {
