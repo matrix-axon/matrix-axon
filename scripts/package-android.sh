@@ -21,8 +21,17 @@
 #     needs arm64. An APK built for the wrong one installs and then fails with
 #     INSTALL_FAILED_NO_MATCHING_ABIS, so say which with --target.
 #
-# Not a gate and not run by CI. Store signing is not handled here yet: this
-# produces the APK used for testing.
+#   * Signing. Nothing here touches Gradle's signing config: the generated
+#     `build.gradle.kts` is regenerated every run, so a config edited into it
+#     would not survive. The build is left unsigned and then signed afterwards
+#     with `jarsigner` (an .aab, which is what Play takes) or `zipalign` +
+#     `apksigner` (an .apk). The key is an *upload* key (ADR 0110): Play
+#     re-signs with its own, so this key is only how Google knows an upload is
+#     ours, and it can be reset if it is lost. Its location and passwords come
+#     from the environment, never from arguments, which land in `ps` and in
+#     shell history.
+#
+# Not a gate and not run by CI (a lane would need the key as a secret).
 set -euo pipefail
 
 usage() {
@@ -32,24 +41,44 @@ Usage: scripts/package-android.sh [options]
   --target <abi>       aarch64 (default, devices) | x86_64 (emulator) |
                        armv7 | i686
   --debug              build a debug APK (default: release)
+  --aab                build an Android App Bundle (what Play takes) instead
+                       of an APK; release only
+  --sign               sign a release build with the upload key named in the
+                       environment (below); needs --aab or a release APK
+  --version-code <n>   Play rejects a reused versionCode; default is derived
+                       from the version (0.1.3 -> 1003), so pass a larger
+                       number to upload the same version twice
   --install            adb install the built APK (uses ANDROID_SERIAL or the
-                       only connected device/emulator). Needs --debug: a
-                       release APK is unsigned and the device refuses it.
+                       only connected device/emulator). Needs --debug or
+                       --sign: an unsigned release APK is refused.
   -h, --help           this
+
+Environment for --sign:
+  ANDROID_KEYSTORE            path to the upload keystore (never in the repo)
+  ANDROID_KEY_ALIAS           the key's alias in it
+  ANDROID_KEYSTORE_PASSWORD   its password (the key must share it, which a
+                              PKCS12 keystore, keytool's default, does)
 
 Examples:
   scripts/package-android.sh --target x86_64 --debug --install
+  scripts/package-android.sh --target aarch64 --aab --sign --version-code 1004
 USAGE
 }
 
 target="aarch64"
 debug=0
+aab=0
+sign=0
+version_code=""
 install_app=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --target) target="${2:?--target needs a value}"; shift ;;
     --debug) debug=1 ;;
+    --aab) aab=1 ;;
+    --sign) sign=1 ;;
+    --version-code) version_code="${2:?--version-code needs a value}"; shift ;;
     --install) install_app=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -57,8 +86,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-if [ "$install_app" -eq 1 ] && [ "$debug" -eq 0 ]; then
-  echo "error: --install needs --debug; a release APK is unsigned and fails with INSTALL_PARSE_FAILED_NO_CERTIFICATES" >&2
+if [ "$install_app" -eq 1 ] && [ "$debug" -eq 0 ] && [ "$sign" -eq 0 ]; then
+  echo "error: --install needs --debug or --sign; an unsigned release APK fails with INSTALL_PARSE_FAILED_NO_CERTIFICATES" >&2
   exit 2
 fi
 
@@ -66,6 +95,38 @@ case "$target" in
   aarch64|x86_64|armv7|i686) ;;
   *) echo "error: unknown --target '$target'" >&2; usage >&2; exit 2 ;;
 esac
+
+# All of this is checked before the build rather than at the signing step: a
+# forgotten variable should not cost a full release build before it is
+# mentioned.
+if [ "$aab" -eq 1 ] && [ "$debug" -eq 1 ]; then
+  echo "error: --aab is a release artifact; drop --debug" >&2
+  exit 2
+fi
+if [ "$sign" -eq 1 ] && [ "$debug" -eq 1 ]; then
+  echo "error: --debug builds are already signed with the debug key; --sign is for release" >&2
+  exit 2
+fi
+if [ "$aab" -eq 1 ] && [ "$install_app" -eq 1 ]; then
+  echo "error: adb cannot install an .aab; build an APK to install" >&2
+  exit 2
+fi
+# Spliced into a JSON `--config` override below, so anything but digits would
+# either close the object early or reach `tauri` as a config it reports
+# obscurely.
+if [ -n "$version_code" ] && ! [[ $version_code =~ ^[1-9][0-9]{0,8}$ ]]; then
+  echo "error: --version-code must be a positive integer of at most nine digits; got '$version_code'" >&2
+  exit 2
+fi
+if [ "$sign" -eq 1 ]; then
+  : "${ANDROID_KEYSTORE:?set ANDROID_KEYSTORE to the upload keystore path (keep it outside the repo)}"
+  : "${ANDROID_KEY_ALIAS:?set ANDROID_KEY_ALIAS to the key alias}"
+  : "${ANDROID_KEYSTORE_PASSWORD:?set ANDROID_KEYSTORE_PASSWORD}"
+  if [ ! -f "$ANDROID_KEYSTORE" ]; then
+    echo "error: ANDROID_KEYSTORE '$ANDROID_KEYSTORE' does not exist" >&2
+    exit 2
+  fi
+fi
 
 # Major version of the JDK at $1, or nothing if it has no javac. `javac
 # -version` prints "javac 21.0.5"; Java 8 prints "javac 1.8.0_x".
@@ -138,25 +199,82 @@ echo "==> installing android/MainActivity.kt"
 cp "$tauri_dir/android/MainActivity.kt" \
   "$tauri_dir/gen/android/app/src/main/java/org/matrixaxon/axon/MainActivity.kt"
 
-build_args=(tauri android build --apk --target "$target")
+if [ "$aab" -eq 1 ]; then format=--aab; else format=--apk; fi
+build_args=(tauri android build "$format" --target "$target")
 if [ "$debug" -eq 1 ]; then build_args+=(--debug); fi
+# Carried as a config override rather than written into the project, which is
+# regenerated above; `tauri.properties` picks it up at build time.
+if [ -n "$version_code" ]; then
+  build_args+=(--config "{\"bundle\":{\"android\":{\"versionCode\":$version_code}}}")
+fi
 
-echo "==> building ($target)"
+echo "==> building ($target, $([ "$aab" -eq 1 ] && echo aab || echo apk))"
 pnpm "${build_args[@]}"
 
-# `|| true`: under pipefail a missing APK would abort here silently, before
-# the diagnostic written for exactly that case. `find -exec ... +` rather than
-# `| xargs ls -t`: with no match xargs still runs `ls` once with no arguments,
-# which lists the current directory and "finds" a file that is not an APK.
-apk=$(find "$tauri_dir/gen/android/app/build/outputs/apk" -name '*.apk' -exec ls -t -- {} + 2>/dev/null \
+# `|| true`: under pipefail a missing artifact would abort here silently,
+# before the diagnostic written for exactly that case. `find -exec ... +`
+# rather than `| xargs ls -t`: with no match xargs still runs `ls` once with no
+# arguments, which lists the current directory and "finds" a file that is not
+# the artifact.
+out_dir="$tauri_dir/gen/android/app/build/outputs"
+if [ "$aab" -eq 1 ]; then ext=aab; else ext=apk; fi
+artifact=$(find "$out_dir" -name "*.$ext" -exec ls -t -- {} + 2>/dev/null \
   | head -1 || true)
-if [ -z "$apk" ]; then
-  echo "error: the build reported success but produced no .apk" >&2
+if [ -z "$artifact" ]; then
+  echo "error: the build reported success but produced no .$ext" >&2
   exit 1
 fi
-echo "==> built $apk"
+echo "==> built $artifact"
+
+if [ "$sign" -eq 1 ]; then
+  base="${artifact%.$ext}"
+  signed="${base%-unsigned}-signed.$ext"
+  rm -f "$signed"
+  if [ "$aab" -eq 1 ]; then
+    # `-storepass:env` and not `-storepass`: an argument is world-readable in
+    # `ps`. RSA is what the upload key is generated as (ADR 0110).
+    jarsigner -keystore "$ANDROID_KEYSTORE" -storepass:env ANDROID_KEYSTORE_PASSWORD \
+      -sigalg SHA256withRSA -digestalg SHA-256 \
+      -signedjar "$signed" "$artifact" "$ANDROID_KEY_ALIAS"
+    # Non-zero for an unsigned or tampered file (measured: an unsigned .aab
+    # exits 1), so `set -e` stops the script rather than reporting "signed".
+    jarsigner -verify "$signed" >/dev/null
+  else
+    build_tools=$(ls -d "$ANDROID_HOME"/build-tools/*/ 2>/dev/null | sort -V | tail -1 || true)
+    if [ -z "$build_tools" ] || [ ! -x "${build_tools}apksigner" ]; then
+      echo "error: no build-tools with apksigner under $ANDROID_HOME/build-tools" >&2
+      exit 1
+    fi
+    # Aligned before signing: apksigner's v2+ signature covers the whole file,
+    # so aligning afterwards would break it.
+    aligned="${base%-unsigned}-aligned.$ext"
+    rm -f "$aligned"
+    "${build_tools}zipalign" -f -p 4 "$artifact" "$aligned"
+    "${build_tools}apksigner" sign --ks "$ANDROID_KEYSTORE" \
+      --ks-key-alias "$ANDROID_KEY_ALIAS" --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+      --out "$signed" "$aligned"
+    "${build_tools}apksigner" verify "$signed"
+    rm -f "$aligned" "$signed.idsig"
+  fi
+  artifact="$signed"
+  echo "==> signed $artifact"
+  # What Play Console asks for when the upload key is registered, and what to
+  # compare if an upload is refused for a signature mismatch.
+  fingerprint=$(keytool -list -keystore "$ANDROID_KEYSTORE" -alias "$ANDROID_KEY_ALIAS" \
+    -storepass:env ANDROID_KEYSTORE_PASSWORD 2>/dev/null \
+    | sed -n 's/^Certificate fingerprint (SHA-256): /    upload key SHA-256: /p; s/^Certificate fingerprint (SHA256): /    upload key SHA-256: /p' || true)
+  if [ -n "$fingerprint" ]; then
+    echo "$fingerprint"
+  else
+    # Silent here would read as "nothing to compare". keytool failed (the
+    # alias, the password) or labels the line differently on this JDK.
+    echo "warning: could not read the upload key's SHA-256 fingerprint; run keytool -list -v -keystore \"\$ANDROID_KEYSTORE\" -alias \"\$ANDROID_KEY_ALIAS\" to compare it with Play Console" >&2
+  fi
+elif [ "$debug" -eq 0 ] && [ "$aab" -eq 0 ]; then
+  echo "warning: a release APK without --sign is unsigned and will not install" >&2
+fi
 
 if [ "$install_app" -eq 1 ]; then
   echo "==> installing"
-  adb install -r "$apk"
+  adb install -r "$artifact"
 fi
