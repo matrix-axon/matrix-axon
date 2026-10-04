@@ -216,18 +216,18 @@ echo "==> regenerating the Android project"
 rm -rf "$tauri_dir/gen/android"
 pnpm tauri android init --ci
 
-# `init` writes a MainActivity that turns on edge-to-edge and never handles the
-# insets that implies; ours does (see the header of the file). Copied rather
-# than generated for the same reason the iOS icons are: `gen/` is regenerated
-# and gitignored, so nothing edited there survives.
-# Same for the launcher icon. `init` writes Tauri's own artwork into
-# `gen/android` and never revisits it, so without this the app ships with the
-# Tauri logo. The committed set under `icons/android/` is the artwork of record,
-# and includes an adaptive-icon definition the generated project lacks, so it is
-# overlaid rather than used to replace single files.
+# The launcher icon. `init` writes Tauri's own artwork into `gen/android` and
+# never revisits it, so without this the app ships with the Tauri logo. The
+# committed set under `icons/android/` is the artwork of record, and includes an
+# adaptive-icon definition the generated project lacks, so it is overlaid
+# rather than used to replace single files.
 echo "==> syncing launcher icons from icons/android"
 cp -R "$tauri_dir/icons/android/." "$tauri_dir/gen/android/app/src/main/res/"
 
+# `init` writes a MainActivity that turns on edge-to-edge and never handles the
+# insets that implies; ours does (see the header of the file). Copied rather
+# than generated for the same reason as the icons, and the iOS ones: `gen/` is
+# regenerated and gitignored, so nothing edited there survives.
 echo "==> installing android/MainActivity.kt"
 cp "$tauri_dir/android/MainActivity.kt" \
   "$tauri_dir/gen/android/app/src/main/java/org/matrixaxon/axon/MainActivity.kt"

@@ -28,38 +28,10 @@ fn patch_android_manifest() {
     let Ok(manifest) = std::fs::read_to_string(&path) else {
         return;
     };
-    let rewritten = with_backup_disabled(
-        &android_manifest::with_camera_block(&manifest).unwrap_or_else(|why| panic!("{why}")),
-    );
+    let rewritten = android_manifest::with_camera_block(&manifest)
+        .and_then(|manifest| android_manifest::with_backup_disabled(&manifest))
+        .unwrap_or_else(|why| panic!("{why}"));
     if rewritten != manifest {
         std::fs::write(&path, rewritten).expect("failed to update AndroidManifest.xml");
     }
-}
-
-/// `manifest` with `android:allowBackup="false"` on `<application>`.
-///
-/// The template sets nothing, and the default is on: Auto Backup then copies
-/// the app's data directory to the user's Google account and restores it onto
-/// a new device. That directory holds the WebView's `localStorage`, where the
-/// sign-in token lives (`auth/persistence.ts`), so the token would leave the
-/// device and reappear on another without anyone signing in there.
-fn with_backup_disabled(manifest: &str) -> String {
-    const ATTR: &str = "android:allowBackup=\"";
-    if let Some(start) = manifest.find(ATTR) {
-        // Already declared: force it off rather than trust a template change.
-        let value_start = start + ATTR.len();
-        if let Some(len) = manifest[value_start..].find('"') {
-            let mut out = String::with_capacity(manifest.len());
-            out.push_str(&manifest[..value_start]);
-            out.push_str("false");
-            out.push_str(&manifest[value_start + len..]);
-            return out;
-        }
-        return manifest.to_string();
-    }
-    manifest.replacen(
-        "<application",
-        "<application\n        android:allowBackup=\"false\"",
-        1,
-    )
 }
