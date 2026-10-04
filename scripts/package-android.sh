@@ -111,6 +111,12 @@ if [ "$aab" -eq 1 ] && [ "$install_app" -eq 1 ]; then
   echo "error: adb cannot install an .aab; build an APK to install" >&2
   exit 2
 fi
+# The symbols are packaged with `zip` after the build, under `set -e`, so a
+# missing one would otherwise end a long build with a bare "command not found".
+if [ "$aab" -eq 1 ] && ! command -v zip >/dev/null 2>&1; then
+  echo "error: --aab packages the native debug symbols with zip, which is not installed (e.g. sudo apt install zip)" >&2
+  exit 2
+fi
 # Spliced into a JSON `--config` override below, so anything but digits would
 # either close the object early or reach `tauri` as a config it reports
 # obscurely.
@@ -134,6 +140,7 @@ case "$target" in
   armv7)   rust_triple=armv7-linux-androideabi;  abi=armeabi-v7a ;;
   x86_64)  rust_triple=x86_64-linux-android;     abi=x86_64 ;;
   i686)    rust_triple=i686-linux-android;       abi=x86 ;;
+  *) echo "error: no cargo target for --target '$target'" >&2; exit 2 ;;
 esac
 
 # Major version of the JDK at $1, or nothing if it has no javac. `javac
@@ -300,12 +307,16 @@ if [ "$aab" -eq 1 ]; then
     exit 1
   fi
   stage=$(mktemp -d)
+  # Removed on any exit, so a failed `cp` or `zip` does not leave a copy of the
+  # unstripped library behind.
+  trap 'rm -rf "$stage"' EXIT
   mkdir -p "$stage/$abi"
   cp "$unstripped" "$stage/$abi/libaxon_lib.so"
   rm -f "$symbols"
   (cd "$stage" && zip -q -r "$symbols" "$abi")
   rm -rf "$stage"
-  echo "==> native debug symbols $symbols (build ID $build_id)"
+  trap - EXIT
+  echo "==> native debug symbols $symbols ($(du -h "$symbols" | cut -f1), build ID $build_id)"
 fi
 
 if [ "$sign" -eq 1 ]; then
