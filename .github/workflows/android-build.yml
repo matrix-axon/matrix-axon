@@ -43,6 +43,8 @@ on:
       - 'scripts/package-android.sh'
       - 'scripts/lib/play-next-version-code.py'
       - 'scripts/lib/test_play_next_version_code.py'
+      - 'scripts/lib/play-upload.py'
+      - 'scripts/lib/test_play_upload.py'
       - '.github/workflows/android-build.yml'
   workflow_dispatch:
 
@@ -74,11 +76,13 @@ jobs:
       - name: check-environment
         uses: ./.github/actions/check-environment
 
-      # `--version-code auto` in the packaging script asks Google Play for the
-      # next number. The helper is tested against a local stand-in for Google
+      # `--version-code auto` and `--upload` in the packaging script talk to
+      # Google Play. Their helpers are tested against a local stand-in for Google
       # and Play, so this needs no credential; it is quick, so it runs first.
-      - name: Test the versionCode helper
-        run: python3 scripts/lib/test_play_next_version_code.py
+      - name: Test the Play helpers
+        run: |
+          python3 scripts/lib/test_play_next_version_code.py
+          python3 scripts/lib/test_play_upload.py
 
       # ANDROID_HOME is set on GitHub's Ubuntu images. The licenses are
       # accepted without a pipe failing the step: `yes` is killed by SIGPIPE

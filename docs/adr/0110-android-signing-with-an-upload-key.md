@@ -57,6 +57,22 @@ Play's API works only on an app that has had its first upload through the Consol
 What it cannot see: a `versionCode` used by a bundle that was uploaded and later discarded, which Play still refuses, and a bundle that is still being processed.
 In either case the upload fails with Play's own message and the next try needs a higher number, which `--version-code` takes explicitly.
 
+### Uploading to Play from the script
+
+`--upload check|draft|release` sends the signed bundle and its native debug symbols to the internal track, through `scripts/lib/play-upload.py` and the same service account.
+Everything happens inside one Play "edit", which is how the API is shaped: nothing is visible until it is committed.
+
+`check` uploads, lets Play inspect the bundle, validates the edit and then discards it.
+Nothing is published and the `versionCode` stays free, so it is the mode for a first run of the pipeline, and a cheap way to learn that Play would accept a bundle.
+`draft` commits the bundle as a draft release, keeping the track's existing releases, and refuses if the track already has a draft rather than replace someone's work; testers see nothing until it is completed in Play Console.
+`release` commits a completed release, which replaces what the track had, because that is what completing one means.
+It prints each release it replaces, and refuses when one is a draft or a rollout that is in progress or halted: finishing or discarding that is a decision for Play Console, not for a script.
+The track is read before the build starts (`play-upload.py --preflight`, read-only), so a refusal costs seconds rather than a finished build.
+It needs `--aab --sign`, and uses the symbols zip from the same build, since Play matches symbols to a bundle by build ID.
+
+The service account needs permission to release to testing tracks, beyond the read access `--version-code auto` needs.
+Only the internal track is wired to the script; the helper itself takes any track.
+
 ## Consequences
 
 - A signed bundle is one command: `scripts/package-android.sh --aab --sign` with the three variables set.

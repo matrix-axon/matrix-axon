@@ -51,6 +51,7 @@ class Server:
 
     def __init__(self, routes):
         self.requests: list[tuple[str, str, dict, bytes]] = []
+        self.queries: list[tuple[str, str]] = []  # (path, raw query string)
         outer = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -59,6 +60,7 @@ class Server:
                 body = self.rfile.read(length) if length else b""
                 path = urllib.parse.urlsplit(self.path).path
                 outer.requests.append((self.command, path, dict(self.headers), body))
+                outer.queries.append((path, urllib.parse.urlsplit(self.path).query))
                 handler = routes.get((self.command, path))
                 if handler is None:
                     status, payload = 404, {"error": {"message": f"no route for {self.command} {path}"}}
@@ -71,7 +73,7 @@ class Server:
                 self.end_headers()
                 self.wfile.write(raw)
 
-            do_GET = do_POST = do_DELETE = handle_any
+            do_GET = do_POST = do_PUT = do_DELETE = handle_any
 
             def log_message(self, *args):  # keep the test output clean
                 pass
