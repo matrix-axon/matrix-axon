@@ -41,10 +41,21 @@ The signature is checked before the script reports success (`jarsigner -verify` 
 `ANDROID_KEYSTORE`, `ANDROID_KEY_ALIAS` and `ANDROID_KEYSTORE_PASSWORD`, all checked before the build starts so a forgotten one does not cost a release build.
 The password is passed to the signing tools as `-storepass:env` and `--ks-pass env:`, never as an argument, because an argument is readable in `ps` and lands in shell history.
 
-### `versionCode` is derived, with an override
+### `versionCode` is derived, with an override, or asked of Play
 
 Tauri derives `versionCode` from the version (`major*1000000 + minor*1000 + patch`, so 0.1.3 is 1003), which release-plz (ADR 0106) already makes monotonic.
 Play refuses a reused `versionCode`, so uploading the same version twice needs `--version-code`, carried as a `bundle.android.versionCode` config override for the same reason iOS's build number is: the project it would otherwise be written into is regenerated.
+
+`--version-code auto` does what `--build-number auto` does for the Apple builds: it asks the store for the highest number it has and adds one, so the caller does not have to remember.
+`scripts/lib/play-next-version-code.py` signs a short-lived token with a Google Cloud service-account key (Python's standard library and `openssl`, nothing installed), opens a read-only Play "edit", takes the highest `versionCode` among the app's bundles and its release tracks, deletes the edit, and prints that plus one.
+It is resolved before anything is regenerated or compiled, so a bad credential costs seconds, and it needs `--aab`, since only a bundle going to Play has any use for it.
+
+It needs a service account that is invited in Play Console with permission to view the app and its releases, with the Google Play Android Developer API enabled in the key's Cloud project, and the key's path in `PLAY_SERVICE_ACCOUNT_JSON`.
+The key stays out of the repository, like the upload keystore, and is read only to sign that token.
+Play's API works only on an app that has had its first upload through the Console, so `auto` cannot number the very first bundle.
+
+What it cannot see: a `versionCode` used by a bundle that was uploaded and later discarded, which Play still refuses, and a bundle that is still being processed.
+In either case the upload fails with Play's own message and the next try needs a higher number, which `--version-code` takes explicitly.
 
 ## Consequences
 

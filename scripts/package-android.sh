@@ -45,13 +45,21 @@ Usage: scripts/package-android.sh [options]
                        of an APK; release only
   --sign               sign a release build with the upload key named in the
                        environment (below); needs --aab or a release APK
-  --version-code <n>   Play rejects a reused versionCode; default is derived
+  --version-code <n|auto>
+                       Play rejects a reused versionCode; default is derived
                        from the version (0.1.3 -> 1003), so pass a larger
-                       number to upload the same version twice
+                       number to upload the same version twice. `auto` asks
+                       Google Play for the highest it has seen and adds one
+                       (needs --aab and the environment below)
   --install            adb install the built APK (uses ANDROID_SERIAL or the
                        only connected device/emulator). Needs --debug or
                        --sign: an unsigned release APK is refused.
   -h, --help           this
+
+Environment for --version-code auto:
+  PLAY_SERVICE_ACCOUNT_JSON   path to a Google Cloud service-account key (JSON)
+                              invited in Play Console with permission to view
+                              the app and its releases; never in the repo
 
 Environment for --sign:
   ANDROID_KEYSTORE            path to the upload keystore (never in the repo)
@@ -62,6 +70,7 @@ Environment for --sign:
 Examples:
   scripts/package-android.sh --target x86_64 --debug --install
   scripts/package-android.sh --target aarch64 --aab --sign --version-code 1004
+  scripts/package-android.sh --target aarch64 --aab --sign --version-code auto
 USAGE
 }
 
@@ -120,9 +129,29 @@ fi
 # Spliced into a JSON `--config` override below, so anything but digits would
 # either close the object early or reach `tauri` as a config it reports
 # obscurely.
-if [ -n "$version_code" ] && ! [[ $version_code =~ ^[1-9][0-9]{0,8}$ ]]; then
-  echo "error: --version-code must be a positive integer of at most nine digits; got '$version_code'" >&2
+if [ -n "$version_code" ] && [ "$version_code" != "auto" ] && ! [[ $version_code =~ ^[1-9][0-9]{0,8}$ ]]; then
+  echo "error: --version-code must be a positive integer of at most nine digits, or auto; got '$version_code'" >&2
   exit 2
+fi
+# `auto` talks to Google Play, so it needs what an upload needs and only makes
+# sense for a build that is going there. Checked now, before the multi-minute
+# build, so a missing credential costs seconds.
+if [ "$version_code" = "auto" ]; then
+  if [ "$aab" -ne 1 ]; then
+    echo "error: --version-code auto asks Google Play for the next number, so it needs --aab (a bundle for Play)" >&2
+    exit 2
+  fi
+  : "${PLAY_SERVICE_ACCOUNT_JSON:?set PLAY_SERVICE_ACCOUNT_JSON to the path of a Play service-account key (JSON); see scripts/lib/play-next-version-code.py}"
+  if [ ! -f "$PLAY_SERVICE_ACCOUNT_JSON" ]; then
+    echo "error: PLAY_SERVICE_ACCOUNT_JSON '$PLAY_SERVICE_ACCOUNT_JSON' does not exist" >&2
+    exit 2
+  fi
+  for tool in python3 openssl; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "error: --version-code auto needs $tool" >&2
+      exit 2
+    fi
+  done
 fi
 if [ "$sign" -eq 1 ]; then
   : "${ANDROID_KEYSTORE:?set ANDROID_KEYSTORE to the upload keystore path (keep it outside the repo)}"
@@ -226,6 +255,21 @@ web_dir="$repo_root/clients/web"
 tauri_dir="$web_dir/src-tauri"
 
 cd "$web_dir"
+
+# Resolve `auto` now, before `rm -rf gen/android` and a multi-minute build, so a
+# bad credential or an unreachable Play costs seconds. After this `version_code`
+# is an ordinary number, spliced into the JSON override below, so it is checked
+# again: whatever the helper printed must be digits and nothing else. The
+# package is read from tauri.conf.json so it cannot drift from the app's own.
+if [ "$version_code" = "auto" ]; then
+  package=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["identifier"])' "$tauri_dir/tauri.conf.json")
+  version_code=$(python3 "$repo_root/scripts/lib/play-next-version-code.py" "$package") || exit 1
+  if ! [[ $version_code =~ ^[1-9][0-9]{0,9}$ ]]; then
+    echo "error: the Play helper returned '$version_code', which is not a versionCode" >&2
+    exit 1
+  fi
+  echo "==> versionCode $version_code (the highest Google Play lists for $package, plus one)"
+fi
 
 echo "==> regenerating the Android project"
 rm -rf "$tauri_dir/gen/android"
