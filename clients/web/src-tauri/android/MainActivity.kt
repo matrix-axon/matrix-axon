@@ -1,5 +1,6 @@
 package org.matrixaxon.axon
 
+import android.content.res.Configuration
 import android.os.Bundle
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -34,6 +35,8 @@ class MainActivity : TauriActivity() {
   @Volatile
   private var insets = Insets(0f, 0f, 0f, 0f)
 
+  private var webView: WebView? = null
+
   private data class Insets(val top: Float, val right: Float, val bottom: Float, val left: Float)
 
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,6 +46,7 @@ class MainActivity : TauriActivity() {
 
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
+    this.webView = webView
 
     webView.addJavascriptInterface(
       object {
@@ -72,5 +76,34 @@ class MainActivity : TauriActivity() {
       windowInsets
     }
     ViewCompat.requestApplyInsets(webView)
+  }
+
+  // The WebView's `prefers-color-scheme` goes stale. Axon keeps `uiMode` in
+  // `configChanges` (recreating the activity would rebuild a window that the
+  // Rust side creates once), so a dark/light switch reaches the activity as
+  // `onConfigurationChanged` and the WebView has to pick it up from the View
+  // dispatch. Measured on a Galaxy S20 FE: Android's own activity configuration
+  // said `night` for minutes while `matchMedia('(prefers-color-scheme: dark)')`
+  // stayed false, so a client set to "System" stayed light. `adb shell cmd
+  // uimode` never reproduced it, switching from the Settings app did.
+  //
+  // Re-dispatching the configuration once the change has landed, and again on
+  // resume, hands the WebView the state Android already has.
+  override fun onConfigurationChanged(newConfig: Configuration) {
+    super.onConfigurationChanged(newConfig)
+    resyncWebViewConfiguration()
+  }
+
+  override fun onResume() {
+    super.onResume()
+    resyncWebViewConfiguration()
+  }
+
+  private fun resyncWebViewConfiguration() {
+    // Posted, so it runs after the framework and AppCompat have finished
+    // applying the new configuration to the activity's resources and theme.
+    // The field is read once: it is the same view for the post and the dispatch.
+    val view = webView ?: return
+    view.post { view.dispatchConfigurationChanged(resources.configuration) }
   }
 }
