@@ -2802,7 +2802,13 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         "Auth: none (insecure, unauthenticated)".to_owned()
     };
 
-    let version = format!("Version: {}", env!("BUILD_INFO"));
+    // The release version equals the git tag (scripts/release-version.sh
+    // enforces it); BUILD_DETAILS adds the commit and build details after it.
+    let version = format!(
+        "Version: v{} (build {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("BUILD_DETAILS")
+    );
 
     let graphics_line = {
         use ratatui_image::picker::ProtocolType;
