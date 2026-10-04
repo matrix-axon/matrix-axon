@@ -166,24 +166,35 @@ jobs:
       - name: Build the release bundle
         run: scripts/package-android.sh --target aarch64 --aab
 
-      - name: Collect the bundle
+      - name: Collect the bundle and its debug symbols
         run: |
+          out=clients/web/src-tauri/gen/android/app/build/outputs/bundle
           # Newest first, as `package-android.sh` picks it. `sed`, not `head`,
           # so a long list cannot SIGPIPE the pipeline under `pipefail`.
-          bundle="$(find clients/web/src-tauri/gen/android/app/build/outputs/bundle -name '*.aab' -exec ls -t -- {} + | sed -n 1p)"
+          bundle="$(find "$out" -name '*.aab' -exec ls -t -- {} + | sed -n 1p)"
+          symbols="$(find "$out" -name 'native-debug-symbols.zip' -exec ls -t -- {} + | sed -n 1p)"
           if [ -z "$bundle" ]; then
             echo "::error::the build reported success but produced no .aab"
             exit 1
           fi
+          if [ -z "$symbols" ]; then
+            echo "::error::the build produced no native-debug-symbols.zip; Play would warn that no debug symbols were uploaded"
+            exit 1
+          fi
           cp "$bundle" axon-android-unsigned.aab
-          ls -l axon-android-unsigned.aab
+          cp "$symbols" axon-android-native-debug-symbols.zip
+          ls -l axon-android-unsigned.aab axon-android-native-debug-symbols.zip
 
-      # Unsigned, so it cannot be installed or uploaded to Play as is. Kept
-      # briefly so a reviewer can inspect what was built.
+      # Unsigned, so the bundle cannot be installed or uploaded to Play as is.
+      # The symbols belong to this exact build (Play matches them to a crash by
+      # build ID), so they travel with it. Kept briefly so a reviewer can
+      # inspect what was built.
       - name: Upload
         uses: actions/upload-artifact@v7
         with:
           name: axon-android-unsigned-aab
-          path: axon-android-unsigned.aab
+          path: |
+            axon-android-unsigned.aab
+            axon-android-native-debug-symbols.zip
           if-no-files-found: error
           retention-days: 5
