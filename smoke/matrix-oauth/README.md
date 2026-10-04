@@ -8,6 +8,10 @@ The harness depends on no Axon product crate.
 
 Prerequisites are Rust, Docker with Compose v2, `curl`, Python 3, and `sed`.
 Each command starts pinned Synapse 1.160.0, MAS 1.24.0, and Postgres containers on automatically selected localhost ports, then tears them down.
+The trusted fixture signs in through MAS's Matrix password-login endpoint, then restores the resulting session in the independent SDK client pointed at Synapse.
+Synapse's delegated-auth listener does not serve password login itself.
+MAS 1.24.0 serializes that path with device reconciliation and commits the session before creating the Synapse device.
+The `issue-compatibility-token` CLI creates the device before committing its session, allowing concurrent user provisioning to remove it and leave the fixture returning HTTP 401.
 
 ```sh
 scripts/matrix-oauth-test.sh api
@@ -33,7 +37,8 @@ These expensive, unstable-protocol lanes remain outside the pull-request path.
 ## Secret handling
 
 Runtime access tokens, refresh tokens, QR payloads, check codes, authorization user codes and URLs, recovery material, and exported secret bundles must never enter diagnostics or retained artifacts.
-The launcher passes its known compatibility and Axon bearer tokens without command-line arguments, and the harness retains known runtime protocol values only in memory for disclosure checks.
+The launcher passes the fixture password through the environment, and the harness retains the resulting trusted-device access token and other known runtime protocol values in memory for disclosure checks.
+The Axon bearer token is passed without command-line arguments.
 
 Axon's stdout and stderr are captured inside a randomly named throwaway run directory.
 Every lane outcome is followed by a check that rejects secret-bearing field names or known runtime values in that log.
@@ -45,4 +50,7 @@ This cleanup applies on success, failure, cancellation, and cooperative interrup
 The workflow deliberately uploads no failure artifacts for these lanes.
 
 Harness errors name only a stable phase or classification.
+The encrypted-history wait logs changes between fixed classifications: request failure, HTTP status, invalid response, missing event, encrypted event, redacted event, unexpected event type, body mismatch, and decrypted history.
+It matches the seeded event ID as well as its expected plaintext, and reports poll and API-failure counts plus whether the event was ever observed or encrypted when its existing deadline expires.
+These observations distinguish an unavailable timeline from a missing event or stalled decryption without printing event IDs, bodies, or raw errors.
 Do not add raw HTTP bodies, SDK errors, OAuth errors, container configuration, or URLs to failure messages.

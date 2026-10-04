@@ -103,36 +103,6 @@ if ! mas manage register-user --yes --password "$matrix_password" --no-admin --i
   exit 1
 fi
 trusted_device_id=AXONQRTRUSTED
-if ! compatibility_output=$(mas manage issue-compatibility-token alice "$trusted_device_id" 2>&1); then
-  echo "matrix-oauth: MAS compatibility-session issuance failed" >&2
-  exit 1
-fi
-mapfile -t compatibility_tokens < <(printf '%s\n' "$compatibility_output" | grep -Eo '(mct|syt)_[A-Za-z0-9_-]+' || true)
-unset compatibility_output
-if [ "${#compatibility_tokens[@]}" -ne 1 ]; then
-  echo "matrix-oauth: MAS compatibility-session output contained ${#compatibility_tokens[@]} token-shaped values; expected exactly one" >&2
-  exit 1
-fi
-compatibility_token=${compatibility_tokens[0]}
-unset compatibility_tokens
-whoami_deadline=$((SECONDS + 30))
-whoami_status=unavailable
-while [ "$SECONDS" -lt "$whoami_deadline" ]; do
-  if whoami_status=$(printf 'header = "Authorization: Bearer %s"\n' "$compatibility_token" | \
-    curl --config - --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
-      "http://127.0.0.1:$MATRIX_OAUTH_SYNAPSE_PORT/_matrix/client/v3/account/whoami"); then
-    if [ "$whoami_status" = 200 ]; then
-      break
-    fi
-  else
-    whoami_status=unavailable
-  fi
-  sleep 1
-done
-if [ "$whoami_status" != 200 ]; then
-  echo "matrix-oauth: compatibility session did not become usable (last result $whoami_status)" >&2
-  exit 1
-fi
 
 target_bin="${CARGO_TARGET_DIR:-$workspace_root/target}/debug"
 "$workspace_root/scripts/check-smoke-isolation.sh" axon-smoke-matrix-oauth
@@ -142,7 +112,6 @@ export AXON_SERVER_BIN="$target_bin/axon-server"
 export MATRIX_OAUTH_HOMESERVER="http://127.0.0.1:$MATRIX_OAUTH_SYNAPSE_PORT"
 export MATRIX_OAUTH_MAS_BASE="http://127.0.0.1:$MATRIX_OAUTH_MAS_PORT"
 export MATRIX_OAUTH_DATABASE_URL="postgres://axon:axon@127.0.0.1:$MATRIX_OAUTH_POSTGRES_PORT/axon"
-export MATRIX_OAUTH_COMPATIBILITY_TOKEN="$compatibility_token"
 export MATRIX_OAUTH_MATRIX_PASSWORD="$matrix_password"
 export MATRIX_OAUTH_USER_ID='@alice:localhost'
 export MATRIX_OAUTH_TRUSTED_DEVICE_ID="$trusted_device_id"
