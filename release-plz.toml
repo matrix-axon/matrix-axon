@@ -14,7 +14,13 @@ git_tag_enable = false
 # cross-build.yml, package.yml and desktop-build.yml create and fill the
 # GitHub Release when the tag lands. A release-plz Release would race them.
 git_release_enable = false
+# The release notes and CHANGELOG.md are grouped by PR label, which
+# release-plz's changelog cannot see, so release-notes.yml writes them
+# instead (ADR 0108).
 changelog_update = false
+# Keeps the release PR out of the next release's generated notes
+# (.github/release.yml).
+pr_labels = ["skip-changelog"]
 # Binaries, not a library API: cargo-semver-checks has nothing to check.
 semver_check = false
 # Tag only when a release PR merges, not on every push to main.

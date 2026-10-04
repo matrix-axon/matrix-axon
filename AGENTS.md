@@ -68,6 +68,7 @@ matrix-axon/
     lint-and-test.yml        # cargo fmt + clippy + test
     package.yml              # nFPM .deb/.rpm (amd64 on ubuntu-22.04, arm64 on ubuntu-22.04-arm); tag uploads to GitHub Releases
     release-plz.yml          # on main: opens the release PR that bumps the Cargo version, and tags its merge (ADR 0106, release-plz.toml)
+    release-notes.yml        # draft release notes grouped by PR label while the release PR is open; publishes them on the tag and opens the CHANGELOG.md PR (ADR 0108, .github/release.yml)
     integration.yml          # selectable E2EE re-decryption and Matrix OAuth QR real-service suites
     matrix-oauth.yml         # reusable Matrix OAuth QR real-service workflow used by integration and smoke
     smoke.yml                # S1 black-box smoke (PR 1: TUI PTY suite; PR 2 added the server gate)
@@ -162,6 +163,13 @@ this table is the orientation copy.
   Scope both guides to the PR's actual diff.
   Subsequent changes to code in PR's should be impelmented as additional commits and pushes so that responsive comments can identify the precise commit that addresses the issue.
   Generally, the commits in a PR will all be squashed at merge time, subject to developer approval.
+- **PR labels and titles feed the release notes** (ADR 0108, `.github/release.yml`).
+  Label every PR you open, when you open it, with the one label that best names its effect on users: `breaking-change`, `security`, `enhancement`, `bug`, `performance`, `documentation`, `dependencies`, `build` or `ci`.
+  Where a PR fits several, `release.yml` lists it under the first match in that order, so pick the one you want it listed under.
+  Use `skip-changelog` for a PR that has no place in the notes, such as a typo fix in a comment or a test-only change.
+  An unlabelled PR is listed under "Other Changes", so a missing label is a visible defect, not a harmless omission.
+  Title the PR as a conventional commit (`feat:`, `fix:`, and so on, with `!` for a breaking change), since the squash commit takes the title and release-plz picks the next version from it (ADR 0106).
+  If you cannot set labels with the tools you have, say so in the PR body so a developer can.
 - **Pushes:** we normally do not push anything directly to `main`.
   Code is incorporated into `main` when PRs are merged.
   Any exception should be approved by a developer. git force-push should only be used to fix an error in branch history and not without developer approval.
