@@ -3,6 +3,7 @@
 
     play-upload.py --package <name> --bundle <file.aab> [--symbols <zip>]
                    [--track internal] [--mode check|draft|release] [--name <release name>]
+                   [--expect-version-code <n>]
 
 Uses the same service account as `play-next-version-code.py` (PLAY_SERVICE_ACCOUNT_JSON),
 which now also needs permission to release to testing tracks. Everything happens inside
@@ -15,10 +16,16 @@ one Play "edit", which is how the API is shaped: nothing is visible until it is 
 --mode draft     Commit the bundle as a DRAFT release on the track. Testers see nothing
                  until someone completes it in Play Console. Refuses to proceed if the
                  track already has a draft, rather than replace someone's work.
---mode release   Commit it as a completed release, i.e. rolled out to the track.
+--mode release   Commit it as a completed release, i.e. rolled out to the track. Prints
+                 each release it replaces, and refuses if one of them is a draft or an
+                 in-progress or halted rollout: finishing or discarding that is a decision
+                 for Play Console, not for a script.
 
 The existing releases on the track are kept when a draft is added to them. A completed
 release replaces what the track had, because that is what completing one means.
+
+--expect-version-code N   Stop, before anything is attached or committed, if Play gives the
+                 uploaded bundle a different versionCode than the build said it would have.
 
 Prints the uploaded versionCode on stdout. Silence with a non-zero exit means nothing was
 changed (or, if it failed after the commit started, the reason is on stderr).
@@ -47,6 +54,10 @@ PlayError = play_api.PlayError
 
 # A bundle is at most 200 MB and this link may be slow. Reads keep their 30 seconds.
 UPLOAD_TIMEOUT_SECONDS = 900
+
+# A release in one of these states is someone's work in progress. A completed
+# release in `release` mode is replaced by design; these are not.
+IN_FLIGHT = ("draft", "inProgress", "halted")
 
 MODES = ("check", "draft", "release")
 TRACKS = ("internal", "alpha", "beta", "production")
@@ -77,6 +88,10 @@ def release_for(version_code: int, name: str | None, status: str) -> dict:
     return {"name": name or str(version_code), "versionCodes": [str(version_code)], "status": status}
 
 
+def describe(release: dict) -> str:
+    return str(release.get("name") or release.get("versionCodes"))
+
+
 def run(args: argparse.Namespace) -> int:
     bundle = read_file(args.bundle, "bundle")
     symbols = read_file(args.symbols, "symbols zip") if args.symbols else None
@@ -101,6 +116,11 @@ def run(args: argparse.Namespace) -> int:
         if remote and remote != local:
             raise PlayError(f"Play stored a bundle with sha256 {remote}, but the file sent is {local}")
         print(f"uploaded the bundle as versionCode {version_code}", file=sys.stderr)
+        if args.expect_version_code is not None and version_code != args.expect_version_code:
+            raise PlayError(
+                f"Play gave the bundle versionCode {version_code}, but the build said "
+                f"{args.expect_version_code}; nothing was attached or committed"
+            )
 
         if symbols is not None:
             status, result = upload(
@@ -134,6 +154,20 @@ def run(args: argparse.Namespace) -> int:
                     )
             releases = [r for r in existing if r.get("status") != "draft"] + [release]
         else:
+            # Replaced by design, but never silently, and never someone's draft
+            # or a rollout in progress (the same care `draft` mode takes).
+            in_flight = [
+                r for r in existing
+                if r.get("status") in IN_FLIGHT and [str(v) for v in r.get("versionCodes", [])] != [str(version_code)]
+            ]
+            if in_flight:
+                raise PlayError(
+                    f"the {args.track} track has "
+                    + ", ".join(f"a {r.get('status')} release ({describe(r)})" for r in in_flight)
+                    + "; a completed release would replace it. Complete or discard it in Play Console first"
+                )
+            for other in existing:
+                print(f"replacing the {other.get('status')} release {describe(other)} on the {args.track} track", file=sys.stderr)
             releases = [release]
 
         status, result = play_api.play(
@@ -182,6 +216,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--track", choices=TRACKS, default="internal")
     parser.add_argument("--mode", choices=MODES, default="check")
     parser.add_argument("--name")
+    parser.add_argument("--expect-version-code", type=int)
     args = parser.parse_args(argv[1:])
     if not os.environ.get("PLAY_SERVICE_ACCOUNT_JSON"):
         print("error: set PLAY_SERVICE_ACCOUNT_JSON to the path of the service-account key (JSON)", file=sys.stderr)

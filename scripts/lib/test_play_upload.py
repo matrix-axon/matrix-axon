@@ -224,6 +224,59 @@ class UploadTest(base.HelperTest):
             {"name": str(VERSION_CODE), "versionCodes": [str(VERSION_CODE)], "status": "completed"},
         ])
 
+    def test_release_says_what_it_replaces(self):
+        track = {"track": "internal", "releases": [
+            {"name": "old build", "versionCodes": ["1000"], "status": "completed"},
+        ]}
+        with base.Server(self.routes(track=track)) as server:
+            result = self.run_upload(server, "--mode", "release")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("replacing the completed release old build", result.stderr)
+
+    def test_release_refuses_to_replace_a_draft_or_a_rollout(self):
+        for status in ("draft", "inProgress", "halted"):
+            with self.subTest(status=status):
+                track = {"track": "internal", "releases": [
+                    {"name": "someone's", "versionCodes": ["1000"], "status": status},
+                ]}
+                with base.Server(self.routes(track=track)) as server:
+                    result = self.run_upload(server, "--mode", "release")
+                    self.assertNothingCommitted(server)
+                    self.assertEditDeleted(server)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(f"a {status} release (someone's)", result.stderr)
+                self.assertIn("Play Console", result.stderr)
+                self.assertIsNone(self.put_body)
+
+    def test_release_may_replace_a_draft_of_the_same_version(self):
+        track = {"track": "internal", "releases": [
+            {"name": "mine", "versionCodes": [str(VERSION_CODE)], "status": "draft"},
+        ]}
+        with base.Server(self.routes(track=track)) as server:
+            result = self.run_upload(server, "--mode", "release")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    # -- the versionCode is checked before anything is committed --------------
+
+    def test_a_matching_expected_version_code_goes_ahead(self):
+        with base.Server(self.routes()) as server:
+            result = self.run_upload(server, "--mode", "draft", "--expect-version-code", str(VERSION_CODE))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_different_version_code_stops_before_symbols_and_commit(self):
+        with base.Server(self.routes()) as server:
+            result = self.run_upload(server, "--mode", "release", "--expect-version-code", str(VERSION_CODE + 1))
+            self.assertNothingCommitted(server)
+            self.assertEditDeleted(server)
+            symbols = [p for p in self.paths(server, "POST") if "deobfuscationFiles" in p]
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn(f"versionCode {VERSION_CODE}", result.stderr)
+        self.assertIn(str(VERSION_CODE + 1), result.stderr)
+        self.assertEqual(symbols, [])
+        self.assertIsNone(self.put_body)
+
     # -- failures leave nothing behind ---------------------------------------
 
     def test_a_rejected_bundle_stops_everything_and_cleans_up(self):

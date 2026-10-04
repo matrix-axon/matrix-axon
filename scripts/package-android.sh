@@ -453,15 +453,22 @@ fi
 # version so it is recognisable in Play Console.
 if [ -n "$upload_mode" ]; then
   props="$tauri_dir/gen/android/app/tauri.properties"
-  built_code=$(sed -n 's/^tauri.android.versionCode=//p' "$props")
-  built_name=$(sed -n 's/^tauri.android.versionName=//p' "$props")
+  built_code=$(sed -n 's/^tauri.android.versionCode=//p' "$props" 2>/dev/null || true)
+  built_name=$(sed -n 's/^tauri.android.versionName=//p' "$props" 2>/dev/null || true)
+  # Without these the release would be named " ()" and there would be nothing
+  # to check Play's answer against, so stop before anything is sent.
+  if [ -z "$built_code" ] || [ -z "$built_name" ]; then
+    echo "error: could not read the versionCode and versionName from $props; nothing was uploaded" >&2
+    exit 1
+  fi
   echo "==> uploading to Google Play (internal track, mode: $upload_mode)"
+  # `--expect-version-code`: the helper stops before it commits if Play numbers
+  # the bundle differently from what was built, rather than this script
+  # noticing once the wrong one is already on the track.
   uploaded_code=$(python3 "$repo_root/scripts/lib/play-upload.py" \
     --package "$package" --bundle "$artifact" --symbols "$symbols" \
-    --track internal --mode "$upload_mode" --name "$built_name ($built_code)") || exit 1
-  if [ "$uploaded_code" != "$built_code" ]; then
-    echo "warning: Play reports versionCode $uploaded_code but the build was $built_code" >&2
-  fi
+    --track internal --mode "$upload_mode" --name "$built_name ($built_code)" \
+    --expect-version-code "$built_code") || exit 1
   echo "==> Play accepted versionCode $uploaded_code ($upload_mode)"
 fi
 
