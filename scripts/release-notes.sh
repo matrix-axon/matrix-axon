@@ -83,7 +83,8 @@ generate)
 	;;
 stamp)
 	text=$(strip_marker)
-	if ! printf '%s' "$text" | grep -q '[^[:space:]]'; then
+	# No pipe: with pipefail, grep -q exiting early could SIGPIPE printf.
+	if ! [[ $text =~ [^[:space:]] ]]; then
 		echo "error: refusing to stamp empty notes" >&2
 		exit 1
 	fi
