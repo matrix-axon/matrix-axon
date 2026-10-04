@@ -756,7 +756,11 @@ fn main_window<R: tauri::Runtime>(
     let builder = builder.with_input_accessory_view_builder(|_webview| None);
     // Android's safe-area insets. The WebView does not report them through
     // `env()` before a recent Chrome, so the activity supplies them and this
-    // applies them to every page load; see `android/MainActivity.kt`.
+    // applies them to every page load; see `android/MainActivity.kt`. Tauri
+    // runs `initialization_script` in the main frame only (the opt-in for
+    // subframes is `initialization_script_for_all_frames`), so an embedded
+    // document never gets the top-level insets, although the `AxonInsets`
+    // interface the script reads is visible to every frame.
     #[cfg(target_os = "android")]
     let builder = builder.initialization_script(include_str!("../android/insets.js"));
     builder.build()
