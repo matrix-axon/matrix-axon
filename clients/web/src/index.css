@@ -2251,6 +2251,30 @@ p.timeline-edge {
      the way back to a bounded row count. */
 }
 
+/* A message row is clickable (a tap opens the action bar) and carries the touch
+   gestures, so Android WebView paints its default tap highlight over the whole
+   row at every touch-down, which a double tap shows twice. Measured on a Galaxy
+   S20 FE: `rgba(51, 181, 229, 0.4)`, a translucent blue. iOS draws nothing
+   comparable, which is why it looks wrong only there. The action bar and the
+   gesture feedback are the response to a touch, so the browser's is turned off
+   for the rows that have them. */
+.event-row,
+.gallery-cell {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* The property inherits, and nothing in this stylesheet draws a pressed state,
+   so the links and buttons inside a row would otherwise give no touch feedback
+   at all. Hand them the browser's default back. The tiles that open the
+   lightbox stay clear: double-tapping one is the reaction gesture, the same
+   double flash as the row's. */
+.event-row
+  :is(a, button):not(.media-open, .gallery-cell-open, .gallery-cell-deferred),
+.gallery-cell
+  :is(a, button):not(.media-open, .gallery-cell-open, .gallery-cell-deferred) {
+  -webkit-tap-highlight-color: initial;
+}
+
 @media (min-width: 48rem) {
   .event-row {
     transition: background-color 120ms ease;

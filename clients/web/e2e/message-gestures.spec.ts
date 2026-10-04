@@ -602,3 +602,64 @@ test('desktop preserves selection and supports timestamp and message double-clic
     await page.evaluate(() => window.getSelection()?.toString().length ?? 0),
   ).toBeGreaterThan(0)
 })
+
+test('message rows paint no native tap highlight', async ({
+  page,
+  browserName,
+}) => {
+  // Firefox has no `-webkit-tap-highlight-color`.
+  test.skip(browserName === 'firefox', 'property is not implemented')
+  await signIn(page)
+  await page.goto(ROOM_URL)
+  await expectLive(page)
+  const row = page.locator('.event-row').first()
+  await expect(row).toBeVisible()
+
+  // The browser's default is translucent (Chromium: `rgba(0, 0, 0, 0.18)`;
+  // Android WebView: `rgba(51, 181, 229, 0.4)`), and on Android it floods the
+  // whole row at every touch-down, so a double tap flashes blue twice.
+  const highlight = await row.evaluate((element) =>
+    getComputedStyle(element).getPropertyValue('-webkit-tap-highlight-color'),
+  )
+  expect(highlight).toBe('rgba(0, 0, 0, 0)')
+
+  // The gallery tile has the same rule. Controls inside either keep the
+  // browser's default (nothing here draws a pressed state of its own), except
+  // the tiles that open the lightbox, whose double tap is the reaction gesture.
+  const computed = await page.evaluate(() => {
+    const read = (element: Element): string =>
+      getComputedStyle(element).getPropertyValue('-webkit-tap-highlight-color')
+    const row = document.querySelector('.event-row')!
+    const tile = document.createElement('div')
+    tile.className = 'gallery-cell'
+    const make = (tag: string, className = ''): Element => {
+      const element = document.createElement(tag)
+      element.className = className
+      return element
+    }
+    const button = make('button')
+    const link = make('a')
+    const open = make('button', 'gallery-cell-open')
+    const inTile = make('button')
+    row.append(button, link, open)
+    tile.append(inTile)
+    document.body.append(tile)
+    const result = {
+      tile: read(tile),
+      button: read(button),
+      link: read(link),
+      open: read(open),
+      inTile: read(inTile),
+    }
+    button.remove()
+    link.remove()
+    open.remove()
+    tile.remove()
+    return result
+  })
+  expect(computed.tile).toBe('rgba(0, 0, 0, 0)')
+  expect(computed.open).toBe('rgba(0, 0, 0, 0)')
+  expect(computed.button).not.toBe('rgba(0, 0, 0, 0)')
+  expect(computed.link).not.toBe('rgba(0, 0, 0, 0)')
+  expect(computed.inTile).not.toBe('rgba(0, 0, 0, 0)')
+})
