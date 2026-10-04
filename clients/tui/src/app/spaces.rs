@@ -1234,6 +1234,13 @@ impl App {
                 }
                 match outcome.page {
                     Ok(page) => {
+                        // Frames drawn while the fetch was in flight settled
+                        // the pin-to-bottom sentinel against the layout that
+                        // was on screen then, so pin again for this page. A
+                        // selection made meanwhile keeps its own position.
+                        if self.messages.selection.is_none() {
+                            self.messages.scroll = usize::MAX;
+                        }
                         self.apply_timeline_page(
                             &outcome.room,
                             page,

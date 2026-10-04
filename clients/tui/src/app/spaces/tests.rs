@@ -955,6 +955,29 @@ async fn background_snapshot_replays_new_messages_and_edits_observed_in_flight()
 }
 
 #[tokio::test]
+async fn background_snapshot_opens_pinned_to_the_newest_message() {
+    let mut app = app();
+    app.messages.page_size = 3;
+    app.messages.width = 60;
+    pending_timeline(&mut app, 7);
+    app.messages.scroll = usize::MAX;
+    // A frame drawn before the page lands settles the sentinel on an empty
+    // layout, which is what used to leave the room open at its oldest message.
+    app.ensure_message_layout();
+    assert_eq!(app.messages.scroll, 0);
+    let events = (0..20)
+        .rev()
+        .map(|n| live_message(&format!("$e{n}"), &format!("message {n}")))
+        .collect();
+    let outcome = timeline_result(&app, 7, events);
+    app.apply_space_outcome(outcome);
+    app.ensure_message_layout();
+    let lines = app.cached_message_ranges().last().unwrap().end;
+    assert!(lines > app.messages.page_size);
+    assert_eq!(app.messages.scroll, lines - app.messages.page_size);
+}
+
+#[tokio::test]
 async fn stale_background_snapshot_cannot_replace_a_newer_request_or_a_historical_jump() {
     let mut app = app();
     pending_timeline(&mut app, 8);
