@@ -207,9 +207,23 @@ def parse_version_code(value: object) -> int | None:
         return None
     if isinstance(value, int):
         return value if value > 0 else None
-    if isinstance(value, str) and value.isdigit():
+    # ASCII only: `str.isdigit()` is also true for '\u00b2' and the like, which
+    # `int()` then rejects with a traceback.
+    if isinstance(value, str) and value.isascii() and value.isdigit():
         return int(value) if int(value) > 0 else None
     return None
+
+
+def as_list(value: object, what: str) -> list:
+    """`value` if it is a list. Play omits an empty field, so None is an empty
+    list; anything else is not what the API documents, so it is ignored with a
+    warning rather than iterated (a string would be split into characters)."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    print(f"warning: ignoring {what} that Play sent as {value!r}", file=sys.stderr)
+    return []
 
 
 def highest_version_code(package: str, account: dict, token: str) -> int | None:
@@ -224,14 +238,21 @@ def highest_version_code(package: str, account: dict, token: str) -> int | None:
         status, bundles = play("GET", f"{quoted}/edits/{edit_id}/bundles", token)
         if status != 200:
             raise explain(status, bundles, "list the uploaded bundles", package, account)
-        values = [item.get("versionCode") for item in bundles.get("bundles", []) if isinstance(item, dict)]
+        values = [
+            item.get("versionCode")
+            for item in as_list(bundles.get("bundles"), "the bundle list")
+            if isinstance(item, dict)
+        ]
 
         status, tracks = play("GET", f"{quoted}/edits/{edit_id}/tracks", token)
         if status != 200:
             raise explain(status, tracks, "list the release tracks", package, account)
-        for track in tracks.get("tracks", []):
-            for release in track.get("releases", []) if isinstance(track, dict) else []:
-                values.extend(release.get("versionCodes", []) if isinstance(release, dict) else [])
+        for track in as_list(tracks.get("tracks"), "the track list"):
+            if not isinstance(track, dict):
+                continue
+            for release in as_list(track.get("releases"), "a track's releases"):
+                if isinstance(release, dict):
+                    values.extend(as_list(release.get("versionCodes"), "a release's versionCodes"))
 
         for value in values:
             code = parse_version_code(value)

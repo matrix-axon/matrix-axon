@@ -234,6 +234,46 @@ class HelperTest(unittest.TestCase):
             result = self.run_helper(server)
         self.assertEqual(result.stdout.strip(), "1")
 
+    def test_a_digit_that_int_cannot_read_is_skipped_not_a_traceback(self):
+        # '\u00b2' (superscript two) is `isdigit()` but not an integer to `int()`.
+        tracks = [{"track": "internal", "releases": [{"versionCodes": ["\u00b2", "1000"]}]}]
+        with Server(self.play_routes(tracks=tracks)) as server:
+            result = self.run_helper(server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "1001")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("'\u00b2'", result.stderr)
+
+    def test_a_field_of_the_wrong_shape_is_ignored_not_a_traceback(self):
+        tracks = [
+            {"track": "internal", "releases": [
+                {"versionCodes": None},
+                {"versionCodes": "1234"},
+                {"versionCodes": ["1000"]},
+            ]},
+            {"track": "beta", "releases": None},
+            "not-a-track",
+        ]
+        with Server(self.play_routes(tracks=tracks)) as server:
+            result = self.run_helper(server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # "1234" is not split into characters or read as a code.
+        self.assertEqual(result.stdout.strip(), "1001")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("'1234'", result.stderr)
+
+    def test_null_lists_mean_none_listed(self):
+        routes = self.play_routes()
+        edits = f"/androidpublisher/v3/applications/{PACKAGE}/edits/edit-1"
+        routes[("GET", f"{edits}/bundles")] = lambda handler, body: (200, {"bundles": None})
+        routes[("GET", f"{edits}/tracks")] = lambda handler, body: (200, {"tracks": None})
+        with Server(routes) as server:
+            result = self.run_helper(server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "1")
+        # Play omitting an empty list is normal, not worth a warning.
+        self.assertNotIn("ignoring", result.stderr)
+
     def test_the_limit_is_enforced(self):
         with Server(self.play_routes(bundles=[helper.MAX_VERSION_CODE])) as server:
             result = self.run_helper(server)
