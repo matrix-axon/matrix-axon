@@ -66,24 +66,53 @@ A management route is reached by an authenticated owner, who is better served by
 Moving it under the gate would break `axon-server utd redecrypt` on any instance that disables management, and would be a breaking API change under ADR 0099.
 Only the new backlog-count read goes under the prefix.
 
-### Any valid bearer may manage
+### Who may manage: any bearer reads, credential changes need a recent sign-in
 
 Axon has no token scopes, and one human owns the instance.
 A bearer can already log Matrix accounts in, read every message, and delete an account.
-Management adds one new capability to that list: **persistence**.
-A stolen one-hour OAuth access token can mint a bearer that never expires.
-The native Apple bind endpoint already has this property, and ADR 0054 accepts it in the same terms.
 
-The mitigations are visibility, not prevention:
+Management routes that change credentials would add something worse than any of that.
+A stolen one-hour OAuth access token could mint a bearer that never expires, revoke every other token, unbind every identity, and bind an identity the attacker controls.
+That is takeover of the instance and lockout of its owner, and an audit trail is no help to an owner who can no longer get in.
+
+So the routes split in two.
+
+**Reads and index maintenance need only a valid bearer:** the token list, the identity list, bind status, the backlog count, and the search rebuild.
+
+**Credential changes need step-up:** minting a token, revoking a token, starting a bind, and unbinding an identity, with or without `allow_lockout`.
+A request passes if the calling token is either:
+
+- **non-expiring**, which is a token minted by the CLI, by `axon-server init`, or by this API; or
+- an OAuth access token whose session began with an **interactive sign-in in the last ten minutes**.
+
+Otherwise the route answers `403` with the code `recent_sign_in_required`.
+The client runs the sign-in flow it already has (the provider redirect, or the native sheet), adopts the new session, and retries.
+
+The sign-in time has to survive refresh, or refreshing would defeat the check.
+`oauth_refresh_tokens` and `tokens` each gain a nullable `authenticated_at`.
+It is set when an upstream sign-in is redeemed (authorization code, native identity token, or the identity-token grant) and copied unchanged through every refresh rotation.
+A stolen access token, and a stolen refresh token, both carry the original time and cannot move it forward: only a fresh proof from the upstream provider does.
+Rows that predate the column have no time and count as not recent.
+
+A non-expiring token passes without step-up, deliberately.
+It is the credential an operator creates on purpose and can revoke, it is what the CLI has always been able to do, and a client holding one has no upstream identity to re-prove.
+A stolen non-expiring token is therefore full control of the instance, as it is today.
+Operators who would rather no bearer had that power set `management_api = false`.
+
+**The existing native Apple bind route takes the same rule.**
+`POST /v1/oauth/apple/native/challenge` and `/token` with `purpose=bind` accept any active bearer today (ADR 0054).
+Left alone, that is a way around step-up: bind the attacker's Apple ID with a stolen bearer, sign in with it, and arrive with a fresh sign-in time.
+So `purpose=bind` there requires the same non-expiring-or-recent bearer.
+This narrows who may call an existing route, with a status code the route already documents, and it amends ADR 0054's statement that any OAuth-issued bearer may bind.
+
+Visibility stays, as the second line of defense:
 
 - `tokens` gains a `created_by_token_id` column, recorded on every API mint.
 - Every mint, revoke, bind and unbind writes a `tracing` line with the acting token's id and the target's id.
   No secret is logged.
 - The token list returns every token, including revoked ones, so an unexpected entry is visible to the owner.
 
-A separate management scope, or step-up authentication before minting, would be a change to the authorization model and is left for its own decision.
-
-To make any of this possible, `TokenVerifier::verify` returns the token id, and `require_bearer` attaches it to the request as an extension that handlers can extract.
+To make any of this possible, `TokenVerifier::verify` returns the token's id, expiry and sign-in time, and `require_bearer` attaches them to the request as an extension that handlers can extract.
 The WebSocket upgrade, which verifies the token itself, changes with it.
 
 ### Guarding against lockout, with an override
@@ -91,8 +120,23 @@ The WebSocket upgrade, which verifies the token itself, changes with it.
 With no shell, losing the last credential is unrecoverable.
 The first-run web bootstrap does not reopen: `first_credential_bootstrap_available` counts revoked and expired tokens as proof that bootstrap was already used.
 
-So a revoke or unbind that would leave the instance with no active non-expiring token and no bound identity answers `409` with the code `last_credential`.
-The check runs in the same transaction as the write, so two concurrent requests cannot each see the other's credential as the survivor.
+So a revoke or unbind that would leave the instance with no surviving credential answers `409` with the code `last_credential`.
+
+A surviving credential is one of exactly two things:
+
+- an active token with no expiry; or
+- a bound identity the owner could actually sign in with: OAuth is enabled, and that identity's provider is enabled for at least one flow (browser, or native for Apple).
+
+An expiring OAuth access token is never a survivor, however long it has left.
+An identity whose provider is disabled is not one either: it cannot produce a session.
+
+The count is taken on the state the write would leave behind.
+Unbinding an identity also revokes that identity's tokens, so the guard counts after that cascade, not before it.
+
+A shared transaction is not enough to make this safe.
+Under Postgres's default `READ COMMITTED`, two concurrent requests revoking token A and token B would each count the other as the survivor and both commit.
+So every credential-removing write takes one transaction-scoped advisory lock (`pg_advisory_xact_lock`, the mechanism the first-credential bootstrap already uses) before it counts.
+The lock is taken inside `Store::revoke_token` and `Store::delete_identity` themselves, so the CLI's revoke and unbind serialize against the API's, though only the API applies the guard.
 
 It is a confirmation, not a prohibition.
 The request may be repeated with `allow_lockout=true`, and the client's job is to explain the consequence before it does.
@@ -179,7 +223,8 @@ A rebuild is single-flight by construction, since one actor owns the writer.
 One silo per pull request, server first.
 
 1. This record.
-2. Server: the switch, the authenticated-token extension, identity list and unbind.
+2. Server: the switch, the authenticated-token extension with the sign-in time and the step-up check, identity list and unbind.
+   This step also corrects the "no admin API" non-goal in `AGENTS.md`, `docs/mvp/implementation.md` and `docs/mvp/prd.md`.
 3. Web: linked sign-ins in Settings, with unlink.
    Steps 2 and 3 go first because they are what an App Store submission needs.
 4. Server: tokens and binds.
@@ -196,8 +241,11 @@ One silo per pull request, server first.
   The CLI remains, unchanged, as the path that needs no running server and no existing credential.
 - The first token still has to come from somewhere outside this API: `axon-server init`, `token issue`, or the first-run web bootstrap.
   Management requires a bearer, so it cannot create the first one.
-- A leaked bearer is worth more than before, because it can create a credential that outlives it.
+- A leaked non-expiring bearer is worth more than before: it can create and remove credentials.
+  A leaked OAuth bearer is not, because it cannot produce a fresh sign-in.
   Operators who would rather keep that power behind a shell set `management_api = false`.
+- A user signed in through a provider is asked to sign in again before changing credentials, if their last interactive sign-in is more than ten minutes old.
+- Linking an Apple ID from a provider session now asks for that same fresh sign-in, where before any active session could link.
 - An operator who disables management also disables unlinking from a client.
   On a single-owner instance the operator and the user are the same person, and the CLI verb remains.
 - Clients take on a new display duty: a token secret shown once and never recoverable, and a search result set that may be partial during a rebuild.
@@ -213,7 +261,15 @@ Rejected above; the caller is the authenticated owner.
 **Refuse outright to remove the last credential.**
 Rejected because unlinking must be possible for a user whose only credential is the identity being unlinked.
 
-**Restrict minting to non-expiring tokens, or to tokens flagged as administrators.**
+**Allow any valid bearer to change credentials, and rely on the audit trail.**
+This was the first draft.
+Rejected in review: a stolen short-lived bearer could take the instance over and lock the owner out, at which point the trail is unreadable to the one person it is for.
+
+**Require a non-expiring bearer for credential changes.**
+Simpler than step-up, and it closes the same hole.
+Rejected because the user this feature is for often has no such token: someone signed in on a phone with Apple could not unlink Apple from the app.
+
+**Tokens flagged as administrators.**
 This is a scope model.
 It may well be right, but it changes what every existing token means, and it deserves its own record.
 
