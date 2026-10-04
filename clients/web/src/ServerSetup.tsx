@@ -116,63 +116,64 @@ export function ServerSetup({
     }
   }
 
-  if (privacy.page !== null) {
-    return privacy.page
-  }
+  // Kept mounted under the policy, only hidden, like the sign-in screen.
   return (
-    <main class="signin">
-      <h1>axon</h1>
-      <p>Connect to your Axon server to get started.</p>
-      <form
-        class="server-setup"
-        onSubmit={(event) => {
-          event.preventDefault()
-          void connect()
-        }}
-      >
-        <label>
-          Server address
-          {/*
-           * `type="text"`, deliberately, with only the keyboard hint from
-           * `inputMode`. `type="url"` looks like the right control and is not:
-           * it applies native constraint validation, under which a bare
-           * `axon.example.com` is a typeMismatch, so the browser silently
-           * blocks submit — killing the "https:// is assumed if you leave it
-           * out" affordance this screen advertises. Validation here is
-           * `normalizeServerUrl`, which is more forgiving on the way in and
-           * stricter about the scheme on the way out.
-           */}
-          <input
-            type="text"
-            inputMode="url"
-            autocomplete="url"
-            autocapitalize="none"
-            autocorrect="off"
-            spellcheck={false}
-            value={draft}
-            placeholder="axon.example.com"
-            disabled={probing}
-            onInput={(event) => {
-              setDraft(event.currentTarget.value)
-              setStatus({ state: 'idle' })
-            }}
-          />
-        </label>
-        <p class="server-setup-hint">
-          {normalized === null
-            ? 'A hostname or full URL. https:// is assumed if you leave it out.'
-            : `Will connect to ${normalized}`}
-        </p>
-        <button type="submit" disabled={normalized === null || probing}>
-          {probing ? 'Connecting…' : 'Connect'}
-        </button>
-        {status.state === 'failed' && (
-          <p class="server-setup-error" role="alert">
-            {status.message}
+    <>
+      {privacy.page}
+      <main class="signin" hidden={privacy.page !== null}>
+        <h1>axon</h1>
+        <p>Connect to your Axon server to get started.</p>
+        <form
+          class="server-setup"
+          onSubmit={(event) => {
+            event.preventDefault()
+            void connect()
+          }}
+        >
+          <label>
+            Server address
+            {/*
+             * `type="text"`, deliberately, with only the keyboard hint from
+             * `inputMode`. `type="url"` looks like the right control and is not:
+             * it applies native constraint validation, under which a bare
+             * `axon.example.com` is a typeMismatch, so the browser silently
+             * blocks submit — killing the "https:// is assumed if you leave it
+             * out" affordance this screen advertises. Validation here is
+             * `normalizeServerUrl`, which is more forgiving on the way in and
+             * stricter about the scheme on the way out.
+             */}
+            <input
+              type="text"
+              inputMode="url"
+              autocomplete="url"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck={false}
+              value={draft}
+              placeholder="axon.example.com"
+              disabled={probing}
+              onInput={(event) => {
+                setDraft(event.currentTarget.value)
+                setStatus({ state: 'idle' })
+              }}
+            />
+          </label>
+          <p class="server-setup-hint">
+            {normalized === null
+              ? 'A hostname or full URL. https:// is assumed if you leave it out.'
+              : `Will connect to ${normalized}`}
           </p>
-        )}
-      </form>
-      {privacy.link}
-    </main>
+          <button type="submit" disabled={normalized === null || probing}>
+            {probing ? 'Connecting…' : 'Connect'}
+          </button>
+          {status.state === 'failed' && (
+            <p class="server-setup-error" role="alert">
+              {status.message}
+            </p>
+          )}
+        </form>
+        {privacy.link}
+      </main>
+    </>
   )
 }

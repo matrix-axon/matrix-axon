@@ -2185,6 +2185,29 @@ describe('privacy policy (ADR 0107)', () => {
     )
   })
 
+  it('keeps a half-entered sign-in while the policy is open', async () => {
+    // The sign-in form stays mounted, only hidden, so Back returns to exactly
+    // what the user had typed rather than a reset form.
+    const services = testServices()
+    services.auth.clearToken()
+    const { findByLabelText, getByLabelText, getByRole, queryByRole } = render(
+      <App services={services} />,
+    )
+    fireEvent.input(await findByLabelText('Access token'), {
+      target: { value: 'tok-half-typed' },
+    })
+
+    fireEvent.click(getByRole('button', { name: 'Privacy policy' }))
+    expect(getByRole('heading', { name: 'Axon Privacy Policy' })).toBeTruthy()
+    // Hidden, so not offered to the user or to assistive tech meanwhile.
+    expect(queryByRole('button', { name: 'Sign in' })).toBeNull()
+    fireEvent.click(getByRole('button', { name: '← Back' }))
+
+    expect((getByLabelText('Access token') as HTMLInputElement).value).toBe(
+      'tok-half-typed',
+    )
+  })
+
   it('is reachable before sign-in, in place, with a way back', async () => {
     const services = testServices()
     services.auth.clearToken()

@@ -206,10 +206,27 @@ describe('ServerSetup privacy policy (ADR 0107)', () => {
     expect(
       screen.getByRole('heading', { name: 'Axon Privacy Policy' }),
     ).toBeTruthy()
-    expect(screen.queryByLabelText('Server address')).toBeNull()
+    // Hidden, not unmounted (it keeps what was typed), so out of the
+    // accessibility tree.
+    expect(screen.queryByRole('textbox', { name: 'Server address' })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: '← Back' }))
     expect(screen.getByLabelText('Server address')).toBeTruthy()
+  })
+})
+
+describe('ServerSetup keeps its form under the policy', () => {
+  it('returns from the policy to the address that was typed', () => {
+    const { input } = setup(ok)
+    fireEvent.input(input, { target: { value: 'axon.example.org' } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Privacy policy' }))
+    expect(screen.queryByRole('button', { name: /^Connect/ })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '← Back' }))
+
+    expect(
+      (screen.getByLabelText('Server address') as HTMLInputElement).value,
+    ).toBe('axon.example.org')
   })
 })
 

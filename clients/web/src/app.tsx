@@ -577,22 +577,24 @@ function SignedOut({ error }: { error?: string | null }) {
   const { auth } = useServices()
   const [privacyOpen, setPrivacyOpen] = useState(false)
   const privacy = usePrivacyInPlace(privacyOpen, setPrivacyOpen)
-  if (privacy.page !== null) {
-    return privacy.page
-  }
+  // The form stays mounted under the policy, only hidden: unmounting it lost
+  // a half-typed token, an SSO choice or an error the user came back for.
   return (
-    <main class="signin">
-      <h1>axon</h1>
-      <p>Sign in with SSO or a server-issued access token.</p>
-      {error != null && (
-        <p class="server-setup-error" role="alert">
-          {error}
-        </p>
-      )}
-      <auth.LoginBootstrap />
-      <ServerFooter />
-      {privacy.link}
-    </main>
+    <>
+      {privacy.page}
+      <main class="signin" hidden={privacy.page !== null}>
+        <h1>axon</h1>
+        <p>Sign in with SSO or a server-issued access token.</p>
+        {error != null && (
+          <p class="server-setup-error" role="alert">
+            {error}
+          </p>
+        )}
+        <auth.LoginBootstrap />
+        <ServerFooter />
+        {privacy.link}
+      </main>
+    </>
   )
 }
 
