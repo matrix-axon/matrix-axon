@@ -25,7 +25,7 @@
 #     `build.gradle.kts` is regenerated every run, so a config edited into it
 #     would not survive. The build is left unsigned and then signed afterwards
 #     with `jarsigner` (an .aab, which is what Play takes) or `zipalign` +
-#     `apksigner` (an .apk). The key is an *upload* key (ADR 0107): Play
+#     `apksigner` (an .apk). The key is an *upload* key (ADR 0110): Play
 #     re-signs with its own, so this key is only how Google knows an upload is
 #     ours, and it can be reset if it is lost. Its location and passwords come
 #     from the environment, never from arguments, which land in `ps` and in
@@ -232,7 +232,7 @@ if [ "$sign" -eq 1 ]; then
   rm -f "$signed"
   if [ "$aab" -eq 1 ]; then
     # `-storepass:env` and not `-storepass`: an argument is world-readable in
-    # `ps`. RSA is what the upload key is generated as (ADR 0107).
+    # `ps`. RSA is what the upload key is generated as (ADR 0110).
     jarsigner -keystore "$ANDROID_KEYSTORE" -storepass:env ANDROID_KEYSTORE_PASSWORD \
       -sigalg SHA256withRSA -digestalg SHA-256 \
       -signedjar "$signed" "$artifact" "$ANDROID_KEY_ALIAS"

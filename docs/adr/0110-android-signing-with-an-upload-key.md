@@ -1,4 +1,4 @@
-# ADR 0107 — Android builds are signed with an upload key, after the build
+# ADR 0110 — Android builds are signed with an upload key, after the build
 
 **Status:** Accepted.
 Implemented in `scripts/package-android.sh` alongside this record.
