@@ -3,32 +3,17 @@ mod android_manifest;
 
 fn main() {
     tauri_build::build();
-    declare_android_camera();
+    patch_android_manifest();
 }
 
-/// Declare `CAMERA` in the generated Android manifest, for the ADR 0097 QR
-/// sign-in flow.
-///
-/// Without it `getUserMedia` fails without ever showing a prompt — the WebView
-/// can only ask the OS for a permission the app has declared — and the page
-/// reports "unavailable in this browser" rather than a denial. The same
-/// failure ADR 0102 records for macOS's missing `NSCameraUsageDescription`.
+/// Edit the manifest `tauri android init` generated: declare the camera, and
+/// turn off auto-backup.
 ///
 /// `gen/android` is regenerated and gitignored, so a hand edit to its manifest
 /// does not survive `tauri android init`; this rewrites the manifest on every
-/// build instead. The block is bracketed by the same marker comments the
-/// deep-link plugin uses for its intent filter, and replaces its own previous
-/// output, so a rebuild does not stack copies. It is a no-op for any target but
-/// Android, and when there is no generated project.
-///
-/// Written here rather than with `tauri_utils::build::update_android_manifest`,
-/// which does exactly this: that function is behind `tauri-utils`'s `build`
-/// feature, which is not on for build scripts and pulls in 42 crates
-/// (`kuchikiki` and its HTML parser among them) to save twenty lines.
-///
-/// `required="false"` on the feature: a tablet or a Chromebook with no camera
-/// should still be able to install the app and sign in some other way.
-fn declare_android_camera() {
+/// build instead. It is a no-op for any target but Android, and when there is
+/// no generated project.
+fn patch_android_manifest() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android") {
         return;
     }
@@ -38,13 +23,14 @@ fn declare_android_camera() {
     let path = std::path::Path::new(&project).join("app/src/main/AndroidManifest.xml");
     // `package-android.sh` deletes and regenerates `gen/android` while `target/`
     // survives, so without this Cargo sees nothing changed, skips the script,
-    // and the fresh manifest never gets the block.
+    // and the fresh manifest never gets its edits.
     println!("cargo:rerun-if-changed={}", path.display());
     let Ok(manifest) = std::fs::read_to_string(&path) else {
         return;
     };
-    let rewritten =
-        android_manifest::with_camera_block(&manifest).unwrap_or_else(|why| panic!("{why}"));
+    let rewritten = android_manifest::with_camera_block(&manifest)
+        .and_then(|manifest| android_manifest::with_backup_disabled(&manifest))
+        .unwrap_or_else(|why| panic!("{why}"));
     if rewritten != manifest {
         std::fs::write(&path, rewritten).expect("failed to update AndroidManifest.xml");
     }

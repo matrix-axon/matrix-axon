@@ -179,6 +179,31 @@ echo "==> JDK $(jdk_major "$JAVA_HOME") at $JAVA_HOME"
 
 : "${ANDROID_HOME:?set ANDROID_HOME to the Android SDK}"
 : "${NDK_HOME:?set NDK_HOME to an NDK under \$ANDROID_HOME/ndk}"
+
+# Say which NDK is used, and say so if it is a prerelease: NDK_HOME is usually
+# a `latest` symlink, so what it points at changes when an NDK is installed, and
+# a store build should not come from a beta (`29.0.13846066-beta3` was the
+# default on the machine this was written on).
+ndk_revision=$(sed -n 's/^Pkg.Revision *= *//p' "$NDK_HOME/source.properties" 2>/dev/null | head -1 || true)
+echo "==> NDK ${ndk_revision:-unknown} at $(readlink -f "$NDK_HOME")"
+case "$ndk_revision" in
+  *beta*|*rc*|*alpha*)
+    echo "warning: NDK $ndk_revision is a prerelease; use a stable NDK for a build that ships" >&2 ;;
+esac
+
+# Cargo does not treat a different NDK as a reason to rebuild: the linker path
+# is not part of a crate's fingerprint, so C objects compiled by one NDK's clang
+# stay in `target/` and are linked next to the new one's. Measured: after moving
+# `latest` from a 29 beta to 30, the library still carried the beta compiler's
+# build stamp (13818152 in `strings`) alongside 30's; after clearing `target/`
+# it was gone. A build that ships should come from one toolchain, so when the
+# NDK differs from the one that last built here, start the Android targets over.
+tauri_target="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/clients/web/src-tauri/target"
+ndk_stamp="$tauri_target/.android-ndk-revision"
+if [ -d "$tauri_target" ] && [ "$(cat "$ndk_stamp" 2>/dev/null || true)" != "$ndk_revision" ]; then
+  echo "==> NDK changed since the last build here; clearing the Android build artifacts"
+  rm -rf "$tauri_target"/*-linux-android*
+fi
 export PATH="$HOME/.cargo/bin:$PATH"
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -191,10 +216,18 @@ echo "==> regenerating the Android project"
 rm -rf "$tauri_dir/gen/android"
 pnpm tauri android init --ci
 
+# The launcher icon. `init` writes Tauri's own artwork into `gen/android` and
+# never revisits it, so without this the app ships with the Tauri logo. The
+# committed set under `icons/android/` is the artwork of record, and includes an
+# adaptive-icon definition the generated project lacks, so it is overlaid
+# rather than used to replace single files.
+echo "==> syncing launcher icons from icons/android"
+cp -R "$tauri_dir/icons/android/." "$tauri_dir/gen/android/app/src/main/res/"
+
 # `init` writes a MainActivity that turns on edge-to-edge and never handles the
 # insets that implies; ours does (see the header of the file). Copied rather
-# than generated for the same reason the iOS icons are: `gen/` is regenerated
-# and gitignored, so nothing edited there survives.
+# than generated for the same reason as the icons, and the iOS ones: `gen/` is
+# regenerated and gitignored, so nothing edited there survives.
 echo "==> installing android/MainActivity.kt"
 cp "$tauri_dir/android/MainActivity.kt" \
   "$tauri_dir/gen/android/app/src/main/java/org/matrixaxon/axon/MainActivity.kt"
@@ -224,6 +257,9 @@ if [ -z "$artifact" ]; then
   echo "error: the build reported success but produced no .$ext" >&2
   exit 1
 fi
+# Recorded only once the build has succeeded, so a failed one is redone clean.
+mkdir -p "$tauri_target" && printf '%s\n' "$ndk_revision" > "$ndk_stamp"
+
 echo "==> built $artifact"
 
 if [ "$sign" -eq 1 ]; then
