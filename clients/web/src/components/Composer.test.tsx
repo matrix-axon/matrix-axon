@@ -952,6 +952,7 @@ describe('Composer attachments (M-W8.5, ADR 0065; multi-image ADR 0081)', () => 
     }
     afterEach(() => {
       vi.useRealTimers()
+      vi.unstubAllGlobals()
       delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
     })
 
@@ -1050,6 +1051,28 @@ describe('Composer attachments (M-W8.5, ADR 0065; multi-image ADR 0081)', () => 
       fireEvent.touchEnd(paperclip(container))
       fireEvent.click(paperclip(container))
       expect(picker).not.toHaveBeenCalled()
+    })
+
+    it('a long press whose release sends no click does not swallow the next click', () => {
+      vi.useFakeTimers()
+      inAndroidShell()
+      const { getByLabelText, container } = renderComposer({
+        onAttach: vi.fn(),
+      })
+      const picker = vi.spyOn(
+        getByLabelText('Attach a file') as HTMLInputElement,
+        'click',
+      )
+
+      holdPaperclip(container)
+      fireEvent.touchEnd(paperclip(container))
+      // No click arrives; a later click (a mouse on the same device) is real.
+      act(() => {
+        vi.advanceTimersByTime(500)
+      })
+      fireEvent.click(paperclip(container))
+
+      expect(picker).toHaveBeenCalledTimes(1)
     })
 
     it('moving the finger before the hold elapses cancels it', () => {

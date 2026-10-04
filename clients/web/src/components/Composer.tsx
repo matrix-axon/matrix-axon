@@ -47,6 +47,9 @@ function isHttpUrl(value: string): boolean {
 const COMPOSER_MIN_HEIGHT = 38
 const COMPOSER_KEYBOARD_RESIZE_STEP = 24
 const MOBILE_COMPOSER_MAX_LINES = 4
+/** How long after a long press ends a click on the paperclip is still treated
+ *  as that press's own release. */
+const ATTACH_CLICK_GRACE_MS = 400
 
 function cssPixelValue(value: string, fallback: number): number {
   const parsed = Number.parseFloat(value)
@@ -1101,7 +1104,22 @@ export function Composer({
                     : undefined
                 }
                 onTouchMove={cameraButtons ? clearAttachHold : undefined}
-                onTouchEnd={cameraButtons ? clearAttachHold : undefined}
+                onTouchEnd={
+                  cameraButtons
+                    ? () => {
+                        clearAttachHold()
+                        // The click that ends a long press follows the release
+                        // at once. If this WebView sent none, drop the flag
+                        // rather than swallow the next real click (a mouse or
+                        // keyboard on the same device).
+                        if (suppressAttachClick.current) {
+                          window.setTimeout(() => {
+                            suppressAttachClick.current = false
+                          }, ATTACH_CLICK_GRACE_MS)
+                        }
+                      }
+                    : undefined
+                }
                 onTouchCancel={cameraButtons ? clearAttachHold : undefined}
                 // Android raises its own context menu on a long press; this
                 // one is ours.
