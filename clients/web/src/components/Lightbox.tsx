@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'preact/hooks'
@@ -174,6 +175,16 @@ export function Lightbox({
   const gestureStart = useRef(0)
   const zoomedAt = useRef(0)
   const trackpadPinch = useRef<ZoomState | null>(null)
+  /**
+   * The zoom the image is actually drawn with. `zoomRef` is the zoom asked
+   * for, which runs ahead of the DOM until the next render; a box measured
+   * with `getBoundingClientRect` carries this one. Set after each commit, when
+   * `LightboxImage` has applied its transform.
+   */
+  const renderedZoom = useRef<ZoomState>(FIT)
+  useLayoutEffect(() => {
+    renderedZoom.current = zoom
+  }, [zoom])
 
   const applyZoom = (next: ZoomState) => {
     zoomRef.current = next
@@ -195,7 +206,9 @@ export function Lightbox({
   /**
    * The image's untransformed size, and its untransformed centre on screen.
    * The transform scales about the centre, so the rendered centre has only
-   * moved by the translation.
+   * moved by the translation — the *rendered* one. Subtracting the zoom asked
+   * for instead put the centre off by however far that had run ahead of the
+   * DOM, and a pinch then drifted away from the pointer.
    */
   const imageGeometry = () => {
     const image = imageRef.current
@@ -203,7 +216,7 @@ export function Lightbox({
       return null
     }
     const rect = image.getBoundingClientRect()
-    const { x, y } = zoomRef.current
+    const { x, y } = renderedZoom.current
     return {
       size: { width: image.offsetWidth, height: image.offsetHeight },
       centre: {
@@ -213,17 +226,25 @@ export function Lightbox({
     }
   }
 
-  /** Zoom to `scale` about a screen point, or about what is in view now. */
-  const zoomTo = (scale: number, at?: Point) => {
+  /**
+   * Zoom to `scale` about a screen point, or about what is in view now.
+   * `from` is the state the scale is relative to: the current zoom, or the
+   * zoom a trackpad pinch started at.
+   */
+  const zoomTo = (
+    scale: number,
+    at?: Point,
+    from: ZoomState = zoomRef.current,
+  ) => {
     const geometry = imageGeometry()
     if (geometry === null) {
       return
     }
     const anchor =
       at === undefined
-        ? { x: zoomRef.current.x, y: zoomRef.current.y }
+        ? { x: from.x, y: from.y }
         : { x: at.x - geometry.centre.x, y: at.y - geometry.centre.y }
-    applyZoom(zoomAt(zoomRef.current, scale, anchor, geometry.size))
+    applyZoom(zoomAt(from, scale, anchor, geometry.size))
   }
 
   /** Start a pan or pinch from whatever pointers are down now. */
@@ -359,8 +380,12 @@ export function Lightbox({
       }
       const pinch = event as GestureEvent
       zoomedAt.current = Date.now()
-      zoomRef.current = from
-      zoomTo(from.scale * pinch.scale, { x: pinch.clientX, y: pinch.clientY })
+      // `scale` is cumulative since `gesturestart`, so zoom from there.
+      zoomTo(
+        from.scale * pinch.scale,
+        { x: pinch.clientX, y: pinch.clientY },
+        from,
+      )
     }
     const onGestureEnd = (event: Event) => {
       if (imageRef.current !== null) {

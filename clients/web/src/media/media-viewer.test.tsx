@@ -1543,6 +1543,56 @@ describe('image zoom in the viewer', () => {
     await waitFor(() => expect(scaleOf(img)).toBeGreaterThan(1))
   })
 
+  it('keeps a trackpad pinch pinned under the pointer across renders', async () => {
+    const img = await openZoomable()
+    // Lay the image out at (0, 0), 400×300, and move its box with its own
+    // transform, as a browser does; jsdom does no layout of its own.
+    img.getBoundingClientRect = () => {
+      const match =
+        /translate\(([-\d.]+)px, ([-\d.]+)px\) scale\(([\d.]+)\)/.exec(
+          img.style.transform,
+        )
+      const [x, y, s] =
+        match === null
+          ? [0, 0, 1]
+          : [Number(match[1]), Number(match[2]), Number(match[3])]
+      const width = 400 * s
+      const height = 300 * s
+      const left = 200 + x - width / 2
+      const top = 150 + y - height / 2
+      return {
+        left,
+        top,
+        width,
+        height,
+        right: left + width,
+        bottom: top + height,
+        x: left,
+        y: top,
+        toJSON: () => ({}),
+      } as DOMRect
+    }
+    // WebKit's GestureEvent: a trackpad pinch in Safari and the macOS shell.
+    const gesture = (type: string, scale: number) => {
+      const event = new Event(type, { bubbles: true, cancelable: true })
+      Object.assign(event, { scale, clientX: 300, clientY: 150 })
+      img.dispatchEvent(event)
+    }
+
+    gesture('gesturestart', 1)
+    gesture('gesturechange', 2)
+    // Let the first change render, so the box the next change measures
+    // carries its transform.
+    await waitFor(() => expect(scaleOf(img)).toBe(2))
+    gesture('gesturechange', 3)
+    await waitFor(() => expect(scaleOf(img)).toBe(3))
+    gesture('gestureend', 3)
+
+    // The pointer is 100px right of the centre. The image point under it at
+    // fit must still be under it at 3x: 100 = x + 3 * 100, so x = -200.
+    expect(img.style.transform).toBe('translate(-200px, 0px) scale(3)')
+  })
+
   it('pinches to zoom and pans with one finger once zoomed', async () => {
     const img = await openZoomable()
 
