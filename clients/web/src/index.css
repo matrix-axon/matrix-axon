@@ -2263,6 +2263,18 @@ p.timeline-edge {
   -webkit-tap-highlight-color: transparent;
 }
 
+/* The property inherits, and nothing in this stylesheet draws a pressed state,
+   so the links and buttons inside a row would otherwise give no touch feedback
+   at all. Hand them the browser's default back. The tiles that open the
+   lightbox stay clear: double-tapping one is the reaction gesture, the same
+   double flash as the row's. */
+.event-row
+  :is(a, button):not(.media-open, .gallery-cell-open, .gallery-cell-deferred),
+.gallery-cell
+  :is(a, button):not(.media-open, .gallery-cell-open, .gallery-cell-deferred) {
+  -webkit-tap-highlight-color: initial;
+}
+
 @media (min-width: 48rem) {
   .event-row {
     transition: background-color 120ms ease;
