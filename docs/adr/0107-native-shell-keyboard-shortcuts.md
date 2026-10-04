@@ -72,6 +72,13 @@ itself (`⌘` on macOS). It steps through the browsers' own zoom levels, from
   per-site zoom, and in the iOS/Android shells, where pinch is the zoom and
   Tauri documents page zoom as unsupported. Where it is `null`, the chords are
   left alone and the help leaves out the zoom rows.
+- **On every screen.** The saved level is applied, and the chords bound, on
+  the server-setup and sign-in screens as well as in the signed-in app. The
+  server-setup screen comes before the settings store exists, so it reads and
+  saves the level in stored settings directly, and the app picks it up once
+  connected. This first shipped in the signed-in shell alone: a saved 200%
+  came back as 100% before sign-in, and the View menu's zoom items did nothing
+  there.
 - **Ctrl-scroll does not zoom.** The desktop shell has keyboard zoom only.
   Wheel zoom would need a handler that can tell a mouse notch from a stream of
   pinch events, and it can be added later if people miss it.
@@ -125,6 +132,10 @@ app, and a macOS user expects the app's help in the Help menu.
   "Axon Help" (⇧⌘/, which is ⌘?) and "Privacy Policy" to its Help menu. The
   menu only relays: it emits `axon://menu` and `AppRoot` turns that into the
   page's own events, so every screen answers with what it already has.
+  Privacy Policy works on every screen. Axon Help does nothing before sign-in,
+  deliberately: the help lists the signed-in app's keyboard shortcuts and
+  commands, none of which apply yet. A help screen of its own for the
+  server-setup and sign-in screens would be a new feature, not a fix.
 - **No menu bar on Windows or Linux.** Tauri gives them none. Adding one just
   for Help would look out of place in a chat app, and Slack, Discord and
   Element on those platforms keep these links inside the app. The Settings

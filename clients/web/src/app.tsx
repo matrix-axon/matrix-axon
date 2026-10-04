@@ -61,7 +61,7 @@ import {
   type AppServices,
 } from './services'
 import { disconnectFromServer } from './server-url'
-import { DEFAULT_ZOOM, stepZoom } from './zoom'
+import { usePageZoom } from './page-zoom'
 import { useExternalLinks } from './external-links'
 import {
   PrivacyPage,
@@ -186,6 +186,14 @@ export function App({
   // Above the sign-in gate, so the signed-out screen's links (the privacy
   // policy's) open in the browser too, not only the shell's.
   useExternalLinks(svc.platform)
+  // Likewise page zoom (ADR 0107): applied and bound on the sign-in screen too.
+  usePageZoom(svc.platform.setZoom, {
+    level: svc.settings.zoom.value,
+    get: () => svc.settings.zoom.value,
+    set: (level) => {
+      svc.settings.zoom.value = level
+    },
+  })
   useEffect(() => applyAppBadge(svc.settings, svc.rooms), [svc])
   // The stored preference drives instrumentation; `?perf=1` still wins for a
   // single session, since `perfEnabled` latches it before this runs.
@@ -821,7 +829,6 @@ function ShellChrome() {
   perfMark('shell:render', { path, mode })
   const collapsed = settings.sidebarCollapsed.value
   const sidebarWidth = settings.sidebarWidth.value
-  const zoom = settings.zoom.value
   const [helpOpen, setHelpOpen] = useState(false)
   const [unreadThreadsOpen, setUnreadThreadsOpen] = useState(false)
   const [verificationInboxOpen, setVerificationInboxOpen] = useState(false)
@@ -1240,24 +1247,6 @@ function ShellChrome() {
     '?': openHelp,
     '/': openSearch,
   })
-  // A desktop shell's webview has no zoom of its own (ADR 0107), so apply the
-  // saved level on launch and on every change.
-  useEffect(() => {
-    svcPlatform.setZoom?.(zoom).catch((error: unknown) => {
-      console.error('could not set the page zoom', error)
-    })
-  }, [svcPlatform, zoom])
-  const zoomBy = (direction: 1 | -1 | 0) => (event: KeyboardEvent) => {
-    if (svcPlatform.setZoom === null || !isPrimaryModifier(event)) {
-      return
-    }
-    event.preventDefault()
-    // From the signal, not the render's `zoom`: two presses before the next
-    // render (key repeat) must step twice, not land on the same level.
-    settings.zoom.value =
-      direction === 0 ? DEFAULT_ZOOM : stepZoom(settings.zoom.value, direction)
-  }
-
   // The native shell (ADR 0107) is not a browser, so it can take the
   // platform's standard chords that a page never could. Only the primary
   // modifier counts: on macOS `Ctrl-F`/`Ctrl-N` are text-field cursor keys.
@@ -1298,14 +1287,6 @@ function ShellChrome() {
         event.preventDefault()
         location.route('/settings')
       },
-      // Zoom in answers to `=` as well as `+`: the unshifted key is what the
-      // label calls `+` on most layouts, and a numpad `+` needs no Shift.
-      'mod+=': zoomBy(1),
-      'mod++': zoomBy(1),
-      'mod+shift+=': zoomBy(1),
-      'mod+shift++': zoomBy(1),
-      'mod+-': zoomBy(-1),
-      'mod+0': zoomBy(0),
       F1: (event) => {
         if (!native) {
           return

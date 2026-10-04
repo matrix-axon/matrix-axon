@@ -1,5 +1,7 @@
 import { useState } from 'preact/hooks'
 import { useExternalLinks } from './external-links'
+import { usePageZoom } from './page-zoom'
+import { readStoredZoom, writeStoredZoom } from './stores/settings'
 import { usePrivacyInPlace } from './pages/PrivacyPage'
 import { browserPlatform, type Platform } from './platform'
 import {
@@ -41,7 +43,8 @@ export function ServerSetup({
   storage = window.localStorage,
 }: {
   onConnected: (baseUrl: string) => void
-  platform?: Pick<Platform, 'fetch'> & Partial<Pick<Platform, 'openExternal'>>
+  platform?: Pick<Platform, 'fetch'> &
+    Partial<Pick<Platform, 'openExternal' | 'setZoom'>>
   storage?: Storage
 }) {
   const [draft, setDraft] = useState('')
@@ -51,6 +54,16 @@ export function ServerSetup({
   // `App` is not mounted yet, so this screen opens its own external links
   // (the privacy policy's), or the shell would drop them.
   useExternalLinks(platform)
+  // And its own page zoom, saved where `App` will read it once connected.
+  const [zoomLevel, setZoomLevel] = useState(() => readStoredZoom(storage))
+  usePageZoom(platform.setZoom, {
+    level: zoomLevel,
+    get: () => readStoredZoom(storage),
+    set: (level) => {
+      writeStoredZoom(storage, level)
+      setZoomLevel(level)
+    },
+  })
 
   const normalized = normalizeServerUrl(draft)
   const probing = status.state === 'probing'

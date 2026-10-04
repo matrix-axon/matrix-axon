@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { memoryStorage } from '../test/memory-storage'
-import { applyTheme, createSettingsStore } from './settings'
+import {
+  applyTheme,
+  createSettingsStore,
+  readStoredZoom,
+  writeStoredZoom,
+} from './settings'
 
 describe('createSettingsStore', () => {
   it('starts from defaults with empty storage and persists them', () => {
@@ -300,6 +305,17 @@ describe('room-list settings (ADRs 0038/0042)', () => {
         }),
       ).appBadgeEnabled.value,
     ).toBe(true)
+  })
+
+  it('reads and writes the zoom without a store, for the server-setup screen', () => {
+    const storage = memoryStorage()
+    expect(readStoredZoom(storage)).toBe(1)
+    writeStoredZoom(storage, 1.5)
+    expect(readStoredZoom(storage)).toBe(1.5)
+    // The store built later sees it, and the write kept nothing else away.
+    const store = createSettingsStore(storage)
+    expect(store.zoom.value).toBe(1.5)
+    expect(store.theme.value).toBe('system')
   })
 
   it('zoom round-trips, and an out-of-range or malformed value resets to 100%', () => {

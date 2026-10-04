@@ -255,6 +255,33 @@ function oneOf<T extends string>(
 }
 
 /** Parse a stored envelope, falling back to defaults on any irregularity. */
+/**
+ * The saved page zoom, read straight from storage. For the server-setup
+ * screen, which comes before the services graph (and so this store) exists.
+ */
+export function readStoredZoom(storage: Storage): number {
+  return parse(storage.getItem(STORAGE_KEY)).zoom
+}
+
+/**
+ * Save a page zoom straight into the stored settings, keeping every other
+ * field. Only for the server-setup screen: it never runs alongside a settings
+ * store, whose own writes replace the whole envelope.
+ */
+export function writeStoredZoom(storage: Storage, zoom: number): void {
+  try {
+    const raw = storage.getItem(STORAGE_KEY)
+    const envelope: unknown = raw === null ? null : JSON.parse(raw)
+    const base =
+      typeof envelope === 'object' && envelope !== null
+        ? envelope
+        : { version: 1 }
+    storage.setItem(STORAGE_KEY, JSON.stringify({ ...base, zoom }))
+  } catch {
+    // A preference: a failed save must not break the screen.
+  }
+}
+
 function parse(raw: string | null): SettingsV1 {
   if (raw === null) {
     return DEFAULTS

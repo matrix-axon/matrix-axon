@@ -256,3 +256,38 @@ describe('ServerSetup external links (ADR 0107)', () => {
     expect(click.defaultPrevented).toBe(true)
   })
 })
+
+describe('ServerSetup page zoom (ADR 0107)', () => {
+  it('applies the saved zoom and saves a change for the app to pick up', async () => {
+    const storage = memoryStorage({
+      'axon.settings': JSON.stringify({
+        version: 1,
+        theme: 'dark',
+        zoom: 1.25,
+      }),
+    })
+    const setZoom = vi.fn<(factor: number) => Promise<void>>(() =>
+      Promise.resolve(),
+    )
+    render(
+      <ServerSetup
+        onConnected={vi.fn()}
+        platform={{ fetch: ok, setZoom }}
+        storage={storage}
+      />,
+    )
+    await waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1.25))
+
+    fireEvent.keyDown(screen.getByLabelText('Server address'), {
+      key: '-',
+      ctrlKey: true,
+    })
+    await waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1.1))
+    // Saved into the settings the app reads once connected, keeping the rest.
+    expect(JSON.parse(storage.getItem('axon.settings')!)).toEqual({
+      version: 1,
+      theme: 'dark',
+      zoom: 1.1,
+    })
+  })
+})

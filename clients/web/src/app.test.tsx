@@ -2019,6 +2019,22 @@ describe('native-shell page zoom (ADR 0107)', () => {
     return { ...view, services, setZoom }
   }
 
+  it('applies and changes the zoom on the sign-in screen too', async () => {
+    const setZoom = vi.fn<(factor: number) => Promise<void>>(() =>
+      Promise.resolve(),
+    )
+    const services = testServices({ platform: { setZoom } })
+    services.settings.zoom.value = 1.5
+    services.auth.clearToken()
+    const { findByRole } = render(<App services={services} />)
+    await findByRole('button', { name: 'Sign in' })
+    await waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1.5))
+
+    fireEvent.keyDown(document.body, { key: '=', ctrlKey: true })
+    expect(services.settings.zoom.value).toBe(1.75)
+    await waitFor(() => expect(setZoom).toHaveBeenLastCalledWith(1.75))
+  })
+
   it('applies the saved level on launch', async () => {
     const setZoom = vi.fn<(factor: number) => Promise<void>>(() =>
       Promise.resolve(),
