@@ -178,7 +178,9 @@ jobs:
           # Publishing a draft in place keeps one release per tag. A
           # published release already here (a hand-made tag, or a build
           # workflow that got in first) only gets notes if it has none.
-          published=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id 2>/dev/null || true)
+          # On a 404 gh prints the error JSON to stdout and exits non-zero, so
+          # a bare `|| true` would leave that JSON in $published.
+          published=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id 2>/dev/null) || published=""
           if [ -n "$published" ]; then
             body=$(gh api "repos/$GITHUB_REPOSITORY/releases/$published" --jq '.body // ""')
             if [ -z "$body" ]; then
