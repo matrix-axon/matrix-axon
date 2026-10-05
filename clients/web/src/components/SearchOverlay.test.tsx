@@ -96,6 +96,98 @@ function searchHandler(
 }
 
 describe('SearchOverlay', () => {
+  it('restarts at page one in the requested server order and restores that sort on reopen', async () => {
+    const seen: URLSearchParams[] = []
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/search`, ({ request }) => {
+        const params = new URL(request.url).searchParams
+        seen.push(params)
+        const sort = params.get('sort') ?? 'relevance'
+        const cursor = params.get('cursor')
+        return HttpResponse.json({
+          data: {
+            results: [
+              hit(
+                cursor ? `$${sort}-page-two` : `$${sort}-first`,
+                `${sort} match`,
+              ),
+            ],
+            total: 200,
+            next_cursor: cursor ? null : `${sort}-cursor`,
+          },
+        })
+      }),
+    )
+    history.replaceState(null, '', '/?search=all:true+needle')
+    const { getByRole, getAllByRole, queryByRole } = render(
+      <App services={testServices()} />,
+    )
+    await waitFor(() =>
+      expect(getAllByRole('link', { name: /relevance match/ })).toHaveLength(1),
+    )
+    fireEvent.click(getByRole('button', { name: 'Load more results' }))
+    await waitFor(() =>
+      expect(getAllByRole('link', { name: /relevance match/ })).toHaveLength(2),
+    )
+    {
+      const select = getByRole('combobox', {
+        name: 'sort',
+      }) as HTMLSelectElement
+      select.value = 'newest'
+      fireEvent(select, new Event('change', { bubbles: true }))
+    }
+    await waitFor(() =>
+      expect(seen.at(-1)!.get('sort'), window.location.href).toBe('newest'),
+    )
+    await waitFor(() => {
+      expect(getAllByRole('link', { name: /newest match/ })).toHaveLength(1)
+    })
+    expect(seen.at(-1)!.get('sort')).toBe('newest')
+    expect(seen.at(-1)!.has('cursor')).toBe(false)
+    expect(getByRole('dialog').textContent).not.toContain(
+      'sorted among loaded results',
+    )
+    fireEvent.click(getByRole('button', { name: 'Load more results' }))
+    await waitFor(() =>
+      expect(seen.at(-1)!.get('cursor')).toBe('newest-cursor'),
+    )
+    expect(seen.at(-1)!.get('sort')).toBe('newest')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(queryByRole('dialog')).toBeNull())
+    const requests = seen.length
+    fireEvent.click(getByRole('button', { name: 'Search messages' }))
+    await waitFor(() =>
+      expect(
+        (getByRole('combobox', { name: 'sort' }) as HTMLSelectElement).value,
+      ).toBe('newest'),
+    )
+    expect(seen).toHaveLength(requests)
+    {
+      const select = getByRole('combobox', {
+        name: 'sort',
+      }) as HTMLSelectElement
+      select.value = 'oldest'
+      fireEvent(select, new Event('change', { bubbles: true }))
+    }
+    await waitFor(() =>
+      expect(getAllByRole('link', { name: /oldest match/ })).toHaveLength(1),
+    )
+    expect(seen.at(-1)!.get('sort')).toBe('oldest')
+    expect(seen.at(-1)!.has('cursor')).toBe(false)
+    {
+      const select = getByRole('combobox', {
+        name: 'sort',
+      }) as HTMLSelectElement
+      select.value = 'relevance'
+      fireEvent(select, new Event('change', { bubbles: true }))
+    }
+    await waitFor(() =>
+      expect(getAllByRole('link', { name: /relevance match/ })).toHaveLength(1),
+    )
+    expect(seen.at(-1)!.get('sort')).toBe('relevance')
+    expect(seen.at(-1)!.has('cursor')).toBe(false)
+  })
+
   it('opens from ?search= with the hint, and Escape strips the param', async () => {
     history.replaceState(null, '', '/?search=')
     const { getByRole, queryByRole } = render(<App services={testServices()} />)

@@ -937,6 +937,7 @@ function ShellChrome() {
         withSearchParam(
           location.url,
           lastQuery === null ? '' : serializeSearchTokens(lastQuery),
+          search.lastSort.value,
         ),
       )
     }

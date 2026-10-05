@@ -93,19 +93,18 @@ a request the server would misinterpret as free text.
 Scope defaults follow the point of invocation: opened from a room route, the
 scope chip starts at that room; opened elsewhere, it starts at all accounts.
 
-### Submit on Enter; relevance order; client-side re-sort
+### Submit on Enter; server-side relevance or date ordering
 
 Queries run on Enter, not per keystroke. The endpoint is an offset-cursor BM25
 query — cheap, but search-as-you-type buys little for message search (users
 know what they are looking for) and costs debounce complexity, request racing,
 and result flicker. It is recorded here as a possible follow-up, not scoped.
 
-Results render in the server's relevance order by default. Newest/oldest are
-offered as a client-side re-sort of the _loaded_ pages by `origin_ts` — the
-same trade the TUI makes — with a visible hint that the sort covers loaded
-results while more pages remain. Re-querying the server in date order is not
-possible (the API has one ranking) and fetching all pages to sort would defeat
-pagination.
+Results render in the server's relevance order by default.
+Newest/oldest request `sort=newest|oldest` from the server, which orders all matches by `origin_ts` before selecting a page.
+Changing sort starts again without a cursor and discards the previously loaded pages; subsequent pages use the same query and sort.
+The cache and URL identify both the query and sort, so reopening the overlay retains its last ordering and shared date-sorted links query the correct first page.
+Generation guards apply to results, errors, and unavailable status so a superseded response cannot overwrite a newer ordering.
 
 Pagination follows the timeline's pattern exactly: a "Load more" button
 whenever a cursor remains, plus an `IntersectionObserver` sentinel that clicks

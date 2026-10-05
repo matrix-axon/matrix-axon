@@ -1,6 +1,14 @@
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { createApiClient } from '../api/client'
 import type { SearchQuery } from '../search-tokens'
 import { createSearchStore, type SearchResult } from './search'
@@ -53,6 +61,93 @@ function hit(id: string, score = 1): SearchResult {
 }
 
 describe('createSearchStore', () => {
+  it('keeps the requested sort on subsequent pages and clears the old cursor on a sort change', async () => {
+    const seen: URLSearchParams[] = []
+    server.use(
+      http.get(SEARCH_PATH, ({ request }) => {
+        const params = new URL(request.url).searchParams
+        seen.push(params)
+        const sort = params.get('sort')!
+        return HttpResponse.json({
+          data: {
+            results: [hit(`$${sort}-${params.get('cursor') ?? 'first'}`)],
+            total: 200,
+            next_cursor: params.has('cursor') ? null : `${sort}-cursor`,
+          },
+        })
+      }),
+    )
+    const store = makeStore()
+    await store.run(query('needle'), 'relevance')
+    await store.loadMore()
+    await store.run(query('needle'), 'newest')
+    expect(seen.at(-1)!.get('sort')).toBe('newest')
+    expect(seen.at(-1)!.has('cursor')).toBe(false)
+    expect(store.results.value.map((hit) => hit.event.event_id)).toEqual([
+      '$newest-first',
+    ])
+    await store.loadMore()
+    expect(seen.at(-1)!.get('sort')).toBe('newest')
+    expect(seen.at(-1)!.get('cursor')).toBe('newest-cursor')
+    expect(store.lastSort.value).toBe('newest')
+    store.clear()
+    expect(store.lastSort.value).toBe('relevance')
+  })
+
+  it.each([200, 400, 503])(
+    'discards an old page and its status after changing sort (HTTP %s)',
+    async (status) => {
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      let pending = false
+      server.use(
+        http.get(SEARCH_PATH, async ({ request }) => {
+          const params = new URL(request.url).searchParams
+          if (params.has('cursor')) {
+            pending = true
+            await gate
+            return status === 200
+              ? HttpResponse.json({
+                  data: {
+                    results: [hit('$stale')],
+                    total: 200,
+                    next_cursor: 'stale-cursor',
+                  },
+                })
+              : HttpResponse.json(
+                  { error: { code: 'stale', message: 'stale error' } },
+                  { status },
+                )
+          }
+          const sort = params.get('sort')
+          return HttpResponse.json({
+            data: {
+              results: [hit(`$${sort}`)],
+              total: 200,
+              next_cursor: `${sort}-cursor`,
+            },
+          })
+        }),
+      )
+      const store = makeStore()
+      await store.run(query('needle'))
+      const stale = store.loadMore()
+      await vi.waitFor(() => expect(pending).toBe(true))
+      await store.run(query('needle'), 'newest')
+      release()
+      await stale
+      expect(store.results.value.map((hit) => hit.event.event_id)).toEqual([
+        '$newest',
+      ])
+      expect(store.error.value).toBeNull()
+      expect(store.unavailable.value).toBe(false)
+      expect(store.loadingMore.value).toBe(false)
+      expect(store.lastSort.value).toBe('newest')
+    },
+  )
+
   it('runs a query and exposes the first page', async () => {
     let seen: URLSearchParams | null = null
     server.use(

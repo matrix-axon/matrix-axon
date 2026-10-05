@@ -15,13 +15,11 @@ import {
 } from '../search-tokens'
 import { useServices } from '../services'
 import { useShortcuts } from '../shortcuts'
-import type { SearchResult } from '../stores/search'
+import type { SearchResult, SearchSort } from '../stores/search'
 import { accountLabels, localpart, roomTitle } from '../stores/room-list'
 import { threadRootId } from '../stores/threads'
 import { localRoomHref, localThreadEventHref } from '../matrix-to'
 import { useModalFocus } from './use-modal-focus'
-
-type ResultSort = 'relevance' | 'newest' | 'oldest'
 
 /**
  * The message-search overlay (ADR 0066, M-W10). Its open state and query live
@@ -42,7 +40,7 @@ export function SearchOverlay() {
 
   const tokens =
     typeof location.query.search === 'string' ? location.query.search : ''
-  const sort: ResultSort =
+  const sort: SearchSort =
     location.query.ssort === 'newest' || location.query.ssort === 'oldest'
       ? location.query.ssort
       : 'relevance'
@@ -100,21 +98,27 @@ export function SearchOverlay() {
     if (tokens === '' || !runnable) {
       return
     }
-    const canonical = serializeSearchTokens(parsed.query)
+    const canonical = JSON.stringify([
+      serializeSearchTokens(parsed.query),
+      sort,
+    ])
     if (lastRan.current === canonical) {
       return
     }
     if (
       search.lastQuery.value !== null &&
       search.total.value !== null &&
-      serializeSearchTokens(search.lastQuery.value) === canonical
+      JSON.stringify([
+        serializeSearchTokens(search.lastQuery.value),
+        search.lastSort.value,
+      ]) === canonical
     ) {
       lastRan.current = canonical
       return
     }
     lastRan.current = canonical
-    void search.run(parsed.query)
-  }, [tokens, runnable, parsed, search])
+    void search.run(parsed.query, sort)
+  }, [tokens, runnable, parsed, search, sort])
 
   const close = () => location.route(withoutSearchParam(location.url))
   useShortcuts(
@@ -162,15 +166,6 @@ export function SearchOverlay() {
   }
 
   const results = search.results.value
-  const sorted = useMemo(() => {
-    if (sort === 'relevance') {
-      return results
-    }
-    const factor = sort === 'newest' ? -1 : 1
-    return [...results].sort(
-      (a, b) => factor * (a.event.origin_ts - b.event.origin_ts),
-    )
-  }, [results, sort])
 
   const terms = useMemo(() => queryTerms(parsed.query.text), [parsed])
   const labels = useMemo(
@@ -187,16 +182,8 @@ export function SearchOverlay() {
   const showAccount =
     parsed.query.scope.kind === 'all' && accounts.accounts.value.length > 1
 
-  const setSort = (next: ResultSort) => {
-    const base = withSearchParam(location.url, tokens)
-    const [pathPart, queryString = ''] = base.split('?', 2)
-    const params = new URLSearchParams(queryString)
-    if (next === 'relevance') {
-      params.delete('ssort')
-    } else {
-      params.set('ssort', next)
-    }
-    location.route(`${pathPart}?${params.toString()}`, true)
+  const setSort = (next: SearchSort) => {
+    location.route(withSearchParam(location.url, tokens, next), true)
   }
 
   const total = search.total.value
@@ -287,7 +274,7 @@ export function SearchOverlay() {
               <select
                 value={sort}
                 onChange={(event) =>
-                  setSort(event.currentTarget.value as ResultSort)
+                  setSort(event.currentTarget.value as SearchSort)
                 }
               >
                 <option value="relevance">relevance</option>
@@ -327,12 +314,9 @@ export function SearchOverlay() {
           <>
             <p class="search-status">
               {total} {total === 1 ? 'result' : 'results'}
-              {sort !== 'relevance' && !search.exhausted.value
-                ? ' — sorted among loaded results'
-                : ''}
             </p>
             <ol class="search-results">
-              {sorted.map((result) => (
+              {results.map((result) => (
                 <SearchHit
                   key={result.event.event_id}
                   result={result}

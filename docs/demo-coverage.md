@@ -90,6 +90,8 @@ shows it.
   corpus makes the viewer a member of every room from before its first message,
   so nothing is unread and the picker is empty. Covering it means teaching the
   corpus to leave a room unread, not writing a longer scene.
+- **Web search result date sorting.** The `search` scenes exercise relevance ordering only.
+  Server-wide newest/oldest ordering and restarting pagination when changing sort remain **not covered** by the recordings.
 - **Search result sort / group / edit toggles.** Each reloads asynchronously and
   restores the result view when it lands, so an Esc that follows one can be
   undone by it. The starting sort order is also not fixed between runs, so the
