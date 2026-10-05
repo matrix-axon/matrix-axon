@@ -25,7 +25,7 @@ generates their attribution for us. They are recorded here deliberately.
   <https://webkit.org/licensing-webkit/>.
 
 ## OVERVIEW
-- MIT License (used by 410 crates)
+- MIT License (used by 413 crates)
 - Unicode License v3 (used by 19 crates)
 - ISC License (used by 18 crates)
 - Apache License 2.0 (used by 8 crates)
@@ -764,7 +764,7 @@ limitations under the License.
 ## LICENSE: Apache License 2.0 (SPDX ID: Apache-2.0)
 ### USED BY:
   - dpi 0.1.2
-  - tao 0.35.3
+  - tao 0.37.1
 ================================================================================
 Apache License
                            Version 2.0, January 2004
@@ -1123,8 +1123,8 @@ pub(crate) static GB18030_2022_OVERRIDE_BYTES: [[u8; 2]; 18] &#x3D; [
 ================================================================================
 ## LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
 ### USED BY:
-  - alloc-no-stdlib 2.0.4
-  - brotli 8.0.4
+  - alloc-no-stdlib 3.0.0
+  - brotli 9.0.0
 ================================================================================
 Copyright (c) 2016 Dropbox, Inc.
 All rights reserved.
@@ -1185,7 +1185,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ================================================================================
 ## LICENSE: BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (SPDX ID: BSD-3-Clause)
 ### USED BY:
-  - alloc-stdlib 0.2.4
+  - alloc-stdlib 0.3.0
 ================================================================================
 Copyright (c) &lt;year&gt; &lt;owner&gt;. 
 
@@ -2283,7 +2283,7 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - brotli 8.0.4
+  - brotli 9.0.0
 ================================================================================
 Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
 
@@ -2667,8 +2667,8 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - html5ever 0.38.0
-  - markup5ever 0.38.0
+  - html5ever 0.39.0
+  - markup5ever 0.39.0
   - web_atoms 0.2.6
 ================================================================================
 Copyright (c) 2014 The html5ever Project Developers
@@ -3705,7 +3705,7 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - keyboard-types 0.7.0
+  - keyboard-types 0.8.3
 ================================================================================
 Copyright (c) 2017 Pyfisch
 
@@ -4210,7 +4210,7 @@ DEALINGS IN THE SOFTWARE.
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
   - dirs-sys 0.5.0
-  - dirs 6.0.0
+  - dirs 7.0.0
 ================================================================================
 Copyright (c) 2018-2019 dirs-rs contributors
 
@@ -5097,9 +5097,7 @@ DEALINGS IN THE SOFTWARE.
   - serde_spanned 0.6.9
   - serde_spanned 1.1.1
   - toml 0.8.2
-  - toml 0.9.12+spec-1.1.0
   - toml 1.1.4+spec-1.1.0
-  - toml_datetime 0.7.5+spec-1.1.0
   - toml_datetime 1.1.1+spec-1.1.0
   - toml_edit 0.19.15
   - toml_edit 0.20.2
@@ -5531,6 +5529,43 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - tauri-build 2.7.1
+  - tauri-codegen 2.7.1
+  - tauri-macros 2.7.1
+  - tauri-runtime-wry 2.12.1
+  - tauri-runtime 2.12.1
+  - tauri-utils 2.10.1
+  - tauri 2.12.1
+================================================================================
+MIT License
+
+Copyright (c) 2017 - Present Tauri Apps Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - precomputed-hash 0.1.1
 ================================================================================
 MIT License
@@ -5562,7 +5597,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - json-patch 3.0.1
+  - json-patch 4.2.0
 ================================================================================
 MIT License
 
@@ -5593,7 +5628,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - cfb 0.7.3
+  - cfb 0.14.0
 ================================================================================
 MIT License
 
@@ -5750,7 +5785,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - infer 0.19.0
+  - infer 0.22.0
 ================================================================================
 MIT License
 
@@ -5939,7 +5974,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - window-vibrancy 0.6.0
+  - window-vibrancy 0.8.1
 ================================================================================
 MIT License
 
@@ -5970,7 +6005,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - wry 0.55.1
+  - wry 0.57.0
 ================================================================================
 MIT License
 
@@ -6065,6 +6100,7 @@ SOFTWARE.
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
   - urlpattern 0.3.0
+  - urlpattern 0.6.0
 ================================================================================
 MIT License
 
@@ -6126,7 +6162,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - jsonptr 0.6.3
+  - jsonptr 0.7.1
 ================================================================================
 MIT License
 
@@ -6187,7 +6223,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - muda 0.19.3
+  - muda 0.20.0
 ================================================================================
 MIT License
 
@@ -6218,7 +6254,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - dom_query 0.27.0
+  - dom_query 0.28.0
 ================================================================================
 MIT License
 
@@ -6286,9 +6322,40 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
+  - web-time 1.1.0
+================================================================================
+MIT License
+
+Copyright (c) 2023 dAxpeDDa
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-----------------------
+
+
+================================================================================
+## LICENSE: MIT License (SPDX ID: MIT)
+### USED BY:
   - block2 0.6.2
-  - brotli-decompressor 5.0.3
-  - cargo_toml 0.22.3
+  - brotli-decompressor 6.0.1
+  - cargo_toml 1.0.1
   - dispatch2 0.3.1
   - dlopen2 0.8.2
   - dlopen2_derive 0.4.3
@@ -6303,9 +6370,6 @@ SOFTWARE.
   - objc2-web-kit 0.3.2
   - objc2 0.6.4
   - siphasher 1.0.3
-  - tauri-build 2.6.3
-  - tauri-codegen 2.6.3
-  - tauri-macros 2.6.3
   - tauri-plugin-deep-link 2.4.10
   - tauri-plugin-dialog 2.7.3
   - tauri-plugin-fs 2.5.2
@@ -6314,28 +6378,27 @@ SOFTWARE.
   - tauri-plugin-single-instance 2.4.4
   - tauri-plugin-websocket 2.4.3
   - tauri-plugin 2.6.3
-  - tauri-runtime-wry 2.11.4
-  - tauri-runtime 2.11.3
-  - tauri-utils 2.9.3
-  - tauri 2.11.5
   - unic-char-property 0.9.0
   - unic-char-range 0.9.0
   - unic-common 0.9.0
   - unic-ucd-ident 0.9.0
   - unic-ucd-version 0.9.0
   - webview2-com-macros 0.8.1
-  - webview2-com-sys 0.38.2
-  - webview2-com 0.38.2
+  - webview2-com-sys 0.39.1
+  - webview2-com 0.39.1
   - windows-collections 0.2.0
+  - windows-collections 0.3.2
   - windows-core 0.61.2
+  - windows-core 0.62.2
   - windows-future 0.2.1
+  - windows-future 0.3.2
   - windows-implement 0.60.2
   - windows-interface 0.59.3
   - windows-link 0.1.3
   - windows-link 0.2.1
   - windows-numerics 0.2.0
+  - windows-numerics 0.3.1
   - windows-registry 0.5.3
-  - windows-registry 0.6.1
   - windows-result 0.3.4
   - windows-result 0.4.1
   - windows-strings 0.4.2
@@ -6346,8 +6409,10 @@ SOFTWARE.
   - windows-targets 0.52.6
   - windows-targets 0.53.5
   - windows-threading 0.1.0
+  - windows-threading 0.2.1
   - windows-version 0.1.7
   - windows 0.61.3
+  - windows 0.62.2
   - windows_x86_64_gnu 0.52.6
   - windows_x86_64_gnu 0.53.1
   - windows_x86_64_msvc 0.52.6
@@ -6705,7 +6770,6 @@ DEALINGS IN THE SOFTWARE.
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
   - winnow 0.5.40
-  - winnow 0.7.15
   - winnow 1.0.4
 ================================================================================
 Permission is hereby granted, free of charge, to any person obtaining
@@ -6783,8 +6847,7 @@ SOFTWARE.
 ================================================================================
 ## LICENSE: MIT License (SPDX ID: MIT)
 ### USED BY:
-  - ctor-proc-macro 0.0.7
-  - ctor 0.8.0
+  - ctor 1.0.13
 ================================================================================
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the &quot;Software&quot;), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
@@ -7918,8 +7981,8 @@ Exhibit B - &quot;Incompatible With Secondary Licenses&quot; Notice
 ================================================================================
 ## LICENSE: Mozilla Public License 2.0 (SPDX ID: MPL-2.0)
 ### USED BY:
-  - cssparser-macros 0.6.1
-  - cssparser 0.36.0
+  - cssparser-macros 0.7.1
+  - cssparser 0.37.0
 ================================================================================
 Mozilla Public License Version 2.0
 &#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;
@@ -8303,7 +8366,7 @@ Exhibit B - &quot;Incompatible With Secondary Licenses&quot; Notice
 ## LICENSE: Mozilla Public License 2.0 (SPDX ID: MPL-2.0)
 ### USED BY:
   - option-ext 0.2.0
-  - selectors 0.36.1
+  - selectors 0.38.0
 ================================================================================
 Mozilla Public License Version 2.0
 &#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;&#x3D;
