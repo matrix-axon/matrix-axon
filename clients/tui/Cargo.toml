@@ -27,6 +27,8 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }
 uuid = { workspace = true, features = ["serde", "v4"] }
 zeroize = "1"
+# Search popup height uses Paragraph::line_count; reassess this unstable API
+# and its wrapping/rendering test whenever Ratatui is upgraded.
 ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 crossterm = { workspace = true }
 libc = "0.2"

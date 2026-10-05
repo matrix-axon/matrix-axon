@@ -95,6 +95,7 @@ shows it.
   The interactive search form also offers relevance sorting and initial room grouping; these choices remain uncovered.
   The `search` scene exercises the default ordering but does not toggle it or verify a match outside the first relevance page.
   A dedicated scene should wait for the refreshed results before continuing.
+  Keeping an edited search form open while a pending sort refresh completes also remains uncovered.
 
 - **Sending media, the remaining message actions, room actions.** These mutate
   the world. They are safe against the disposable local stack and worth adding;

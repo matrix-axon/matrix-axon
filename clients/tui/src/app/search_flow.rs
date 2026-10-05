@@ -210,6 +210,7 @@ impl App {
             return;
         }
         self.pending_search = None;
+        let preserve_edit_form = grouping.is_none() && self.mode == Mode::SearchForm;
         // Form submissions choose grouping explicitly. Sort refreshes preserve
         // the current grouping, including toggles made while awaiting a response.
         let grouping = grouping.unwrap_or_else(|| {
@@ -237,15 +238,21 @@ impl App {
                 };
                 state.select_first_ordered();
                 self.search_results = Some(state);
-                self.mode = Mode::SearchResults;
-                self.status = Status::from(if count == 0 {
-                    "search: no results".to_owned()
-                } else {
-                    format!("search: showing {count} of {total}")
-                });
+                if !preserve_edit_form {
+                    self.mode = Mode::SearchResults;
+                    self.status = Status::from(if count == 0 {
+                        "search: no results".to_owned()
+                    } else {
+                        format!("search: showing {count} of {total}")
+                    });
+                }
                 self.request_selected_search_context();
             }
-            Err(err) => self.status = Status::from(search_error_status(&err)),
+            Err(err) => {
+                if !preserve_edit_form {
+                    self.status = Status::from(search_error_status(&err));
+                }
+            }
         }
     }
 
@@ -1035,6 +1042,82 @@ mod tests {
             }}], "total": 200, "next_cursor": cursor
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sort_refresh_preserves_an_open_edit_form_on_success_and_failure() {
+        for succeeds in [true, false] {
+            let mut app = test_app();
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            app.search_tx = Some(tx);
+            let parsed = parse_search_terms("all:true needle").unwrap();
+            app.run_parsed_search(parsed).await;
+            let initial = app.pending_search.clone().unwrap();
+            let form =
+                SearchFormState::from_parsed(&parse_search_terms("all:true needle").unwrap());
+            app.apply_initial_search_outcome(
+                app.search_generation,
+                initial,
+                form,
+                Some(SearchGrouping::None),
+                Ok(page("$original", None)),
+            );
+            app.toggle_search_result_sort_order().await;
+            let request = app.pending_search.clone().unwrap();
+            let saved_form = app.search_results.as_ref().unwrap().edit_form.clone();
+            app.edit_current_search();
+            app.search_form.query = "unfinished edit".to_owned();
+            app.search_form.sender = "alice".to_owned();
+            app.search_form.field = crate::search::SearchFormField::Sender;
+            app.search_form.grouping = SearchGrouping::Room;
+            app.search_form.sort = crate::search::SearchSortOrder::Relevance;
+            app.status = Status::from("editing sender");
+            let editing = app.search_form.clone();
+            let result = if succeeds {
+                Ok(page("$refreshed", Some("new-cursor")))
+            } else {
+                Err(ApiError::Status {
+                    status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    message: "unavailable".to_owned(),
+                })
+            };
+            app.apply_initial_search_outcome(
+                app.search_generation,
+                request.clone(),
+                saved_form,
+                None,
+                result,
+            );
+            assert_eq!(app.mode, Mode::SearchForm);
+            assert_eq!(app.search_form, editing);
+            assert!(matches!(&app.status, Status::Info(message) if message == "editing sender"));
+            assert!(app.pending_search.is_none());
+            let state = app.search_results.as_ref().unwrap();
+            if succeeds {
+                assert_eq!(state.request, request);
+                assert_eq!(state.results[0].event.event_id, "$refreshed");
+                assert_eq!(state.next_cursor.as_deref(), Some("new-cursor"));
+            } else {
+                assert_eq!(state.results[0].event.event_id, "$original");
+            }
+            // Submitting the edited form still opens its own results normally.
+            app.submit_search_form().await;
+            let request = app.pending_search.clone().unwrap();
+            app.apply_initial_search_outcome(
+                app.search_generation,
+                request,
+                editing,
+                Some(SearchGrouping::Room),
+                Ok(page("$edited", None)),
+            );
+            assert_eq!(app.mode, Mode::SearchResults);
+            assert_eq!(
+                app.search_results.as_ref().unwrap().results[0]
+                    .event
+                    .event_id,
+                "$edited"
+            );
+        }
     }
 
     #[tokio::test]

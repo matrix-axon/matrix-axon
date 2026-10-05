@@ -437,9 +437,12 @@ formatted content produces no displayable text.
 `/search` requests newest-first results across all matching messages before pagination.
 The search results sort shortcut (`s` by default) cycles newest-first, oldest-first, and relevance by starting again at page one in the selected server order.
 Room grouping remains a local display option and is retained through a sort change.
-This requires a server supporting `GET /v1/search?sort=newest|oldest|relevance`; older servers may ignore the parameter.
+This requires a server supporting `GET /v1/search?sort=newest|oldest|relevance`; the server must include the date-sort support introduced in server PR [599](https://github.com/matrix-axon/matrix-axon/pull/599).
+Upgrade the server together with the client: older servers may ignore `sort`, leaving results in relevance order even when the TUI displays a date-sort selection.
 
 The interactive `/search` form includes **Sort** (newest first, oldest first, relevance) and **Group** (none, room) choices.
 Use Tab/Down or Shift+Tab/Up to select a field, then Left/Right/Space to change its choice before pressing Enter.
 New searches default to newest first with no grouping; editing results retains the selected sort and grouping.
 Room grouping applies to loaded results and, in relevance order, ranks rooms by their best hit while retaining the server ranking within each room.
+
+Editing a search while a sort refresh is pending keeps the form, unsent edits, and editing status visible when that refresh succeeds or fails.
