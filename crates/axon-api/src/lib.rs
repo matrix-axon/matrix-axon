@@ -60,10 +60,10 @@ pub use member_profiles::{
     MemberProfile, MemberProfileError, MemberProfileService, NoopMemberProfileService,
 };
 pub use oauth::{
-    callback_url as oauth_callback_url, http_client as oauth_http_client,
-    rate_limit::spawn_sweeper as spawn_oauth_rate_limit_sweeper, AppleNativeVerifier,
-    AppleProvider, GenericOidcProvider, NativeIdentityVerifier, OAuthRuntime, OidcError,
-    OidcProvider, UpstreamTokens, VerifiedIdentity,
+    authentication_time as oauth_authentication_time, callback_url as oauth_callback_url,
+    http_client as oauth_http_client, rate_limit::spawn_sweeper as spawn_oauth_rate_limit_sweeper,
+    AppleNativeVerifier, AppleProvider, GenericOidcProvider, NativeIdentityVerifier, OAuthRuntime,
+    OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity,
 };
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};

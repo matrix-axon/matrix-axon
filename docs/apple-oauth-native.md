@@ -79,6 +79,7 @@ Success binds the verified Apple subject and returns its new access/refresh pair
 There is no unauthenticated first-user claim.
 Binding is a credential change, so it takes the step-up rule of ADR 0109.
 The bearer must be one that never expires, or an OAuth-issued one whose session signed in with its provider in the last ten minutes.
+That time is the one the provider's signed identity token vouches for (`auth_time`, else `iat` for a nonce-bound token), not when Axon redeemed it.
 Any other bearer is refused at the challenge step with `403` and the code `recent_sign_in_required`; the client signs the owner in again and retries.
 This amends ADR 0054, under which any active bearer could bind: a stolen short-lived bearer could then bind an identity its thief controlled, which outlived the bearer's expiry or revocation.
 The rule is decided when the challenge is created.

@@ -31,6 +31,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 const CLIENT_ID: &str = "test-client";
+const REDIRECT_URI: &str = "https://client.test/callback";
 const IDENTITIES: &str = "/v1/management/oauth/identities";
 const NATIVE_CHALLENGE: &str = "/v1/oauth/apple/native/challenge";
 
@@ -68,16 +69,16 @@ enum Providers {
 }
 
 fn app(store: Store, management: bool, providers: Providers) -> axum::Router {
-    app_and_native_provider(store, management, providers).0
+    app_and_fakes(store, management, providers).0
 }
 
-/// The router, plus the fake behind native Apple (present for
+/// The router, plus the fake provider behind each name (`"apple"` for
 /// [`Providers::NativeApple`]) so a test can sign identity tokens for it.
-fn app_and_native_provider(
+fn app_and_fakes(
     store: Store,
     management: bool,
     providers: Providers,
-) -> (axum::Router, Option<Arc<TestOidcProvider>>) {
+) -> (axum::Router, HashMap<&'static str, Arc<TestOidcProvider>>) {
     let (live, _rx) = tokio::sync::broadcast::channel(16);
     let mut state = AppState::new(
         store.clone(),
@@ -94,7 +95,7 @@ fn app_and_native_provider(
     .with_management(management);
 
     let fake = |name| Arc::new(TestOidcProvider::new(name, "https://idp.test/", "audience"));
-    let mut native = None;
+    let mut fakes = HashMap::new();
     let config = OauthConfig {
         enabled: true,
         external_base_url: Some("http://axon.test".to_owned()),
@@ -102,16 +103,17 @@ fn app_and_native_provider(
         refresh_token_ttl_secs: 2_592_000,
         clients: vec![OauthClientConfig {
             client_id: CLIENT_ID.to_owned(),
-            redirect_uris: vec!["https://client.test/callback".to_owned()],
+            redirect_uris: vec![REDIRECT_URI.to_owned()],
         }],
         providers: axon_core::OauthProvidersConfig::default(),
     };
     match providers {
         Providers::None => {}
         Providers::Browser(names) => {
-            let map: HashMap<&'static str, Arc<dyn OidcProvider>> = names
+            fakes = names.iter().map(|name| (*name, fake(name))).collect();
+            let map: HashMap<&'static str, Arc<dyn OidcProvider>> = fakes
                 .iter()
-                .map(|name| (*name, fake(name) as Arc<dyn OidcProvider>))
+                .map(|(name, fake)| (*name, fake.clone() as Arc<dyn OidcProvider>))
                 .collect();
             state = state.with_oauth(Arc::new(OAuthRuntime::new(&config, map)));
         }
@@ -120,10 +122,10 @@ fn app_and_native_provider(
             let mut runtime = OAuthRuntime::new(&config, HashMap::new());
             runtime.native_apple = Some(apple.clone());
             state = state.with_oauth(Arc::new(runtime));
-            native = Some(apple);
+            fakes.insert("apple", apple);
         }
     }
-    (axon_api::router(state), native)
+    (axon_api::router(state), fakes)
 }
 
 /// POST a form to an unauthenticated `/v1/oauth/*` route.
@@ -515,8 +517,8 @@ async fn refreshing_a_stale_session_does_not_make_it_recent() {
 async fn a_fresh_upstream_sign_in_is_recent_and_survives_a_refresh() {
     let store = store().await;
     clear_credentials(&store).await;
-    let (app, apple) = app_and_native_provider(store.clone(), true, Providers::NativeApple);
-    let apple = apple.unwrap();
+    let (app, fakes) = app_and_fakes(store.clone(), true, Providers::NativeApple);
+    let apple = fakes["apple"].clone();
     store.issue_token("keeps-the-guard-quiet").await.unwrap();
     let subject = Uuid::new_v4().to_string();
     store.bind_identity("apple", &subject, None).await.unwrap();
@@ -567,5 +569,245 @@ async fn a_fresh_upstream_sign_in_is_recent_and_survives_a_refresh() {
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    }
+}
+
+const HALF_AN_HOUR: i64 = 30 * 60;
+
+/// Unbind a throwaway identity with `access`, reporting how the server ruled.
+async fn try_credential_change(
+    app: &axum::Router,
+    store: &Store,
+    access: &str,
+) -> (StatusCode, String) {
+    let target = bind(store, "google", None).await;
+    let (status, body) = call(
+        app,
+        Method::DELETE,
+        &format!("{IDENTITIES}/{target}"),
+        Some(access),
+    )
+    .await;
+    (status, code(&body).to_owned())
+}
+
+fn refused() -> (StatusCode, String) {
+    (StatusCode::FORBIDDEN, "recent_sign_in_required".to_owned())
+}
+
+fn allowed() -> (StatusCode, String) {
+    (StatusCode::NO_CONTENT, String::new())
+}
+
+/// An identity token stays valid long after it is issued. Redeeming one must
+/// never read as a fresh sign-in: the session's sign-in time is whatever the
+/// provider's signature vouches for, and when that is nothing, it is unknown.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn redeeming_an_old_identity_token_is_not_a_recent_sign_in() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let (app, fakes) = app_and_fakes(store.clone(), true, Providers::Browser(&["google"]));
+    let google = fakes["google"].clone();
+    store.issue_token("keeps-the-guard-quiet").await.unwrap();
+    let subject = Uuid::new_v4().to_string();
+    store.bind_identity("google", &subject, None).await.unwrap();
+
+    // The nonce-free identity-token grant, as a native SDK would use it.
+    let redeem = |identity_token: String| {
+        let app = app.clone();
+        async move {
+            let (status, body) = post_form(
+                &app,
+                "/v1/oauth/token",
+                &[
+                    ("grant_type", "urn:axon:identity_token"),
+                    ("provider", "google"),
+                    ("identity_token", &identity_token),
+                    ("client_id", CLIENT_ID),
+                ],
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["access_token"].as_str().unwrap().to_owned()
+        }
+    };
+
+    // Issued half an hour ago, redeemed now: the case a stolen, unredeemed
+    // token presents. It signs in, and that is all it does.
+    let old =
+        redeem(google.sign_identity_token_issued_ago(&subject, None, HALF_AN_HOUR, None)).await;
+    assert_eq!(try_credential_change(&app, &store, &old).await, refused());
+    let old = redeem(google.sign_identity_token_issued_ago(
+        &subject,
+        None,
+        HALF_AN_HOUR,
+        Some(HALF_AN_HOUR),
+    ))
+    .await;
+    assert_eq!(try_credential_change(&app, &store, &old).await, refused());
+
+    // Issued just now, but nonce-free and silent about `auth_time`: nothing
+    // ties it to a sign-in this server started. Unknown is not recent.
+    let unknown = redeem(google.sign_identity_token_issued_ago(&subject, None, 0, None)).await;
+    assert_eq!(
+        try_credential_change(&app, &store, &unknown).await,
+        refused()
+    );
+
+    // Freshly issued for an authentication that happened long ago (a
+    // provider session being reused): `auth_time` wins over `iat`.
+    let reused =
+        redeem(google.sign_identity_token_issued_ago(&subject, None, 0, Some(HALF_AN_HOUR))).await;
+    assert_eq!(
+        try_credential_change(&app, &store, &reused).await,
+        refused()
+    );
+
+    // The provider itself says the owner authenticated a minute ago.
+    let fresh = redeem(google.sign_identity_token_issued_ago(&subject, None, 30, Some(60))).await;
+    assert_eq!(try_credential_change(&app, &store, &fresh).await, allowed());
+}
+
+/// The native flow binds the token to a server nonce, which proves the token
+/// was issued for this sign-in. It does not excuse an `auth_time` that says
+/// the owner authenticated long before.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_nonce_bound_token_still_answers_to_its_auth_time() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let (app, fakes) = app_and_fakes(store.clone(), true, Providers::NativeApple);
+    let apple = fakes["apple"].clone();
+    store.issue_token("keeps-the-guard-quiet").await.unwrap();
+    let subject = Uuid::new_v4().to_string();
+    store.bind_identity("apple", &subject, None).await.unwrap();
+
+    for (auth_time_ago, expected) in [(Some(HALF_AN_HOUR), refused()), (Some(60), allowed())] {
+        let (_, challenge) = post_form(
+            &app,
+            NATIVE_CHALLENGE,
+            &[("client_id", CLIENT_ID), ("purpose", "login")],
+            None,
+        )
+        .await;
+        let identity_token = apple.sign_identity_token_issued_ago(
+            &subject,
+            challenge["nonce"].as_str(),
+            0,
+            auth_time_ago,
+        );
+        let (status, pair) = post_form(
+            &app,
+            "/v1/oauth/apple/native/token",
+            &[
+                ("client_id", CLIENT_ID),
+                ("challenge", challenge["challenge"].as_str().unwrap()),
+                ("identity_token", &identity_token),
+            ],
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{pair}");
+        let access = pair["access_token"].as_str().unwrap();
+        assert_eq!(try_credential_change(&app, &store, access).await, expected);
+    }
+}
+
+/// The browser flow verifies the identity token at the callback and mints
+/// later, at code redemption. The session must carry the time verified at the
+/// callback, not the moment the code was redeemed.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn the_browser_flow_carries_the_verified_time_to_code_redemption() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let (app, fakes) = app_and_fakes(store.clone(), true, Providers::Browser(&["google"]));
+    let google = fakes["google"].clone();
+    store.issue_token("keeps-the-guard-quiet").await.unwrap();
+    let subject = Uuid::new_v4().to_string();
+    store.bind_identity("google", &subject, None).await.unwrap();
+
+    let get = |uri: String| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::get(uri).body(Body::empty()).unwrap();
+            let peer: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+            request
+                .extensions_mut()
+                .insert(axum::extract::ConnectInfo(peer));
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap()
+        }
+    };
+    let param = |url: &url::Url, name: &str| {
+        url.query_pairs()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned())
+            .unwrap()
+    };
+    // PKCE S256 over a fixed verifier.
+    let verifier = "management-test-pkce-verifier-0123456789-abcdef";
+    let pkce = {
+        use base64::Engine;
+        use sha2::Digest;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(sha2::Sha256::digest(verifier.as_bytes()))
+    };
+
+    // `backdate` rewinds what the callback recorded, standing in for a code
+    // that sat unredeemed: redemption must use the record, not its own clock.
+    for (backdate, expected) in [(false, allowed()), (true, refused())] {
+        let redirect: String =
+            url::form_urlencoded::byte_serialize(REDIRECT_URI.as_bytes()).collect();
+        let upstream = get(format!(
+            "/v1/oauth/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri={redirect}\
+             &code_challenge={pkce}&code_challenge_method=S256&provider=google&state=s"
+        ))
+        .await;
+        let code = google.issue_code(&subject, None, &param(&upstream, "nonce"));
+        let back = get(format!(
+            "/v1/oauth/google/callback?code={code}&state={}",
+            param(&upstream, "state")
+        ))
+        .await;
+        let recorded: Option<DateTime<Utc>> = sqlx_core::query_scalar::query_scalar(
+            "SELECT authenticated_at FROM oauth_authorization_requests WHERE status = 'code_issued'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert!(
+            recorded.is_some_and(|at| (Utc::now() - at).num_seconds().abs() < 120),
+            "the callback records the verified time: {recorded:?}"
+        );
+        if backdate {
+            sqlx_core::query::query(
+                "UPDATE oauth_authorization_requests \
+                    SET authenticated_at = now() - interval '30 minutes' \
+                  WHERE status = 'code_issued'",
+            )
+            .execute(store.pool())
+            .await
+            .unwrap();
+        }
+        let (status, pair) = post_form(
+            &app,
+            "/v1/oauth/token",
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &param(&back, "code")),
+                ("code_verifier", verifier),
+                ("client_id", CLIENT_ID),
+                ("redirect_uri", REDIRECT_URI),
+            ],
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{pair}");
+        let access = pair["access_token"].as_str().unwrap();
+        assert_eq!(try_credential_change(&app, &store, access).await, expected);
     }
 }

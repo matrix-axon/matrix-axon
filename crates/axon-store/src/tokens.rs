@@ -229,9 +229,10 @@ impl Store {
     /// but carrying an expiry and the OAuth provenance columns. Used by the
     /// `oauth` module's token orchestration, never by the CLI.
     ///
-    /// `authenticated_at` is when the upstream sign-in behind this session
-    /// completed: now for a token minted straight from one, the refresh
-    /// token's own recorded time for a token minted by a refresh.
+    /// `authenticated_at` is when the upstream provider says the owner behind
+    /// this session authenticated: the verified identity token's time for a
+    /// token minted from a sign-in, the refresh token's recorded time for one
+    /// minted by a refresh. Never the caller's clock.
     pub async fn issue_oauth_token(
         &self,
         label: &str,
@@ -298,6 +299,10 @@ impl Store {
     /// it is being revoked.
     pub async fn revoke_token(&self, id: Uuid) -> Result<bool, StoreError> {
         let mut tx = self.pool.begin().await?;
+        // Bound the wait for the credential lock, as identity removal does.
+        sqlx_core::query::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
         Self::lock_credentials(&mut tx).await?;
         let result = sqlx_core::query::query(
             "UPDATE tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL",
@@ -337,6 +342,7 @@ impl Store {
         email: Option<&str>,
         access_expires_at: DateTime<Utc>,
         refresh_expires_at: DateTime<Utc>,
+        authenticated_at: Option<DateTime<Utc>>,
     ) -> Result<Option<IssuedOAuthTokenPair>, StoreError> {
         let mut tx: Transaction<'_, Postgres> = self.pool.begin().await?;
         self.lock_bootstrap(&mut tx).await?;
@@ -383,6 +389,7 @@ impl Store {
             client_id,
             access_expires_at,
             refresh_expires_at,
+            authenticated_at,
         )
         .await?;
         tx.commit().await?;
@@ -396,11 +403,12 @@ impl Store {
         client_id: &str,
         access_expires_at: DateTime<Utc>,
         refresh_expires_at: DateTime<Utc>,
+        // What the verified identity token says about when the owner
+        // authenticated, never this function's own clock. One value for both
+        // rows: the refresh chain must carry exactly what the access token
+        // shows.
+        authenticated_at: Option<DateTime<Utc>>,
     ) -> Result<IssuedOAuthTokenPair, StoreError> {
-        // Every caller mints straight from a verified upstream sign-in, so the
-        // session's sign-in time is now. One value for both rows: the refresh
-        // chain must carry exactly what the access token shows.
-        let authenticated_at = Utc::now();
         let access_token = generate_token();
         let access_hash = hash_token(&access_token);
         sqlx_core::query::query(

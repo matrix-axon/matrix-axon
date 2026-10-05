@@ -31,7 +31,9 @@ use axon_core::OauthConfig;
 
 pub use apple::{AppleNativeVerifier, AppleProvider};
 pub use generic::GenericOidcProvider;
-pub use provider::{OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity};
+pub use provider::{
+    authentication_time, OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity,
+};
 
 /// Native verification uses a server-owned nonce and no browser credentials.
 #[async_trait::async_trait]

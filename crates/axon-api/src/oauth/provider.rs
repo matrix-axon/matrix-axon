@@ -22,6 +22,40 @@ pub struct VerifiedIdentity {
     /// token when the provider omits `jti`. Path B consumes it atomically with
     /// its token pair via [`axon_store::Store::redeem_identity_atomically`].
     pub replay_key: String,
+    /// When the provider says the owner authenticated, if the token gives
+    /// usable evidence of it. See [`authentication_time`]. Step-up for
+    /// credential changes (ADR 0109) is measured from this, so it must never
+    /// be the moment the token happened to be redeemed.
+    pub authenticated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// What a verified identity token proves about *when* its owner authenticated.
+///
+/// An identity token stays valid well after it is issued, and OIDC separates
+/// the two instants: `iat` is when the token was issued, `auth_time` when the
+/// end-user actually authenticated. Redeeming a token says nothing about
+/// either, so neither is ever approximated by "now".
+///
+/// - `auth_time` present: that time, capped at `iat` (a token cannot vouch for
+///   an authentication later than its own issuance).
+/// - `auth_time` absent, token bound to a nonce this server issued: `iat`.
+///   The nonce ties the token to one sign-in this server started minutes ago,
+///   so its issuance is that sign-in. Not every provider emits `auth_time`
+///   (Google does not), and for those this is the only evidence there is.
+/// - Otherwise `None`. A nonce-free token with no `auth_time` could have been
+///   issued for anyone, at any point in its validity; its freshness is
+///   unknown, and unknown is not recent.
+pub fn authentication_time(
+    auth_time: Option<i64>,
+    iat: i64,
+    nonce_bound: bool,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let seconds = match auth_time {
+        Some(auth_time) => auth_time.min(iat),
+        None if nonce_bound => iat,
+        None => return None,
+    };
+    chrono::DateTime::from_timestamp(seconds, 0)
 }
 
 /// The tokens returned by exchanging an upstream authorization code (Path A).
@@ -124,4 +158,40 @@ pub trait OidcProvider: Send + Sync {
         token: &str,
         nonce: Option<&str>,
     ) -> Result<VerifiedIdentity, OidcError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::authentication_time;
+
+    const IAT: i64 = 1_800_000_000;
+
+    fn seconds(time: Option<chrono::DateTime<chrono::Utc>>) -> Option<i64> {
+        time.map(|time| time.timestamp())
+    }
+
+    #[test]
+    fn auth_time_is_the_authentication_time() {
+        for nonce_bound in [true, false] {
+            assert_eq!(
+                seconds(authentication_time(Some(IAT - 1800), IAT, nonce_bound)),
+                Some(IAT - 1800),
+                "a reused provider session is not a fresh authentication"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_time_cannot_claim_to_be_later_than_issuance() {
+        assert_eq!(
+            seconds(authentication_time(Some(IAT + 600), IAT, true)),
+            Some(IAT)
+        );
+    }
+
+    #[test]
+    fn without_auth_time_only_a_nonce_bound_token_vouches_for_its_issuance() {
+        assert_eq!(seconds(authentication_time(None, IAT, true)), Some(IAT));
+        assert_eq!(authentication_time(None, IAT, false), None);
+    }
 }

@@ -68,8 +68,8 @@ impl Store {
     /// bootstrap-gated mint — can only ever add a single row, so it needs no
     /// sweep of its own.
     ///
-    /// `authenticated_at` is when the upstream sign-in completed. It starts the
-    /// value every later rotation of this chain copies forward.
+    /// `authenticated_at` is the verified upstream authentication time. It
+    /// starts the value every later rotation of this chain copies forward.
     pub async fn issue_refresh_token(
         &self,
         hash: &str,

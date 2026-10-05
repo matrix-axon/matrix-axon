@@ -64,7 +64,7 @@ async fn unbind_invalidates_login_credentials_without_affecting_other_identities
                 .unwrap();
             let hash = Uuid::new_v4().to_string();
             assert!(store
-                .complete_authorization(request, id, &hash)
+                .complete_authorization(request, id, &hash, None)
                 .await
                 .unwrap());
             if redeemed {

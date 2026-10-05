@@ -25,6 +25,7 @@ fn redemption<'a>(subject: &'a str, replay: &'a str) -> IdentityRedemption<'a> {
         client_id: "native-test",
         access_expires_at: Utc::now() + Duration::hours(1),
         refresh_expires_at: Utc::now() + Duration::days(1),
+        authenticated_at: Some(Utc::now()),
     }
 }
 

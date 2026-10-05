@@ -324,6 +324,7 @@ pub async fn token(
                     client_id: &body.client_id,
                     access_expires_at: Utc::now() + runtime.access_token_ttl,
                     refresh_expires_at: Utc::now() + runtime.refresh_token_ttl,
+                    authenticated_at: verified.authenticated_at,
                 },
                 Some(&c),
             )

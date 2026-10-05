@@ -24,6 +24,24 @@ use uuid::Uuid;
 
 use axon_test_support::{ec_key, TEST_KID};
 
+/// A signed token's time claims, relative to now.
+struct Timing {
+    expires_in_secs: i64,
+    issued_ago_secs: i64,
+    auth_time_ago_secs: Option<i64>,
+}
+
+impl Timing {
+    /// Issued now, with no `auth_time` claim.
+    fn fresh(expires_in_secs: i64) -> Self {
+        Self {
+            expires_in_secs,
+            issued_ago_secs: 0,
+            auth_time_ago_secs: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TestClaims {
     iss: String,
@@ -37,6 +55,8 @@ struct TestClaims {
     nonce: Option<String>,
     #[serde(default)]
     jti: Option<String>,
+    #[serde(default)]
+    auth_time: Option<i64>,
 }
 
 struct PendingCode {
@@ -107,13 +127,37 @@ impl TestOidcProvider {
         nonce: Option<&str>,
         jti: Option<&str>,
     ) -> String {
-        self.sign(sub, email, nonce, jti, 3600)
+        self.sign(sub, email, nonce, jti, Timing::fresh(3600))
+    }
+
+    /// A still-valid identity token that was issued `issued_ago_secs` ago,
+    /// optionally carrying an `auth_time` that many seconds in the past: what
+    /// a token looks like when it is redeemed long after the sign-in it came
+    /// from.
+    pub fn sign_identity_token_issued_ago(
+        &self,
+        sub: &str,
+        nonce: Option<&str>,
+        issued_ago_secs: i64,
+        auth_time_ago_secs: Option<i64>,
+    ) -> String {
+        self.sign(
+            sub,
+            None,
+            nonce,
+            None,
+            Timing {
+                expires_in_secs: 3600,
+                issued_ago_secs,
+                auth_time_ago_secs,
+            },
+        )
     }
 
     /// As [`sign_identity_token`](Self::sign_identity_token), but already
     /// expired — for the expiry-rejection test.
     pub fn sign_expired_identity_token(&self, sub: &str) -> String {
-        self.sign(sub, None, None, None, -3600)
+        self.sign(sub, None, None, None, Timing::fresh(-3600))
     }
 
     fn sign(
@@ -122,18 +166,19 @@ impl TestOidcProvider {
         email: Option<&str>,
         nonce: Option<&str>,
         jti: Option<&str>,
-        expires_in_secs: i64,
+        timing: Timing,
     ) -> String {
         let now = Utc::now().timestamp();
         let claims = TestClaims {
             iss: self.issuer.clone(),
             aud: self.audience.clone(),
             sub: sub.to_owned(),
-            exp: now + expires_in_secs,
-            iat: now,
+            exp: now + timing.expires_in_secs,
+            iat: now - timing.issued_ago_secs,
             email: email.map(str::to_owned),
             nonce: nonce.map(str::to_owned),
             jti: jti.map(str::to_owned),
+            auth_time: timing.auth_time_ago_secs.map(|ago| now - ago),
         };
         let mut header = Header::new(Algorithm::ES256);
         header.kid = Some(TEST_KID.to_owned());
@@ -218,6 +263,13 @@ impl OidcProvider for TestOidcProvider {
             subject: claims.sub,
             email: claims.email,
             replay_key,
+            // The production rule itself, so a test of freshness exercises
+            // what ships and not a copy of it.
+            authenticated_at: axon_api::oauth_authentication_time(
+                claims.auth_time,
+                claims.iat,
+                nonce.is_some(),
+            ),
         })
     }
 }

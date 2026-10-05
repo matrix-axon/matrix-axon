@@ -419,7 +419,12 @@ pub async fn callback(
             };
             let axon_code = tokens::generate_opaque_value();
             if !store
-                .complete_authorization(request.id, identity.id, &tokens::hash_secret(&axon_code))
+                .complete_authorization(
+                    request.id,
+                    identity.id,
+                    &tokens::hash_secret(&axon_code),
+                    verified.authenticated_at,
+                )
                 .await?
             {
                 return Err(invalid_flow());

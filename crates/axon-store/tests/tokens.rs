@@ -207,6 +207,7 @@ async fn first_oauth_bootstrap_binds_identity_and_mints_tokens_once() {
             Some("owner@example.com"),
             Utc::now() + Duration::hours(1),
             Utc::now() + Duration::days(30),
+            Some(Utc::now()),
         )
         .await
         .expect("issue oauth")
@@ -237,6 +238,7 @@ async fn first_oauth_bootstrap_binds_identity_and_mints_tokens_once() {
                 None,
                 Utc::now() + Duration::hours(1),
                 Utc::now() + Duration::days(30),
+                Some(Utc::now()),
             )
             .await
             .expect("issue second oauth")
@@ -267,7 +269,8 @@ async fn canceled_or_expired_bootstrap_flow_cannot_mint_even_when_bootstrap_is_a
                 "must-not-bind",
                 None,
                 Utc::now() + Duration::hours(1),
-                Utc::now() + Duration::days(30)
+                Utc::now() + Duration::days(30),
+                None,
             )
             .await
             .unwrap()

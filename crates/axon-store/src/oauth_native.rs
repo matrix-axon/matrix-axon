@@ -34,6 +34,9 @@ pub struct IdentityRedemption<'a> {
     pub client_id: &'a str,
     pub access_expires_at: DateTime<Utc>,
     pub refresh_expires_at: DateTime<Utc>,
+    /// When the verified identity token says the owner authenticated, or
+    /// `None` if it gave no usable evidence (ADR 0109).
+    pub authenticated_at: Option<DateTime<Utc>>,
 }
 
 impl Store {
@@ -172,6 +175,7 @@ impl Store {
             r.client_id,
             r.access_expires_at,
             r.refresh_expires_at,
+            r.authenticated_at,
         )
         .await?;
         tx.commit().await?;

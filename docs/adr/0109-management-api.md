@@ -91,7 +91,19 @@ The client runs the sign-in flow it already has (the provider redirect, or the n
 
 The sign-in time has to survive refresh, or refreshing would defeat the check.
 `oauth_refresh_tokens` and `tokens` each gain a nullable `authenticated_at`.
-It is set when an upstream sign-in is redeemed (authorization code, native identity token, or the identity-token grant) and copied unchanged through every refresh rotation.
+It records when the upstream provider says the owner authenticated, and is copied unchanged through every refresh rotation.
+
+It is never the moment Axon redeemed the identity token.
+An identity token stays valid well after it is issued, so a stolen, unredeemed one would otherwise buy a fresh window on redemption.
+OIDC keeps the two instants apart, `auth_time` for the authentication and `iat` for the token's issuance, and the time is read from the signed claims:
+
+- `auth_time` when the token carries it, capped at `iat`.
+- Otherwise `iat`, but only for a token bound to a nonce this server issued.
+  The nonce ties the token to one sign-in started minutes earlier, so its issuance is that sign-in.
+  Google emits no `auth_time`, so for it this is the only evidence available, and it cannot tell a fresh password entry from a provider session being reused.
+- Otherwise nothing: a nonce-free token with no `auth_time` has unknown freshness, and unknown fails step-up.
+
+The browser flow verifies the token at the callback and mints at code redemption, so the verified time is kept on the authorization request in between.
 A stolen access token, and a stolen refresh token, both carry the original time and cannot move it forward: only a fresh proof from the upstream provider does.
 Rows that predate the column have no time and count as not recent.
 
