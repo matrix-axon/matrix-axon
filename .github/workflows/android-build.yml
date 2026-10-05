@@ -18,11 +18,11 @@
 # **Unsigned, on purpose.** The bundle is built the way Play takes it but not
 # signed: the upload key (ADR 0107) does not belong in a lane that runs on
 # pull requests, and a job that signs only when a secret exists is a signing
-# path nothing has exercised. Signing and the version-from-tag step that
-# `.github/actions/tauri-build` does for the desktop are the release wiring,
-# which is its own change. For that reason there is no tag trigger here either:
-# a tag build from this file would ship the committed version, the
-# misreporting that action's header describes.
+# path nothing has exercised. Signing is the release wiring, which is its own
+# change; for that reason there is no tag trigger here either. The bundle's
+# version is not part of that: like the desktop build, this takes it from the
+# workspace's Cargo version (`scripts/bundle-version.sh`), so it is the
+# release's whatever the ref.
 #
 # The runner's pre-installed NDK is not the one this repo builds with, so the
 # pinned one is installed with the SDK's own `sdkmanager`. No third-party
@@ -39,6 +39,8 @@ on:
       # The JS half of the shell (`@tauri-apps/*`, including the CLI that
       # generates the Android project) is an input to the build.
       - 'clients/web/package.json'
+      - 'scripts/bundle-version.sh'
+      - 'scripts/release-version.sh'
       - 'clients/web/pnpm-lock.yaml'
       - 'scripts/package-android.sh'
       - 'scripts/lib/play-next-version-code.py'
@@ -146,6 +148,13 @@ jobs:
       - name: Install web dependencies
         run: pnpm install --frozen-lockfile
         working-directory: clients/web
+
+      # The bundle's marketing version (CFBundleShortVersionString) comes from
+      # clients/web/package.json, which this takes from the workspace's Cargo
+      # version as the desktop build does: the committed file may lag a release, and
+      # Play's versionName and default versionCode are derived from it.
+      - name: Take the bundle version from the release version
+        run: scripts/bundle-version.sh sync
 
       # `generate_context!()` embeds `../dist` at compile time, so the frontend
       # has to exist before the crate will compile, including for clippy.

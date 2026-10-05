@@ -37,6 +37,8 @@ on:
       # `checks` compiles the frontend the crate embeds, so the JS half of the
       # shell (`@tauri-apps/*`) is an input to it.
       - 'clients/web/package.json'
+      - 'scripts/bundle-version.sh'
+      - 'scripts/release-version.sh'
       - 'clients/web/pnpm-lock.yaml'
       # Everything `thirdparty` reads. Without these a change to the accepted
       # licenses, the notice templates or the generator ran no gate until a

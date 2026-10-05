@@ -110,8 +110,41 @@ jobs:
 
       - name: Open or update the release PR
         if: steps.fresh.outputs.stale != 'true'
+        id: release-pr
         uses: release-plz/action@v0.5
         with:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      # release-plz bumps Cargo versions only. The web client's package.json is
+      # what every desktop, store and Android bundle ships, so it has to move
+      # with them (scripts/bundle-version.sh; package.yml fails a PR where it
+      # does not). It is folded into release-plz's own commit, not added as a
+      # second one, so the branch stays the single commit release-plz wrote and
+      # authored: release-plz leaves a PR alone once someone else has committed
+      # to it. The push uses the PAT, so the PR's checks run again on it.
+      #
+      # No PR (nothing to release) leaves `prs` empty and skips the step.
+      - name: Carry the bundle version into the release PR
+        if: steps.fresh.outputs.stale != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          PRS: ${{ steps.release-pr.outputs.prs }}
+        run: |
+          branch=$(printf '%s' "${PRS:-[]}" | jq -r '.[0].head_branch // empty')
+          if [ -z "$branch" ]; then
+            echo "No release PR was opened or updated; nothing to carry."
+            exit 0
+          fi
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch origin "$branch"
+          git checkout -B "$branch" FETCH_HEAD
+          scripts/bundle-version.sh sync
+          if git diff --quiet -- clients/web/package.json; then
+            echo "package.json already matches."
+            exit 0
+          fi
+          git -c user.name=release-plz -c user.email=release-plz@users.noreply.github.com \
+            commit --amend --no-edit --quiet -- clients/web/package.json
+          git push --force-with-lease="$branch:$(git rev-parse FETCH_HEAD)" origin "$branch"

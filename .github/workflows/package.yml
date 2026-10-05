@@ -18,7 +18,11 @@ on:
       - "crates/axon-crypto/**"
       - "crates/axon-search/**"
       - "crates/axon-media/**"
+      - "Cargo.toml"
       - "Cargo.lock"
+      - "clients/web/package.json"
+      - "scripts/bundle-version.sh"
+      - "scripts/bundle-version-test.sh"
       - "scripts/release-version.sh"
       - "scripts/release-version-test.sh"
       - "scripts/release-notes.sh"
@@ -57,6 +61,17 @@ jobs:
         run: |
           shellcheck scripts/release-version.sh scripts/release-version-test.sh
           scripts/release-version-test.sh
+
+      # The desktop, store and Android builds all ship clients/web/package.json's
+      # version. The release PR carries it with Cargo.toml (release-plz.yml); this
+      # is what fails a PR that moves one without the other.
+      - name: Bundle version script
+        run: |
+          shellcheck scripts/bundle-version.sh scripts/bundle-version-test.sh
+          scripts/bundle-version-test.sh
+
+      - name: Web client version matches the workspace version
+        run: scripts/bundle-version.sh check
 
       - name: Release notes script
         run: |
