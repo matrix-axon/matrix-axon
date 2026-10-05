@@ -1,4 +1,4 @@
-import type { operations } from './api/schema'
+import type { components, operations } from './api/schema'
 import { isoCalendarDay, parseCalendarDay } from './calendar-day'
 import { resolveRoomTarget } from './stores/room-command'
 import type { RoomDto } from './stores/room-list'
@@ -469,10 +469,19 @@ export function hasNarrowingFilter(query: SearchQuery): boolean {
 // the page beneath it.
 
 /** `url` with `search` set to `tokens`, other params preserved. */
-export function withSearchParam(url: string, tokens: string): string {
+export function withSearchParam(
+  url: string,
+  tokens: string,
+  sort?: components['schemas']['SearchSort'],
+): string {
   const [base, queryString = ''] = url.split('?', 2)
   const params = new URLSearchParams(queryString)
   params.set('search', tokens)
+  if (sort === 'relevance') {
+    params.delete('ssort')
+  } else if (sort !== undefined) {
+    params.set('ssort', sort)
+  }
   return `${base}?${params.toString()}`
 }
 

@@ -5,6 +5,8 @@ import {
   type Page,
 } from '@playwright/test'
 import {
+  ACCOUNT_ID,
+  ROOM_ID,
   expectSendsSettled,
   openRoom,
   ROOM_URL,
@@ -279,4 +281,72 @@ test('a search-disabled server renders the unavailable state', async ({
   } finally {
     await request.post('/__e2e/search-503?disabled=false')
   }
+})
+
+test('date sorting requests the globally newest match on a fresh first page', async ({
+  page,
+}) => {
+  const requests: URLSearchParams[] = []
+  const hits = Array.from({ length: 61 }, (_, i) => ({
+    score: i === 60 ? 0.01 : 10,
+    event: {
+      account_id: ACCOUNT_ID,
+      room_id: ROOM_ID,
+      event_id: `$date-sort-${i}`,
+      sender: '@alice:hs',
+      origin_ts: 1_700_000_000_000 + i * 1000,
+      arrival_order: i,
+      type: 'm.room.message',
+      body: i === 60 ? 'needle newest low relevance' : `needle older ${i}`,
+      redacted: false,
+      edited: false,
+      edit_count: 0,
+    },
+  }))
+  await page.route('**/v1/search?**', async (route) => {
+    const params = new URL(route.request().url()).searchParams
+    requests.push(params)
+    const sort = params.get('sort')
+    const ordered = sort === 'newest' ? [...hits].reverse() : hits
+    const offset = Number(params.get('cursor') ?? 0)
+    const limit = Number(params.get('limit') ?? 50)
+    await route.fulfill({
+      json: {
+        data: {
+          results: ordered.slice(offset, offset + limit),
+          total: hits.length,
+          next_cursor:
+            offset + limit < hits.length ? String(offset + limit) : null,
+        },
+      },
+    })
+  })
+  await openRoom(page)
+  await page.getByRole('button', { name: 'Search messages' }).click()
+  await page.getByLabel('Search query').fill('needle')
+  await page.getByLabel('Search query').press('Enter')
+  await expect(page.locator('a.search-hit').first()).toContainText(
+    'needle older 0',
+  )
+  await dialog(page)
+    .getByRole('combobox', { name: 'sort' })
+    .selectOption('newest')
+  await expect(page.locator('a.search-hit').first()).toContainText(
+    'needle newest low relevance',
+  )
+  const newest = requests.find((params) => params.get('sort') === 'newest')
+  expect(newest, 'newest sort must send a fresh search request').toBeDefined()
+  if (!newest) throw new Error('newest search request was not sent')
+  expect(newest.has('cursor')).toBe(false)
+  await expect(dialog(page)).not.toContainText('sorted among loaded results')
+  await dialog(page)
+    .getByRole('combobox', { name: 'sort' })
+    .selectOption('oldest')
+  await expect(page.locator('a.search-hit').first()).toContainText(
+    'needle older 0',
+  )
+  const oldest = requests.find((params) => params.get('sort') === 'oldest')
+  expect(oldest, 'oldest sort must send a fresh search request').toBeDefined()
+  if (!oldest) throw new Error('oldest search request was not sent')
+  expect(oldest.has('cursor')).toBe(false)
 })

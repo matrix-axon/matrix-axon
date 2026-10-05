@@ -1335,6 +1335,16 @@ async function handleApi(req, res, url) {
         (Number.isNaN(from) || event.origin_ts >= from) &&
         (Number.isNaN(to) || event.origin_ts <= to),
     )
+    const sort = url.searchParams.get('sort') ?? 'relevance'
+    if (sort === 'newest' || sort === 'oldest') {
+      const direction = sort === 'newest' ? -1 : 1
+      // Mock scores are equal; use an explicit secondary key across pages.
+      matches.sort(
+        (a, b) =>
+          direction * (a.origin_ts - b.origin_ts) ||
+          (a.event_id < b.event_id ? -1 : a.event_id > b.event_id ? 1 : 0),
+      )
+    }
     const page = matches.slice(offset, offset + limit)
     return json(res, {
       data: {

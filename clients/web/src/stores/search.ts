@@ -9,13 +9,13 @@ import type { components } from '../api/schema'
 import { toApiParams, type SearchQuery } from '../search-tokens'
 
 export type SearchResult = components['schemas']['SearchResultDto']
+export type SearchSort = components['schemas']['SearchSort']
 
 /** Page size for the first page and each `loadMore`. */
 const PAGE_LIMIT = 50
 
 export interface SearchStore {
-  /** Loaded hits in the server's relevance order (most relevant first).
-   *  Date sort is the overlay's view concern, not the store's. */
+  /** Loaded hits in the requested server order. */
   results: ReadonlySignal<SearchResult[]>
   /** Total matches across all pages, or null before the first run settles. */
   total: ReadonlySignal<number | null>
@@ -31,9 +31,11 @@ export interface SearchStore {
   unavailable: ReadonlySignal<boolean>
   /** The query that produced the currently cached result set, if any. */
   lastQuery: ReadonlySignal<SearchQuery | null>
+  /** Ordering that produced the cached results and cursor. */
+  lastSort: ReadonlySignal<SearchSort>
 
   /** Run a query, replacing any loaded results with its first page. */
-  run(query: SearchQuery): Promise<void>
+  run(query: SearchQuery, sort?: SearchSort): Promise<void>
   /** Append the next page of the last-run query. */
   loadMore(): Promise<void>
   /** Back to the never-searched state. */
@@ -62,10 +64,13 @@ export function createSearchStore(api: ApiClient): SearchStore {
   let generation = 0
   let preserveForResultJump = false
   const lastQuery = signal<SearchQuery | null>(null)
+  const lastSort = signal<SearchSort>('relevance')
 
   async function fetchPage(
     query: SearchQuery,
     cursor: string | null,
+    sort: SearchSort,
+    started: number,
   ): Promise<{
     results: SearchResult[]
     total: number
@@ -81,10 +86,14 @@ export function createSearchStore(api: ApiClient): SearchStore {
           query: {
             ...toApiParams(query),
             limit: PAGE_LIMIT,
+            sort,
             ...(cursor === null ? {} : { cursor }),
           },
         },
       })
+      if (generation !== started) {
+        return null
+      }
       if (apiError !== undefined) {
         if (response.status === 503) {
           unavailable.value = true
@@ -102,15 +111,23 @@ export function createSearchStore(api: ApiClient): SearchStore {
         next: data.data.next_cursor ?? null,
       }
     } catch (cause) {
+      if (generation !== started) {
+        return null
+      }
       error.value = cause instanceof Error ? cause.message : String(cause)
       return null
     }
   }
 
-  async function run(query: SearchQuery): Promise<void> {
+  async function run(
+    query: SearchQuery,
+    sort: SearchSort = 'relevance',
+  ): Promise<void> {
     generation += 1
     const started = generation
     lastQuery.value = query
+    lastSort.value = sort
+    error.value = null
     loading.value = true
     // A superseded in-flight `loadMore` discards its page but cannot clean
     // up after itself (its generation check comes after the await).
@@ -119,7 +136,7 @@ export function createSearchStore(api: ApiClient): SearchStore {
     total.value = null
     nextCursor.value = null
     unavailable.value = false
-    const page = await fetchPage(query, null)
+    const page = await fetchPage(query, null, sort, started)
     if (generation !== started) {
       return
     }
@@ -139,7 +156,12 @@ export function createSearchStore(api: ApiClient): SearchStore {
     }
     const started = generation
     loadingMore.value = true
-    const page = await fetchPage(lastQuery.value, cursor)
+    const page = await fetchPage(
+      lastQuery.value,
+      cursor,
+      lastSort.value,
+      started,
+    )
     if (generation !== started) {
       return
     }
@@ -156,6 +178,7 @@ export function createSearchStore(api: ApiClient): SearchStore {
     generation += 1
     preserveForResultJump = false
     lastQuery.value = null
+    lastSort.value = 'relevance'
     results.value = []
     total.value = null
     loading.value = false
@@ -180,6 +203,7 @@ export function createSearchStore(api: ApiClient): SearchStore {
     error,
     unavailable: computed(() => unavailable.value),
     lastQuery: computed(() => lastQuery.value),
+    lastSort: computed(() => lastSort.value),
     run,
     loadMore,
     clear,
