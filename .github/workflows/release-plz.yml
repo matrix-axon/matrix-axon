@@ -89,7 +89,10 @@ jobs:
       # tag and the merged PR, so it would open a second PR for the release
       # just made (v0.1.5's merge produced a second v0.1.5 PR, #593). The
       # later push has its own run, queued behind this one by the
-      # concurrency group, so skipping loses nothing.
+      # concurrency group, so skipping loses little. The skipped run reports
+      # green, so if the newer run's token or release job fails, no release
+      # PR is opened until a later push or a manual re-run. A merge landing
+      # after this check can still race (#608).
       - name: Skip when main has moved on
         id: fresh
         env:
