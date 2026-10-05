@@ -103,6 +103,18 @@ OIDC keeps the two instants apart, `auth_time` for the authentication and `iat` 
   Google emits no `auth_time`, so for it this is the only evidence available, and it cannot tell a fresh password entry from a provider session being reused.
 - Otherwise nothing: a nonce-free token with no `auth_time` has unknown freshness, and unknown fails step-up.
 
+Measured against the real providers on 2026-10-05, comparing the recorded time with the moment the session was minted:
+
+| Provider | Recorded time | What it is |
+| --- | --- | --- |
+| Google (browser) | 0.4 s earlier | `iat`; no `auth_time` |
+| Apple (browser and native) | 1.6 to 2.0 s earlier | within a second or two of the sign-in |
+| Microsoft (browser) | 5 min 0.7 s earlier, twice | `iat`, which Microsoft backdates by five minutes; no `auth_time` |
+
+Microsoft's second reading was taken by signing in again with its own session still live, and the recorded time moved forward by the same amount as the clock, so it is a backdated issuance and not a remembered authentication.
+The consequence is that a Microsoft session has about five minutes for credential changes rather than ten.
+That errs toward asking again, which is the safe direction, and the window is not widened to compensate: nothing in the token distinguishes Microsoft's backdating from a token that really is five minutes old.
+
 The browser flow verifies the token at the callback and mints at code redemption, so the verified time is kept on the authorization request in between.
 A stolen access token, and a stolen refresh token, both carry the original time and cannot move it forward: only a fresh proof from the upstream provider does.
 Rows that predate the column have no time and count as not recent.
