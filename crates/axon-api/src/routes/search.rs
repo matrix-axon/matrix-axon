@@ -1,7 +1,8 @@
 //! Full-text search endpoint (M9b).
 //!
-//! `GET /v1/search` runs a relevance- or timestamp-ordered query against the `axon-search` index (via the
-//! [`SearchQuery`] port) and hydrates each hit into the same resolved [`EventDto`]
+//! `GET /v1/search` runs a relevance- or timestamp-ordered query against the
+//! `axon-search` index (via the [`SearchQuery`] port) and hydrates each hit into
+//! the same resolved [`EventDto`]
 //! the rest of the read API returns. The index holds only `(account_id, event_id)`
 //! keys, so hydration is a per-hit store read; an index/DB race (a hit whose row
 //! was since deleted) drops that hit rather than failing the page.
