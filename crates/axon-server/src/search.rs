@@ -104,6 +104,11 @@ impl SearchQuery for SearchAdapter {
                 sender: params.sender.as_deref(),
                 from_ts: params.from_ts,
                 to_ts: params.to_ts,
+                sort: match params.sort {
+                    axon_api::SearchSort::Relevance => axon_search::SearchSort::Relevance,
+                    axon_api::SearchSort::Newest => axon_search::SearchSort::Newest,
+                    axon_api::SearchSort::Oldest => axon_search::SearchSort::Oldest,
+                },
                 limit: params.limit,
                 offset: params.offset,
             };

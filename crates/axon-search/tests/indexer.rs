@@ -111,6 +111,7 @@ async fn wait_for_count(index: &SearchIndex, account: Uuid, text: &str, expected
                 sender: None,
                 from_ts: None,
                 to_ts: None,
+                sort: axon_search::SearchSort::Relevance,
                 limit: 10,
                 offset: 0,
             })

@@ -8174,7 +8174,7 @@
         "tags": [
           "search"
         ],
-        "summary": "Search across the index, BM25-ranked when a full-text query is present,\npaginated.",
+        "summary": "Search across the index, BM25-ranked when a full-text query is present,\nor timestamp-ordered when `sort=newest` or `sort=oldest`, then paginated.\nKeep the query filters and sort unchanged while following cursors.\nChanging the sort requires starting again without a cursor.",
         "description": "`503` when search is disabled (`search.enabled = false`). A missing/empty `q`\nis allowed only with at least one narrowing filter (`account_id`, `room_id`,\n`sender`, `from`, or `to`); an unbounded empty query or malformed `cursor` is\na `400`. Results are the resolved read-API event view (latest edited body,\nredaction-masked) plus each hit's score.",
         "operationId": "search",
         "parameters": [
@@ -8236,6 +8236,15 @@
             }
           },
           {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort all matches before pagination: relevance (default), newest, or oldest.\nDate ordering uses the event's origin timestamp, not arrival time.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SearchSort"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Page size (default 50, max 200).",
@@ -8257,7 +8266,7 @@
         ],
         "responses": {
           "200": {
-            "description": "A page of ranked search results",
+            "description": "A page of search results in the requested order",
             "content": {
               "application/json": {
                 "schema": {
@@ -12459,6 +12468,15 @@
             "description": "BM25 relevance score (higher is more relevant)."
           }
         }
+      },
+      "SearchSort": {
+        "type": "string",
+        "description": "Ordering applied to all matching documents before pagination.",
+        "enum": [
+          "relevance",
+          "newest",
+          "oldest"
+        ]
       },
       "SendMediaRequest": {
         "type": "object",

@@ -188,6 +188,15 @@ hydrate. Pagination is offset/limit (BM25 score doesn't compose with the timelin
 opaque cursor). Cross-account by default; `account_id` is an optional filter (tech
 spec: "account_id as a facet… scope to one account or aggregate across all").
 
+The optional `sort` query parameter selects `relevance` (the default), `newest`, or `oldest`.
+Timestamp ordering uses `origin_ts` across all matching documents **before** offset/limit pagination, so a recent low-relevance match can lead the first page.
+Equal timestamps are ordered by relevance, then Tantivy document address; this is deterministic for an unchanged index, rather than a snapshot guarantee across index updates.
+The existing timestamp fast field supplies the ordering without a schema change or index rebuild.
+The response's `score` remains the BM25 score in every sort mode.
+Keep the filters and sort unchanged when following `next_cursor`; changing the sort starts a new search without a cursor.
+Unknown sort values return `400`, and selecting a sort alone does not allow an unbounded empty query.
+Existing clients that omit `sort` retain relevance pagination and need a separate client change to request server date ordering.
+
 The query path is the first heavy user-triggered work on the bearer-gated API, so it
 carries three explicit resource bounds. **Per-query work** is bounded by capping the
 decoded paging offset (`MAX_OFFSET`): offset pagination is skip-N work at the index

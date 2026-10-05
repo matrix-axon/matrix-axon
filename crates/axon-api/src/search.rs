@@ -13,6 +13,19 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
+/// Ordering applied to all matching documents before pagination.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchSort {
+    /// Highest BM25 relevance first (the default).
+    #[default]
+    Relevance,
+    /// Highest origin timestamp first.
+    Newest,
+    /// Lowest origin timestamp first.
+    Oldest,
+}
+
 /// An owned search query plus its filters and offset pagination. Empty `text`
 /// means a filter-only search; the HTTP handler rejects unbounded empty searches
 /// before this port is called. All filters are optional; omit `account_id` to
@@ -33,6 +46,8 @@ pub struct SearchQueryParams {
     pub from_ts: Option<i64>,
     /// Inclusive upper bound on `origin_ts` (ms since epoch).
     pub to_ts: Option<i64>,
+    /// Ordering applied before pagination.
+    pub sort: SearchSort,
     /// Maximum hits to return.
     pub limit: usize,
     /// Number of leading hits to skip (offset pagination).
@@ -54,7 +69,7 @@ pub struct SearchHit {
 /// A page of ranked hits plus the total match count across all pages.
 #[derive(Debug, Clone)]
 pub struct SearchHits {
-    /// The hits on this page, most relevant first.
+    /// The hits on this page, in the requested sort order.
     pub hits: Vec<SearchHit>,
     /// Total number of matching documents across all pages.
     pub total: usize,
@@ -89,7 +104,7 @@ impl From<SearchQueryError> for crate::response::ApiError {
 /// where `None` means search is disabled and `/v1/search` returns `503`.
 #[async_trait]
 pub trait SearchQuery: Send + Sync {
-    /// Run a BM25 search, or a filter-only search when `text` is empty, and
-    /// return the requested page of hits plus the total match count.
+    /// Run a full-text or filter-only search, order all matches as requested,
+    /// and return the page of hits plus the total match count.
     async fn search(&self, params: &SearchQueryParams) -> Result<SearchHits, SearchQueryError>;
 }
