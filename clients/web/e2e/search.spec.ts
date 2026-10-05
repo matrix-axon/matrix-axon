@@ -334,8 +334,9 @@ test('date sorting requests the globally newest match on a fresh first page', as
   await expect(page.locator('a.search-hit').first()).toContainText(
     'needle newest low relevance',
   )
-  const newest = requests.find((params) => params.get('sort') === 'newest')!
-  expect(newest).toBeDefined()
+  const newest = requests.find((params) => params.get('sort') === 'newest')
+  expect(newest, 'newest sort must send a fresh search request').toBeDefined()
+  if (!newest) throw new Error('newest search request was not sent')
   expect(newest.has('cursor')).toBe(false)
   await expect(dialog(page)).not.toContainText('sorted among loaded results')
   await dialog(page)
@@ -344,7 +345,8 @@ test('date sorting requests the globally newest match on a fresh first page', as
   await expect(page.locator('a.search-hit').first()).toContainText(
     'needle older 0',
   )
-  const oldest = requests.find((params) => params.get('sort') === 'oldest')!
-  expect(oldest).toBeDefined()
+  const oldest = requests.find((params) => params.get('sort') === 'oldest')
+  expect(oldest, 'oldest sort must send a fresh search request').toBeDefined()
+  if (!oldest) throw new Error('oldest search request was not sent')
   expect(oldest.has('cursor')).toBe(false)
 })
