@@ -84,10 +84,29 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # A run for an older push can reach this job after a later push (a
+      # release PR's merge) has landed. Its checkout still predates the new
+      # tag and the merged PR, so it would open a second PR for the release
+      # just made (v0.1.5's merge produced a second v0.1.5 PR, #593). The
+      # later push has its own run, queued behind this one by the
+      # concurrency group, so skipping loses nothing.
+      - name: Skip when main has moved on
+        id: fresh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head=$(gh api "repos/$GITHUB_REPOSITORY/commits/${GITHUB_REF_NAME}" --jq .sha)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::notice::$GITHUB_REF_NAME is at $head, not $GITHUB_SHA; the run for that push opens the release PR."
+            echo "stale=true" >>"$GITHUB_OUTPUT"
+          fi
+
       - name: Install Rust toolchain
+        if: steps.fresh.outputs.stale != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Open or update the release PR
+        if: steps.fresh.outputs.stale != 'true'
         uses: release-plz/action@v0.5
         with:
           command: release-pr
