@@ -197,6 +197,10 @@ describe('AppRoot wiring the transport into the app', () => {
       appleSignIn: null,
       setZoom: null,
       onMenuCommand: null,
+      notificationPermission: () => Promise.resolve('default' as const),
+      requestNotificationPermission: () => Promise.resolve('default' as const),
+      notify: () => Promise.resolve(),
+      onNotificationClick: null,
     }
 
     // A token, so the shell mounts signed-in and actually issues requests.

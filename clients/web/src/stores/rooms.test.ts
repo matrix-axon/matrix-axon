@@ -431,9 +431,15 @@ describe('createRoomsStore', () => {
     expect(store.preview(roomKey(NAMED))?.senderDisplay).toBe(
       '@adam:example.org',
     )
+    expect(
+      store.senderDisplay(ACCOUNT, NAMED.room_id, '@adam:example.org'),
+    ).toBe('@adam')
     await vi.waitFor(() =>
       expect(store.preview(roomKey(NAMED))?.senderDisplay).toBe('Adam'),
     )
+    expect(
+      store.senderDisplay(ACCOUNT, NAMED.room_id, '@adam:example.org'),
+    ).toBe('Adam')
     expect(timelineCalls).toBe(0)
   })
 

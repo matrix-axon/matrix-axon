@@ -25,8 +25,8 @@ fn give_android_library_a_build_id() {
     }
 }
 
-/// Edit the manifest `tauri android init` generated: declare the camera, and
-/// turn off auto-backup.
+/// Edit the manifest `tauri android init` generated: declare the camera and
+/// `POST_NOTIFICATIONS`, and turn off auto-backup.
 ///
 /// `gen/android` is regenerated and gitignored, so a hand edit to its manifest
 /// does not survive `tauri android init`; this rewrites the manifest on every
@@ -48,6 +48,7 @@ fn patch_android_manifest() {
         return;
     };
     let rewritten = android_manifest::with_camera_block(&manifest)
+        .and_then(|manifest| android_manifest::with_post_notifications(&manifest))
         .and_then(|manifest| android_manifest::with_backup_disabled(&manifest))
         .unwrap_or_else(|why| panic!("{why}"));
     if rewritten != manifest {

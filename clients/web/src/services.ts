@@ -19,6 +19,8 @@ import {
   isTauriRuntime,
   type Platform,
 } from './platform'
+import { markdownToPlainText } from './markdown/markdown'
+import { messageNotificationBody } from './platform/notifications'
 import { readStoredServerUrl } from './server-url'
 import {
   createCompositeAuthProvider,
@@ -63,9 +65,11 @@ import {
   requestPersistentStorage,
   type CacheStore,
 } from './stores/cache-store'
-import { roomTitle } from './stores/room-list'
+import { roomKey, roomTitle } from './stores/room-list'
+import { threadRootId } from './stores/threads'
 import { createRoomListCache } from './stores/room-list-cache'
 import { createTelemetryStore, type TelemetryStore } from './stores/telemetry'
+import { isRoomUnreadEvent, type EventDto } from './stores/timeline'
 import { createInvitesStore, type InvitesStore } from './stores/invites'
 import {
   createVerificationStore,
@@ -322,6 +326,244 @@ export function connectLiveThreadUnread(
       activeThread: activeThread.value,
     })
   })
+}
+
+/** How many event ids one session remembers, so a replay cannot toast twice. */
+const NOTIFIED_EVENT_LIMIT = 2000
+
+interface PendingNotice {
+  title: string
+  body: string
+  accountId: string
+  roomId: string
+  eventId: string
+  threadRootId: string | null
+}
+
+interface ObservedCounts {
+  notification: number
+  highlight: number
+}
+
+/**
+ * Post a local notification for a live message the user is not already reading.
+ *
+ * A `timeline.event` after a restart is often the room's recent history, the
+ * same replay `connectLiveThreadUnread` refuses to badge. Two guards keep that
+ * from becoming another toast. The cutoff moves forward on every reconnect,
+ * the way `connectThreadReceipts` does, because a frame first seen after a
+ * drop is a redelivery however recent its stamp. And every event id this
+ * session has already handled — posted, or skipped because it was the user's
+ * own or on the focused screen — is remembered, so the slack window cannot
+ * post it again.
+ *
+ * While the socket stays up, a candidate is posted only after that room's
+ * `notification_count` or `highlight_count` rises (ADR 0070). That count is
+ * the server's push-rule answer: a mute, a notice, or a mentions-only miss
+ * does not raise it, and a replay does not either. The toast still carries
+ * the sender and the message text, because the count frame has neither. The
+ * count frame is not replayed across a drop, so after a reconnect an event
+ * id this session has not handled, and which is stamped after the new cutoff,
+ * is posted on its own.
+ *
+ * Edits, redactions, empty bodies, and anything other than `m.room.message`
+ * are not messages (`isRoomUnreadEvent`). The account's own sends are not
+ * news. The open room is skipped while the window is focused. A hidden
+ * window, and a window sitting behind another app, still notifies for it.
+ *
+ * Nothing is posted until Settings has opted in. OS permission is a second
+ * gate, checked when a message is actually posted, so a grant applies to the
+ * next one. A desktop shell reports that permission as granted without asking.
+ */
+export function connectMessageNotifications(
+  live: LiveConnection,
+  rooms: RoomsStore,
+  accounts: AccountsStore,
+  activeRoom: Signal<string | null>,
+  platform: Pick<Platform, 'notificationPermission' | 'notify'>,
+  enabled: () => boolean = () => false,
+  now: () => number = () => Date.now(),
+  isFocused: () => boolean = () => document.hasFocus(),
+): () => void {
+  let liveSince = now() - LIVE_THREAD_REPLAY_SLACK_MS
+  // Zero until the socket drops and comes back. The first connection's
+  // replay has no count frame — the totals are already on the room list —
+  // so only a later rise may post. A reconnect has missed the rise that
+  // happened while the socket was down.
+  let socketGeneration = 0
+  const seen = new Set<string>()
+  const baseline = new Map<string, ObservedCounts>()
+  const pending = new Map<string, PendingNotice>()
+  const owed = new Set<string>()
+  let disposed = false
+
+  const disposeReconnects = effect(() => {
+    if (live.reconnects.value === 0) {
+      return
+    }
+    // Effects run synchronously on the write, before the new socket delivers
+    // its first frame. Same ordering as `connectThreadReceipts`.
+    liveSince = now() - LIVE_THREAD_REPLAY_SLACK_MS
+    socketGeneration = live.reconnects.value
+    pending.clear()
+    owed.clear()
+  })
+
+  const remember = (eventId: string) => {
+    if (seen.has(eventId)) {
+      return
+    }
+    seen.add(eventId)
+    if (seen.size <= NOTIFIED_EVENT_LIMIT) {
+      return
+    }
+    const oldest = seen.values().next().value
+    if (oldest !== undefined) {
+      seen.delete(oldest)
+    }
+  }
+
+  const roomIsFocused = (accountId: string, roomId: string) =>
+    activeRoom.value === roomKey({ account_id: accountId, room_id: roomId }) &&
+    isFocused()
+
+  const post = (notice: PendingNotice) => {
+    if (!enabled()) {
+      return
+    }
+    void platform
+      .notificationPermission()
+      .then((state) => {
+        if (disposed || !enabled() || state !== 'granted') {
+          return
+        }
+        return platform.notify(notice)
+      })
+      .catch((error: unknown) => {
+        console.warn(
+          'could not post a message notification',
+          error instanceof Error ? error.message : String(error),
+        )
+      })
+  }
+
+  const onCounts = (
+    accountId: string,
+    change: {
+      roomId: string
+      notificationCount: number
+      highlightCount: number
+    },
+  ) => {
+    const key = roomKey({ account_id: accountId, room_id: change.roomId })
+    const next = {
+      notification: change.notificationCount,
+      highlight: change.highlightCount,
+    }
+    const prev = baseline.get(key)
+    baseline.set(key, next)
+    const rose =
+      prev === undefined
+        ? next.notification > 0 || next.highlight > 0
+        : next.notification > prev.notification ||
+          next.highlight > prev.highlight
+    if (!enabled() || !rose || roomIsFocused(accountId, change.roomId)) {
+      pending.delete(key)
+      owed.delete(key)
+      return
+    }
+    const notice = pending.get(key)
+    if (notice === undefined) {
+      owed.add(key)
+      return
+    }
+    pending.delete(key)
+    owed.delete(key)
+    post(notice)
+  }
+
+  const onEvent = (event: EventDto) => {
+    if (event.origin_ts < liveSince || !isRoomUnreadEvent(event)) {
+      return
+    }
+    if (seen.has(event.event_id)) {
+      return
+    }
+    remember(event.event_id)
+    const key = roomKey({
+      account_id: event.account_id,
+      room_id: event.room_id,
+    })
+    if (roomIsFocused(event.account_id, event.room_id)) {
+      pending.delete(key)
+      owed.delete(key)
+      return
+    }
+    const room = rooms.rooms.value.find(
+      (candidate) =>
+        candidate.account_id === event.account_id &&
+        candidate.room_id === event.room_id,
+    )
+    const ownUserId =
+      accounts.accounts.value.find(
+        (account) => account.account_id === event.account_id,
+      )?.user_id ??
+      room?.account_user_id ??
+      null
+    if (ownUserId === null || event.sender === ownUserId || !enabled()) {
+      return
+    }
+    const titled =
+      room === undefined ? 'New message' : roomTitle(room, rooms.titles.value)
+    const title =
+      room !== undefined && titled === room.room_id ? 'New message' : titled
+    const notice: PendingNotice = {
+      title,
+      body: messageNotificationBody(
+        senderLabel(rooms, event),
+        markdownToPlainText(event.body ?? ''),
+      ),
+      accountId: event.account_id,
+      roomId: event.room_id,
+      eventId: event.event_id,
+      threadRootId: threadRootId(event),
+    }
+    // After a reconnect the rise may already have been broadcast, and the
+    // bus does not replay it. An id this session has not handled is news.
+    if (socketGeneration > 0 || owed.has(key)) {
+      owed.delete(key)
+      pending.delete(key)
+      post(notice)
+      return
+    }
+    pending.set(key, notice)
+  }
+
+  const unsubscribe = live.subscribe((frame) => {
+    const counts = unreadCountsChange(frame)
+    if (counts !== null) {
+      onCounts(frame.accountId, counts)
+      return
+    }
+    const event = timelineEvent(frame)
+    if (event !== null) {
+      onEvent(event)
+    }
+  })
+  return () => {
+    disposed = true
+    unsubscribe()
+    disposeReconnects()
+  }
+}
+
+/**
+ * The roster name when this store has already loaded the room's members, and
+ * `@localpart` until then. The room preview upgrades the same way, but a
+ * toast cannot wait on `/members`.
+ */
+function senderLabel(rooms: RoomsStore, event: EventDto): string {
+  return rooms.senderDisplay(event.account_id, event.room_id, event.sender)
 }
 
 /**
@@ -1180,6 +1422,14 @@ export function createServices(
   connectFavouriteSession(auth, favourites)
   connectSpaceOrderSession(auth, spaceOrder)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
+  connectMessageNotifications(
+    live,
+    rooms,
+    accounts,
+    activeRoom,
+    platform,
+    () => settings.messageNotifications.value,
+  )
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
   connectThreadReadMarkers(live, threadUnread, deviceState)

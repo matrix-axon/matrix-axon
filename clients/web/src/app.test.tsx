@@ -21,6 +21,7 @@ import {
 import type { OAuthCallbackResult } from './auth/provider'
 import { App, accountIdForRoomEntry } from './app.tsx'
 import { layoutMode, SINGLE_PANE_QUERY } from './layout'
+import type { NotificationClick } from './platform'
 import type { Account } from './stores/accounts'
 import type { EventDto } from './stores/timeline'
 import { memoryStorage } from './test/memory-storage'
@@ -95,6 +96,56 @@ describe('App', () => {
     const services = testServices({ token: null })
     const { getByRole } = render(<App services={services} />)
     expect(getByRole('button', { name: 'Sign in' })).toBeTruthy()
+  })
+
+  it('opens the room a notification tap names', async () => {
+    let deliver: ((click: NotificationClick) => void) | null = null
+    const services = testServices({
+      platform: {
+        onNotificationClick: (handler) => {
+          deliver = handler
+          return () => {}
+        },
+      },
+    })
+    installNotificationRouteHandlers()
+    render(<App services={services} />)
+    expect(deliver).not.toBeNull()
+    deliver!({
+      accountId: ACCOUNT,
+      roomId: ROOM,
+      eventId: '$evt',
+      threadRootId: null,
+    })
+    await waitFor(() =>
+      expect(window.location.pathname).toBe(
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      ),
+    )
+    expect(window.location.search).toBe('?event=%24evt')
+  })
+
+  it('opens the thread a reply notification names', async () => {
+    let deliver: ((click: NotificationClick) => void) | null = null
+    const services = testServices({
+      platform: {
+        onNotificationClick: (handler) => {
+          deliver = handler
+          return () => {}
+        },
+      },
+    })
+    installNotificationRouteHandlers()
+    render(<App services={services} />)
+    deliver!({
+      accountId: ACCOUNT,
+      roomId: ROOM,
+      eventId: '$reply',
+      threadRootId: '$root',
+    })
+    await waitFor(() =>
+      expect(window.location.search).toBe('?thread=%24root&event=%24reply'),
+    )
   })
 
   it('signed in renders the shell with settings, brand home, and the room-list sidebar', async () => {
@@ -1352,6 +1403,35 @@ describe('layoutMode (ADR 0062)', () => {
     expect(layoutMode(path)).toBe(mode)
   })
 })
+
+/** Room navigation plus the event a notification deep link asks the thread panel to show. */
+function installNotificationRouteHandlers(): void {
+  installRoomPageHandlers()
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+      ({ params }) =>
+        HttpResponse.json({
+          data: {
+            account_id: ACCOUNT,
+            event_id: String(params.eventId),
+            room_id: ROOM,
+            sender: ACCOUNT_DTO.user_id,
+            origin_ts: 1,
+            arrival_order: 1,
+            type: 'm.room.message',
+            body: 'hi',
+            content: {},
+            redacted: false,
+            edited: false,
+            edit_count: 0,
+            state_key: null,
+            reactions: null,
+          },
+        }),
+    ),
+  )
+}
 
 function installRoomPageHandlers(): void {
   server.use(

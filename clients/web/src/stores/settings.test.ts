@@ -40,6 +40,7 @@ describe('createSettingsStore', () => {
       pageScrollReset: false,
       appBadgeEnabled: true,
       cacheRoomList: true,
+      messageNotifications: false,
     })
   })
 
@@ -48,10 +49,12 @@ describe('createSettingsStore', () => {
     const first = createSettingsStore(storage)
     first.theme.value = 'dark'
     first.activeAccountId.value = 'acct-1'
+    first.messageNotifications.value = true
 
     const second = createSettingsStore(storage)
     expect(second.theme.value).toBe('dark')
     expect(second.activeAccountId.value).toBe('acct-1')
+    expect(second.messageNotifications.value).toBe(true)
   })
 
   it.each([
@@ -77,6 +80,8 @@ describe('createSettingsStore', () => {
     )
     expect(store.theme.value).toBe('light')
     expect(store.activeAccountId.value).toBe('acct-9')
+    // An envelope written before message notifications existed stays opted out.
+    expect(store.messageNotifications.value).toBe(false)
   })
 })
 

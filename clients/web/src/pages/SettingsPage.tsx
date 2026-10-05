@@ -23,7 +23,14 @@ import {
   matrixProtocolHandlerAvailable,
   registerMatrixProtocolHandler,
 } from '../matrix-protocol'
-import { isInstalledDisplay } from '../platform'
+import {
+  isInstalledDisplay,
+  type NotificationPermissionState,
+} from '../platform'
+import {
+  publishNotificationPermission,
+  subscribeNotificationPermission,
+} from '../platform/notifications'
 import { browserReloadEnvironment, reloadNow } from '../reload'
 import { disconnectFromServer } from '../server-url'
 import { formatTelemetry } from '../stores/telemetry'
@@ -263,6 +270,7 @@ function SettingsPageContents() {
           {markingRead ? 'Marking…' : 'Mark all as read'}
         </button>
       </section>
+      <MessageNotificationSettings />
       {platform.browserCanAdoptApp && <InstallAppSettings />}
       {platform.browserCanAdoptApp && (
         <section class="panel">
@@ -844,6 +852,110 @@ function DebugSettings() {
   )
 }
 
+function MessageNotificationSettings() {
+  const { platform, settings } = useServices()
+  const enabled = settings.messageNotifications.value
+  const [permission, setPermission] =
+    useState<NotificationPermissionState | null>(null)
+  const [askFailed, setAskFailed] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    const apply = (state: NotificationPermissionState) => {
+      if (!cancelled) {
+        setPermission(state)
+      }
+    }
+    void platform.notificationPermission().then(
+      (state) => {
+        apply(state)
+        publishNotificationPermission(state)
+      },
+      () => {
+        // A failed check is not a denial. Leave the control so the click can
+        // try the request itself.
+        apply('default')
+      },
+    )
+    const unsubscribe = subscribeNotificationPermission(apply)
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [platform])
+
+  const onToggle = (event: Event) => {
+    const next = (event.currentTarget as HTMLInputElement).checked
+    settings.messageNotifications.value = next
+    setAskFailed(false)
+    if (
+      !next ||
+      permission === 'granted' ||
+      permission === 'denied' ||
+      permission === 'unsupported'
+    ) {
+      return
+    }
+    // The platform method starts the OS request before it awaits. This click
+    // must not await anything first, or iOS and Android drop the sheet.
+    const request = platform.requestNotificationPermission()
+    void request.then(
+      (state) => {
+        setPermission(state)
+        publishNotificationPermission(state)
+        if (state === 'unsupported') {
+          settings.messageNotifications.value = false
+        }
+      },
+      () => {
+        settings.messageNotifications.value = false
+        setAskFailed(true)
+      },
+    )
+  }
+
+  return (
+    <section class="panel">
+      <h2>Notifications</h2>
+      <p class="muted">
+        Show a notification when a new message arrives while Axon is open and
+        you are not reading that room.
+      </p>
+      <label class="setting-row">
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={permission === 'unsupported'}
+          onChange={onToggle}
+        />
+        Message notifications
+      </label>
+      {permission === 'unsupported' ? (
+        <p class="muted">
+          This browser can't show a message notification from the page.
+        </p>
+      ) : permission === 'denied' ? (
+        <p class="muted">
+          Notifications are blocked. Enable them for Axon in your system
+          settings, then reopen Axon.
+        </p>
+      ) : askFailed ? (
+        <p class="muted">Axon couldn't ask for permission. Try again.</p>
+      ) : enabled && permission === 'granted' ? (
+        <p class="muted">
+          Notifications are allowed. Banners and sounds follow your system
+          settings.
+        </p>
+      ) : (
+        <p class="muted">
+          Off until you turn it on. A permission used for the app-icon badge
+          does not turn this on, and a desktop app does not ask on its own.
+        </p>
+      )}
+    </section>
+  )
+}
+
 function InstallAppSettings() {
   const { settings } = useServices()
   const [installing, setInstalling] = useState(false)
@@ -869,13 +981,26 @@ function InstallAppSettings() {
     }
   }
 
+  useEffect(
+    () =>
+      subscribeNotificationPermission((state) => {
+        if (state === 'granted' || state === 'denied' || state === 'default') {
+          setNotificationPermission(state)
+        }
+      }),
+    [],
+  )
+
   const requestBadgePermission = () => {
     // Must run synchronously inside this click handler, with no `await`
     // ahead of it — Safari only honors `Notification.requestPermission()`
     // from a real user gesture (ADR 0080).
     const request = requestAppBadgeNotificationPermission()
     if (request !== null) {
-      void request.then(setNotificationPermission)
+      void request.then((state) => {
+        setNotificationPermission(state)
+        publishNotificationPermission(state)
+      })
     }
   }
 
@@ -936,8 +1061,7 @@ function InstallAppSettings() {
           </button>
           <p class="muted">
             Safari only displays this badge once notification permission is
-            granted, even though Axon doesn't send notifications. This asks for
-            that permission — nothing else changes.
+            granted. This asks for that permission.
           </p>
         </>
       )}

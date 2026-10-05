@@ -706,3 +706,83 @@ describe('the settings a browser grants', () => {
     expect(queryByLabelText('Handle matrix: links')).toBeNull()
   })
 })
+
+describe('message notifications', () => {
+  it('asks from the opt-in checkbox and then reports the grant', async () => {
+    const requestNotificationPermission = vi.fn(() =>
+      Promise.resolve('granted' as const),
+    )
+    const services = testServices({
+      platform: {
+        browserCanAdoptApp: false,
+        notificationPermission: () => Promise.resolve('default'),
+        requestNotificationPermission,
+      },
+    })
+    const { findByRole, findByText, queryByText } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+
+    expect(queryByText('Matrix links')).toBeNull()
+    expect(
+      await findByText(
+        'Off until you turn it on. A permission used for the app-icon badge does not turn this on, and a desktop app does not ask on its own.',
+      ),
+    ).toBeTruthy()
+    const checkbox = await findByRole('checkbox', {
+      name: 'Message notifications',
+    })
+    expect((checkbox as HTMLInputElement).checked).toBe(false)
+    fireEvent.click(checkbox)
+    expect(requestNotificationPermission).toHaveBeenCalledTimes(1)
+    expect(services.settings.messageNotifications.value).toBe(true)
+    expect(
+      await findByText(
+        'Notifications are allowed. Banners and sounds follow your system settings.',
+      ),
+    ).toBeTruthy()
+  })
+
+  it('does not describe a browser without notifications as blocked in system settings', async () => {
+    const services = testServices({
+      platform: {
+        notificationPermission: () => Promise.resolve('unsupported'),
+        requestNotificationPermission: () => Promise.resolve('unsupported'),
+      },
+    })
+    const { findByText, queryByText } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    expect(
+      await findByText(
+        "This browser can't show a message notification from the page.",
+      ),
+    ).toBeTruthy()
+    expect(queryByText(/system settings/)).toBeNull()
+  })
+
+  it('leaves the opt-in off when the permission request fails', async () => {
+    const services = testServices({
+      platform: {
+        notificationPermission: () => Promise.resolve('default'),
+        requestNotificationPermission: () => Promise.reject(new Error('nope')),
+      },
+    })
+    const { findByRole, findByText } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    fireEvent.click(
+      await findByRole('checkbox', { name: 'Message notifications' }),
+    )
+    expect(
+      await findByText("Axon couldn't ask for permission. Try again."),
+    ).toBeTruthy()
+    expect(services.settings.messageNotifications.value).toBe(false)
+  })
+})

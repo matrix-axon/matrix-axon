@@ -24,7 +24,7 @@ generates their attribution for us. They are recorded here deliberately.
     Details: https://webkit.org/licensing-webkit/
 
 OVERVIEW
-- MIT License (used by 413 crates)
+- MIT License (used by 417 crates)
 - Unicode License v3 (used by 19 crates)
 - ISC License (used by 18 crates)
 - Apache License 2.0 (used by 8 crates)
@@ -5463,6 +5463,36 @@ SOFTWARE.
 ================================================================================
 LICENSE: MIT License (SPDX ID: MIT)
 USED BY:
+  - notify-rust 4.18.1
+================================================================================
+MIT License
+
+Copyright (c) 2017 Hendrik Sollich
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+--------------------------------------------------------------------------------
+
+================================================================================
+LICENSE: MIT License (SPDX ID: MIT)
+USED BY:
   - json-patch 4.2.0
 ================================================================================
 MIT License
@@ -6202,6 +6232,7 @@ USED BY:
   - dlopen2 0.8.2
   - dlopen2_derive 0.4.3
   - dpi 0.1.2
+  - mac-notification-sys 0.6.15
   - objc2-app-kit 0.3.2
   - objc2-core-foundation 0.3.2
   - objc2-core-graphics 0.3.2
@@ -6216,10 +6247,12 @@ USED BY:
   - tauri-plugin-dialog 2.7.3
   - tauri-plugin-fs 2.5.2
   - tauri-plugin-http 2.5.9
+  - tauri-plugin-notification 2.5.1
   - tauri-plugin-opener 2.5.5
   - tauri-plugin-single-instance 2.4.4
   - tauri-plugin-websocket 2.4.3
-  - tauri-plugin 2.6.3
+  - tauri-plugin 2.7.1
+  - tauri-winrt-notification 0.8.1
   - unic-char-property 0.9.0
   - unic-char-range 0.9.0
   - unic-common 0.9.0

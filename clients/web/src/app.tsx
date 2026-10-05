@@ -20,9 +20,15 @@ import { VerificationInboxPanel } from './components/VerificationInboxPanel'
 import { UpdateBanner } from './components/UpdateBanner'
 import { useModalFocus } from './components/use-modal-focus'
 import { layoutMode, SINGLE_PANE_QUERY, useMediaQuery } from './layout'
-import { isInstalledDisplay, isTauriRuntime, type Platform } from './platform'
+import {
+  isInstalledDisplay,
+  isTauriRuntime,
+  type NotificationClick,
+  type Platform,
+} from './platform'
 import {
   localRoomHref,
+  localThreadEventHref,
   parseMatrixRoomReference,
   resolveMatrixToRoomLink,
   type MatrixRoomReference,
@@ -811,6 +817,21 @@ function SidebarPaneHandle({
  * it on a room switch would throw away its scroll position and the room list's
  * session-only name/account filters.
  */
+/** Where a notification tap lands. A thread reply opens that thread. */
+function notificationHref(click: NotificationClick): string {
+  const eventId = click.eventId ?? null
+  const threadRootId = click.threadRootId ?? null
+  if (threadRootId !== null && eventId !== null) {
+    return localThreadEventHref(
+      click.accountId,
+      click.roomId,
+      threadRootId,
+      eventId,
+    )
+  }
+  return localRoomHref(click.accountId, click.roomId, eventId)
+}
+
 function ShellChrome() {
   const location = useLocation()
   const { path, query } = location
@@ -851,6 +872,19 @@ function ShellChrome() {
   const pickerOpen = pickerTarget !== null
   const exclusiveModal = sasOpen || pickerOpen
   const verificationInboxCount = verification.inboxCount.value
+
+  // Open the room a notification tap names. A thread reply is not on the main
+  // timeline, so that tap keeps the thread open. The platform holds a tap that
+  // reached the page before this shell mounted, and delivers it on subscribe.
+  useEffect(() => {
+    const subscribe = svcPlatform.onNotificationClick
+    if (subscribe === null) {
+      return
+    }
+    return subscribe((click) => {
+      location.route(notificationHref(click))
+    })
+  }, [svcPlatform, location])
 
   useEffect(() => {
     if (!exclusiveModal) {
