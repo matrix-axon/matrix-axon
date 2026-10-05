@@ -119,8 +119,8 @@ jobs:
 
       # release-plz bumps Cargo versions only. The web client's package.json is
       # what every desktop, store and Android bundle ships, so it has to move
-      # with them (scripts/bundle-version.sh; package.yml fails a PR where it
-      # does not). It is folded into release-plz's own commit, not added as a
+      # with them (scripts/bundle-version.sh; the bundle-version hook in the
+      # required lint-and-test job fails a PR where it does not). It is folded into release-plz's own commit, not added as a
       # second one, so the branch stays the single commit release-plz wrote and
       # authored: release-plz leaves a PR alone once someone else has committed
       # to it. The push uses the PAT, so the PR's checks run again on it.

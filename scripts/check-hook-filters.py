@@ -64,6 +64,7 @@ CASES: list[tuple[str, set[str]]] = [
         "clients/web/package.json",
         {
             "prettier",
+            "bundle-version",
             "web-install",
             "web-peers",
             "web-api-schema",
@@ -161,7 +162,8 @@ CASES: list[tuple[str, set[str]]] = [
     ("clients/web/src-tauri/gen/android/app/src/main/assets/x.js", set()),
     # ...but the root workspace's own manifest still gates the workspace hooks
     # even though it now names src-tauri in `exclude`.
-    ("Cargo.toml", {"rustfmt", "rust-clippy", "cargo-test"}),
+    # bundle-version too: the release version lives here and the web client's copy must follow.
+    ("Cargo.toml", {"rustfmt", "rust-clippy", "cargo-test", "bundle-version"}),
     # .cargo/config.toml can carry rustflags and target overrides, so it is a
     # rust build input even though it holds only aliases today.
     (".cargo/config.toml", {"rustfmt", "rust-clippy", "cargo-test"}),
