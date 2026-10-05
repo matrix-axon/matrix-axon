@@ -17,10 +17,11 @@ name = "axon"
 # crate is `publish = false`, so this string appears nowhere but its own
 # Cargo.lock. Leave it be when cutting a release.
 #
-# For a `v<semver>` release, the tag is authoritative: the shared
-# `.github/actions/tauri-build` step rewrites `../package.json` in the runner's
-# checkout before the build, so the committed value sets the version only for
-# local builds, untagged CI, and `alpha-*`/`beta-*` tags.
+# The product version is the workspace's Cargo version. `../package.json`
+# carries it (release-plz.yml folds it into the release PR, and
+# `scripts/bundle-version.sh check` fails a PR where the two differ), and the
+# shared `.github/actions/tauri-build` step and the store and Android workflows
+# re-sync it in the runner's checkout before the build.
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.86"

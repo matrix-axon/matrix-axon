@@ -83,6 +83,13 @@ jobs:
           key: binary-builder-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: binary-builder-cargo-
 
+      # After the toolchain: the script asks cargo for the workspace version.
+      # In this job, which is a required check, so a release PR whose
+      # package.json was not carried (release-plz.yml) cannot merge.
+      - name: check-bundle-version
+        shell: bash
+        run: pre-commit run bundle-version --all-files --hook-stage pre-push
+
       - name: Check formatting
         run: cargo fmt --all --check
 

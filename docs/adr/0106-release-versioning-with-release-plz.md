@@ -91,5 +91,5 @@ So the first release PR appears after the next commit to `main`, and releases go
 - Hand-made `v*` tags still work, but only on a commit whose Cargo version matches; the guard's error says how to get there.
 - `main` carries a standing release PR whenever unreleased commits exist. It is updated in place, not reopened, on every push.
 - The Homebrew formula's `brew test` can assert the exact version again once the first release-plz release has shipped.
-- `desktop-build.yml` is not guarded. Its version already comes from the tag, and `clients/web/package.json` is in the client silo; making its committed value follow the workspace version is a separate change.
+- `desktop-build.yml` is not guarded. Its version already comes from the tag, and `clients/web/package.json` is in the client silo; making its committed value follow the workspace version is a separate change. That change has since been made: `scripts/bundle-version.sh` keeps `package.json` at the workspace version, the release PR carries it, and the desktop, store and Android builds all take it from there rather than from the tag.
 - A tag release-plz creates is authored by whoever owns `RELEASE_PLZ_TOKEN`.

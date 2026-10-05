@@ -178,6 +178,13 @@ jobs:
       - name: Install the iOS build tooling
         run: brew install xcodegen cocoapods libimobiledevice
 
+      # The bundle's marketing version (CFBundleShortVersionString) comes from
+      # clients/web/package.json, which this takes from the workspace's Cargo
+      # version as the desktop build does: a manual run is on a branch, with no
+      # tag to read, and the committed file may lag a release.
+      - name: Take the bundle version from the release version
+        run: scripts/bundle-version.sh sync
+
       - name: Install the signing credentials
         env:
           APPLE_STORE_CERTIFICATES: ${{ secrets.APPLE_STORE_CERTIFICATES }}
@@ -318,6 +325,13 @@ jobs:
       - name: Install web dependencies
         run: pnpm install --frozen-lockfile
         working-directory: clients/web
+
+      # The bundle's marketing version (CFBundleShortVersionString) comes from
+      # clients/web/package.json, which this takes from the workspace's Cargo
+      # version as the desktop build does: a manual run is on a branch, with no
+      # tag to read, and the committed file may lag a release.
+      - name: Take the bundle version from the release version
+        run: scripts/bundle-version.sh sync
 
       - name: Install the signing credentials
         env:

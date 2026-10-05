@@ -101,6 +101,19 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
+      # The desktop, store and Android bundles ship clients/web/package.json's
+      # version, and release-plz bumps only Cargo.toml. release-plz.yml folds
+      # the package.json bump into the release PR; this is what fails a PR
+      # where one moved without the other. In the required lint-and-test job
+      # so the carry step failing blocks the merge rather than only reddening
+      # a job nobody has to pass. Needs cargo and node, both on the runner.
+      - id: bundle-version
+        name: web client version matches the workspace version
+        language: system
+        entry: scripts/bundle-version.sh check
+        files: '^(Cargo\.toml|clients/web/package\.json|scripts/(bundle|release)-version(-test)?\.sh)$'
+        pass_filenames: false
+        stages: [pre-push]
       - id: prettier
         name: prettier (check)
         language: node
