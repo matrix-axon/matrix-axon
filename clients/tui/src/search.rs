@@ -133,7 +133,7 @@ impl SearchResultsState {
                             &group_order
                                 .get(&(right_event.account_id, right_event.room_id.clone())),
                         )
-                        .then_with(|| self.compare_results_for_time_order(left, right))
+                        .then_with(|| self.compare_results_for_sort_order(left, right))
                 });
             }
         }
@@ -146,12 +146,16 @@ impl SearchResultsState {
             .position(|index| *index == self.selected)
     }
 
-    fn compare_results_for_time_order(&self, left: usize, right: usize) -> std::cmp::Ordering {
+    fn compare_results_for_sort_order(&self, left: usize, right: usize) -> std::cmp::Ordering {
+        if self.request.sort == SearchSortOrder::Relevance {
+            return left.cmp(&right);
+        }
         let left_event = &self.results[left].event;
         let right_event = &self.results[right].event;
         let by_time = match self.request.sort {
             SearchSortOrder::NewestFirst => right_event.origin_ts.cmp(&left_event.origin_ts),
             SearchSortOrder::OldestFirst => left_event.origin_ts.cmp(&right_event.origin_ts),
+            SearchSortOrder::Relevance => unreachable!(),
         };
         by_time
             .then_with(|| left_event.room_id.cmp(&right_event.room_id))
@@ -159,6 +163,17 @@ impl SearchResultsState {
     }
 
     fn room_group_order(&self) -> HashMap<(Uuid, String), usize> {
+        if self.request.sort == SearchSortOrder::Relevance {
+            let mut rooms = HashMap::new();
+            for result in &self.results {
+                let next = rooms.len();
+                let event = &result.event;
+                rooms
+                    .entry((event.account_id, event.room_id.clone()))
+                    .or_insert(next);
+            }
+            return rooms;
+        }
         let mut room_bounds: HashMap<(Uuid, String), (i64, i64)> = HashMap::new();
         for result in &self.results {
             let event = &result.event;
@@ -175,6 +190,7 @@ impl SearchResultsState {
                 let by_time = match self.request.sort {
                     SearchSortOrder::NewestFirst => right_max.cmp(left_max),
                     SearchSortOrder::OldestFirst => left_min.cmp(right_min),
+                    SearchSortOrder::Relevance => unreachable!(),
                 };
                 by_time
                     .then_with(|| left_room.cmp(right_room))
@@ -191,6 +207,7 @@ impl SearchResultsState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SearchSortOrder {
+    Relevance,
     NewestFirst,
     OldestFirst,
 }
@@ -199,12 +216,14 @@ impl SearchSortOrder {
     pub(crate) fn toggle(self) -> Self {
         match self {
             SearchSortOrder::NewestFirst => SearchSortOrder::OldestFirst,
-            SearchSortOrder::OldestFirst => SearchSortOrder::NewestFirst,
+            SearchSortOrder::OldestFirst => SearchSortOrder::Relevance,
+            SearchSortOrder::Relevance => SearchSortOrder::NewestFirst,
         }
     }
 
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::Relevance => "relevance",
             Self::NewestFirst => "newest",
             Self::OldestFirst => "oldest",
         }
@@ -212,6 +231,7 @@ impl SearchSortOrder {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
+            SearchSortOrder::Relevance => "relevance",
             SearchSortOrder::NewestFirst => "newest first",
             SearchSortOrder::OldestFirst => "oldest first",
         }
@@ -234,7 +254,7 @@ impl SearchGrouping {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            SearchGrouping::None => "time",
+            SearchGrouping::None => "none",
             SearchGrouping::Room => "room",
         }
     }
@@ -242,6 +262,8 @@ impl SearchGrouping {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SearchFormField {
+    Sort,
+    Group,
     Query,
     Scope,
     Account,
@@ -266,6 +288,8 @@ pub(crate) enum SearchScope {
 pub(crate) struct SearchFormState {
     pub(crate) field: SearchFormField,
     pub(crate) scope: SearchScope,
+    pub(crate) sort: SearchSortOrder,
+    pub(crate) grouping: SearchGrouping,
     pub(crate) query: String,
     pub(crate) account: String,
     pub(crate) room: String,
@@ -282,6 +306,8 @@ impl Default for SearchFormState {
         Self {
             field: SearchFormField::Query,
             scope: SearchScope::CurrentRoom,
+            sort: SearchSortOrder::NewestFirst,
+            grouping: SearchGrouping::None,
             query: String::new(),
             account: String::new(),
             room: String::new(),
@@ -318,6 +344,8 @@ impl SearchFormState {
         Self {
             field: SearchFormField::Query,
             scope,
+            sort: SearchSortOrder::NewestFirst,
+            grouping: SearchGrouping::None,
             query: parsed.query.clone(),
             account: if account == "*" {
                 String::new()
@@ -374,6 +402,21 @@ impl SearchFormState {
         self.ensure_visible_field();
     }
 
+    pub(crate) fn cycle_choice(&mut self, reverse: bool) {
+        match self.field {
+            SearchFormField::Scope => self.cycle_scope(reverse),
+            SearchFormField::Sort => {
+                self.sort = self.sort.toggle();
+                if reverse {
+                    self.sort = self.sort.toggle();
+                }
+            }
+            SearchFormField::Group => self.grouping = self.grouping.toggle(),
+            _ => {}
+        }
+        self.error = None;
+    }
+
     pub(crate) fn edit_buffer_mut(&mut self) -> Option<&mut String> {
         if !self.field_is_visible(&self.field) {
             self.ensure_visible_field();
@@ -387,7 +430,7 @@ impl SearchFormState {
             SearchFormField::After => Some(&mut self.after),
             SearchFormField::Before => Some(&mut self.before),
             SearchFormField::Limit => Some(&mut self.limit),
-            SearchFormField::Scope => None,
+            SearchFormField::Scope | SearchFormField::Sort | SearchFormField::Group => None,
         }
     }
 
@@ -412,7 +455,7 @@ impl SearchFormState {
             }
             SearchScope::SpecificAccount => fields.push(Account),
         }
-        fields.extend([Sender, Date, After, Before, Limit]);
+        fields.extend([Sender, Date, After, Before, Limit, Sort, Group]);
         fields
     }
 
@@ -858,6 +901,47 @@ mod tests {
 
         state.request.sort = SearchSortOrder::OldestFirst;
         assert_eq!(state.ordered_indices(), vec![0, 1]);
+    }
+
+    #[test]
+    fn relevance_preserves_rank_within_rooms_and_orders_rooms_by_best_hit() {
+        let mut state = search_state(vec![
+            search_result("!b:example.org", "$best", 10),
+            search_result("!a:example.org", "$second", 90),
+            search_result("!b:example.org", "$third", 100),
+        ]);
+        state.request.sort = SearchSortOrder::Relevance;
+        assert_eq!(state.ordered_indices(), vec![0, 1, 2]);
+        state.grouping = SearchGrouping::Room;
+        assert_eq!(state.ordered_indices(), vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn form_choices_cycle_both_directions_and_are_not_text_fields() {
+        let mut form = SearchFormState {
+            field: SearchFormField::Limit,
+            ..Default::default()
+        };
+        form.next_field(false);
+        assert_eq!(form.field, SearchFormField::Sort);
+        assert!(form.edit_buffer_mut().is_none());
+        form.cycle_choice(true);
+        assert_eq!(form.sort, SearchSortOrder::Relevance);
+        form.cycle_choice(false);
+        assert_eq!(form.sort, SearchSortOrder::NewestFirst);
+        form.cycle_choice(false);
+        assert_eq!(form.sort, SearchSortOrder::OldestFirst);
+        form.cycle_choice(false);
+        assert_eq!(form.sort, SearchSortOrder::Relevance);
+        form.next_field(false);
+        assert_eq!(form.field, SearchFormField::Group);
+        assert!(form.edit_buffer_mut().is_none());
+        form.cycle_choice(false);
+        assert_eq!(form.grouping, SearchGrouping::Room);
+        form.cycle_choice(true);
+        assert_eq!(form.grouping, SearchGrouping::None);
+        form.next_field(false);
+        assert_eq!(form.field, SearchFormField::Query);
     }
 
     #[test]

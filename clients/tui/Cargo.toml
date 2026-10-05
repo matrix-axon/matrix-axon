@@ -27,7 +27,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }
 uuid = { workspace = true, features = ["serde", "v4"] }
 zeroize = "1"
-ratatui = { workspace = true }
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 crossterm = { workspace = true }
 libc = "0.2"
 emojis = "0.8"

@@ -92,6 +92,7 @@ shows it.
   corpus to leave a room unread, not writing a longer scene.
 - **Search result sort / group / edit toggles.** These remain uncovered.
   TUI search defaults to server-wide newest-first ordering, and changing its sort restarts pagination while retaining room grouping.
+  The interactive search form also offers relevance sorting and initial room grouping; these choices remain uncovered.
   The `search` scene exercises the default ordering but does not toggle it or verify a match outside the first relevance page.
   A dedicated scene should wait for the refreshed results before continuing.
 

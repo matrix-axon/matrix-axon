@@ -45,8 +45,10 @@ date values such as `"last week"`, `"last year"`, `"this month"`, and
 
 Search results render in a dedicated overlay rather than the status line. The
 overlay lists hits with room, sender, timestamp, and snippet.
-The TUI requests `sort=newest` by default, and the results sort shortcut toggles `newest` and `oldest` on the server.
+The TUI requests `sort=newest` by default, and the results sort shortcut cycles `newest`, `oldest`, and `relevance` on the server.
 Each sort change restarts pagination without a cursor, so time ordering covers all matches rather than only loaded relevance-ranked pages.
+The interactive form exposes sort and grouping choices before the initial request; editing retains the selected choices.
+In relevance order, room groups follow their best-ranked loaded hit and retain server ranking within each room.
 Ungrouped results retain the server's order, including equal-timestamp ties; room grouping remains a local presentation of the loaded results.
 A generation counter rejects superseded initial/page responses, including switching back to the same query and sort while an older response remains in flight. The
 selected result lazily loads a small timeline context window around the hit.
