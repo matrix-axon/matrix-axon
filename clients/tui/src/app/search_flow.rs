@@ -6,7 +6,7 @@ use crate::api::{
 use crate::search::{
     parse_search_terms, ParsedSearch, SearchCommandInput, SearchContextKey, SearchFormState,
     SearchGrouping, SearchRequest, SearchResultContext, SearchResultsState, SearchScope,
-    SearchSortOrder, DEFAULT_CONTEXT_RADIUS, SEARCH_HELP_TEXT,
+    DEFAULT_CONTEXT_RADIUS, SEARCH_HELP_TEXT,
 };
 
 use super::{
@@ -19,11 +19,14 @@ const SEARCH_CONTEXT_LIMIT: usize = 25;
 #[derive(Debug)]
 pub(crate) enum SearchOutcome {
     Initial {
+        generation: u64,
+        grouping: Option<SearchGrouping>,
         request: SearchRequest,
         edit_form: SearchFormState,
         result: Result<SearchPage, ApiError>,
     },
     Page {
+        generation: u64,
         request: SearchRequest,
         cursor: String,
         result: Result<SearchPage, ApiError>,
@@ -110,7 +113,7 @@ impl App {
         parsed: ParsedSearch,
         edit_form: SearchFormState,
     ) {
-        let request = match self.search_request_from(parsed) {
+        let mut request = match self.search_request_from(parsed) {
             Ok(request) => request,
             Err(err) => {
                 self.status = Status::from(err);
@@ -121,10 +124,19 @@ impl App {
             self.status = Status::from("search requires text or at least one filter".to_owned());
             return;
         }
-        self.start_search_request(request, edit_form);
+        request.sort = edit_form.sort;
+        let grouping = edit_form.grouping;
+        self.start_search_request(request, edit_form, Some(grouping));
     }
 
-    fn start_search_request(&mut self, request: SearchRequest, edit_form: SearchFormState) {
+    fn start_search_request(
+        &mut self,
+        request: SearchRequest,
+        edit_form: SearchFormState,
+        grouping: Option<SearchGrouping>,
+    ) {
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let generation = self.search_generation;
         self.status = Status::from(searching_status(&request));
         self.pending_search = Some(request.clone());
         let Some(tx) = self.search_tx.clone() else {
@@ -136,6 +148,8 @@ impl App {
         tokio::spawn(async move {
             let result = client.search(&request).await;
             let _ = tx.send(SearchOutcome::Initial {
+                generation,
+                grouping,
                 request,
                 edit_form,
                 result,
@@ -146,15 +160,20 @@ impl App {
     pub(crate) fn handle_search_outcome(&mut self, outcome: SearchOutcome) {
         match outcome {
             SearchOutcome::Initial {
+                generation,
+                grouping,
                 request,
                 edit_form,
                 result,
-            } => self.apply_initial_search_outcome(request, edit_form, result),
+            } => {
+                self.apply_initial_search_outcome(generation, request, edit_form, grouping, result)
+            }
             SearchOutcome::Page {
+                generation,
                 request,
                 cursor,
                 result,
-            } => self.apply_search_page_outcome(request, &cursor, result),
+            } => self.apply_search_page_outcome(generation, request, &cursor, result),
             SearchOutcome::Context { key, hit, result } => {
                 self.apply_search_context_outcome(key, hit, result);
             }
@@ -178,14 +197,30 @@ impl App {
 
     fn apply_initial_search_outcome(
         &mut self,
+        generation: u64,
         request: SearchRequest,
         edit_form: SearchFormState,
+        grouping: Option<SearchGrouping>,
         result: Result<SearchPage, ApiError>,
     ) {
+        if generation != self.search_generation {
+            return;
+        }
         if self.pending_search.as_ref() != Some(&request) {
             return;
         }
         self.pending_search = None;
+        let preserve_edit_form = grouping.is_none() && self.mode == Mode::SearchForm;
+        // Form submissions choose grouping explicitly. Sort refreshes preserve
+        // the current grouping, including toggles made while awaiting a response.
+        let grouping = grouping.unwrap_or_else(|| {
+            self.search_results
+                .as_ref()
+                .map_or(SearchGrouping::None, |state| state.grouping)
+        });
+        let mut edit_form = edit_form;
+        edit_form.sort = request.sort;
+        edit_form.grouping = grouping;
         match result {
             Ok(page) => {
                 let total = page.total;
@@ -198,21 +233,26 @@ impl App {
                     next_cursor: page.next_cursor,
                     selected: 0,
                     loading: false,
-                    sort_order: SearchSortOrder::NewestFirst,
-                    grouping: SearchGrouping::None,
+                    grouping,
                     context_cache: Default::default(),
                 };
                 state.select_first_ordered();
                 self.search_results = Some(state);
-                self.mode = Mode::SearchResults;
-                self.status = Status::from(if count == 0 {
-                    "search: no results".to_owned()
-                } else {
-                    format!("search: showing {count} of {total}")
-                });
+                if !preserve_edit_form {
+                    self.mode = Mode::SearchResults;
+                    self.status = Status::from(if count == 0 {
+                        "search: no results".to_owned()
+                    } else {
+                        format!("search: showing {count} of {total}")
+                    });
+                }
                 self.request_selected_search_context();
             }
-            Err(err) => self.status = Status::from(search_error_status(&err)),
+            Err(err) => {
+                if !preserve_edit_form {
+                    self.status = Status::from(search_error_status(&err));
+                }
+            }
         }
     }
 
@@ -265,6 +305,7 @@ impl App {
             from: parsed.from,
             to: parsed.to,
             limit: parsed.limit.clamp(1, 200),
+            sort: crate::search::SearchSortOrder::NewestFirst,
             cursor: None,
         })
     }
@@ -391,11 +432,18 @@ impl App {
         let Some(state) = self.search_results.as_mut() else {
             return;
         };
-        state.sort_order = state.sort_order.toggle();
-        state.select_first_ordered();
-        let label = state.sort_order.label();
-        self.status = Status::from(format!("search: sorted {label}"));
-        self.request_selected_search_context();
+        let mut request = state.request.clone();
+        request.sort = self
+            .pending_search
+            .as_ref()
+            .map_or(request.sort, |pending| pending.sort)
+            .toggle();
+        request.cursor = None;
+        let edit_form = state.edit_form.clone();
+        // Supersede any page fetch while retaining the old results if the new
+        // ordering fails. Its response is guarded by the search generation.
+        state.loading = false;
+        self.start_search_request(request, edit_form, None);
     }
 
     pub(crate) async fn toggle_search_result_grouping(&mut self) {
@@ -403,6 +451,7 @@ impl App {
             return;
         };
         state.grouping = state.grouping.toggle();
+        state.edit_form.grouping = state.grouping;
         state.select_first_ordered();
         let label = state.grouping.label();
         self.status = Status::from(format!("search: grouped by {label}"));
@@ -423,6 +472,10 @@ impl App {
     }
 
     pub(crate) fn fetch_next_search_page(&mut self) {
+        if self.pending_search.is_some() {
+            return;
+        }
+        let generation = self.search_generation;
         let Some((base_request, cursor)) = self.search_results.as_mut().and_then(|state| {
             if state.loading {
                 None
@@ -453,6 +506,7 @@ impl App {
         tokio::spawn(async move {
             let result = client.search(&request).await;
             let _ = tx.send(SearchOutcome::Page {
+                generation,
                 request: base_request,
                 cursor,
                 result,
@@ -462,10 +516,14 @@ impl App {
 
     fn apply_search_page_outcome(
         &mut self,
+        generation: u64,
         request: SearchRequest,
         cursor: &str,
         result: Result<SearchPage, ApiError>,
     ) {
+        if generation != self.search_generation || self.pending_search.is_some() {
+            return;
+        }
         let Some(state) = self.search_results.as_mut() else {
             return;
         };
@@ -961,8 +1019,390 @@ mod tests {
             from: None,
             to: None,
             limit: crate::search::DEFAULT_SEARCH_LIMIT,
+            sort: crate::search::SearchSortOrder::NewestFirst,
             cursor: None,
         }
+    }
+
+    fn test_app() -> App {
+        App::new(
+            AxonClient::new("http://127.0.0.1:1".to_owned(), None),
+            None,
+            crate::config::TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        )
+    }
+
+    fn page(id: &str, cursor: Option<&str>) -> SearchPage {
+        serde_json::from_value(serde_json::json!({
+            "results": [{ "score": 0.1, "event": {
+                "account_id": Uuid::nil(), "event_id": id, "room_id": "!r:x",
+                "sender": "@alice:x", "origin_ts": 1000, "arrival_order": 1000,
+                "type": "m.room.message", "body": "needle", "redacted": false
+            }}], "total": 200, "next_cursor": cursor
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sort_refresh_preserves_an_open_edit_form_on_success_and_failure() {
+        for succeeds in [true, false] {
+            let mut app = test_app();
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            app.search_tx = Some(tx);
+            let parsed = parse_search_terms("all:true needle").unwrap();
+            app.run_parsed_search(parsed).await;
+            let initial = app.pending_search.clone().unwrap();
+            let form =
+                SearchFormState::from_parsed(&parse_search_terms("all:true needle").unwrap());
+            app.apply_initial_search_outcome(
+                app.search_generation,
+                initial,
+                form,
+                Some(SearchGrouping::None),
+                Ok(page("$original", None)),
+            );
+            app.toggle_search_result_sort_order().await;
+            let request = app.pending_search.clone().unwrap();
+            let saved_form = app.search_results.as_ref().unwrap().edit_form.clone();
+            app.edit_current_search();
+            app.search_form.query = "unfinished edit".to_owned();
+            app.search_form.sender = "alice".to_owned();
+            app.search_form.field = crate::search::SearchFormField::Sender;
+            app.search_form.grouping = SearchGrouping::Room;
+            app.search_form.sort = crate::search::SearchSortOrder::Relevance;
+            app.status = Status::from("editing sender");
+            let editing = app.search_form.clone();
+            let result = if succeeds {
+                Ok(page("$refreshed", Some("new-cursor")))
+            } else {
+                Err(ApiError::Status {
+                    status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    message: "unavailable".to_owned(),
+                })
+            };
+            app.apply_initial_search_outcome(
+                app.search_generation,
+                request.clone(),
+                saved_form,
+                None,
+                result,
+            );
+            assert_eq!(app.mode, Mode::SearchForm);
+            assert_eq!(app.search_form, editing);
+            assert!(matches!(&app.status, Status::Info(message) if message == "editing sender"));
+            assert!(app.pending_search.is_none());
+            let state = app.search_results.as_ref().unwrap();
+            if succeeds {
+                assert_eq!(state.request, request);
+                assert_eq!(state.results[0].event.event_id, "$refreshed");
+                assert_eq!(state.next_cursor.as_deref(), Some("new-cursor"));
+            } else {
+                assert_eq!(state.results[0].event.event_id, "$original");
+            }
+            // Submitting the edited form still opens its own results normally.
+            app.submit_search_form().await;
+            let request = app.pending_search.clone().unwrap();
+            app.apply_initial_search_outcome(
+                app.search_generation,
+                request,
+                editing,
+                Some(SearchGrouping::Room),
+                Ok(page("$edited", None)),
+            );
+            assert_eq!(app.mode, Mode::SearchResults);
+            assert_eq!(
+                app.search_results.as_ref().unwrap().results[0]
+                    .event
+                    .event_id,
+                "$edited"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sort_restarts_pagination_preserves_grouping_and_rejects_stale_outcomes() {
+        use crate::search::SearchSortOrder;
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.search_tx = Some(tx);
+        let mut initial = request();
+        initial.q = "needle".to_owned();
+        let form = SearchFormState::from_parsed(&parse_search_terms("needle").unwrap());
+        app.start_search_request(initial.clone(), form.clone(), Some(SearchGrouping::Room));
+        let first_generation = app.search_generation;
+        app.apply_initial_search_outcome(
+            first_generation,
+            initial.clone(),
+            form.clone(),
+            Some(SearchGrouping::Room),
+            Ok(page("$newest", Some("newest-cursor"))),
+        );
+        app.search_results.as_mut().unwrap().loading = true;
+
+        app.toggle_search_result_sort_order().await;
+        let oldest = app.pending_search.clone().unwrap();
+        assert_eq!(oldest.sort, SearchSortOrder::OldestFirst);
+        assert!(oldest.cursor.is_none());
+        app.apply_search_page_outcome(
+            first_generation,
+            initial.clone(),
+            "newest-cursor",
+            Ok(page("$stale-page", None)),
+        );
+        assert_eq!(app.search_results.as_ref().unwrap().results.len(), 1);
+
+        // Toggle back before the oldest response arrives. The request is again
+        // identical to the original, so request equality alone is insufficient.
+        app.toggle_search_result_sort_order().await;
+        assert_eq!(
+            app.pending_search.as_ref().unwrap().sort,
+            SearchSortOrder::Relevance
+        );
+        app.toggle_search_result_sort_order().await;
+        assert_eq!(app.pending_search.as_ref(), Some(&initial));
+        app.apply_initial_search_outcome(
+            first_generation,
+            initial.clone(),
+            form.clone(),
+            Some(SearchGrouping::None),
+            Ok(page("$stale-initial", None)),
+        );
+        assert_eq!(
+            app.search_results.as_ref().unwrap().results[0]
+                .event
+                .event_id,
+            "$newest"
+        );
+        app.apply_initial_search_outcome(
+            app.search_generation,
+            initial.clone(),
+            form.clone(),
+            Some(SearchGrouping::Room),
+            Ok(page("$fresh", Some("fresh-cursor"))),
+        );
+        let state = app.search_results.as_ref().unwrap();
+        assert_eq!(state.request.sort, SearchSortOrder::NewestFirst);
+        assert_eq!(state.grouping, SearchGrouping::Room);
+        assert_eq!(state.next_cursor.as_deref(), Some("fresh-cursor"));
+        assert_eq!(state.selected, 0);
+        app.apply_search_page_outcome(
+            app.search_generation,
+            initial,
+            "fresh-cursor",
+            Ok(page("$fresh-page", None)),
+        );
+        assert_eq!(app.search_results.as_ref().unwrap().results.len(), 2);
+
+        app.toggle_search_result_sort_order().await;
+        let pending = app.pending_search.clone().unwrap();
+        app.clear_search_results();
+        app.apply_initial_search_outcome(
+            app.search_generation,
+            pending,
+            form,
+            Some(SearchGrouping::Room),
+            Ok(page("$closed", None)),
+        );
+        assert!(app.search_results.is_none());
+        assert_eq!(app.mode, Mode::Compose);
+    }
+
+    #[tokio::test]
+    async fn failed_sort_keeps_previous_results_and_grouping_changes_survive_pending_sort() {
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.search_tx = Some(tx);
+        let initial = app
+            .search_request_from(parse_search_terms("all:true needle").unwrap())
+            .unwrap();
+        assert_eq!(initial.sort, crate::search::SearchSortOrder::NewestFirst);
+        let form = SearchFormState::from_parsed(&parse_search_terms("needle").unwrap());
+        app.start_search_request(initial.clone(), form.clone(), Some(SearchGrouping::None));
+        app.apply_initial_search_outcome(
+            app.search_generation,
+            initial,
+            form.clone(),
+            Some(SearchGrouping::None),
+            Ok(page("$kept", Some("kept-cursor"))),
+        );
+        app.toggle_search_result_sort_order().await;
+        let oldest = app.pending_search.clone().unwrap();
+        app.apply_initial_search_outcome(
+            app.search_generation,
+            oldest,
+            form.clone(),
+            Some(SearchGrouping::None),
+            Err(ApiError::Status {
+                status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                message: "unavailable".to_owned(),
+            }),
+        );
+        let state = app.search_results.as_ref().unwrap();
+        assert_eq!(state.results[0].event.event_id, "$kept");
+        assert_eq!(state.next_cursor.as_deref(), Some("kept-cursor"));
+        assert_eq!(
+            state.request.sort,
+            crate::search::SearchSortOrder::NewestFirst
+        );
+        assert!(!state.loading);
+        app.toggle_search_result_sort_order().await;
+        let oldest = app.pending_search.clone().unwrap();
+        app.toggle_search_result_grouping().await;
+        app.apply_initial_search_outcome(
+            app.search_generation,
+            oldest,
+            form,
+            None,
+            Ok(page("$oldest", None)),
+        );
+        assert_eq!(
+            app.search_results.as_ref().unwrap().grouping,
+            SearchGrouping::Room
+        );
+    }
+
+    #[tokio::test]
+    async fn form_keys_submit_choices_and_edit_can_replace_grouping_for_same_query() {
+        use crate::search::{SearchFormField, SearchSortOrder};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.search_tx = Some(tx);
+        app.open_search_form();
+        app.search_form.scope = SearchScope::All;
+        app.search_form.query = "needle".to_owned();
+        app.search_form.field = SearchFormField::Sort;
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.search_form.sort, SearchSortOrder::Relevance);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.search_form.field, SearchFormField::Group);
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.search_form.grouping, SearchGrouping::Room);
+        app.submit_search_form().await;
+        let request = app.pending_search.clone().unwrap();
+        assert_eq!(request.sort, SearchSortOrder::Relevance);
+        assert!(request.cursor.is_none());
+        app.apply_initial_search_outcome(
+            app.search_generation,
+            request.clone(),
+            app.search_form.clone(),
+            Some(SearchGrouping::Room),
+            Ok(page("$ranked", Some("ranked-cursor"))),
+        );
+        app.apply_search_page_outcome(
+            app.search_generation,
+            request.clone(),
+            "ranked-cursor",
+            Ok(page("$page", None)),
+        );
+        assert_eq!(
+            app.search_results.as_ref().unwrap().request.sort,
+            SearchSortOrder::Relevance
+        );
+        app.edit_current_search();
+        assert_eq!(app.search_form.sort, SearchSortOrder::Relevance);
+        assert_eq!(app.search_form.grouping, SearchGrouping::Room);
+        app.search_form.grouping = SearchGrouping::None;
+        app.submit_search_form().await;
+        assert_eq!(app.pending_search.as_ref(), Some(&request));
+        app.apply_initial_search_outcome(
+            app.search_generation,
+            request,
+            app.search_form.clone(),
+            Some(SearchGrouping::None),
+            Ok(page("$ungrouped", None)),
+        );
+        assert_eq!(
+            app.search_results.as_ref().unwrap().grouping,
+            SearchGrouping::None
+        );
+        app.toggle_search_result_sort_order().await;
+        let request = app.pending_search.clone().unwrap();
+        app.toggle_search_result_grouping().await;
+        app.apply_initial_search_outcome(
+            app.search_generation,
+            request,
+            app.search_form.clone(),
+            None,
+            Ok(page("$newest", None)),
+        );
+        app.edit_current_search();
+        assert_eq!(app.search_form.sort, SearchSortOrder::NewestFirst);
+        assert_eq!(app.search_form.grouping, SearchGrouping::Room);
+    }
+
+    #[tokio::test]
+    async fn search_sends_requested_order_on_initial_and_cursor_pages() {
+        use crate::search::SearchSortOrder;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut targets = Vec::new();
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut chunk = [0; 1024];
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    assert!(read > 0);
+                    bytes.extend_from_slice(&chunk[..read]);
+                    if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                targets.push(
+                    String::from_utf8(bytes)
+                        .unwrap()
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap()
+                        .to_owned(),
+                );
+                let body = r#"{"data":{"results":[],"total":0,"next_cursor":null}}"#;
+                socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+            targets
+        });
+        let client = AxonClient::new(format!("http://{address}"), None);
+        let mut params = request();
+        params.q = "needle".to_owned();
+        client.search(&params).await.unwrap();
+        params.sort = SearchSortOrder::OldestFirst;
+        params.cursor = Some("oldest-cursor".to_owned());
+        client.search(&params).await.unwrap();
+        params.sort = SearchSortOrder::Relevance;
+        params.cursor = Some("relevance-cursor".to_owned());
+        client.search(&params).await.unwrap();
+        let targets = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        let urls = targets
+            .iter()
+            .map(|target| reqwest::Url::parse(&format!("http://{address}{target}")).unwrap())
+            .collect::<Vec<_>>();
+        let params = urls
+            .iter()
+            .map(|url| {
+                url.query_pairs()
+                    .into_owned()
+                    .collect::<std::collections::HashMap<_, _>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(params[0]["sort"], "newest");
+        assert!(!params[0].contains_key("cursor"));
+        assert_eq!(params[1]["sort"], "oldest");
+        assert_eq!(params[1]["cursor"], "oldest-cursor");
+        assert_eq!(params[2]["sort"], "relevance");
+        assert_eq!(params[2]["cursor"], "relevance-cursor");
     }
 
     #[test]

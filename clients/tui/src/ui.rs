@@ -1473,7 +1473,13 @@ fn search_form_area(lines: &[Line<'static>], caption: &Line<'static>, screen: Re
     let max_width = screen.width.saturating_sub(2).max(1) as usize;
     let min_width = 42.min(max_width);
     let width = content_width.saturating_add(2).clamp(min_width, max_width) as u16;
-    let height = (lines.len() as u16)
+    // Use the same wrapping as the rendered paragraph so narrow terminals
+    // still display the final choices when the scope row spans several lines.
+    let wrapped_height = Paragraph::new(lines.to_vec())
+        .wrap(Wrap { trim: false })
+        .line_count(width.saturating_sub(2));
+    let height = u16::try_from(wrapped_height)
+        .unwrap_or(u16::MAX)
         .saturating_add(2)
         .min(screen.height.saturating_sub(2).max(3));
     centered_size(width.min(screen.width), height, screen)
@@ -1496,7 +1502,7 @@ fn search_form_caption() -> Line<'static> {
             " Left/Right/Space ",
             Style::default().add_modifier(Modifier::BOLD),
         ),
-        Span::raw("scope  "),
+        Span::raw("choose  "),
         Span::styled(" Enter ", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("search  "),
         Span::styled(" Esc ", Style::default().add_modifier(Modifier::BOLD)),
@@ -1586,6 +1592,22 @@ fn search_form_lines(app: &App) -> Vec<Line<'static>> {
             app,
         ),
     ]);
+    lines.push(search_form_field_line(
+        "Sort",
+        form.sort.label(),
+        "",
+        form.field == SearchFormField::Sort,
+        false,
+        app,
+    ));
+    lines.push(search_form_field_line(
+        "Group",
+        form.grouping.label(),
+        "",
+        form.field == SearchFormField::Group,
+        false,
+        app,
+    ));
     if let Some(error) = form.error.as_deref() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -1784,7 +1806,7 @@ fn search_results_lines(app: &App, width: usize, height: usize) -> Vec<Line<'sta
         Span::styled(
             format!(
                 "  sort: {}  group: {}",
-                state.sort_order.label(),
+                state.request.sort.label(),
                 state.grouping.label()
             ),
             Style::default().fg(Color::DarkGray),
@@ -3143,7 +3165,7 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
         Row::Kv("Home / End".to_owned(), "first / last result"),
         Row::Kv(
             shortcuts.search_sort.label(),
-            "toggle newest-first / oldest-first sort",
+            "cycle newest-first / oldest-first / relevance sort",
         ),
         Row::Kv(
             shortcuts.search_group.label(),
@@ -3898,6 +3920,29 @@ mod tests {
     }
 
     #[test]
+    fn search_form_renders_selected_sort_and_group_choices() {
+        let mut app = App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+        app.mode = Mode::SearchForm;
+        app.search_form.sort = crate::search::SearchSortOrder::Relevance;
+        app.search_form.grouping = SearchGrouping::Room;
+        app.search_form.field = SearchFormField::Sort;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        draw_frame(&mut terminal, &mut app);
+        let buffer = terminal.backend().buffer();
+        let text = (0..24)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("> Sort     relevance"), "{text}");
+        assert!(text.contains("Group    room"), "{text}");
+    }
+
+    #[test]
     fn search_results_lines_use_available_height() {
         let mut app = App::new(
             crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
@@ -3937,6 +3982,7 @@ mod tests {
                 from: None,
                 to: None,
                 limit: crate::search::DEFAULT_SEARCH_LIMIT,
+                sort: crate::search::SearchSortOrder::NewestFirst,
                 cursor: None,
             },
             edit_form: crate::search::SearchFormState::from_parsed(
@@ -3947,7 +3993,6 @@ mod tests {
             next_cursor: None,
             selected: 0,
             loading: false,
-            sort_order: crate::search::SearchSortOrder::NewestFirst,
             grouping: crate::search::SearchGrouping::None,
             context_cache: Default::default(),
         });
@@ -4005,6 +4050,7 @@ mod tests {
                 from: None,
                 to: None,
                 limit: crate::search::DEFAULT_SEARCH_LIMIT,
+                sort: crate::search::SearchSortOrder::OldestFirst,
                 cursor: None,
             },
             edit_form: crate::search::SearchFormState::from_parsed(
@@ -4015,7 +4061,6 @@ mod tests {
             next_cursor: None,
             selected: 2,
             loading: false,
-            sort_order: crate::search::SearchSortOrder::OldestFirst,
             grouping: crate::search::SearchGrouping::None,
             context_cache: Default::default(),
         });

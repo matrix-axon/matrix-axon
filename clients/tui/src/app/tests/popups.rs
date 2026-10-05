@@ -180,6 +180,7 @@ async fn search_results_edit_key_reopens_existing_query_form() {
             from: None,
             to: None,
             limit: crate::search::DEFAULT_SEARCH_LIMIT,
+            sort: crate::search::SearchSortOrder::NewestFirst,
             cursor: None,
         },
         edit_form: edit_form.clone(),
@@ -188,7 +189,6 @@ async fn search_results_edit_key_reopens_existing_query_form() {
         next_cursor: None,
         selected: 0,
         loading: false,
-        sort_order: crate::search::SearchSortOrder::NewestFirst,
         grouping: crate::search::SearchGrouping::None,
         context_cache: Default::default(),
     });

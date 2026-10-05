@@ -251,6 +251,7 @@ impl AxonClient {
         if let Some(to) = params.to {
             request = request.query(&[("to", to)]);
         }
+        request = request.query(&[("sort", params.sort.as_str())]);
         let limit = params.limit.to_string();
         request = request.query(&[("limit", limit.as_str())]);
         if let Some(cursor) = params.cursor.as_deref() {

@@ -301,16 +301,20 @@ impl App {
             || (key.code == KeyCode::Up && key.modifiers.is_empty())
         {
             self.search_form.next_field(true);
-        } else if self.search_form.field == SearchFormField::Scope
-            && key.code == KeyCode::Left
+        } else if matches!(
+            self.search_form.field,
+            SearchFormField::Scope | SearchFormField::Sort | SearchFormField::Group
+        ) && key.code == KeyCode::Left
             && key.modifiers.is_empty()
         {
-            self.search_form.cycle_scope(true);
-        } else if self.search_form.field == SearchFormField::Scope
-            && (key.code == KeyCode::Right || key.code == KeyCode::Char(' '))
+            self.search_form.cycle_choice(true);
+        } else if matches!(
+            self.search_form.field,
+            SearchFormField::Scope | SearchFormField::Sort | SearchFormField::Group
+        ) && (key.code == KeyCode::Right || key.code == KeyCode::Char(' '))
             && key.modifiers.is_empty()
         {
-            self.search_form.cycle_scope(false);
+            self.search_form.cycle_choice(false);
         } else if key.code == KeyCode::Left && key.modifiers == KeyModifiers::ALT {
             self.search_form.cycle_scope(true);
         } else if key.code == KeyCode::Right && key.modifiers == KeyModifiers::ALT {

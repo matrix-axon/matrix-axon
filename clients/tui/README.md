@@ -202,8 +202,8 @@ When the **Search Results** popup is open:
 | `Up` / `Down`         | Select the previous or next result.                           |
 | `PageUp` / `PageDown` | Page through results.                                         |
 | `Home` / `End`        | Jump to the first or last result.                             |
-| `s`                   | Toggle newest-first or oldest-first ordering.                 |
-| `g`                   | Toggle straight time ordering or room grouping.               |
+| `s`                   | Cycle newest-first, oldest-first, or relevance ordering.      |
+| `g`                   | Toggle ungrouped results or room grouping.                    |
 | `Enter`               | Jump to the selected result in the room timeline.             |
 | `r`                   | Reply to the selected result, after jumping to it.            |
 | `t`                   | Start a thread from the selected result, after jumping to it. |
@@ -431,3 +431,18 @@ and renders a small terminal-friendly subset: bold, italic, inline code, links,
 block quotes, lists, paragraphs, line breaks, and preformatted code blocks.
 Unsupported HTML is stripped, and the TUI falls back to plain `body` if the
 formatted content produces no displayable text.
+
+## Indexed search ordering
+
+`/search` requests newest-first results across all matching messages before pagination.
+The search results sort shortcut (`s` by default) cycles newest-first, oldest-first, and relevance by starting again at page one in the selected server order.
+Room grouping remains a local display option and is retained through a sort change.
+This requires a server supporting `GET /v1/search?sort=newest|oldest|relevance`; the server must include the date-sort support introduced in server PR [599](https://github.com/matrix-axon/matrix-axon/pull/599).
+Upgrade the server together with the client: older servers may ignore `sort`, leaving results in relevance order even when the TUI displays a date-sort selection.
+
+The interactive `/search` form includes **Sort** (newest first, oldest first, relevance) and **Group** (none, room) choices.
+Use Tab/Down or Shift+Tab/Up to select a field, then Left/Right/Space to change its choice before pressing Enter.
+New searches default to newest first with no grouping; editing results retains the selected sort and grouping.
+Room grouping applies to loaded results and, in relevance order, ranks rooms by their best hit while retaining the server ranking within each room.
+
+Editing a search while a sort refresh is pending keeps the form, unsent edits, and editing status visible when that refresh succeeds or fails.
