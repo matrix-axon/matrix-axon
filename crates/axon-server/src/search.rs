@@ -48,10 +48,11 @@ pub fn run(action: SearchAction, config: &Config) -> anyhow::Result<()> {
 /// Two resource bounds gate the query path (ADR 0039, "Resource boundedness"): a
 /// [`Semaphore`] caps concurrent searches so bearer-gated queries can't flood the
 /// blocking pool (over-limit requests queue, they aren't rejected), and a per-query
-/// timeout caps client-perceived latency. The concurrency permit is held by the
+/// timeout caps execution-response latency after acquiring a permit. The concurrency permit is held by the
 /// blocking task itself, so a timed-out search still counts against the cap until it
-/// drains. Together with the handler's offset cap — which bounds each query's *work*
-/// — they bound the endpoint's resource use.
+/// drains. The handler's offset cap bounds collector heap size; it does not
+/// bound total CPU work, which also depends on the number of matching documents.
+/// Date ordering scores every match to preserve scores and break timestamp ties.
 pub struct SearchAdapter {
     index: Arc<SearchIndex>,
     /// Bounds concurrent in-flight searches.
@@ -115,11 +116,11 @@ impl SearchQuery for SearchAdapter {
             index.search(&p)
         });
 
-        // Bound latency. A timed-out `spawn_blocking` closure can't be cancelled, so
-        // it runs to completion on the blocking pool — acceptable because the
-        // handler's offset cap already bounds each query's work, and its permit
-        // (moved into the closure above) keeps it counted against the concurrency
-        // cap until it drains.
+        // Bound execution-response latency. A timed-out blocking task can't be canceled, so
+        // it runs to completion on the blocking pool. The offset cap bounds the
+        // collector heap, not total work or completion time; broad searches can
+        // keep running after the response times out. The permit (moved into the
+        // closure above) keeps that work counted against the concurrency cap.
         let result = match tokio::time::timeout(self.timeout, query).await {
             Ok(joined) => joined,
             Err(_elapsed) => {
