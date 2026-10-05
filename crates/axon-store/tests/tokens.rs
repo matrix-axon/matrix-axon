@@ -65,7 +65,7 @@ async fn issue_then_verify_round_trips_and_touches_last_used() {
         .await
         .expect("verify")
         .expect("token is accepted");
-    assert_eq!(id, issued.id);
+    assert_eq!(id.id, issued.id);
 
     // Verification stamped last_used_at.
     let listed = store.list_tokens().await.expect("list");

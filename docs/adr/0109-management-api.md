@@ -1,7 +1,8 @@
 # ADR 0109 — A management API, so a client can administer the server
 
-**Status:** Proposed.
-Nothing here is implemented yet; this record is up for review before any code lands.
+**Status:** Accepted.
+Implemented in steps, tracked in #587; see "Sequence" below.
+Step 2 (the switch, step-up, identity list and unbind) is in.
 
 ## Context
 

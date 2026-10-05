@@ -643,6 +643,7 @@ Apple therefore never shows its Share My Email / Hide My Email choice to the nat
 The browser flow still requests `email`, so Hide My Email remains a browser acceptance check.
 
 A signed-in owner links an Apple ID from Settings with `purpose=bind` and their current bearer, then adopts the returned Apple session.
+_(Amended by ADR 0109: that bearer must never expire, or belong to a session whose upstream sign-in was within ten minutes; otherwise the challenge is refused with `recent_sign_in_required`. And `GET /v1/management/oauth/identities` now lists linked identities, so the next sentence describes the client before that route existed.)_
 Settings offers the link only when the current session is not an Apple one: an Apple session proves the link, while no `/v1` route lists linked identities, so any other session cannot tell whether one exists.
 Re-linking an already-linked Apple ID is harmless (the server binds idempotently) but would look like a button that does nothing.
 This is how a self-hoster with no Apple web credentials makes Apple sign-in work: sign in once with a CLI token or another provider, then link.

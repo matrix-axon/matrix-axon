@@ -27,6 +27,10 @@ pub struct RotatedRefreshToken {
     pub oauth_identity_id: Uuid,
     /// The client that redeemed it.
     pub client_id: String,
+    /// When the upstream sign-in that began this chain completed, carried
+    /// unchanged from the redeemed token (ADR 0109). `None` for a chain that
+    /// began before the column existed.
+    pub authenticated_at: Option<DateTime<Utc>>,
 }
 
 /// Why a refresh-token redemption was rejected.
@@ -63,22 +67,28 @@ impl Store {
     /// which bypasses this method entirely but — being a one-time,
     /// bootstrap-gated mint — can only ever add a single row, so it needs no
     /// sweep of its own.
+    ///
+    /// `authenticated_at` is when the upstream sign-in completed. It starts the
+    /// value every later rotation of this chain copies forward.
     pub async fn issue_refresh_token(
         &self,
         hash: &str,
         oauth_identity_id: Uuid,
         client_id: &str,
         expires_at: DateTime<Utc>,
+        authenticated_at: Option<DateTime<Utc>>,
     ) -> Result<Uuid, StoreError> {
         self.delete_stale_refresh_tokens().await?;
         let row = sqlx_core::query::query(
-            "INSERT INTO oauth_refresh_tokens (hash, oauth_identity_id, client_id, expires_at) \
-             VALUES ($1, $2, $3, $4) RETURNING id",
+            "INSERT INTO oauth_refresh_tokens \
+                 (hash, oauth_identity_id, client_id, expires_at, authenticated_at) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING id",
         )
         .bind(hash)
         .bind(oauth_identity_id)
         .bind(client_id)
         .bind(expires_at)
+        .bind(authenticated_at)
         .fetch_one(&self.pool)
         .await?;
         Ok(row.try_get("id")?)
@@ -110,13 +120,14 @@ impl Store {
                  UPDATE oauth_refresh_tokens \
                     SET revoked_at = now(), replaced_by = $2 \
                   WHERE hash = $1 AND revoked_at IS NULL AND expires_at > now() \
-              RETURNING oauth_identity_id, client_id \
+              RETURNING oauth_identity_id, client_id, authenticated_at \
              ), inserted AS ( \
-                 INSERT INTO oauth_refresh_tokens (id, hash, oauth_identity_id, client_id, expires_at) \
-                 SELECT $2, $3, oauth_identity_id, client_id, $4 FROM revoked \
-              RETURNING id, oauth_identity_id, client_id \
+                 INSERT INTO oauth_refresh_tokens \
+                     (id, hash, oauth_identity_id, client_id, expires_at, authenticated_at) \
+                 SELECT $2, $3, oauth_identity_id, client_id, $4, authenticated_at FROM revoked \
+              RETURNING id, oauth_identity_id, client_id, authenticated_at \
              ) \
-             SELECT id, oauth_identity_id, client_id FROM inserted",
+             SELECT id, oauth_identity_id, client_id, authenticated_at FROM inserted",
         )
         .bind(old_hash)
         .bind(new_id)
@@ -130,6 +141,7 @@ impl Store {
                 id: row.try_get("id")?,
                 oauth_identity_id: row.try_get("oauth_identity_id")?,
                 client_id: row.try_get("client_id")?,
+                authenticated_at: row.try_get("authenticated_at")?,
             }));
         }
 

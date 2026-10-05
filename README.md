@@ -260,6 +260,20 @@ AXON_TOKEN=<token> AXON_BASE_URL=<axon-server-url> axon utd redecrypt --account-
 `AXON_BASE_URL` defaults to `http://127.0.0.1:8080` if unset — set it explicitly whenever the server isn't on localhost, or the request silently goes nowhere useful and fails with a 401 (the token is fine; it's just being checked against the wrong server).
 See [Environment variables](#environment-variables) below for the full list of vars axon reads.
 
+### Managing the server from a client
+
+A signed-in client can administer the server through the management API under `/v1/management/` (ADR 0109), so the common jobs do not need a shell on the machine.
+Today that is listing the sign-in identities linked to you and unlinking one;
+tokens, search-index rebuilds and the decryption backlog follow.
+
+Changing credentials asks for more than being signed in.
+The request must come from a token that never expires (one minted by `axon-server token issue` or `init`), or from a session that signed in with its provider in the last ten minutes;
+otherwise the server answers `recent_sign_in_required` and the client signs you in again.
+Removing the last way to sign in is refused until you confirm it.
+
+It is on by default.
+To keep these operations behind the command line, set `server.management_api = false` (or `AXON_SERVER__MANAGEMENT_API=false`): every management route then answers `403`, and the `axon-server` subcommands keep working.
+
 ### TLS
 
 Axon serves plain HTTP.

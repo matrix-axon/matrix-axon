@@ -158,6 +158,19 @@ impl OAuthRuntime {
         }
     }
 
+    /// The providers a sign-in can currently go through, by either flow: the
+    /// enabled browser providers, plus Apple when only its native flow is on.
+    /// A bound identity is a usable credential only if its provider is here
+    /// (ADR 0109's lockout guard).
+    pub fn sign_in_providers(&self) -> Vec<String> {
+        let mut providers: Vec<String> = self.providers.keys().map(|p| (*p).to_owned()).collect();
+        if self.native_apple.is_some() && !self.providers.contains_key("apple") {
+            providers.push("apple".to_owned());
+        }
+        providers.sort_unstable();
+        providers
+    }
+
     /// Look up a constructed provider by name, if it's enabled and wired up.
     pub fn provider(&self, name: &str) -> Option<&Arc<dyn OidcProvider>> {
         self.providers.get(name)

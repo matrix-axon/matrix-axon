@@ -348,7 +348,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     .with_room_entry(room_entry)
     .with_room_settings(room_settings)
     .with_power_levels(power_levels)
-    .with_account_actions(account_actions);
+    .with_account_actions(account_actions)
+    .with_management(config.server.management_api);
+    if !config.server.management_api {
+        tracing::info!(
+            "management API disabled (server.management_api = false); \
+             /v1/management/* answers 403"
+        );
+    }
     if let Some(oauth) = oauth {
         state = state.with_oauth(oauth);
     }

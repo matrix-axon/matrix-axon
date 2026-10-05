@@ -1670,6 +1670,58 @@ pub struct StatusDto {
     pub build: BuildInfoDto,
     /// Per-account sync-service status.
     pub sync: Vec<AccountSyncStatusDto>,
+    /// The management API's availability (ADR 0109).
+    pub management: ManagementStatusDto,
+}
+
+/// Whether this server serves `/v1/management/*`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ManagementStatusDto {
+    /// False when the operator set `[server] management_api = false`; every
+    /// management route then answers `403 management_disabled`, and a client
+    /// should hide its management UI rather than probe.
+    pub enabled: bool,
+}
+
+/// An upstream sign-in identity bound to this instance's owner
+/// (`GET /v1/management/oauth/identities`). The provider's opaque subject is
+/// deliberately not exposed: it identifies nothing to a person, and `id` is
+/// what the API addresses an identity by.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OauthIdentityDto {
+    /// Stable id, used to unbind the identity.
+    pub id: Uuid,
+    /// The upstream provider: `"apple"`, `"google"` or `"microsoft"`.
+    pub provider: String,
+    /// The email the provider reported when the identity was bound, if any.
+    /// A label for the owner, never proof of ownership.
+    pub email: Option<String>,
+    /// When the identity was bound, RFC 3339.
+    pub linked_at: String,
+    /// Whether the calling session signed in with this identity. Unbinding it
+    /// ends that session.
+    pub current: bool,
+    /// Whether a sign-in with this identity is currently possible: OAuth is
+    /// enabled and so is this identity's provider. False means the identity is
+    /// bound but cannot produce a session.
+    pub sign_in_available: bool,
+}
+
+impl OauthIdentityDto {
+    pub(crate) fn new(
+        identity: axon_store::OauthIdentity,
+        caller: &crate::auth::AuthedToken,
+        sign_in_providers: &[String],
+    ) -> Self {
+        Self {
+            current: caller.oauth_identity_id == Some(identity.id),
+            sign_in_available: sign_in_providers.contains(&identity.provider),
+            id: identity.id,
+            provider: identity.provider,
+            email: identity.email,
+            linked_at: identity.linked_at.to_rfc3339(),
+        }
+    }
 }
 
 /// The running binary's build identity, mirroring the fields logged in the

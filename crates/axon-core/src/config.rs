@@ -136,6 +136,17 @@ pub struct ServerConfig {
     /// a proxied deployment also needs `bootstrap_web_allow_remote = true`.
     #[serde(default)]
     pub bootstrap_web_auto: bool,
+    /// Serve the management API under `/v1/management/` (ADR 0109): the routes
+    /// that let a client administer this instance — list and unbind sign-in
+    /// identities today, with tokens and index maintenance to follow —
+    /// without a shell on the server. Defaults to `true`.
+    ///
+    /// Set `false` to keep that power behind the command line. Every
+    /// management route then answers `403 management_disabled`, and
+    /// `GET /v1/status` reports it so clients hide the UI. The `axon-server`
+    /// subcommands are unaffected either way.
+    #[serde(default = "default_management_api")]
+    pub management_api: bool,
 }
 
 /// Postgres connection settings.
@@ -649,6 +660,10 @@ impl Default for OauthConfig {
     }
 }
 
+fn default_management_api() -> bool {
+    true
+}
+
 fn default_host() -> IpAddr {
     IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
@@ -970,6 +985,7 @@ impl Default for ServerConfig {
             bootstrap_web_allow_remote: false,
             web_client_url: None,
             bootstrap_web_auto: false,
+            management_api: default_management_api(),
         }
     }
 }
@@ -1353,6 +1369,30 @@ mod tests {
     }
 
     #[test]
+    fn management_api_defaults_on_and_can_be_switched_off() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://env@localhost/db");
+            assert!(Config::load(None).expect("load").server.management_api);
+
+            jail.create_file(
+                "axon.toml",
+                r#"
+                    [server]
+                    management_api = false
+                "#,
+            )?;
+            let config = Config::load(Some(Path::new("axon.toml"))).expect("load");
+            assert!(!config.server.management_api);
+
+            jail.set_env("AXON_SERVER__MANAGEMENT_API", "true");
+            let config = Config::load(Some(Path::new("axon.toml"))).expect("load");
+            assert!(config.server.management_api, "env beats file");
+            Ok(())
+        });
+    }
+
+    #[test]
     fn socket_addr_combines_host_and_port() {
         let config = Config {
             server: ServerConfig {
@@ -1362,6 +1402,7 @@ mod tests {
                 bootstrap_web_allow_remote: false,
                 web_client_url: None,
                 bootstrap_web_auto: false,
+                management_api: true,
             },
             database: DatabaseConfig {
                 url: "x".into(),

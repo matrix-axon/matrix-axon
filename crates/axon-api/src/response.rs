@@ -96,6 +96,42 @@ impl ApiError {
         Self::new(StatusCode::FORBIDDEN, "forbidden", message)
     }
 
+    /// `403 Forbidden` — the management API is switched off in this server's
+    /// configuration (`[server] management_api = false`, ADR 0109). A distinct
+    /// code so a client can say the operator disabled it, instead of treating
+    /// it as a permission the caller lacks.
+    pub fn management_disabled() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "management_disabled",
+            "The management API is disabled on this server.",
+        )
+    }
+
+    /// `403 Forbidden` — a credential change needs a non-expiring token or a
+    /// session whose interactive sign-in was recent (ADR 0109). The distinct
+    /// code tells a client to run its sign-in flow again and retry, which a
+    /// plain `forbidden` would not.
+    pub fn recent_sign_in_required() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "recent_sign_in_required",
+            "Sign in again to confirm it is you, then retry.",
+        )
+    }
+
+    /// `409 Conflict` — the removal would leave this instance with no way to
+    /// sign in (ADR 0109). Nothing was changed; the same request with
+    /// `allow_lockout=true` goes ahead.
+    pub fn last_credential() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "last_credential",
+            "This is the last way to sign in to this server. Removing it locks you out \
+             unless you have command-line access to the server.",
+        )
+    }
+
     /// `409 Conflict` — the request collides with the resource's current state
     /// (e.g. logging in an account that is already active).
     pub fn conflict(message: impl Into<String>) -> Self {

@@ -16,12 +16,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use axon_store::Store;
-use axum::extract::{Request, State};
+use axon_store::{Store, VerifiedToken};
+use axum::extract::{FromRequestParts, Request, State};
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use crate::response::ApiError;
 
@@ -34,15 +38,96 @@ const CHALLENGE_BEARER: HeaderValue = HeaderValue::from_static("Bearer");
 const CHALLENGE_INVALID_TOKEN: HeaderValue =
     HeaderValue::from_static("Bearer error=\"invalid_token\"");
 
+/// How recent an OAuth session's interactive sign-in must be for it to change
+/// credentials (ADR 0109).
+pub const RECENT_SIGN_IN_WINDOW: chrono::Duration = chrono::Duration::minutes(10);
+
+/// The bearer token that authenticated a request: what it is, never its
+/// secret. [`require_bearer`] attaches it to the request as an extension, so a
+/// handler behind the gate can take it as an [`axum::Extension`] or, for a
+/// credential change, as [`CredentialChange`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthedToken {
+    /// The token's id.
+    pub id: Uuid,
+    /// When it stops verifying; `None` for a token that never expires.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// When the upstream sign-in behind its session completed, if it has one.
+    pub authenticated_at: Option<DateTime<Utc>>,
+    /// The bound identity it was minted for, if any.
+    pub oauth_identity_id: Option<Uuid>,
+}
+
+impl AuthedToken {
+    /// Whether this token may change credentials (ADR 0109): it never expires,
+    /// or its session's interactive sign-in was within
+    /// [`RECENT_SIGN_IN_WINDOW`] of `now`.
+    ///
+    /// A non-expiring token is what an operator mints on purpose and can
+    /// revoke. An expiring one is an OAuth session, and a stolen access or
+    /// refresh token carries the original sign-in time: only a fresh proof
+    /// from the upstream provider moves it forward.
+    pub fn may_change_credentials(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_none()
+            || self
+                .authenticated_at
+                .is_some_and(|at| now.signed_duration_since(at) <= RECENT_SIGN_IN_WINDOW)
+    }
+}
+
+impl From<VerifiedToken> for AuthedToken {
+    fn from(token: VerifiedToken) -> Self {
+        Self {
+            id: token.id,
+            expires_at: token.expires_at,
+            authenticated_at: token.authenticated_at,
+            oauth_identity_id: token.oauth_identity_id,
+        }
+    }
+}
+
+/// Proof that the request may change credentials: extracting it *is* the
+/// step-up check, so a handler that mints, revokes, binds or unbinds cannot be
+/// written without it. Rejects with `403 recent_sign_in_required`.
+#[derive(Debug, Clone, Copy)]
+pub struct CredentialChange(pub AuthedToken);
+
+impl<S: Send + Sync> FromRequestParts<S> for CredentialChange {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        // Absent only if a route was mounted outside `require_bearer`: a
+        // wiring bug, and never a reason to let the request through.
+        let token = parts
+            .extensions
+            .get::<AuthedToken>()
+            .copied()
+            .ok_or_else(|| {
+                tracing::error!("credential-change route reached without an authenticated token");
+                ApiError::internal()
+            })?;
+        if !token.may_change_credentials(Utc::now()) {
+            tracing::info!(
+                token_id = %token.id,
+                reason = "recent_sign_in_required",
+                "Credential change refused"
+            );
+            return Err(ApiError::recent_sign_in_required());
+        }
+        Ok(Self(token))
+    }
+}
+
 /// Validates a presented bearer token. The seam between the API's auth gate and
 /// however tokens are actually issued/validated — held in
 /// [`AppState`](crate::AppState) as `Arc<dyn TokenVerifier>`.
 #[async_trait]
 pub trait TokenVerifier: Send + Sync {
-    /// Whether `token` (the raw bearer string, sans the `Bearer ` prefix) is
-    /// currently valid. `Ok(false)` is an unknown or revoked token; `Err` is an
-    /// infrastructure failure (e.g. the store), surfaced to the client as `500`.
-    async fn verify(&self, token: &str) -> Result<bool, ApiError>;
+    /// What `token` (the raw bearer string, sans the `Bearer ` prefix) is, if
+    /// it is currently valid. `Ok(None)` is an unknown, revoked or expired
+    /// token; `Err` is an infrastructure failure (e.g. the store), surfaced to
+    /// the client as `500`.
+    async fn verify(&self, token: &str) -> Result<Option<AuthedToken>, ApiError>;
 }
 
 /// The shipped [`TokenVerifier`]: hashes the presented token and looks it up in
@@ -62,9 +147,9 @@ impl StoreTokenVerifier {
 
 #[async_trait]
 impl TokenVerifier for StoreTokenVerifier {
-    async fn verify(&self, token: &str) -> Result<bool, ApiError> {
+    async fn verify(&self, token: &str) -> Result<Option<AuthedToken>, ApiError> {
         // A store failure converts into a logged 500 via `From<StoreError>`.
-        Ok(self.store.verify_token(token).await?.is_some())
+        Ok(self.store.verify_token(token).await?.map(AuthedToken::from))
     }
 }
 
@@ -148,13 +233,14 @@ fn challenge(message: impl Into<String>, challenge: HeaderValue) -> Response {
 /// HTTP middleware enforcing a valid bearer token on every request it guards.
 /// A missing or malformed `Authorization` header, or a token that fails
 /// verification, is a `401` carrying the appropriate `WWW-Authenticate: Bearer`
-/// challenge (RFC 6750); the guarded handler runs only on success.
+/// challenge (RFC 6750); the guarded handler runs only on success, with the
+/// verified [`AuthedToken`] attached to the request as an extension.
 ///
 /// The [`TokenVerifier`] is pulled from router state via `State`, so the same
 /// guard works for any verifier implementation.
 pub async fn require_bearer(
     State(verifier): State<Arc<dyn TokenVerifier>>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
     let Some(token) = bearer_from_headers(req.headers()) else {
@@ -162,8 +248,11 @@ pub async fn require_bearer(
     };
 
     match verifier.verify(token).await {
-        Ok(true) => next.run(req).await,
-        Ok(false) => invalid_token_response(),
+        Ok(Some(authed)) => {
+            req.extensions_mut().insert(authed);
+            next.run(req).await
+        }
+        Ok(None) => invalid_token_response(),
         Err(err) => err.into_response(),
     }
 }
@@ -213,6 +302,44 @@ mod tests {
         );
         assert!(!warnings.allow(now + Duration::from_secs(29)));
         assert!(warnings.allow(now + Duration::from_secs(30)));
+    }
+
+    fn token(
+        expires_in: Option<chrono::Duration>,
+        signed_in_ago: Option<chrono::Duration>,
+        now: DateTime<Utc>,
+    ) -> AuthedToken {
+        AuthedToken {
+            id: Uuid::nil(),
+            expires_at: expires_in.map(|d| now + d),
+            authenticated_at: signed_in_ago.map(|d| now - d),
+            oauth_identity_id: None,
+        }
+    }
+
+    #[test]
+    fn a_non_expiring_token_may_change_credentials_without_a_sign_in_time() {
+        let now = Utc::now();
+        assert!(token(None, None, now).may_change_credentials(now));
+    }
+
+    #[test]
+    fn an_expiring_token_needs_a_sign_in_inside_the_window() {
+        let now = Utc::now();
+        let hour = Some(chrono::Duration::hours(1));
+        let at = |ago| token(hour, Some(ago), now).may_change_credentials(now);
+        assert!(at(chrono::Duration::zero()));
+        assert!(at(RECENT_SIGN_IN_WINDOW));
+        assert!(!at(RECENT_SIGN_IN_WINDOW + chrono::Duration::seconds(1)));
+        assert!(!at(chrono::Duration::days(3)));
+    }
+
+    #[test]
+    fn an_expiring_token_with_no_recorded_sign_in_is_not_recent() {
+        // A session that began before the column existed, or a refresh chain
+        // that never carried a time: unknown is not recent.
+        let now = Utc::now();
+        assert!(!token(Some(chrono::Duration::hours(1)), None, now).may_change_credentials(now));
     }
 
     fn header(value: &'static str) -> HeaderMap {

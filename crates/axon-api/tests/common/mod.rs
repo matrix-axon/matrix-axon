@@ -14,10 +14,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axon_api::{
-    AccountActionsSender, AccountLifecycle, ApiError, BackupAction, CurrentTrust, DeleteError,
-    DeviceInfo, DeviceList, DeviceListError, DeviceListService, EphemeralSender, FlowStage,
-    FlowSummary, Formatted, LeaveOutcome, LoginError, LogoutError, MediaAttachment, MediaError,
-    MediaProxy, MediaResource, MemberProfile, MemberProfileError, MemberProfileService,
+    AccountActionsSender, AccountLifecycle, ApiError, AuthedToken, BackupAction, CurrentTrust,
+    DeleteError, DeviceInfo, DeviceList, DeviceListError, DeviceListService, EphemeralSender,
+    FlowStage, FlowSummary, Formatted, LeaveOutcome, LoginError, LogoutError, MediaAttachment,
+    MediaError, MediaProxy, MediaResource, MemberProfile, MemberProfileError, MemberProfileService,
     MembershipSender, MessageSender, PowerLevelsSender, RecoverError, RecoverResult,
     RedecryptUtdsError, RedecryptUtdsStats, Relation, RoomEntrySender, RoomSettingsSender,
     SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SendError,
@@ -50,6 +50,9 @@ pub const TEST_TOKEN: &str = "axon_test-token";
 pub struct StubTokenVerifier {
     accepted: String,
     active: Arc<AtomicBool>,
+    /// What the accepted token verifies as. Non-expiring by default, like a
+    /// CLI-minted token; [`verifying_as`](Self::verifying_as) overrides it.
+    token: AuthedToken,
 }
 
 impl StubTokenVerifier {
@@ -58,7 +61,20 @@ impl StubTokenVerifier {
         Self {
             accepted: TEST_TOKEN.to_owned(),
             active: Arc::new(AtomicBool::new(true)),
+            token: AuthedToken {
+                id: Uuid::nil(),
+                expires_at: None,
+                authenticated_at: None,
+                oauth_identity_id: None,
+            },
         }
+    }
+
+    /// Make [`TEST_TOKEN`] verify as `token` instead: an OAuth session with a
+    /// given expiry and sign-in time, say, to exercise step-up.
+    pub fn verifying_as(mut self, token: AuthedToken) -> Self {
+        self.token = token;
+        self
     }
 
     /// A handle to this stub's active flag. Store `false` into it to revoke the
@@ -70,8 +86,9 @@ impl StubTokenVerifier {
 
 #[async_trait]
 impl TokenVerifier for StubTokenVerifier {
-    async fn verify(&self, token: &str) -> Result<bool, ApiError> {
-        Ok(token == self.accepted && self.active.load(Ordering::SeqCst))
+    async fn verify(&self, token: &str) -> Result<Option<AuthedToken>, ApiError> {
+        let valid = token == self.accepted && self.active.load(Ordering::SeqCst);
+        Ok(valid.then_some(self.token))
     }
 }
 

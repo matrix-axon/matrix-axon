@@ -103,6 +103,8 @@ pub async fn mint_token_pair(
             provider,
             oauth_identity_id,
             client_id,
+            // Every caller mints straight from a verified upstream sign-in.
+            Some(now),
         )
         .await?;
 
@@ -115,6 +117,7 @@ pub async fn mint_token_pair(
             oauth_identity_id,
             client_id,
             refresh_expires_at,
+            Some(now),
         )
         .await?;
 
@@ -213,6 +216,9 @@ pub async fn redeem_refresh_token(
             &identity.provider,
             identity.id,
             &rotated.client_id,
+            // A refresh proves possession of the refresh token, not a fresh
+            // sign-in: the session keeps the time it started with.
+            rotated.authenticated_at,
         )
         .await?;
 

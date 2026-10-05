@@ -130,6 +130,7 @@ async fn issuing_a_token_sweeps_long_dead_rows_but_spares_fresh_ones() {
             identity.id,
             "client-a",
             now + Duration::days(30),
+            None,
         )
         .await
         .expect("issue");

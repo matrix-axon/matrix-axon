@@ -1,0 +1,22 @@
+-- When the session behind a credential last proved itself to its upstream
+-- provider (ADR 0109).
+--
+-- Management routes that change credentials require either a non-expiring
+-- token or an OAuth session whose interactive sign-in was recent. An access
+-- token lives an hour and is replaced on every refresh, so its own
+-- `created_at` says nothing about when the owner last signed in: the time has
+-- to be recorded at the upstream sign-in and carried along the refresh chain.
+--
+--   tokens.authenticated_at                when the sign-in that began this
+--                                          access token's session completed.
+--   oauth_refresh_tokens.authenticated_at  the same instant, copied unchanged
+--                                          into every rotation's replacement
+--                                          row, and from there into the access
+--                                          token each refresh mints.
+--
+-- Both are nullable and default NULL. A row written before this migration, and
+-- every non-OAuth token (`axon token issue`), has no sign-in time. NULL is
+-- "not recent": an existing OAuth session must sign in again before it can
+-- change credentials, which is the conservative reading of an unknown time.
+ALTER TABLE tokens ADD COLUMN authenticated_at TIMESTAMPTZ;
+ALTER TABLE oauth_refresh_tokens ADD COLUMN authenticated_at TIMESTAMPTZ;

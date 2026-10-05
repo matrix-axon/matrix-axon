@@ -76,6 +76,23 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for Token {
     }
 }
 
+/// What a presented bearer token proved to be, from [`Store::verify_token`].
+/// Carries no secret: only what an authorization decision needs to know about
+/// the credential that made a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedToken {
+    /// The token's row id.
+    pub id: Uuid,
+    /// When it stops verifying, or `None` for a token that never expires.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// When the upstream sign-in behind this token's session completed, or
+    /// `None` if it has none: a non-OAuth token, or an OAuth session that
+    /// began before the column existed (ADR 0109).
+    pub authenticated_at: Option<DateTime<Utc>>,
+    /// The bound identity this token was minted for, if any.
+    pub oauth_identity_id: Option<Uuid>,
+}
+
 /// A freshly minted token: the row id plus the **raw** secret, returned exactly
 /// once from [`Store::issue_token`] so the CLI can print it. The raw value is
 /// never stored or recoverable afterward.
@@ -102,6 +119,12 @@ const TOKEN_COLUMNS: &str =
     "id, label, created_at, last_used_at, revoked_at, expires_at, provider, oauth_identity_id, client_id";
 
 const BOOTSTRAP_LOCK_KEY: i64 = 0x4158_4f4e_424f_4f54;
+
+/// Serializes every write that removes a credential (ADR 0109). The lockout
+/// guard counts what a removal would leave behind; without one lock shared by
+/// all removals, two concurrent requests each see the other's credential as the
+/// survivor under `READ COMMITTED` and both commit.
+const CREDENTIAL_LOCK_KEY: i64 = 0x4158_4f4e_4352_4544;
 
 impl Store {
     /// Whether the one-time web bootstrap may still create the first login
@@ -173,26 +196,31 @@ impl Store {
     }
 
     /// Verify a presented bearer token. Hashes it, looks up an **unrevoked,
-    /// unexpired** row, and (on a match) stamps `last_used_at`. Returns the
-    /// token's id on success or `None` if the token is unknown, revoked, or
+    /// unexpired** row, and (on a match) stamps `last_used_at`. Returns what the
+    /// token is on success or `None` if the token is unknown, revoked, or
     /// expired. The match and the `last_used_at` touch happen in one
     /// statement so verification is a single round-trip on the hot path
     /// (every `/v1/` request goes through here). A CLI-minted token's
     /// `expires_at` is `NULL`, so `expires_at IS NULL` keeps it verifying
     /// forever exactly as before OAuth existed.
-    pub async fn verify_token(&self, raw: &str) -> Result<Option<Uuid>, StoreError> {
+    pub async fn verify_token(&self, raw: &str) -> Result<Option<VerifiedToken>, StoreError> {
         let hash = hash_token(raw);
         let row = sqlx_core::query::query(
             "UPDATE tokens SET last_used_at = now() \
              WHERE hash = $1 AND revoked_at IS NULL \
                AND (expires_at IS NULL OR expires_at > now()) \
-             RETURNING id",
+             RETURNING id, expires_at, authenticated_at, oauth_identity_id",
         )
         .bind(&hash)
         .fetch_optional(&self.pool)
         .await?;
         match row {
-            Some(row) => Ok(Some(row.try_get("id")?)),
+            Some(row) => Ok(Some(VerifiedToken {
+                id: row.try_get("id")?,
+                expires_at: row.try_get("expires_at")?,
+                authenticated_at: row.try_get("authenticated_at")?,
+                oauth_identity_id: row.try_get("oauth_identity_id")?,
+            })),
             None => Ok(None),
         }
     }
@@ -200,6 +228,10 @@ impl Store {
     /// Mint an OAuth-backed access token: like [`issue_token`](Self::issue_token),
     /// but carrying an expiry and the OAuth provenance columns. Used by the
     /// `oauth` module's token orchestration, never by the CLI.
+    ///
+    /// `authenticated_at` is when the upstream sign-in behind this session
+    /// completed: now for a token minted straight from one, the refresh
+    /// token's own recorded time for a token minted by a refresh.
     pub async fn issue_oauth_token(
         &self,
         label: &str,
@@ -207,12 +239,14 @@ impl Store {
         provider: &str,
         oauth_identity_id: Uuid,
         client_id: &str,
+        authenticated_at: Option<DateTime<Utc>>,
     ) -> Result<IssuedToken, StoreError> {
         let token = generate_token();
         let hash = hash_token(&token);
         let row = sqlx_core::query::query(
-            "INSERT INTO tokens (label, hash, expires_at, provider, oauth_identity_id, client_id) \
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+            "INSERT INTO tokens \
+                 (label, hash, expires_at, provider, oauth_identity_id, client_id, authenticated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
         )
         .bind(label)
         .bind(&hash)
@@ -220,6 +254,7 @@ impl Store {
         .bind(provider)
         .bind(oauth_identity_id)
         .bind(client_id)
+        .bind(authenticated_at)
         .fetch_one(&self.pool)
         .await?;
         Ok(IssuedToken {
@@ -257,13 +292,20 @@ impl Store {
     /// so the CLI can report the difference. Idempotent: the first revocation's
     /// timestamp is preserved (the `revoked_at IS NULL` guard makes a re-revoke a
     /// no-op).
+    ///
+    /// Takes the credential lock, like every credential-removing write, so a
+    /// guarded removal elsewhere never counts this token as a survivor while
+    /// it is being revoked.
     pub async fn revoke_token(&self, id: Uuid) -> Result<bool, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        Self::lock_credentials(&mut tx).await?;
         let result = sqlx_core::query::query(
             "UPDATE tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL",
         )
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -355,11 +397,16 @@ impl Store {
         access_expires_at: DateTime<Utc>,
         refresh_expires_at: DateTime<Utc>,
     ) -> Result<IssuedOAuthTokenPair, StoreError> {
+        // Every caller mints straight from a verified upstream sign-in, so the
+        // session's sign-in time is now. One value for both rows: the refresh
+        // chain must carry exactly what the access token shows.
+        let authenticated_at = Utc::now();
         let access_token = generate_token();
         let access_hash = hash_token(&access_token);
         sqlx_core::query::query(
-            "INSERT INTO tokens (label, hash, expires_at, provider, oauth_identity_id, client_id) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO tokens \
+                 (label, hash, expires_at, provider, oauth_identity_id, client_id, authenticated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(format!("oauth:{provider}:{client_id}"))
         .bind(&access_hash)
@@ -367,19 +414,22 @@ impl Store {
         .bind(provider)
         .bind(identity_id)
         .bind(client_id)
+        .bind(authenticated_at)
         .execute(&mut **tx)
         .await?;
 
         let refresh_token = generate_refresh_token();
         let refresh_hash = hash_token(&refresh_token);
         sqlx_core::query::query(
-            "INSERT INTO oauth_refresh_tokens (hash, oauth_identity_id, client_id, expires_at) \
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO oauth_refresh_tokens \
+                 (hash, oauth_identity_id, client_id, expires_at, authenticated_at) \
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(&refresh_hash)
         .bind(identity_id)
         .bind(client_id)
         .bind(refresh_expires_at)
+        .bind(authenticated_at)
         .execute(&mut **tx)
         .await?;
 
@@ -387,6 +437,43 @@ impl Store {
             access_token,
             refresh_token,
         })
+    }
+
+    /// Take the transaction-scoped credential lock. See [`CREDENTIAL_LOCK_KEY`].
+    pub(crate) async fn lock_credentials(
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> Result<(), StoreError> {
+        sqlx_core::query::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(CREDENTIAL_LOCK_KEY)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
+    /// Whether the owner could still sign in, given the state this transaction
+    /// would commit (ADR 0109). A surviving credential is an active token that
+    /// never expires, or a bound identity whose provider is in
+    /// `usable_providers`, the providers a sign-in could currently go through.
+    /// An expiring OAuth access token is never one, however long it has left.
+    ///
+    /// Call it after the removal's own writes and under
+    /// [`lock_credentials`](Self::lock_credentials), so the count is of what
+    /// would be left and no concurrent removal can change it.
+    pub(crate) async fn surviving_credential_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        usable_providers: &[String],
+    ) -> Result<bool, StoreError> {
+        let survives: bool = sqlx_core::query::query(
+            "SELECT EXISTS (SELECT 1 FROM tokens \
+                             WHERE revoked_at IS NULL AND expires_at IS NULL) \
+                 OR EXISTS (SELECT 1 FROM oauth_identities WHERE provider = ANY($1)) \
+                 AS survives",
+        )
+        .bind(usable_providers)
+        .fetch_one(&mut **tx)
+        .await?
+        .try_get("survives")?;
+        Ok(survives)
     }
 
     pub(crate) async fn lock_bootstrap(

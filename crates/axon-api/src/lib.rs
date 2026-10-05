@@ -37,7 +37,7 @@ mod uploads;
 mod verification;
 mod ws;
 
-pub use auth::{StoreTokenVerifier, TokenVerifier};
+pub use auth::{AuthedToken, StoreTokenVerifier, TokenVerifier, RECENT_SIGN_IN_WINDOW};
 pub use axon_core::{Formatted, MediaAttachment, MediaSendKind, Relation};
 pub use backfill::{BackfillStatusProvider, BackfillStatusSnapshot};
 pub use backup_state::BackupStateProvider;
@@ -72,7 +72,7 @@ pub use sender::{
     AccountActionsSender, EphemeralSender, LeaveOutcome, MembershipSender, MessageSender,
     PowerLevelsSender, RoomEntrySender, RoomSettingsSender, SendError,
 };
-pub use state::{AppState, BootstrapConfig};
+pub use state::{AppState, BootstrapConfig, ManagementConfig};
 pub use sync_state::SyncStateProvider;
 pub use sync_status::{AccountSyncSnapshot, SyncStatusProvider};
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
@@ -146,8 +146,27 @@ pub fn router(state: AppState) -> Router {
             post(routes::matrix_oauth_grant::submit_check_code),
         )
         .layer(DefaultBodyLimit::max(10 * 1024));
+    // The management API (ADR 0109). Its own sub-router so the operator's
+    // switch is one layer over all of it, for the same reason the bearer gate
+    // is: no management route can be added without it. Merged into `authed`
+    // below, so the bearer gate runs first and the switch answers only an
+    // authenticated caller.
+    let management = Router::new()
+        .route(
+            "/v1/management/oauth/identities",
+            get(routes::management::list_identities),
+        )
+        .route(
+            "/v1/management/oauth/identities/{identity_id}",
+            axum::routing::delete(routes::management::unbind_identity),
+        )
+        .route_layer(from_fn_with_state(
+            state.management,
+            routes::management::require_enabled,
+        ));
     let authed = Router::new()
         .merge(matrix_oauth_qr)
+        .merge(management)
         // Account read API: the cross-account list and a single account.
         .route("/v1/accounts", get(routes::accounts::list_accounts))
         // Runtime login / logout / recover — the secret-bearing lifecycle verbs.
