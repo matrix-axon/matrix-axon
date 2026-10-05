@@ -25,7 +25,7 @@ mod index;
 mod schema;
 mod writer;
 
-pub use index::{SearchHit, SearchIndex, SearchParams, SearchResults};
+pub use index::{SearchHit, SearchIndex, SearchParams, SearchResults, SearchSort};
 pub use writer::{IndexHandle, IndexerHandles, IndexerOptions};
 
 /// The index schema version. Bumped whenever the Tantivy schema or analyzer chain

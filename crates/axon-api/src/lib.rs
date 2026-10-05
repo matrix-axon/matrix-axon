@@ -67,7 +67,9 @@ pub use oauth::{
 };
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
-pub use search::{SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams};
+pub use search::{
+    SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SearchSort,
+};
 pub use sender::{
     AccountActionsSender, EphemeralSender, LeaveOutcome, MembershipSender, MessageSender,
     PowerLevelsSender, RoomEntrySender, RoomSettingsSender, SendError,

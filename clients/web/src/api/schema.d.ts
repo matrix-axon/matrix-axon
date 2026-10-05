@@ -1641,7 +1641,9 @@ export interface paths {
         };
         /**
          * Search across the index, BM25-ranked when a full-text query is present,
-         *     paginated.
+         *     or timestamp-ordered when `sort=newest` or `sort=oldest`, then paginated.
+         *     Keep the query filters and sort unchanged while following cursors.
+         *     Changing the sort requires starting again without a cursor.
          * @description `503` when search is disabled (`search.enabled = false`). A missing/empty `q`
          *     is allowed only with at least one narrowing filter (`account_id`, `room_id`,
          *     `sender`, `from`, or `to`); an unbounded empty query or malformed `cursor` is
@@ -3890,6 +3892,11 @@ export interface components {
              */
             score: number;
         };
+        /**
+         * @description Ordering applied to all matching documents before pagination.
+         * @enum {string}
+         */
+        SearchSort: "relevance" | "newest" | "oldest";
         /**
          * @description Request body for sending a staged media upload into a room
          *     (`POST …/rooms/{room_id}/send-media`). The `upload_id` must refer to an
@@ -10059,6 +10066,11 @@ export interface operations {
                 from?: number;
                 /** @description Inclusive upper bound on `origin_server_ts`, Unix milliseconds. */
                 to?: number;
+                /**
+                 * @description Sort all matches before pagination: relevance (default), newest, or oldest.
+                 *     Date ordering uses the event's origin timestamp, not arrival time.
+                 */
+                sort?: components["schemas"]["SearchSort"];
                 /** @description Page size (default 50, max 200). */
                 limit?: number;
                 /** @description Opaque cursor from a previous page's `next_cursor`; omit for the first page. */
@@ -10070,7 +10082,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description A page of ranked search results */
+            /** @description A page of search results in the requested order */
             200: {
                 headers: {
                     [name: string]: unknown;

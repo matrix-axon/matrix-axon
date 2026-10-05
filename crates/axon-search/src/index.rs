@@ -48,10 +48,24 @@ pub struct SearchParams<'a> {
     pub from_ts: Option<i64>,
     /// Inclusive upper bound on `origin_ts` (ms since epoch).
     pub to_ts: Option<i64>,
+    /// Ordering applied before pagination.
+    pub sort: SearchSort,
     /// Maximum hits to return.
     pub limit: usize,
     /// Number of leading hits to skip (offset pagination).
     pub offset: usize,
+}
+
+/// Ordering applied across all matches before selecting a page.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchSort {
+    /// Highest BM25 relevance first.
+    #[default]
+    Relevance,
+    /// Highest origin timestamp first.
+    Newest,
+    /// Lowest origin timestamp first.
+    Oldest,
 }
 
 /// One search hit: enough to hydrate the full event from Postgres, plus its score.
@@ -68,7 +82,7 @@ pub struct SearchHit {
 /// A page of search results.
 #[derive(Debug, Clone)]
 pub struct SearchResults {
-    /// The hits on this page, most relevant first.
+    /// The hits on this page, in the requested sort order.
     pub hits: Vec<SearchHit>,
     /// Total number of matching documents across all pages.
     pub total: usize,
@@ -181,8 +195,8 @@ impl SearchIndex {
         Ok(())
     }
 
-    /// Run a BM25 search, or a filter-only search when `text` is empty. Returns
-    /// the requested page of hits plus the total match count. A malformed `text`
+    /// Run a full-text or filter-only search, ordering matches before pagination.
+    /// Returns the requested page of hits plus the total match count. A malformed `text`
     /// query is a [`SearchError::BadQuery`].
     pub fn search(&self, params: &SearchParams<'_>) -> Result<SearchResults, SearchError> {
         let searcher = self.reader.searcher();
@@ -227,13 +241,51 @@ impl SearchIndex {
         }
         let query = BooleanQuery::new(clauses);
 
-        let collector = (
-            TopDocs::with_limit(params.limit)
-                .and_offset(params.offset)
-                .order_by_score(),
-            Count,
-        );
-        let (top, total) = searcher.search(&query, &collector)?;
+        let top_docs = TopDocs::with_limit(params.limit).and_offset(params.offset);
+        let (top, total) = match params.sort {
+            SearchSort::Relevance => {
+                searcher.search(&query, &(top_docs.order_by_score(), Count))?
+            }
+            sort => {
+                // Validate the fast field on every segment before constructing the
+                // infallible scoring closure. No schema change or rebuild is needed.
+                let timestamps = searcher
+                    .segment_readers()
+                    .iter()
+                    .map(|segment| {
+                        Ok((
+                            segment.segment_id(),
+                            segment
+                                .fast_fields()
+                                .i64("origin_ts")?
+                                .first_or_default_col(0),
+                        ))
+                    })
+                    .collect::<tantivy::Result<std::collections::HashMap<_, _>>>()?;
+                let collector = top_docs.tweak_score(move |segment: &tantivy::SegmentReader| {
+                    let timestamps = timestamps[&segment.segment_id()].clone();
+                    move |doc: tantivy::DocId, score: tantivy::Score| {
+                        // Map signed timestamps to unsigned order, then reverse for
+                        // oldest-first without overflow at i64::MIN. Relevance only
+                        // breaks equal-timestamp ties; retain it in the response.
+                        let timestamp = (timestamps.get_val(doc) as u64) ^ (1 << 63);
+                        let key = if sort == SearchSort::Oldest {
+                            !timestamp
+                        } else {
+                            timestamp
+                        };
+                        (key, score)
+                    }
+                });
+                let (top, total) = searcher.search(&query, &(collector, Count))?;
+                (
+                    top.into_iter()
+                        .map(|((_, score), addr)| (score, addr))
+                        .collect(),
+                    total,
+                )
+            }
+        };
 
         let mut hits = Vec::with_capacity(top.len());
         for (score, addr) in top {
@@ -427,8 +479,145 @@ mod tests {
             sender: None,
             from_ts: None,
             to_ts: None,
+            sort: SearchSort::Relevance,
             limit: 10,
             offset: 0,
+        }
+    }
+
+    #[test]
+    fn date_ordering_precedes_pagination_and_preserves_scores() {
+        let (index, _dir) = open_tmp();
+        let account = Uuid::new_v4();
+        let mut events = (0..60)
+            .map(|i| ev(account, &format!("$old-{i}"), "!r", "@u:x", i, "needle"))
+            .collect::<Vec<_>>();
+        events.push(ev(account, "$newest", "!r", "@u:x", i64::MAX,
+            "needle hidden among many other words with much lower relevance than the short messages"));
+        events.push(ev(
+            account,
+            "$oldest",
+            "!r",
+            "@u:x",
+            i64::MIN,
+            "needle also hidden among many other words with lower relevance",
+        ));
+        // A newer nonmatch must never appear in a full-text search.
+        events.push(ev(
+            account,
+            "$nonmatch",
+            "!r",
+            "@u:x",
+            i64::MAX,
+            "unrelated",
+        ));
+        index.index_for_test(&events);
+
+        let mut p = params("needle");
+        p.limit = 50;
+        let relevance = index.search(&p).unwrap();
+        assert_eq!(relevance.total, 62);
+        assert!(relevance
+            .hits
+            .iter()
+            .all(|hit| hit.event_id.starts_with("$old-")));
+        p.limit = 100;
+        let all = index.search(&p).unwrap();
+        p.limit = 50;
+        for (sort, first, last) in [
+            (SearchSort::Newest, "$newest", "$oldest"),
+            (SearchSort::Oldest, "$oldest", "$newest"),
+        ] {
+            p.sort = sort;
+            p.offset = 0;
+            let first_page = index.search(&p).unwrap();
+            assert_eq!(first_page.total, 62);
+            assert_eq!(first_page.hits[0].event_id, first);
+            p.offset = 50;
+            let second_page = index.search(&p).unwrap();
+            assert_eq!(second_page.hits.len(), 12);
+            assert_eq!(second_page.hits.last().unwrap().event_id, last);
+            let hits = first_page
+                .hits
+                .iter()
+                .chain(&second_page.hits)
+                .collect::<Vec<_>>();
+            let ids = hits
+                .iter()
+                .map(|hit| &hit.event_id)
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(ids.len(), 62, "pages have no duplicates or omissions");
+            let times = hits
+                .iter()
+                .map(|hit| {
+                    events
+                        .iter()
+                        .find(|event| event.event_id == hit.event_id)
+                        .unwrap()
+                        .origin_ts
+                })
+                .collect::<Vec<_>>();
+            assert!(times.windows(2).all(|pair| match sort {
+                SearchSort::Newest => pair[0] >= pair[1],
+                SearchSort::Oldest => pair[0] <= pair[1],
+                SearchSort::Relevance => unreachable!(),
+            }));
+            for hit in hits {
+                let ranked = all
+                    .hits
+                    .iter()
+                    .find(|ranked| ranked.event_id == hit.event_id)
+                    .unwrap();
+                assert_eq!(
+                    hit.score, ranked.score,
+                    "date ordering preserves BM25 scores"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn date_ordering_respects_filters_for_text_and_filter_only_queries() {
+        let (index, _dir) = open_tmp();
+        let account = Uuid::new_v4();
+        index.index_for_test(&[
+            ev(account, "$old", "!r", "@alice:x", -10, "needle"),
+            ev(account, "$new", "!r", "@alice:x", 10, "needle"),
+            ev(account, "$outside", "!r", "@alice:x", 100, "needle"),
+            ev(
+                Uuid::new_v4(),
+                "$other-account",
+                "!r",
+                "@alice:x",
+                15,
+                "needle",
+            ),
+            ev(account, "$other-room", "!other", "@alice:x", 15, "needle"),
+            ev(account, "$other-sender", "!r", "@bob:x", 15, "needle"),
+        ]);
+        for text in ["needle", ""] {
+            for (sort, expected) in [
+                (SearchSort::Newest, ["$new", "$old"]),
+                (SearchSort::Oldest, ["$old", "$new"]),
+            ] {
+                let mut p = params(text);
+                p.account_id = Some(account);
+                p.room_id = Some("!r");
+                p.sender = Some("alice");
+                p.from_ts = Some(-10);
+                p.to_ts = Some(20);
+                p.sort = sort;
+                let results = index.search(&p).unwrap();
+                assert_eq!(results.total, 2);
+                assert_eq!(
+                    results
+                        .hits
+                        .iter()
+                        .map(|hit| hit.event_id.as_str())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
         }
     }
 

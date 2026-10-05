@@ -52,8 +52,10 @@ pub fn decode(s: &str) -> Option<TimelineCursor> {
 }
 
 /// Encode a search offset into an opaque cursor string. Search results are
-/// BM25-ranked rather than keyset-ordered, so the page boundary is a plain offset;
-/// wrapping it keeps the on-the-wire contract opaque, like the timeline cursor.
+/// relevance- or timestamp-ordered using offset pagination, so the page boundary
+/// is a plain offset. It carries no query or sort identity: callers must retain
+/// the same filters and sort, and restart without a cursor when either changes.
+/// Wrapping it keeps the on-the-wire contract opaque, like the timeline cursor.
 pub fn encode_offset(offset: usize) -> String {
     URL_SAFE_NO_PAD.encode(offset.to_string())
 }

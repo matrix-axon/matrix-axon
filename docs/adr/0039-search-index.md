@@ -188,21 +188,27 @@ hydrate. Pagination is offset/limit (BM25 score doesn't compose with the timelin
 opaque cursor). Cross-account by default; `account_id` is an optional filter (tech
 spec: "account_id as a facet… scope to one account or aggregate across all").
 
-The query path is the first heavy user-triggered work on the bearer-gated API, so it
-carries three explicit resource bounds. **Per-query work** is bounded by capping the
-decoded paging offset (`MAX_OFFSET`): offset pagination is skip-N work at the index
-(Tantivy's collector keeps the top `offset + limit` docs), so a forged opaque cursor for
-a huge offset would amplify one authenticated request into large allocation/CPU — a
-cursor past the cap is a `400`, not an execution, and the cursor module is the single
-choke point that decodes offsets through a bounded helper. **Concurrency** is bounded by
-a semaphore in the query adapter (`search.max_concurrent_queries`, default 8): each query
-runs on a blocking thread and holds a Tantivy reader, so over-limit queries queue rather
-than flooding the blocking pool. The permit is owned by the blocking task itself, so it is
-released only when the search actually finishes — a timed-out but still-running search keeps
-counting against the cap, rather than freeing a slot a new request could claim while it runs.
-**Latency** is bounded by a per-query timeout (`search.query_timeout_ms`, default 10s) →
-`503`; a timed-out `spawn_blocking` closure can't be cancelled, but the offset cap already
-bounds its worst-case work, so it drains promptly. These are personal-scale defaults, tunable via `[search]`.
+The optional `sort` query parameter selects `relevance` (the default), `newest`, or `oldest`.
+Timestamp ordering uses `origin_ts` across all matching documents **before** offset/limit pagination, so a recent low-relevance match can lead the first page.
+Equal timestamps are ordered by relevance, then Tantivy document address; this is deterministic for an unchanged index, rather than a snapshot guarantee across index updates.
+The existing timestamp fast field supplies the ordering without a schema change or index rebuild.
+The response's `score` remains the BM25 score in every sort mode.
+Keep the filters and sort unchanged when following `next_cursor`; changing the sort starts a new search without a cursor.
+The cursor carries only an offset, so the server cannot detect reuse with a different query or sort and does not reject it.
+Such reuse can skip or repeat matches; query-bound cursors would require a separate compatibility design.
+Unknown sort values return `400`, and selecting a sort alone does not allow an unbounded empty query.
+Existing clients that omit `sort` retain relevance pagination and need a separate client change to request server date ordering.
+
+The query path is the first heavy user-triggered work on the bearer-gated API, so it carries three explicit resource bounds.
+**Collector memory** is bounded by capping the decoded paging offset (`MAX_OFFSET`): Tantivy keeps the top `offset + limit` documents per segment and merges them, so a forged huge offset would amplify allocation and heap maintenance.
+A cursor past the cap is a `400`, and the cursor module is the single place that decodes offsets through a bounded helper.
+The offset cap does not bound total CPU work: date ordering visits and scores every matching document to preserve BM25 scores and use relevance to break equal-timestamp ties, and the exact total count also requires visiting all matches.
+Broad queries can therefore cost more as the matching corpus grows, even with a small page size.
+**Concurrency** is bounded by a semaphore in the query adapter (`search.max_concurrent_queries`, default 8): each query runs on a blocking thread and holds a Tantivy reader, so over-limit queries queue rather than flooding the blocking pool.
+The blocking task owns its permit until it finishes; timing out the response does not release it while the work is still running.
+**Execution-response latency** after acquiring a permit is bounded by a per-query timeout (`search.query_timeout_ms`, default 10s), returning `503` on expiry.
+Permit acquisition itself is outside that timeout, and a timed-out `spawn_blocking` closure cannot be canceled, so neither total request latency nor background completion time has this bound.
+These are personal-scale defaults, tunable via `[search]`.
 
 ### Dependency direction
 

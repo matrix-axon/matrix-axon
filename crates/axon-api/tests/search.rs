@@ -146,7 +146,7 @@ async fn search_passes_filters_and_pagination_to_port() {
     // The first page's cursor encodes offset 50 (base64url of "50" = "NTA").
     let uri = format!(
         "/v1/search?q=hello%20world&account_id={account_id}&room_id=!r:localhost\
-         &sender=@bob:localhost&from=100&to=900&limit=500&cursor=NTA"
+         &sender=@bob:localhost&from=100&to=900&sort=newest&limit=500&cursor=NTA"
     );
     let (status, _body) = get(&app, &uri).await;
     assert_eq!(status, StatusCode::OK);
@@ -160,6 +160,7 @@ async fn search_passes_filters_and_pagination_to_port() {
     assert_eq!(p.sender.as_deref(), Some("@bob:localhost"));
     assert_eq!(p.from_ts, Some(100));
     assert_eq!(p.to_ts, Some(900));
+    assert_eq!(p.sort, axon_api::SearchSort::Newest);
     assert_eq!(p.limit, 200, "limit clamps to the max");
     assert_eq!(p.offset, 50, "cursor decodes to the offset");
 }
@@ -331,4 +332,32 @@ async fn search_disabled_is_503() {
     let (status, body) = get(&app, "/v1/search?q=hello").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"]["code"], "service_unavailable");
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL"]
+async fn search_sort_defaults_validates_and_does_not_count_as_a_filter() {
+    let store = store().await;
+    let stub = Arc::new(StubSearchQuery::returning(vec![], 0));
+    let app = search_app(store, Some(stub.clone()));
+    for (suffix, expected) in [
+        ("", axon_api::SearchSort::Relevance),
+        ("&sort=relevance", axon_api::SearchSort::Relevance),
+        ("&sort=newest", axon_api::SearchSort::Newest),
+        ("&sort=oldest", axon_api::SearchSort::Oldest),
+    ] {
+        let (status, body) = get(&app, &format!("/v1/search?q=needle{suffix}")).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(stub.calls().last().unwrap().sort, expected);
+    }
+    let calls = stub.calls().len();
+    for uri in ["/v1/search?q=needle&sort=invalid", "/v1/search?sort=newest"] {
+        let (status, body) = get(&app, uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    }
+    assert_eq!(
+        stub.calls().len(),
+        calls,
+        "invalid requests never reach the index"
+    );
 }
