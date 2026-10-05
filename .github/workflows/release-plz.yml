@@ -125,17 +125,23 @@ jobs:
       # authored: release-plz leaves a PR alone once someone else has committed
       # to it. The push uses the PAT, so the PR's checks run again on it.
       #
-      # No PR (nothing to release) leaves `prs` empty and skips the step.
+      # No PR (nothing to release) leaves `prs` empty and skips the step. A PR
+      # reported without a `head_branch` fails it, loudly: skipping quietly would
+      # let a schema change in the action ship a release with a stale package.json.
       - name: Carry the bundle version into the release PR
         if: steps.fresh.outputs.stale != 'true'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           PRS: ${{ steps.release-pr.outputs.prs }}
         run: |
-          branch=$(printf '%s' "${PRS:-[]}" | jq -r '.[0].head_branch // empty')
-          if [ -z "$branch" ]; then
+          if [ "$(printf '%s' "${PRS:-[]}" | jq 'length')" = 0 ]; then
             echo "No release PR was opened or updated; nothing to carry."
             exit 0
+          fi
+          branch=$(printf '%s' "$PRS" | jq -r '.[0].head_branch // empty')
+          if [ -z "$branch" ]; then
+            echo "::error::release-plz reported a release PR but its output has no head_branch, so the bundle version was not carried into it. prs=$PRS" >&2
+            exit 1
           fi
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git fetch origin "$branch"

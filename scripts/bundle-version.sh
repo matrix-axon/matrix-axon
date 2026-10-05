@@ -21,7 +21,7 @@ root=$(CDPATH="" cd -- "$(dirname "$0")/.." && pwd)
 package_json=${BUNDLE_PACKAGE_JSON:-$root/clients/web/package.json}
 
 usage() {
-	sed -n '2,16p' "$0" >&2
+	sed -n '2,17p' "$0" >&2
 }
 
 current() {
