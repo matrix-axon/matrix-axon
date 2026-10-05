@@ -39,8 +39,8 @@ redact-with-confirm, reaction toggle, and threads (badges, panel via
 across rooms, or — when you are in a room — that room's threads, toggled from
 the drawer title; hidden thread replies stay unread until their thread panel
 loads), full-text message search (M-W10, ADR 0066: a URL-addressed overlay
-opened with `/`, `Ctrl-G`, a topbar button, or `/search`, with chip/token filters and client-side
-re-sorting), `/leave`, `/part`, and `/forget` room-membership slash commands
+opened with `/`, `Ctrl-G`, a topbar button, or `/search`, with chip/token filters and server-side
+relevance/newest/oldest ordering across all matches), `/leave`, `/part`, and `/forget` room-membership slash commands
 (M19-W1), an incoming-invite inbox (`/invites`, Accept/Reject and Accept
 all/Reject all; an Invites row appears at the top of the room list when any
 are pending), `/invite` and `/cancel` room invite commands, room entry via
