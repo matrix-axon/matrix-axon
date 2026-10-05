@@ -179,8 +179,17 @@ jobs:
           # published release already here (a hand-made tag, or a build
           # workflow that got in first) only gets notes if it has none.
           # On a 404 gh prints the error JSON to stdout and exits non-zero, so
-          # a bare `|| true` would leave that JSON in $published.
-          published=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id 2>/dev/null) || published=""
+          # a bare `|| true` would leave that JSON in $published. Only a 404
+          # means "none published"; any other failure (5xx, rate limit,
+          # network) stops here rather than falling through to a create.
+          if published=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id 2>lookup.err); then
+            :
+          elif grep -q 'HTTP 404' lookup.err; then
+            published=""
+          else
+            cat lookup.err >&2
+            exit 1
+          fi
           if [ -n "$published" ]; then
             body=$(gh api "repos/$GITHUB_REPOSITORY/releases/$published" --jq '.body // ""')
             if [ -z "$body" ]; then
