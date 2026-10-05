@@ -90,11 +90,11 @@ shows it.
   corpus makes the viewer a member of every room from before its first message,
   so nothing is unread and the picker is empty. Covering it means teaching the
   corpus to leave a room unread, not writing a longer scene.
-- **Search result sort / group / edit toggles.** Each reloads asynchronously and
-  restores the result view when it lands, so an Esc that follows one can be
-  undone by it. The starting sort order is also not fixed between runs, so the
-  toggled label cannot be waited on. A scene here would be a race, and a flaky
-  scene is worse than an honest gap.
+- **Search result sort / group / edit toggles.** These remain uncovered.
+  TUI search defaults to server-wide newest-first ordering, and changing its sort restarts pagination while retaining room grouping.
+  The `search` scene exercises the default ordering but does not toggle it or verify a match outside the first relevance page.
+  A dedicated scene should wait for the refreshed results before continuing.
+
 - **Sending media, the remaining message actions, room actions.** These mutate
   the world. They are safe against the disposable local stack and worth adding;
   they are simply not written yet. `react` shows the pattern the rest should

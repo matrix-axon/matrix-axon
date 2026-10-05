@@ -44,7 +44,11 @@ date values such as `"last week"`, `"last year"`, `"this month"`, and
 `"last Tuesday"` must be quoted.
 
 Search results render in a dedicated overlay rather than the status line. The
-overlay lists ranked hits with room, sender, timestamp, and snippet. The
+overlay lists hits with room, sender, timestamp, and snippet.
+The TUI requests `sort=newest` by default, and the results sort shortcut toggles `newest` and `oldest` on the server.
+Each sort change restarts pagination without a cursor, so time ordering covers all matches rather than only loaded relevance-ranked pages.
+Ungrouped results retain the server's order, including equal-timestamp ties; room grouping remains a local presentation of the loaded results.
+A generation counter rejects superseded initial/page responses, including switching back to the same query and sort while an older response remains in flight. The
 selected result lazily loads a small timeline context window around the hit.
 `Enter` jumps to the result in the room timeline; reply/thread shortcuts first
 jump to the result and then use the TUI's normal selected-message action.

@@ -72,6 +72,7 @@ pub(crate) struct SearchRequest {
     pub(crate) from: Option<i64>,
     pub(crate) to: Option<i64>,
     pub(crate) limit: usize,
+    pub(crate) sort: SearchSortOrder,
     pub(crate) cursor: Option<String>,
 }
 
@@ -106,7 +107,6 @@ pub(crate) struct SearchResultsState {
     pub(crate) next_cursor: Option<String>,
     pub(crate) selected: usize,
     pub(crate) loading: bool,
-    pub(crate) sort_order: SearchSortOrder,
     pub(crate) grouping: SearchGrouping,
     pub(crate) context_cache: HashMap<SearchContextKey, SearchResultContext>,
 }
@@ -119,9 +119,9 @@ impl SearchResultsState {
     pub(crate) fn ordered_indices(&self) -> Vec<usize> {
         let mut indices = (0..self.results.len()).collect::<Vec<_>>();
         match self.grouping {
-            SearchGrouping::None => {
-                indices.sort_by(|&left, &right| self.compare_results_for_time_order(left, right));
-            }
+            // The server orders every match before pagination. Preserve its
+            // order (including equal-timestamp ties) when grouping is disabled.
+            SearchGrouping::None => {}
             SearchGrouping::Room => {
                 let group_order = self.room_group_order();
                 indices.sort_by(|&left, &right| {
@@ -149,7 +149,7 @@ impl SearchResultsState {
     fn compare_results_for_time_order(&self, left: usize, right: usize) -> std::cmp::Ordering {
         let left_event = &self.results[left].event;
         let right_event = &self.results[right].event;
-        let by_time = match self.sort_order {
+        let by_time = match self.request.sort {
             SearchSortOrder::NewestFirst => right_event.origin_ts.cmp(&left_event.origin_ts),
             SearchSortOrder::OldestFirst => left_event.origin_ts.cmp(&right_event.origin_ts),
         };
@@ -172,7 +172,7 @@ impl SearchResultsState {
         rooms.sort_by(
             |((left_account, left_room), (left_min, left_max)),
              ((right_account, right_room), (right_min, right_max))| {
-                let by_time = match self.sort_order {
+                let by_time = match self.request.sort {
                     SearchSortOrder::NewestFirst => right_max.cmp(left_max),
                     SearchSortOrder::OldestFirst => left_min.cmp(right_min),
                 };
@@ -200,6 +200,13 @@ impl SearchSortOrder {
         match self {
             SearchSortOrder::NewestFirst => SearchSortOrder::OldestFirst,
             SearchSortOrder::OldestFirst => SearchSortOrder::NewestFirst,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::NewestFirst => "newest",
+            Self::OldestFirst => "oldest",
         }
     }
 
@@ -827,6 +834,7 @@ mod tests {
                 from: None,
                 to: None,
                 limit: DEFAULT_SEARCH_LIMIT,
+                sort: crate::search::SearchSortOrder::NewestFirst,
                 cursor: None,
             },
             edit_form: SearchFormState::from_parsed(&parse_search_terms("needle").unwrap()),
@@ -835,21 +843,20 @@ mod tests {
             next_cursor: None,
             selected: 0,
             loading: false,
-            sort_order: SearchSortOrder::NewestFirst,
             grouping: SearchGrouping::None,
             context_cache: HashMap::new(),
         }
     }
 
     #[test]
-    fn orders_loaded_results_by_selected_time_order() {
+    fn preserves_server_order_without_grouping() {
         let mut state = search_state(vec![
             search_result("!a:example.org", "$old", 10),
             search_result("!b:example.org", "$new", 30),
         ]);
-        assert_eq!(state.ordered_indices(), vec![1, 0]);
+        assert_eq!(state.ordered_indices(), vec![0, 1]);
 
-        state.sort_order = SearchSortOrder::OldestFirst;
+        state.request.sort = SearchSortOrder::OldestFirst;
         assert_eq!(state.ordered_indices(), vec![0, 1]);
     }
 
@@ -863,22 +870,22 @@ mod tests {
         state.grouping = SearchGrouping::Room;
         assert_eq!(state.ordered_indices(), vec![2, 0, 1]);
 
-        state.sort_order = SearchSortOrder::OldestFirst;
+        state.request.sort = SearchSortOrder::OldestFirst;
         assert_eq!(state.ordered_indices(), vec![0, 2, 1]);
     }
 
     #[test]
     fn selects_first_result_in_current_order() {
         let mut state = search_state(vec![
-            search_result("!a:example.org", "$old", 10),
             search_result("!b:example.org", "$new", 30),
+            search_result("!a:example.org", "$old", 10),
         ]);
-        state.selected = 0;
+        state.selected = 1;
 
         state.select_first_ordered();
-        assert_eq!(state.selected, 1);
+        assert_eq!(state.selected, 0);
 
-        state.sort_order = SearchSortOrder::OldestFirst;
+        state.request.sort = SearchSortOrder::OldestFirst;
         state.select_first_ordered();
         assert_eq!(state.selected, 0);
     }

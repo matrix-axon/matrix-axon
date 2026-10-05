@@ -1784,7 +1784,7 @@ fn search_results_lines(app: &App, width: usize, height: usize) -> Vec<Line<'sta
         Span::styled(
             format!(
                 "  sort: {}  group: {}",
-                state.sort_order.label(),
+                state.request.sort.label(),
                 state.grouping.label()
             ),
             Style::default().fg(Color::DarkGray),
@@ -3937,6 +3937,7 @@ mod tests {
                 from: None,
                 to: None,
                 limit: crate::search::DEFAULT_SEARCH_LIMIT,
+                sort: crate::search::SearchSortOrder::NewestFirst,
                 cursor: None,
             },
             edit_form: crate::search::SearchFormState::from_parsed(
@@ -3947,7 +3948,6 @@ mod tests {
             next_cursor: None,
             selected: 0,
             loading: false,
-            sort_order: crate::search::SearchSortOrder::NewestFirst,
             grouping: crate::search::SearchGrouping::None,
             context_cache: Default::default(),
         });
@@ -4005,6 +4005,7 @@ mod tests {
                 from: None,
                 to: None,
                 limit: crate::search::DEFAULT_SEARCH_LIMIT,
+                sort: crate::search::SearchSortOrder::OldestFirst,
                 cursor: None,
             },
             edit_form: crate::search::SearchFormState::from_parsed(
@@ -4015,7 +4016,6 @@ mod tests {
             next_cursor: None,
             selected: 2,
             loading: false,
-            sort_order: crate::search::SearchSortOrder::OldestFirst,
             grouping: crate::search::SearchGrouping::None,
             context_cache: Default::default(),
         });

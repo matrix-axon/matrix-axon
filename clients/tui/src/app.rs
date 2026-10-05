@@ -791,6 +791,7 @@ pub(crate) struct App {
     /// applied. Stale responses are ignored so quick successive searches cannot
     /// replace newer results.
     pub(crate) pending_search: Option<SearchRequest>,
+    search_generation: u64,
     pub(crate) show_input_help: bool,
     pub(crate) status: Status,
     /// A completed slash-command response waiting for the renderer to decide
@@ -1203,6 +1204,7 @@ impl App {
             search_results: None,
             search_tx: None,
             pending_search: None,
+            search_generation: 0,
             show_input_help: true,
             status: Status::Info(config_status),
             pending_command_response: None,

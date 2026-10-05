@@ -431,3 +431,10 @@ and renders a small terminal-friendly subset: bold, italic, inline code, links,
 block quotes, lists, paragraphs, line breaks, and preformatted code blocks.
 Unsupported HTML is stripped, and the TUI falls back to plain `body` if the
 formatted content produces no displayable text.
+
+## Indexed search ordering
+
+`/search` requests newest-first results across all matching messages before pagination.
+The search results sort shortcut (`s` by default) toggles newest-first and oldest-first by starting again at page one in the selected server order.
+Room grouping remains a local display option and is retained through a sort change.
+This requires a server supporting `GET /v1/search?sort=newest|oldest`; older servers may ignore the parameter.
