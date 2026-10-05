@@ -58,7 +58,7 @@ fn sign_in_providers(oauth: Option<&OAuthRuntime>) -> Vec<String> {
     get,
     path = "/v1/management/oauth/identities",
     responses(
-        (status = 200, description = "The bound identities, oldest first", body = ApiResponse<Vec<OauthIdentityDto>>),
+        (status = 200, description = "The bound identities, most recently linked first", body = ApiResponse<Vec<OauthIdentityDto>>),
         (status = 403, description = "The management API is disabled (`management_disabled`)", body = crate::response::ErrorResponse),
     ),
     tag = "management",
@@ -132,11 +132,22 @@ pub async fn unbind_identity(
             .await?
     };
     match removal {
+        IdentityRemoval::Removed if query.allow_lockout => {
+            // The one path that skips the lockout guard, and so the one that
+            // can leave the owner with no way in: worth more than an info line.
+            tracing::warn!(
+                acting_token_id = %caller.id,
+                %identity_id,
+                allow_lockout = true,
+                "OAuth identity unbound through the management API with the lockout guard overridden"
+            );
+            Ok(StatusCode::NO_CONTENT)
+        }
         IdentityRemoval::Removed => {
             tracing::info!(
                 acting_token_id = %caller.id,
                 %identity_id,
-                allow_lockout = query.allow_lockout,
+                allow_lockout = false,
                 "OAuth identity unbound through the management API"
             );
             Ok(StatusCode::NO_CONTENT)

@@ -7053,7 +7053,7 @@
         "operationId": "list_identities",
         "responses": {
           "200": {
-            "description": "The bound identities, oldest first",
+            "description": "The bound identities, most recently linked first",
             "content": {
               "application/json": {
                 "schema": {

@@ -272,6 +272,11 @@ async fn the_list_marks_the_callers_identity_and_unusable_providers() {
     assert_eq!(status, StatusCode::OK);
     let list = body["data"].as_array().unwrap();
     assert_eq!(list.len(), 2);
+    // Most recently linked first, as documented: Apple was bound after Google.
+    assert_eq!(
+        [&list[0]["id"], &list[1]["id"]],
+        [&apple.to_string(), &google.to_string()]
+    );
     let entry = |id: Uuid| {
         list.iter()
             .find(|identity| identity["id"] == id.to_string())

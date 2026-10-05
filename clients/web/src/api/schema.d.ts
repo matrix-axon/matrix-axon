@@ -9188,7 +9188,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The bound identities, oldest first */
+            /** @description The bound identities, most recently linked first */
             200: {
                 headers: {
                     [name: string]: unknown;

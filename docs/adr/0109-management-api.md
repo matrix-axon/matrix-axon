@@ -79,6 +79,10 @@ That is takeover of the instance and lockout of its owner, and an audit trail is
 So the routes split in two.
 
 **Reads and index maintenance need only a valid bearer:** the token list, the identity list, bind status, the backlog count, and the search rebuild.
+This is a decision, not an oversight.
+The identity list shows which providers are linked and the email each reported, so a stolen short-lived bearer can read them.
+That bearer can already read every message in every account, and gating the list behind step-up would stop a signed-in owner from seeing what is linked without re-authenticating first.
+The provider's subject, the value that actually identifies the owner to the provider, is not returned.
 
 **Credential changes need step-up:** minting a token, revoking a token, starting a bind, and unbinding an identity, with or without `allow_lockout`.
 A request passes if the calling token is either:
@@ -135,6 +139,7 @@ Visibility stays, as the second line of defense:
 - `tokens` gains a `created_by_token_id` column, recorded on every API mint.
 - Every mint, revoke, bind and unbind writes a `tracing` line with the acting token's id and the target's id.
   No secret is logged.
+  A removal that overrides the lockout guard is logged at `warn`, since it is the one path that can lock the owner out.
 - The token list returns every token, including revoked ones, so an unexpected entry is visible to the owner.
 
 To make any of this possible, `TokenVerifier::verify` returns the token's id, expiry and sign-in time, and `require_bearer` attaches them to the request as an extension that handlers can extract.
