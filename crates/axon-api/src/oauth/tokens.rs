@@ -87,12 +87,18 @@ pub fn verify_pkce(code_verifier: &str, code_challenge: &str, code_challenge_met
 /// The only caller-trusted input is `oauth_identity_id` — every path that
 /// reaches here has already verified the identity is genuinely bound
 /// (Path A via `redeem_authorization_code`, Path B via `redeem_identity_token`).
+///
+/// `authenticated_at` is the verified identity token's authentication time
+/// (see [`authentication_time`](crate::oauth::authentication_time)), passed in
+/// because this function runs at redemption and its own clock proves nothing
+/// about when the owner signed in.
 pub async fn mint_token_pair(
     store: &Store,
     runtime: &OAuthRuntime,
     oauth_identity_id: Uuid,
     provider: &str,
     client_id: &str,
+    authenticated_at: Option<chrono::DateTime<Utc>>,
 ) -> Result<TokenPair, TokenError> {
     let now = Utc::now();
     let access_expires_at = now + runtime.access_token_ttl;
@@ -103,6 +109,7 @@ pub async fn mint_token_pair(
             provider,
             oauth_identity_id,
             client_id,
+            authenticated_at,
         )
         .await?;
 
@@ -115,6 +122,7 @@ pub async fn mint_token_pair(
             oauth_identity_id,
             client_id,
             refresh_expires_at,
+            authenticated_at,
         )
         .await?;
 
@@ -162,6 +170,8 @@ pub async fn redeem_authorization_code(
         oauth_identity_id,
         &request.provider,
         client_id,
+        // Verified at the callback and kept on the row; not this moment.
+        request.authenticated_at,
     )
     .await
 }
@@ -213,6 +223,9 @@ pub async fn redeem_refresh_token(
             &identity.provider,
             identity.id,
             &rotated.client_id,
+            // A refresh proves possession of the refresh token, not a fresh
+            // sign-in: the session keeps the time it started with.
+            rotated.authenticated_at,
         )
         .await?;
 
@@ -254,6 +267,8 @@ pub async fn redeem_identity_token(
                 client_id,
                 access_expires_at: Utc::now() + runtime.access_token_ttl,
                 refresh_expires_at: Utc::now() + runtime.refresh_token_ttl,
+                // This grant is nonce-free, so this is `auth_time` or nothing.
+                authenticated_at: verified.authenticated_at,
             },
             None,
         )

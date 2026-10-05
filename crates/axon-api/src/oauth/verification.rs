@@ -25,6 +25,9 @@ struct Claims {
     nonce: Option<String>,
     #[serde(default)]
     jti: Option<String>,
+    /// OIDC's time of end-user authentication, distinct from `iat`.
+    #[serde(default)]
+    auth_time: Option<i64>,
     /// Microsoft's tenant id claim — substituted into a `{tenantid}`-templated
     /// issuer to validate multi-tenant tokens. Absent for Google.
     #[serde(default)]
@@ -118,6 +121,13 @@ pub(super) async fn verify(
         subject: claims.sub,
         email: claims.email,
         replay_key,
+        // `nonce` was checked against the claim above, so `is_some` here
+        // means the token is bound to a nonce the caller expected.
+        authenticated_at: super::provider::authentication_time(
+            claims.auth_time,
+            claims.iat,
+            nonce.is_some(),
+        ),
     })
 }
 

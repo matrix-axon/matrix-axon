@@ -240,7 +240,12 @@ this table is the orientation copy.
   Follow idiomatic open-source Rust unless there's a specific reason to deviate.
   Keep the dependency graph simple and prefer indirection (a consumer-owned port + composition-root adapter, ADR 0021) over tight coupling.
   When an ADR justifies a dependency choice against an alternative already in the graph, explain the _behavioral_ difference, not just a library preference.
-- **What not to build:** no push (APNs/FCM), no admin API, no multi-human-per-process, no federation, no S3 media backend — see `docs/mvp/implementation.md` "What not to build" for the full list.
+- **What not to build:** no push (APNs/FCM), no multi-human-per-process, no federation, no S3 media backend — see `docs/mvp/implementation.md` "What not to build" for the full list.
+- **Management API (ADR 0109).**
+  Routes that administer the instance live under `/v1/management/`, in their own sub-router behind one layer for the `[server] management_api` switch — add a management route there, never beside it.
+  A handler that changes credentials (mint, revoke, bind, unbind) takes the `CredentialChange` extractor, which is the step-up check: a non-expiring token, or a session whose upstream sign-in was within ten minutes.
+  A write that removes a credential takes the store's credential lock and, from the API, the lockout guard.
+  This is runtime state only; it does not edit the config file.
 - **Spelling:** U.S. English throughout all source files, comments, and docs (e.g. "initialize" not "initialise", "honors" not "honours").
   Note that the Matrix spec itself uses some Britishisms (`m.tag` `favourite`), in which case the standard should be used in code.
 - **Version control:** some developers who contribute to this repo use [jj (Jujutsu)](https://github.com/jj-vcs/jj) in colocated mode alongside git (both `.jj/` and `.git/` are present).

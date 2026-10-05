@@ -117,9 +117,19 @@ impl From<AuthorityError> for TokenError {
     }
 }
 
+/// Which leg of a native flow is asking for its authority.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Leg {
+    /// Creating the challenge: where a bind is authorized.
+    Challenge,
+    /// Redeeming it: the same authority must still hold.
+    Redeem,
+}
+
 async fn authority(
     store: &Store,
     purpose: &str,
+    leg: Leg,
     headers: &HeaderMap,
     bootstrap: &Option<BootstrapConfig>,
     code: Option<&str>,
@@ -130,8 +140,25 @@ async fn authority(
         "bind" if code.is_none() => {
             let raw = crate::auth::bearer_from_headers(headers)
                 .ok_or_else(|| ApiError::forbidden("an active owner bearer is required"))?;
-            if raw.len() > 512 || store.verify_token(raw).await?.is_none() {
+            let owner = if raw.len() > 512 {
+                None
+            } else {
+                store.verify_token(raw).await?
+            };
+            let Some(owner) = owner.map(crate::auth::AuthedToken::from) else {
                 return Err(ApiError::forbidden("an active owner bearer is required").into());
+            };
+            // Binding an identity is a credential change (ADR 0109). Without
+            // this, a stolen short-lived bearer could bind an identity its
+            // thief controls, sign in with it, and arrive holding the fresh
+            // sign-in time every other credential change demands.
+            //
+            // Decided when the challenge is created. Redemption only needs the
+            // same bearer to still be active (rechecked here and, under lock,
+            // in the store): re-applying the window there would fail a bind
+            // whose Apple sheet happened to straddle the ten-minute mark.
+            if leg == Leg::Challenge && !owner.may_change_credentials(Utc::now()) {
+                return Err(ApiError::recent_sign_in_required().into());
             }
             Ok(Some(axon_core::hash_secret(raw)))
         }
@@ -158,10 +185,10 @@ async fn authority(
 }
 
 #[utoipa::path(post, path="/v1/oauth/apple/native/challenge",
-    params(("Authorization" = Option<String>, Header, description = "Bearer owner token; required for purpose=bind, omitted for login/bootstrap.")),
+    params(("Authorization" = Option<String>, Header, description = "Bearer owner token; required for purpose=bind, omitted for login/bootstrap. A bind is a credential change: the token must never expire, or come from a sign-in in the last ten minutes.")),
     request_body(content=NativeChallengeRequest, content_type="application/x-www-form-urlencoded"),
     responses((status=200, body=NativeChallengeResponse), (status=400, description="Invalid form or request", body=NativeErrorBody),
-        (status=403, description="Owner authorization required", body=crate::response::ErrorResponse),
+        (status=403, description="Owner authorization required. For purpose=bind the bearer must also be non-expiring or from a sign-in in the last ten minutes, else the code is `recent_sign_in_required`.", body=crate::response::ErrorResponse),
         (status=404, description="Native Apple disabled", body=crate::response::ErrorResponse),
         (status=409, description="Bootstrap closed", body=crate::response::ErrorResponse),
         (status=413, description="Body too large", body=crate::response::ErrorResponse),
@@ -181,6 +208,7 @@ pub async fn challenge(
     let authority_hash = authority(
         &store,
         &body.purpose,
+        Leg::Challenge,
         &headers,
         &bootstrap,
         body.bootstrap_code.as_deref(),
@@ -267,6 +295,7 @@ pub async fn token(
         let authorization = authority(
             &store,
             &c.purpose,
+            Leg::Redeem,
             &headers,
             &bootstrap,
             body.bootstrap_code.as_deref(),
@@ -295,6 +324,7 @@ pub async fn token(
                     client_id: &body.client_id,
                     access_expires_at: Utc::now() + runtime.access_token_ttl,
                     refresh_expires_at: Utc::now() + runtime.refresh_token_ttl,
+                    authenticated_at: verified.authenticated_at,
                 },
                 Some(&c),
             )

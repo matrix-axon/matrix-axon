@@ -7043,6 +7043,140 @@
         }
       }
     },
+    "/v1/management/oauth/identities": {
+      "get": {
+        "tags": [
+          "management"
+        ],
+        "summary": "List the upstream sign-in identities bound to this instance's owner.",
+        "description": "Each carries `current`, set on the identity the calling session signed in\nwith, and `sign_in_available`, false when its provider is switched off and\nthe identity therefore cannot produce a session.",
+        "operationId": "list_identities",
+        "responses": {
+          "200": {
+            "description": "The bound identities, most recently linked first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_OauthIdentityDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The management API is disabled (`management_disabled`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/management/oauth/identities/{identity_id}": {
+      "delete": {
+        "tags": [
+          "management"
+        ],
+        "summary": "Unbind a sign-in identity and end every session it was used to start.",
+        "description": "Axon forgets the identity: its access tokens are revoked and its refresh\ntokens deleted, atomically. This does **not** revoke the upstream\nprovider's own authorization of Axon; that is the provider's to withdraw.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise). Unbinding the identity the calling\nsession signed in with ends that session too.",
+        "operationId": "unbind_identity",
+        "parameters": [
+          {
+            "name": "identity_id",
+            "in": "path",
+            "description": "The identity's id, from the list",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "allow_lockout",
+            "in": "query",
+            "description": "Go ahead even if this is the last way to sign in. Without it such a\nrequest is refused with `409 last_credential` and changes nothing.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The identity was unbound"
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`management_disabled`, or `recent_sign_in_required`: sign in again and retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`last_credential`: this is the last way to sign in. Nothing was changed; repeat with `allow_lockout=true` to go ahead",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/media/{account_id}/{server_name}/{media_id}": {
       "get": {
         "tags": [
@@ -7392,7 +7526,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "Bearer owner token; required for purpose=bind, omitted for login/bootstrap.",
+            "description": "Bearer owner token; required for purpose=bind, omitted for login/bootstrap. A bind is a credential change: the token must never expire, or come from a sign-in in the last ten minutes.",
             "required": false,
             "schema": {
               "type": [
@@ -7434,7 +7568,7 @@
             }
           },
           "403": {
-            "description": "Owner authorization required",
+            "description": "Owner authorization required. For purpose=bind the bearer must also be non-expiring or from a sign-in in the last ten minutes, else the code is `recent_sign_in_required`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8178,7 +8312,7 @@
         "tags": [
           "status"
         ],
-        "summary": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress; per-account sync-service status;\nand the running build's identity.",
+        "summary": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress; per-account sync-service status;\nthe running build's identity; and whether the management API is served.",
         "operationId": "get_status",
         "responses": {
           "200": {
@@ -9431,7 +9565,8 @@
             "required": [
               "backfill",
               "build",
-              "sync"
+              "sync",
+              "management"
             ],
             "properties": {
               "backfill": {
@@ -9441,6 +9576,10 @@
               "build": {
                 "$ref": "#/components/schemas/BuildInfoDto",
                 "description": "The running binary's build identity."
+              },
+              "management": {
+                "$ref": "#/components/schemas/ManagementStatusDto",
+                "description": "The management API's availability (ADR 0109)."
               },
               "sync": {
                 "type": "array",
@@ -9954,6 +10093,59 @@
                 "provider": {
                   "type": "string",
                   "description": "The value to pass as `provider` to `GET /v1/oauth/authorize`, e.g.\n`\"google\"`."
+                }
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_Vec_OauthIdentityDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "An upstream sign-in identity bound to this instance's owner\n(`GET /v1/management/oauth/identities`). The provider's opaque subject is\ndeliberately not exposed: it identifies nothing to a person, and `id` is\nwhat the API addresses an identity by.",
+              "required": [
+                "id",
+                "provider",
+                "linked_at",
+                "current",
+                "sign_in_available"
+              ],
+              "properties": {
+                "current": {
+                  "type": "boolean",
+                  "description": "Whether the calling session signed in with this identity. Unbinding it\nends that session."
+                },
+                "email": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The email the provider reported when the identity was bound, if any.\nA label for the owner, never proof of ownership."
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "Stable id, used to unbind the identity."
+                },
+                "linked_at": {
+                  "type": "string",
+                  "description": "When the identity was bound, RFC 3339."
+                },
+                "provider": {
+                  "type": "string",
+                  "description": "The upstream provider: `\"apple\"`, `\"google\"` or `\"microsoft\"`."
+                },
+                "sign_in_available": {
+                  "type": "boolean",
+                  "description": "Whether a sign-in with this identity is currently possible: OAuth is\nenabled and so is this identity's provider. False means the identity is\nbound but cannot produce a session."
                 }
               }
             }
@@ -11190,6 +11382,19 @@
           }
         }
       },
+      "ManagementStatusDto": {
+        "type": "object",
+        "description": "Whether this server serves `/v1/management/*`.",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "False when the operator set `[server] management_api = false`; every\nmanagement route then answers `403 management_disabled`, and a client\nshould hide its management UI rather than probe."
+          }
+        }
+      },
       "MatrixOAuthQrFlowDto": {
         "type": "object",
         "description": "Replayable, presentation-safe state of one QR login flow. Optional fields\nare omitted unless they belong to the current stage.",
@@ -11526,6 +11731,47 @@
           "provider": {
             "type": "string",
             "description": "The value to pass as `provider` to `GET /v1/oauth/authorize`, e.g.\n`\"google\"`."
+          }
+        }
+      },
+      "OauthIdentityDto": {
+        "type": "object",
+        "description": "An upstream sign-in identity bound to this instance's owner\n(`GET /v1/management/oauth/identities`). The provider's opaque subject is\ndeliberately not exposed: it identifies nothing to a person, and `id` is\nwhat the API addresses an identity by.",
+        "required": [
+          "id",
+          "provider",
+          "linked_at",
+          "current",
+          "sign_in_available"
+        ],
+        "properties": {
+          "current": {
+            "type": "boolean",
+            "description": "Whether the calling session signed in with this identity. Unbinding it\nends that session."
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The email the provider reported when the identity was bound, if any.\nA label for the owner, never proof of ownership."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable id, used to unbind the identity."
+          },
+          "linked_at": {
+            "type": "string",
+            "description": "When the identity was bound, RFC 3339."
+          },
+          "provider": {
+            "type": "string",
+            "description": "The upstream provider: `\"apple\"`, `\"google\"` or `\"microsoft\"`."
+          },
+          "sign_in_available": {
+            "type": "boolean",
+            "description": "Whether a sign-in with this identity is currently possible: OAuth is\nenabled and so is this identity's provider. False means the identity is\nbound but cannot produce a session."
           }
         }
       },
@@ -12578,7 +12824,8 @@
         "required": [
           "backfill",
           "build",
-          "sync"
+          "sync",
+          "management"
         ],
         "properties": {
           "backfill": {
@@ -12588,6 +12835,10 @@
           "build": {
             "$ref": "#/components/schemas/BuildInfoDto",
             "description": "The running binary's build identity."
+          },
+          "management": {
+            "$ref": "#/components/schemas/ManagementStatusDto",
+            "description": "The management API's availability (ADR 0109)."
           },
           "sync": {
             "type": "array",
@@ -12882,6 +13133,10 @@
     {
       "name": "status",
       "description": "Server health and backfill status"
+    },
+    {
+      "name": "management",
+      "description": "Administering this instance from a client (ADR 0109); switched off with `[server] management_api = false`"
     },
     {
       "name": "events",

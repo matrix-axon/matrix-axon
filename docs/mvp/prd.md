@@ -96,7 +96,7 @@ These are deliberately deferred. Many appear on the post-MVP roadmap.
 - **Spaces as first-class API resources.** Events flow through; no space-specific endpoints.
 - **Voice / video signaling.**
 - **Advanced search UI** (faceted, semantic). Backend ships, simple search input ships in `axon-tui`; rich UI does not.
-- **Admin API.**
+- **Admin API.** _(Post-MVP, superseded by ADR 0109: a management API under `/v1/management/`, on by default and switchable off with `server.management_api`.)_
 - **Backup / restore tooling.**
 - **Migration tooling from existing clients.** Onboarding is fresh sync only.
 - **QR-code device verification.** Interactive SAS (emoji) verification and recovery-key device verification ship as a first-class account-lifecycle API (and `axon-tui` can drive them); QR-code verification is a follow-up.

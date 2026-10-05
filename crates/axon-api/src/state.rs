@@ -193,6 +193,23 @@ pub struct AppState {
     /// was started interactively, the operator explicitly armed it, and the DB
     /// had no accounts or credentials at boot.
     pub bootstrap: Option<BootstrapConfig>,
+    /// The management API's operator switch (ADR 0109). On by default, as the
+    /// config key is; the binary passes `[server] management_api` through
+    /// [`with_management`](Self::with_management).
+    pub management: ManagementConfig,
+}
+
+/// Whether `/v1/management/*` is served (`[server] management_api`, ADR 0109).
+/// Its own type so the gate layer and `GET /v1/status` read one value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ManagementConfig {
+    pub enabled: bool,
+}
+
+impl Default for ManagementConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Clone)]
@@ -341,6 +358,7 @@ impl AppState {
             backup_state: Arc::new(NoBackupState),
             oauth: None,
             bootstrap: None,
+            management: ManagementConfig::default(),
         }
     }
 
@@ -488,6 +506,13 @@ impl AppState {
     /// default `None` (every oauth route 404s).
     pub fn with_oauth(mut self, oauth: Arc<OAuthRuntime>) -> Self {
         self.oauth = Some(oauth);
+        self
+    }
+
+    /// Set whether the management API is served. The binary calls this with
+    /// `[server] management_api`; tests that don't care keep it enabled.
+    pub fn with_management(mut self, enabled: bool) -> Self {
+        self.management = ManagementConfig { enabled };
         self
     }
 
@@ -875,6 +900,12 @@ impl StagedUploadService for DisabledStagedUploads {
         Err(StageUploadError::Internal(
             "staged upload service is not configured".to_owned(),
         ))
+    }
+}
+
+impl FromRef<AppState> for ManagementConfig {
+    fn from_ref(state: &AppState) -> ManagementConfig {
+        state.management
     }
 }
 

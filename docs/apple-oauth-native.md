@@ -77,10 +77,14 @@ Use `purpose=bind` and the existing owner's `Authorization: Bearer` header at bo
 The same bearer must still be active when the transaction redeems the challenge.
 Success binds the verified Apple subject and returns its new access/refresh pair.
 There is no unauthenticated first-user claim.
-As specified by ADR 0054, an active owner session includes an OAuth-issued bearer, not just a CLI-issued token.
-These are full-owner credentials: a stolen short-lived bearer can authorize a persistent identity binding that survives its expiry or revocation.
-Operators must revoke unauthorized identities as well as compromised sessions.
-Requiring local approval, step-up authentication, or a separate binding privilege would be a separate authorization-policy change, not a restriction implemented by this endpoint.
+Binding is a credential change, so it takes the step-up rule of ADR 0109.
+The bearer must be one that never expires, or an OAuth-issued one whose session signed in with its provider in the last ten minutes.
+That time is the one the provider's signed identity token vouches for (`auth_time`, else `iat` for a nonce-bound token), not when Axon redeemed it.
+Any other bearer is refused at the challenge step with `403` and the code `recent_sign_in_required`; the client signs the owner in again and retries.
+This amends ADR 0054, under which any active bearer could bind: a stolen short-lived bearer could then bind an identity its thief controlled, which outlived the bearer's expiry or revocation.
+The rule is decided when the challenge is created.
+Redemption requires only that the same bearer is still active, so an Apple sheet left open across the ten-minute mark does not fail the bind.
+A non-expiring bearer remains a full-owner credential, and operators must revoke unauthorized identities as well as compromised sessions.
 
 For a genuinely empty instance, the operator may explicitly arm the existing first-run bootstrap capability.
 Use `purpose=bootstrap` and `bootstrap_code` at both steps.

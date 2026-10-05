@@ -417,8 +417,8 @@ pub async fn ws_handler(
         return auth::missing_token_response("missing bearer token");
     };
     match verifier.verify(&token).await {
-        Ok(true) => {}
-        Ok(false) => return auth::invalid_token_response(),
+        Ok(Some(_)) => {}
+        Ok(None) => return auth::invalid_token_response(),
         Err(err) => return err.into_response(),
     }
 
@@ -579,8 +579,8 @@ async fn pump(
             // transient verifier error is logged but does not drop a live client.
             _ = revalidate.tick() => {
                 match verifier.verify(&token).await {
-                    Ok(true) => {}
-                    Ok(false) => {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
                         tracing::info!("websocket token revoked; closing socket");
                         // Best-effort notice: the socket is closing either way, so a
                         // timed-out or failed send changes nothing here.

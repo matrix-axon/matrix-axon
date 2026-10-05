@@ -33,6 +33,13 @@ bootstrap_web_allow_remote = false
 # page links here after showing the freshly minted credential. Tokens are never
 # placed in this URL.
 # web_client_url = "https://axon.example.com/app"
+# The management API (/v1/management/*, ADR 0109) lets a signed-in client
+# administer this server without a shell on it: today, list the sign-in
+# identities linked to the owner and unlink one. Default true. Set false to
+# keep that behind the command line: every management route then answers
+# 403 management_disabled and clients hide the UI. The axon-server
+# subcommands work either way. Also AXON_SERVER__MANAGEMENT_API.
+management_api = true
 
 [database]
 # Required. Also accepted via the bare DATABASE_URL env var.

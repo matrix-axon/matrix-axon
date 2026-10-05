@@ -11,13 +11,14 @@ use axum::extract::State;
 
 use crate::backfill::BackfillStatusProvider;
 use crate::build_info::BuildInfo;
-use crate::dto::{AccountSyncStatusDto, BackfillStatusDto, StatusDto};
+use crate::dto::{AccountSyncStatusDto, BackfillStatusDto, ManagementStatusDto, StatusDto};
 use crate::response::{ApiError, ApiResponse};
+use crate::state::ManagementConfig;
 use crate::sync_status::SyncStatusProvider;
 
 /// Report backfill status: the disk-space valve state (live free space, whether
 /// paused) plus per-account backfill progress; per-account sync-service status;
-/// and the running build's identity.
+/// the running build's identity; and whether the management API is served.
 #[utoipa::path(
     get,
     path = "/v1/status",
@@ -31,6 +32,7 @@ pub async fn get_status(
     State(backfill_provider): State<Arc<dyn BackfillStatusProvider>>,
     State(sync_provider): State<Arc<dyn SyncStatusProvider>>,
     State(build_info): State<BuildInfo>,
+    State(management): State<ManagementConfig>,
 ) -> Result<ApiResponse<StatusDto>, ApiError> {
     let progress = store.backfill_progress().await?;
     Ok(ApiResponse::new(StatusDto {
@@ -41,5 +43,8 @@ pub async fn get_status(
             .map(AccountSyncStatusDto::from)
             .collect(),
         build: build_info.into(),
+        management: ManagementStatusDto {
+            enabled: management.enabled,
+        },
     }))
 }

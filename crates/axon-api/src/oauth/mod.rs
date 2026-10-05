@@ -31,7 +31,9 @@ use axon_core::OauthConfig;
 
 pub use apple::{AppleNativeVerifier, AppleProvider};
 pub use generic::GenericOidcProvider;
-pub use provider::{OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity};
+pub use provider::{
+    authentication_time, OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity,
+};
 
 /// Native verification uses a server-owned nonce and no browser credentials.
 #[async_trait::async_trait]
@@ -156,6 +158,19 @@ impl OAuthRuntime {
             native_apple: None,
             rate_limiter: rate_limit::OAuthRateLimiter::new(),
         }
+    }
+
+    /// The providers a sign-in can currently go through, by either flow: the
+    /// enabled browser providers, plus Apple when only its native flow is on.
+    /// A bound identity is a usable credential only if its provider is here
+    /// (ADR 0109's lockout guard).
+    pub fn sign_in_providers(&self) -> Vec<String> {
+        let mut providers: Vec<String> = self.providers.keys().map(|p| (*p).to_owned()).collect();
+        if self.native_apple.is_some() && !self.providers.contains_key("apple") {
+            providers.push("apple".to_owned());
+        }
+        providers.sort_unstable();
+        providers
     }
 
     /// Look up a constructed provider by name, if it's enabled and wired up.

@@ -16,7 +16,7 @@ async fn unbind_invalidates_login_credentials_without_affecting_other_identities
         .unwrap();
     let expires = Utc::now() + Duration::hours(1);
     let other_access = store
-        .issue_oauth_token("other", expires, "google", other.id, "web")
+        .issue_oauth_token("other", expires, "google", other.id, "web", None)
         .await
         .unwrap();
     for provider in ["apple", "google", "microsoft"] {
@@ -31,13 +31,13 @@ async fn unbind_invalidates_login_credentials_without_affecting_other_identities
             .unwrap()
             .unwrap();
         let access = store
-            .issue_oauth_token("unbind", expires, provider, id, "web")
+            .issue_oauth_token("unbind", expires, provider, id, "web", None)
             .await
             .unwrap();
         let old_hash = Uuid::new_v4().to_string();
         let new_hash = Uuid::new_v4().to_string();
         store
-            .issue_refresh_token(&old_hash, id, "web", expires)
+            .issue_refresh_token(&old_hash, id, "web", expires, None)
             .await
             .unwrap();
         store
@@ -64,7 +64,7 @@ async fn unbind_invalidates_login_credentials_without_affecting_other_identities
                 .unwrap();
             let hash = Uuid::new_v4().to_string();
             assert!(store
-                .complete_authorization(request, id, &hash)
+                .complete_authorization(request, id, &hash, None)
                 .await
                 .unwrap());
             if redeemed {
@@ -113,7 +113,7 @@ async fn unbind_invalidates_login_credentials_without_affecting_other_identities
             .oauth_identity_id
             .is_none());
         assert!(store
-            .issue_oauth_token("late", expires, provider, id, "web")
+            .issue_oauth_token("late", expires, provider, id, "web", None)
             .await
             .is_err());
         let rebound = store.bind_identity(provider, &subject, None).await.unwrap();
@@ -141,12 +141,12 @@ async fn unbind_failure_rolls_back_credential_revocation() {
         .unwrap();
     let expires = Utc::now() + Duration::hours(1);
     let access = store
-        .issue_oauth_token("rollback", expires, "apple", identity.id, "web")
+        .issue_oauth_token("rollback", expires, "apple", identity.id, "web", None)
         .await
         .unwrap();
     let hash = Uuid::new_v4().to_string();
     let refresh = store
-        .issue_refresh_token(&hash, identity.id, "web", expires)
+        .issue_refresh_token(&hash, identity.id, "web", expires, None)
         .await
         .unwrap();
     // Hold a child row lock so unbind fails after updating the access token.

@@ -1,7 +1,8 @@
 # ADR 0109 — A management API, so a client can administer the server
 
-**Status:** Proposed.
-Nothing here is implemented yet; this record is up for review before any code lands.
+**Status:** Accepted.
+Implemented in steps, tracked in #587; see "Sequence" below.
+Step 2 (the switch, step-up, identity list and unbind) is in.
 
 ## Context
 
@@ -78,6 +79,10 @@ That is takeover of the instance and lockout of its owner, and an audit trail is
 So the routes split in two.
 
 **Reads and index maintenance need only a valid bearer:** the token list, the identity list, bind status, the backlog count, and the search rebuild.
+This is a decision, not an oversight.
+The identity list shows which providers are linked and the email each reported, so a stolen short-lived bearer can read them.
+That bearer can already read every message in every account, and gating the list behind step-up would stop a signed-in owner from seeing what is linked without re-authenticating first.
+The provider's subject, the value that actually identifies the owner to the provider, is not returned.
 
 **Credential changes need step-up:** minting a token, revoking a token, starting a bind, and unbinding an identity, with or without `allow_lockout`.
 A request passes if the calling token is either:
@@ -90,7 +95,31 @@ The client runs the sign-in flow it already has (the provider redirect, or the n
 
 The sign-in time has to survive refresh, or refreshing would defeat the check.
 `oauth_refresh_tokens` and `tokens` each gain a nullable `authenticated_at`.
-It is set when an upstream sign-in is redeemed (authorization code, native identity token, or the identity-token grant) and copied unchanged through every refresh rotation.
+It records when the upstream provider says the owner authenticated, and is copied unchanged through every refresh rotation.
+
+It is never the moment Axon redeemed the identity token.
+An identity token stays valid well after it is issued, so a stolen, unredeemed one would otherwise buy a fresh window on redemption.
+OIDC keeps the two instants apart, `auth_time` for the authentication and `iat` for the token's issuance, and the time is read from the signed claims:
+
+- `auth_time` when the token carries it, capped at `iat`.
+- Otherwise `iat`, but only for a token bound to a nonce this server issued.
+  The nonce ties the token to one sign-in started minutes earlier, so its issuance is that sign-in.
+  Google emits no `auth_time`, so for it this is the only evidence available, and it cannot tell a fresh password entry from a provider session being reused.
+- Otherwise nothing: a nonce-free token with no `auth_time` has unknown freshness, and unknown fails step-up.
+
+Measured against the real providers on 2026-10-05, comparing the recorded time with the moment the session was minted:
+
+| Provider | Recorded time | What it is |
+| --- | --- | --- |
+| Google (browser) | 0.4 s earlier | `iat`; no `auth_time` |
+| Apple (browser and native) | 1.6 to 2.0 s earlier | within a second or two of the sign-in |
+| Microsoft (browser) | 5 min 0.7 s earlier, twice | `iat`, which Microsoft backdates by five minutes; no `auth_time` |
+
+Microsoft's second reading was taken by signing in again with its own session still live, and the recorded time moved forward by the same amount as the clock, so it is a backdated issuance and not a remembered authentication.
+The consequence is that a Microsoft session has about five minutes for credential changes rather than ten.
+That errs toward asking again, which is the safe direction, and the window is not widened to compensate: nothing in the token distinguishes Microsoft's backdating from a token that really is five minutes old.
+
+The browser flow verifies the token at the callback and mints at code redemption, so the verified time is kept on the authorization request in between.
 A stolen access token, and a stolen refresh token, both carry the original time and cannot move it forward: only a fresh proof from the upstream provider does.
 Rows that predate the column have no time and count as not recent.
 
@@ -110,6 +139,7 @@ Visibility stays, as the second line of defense:
 - `tokens` gains a `created_by_token_id` column, recorded on every API mint.
 - Every mint, revoke, bind and unbind writes a `tracing` line with the acting token's id and the target's id.
   No secret is logged.
+  A removal that overrides the lockout guard is logged at `warn`, since it is the one path that can lock the owner out.
 - The token list returns every token, including revoked ones, so an unexpected entry is visible to the owner.
 
 To make any of this possible, `TokenVerifier::verify` returns the token's id, expiry and sign-in time, and `require_bearer` attaches them to the request as an extension that handlers can extract.

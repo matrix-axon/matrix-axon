@@ -48,7 +48,7 @@ pub use media_uploads::{MediaUpload, MediaUploadKind, MediaUploadState, NewMedia
 pub use migrations::{embedded_migrations, EmbeddedMigration};
 pub use oauth_authorization_requests::{AuthorizationRequest, NewAuthorizationRequest};
 pub use oauth_bind_requests::BindRequest;
-pub use oauth_identities::OauthIdentity;
+pub use oauth_identities::{IdentityRemoval, OauthIdentity};
 pub use oauth_native::{
     IdentityRedemption, IdentityRedemptionRejection, NativeChallenge, NATIVE_CHALLENGE_TTL_SECS,
 };
@@ -60,7 +60,7 @@ pub use search::{
 };
 pub use spaces::{SpaceChildRow, SpaceParentRow};
 pub use state::{AccountDataRow, AccountDataUpsert, RoomStateRow, RoomStateUpsert};
-pub use tokens::{IssuedOAuthTokenPair, IssuedToken, Token};
+pub use tokens::{IssuedOAuthTokenPair, IssuedToken, Token, VerifiedToken};
 
 use sqlx_postgres::{PgPool, PgPoolOptions};
 

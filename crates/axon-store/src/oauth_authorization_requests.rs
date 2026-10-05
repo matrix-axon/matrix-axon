@@ -28,11 +28,15 @@ pub struct AuthorizationRequest {
     pub expires_at: DateTime<Utc>,
     pub status: String,
     pub oauth_identity_id: Option<Uuid>,
+    /// When the upstream provider says the owner authenticated, recorded once
+    /// the callback has verified the identity token (ADR 0109). `None` before
+    /// that, and when the token gave no usable evidence of it.
+    pub authenticated_at: Option<DateTime<Utc>>,
 }
 
 const AUTH_REQUEST_COLUMNS: &str = "id, client_id, redirect_uri, code_challenge, \
      code_challenge_method, client_state, provider, upstream_state, upstream_nonce, \
-     expires_at, status, oauth_identity_id";
+     expires_at, status, oauth_identity_id, authenticated_at";
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for AuthorizationRequest {
     fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
@@ -49,6 +53,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for AuthorizationRequest {
             expires_at: row.try_get("expires_at")?,
             status: row.try_get("status")?,
             oauth_identity_id: row.try_get("oauth_identity_id")?,
+            authenticated_at: row.try_get("authenticated_at")?,
         })
     }
 }
@@ -142,20 +147,27 @@ impl Store {
     /// with no path back out except waiting for `expires_at` to lapse.
     /// Returns `false` (no-op) if the row wasn't in `pending` or has
     /// expired — callers treat that as "stale or replayed callback".
+    ///
+    /// `authenticated_at` is the verified identity token's authentication
+    /// time, kept on the row so the later code redemption mints a session
+    /// carrying it rather than its own clock.
     pub async fn complete_authorization(
         &self,
         id: Uuid,
         oauth_identity_id: Uuid,
         axon_code_hash: &str,
+        authenticated_at: Option<DateTime<Utc>>,
     ) -> Result<bool, StoreError> {
         let result = sqlx_core::query::query(
             "UPDATE oauth_authorization_requests \
-                SET status = 'code_issued', oauth_identity_id = $2, axon_code_hash = $3 \
+                SET status = 'code_issued', oauth_identity_id = $2, axon_code_hash = $3, \
+                    authenticated_at = $4 \
               WHERE id = $1 AND status = 'pending' AND expires_at > now()",
         )
         .bind(id)
         .bind(oauth_identity_id)
         .bind(axon_code_hash)
+        .bind(authenticated_at)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)

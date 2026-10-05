@@ -37,6 +37,7 @@ pub mod devices;
 pub mod ephemeral;
 pub mod events;
 pub mod invites;
+pub mod management;
 pub mod matrix_oauth_acquire;
 pub mod matrix_oauth_grant;
 pub mod media;

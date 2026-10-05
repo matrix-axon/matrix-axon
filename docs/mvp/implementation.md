@@ -631,7 +631,7 @@ Mirrors the PRD non-goals and out-of-scope items; the agent should not drift int
 - No multi-human-per-process isolation. One human per Axon.
 - No federation hooks, no peer-to-peer ingestion.
 - No native client scaffolding (iOS, desktop). Generated Swift stubs only.
-- No admin API.
+- No admin API. _(Post-MVP, superseded by ADR 0109: a management API under `/v1/management/` lets a client administer the instance. It manages runtime state — credentials, sign-in identities, the search index — and is not a config editor.)_
 - No bridge metadata normalization.
 - No importers from existing clients.
 - No full OAuth 2.0 server. Bearer tokens via CLI only. _(Post-MVP, shipped ahead of MVP freeze: M14 landed — axon is its own minimal OAuth 2.0 authorization server plus an OIDC relying party to Google/Microsoft, behind the existing `TokenVerifier` seam, ADR 0054. `axon oauth bind` connects an identity; Apple/Sign-in-with-Apple stays deferred to the iOS client work.)_

@@ -219,7 +219,26 @@ mod tests {
                     .replay_key,
                 "replay"
             );
-            assert!(provider.verify_identity_token(&token, None).await.is_ok());
+            // The authentication time comes from the signed claims: `iat` for
+            // a nonce-bound token with no `auth_time`, nothing without the nonce.
+            let bound = provider
+                .verify_identity_token(&token, Some("n"))
+                .await
+                .unwrap();
+            assert_eq!(bound.authenticated_at.map(|at| at.timestamp()), Some(now));
+            let unbound = provider.verify_identity_token(&token, None).await.unwrap();
+            assert_eq!(unbound.authenticated_at, None);
+            let mut aged = claims.clone();
+            aged["iat"] = json!(now - 120);
+            aged["auth_time"] = json!(now - 1800);
+            let aged = encode(&header, &aged, &key).unwrap();
+            for nonce in [Some("n"), None] {
+                let verified = provider.verify_identity_token(&aged, nonce).await.unwrap();
+                assert_eq!(
+                    verified.authenticated_at.map(|at| at.timestamp()),
+                    Some(now - 1800)
+                );
+            }
             assert!(matches!(
                 provider.verify_identity_token(&token, Some("wrong")).await,
                 Err(OidcError::InvalidNonce)

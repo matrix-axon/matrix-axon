@@ -25,6 +25,18 @@ pub struct OauthIdentity {
     pub linked_at: DateTime<Utc>,
 }
 
+/// What an attempt to remove a bound identity did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityRemoval {
+    /// The identity and every credential minted for it are gone.
+    Removed,
+    /// No identity has that id.
+    NotFound,
+    /// Refused: removing it would leave no surviving credential. Nothing was
+    /// changed.
+    LastCredential,
+}
+
 const OAUTH_IDENTITY_COLUMNS: &str = "id, provider, subject, email, linked_at";
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for OauthIdentity {
@@ -110,11 +122,37 @@ impl Store {
     /// remove refresh tokens and authorization requests, then delete the identity.
     /// No caller-side revocation is needed. A failure rolls back all changes.
     pub async fn delete_identity(&self, id: Uuid) -> Result<bool, StoreError> {
+        Ok(self.remove_identity(id, None).await? == IdentityRemoval::Removed)
+    }
+
+    /// [`delete_identity`](Self::delete_identity), refused when it would leave
+    /// the owner with no way to sign in (ADR 0109): no active non-expiring
+    /// token, and no bound identity whose provider is in `usable_providers`.
+    /// A refusal rolls everything back and removes nothing.
+    ///
+    /// The management API's unbind. The CLI keeps the unguarded form: an
+    /// operator with a shell can always mint another token.
+    pub async fn delete_identity_unless_last_credential(
+        &self,
+        id: Uuid,
+        usable_providers: &[String],
+    ) -> Result<IdentityRemoval, StoreError> {
+        self.remove_identity(id, Some(usable_providers)).await
+    }
+
+    async fn remove_identity(
+        &self,
+        id: Uuid,
+        guard: Option<&[String]>,
+    ) -> Result<IdentityRemoval, StoreError> {
         let mut tx = self.pool.begin().await?;
         // Bound waits, including contention with an in-flight token rotation.
         sqlx_core::query::query("SET LOCAL lock_timeout = '5s'")
             .execute(&mut *tx)
             .await?;
+        // Before any row lock, and before the guard counts: every
+        // credential-removing write queues here, in one order.
+        Self::lock_credentials(&mut tx).await?;
         // FOR UPDATE conflicts with the key-share locks taken by FK inserts:
         // credentials committed before this lock are cleaned up below; later
         // inserts cannot reference the deleted identity after we commit.
@@ -125,7 +163,7 @@ impl Store {
                 .await?;
         if identity.is_none() {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(IdentityRemoval::NotFound);
         }
         for sql in [
             "UPDATE tokens SET revoked_at = COALESCE(revoked_at, now()), oauth_identity_id = NULL \
@@ -145,7 +183,15 @@ impl Store {
             .bind(id)
             .execute(&mut *tx)
             .await?;
+        // Counted on the state this transaction would commit: the identity
+        // and the tokens it backed are already gone from this view.
+        if let Some(usable_providers) = guard {
+            if !Self::surviving_credential_in_tx(&mut tx, usable_providers).await? {
+                tx.rollback().await?;
+                return Ok(IdentityRemoval::LastCredential);
+            }
+        }
         tx.commit().await?;
-        Ok(true)
+        Ok(IdentityRemoval::Removed)
     }
 }

@@ -154,6 +154,7 @@ pub(crate) async fn complete_oauth_callback(
             verified.email.as_deref(),
             access_expires_at,
             refresh_expires_at,
+            verified.authenticated_at,
         )
         .await?
         .ok_or_else(|| ApiError::conflict("first credential bootstrap is no longer available"))?;

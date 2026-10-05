@@ -1404,6 +1404,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/management/oauth/identities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the upstream sign-in identities bound to this instance's owner.
+         * @description Each carries `current`, set on the identity the calling session signed in
+         *     with, and `sign_in_available`, false when its provider is switched off and
+         *     the identity therefore cannot produce a session.
+         */
+        get: operations["list_identities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/management/oauth/identities/{identity_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Unbind a sign-in identity and end every session it was used to start.
+         * @description Axon forgets the identity: its access tokens are revoked and its refresh
+         *     tokens deleted, atomically. This does **not** revoke the upstream
+         *     provider's own authorization of Axon; that is the provider's to withdraw.
+         *
+         *     A credential change, so it needs a non-expiring token or a session whose
+         *     interactive sign-in was in the last ten minutes (`403
+         *     recent_sign_in_required` otherwise). Unbinding the identity the calling
+         *     session signed in with ends that session too.
+         */
+        delete: operations["unbind_identity"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/media/{account_id}/{server_name}/{media_id}": {
         parameters: {
             query?: never;
@@ -1618,7 +1667,7 @@ export interface paths {
         /**
          * Report backfill status: the disk-space valve state (live free space, whether
          *     paused) plus per-account backfill progress; per-account sync-service status;
-         *     and the running build's identity.
+         *     the running build's identity; and whether the management API is served.
          */
         get: operations["get_status"];
         put?: never;
@@ -2290,6 +2339,8 @@ export interface components {
                 backfill: components["schemas"]["BackfillStatusDto"];
                 /** @description The running binary's build identity. */
                 build: components["schemas"]["BuildInfoDto"];
+                /** @description The management API's availability (ADR 0109). */
+                management: components["schemas"]["ManagementStatusDto"];
                 /** @description Per-account sync-service status. */
                 sync: components["schemas"]["AccountSyncStatusDto"][];
             };
@@ -2553,6 +2604,36 @@ export interface components {
                  *     `"google"`.
                  */
                 provider: string;
+            }[];
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_Vec_OauthIdentityDto: {
+            data: {
+                /**
+                 * @description Whether the calling session signed in with this identity. Unbinding it
+                 *     ends that session.
+                 */
+                current: boolean;
+                /**
+                 * @description The email the provider reported when the identity was bound, if any.
+                 *     A label for the owner, never proof of ownership.
+                 */
+                email?: string | null;
+                /**
+                 * Format: uuid
+                 * @description Stable id, used to unbind the identity.
+                 */
+                id: string;
+                /** @description When the identity was bound, RFC 3339. */
+                linked_at: string;
+                /** @description The upstream provider: `"apple"`, `"google"` or `"microsoft"`. */
+                provider: string;
+                /**
+                 * @description Whether a sign-in with this identity is currently possible: OAuth is
+                 *     enabled and so is this identity's provider. False means the identity is
+                 *     bound but cannot produce a session.
+                 */
+                sign_in_available: boolean;
             }[];
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -3234,6 +3315,15 @@ export interface components {
              */
             username: string;
         };
+        /** @description Whether this server serves `/v1/management/*`. */
+        ManagementStatusDto: {
+            /**
+             * @description False when the operator set `[server] management_api = false`; every
+             *     management route then answers `403 management_disabled`, and a client
+             *     should hide its management UI rather than probe.
+             */
+            enabled: boolean;
+        };
         /**
          * @description Replayable, presentation-safe state of one QR login flow. Optional fields
          *     are omitted unless they belong to the current stage.
@@ -3370,6 +3460,39 @@ export interface components {
              *     `"google"`.
              */
             provider: string;
+        };
+        /**
+         * @description An upstream sign-in identity bound to this instance's owner
+         *     (`GET /v1/management/oauth/identities`). The provider's opaque subject is
+         *     deliberately not exposed: it identifies nothing to a person, and `id` is
+         *     what the API addresses an identity by.
+         */
+        OauthIdentityDto: {
+            /**
+             * @description Whether the calling session signed in with this identity. Unbinding it
+             *     ends that session.
+             */
+            current: boolean;
+            /**
+             * @description The email the provider reported when the identity was bound, if any.
+             *     A label for the owner, never proof of ownership.
+             */
+            email?: string | null;
+            /**
+             * Format: uuid
+             * @description Stable id, used to unbind the identity.
+             */
+            id: string;
+            /** @description When the identity was bound, RFC 3339. */
+            linked_at: string;
+            /** @description The upstream provider: `"apple"`, `"google"` or `"microsoft"`. */
+            provider: string;
+            /**
+             * @description Whether a sign-in with this identity is currently possible: OAuth is
+             *     enabled and so is this identity's provider. False means the identity is
+             *     bound but cannot produce a session.
+             */
+            sign_in_available: boolean;
         };
         /**
          * @description Request body for setting a room's power levels (`PUT
@@ -4015,6 +4138,8 @@ export interface components {
             backfill: components["schemas"]["BackfillStatusDto"];
             /** @description The running binary's build identity. */
             build: components["schemas"]["BuildInfoDto"];
+            /** @description The management API's availability (ADR 0109). */
+            management: components["schemas"]["ManagementStatusDto"];
             /** @description Per-account sync-service status. */
             sync: components["schemas"]["AccountSyncStatusDto"][];
         };
@@ -9054,6 +9179,111 @@ export interface operations {
             };
         };
     };
+    list_identities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The bound identities, most recently linked first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Vec_OauthIdentityDto"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The management API is disabled (`management_disabled`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    unbind_identity: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Go ahead even if this is the last way to sign in. Without it such a
+                 *     request is refused with `409 last_credential` and changes nothing.
+                 */
+                allow_lockout?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description The identity's id, from the list */
+                identity_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The identity was unbound */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `management_disabled`, or `recent_sign_in_required`: sign in again and retry */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such identity */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `last_credential`: this is the last way to sign in. Nothing was changed; repeat with `allow_lockout=true` to go ahead */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     get_media: {
         parameters: {
             query?: never;
@@ -9325,7 +9555,7 @@ export interface operations {
         parameters: {
             query?: never;
             header?: {
-                /** @description Bearer owner token; required for purpose=bind, omitted for login/bootstrap. */
+                /** @description Bearer owner token; required for purpose=bind, omitted for login/bootstrap. A bind is a credential change: the token must never expire, or come from a sign-in in the last ten minutes. */
                 Authorization?: string | null;
             };
             path?: never;
@@ -9354,7 +9584,7 @@ export interface operations {
                     "application/json": components["schemas"]["NativeErrorBody"];
                 };
             };
-            /** @description Owner authorization required */
+            /** @description Owner authorization required. For purpose=bind the bearer must also be non-expiring or from a sign-in in the last ten minutes, else the code is `recent_sign_in_required`. */
             403: {
                 headers: {
                     [name: string]: unknown;
