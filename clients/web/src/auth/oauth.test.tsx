@@ -87,6 +87,48 @@ describe('createOAuthAuthProvider', () => {
     expect(new URLSearchParams(form).get('code_verifier')).toBe('verifier-123')
   })
 
+  it('returns to a same-origin path only', async () => {
+    server.use(
+      http.post(TOKEN_URL, () =>
+        HttpResponse.json({
+          access_token: 'access-1',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: 'refresh-1',
+        }),
+      ),
+    )
+    const land = async (returnTo: string) => {
+      const auth = createOAuthAuthProvider({
+        providers: [{ provider: 'google', label: 'Google' }],
+        baseUrl: BASE_URL,
+        storage: memoryStorage(),
+        pendingStorage: memoryStorage({
+          'axon.oauth.pending': JSON.stringify({
+            state: 'state-123',
+            codeVerifier: 'verifier-123',
+            provider: 'google',
+            redirectUri: 'http://localhost:3000/oauth/callback',
+            createdAt: Date.now(),
+            returnTo,
+          }),
+        }),
+      })
+      expect(auth.lastSignInAt.value).toBeNull()
+      await auth.completeRedirect(
+        new URL(
+          'http://localhost:3000/oauth/callback?code=code-1&state=state-123',
+        ),
+      )
+      expect(auth.lastSignInAt.value).not.toBeNull()
+      return window.location.pathname
+    }
+
+    expect(await land('/settings')).toBe('/settings')
+    expect(await land('//evil.example/settings')).toBe('/')
+    expect(await land('https://evil.example/')).toBe('/')
+  })
+
   it('stores a one-time OAuth session in session storage', async () => {
     const storage = memoryStorage()
     const sessionStorage = memoryStorage()

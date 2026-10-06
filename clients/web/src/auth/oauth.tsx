@@ -86,6 +86,32 @@ export class OAuthTransportError extends Error {
  */
 const GRANT_REJECTED = 'invalid_grant'
 
+/**
+ * The server will not make a credential change for a session this old (ADR
+ * 0109): the bearer is an OAuth access token whose interactive sign-in was more
+ * than ten minutes ago. Not a verdict on the credentials — the session is fine
+ * for everything else — so, like `OAuthTransportError`, it never ends one. The
+ * remedy is to sign in again and repeat the request.
+ */
+export class OAuthStepUpRequiredError extends Error {
+  readonly name = 'OAuthStepUpRequiredError'
+}
+
+const STEP_UP_REQUIRED = 'recent_sign_in_required'
+
+/** The code from Axon's own error envelope (`{error: {code, message}}`). */
+function envelopeErrorCode(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null) {
+    return null
+  }
+  const { error } = body as { error?: unknown }
+  if (typeof error !== 'object' || error === null) {
+    return null
+  }
+  const { code } = error as { code?: unknown }
+  return typeof code === 'string' ? code : null
+}
+
 /** The OAuth error code from a token-endpoint error body, if it has one. */
 function oauthErrorCode(body: unknown): string | null {
   if (typeof body !== 'object' || body === null) {
@@ -154,6 +180,8 @@ interface PendingOAuth {
   redirectUri: string
   createdAt: number
   storageMode: AuthStorageMode
+  /** Where the app goes once the callback is redeemed. Defaults to `/`. */
+  returnTo?: string
 }
 
 interface TokenSuccessBody {
@@ -195,7 +223,18 @@ export interface OAuthAuthProvider extends AuthProvider {
   /**
    * Rejects with `NativeSignInCancelled` when a native sheet was dismissed.
    */
-  startSignIn(provider: string): Promise<SignInOutcome>
+  startSignIn(
+    provider: string,
+    options?: {
+      /**
+       * The in-app path to land on once a browser sign-in comes back, for a
+       * sign-in started from inside the app (ADR 0109 step-up) rather than
+       * from the signed-out screen. Ignored by a native flow, which never
+       * leaves.
+       */
+      returnTo?: string
+    },
+  ): Promise<SignInOutcome>
   completeRedirect(url: URL): Promise<OAuthCallbackResult>
   /**
    * Whether this platform can link an Apple ID to the signed-in owner in place
@@ -207,10 +246,18 @@ export interface OAuthAuthProvider extends AuthProvider {
    * The provider the current OAuth session came from, or `null` when there is
    * none (signed out, or signed in with a pasted token). `'apple'` proves the
    * Apple ID is linked: the server issues an Apple session for linked Apple
-   * IDs only. The reverse is unknowable from here — no `/v1` route lists linked
-   * identities — so any other value says nothing either way.
+   * IDs only. Any other value says nothing either way; the management API's
+   * identity list (ADR 0109) is what answers that, where it is served.
    */
   sessionProvider: ReadonlySignal<string | null>
+  /**
+   * When an interactive sign-in last completed in this page's lifetime
+   * (`Date.now()`), or `null` if none has. A refresh is not one. This is how a
+   * credential change that was refused with `recent_sign_in_required` learns
+   * that the sign-in it asked for has happened, including one that finished in
+   * another application and came back as a deep link.
+   */
+  lastSignInAt: ReadonlySignal<number | null>
   /**
    * Bind the Apple ID the user picks to the owner `bearer` authenticates, and
    * adopt the Apple session the server returns for it.
@@ -219,6 +266,9 @@ export interface OAuthAuthProvider extends AuthProvider {
    * sign-in work: sign in once some other way, link here, and from then on
    * Sign in with Apple finds that owner. Ownership comes from `bearer` alone,
    * never from Apple's email (`docs/apple-oauth-native.md`).
+   *
+   * Rejects with `OAuthStepUpRequiredError` when `bearer` is from a sign-in
+   * too old for a credential change, before any sheet is shown.
    */
   bindApple(bearer: string): Promise<void>
 }
@@ -400,6 +450,7 @@ export function createOAuthAuthProvider({
   const sessionMode = signal<AuthStorageMode | null>(
     session.value === null ? null : (storedSession?.mode ?? 'persistent'),
   )
+  const lastSignInAt = signal<number | null>(null)
   let refreshInFlight: Promise<string | null> | null = null
   let lastAuthFailureRefreshAt = 0
 
@@ -448,6 +499,9 @@ export function createOAuthAuthProvider({
       // Only an explicit `invalid_grant` ends a session. Everything else — a
       // 429 from the rate limiter, a 5xx, a proxy mid-restart, an error body we
       // cannot read — is "no verdict", and the credentials stay.
+      if (envelopeErrorCode(body) === STEP_UP_REQUIRED) {
+        throw new OAuthStepUpRequiredError(message)
+      }
       throw oauthErrorCode(body) === GRANT_REJECTED
         ? new OAuthRejectedError(message)
         : new OAuthTransportError(message)
@@ -578,6 +632,7 @@ export function createOAuthAuthProvider({
     signInLeavesTheApp,
     canBindApple: computed(() => nativeAppleOffered.value),
     sessionProvider: computed(() => session.value?.provider ?? null),
+    lastSignInAt: computed(() => lastSignInAt.value),
     discoverProviders() {
       discovery ??= (async () => {
         const [names, nativeNames] = await Promise.all([
@@ -632,8 +687,12 @@ export function createOAuthAuthProvider({
     async bindApple(bearer: string) {
       const next = await nativeApple('bind', bearer)
       persist(next, persistence.rememberMe.value ? 'persistent' : 'session')
+      lastSignInAt.value = Date.now()
     },
-    async startSignIn(providerName: string): Promise<SignInOutcome> {
+    async startSignIn(
+      providerName: string,
+      { returnTo }: { returnTo?: string } = {},
+    ): Promise<SignInOutcome> {
       const entry = providerList.value.find(
         ({ provider }) => provider === providerName,
       )
@@ -645,6 +704,7 @@ export function createOAuthAuthProvider({
           ? 'persistent'
           : 'session'
         persist(await nativeApple('login'), storageMode)
+        lastSignInAt.value = Date.now()
         return 'signed-in'
       }
       const codeVerifier = randomBase64Url(32)
@@ -662,6 +722,7 @@ export function createOAuthAuthProvider({
         redirectUri: callbackUri,
         createdAt: Date.now(),
         storageMode,
+        ...(returnTo === undefined ? {} : { returnTo }),
       }
       pendingStorage.setItem(PENDING_KEY, JSON.stringify(pending))
 
@@ -716,7 +777,8 @@ export function createOAuthAuthProvider({
         )
         persist({ ...next, provider: pending.provider }, pending.storageMode)
         pendingStorage.removeItem(PENDING_KEY)
-        window.history.replaceState(null, '', '/')
+        lastSignInAt.value = Date.now()
+        window.history.replaceState(null, '', pending.returnTo ?? '/')
         return { ok: true }
       } catch (err) {
         return {
@@ -851,90 +913,6 @@ function OAuthButtons({ provider }: { provider: OAuthAuthProvider }) {
   )
 }
 
-/**
- * Link an Apple ID to the signed-in owner (`OAuthAuthProvider.bindApple`), for
- * Settings. Renders nothing unless this platform and server can do it.
- *
- * Signed in with Apple, there is nothing to do: that session is itself proof
- * the Apple ID is linked, and linking it again would change nothing on the
- * server (it binds idempotently) while looking like a button that does
- * nothing. Signed in any other way, the server cannot be asked whether an
- * Apple ID is already linked, so the action is offered and says what it does.
- *
- * A plain button rather than Apple's branded one: it names an Axon action,
- * and Apple's guidelines only allow a branded button a fixed set of titles,
- * none of which says "link". The branded part is Apple's own sheet.
- */
-export function LinkAppleSection({
-  oauth,
-  bearer,
-}: {
-  oauth: OAuthAuthProvider
-  bearer: () => string | null | Promise<string | null>
-}) {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  // The signed-out screen is the usual place this is asked; Settings is only
-  // reached signed in, so it asks for itself. Shared and idempotent.
-  useEffect(() => {
-    void oauth.discoverProviders()
-  }, [oauth])
-
-  if (!oauth.canBindApple.value) {
-    return null
-  }
-
-  if (oauth.sessionProvider.value === 'apple') {
-    return (
-      <section class="panel">
-        <h2>Sign in with Apple</h2>
-        <p class="muted" role="status">
-          You are signed in with Apple, so your Apple ID is linked to this
-          server. The link is to your Apple ID, not your email address.
-        </p>
-      </section>
-    )
-  }
-
-  const link = async () => {
-    const token = await bearer()
-    if (token === null) {
-      throw new Error('Sign in first, then link your Apple ID.')
-    }
-    await oauth.bindApple(token)
-  }
-
-  return (
-    <section class="panel">
-      <h2>Sign in with Apple</h2>
-      <p class="muted">
-        Link an Apple ID to this Axon server so you can sign in with Apple here
-        and on your other devices. Linking also signs you in with that Apple ID.
-        The link is to your Apple ID, not your email address.
-      </p>
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => {
-          setBusy(true)
-          setError(null)
-          void link()
-            .catch((err: unknown) => {
-              if (!(err instanceof NativeSignInCancelled)) {
-                setError(err instanceof Error ? err.message : 'Linking failed')
-              }
-            })
-            .finally(() => setBusy(false))
-        }}
-      >
-        {busy ? 'Linking...' : 'Link an Apple ID'}
-      </button>
-      {error !== null && <p class="error">{error}</p>}
-    </section>
-  )
-}
-
 function providerBrand(provider: string, label: string) {
   switch (provider) {
     case 'google':
@@ -1065,6 +1043,11 @@ function parsePending(raw: string | null): PendingOAuth | null {
         redirectUri: value.redirectUri,
         createdAt: value.createdAt,
         storageMode: value.storageMode === 'session' ? 'session' : 'persistent',
+        // Same-origin paths only: this value ends up in `replaceState`.
+        ...(typeof value.returnTo === 'string' &&
+        /^\/(?!\/)/.test(value.returnTo)
+          ? { returnTo: value.returnTo }
+          : {}),
       }
     }
   } catch {

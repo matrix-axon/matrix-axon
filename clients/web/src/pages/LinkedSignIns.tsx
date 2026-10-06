@@ -1,0 +1,534 @@
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
+import { apiErrorCode, apiErrorMessage } from '../api/client'
+import type { components } from '../api/schema'
+import { OAuthStepUpRequiredError } from '../auth/oauth'
+import { NativeSignInCancelled } from '../platform'
+import { useServices } from '../services'
+
+type Identity = components['schemas']['OauthIdentityDto']
+
+/**
+ * A credential change that was refused with `recent_sign_in_required` and is
+ * waiting for the sign-in it asked for (ADR 0109).
+ *
+ * In `sessionStorage` because a browser sign-in replaces this page: the
+ * redirect comes back as a fresh load, and without this the user would sign in
+ * again only to be asked to repeat what they had already confirmed.
+ */
+export const RESUME_KEY = 'axon.management.resume'
+
+/**
+ * How long an intent stays good. The server's own window for "recent" is ten
+ * minutes, so anything older could not succeed anyway; more to the point, a
+ * confirmation that old is no longer something the user is in the middle of.
+ */
+const RESUME_TTL_MS = 10 * 60_000
+
+type Change =
+  | {
+      kind: 'unlink'
+      identityId: string
+      allowLockout: boolean
+      /** Whether this session signed in with it, so unlinking ends it. */
+      current: boolean
+    }
+  | { kind: 'link-apple' }
+
+type Intent = Change & { createdAt: number }
+
+function readIntent(): Intent | null {
+  try {
+    const raw = window.sessionStorage.getItem(RESUME_KEY)
+    if (raw === null) {
+      return null
+    }
+    const value = JSON.parse(raw) as Partial<Intent>
+    if (
+      typeof value.createdAt !== 'number' ||
+      Date.now() - value.createdAt > RESUME_TTL_MS
+    ) {
+      clearIntent()
+      return null
+    }
+    if (value.kind === 'link-apple') {
+      return { kind: 'link-apple', createdAt: value.createdAt }
+    }
+    if (value.kind === 'unlink' && typeof value.identityId === 'string') {
+      return {
+        kind: 'unlink',
+        identityId: value.identityId,
+        allowLockout: value.allowLockout === true,
+        current: value.current === true,
+        createdAt: value.createdAt,
+      }
+    }
+  } catch {
+    // Unreadable storage or a corrupt entry: there is nothing to resume.
+  }
+  return null
+}
+
+function writeIntent(change: Change): void {
+  try {
+    window.sessionStorage.setItem(
+      RESUME_KEY,
+      JSON.stringify({ ...change, createdAt: Date.now() }),
+    )
+  } catch {
+    // Without storage a browser redirect cannot resume; the user repeats the
+    // action after signing in, which then passes.
+  }
+}
+
+function clearIntent(): void {
+  try {
+    window.sessionStorage.removeItem(RESUME_KEY)
+  } catch {
+    // Nothing to clear.
+  }
+}
+
+function providerName(provider: string): string {
+  return provider.charAt(0).toUpperCase() + provider.slice(1)
+}
+
+/**
+ * Where the user withdraws the provider's own authorization of Axon.
+ * Unlinking cannot do it for them (ADR 0109): Axon only forgets the identity.
+ */
+function providerControls(provider: string) {
+  switch (provider) {
+    case 'apple':
+      return (
+        <>
+          To remove Axon from your Apple Account as well, open Settings on your
+          iPhone, iPad or Mac, choose your name, then Sign-In &amp; Security,
+          then Sign in with Apple, and remove Axon there.
+        </>
+      )
+    case 'google':
+      return (
+        <>
+          To remove Axon from your Google Account as well, open your Google
+          Account's third-party connections (myaccount.google.com/connections)
+          and remove Axon there.
+        </>
+      )
+    case 'microsoft':
+      return (
+        <>
+          To remove Axon from your Microsoft account as well, open your
+          Microsoft account's privacy settings and remove Axon from the apps and
+          services you have given access to.
+        </>
+      )
+    default:
+      return (
+        <>
+          To remove Axon there as well, use {providerName(provider)}'s own
+          account settings.
+        </>
+      )
+  }
+}
+
+/**
+ * The sign-in identities linked to this server's owner, with Unlink, and the
+ * place an Apple ID is linked (ADR 0109 step 3, `/v1/management/oauth/*`).
+ *
+ * Renders nothing unless there is something to show or do. Where the operator
+ * has switched the management API off, the list and Unlink are hidden rather
+ * than probed (`status.management.enabled`), and what remains is the link
+ * action, which is an OAuth route and not a management one.
+ */
+export function LinkedSignIns() {
+  const { api, auth } = useServices()
+  const oauth = auth.oauth
+  // `null` until the server has said whether it serves the management API.
+  const [management, setManagement] = useState<boolean | null>(null)
+  const [identities, setIdentities] = useState<Identity[] | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState<{
+    identityId: string
+    lastCredential: boolean
+  } | null>(null)
+  // The identity id being unlinked, or `'link'`.
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [handedOff, setHandedOff] = useState(false)
+  const mounted = useRef(true)
+  useEffect(
+    () => () => {
+      mounted.current = false
+    },
+    [],
+  )
+
+  const load = useCallback(async () => {
+    try {
+      const { data, error: apiError } = await api.GET(
+        '/v1/management/oauth/identities',
+      )
+      if (!mounted.current) {
+        return
+      }
+      if (apiError !== undefined) {
+        if (apiErrorCode(apiError) === 'management_disabled') {
+          setManagement(false)
+          return
+        }
+        setLoadError(apiErrorMessage(apiError))
+        return
+      }
+      setLoadError(null)
+      setIdentities(data.data)
+    } catch (cause) {
+      if (mounted.current) {
+        setLoadError(cause instanceof Error ? cause.message : String(cause))
+      }
+    }
+  }, [api])
+
+  // The signed-out screen is the usual place providers are discovered;
+  // Settings is only reached signed in, so it asks for itself. Shared and
+  // idempotent.
+  useEffect(() => {
+    void oauth.discoverProviders()
+  }, [oauth])
+
+  useEffect(() => {
+    void api.GET('/v1/status').then(
+      ({ data }) => {
+        if (!mounted.current) {
+          return
+        }
+        // Absent on a server older than the management API: nothing to list.
+        const enabled = data?.data.management?.enabled === true
+        setManagement(enabled)
+        if (enabled) {
+          void load()
+        }
+      },
+      () => {
+        if (mounted.current) {
+          setManagement(false)
+        }
+      },
+    )
+  }, [api, load])
+
+  /** Make the change once. `'step-up'` means the server wants a fresh sign-in. */
+  async function perform(change: Change): Promise<'done' | 'step-up'> {
+    if (change.kind === 'link-apple') {
+      const token = await auth.getToken()
+      if (token === null) {
+        throw new Error('Sign in first, then link your Apple ID.')
+      }
+      try {
+        await oauth.bindApple(token)
+      } catch (err) {
+        if (err instanceof OAuthStepUpRequiredError) {
+          return 'step-up'
+        }
+        throw err
+      }
+      await load()
+      return 'done'
+    }
+
+    const { error: apiError, response } = await api.DELETE(
+      '/v1/management/oauth/identities/{identity_id}',
+      {
+        params: {
+          path: { identity_id: change.identityId },
+          query: change.allowLockout ? { allow_lockout: true } : {},
+        },
+      },
+    )
+    if (apiError === undefined) {
+      setConfirming(null)
+      if (change.current) {
+        // The server has already ended this session with the identity. Drop
+        // the dead tokens now instead of waiting to trip over a 401.
+        auth.clearToken()
+        return 'done'
+      }
+      await load()
+      return 'done'
+    }
+    switch (apiErrorCode(apiError)) {
+      case 'recent_sign_in_required':
+        return 'step-up'
+      case 'last_credential':
+        // Nothing was changed. Ask again, saying what it would cost.
+        setConfirming({ identityId: change.identityId, lastCredential: true })
+        return 'done'
+      case 'management_disabled':
+        setManagement(false)
+        return 'done'
+      default:
+        if (response.status === 404) {
+          // Already gone, from another device or the CLI.
+          setConfirming(null)
+          await load()
+          return 'done'
+        }
+        throw new Error(apiErrorMessage(apiError))
+    }
+  }
+
+  /**
+   * Make the change, signing in again first if the server asks for it.
+   *
+   * `resumed` marks the attempt that follows that sign-in. It never starts
+   * another: a second refusal is reported, so a provider that reports no fresh
+   * authentication cannot bounce the user between here and its sign-in page.
+   */
+  async function run(change: Change, resumed = false): Promise<void> {
+    if ((await perform(change)) === 'done') {
+      return
+    }
+    if (resumed) {
+      throw new Error(
+        'The server still needs a more recent sign-in for this change. Sign out, sign in again, and retry within ten minutes.',
+      )
+    }
+    const provider = oauth.sessionProvider.value
+    await oauth.discoverProviders()
+    if (
+      provider === null ||
+      !oauth.providers.value.some((entry) => entry.provider === provider)
+    ) {
+      // A pasted token that expires, or a session whose provider has since
+      // been switched off: there is no sign-in flow here to re-run.
+      throw new Error(
+        'This change needs a sign-in from the last ten minutes. Sign out, sign in again, and retry.',
+      )
+    }
+    writeIntent(change)
+    let outcome
+    try {
+      outcome = await oauth.startSignIn(provider, { returnTo: '/settings' })
+    } catch (err) {
+      clearIntent()
+      throw err
+    }
+    if (outcome === 'signed-in') {
+      // A native sheet, finished in place.
+      clearIntent()
+      await run(change, true)
+      return
+    }
+    // In a browser the page is already being replaced. In a shell the sign-in
+    // is in the user's browser, and the effect below picks it up on return.
+    setHandedOff(true)
+  }
+
+  function start(change: Change, resumed = false): void {
+    setBusy(change.kind === 'unlink' ? change.identityId : 'link')
+    setError(null)
+    setHandedOff(false)
+    void run(change, resumed)
+      .catch((err: unknown) => {
+        // Dismissing Apple's sheet is a choice, not an error.
+        if (mounted.current && !(err instanceof NativeSignInCancelled)) {
+          setError(err instanceof Error ? err.message : 'The change failed')
+        }
+      })
+      .finally(() => {
+        if (mounted.current) {
+          setBusy(null)
+        }
+      })
+  }
+
+  // Finish a change that was waiting on a sign-in, once that sign-in has
+  // happened: on the load a browser redirect comes back to, or in place when a
+  // shell's deep link lands. An intent with no sign-in after it is left alone,
+  // since that is someone who backed out of the provider's page.
+  const lastSignInAt = oauth.lastSignInAt.value
+  useEffect(() => {
+    if (management !== true || lastSignInAt === null) {
+      return
+    }
+    const intent = readIntent()
+    if (intent === null || lastSignInAt < intent.createdAt) {
+      return
+    }
+    clearIntent()
+    start(intent, true)
+    // `start` closes over state setters only; re-running on its identity would
+    // repeat a destructive request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [management, lastSignInAt])
+
+  if (management === null) {
+    return null
+  }
+  const canLink = oauth.canBindApple.value
+  const linkButton = canLink && (
+    <button
+      type="button"
+      disabled={busy !== null}
+      onClick={() => start({ kind: 'link-apple' })}
+    >
+      {busy === 'link' ? 'Linking...' : 'Link an Apple ID'}
+    </button>
+  )
+  const feedback = (
+    <>
+      {handedOff && error === null && (
+        <p class="muted" role="status">
+          Continue signing in in your browser, then come back. The change
+          finishes once you have signed in.
+        </p>
+      )}
+      {error !== null && (
+        <p class="error" role="alert">
+          {error}
+        </p>
+      )}
+    </>
+  )
+
+  if (!management) {
+    if (!canLink) {
+      return null
+    }
+    if (oauth.sessionProvider.value === 'apple') {
+      return (
+        <section class="panel">
+          <h2>Sign in with Apple</h2>
+          <p class="muted" role="status">
+            You are signed in with Apple, so your Apple ID is linked to this
+            server. The link is to your Apple ID, not your email address.
+          </p>
+        </section>
+      )
+    }
+    return (
+      <section class="panel">
+        <h2>Sign in with Apple</h2>
+        <p class="muted">
+          Link an Apple ID to this Axon server so you can sign in with Apple
+          here and on your other devices. Linking also signs you in with that
+          Apple ID. The link is to your Apple ID, not your email address.
+        </p>
+        {linkButton}
+        {feedback}
+      </section>
+    )
+  }
+
+  const listed = identities ?? []
+  if (listed.length === 0 && !canLink && loadError === null) {
+    return null
+  }
+
+  return (
+    <section class="panel">
+      <h2>Linked sign-ins</h2>
+      <p class="muted">
+        The accounts that can sign in to this Axon server. A link is to the
+        account itself, not to its email address.
+      </p>
+      {loadError !== null && (
+        <p class="muted">Could not load linked sign-ins: {loadError}</p>
+      )}
+      {identities !== null && listed.length === 0 && (
+        <p class="muted">No sign-ins are linked.</p>
+      )}
+      <ul class="linked-sign-ins">
+        {listed.map((identity) => {
+          const name = providerName(identity.provider)
+          const asking =
+            confirming?.identityId === identity.id ? confirming : null
+          return (
+            <li key={identity.id}>
+              <div class="linked-sign-in-row">
+                <div>
+                  <strong>{name}</strong>
+                  {identity.email != null && <> · {identity.email}</>}
+                  <div class="muted">
+                    Linked {new Date(identity.linked_at).toLocaleDateString()}
+                    {identity.current && ' · This session'}
+                    {!identity.sign_in_available &&
+                      ' · Sign-in is switched off on this server'}
+                  </div>
+                </div>
+                {asking === null && (
+                  <button
+                    type="button"
+                    class="danger"
+                    disabled={busy !== null}
+                    aria-label={`Unlink ${name}${identity.email != null ? ` ${identity.email}` : ''}`}
+                    onClick={() => {
+                      setError(null)
+                      setConfirming({
+                        identityId: identity.id,
+                        lastCredential: false,
+                      })
+                    }}
+                  >
+                    {busy === identity.id ? 'Unlinking...' : 'Unlink'}
+                  </button>
+                )}
+              </div>
+              {asking !== null && (
+                <div class="linked-sign-in-confirm" role="group">
+                  {asking.lastCredential ? (
+                    <p role="alert">
+                      <strong>This is the last way to sign in.</strong> Nothing
+                      has been changed yet. If you unlink it, nobody can sign in
+                      to this server from an app again until a new token is
+                      issued on the server itself (
+                      <code>axon-server token issue</code>).
+                    </p>
+                  ) : (
+                    <p>
+                      Axon will forget this {name} sign-in and end every session
+                      that was started with it
+                      {identity.current && ', including this one'}.
+                    </p>
+                  )}
+                  <p class="muted">
+                    Unlinking does not withdraw the permission you gave Axon at{' '}
+                    {name}. {providerControls(identity.provider)}
+                  </p>
+                  <button
+                    type="button"
+                    class="danger"
+                    disabled={busy !== null}
+                    onClick={() =>
+                      start({
+                        kind: 'unlink',
+                        identityId: identity.id,
+                        allowLockout: asking.lastCredential,
+                        current: identity.current,
+                      })
+                    }
+                  >
+                    {busy === identity.id
+                      ? 'Unlinking...'
+                      : asking.lastCredential
+                        ? 'Unlink anyway'
+                        : `Unlink ${name}`}
+                  </button>{' '}
+                  <button
+                    type="button"
+                    disabled={busy !== null}
+                    onClick={() => setConfirming(null)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+      {linkButton}
+      {feedback}
+    </section>
+  )
+}
