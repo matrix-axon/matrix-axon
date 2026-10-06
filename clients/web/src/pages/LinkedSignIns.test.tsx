@@ -48,14 +48,10 @@ afterEach(() => {
 })
 afterAll(() => server.close())
 
-function status(enabled: boolean | undefined) {
-  return http.get(`${TEST_BASE_URL}/v1/status`, () =>
-    HttpResponse.json({
-      data: {
-        backfill: { paused: false, free_bytes: 0, accounts: [] },
-        ...(enabled === undefined ? {} : { management: { enabled } }),
-      },
-    }),
+/** How a server answers the list when it does not serve management. */
+function managementOff(status = 403) {
+  return http.get(IDENTITIES_URL, () =>
+    refuse(status, status === 403 ? 'management_disabled' : 'not_found'),
   )
 }
 
@@ -127,29 +123,40 @@ function renderPanel(services = testServices()) {
 }
 
 describe('LinkedSignIns', () => {
-  it('lists nothing and asks for nothing where management is switched off', async () => {
-    let asked = false
-    server.use(
-      status(false),
-      noProviders(),
-      http.get(IDENTITIES_URL, () => {
-        asked = true
-        return refuse(403, 'management_disabled')
-      }),
-    )
+  it('lists nothing where management is switched off', async () => {
+    server.use(managementOff(), noProviders())
     const view = renderPanel()
 
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(view.container.textContent).toBe('')
-    expect(asked).toBe(false)
   })
 
   it('stays hidden on a server older than the management API', async () => {
-    server.use(status(undefined), noProviders())
+    server.use(managementOff(404), noProviders())
     const view = renderPanel()
 
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(view.container.textContent).toBe('')
+  })
+
+  it('never asks for server status, which is expensive to compute', async () => {
+    // `onUnhandledRequest: 'error'` fails any request with no handler, and
+    // there is none here for `/v1/status`.
+    const routes = identityRoutes([apple])
+    server.use(noProviders(), ...routes.handlers)
+    const view = renderPanel()
+
+    await view.findByRole('button', { name: 'Unlink Apple' })
+  })
+
+  it('says so when the list cannot be loaded', async () => {
+    server.use(
+      noProviders(),
+      http.get(IDENTITIES_URL, () => refuse(500, 'internal')),
+    )
+    const view = renderPanel()
+
+    await view.findByText('Could not load linked sign-ins: internal')
   })
 
   it('lists each linked sign-in, marking the current and the unusable', async () => {
@@ -157,7 +164,7 @@ describe('LinkedSignIns', () => {
       google,
       { ...apple, sign_in_available: false },
     ])
-    server.use(status(true), noProviders(), ...routes.handlers)
+    server.use(noProviders(), ...routes.handlers)
     const view = renderPanel()
 
     await view.findByRole('heading', { name: 'Linked sign-ins' })
@@ -172,7 +179,7 @@ describe('LinkedSignIns', () => {
 
   it('unlinks after a confirmation that points at the provider', async () => {
     const routes = identityRoutes([google, apple])
-    server.use(status(true), noProviders(), ...routes.handlers)
+    server.use(noProviders(), ...routes.handlers)
     const view = renderPanel()
 
     fireEvent.click(await view.findByRole('button', { name: 'Unlink Apple' }))
@@ -196,7 +203,7 @@ describe('LinkedSignIns', () => {
 
   it('cancels without sending anything', async () => {
     const routes = identityRoutes([apple])
-    server.use(status(true), noProviders(), ...routes.handlers)
+    server.use(noProviders(), ...routes.handlers)
     const view = renderPanel()
 
     fireEvent.click(await view.findByRole('button', { name: 'Unlink Apple' }))
@@ -210,7 +217,7 @@ describe('LinkedSignIns', () => {
     const routes = identityRoutes([apple], (call) =>
       call === 1 ? refuse(409, 'last_credential') : null,
     )
-    server.use(status(true), noProviders(), ...routes.handlers)
+    server.use(noProviders(), ...routes.handlers)
     const view = renderPanel()
 
     fireEvent.click(await view.findByRole('button', { name: 'Unlink Apple' }))
@@ -230,7 +237,7 @@ describe('LinkedSignIns', () => {
 
   it('signs out after unlinking the identity this session came from', async () => {
     const routes = identityRoutes([google])
-    server.use(status(true), noProviders(), ...routes.handlers)
+    server.use(noProviders(), ...routes.handlers)
     const view = renderPanel()
 
     fireEvent.click(
@@ -246,7 +253,7 @@ describe('LinkedSignIns', () => {
 
   it('reports a failure and leaves the list as it was', async () => {
     const routes = identityRoutes([apple], () => refuse(500, 'internal'))
-    server.use(status(true), noProviders(), ...routes.handlers)
+    server.use(noProviders(), ...routes.handlers)
     const view = renderPanel()
 
     fireEvent.click(await view.findByRole('button', { name: 'Unlink Apple' }))
@@ -269,7 +276,6 @@ describe('a change the server wants a fresh sign-in for', () => {
       (call) => (call === 1 ? refuse(403, 'recent_sign_in_required') : null),
     )
     server.use(
-      status(true),
       providers([], ['apple']),
       ...routes.handlers,
       http.post(`${TEST_BASE_URL}/v1/oauth/apple/native/challenge`, () =>
@@ -319,7 +325,6 @@ describe('a change the server wants a fresh sign-in for', () => {
       refuse(403, 'recent_sign_in_required'),
     )
     server.use(
-      status(true),
       providers([], ['apple']),
       ...routes.handlers,
       http.post(`${TEST_BASE_URL}/v1/oauth/apple/native/challenge`, () =>
@@ -358,7 +363,6 @@ describe('a change the server wants a fresh sign-in for', () => {
       call === 1 ? refuse(403, 'recent_sign_in_required') : null,
     )
     server.use(
-      status(true),
       providers(['google']),
       ...routes.handlers,
       http.post(`${TEST_BASE_URL}/v1/oauth/token`, () =>
@@ -415,7 +419,7 @@ describe('a change the server wants a fresh sign-in for', () => {
 
   it('leaves a waiting change alone when no sign-in followed it', async () => {
     const routes = identityRoutes([apple])
-    server.use(status(true), noProviders(), ...routes.handlers)
+    server.use(noProviders(), ...routes.handlers)
     window.sessionStorage.setItem(
       RESUME_KEY,
       JSON.stringify({
@@ -438,7 +442,7 @@ describe('a change the server wants a fresh sign-in for', () => {
     const routes = identityRoutes([apple], () =>
       refuse(403, 'recent_sign_in_required'),
     )
-    server.use(status(true), noProviders(), ...routes.handlers)
+    server.use(noProviders(), ...routes.handlers)
     const view = renderPanel()
 
     fireEvent.click(await view.findByRole('button', { name: 'Unlink Apple' }))
@@ -480,7 +484,6 @@ describe('linking an Apple ID', () => {
     const challenges: (string | null)[] = []
     let listed: Identity[] = [google]
     server.use(
-      status(true),
       providers([], ['apple']),
       http.get(IDENTITIES_URL, () => HttpResponse.json({ data: listed })),
       ...nativeRoutes(challenges),
@@ -506,7 +509,7 @@ describe('linking an Apple ID', () => {
   it('still offers linking where management is switched off', async () => {
     const challenges: (string | null)[] = []
     server.use(
-      status(false),
+      managementOff(),
       providers([], ['apple']),
       ...nativeRoutes(challenges),
     )
@@ -527,7 +530,7 @@ describe('linking an Apple ID', () => {
   })
 
   it('offers nothing where native Apple is not available', async () => {
-    server.use(status(false), noProviders())
+    server.use(managementOff(), noProviders())
     const view = renderPanel(
       testServices({ platform: { appleSignIn: vi.fn() } }),
     )

@@ -137,9 +137,9 @@ function providerControls(provider: string) {
  * place an Apple ID is linked (ADR 0109 step 3, `/v1/management/oauth/*`).
  *
  * Renders nothing unless there is something to show or do. Where the operator
- * has switched the management API off, the list and Unlink are hidden rather
- * than probed (`status.management.enabled`), and what remains is the link
- * action, which is an OAuth route and not a management one.
+ * has switched the management API off (the list answers `403
+ * management_disabled`), the list and Unlink are hidden, and what remains is
+ * the link action, which is an OAuth route and not a management one.
  */
 export function LinkedSignIns() {
   const { api, auth } = useServices()
@@ -166,24 +166,33 @@ export function LinkedSignIns() {
 
   const load = useCallback(async () => {
     try {
-      const { data, error: apiError } = await api.GET(
-        '/v1/management/oauth/identities',
-      )
+      const {
+        data,
+        error: apiError,
+        response,
+      } = await api.GET('/v1/management/oauth/identities')
       if (!mounted.current) {
         return
       }
       if (apiError !== undefined) {
-        if (apiErrorCode(apiError) === 'management_disabled') {
+        // Switched off by the operator, or a server older than the route.
+        if (
+          apiErrorCode(apiError) === 'management_disabled' ||
+          response.status === 404
+        ) {
           setManagement(false)
           return
         }
+        setManagement(true)
         setLoadError(apiErrorMessage(apiError))
         return
       }
+      setManagement(true)
       setLoadError(null)
       setIdentities(data.data)
     } catch (cause) {
       if (mounted.current) {
+        setManagement(true)
         setLoadError(cause instanceof Error ? cause.message : String(cause))
       }
     }
@@ -196,26 +205,15 @@ export function LinkedSignIns() {
     void oauth.discoverProviders()
   }, [oauth])
 
+  // The list request is also how this learns whether management is served.
+  // `GET /v1/status` states it outright, but it also computes backfill
+  // progress across every stored event, which on a large instance runs for
+  // minutes and holds a database connection the whole time. A handful of
+  // Settings visits exhausted the server's pool that way (#614). This costs a
+  // disabled server one cheap 403 instead.
   useEffect(() => {
-    void api.GET('/v1/status').then(
-      ({ data }) => {
-        if (!mounted.current) {
-          return
-        }
-        // Absent on a server older than the management API: nothing to list.
-        const enabled = data?.data.management?.enabled === true
-        setManagement(enabled)
-        if (enabled) {
-          void load()
-        }
-      },
-      () => {
-        if (mounted.current) {
-          setManagement(false)
-        }
-      },
-    )
-  }, [api, load])
+    void load()
+  }, [load])
 
   /** Make the change once. `'step-up'` means the server wants a fresh sign-in. */
   async function perform(change: Change): Promise<'done' | 'step-up'> {
