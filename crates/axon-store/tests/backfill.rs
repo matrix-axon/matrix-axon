@@ -9,7 +9,6 @@
 
 mod common;
 
-use axon_store::room_purge_sentinel;
 use common::{insert_message, migrated_store, raw_pool, test_account};
 use sqlx_postgres::PgPool;
 use uuid::Uuid;
@@ -233,16 +232,15 @@ async fn purge_room_clears_stored_state_and_enqueues_search_purge() {
         "backfill cursor removed"
     );
 
-    // The room-purge sentinel is enqueued for the indexer.
-    let sentinel = room_purge_sentinel(&room_id);
-    let n = count(
-        &pool,
-        "SELECT count(*) FROM search_outbox WHERE account_id=$1 AND event_id=$2",
-        account_id,
-        &sentinel,
-    )
-    .await;
-    assert_eq!(n, 1, "one room-purge obligation appended");
+    // Deleted events carry individual obligations so a later rejoin's documents
+    // are never removed by an account/room-wide search sentinel.
+    let entries = store.drain_search_outbox(0, 10000).await.unwrap();
+    let mine: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.account_id == account_id)
+        .collect();
+    assert_eq!(mine.len(), 4, "two ingestion and two deletion obligations");
+    assert!(mine.iter().all(|entry| entry.room_purge().is_none()));
 
     assert_eq!(
         count(
@@ -339,17 +337,14 @@ async fn purge_room_rerun_enqueues_no_duplicate_obligation() {
         .await
         .expect("second purge (no-op)");
 
-    let sentinel = room_purge_sentinel(&room_id);
-    let n = count(
-        &pool,
-        "SELECT count(*) FROM search_outbox WHERE account_id=$1 AND event_id=$2",
-        account_id,
-        &sentinel,
-    )
-    .await;
+    let entries = store.drain_search_outbox(0, 10000).await.unwrap();
     assert_eq!(
-        n, 1,
-        "re-purging an empty room enqueues no extra obligation"
+        entries
+            .iter()
+            .filter(|entry| entry.account_id == account_id)
+            .count(),
+        2,
+        "one ingestion and one deletion obligation; rerun adds nothing"
     );
 
     common::cleanup_account(&pool, account_id).await;
@@ -590,13 +585,13 @@ async fn backfill_progress_timeout_releases_connection_even_after_caller_cancels
     let pool = raw_pool().await;
     let (original_timeout,): (String,) =
         sqlx_core::query_as::query_as("SELECT current_setting('statement_timeout')")
-            .fetch_one(store.read_pool())
+            .fetch_one(store.status_pool())
             .await
             .expect("original settings");
 
     for cancel_caller in [false, true] {
         let (pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
-            .fetch_one(store.read_pool())
+            .fetch_one(store.status_pool())
             .await
             .expect("query backend");
         let mut blocker = pool.begin().await.expect("blocker transaction");
@@ -669,7 +664,7 @@ async fn backfill_progress_timeout_releases_connection_even_after_caller_cancels
                 sqlx_core::query_as::query_as(
                     "SELECT pg_backend_pid(), current_setting('statement_timeout')",
                 )
-                .fetch_one(store.read_pool())
+                .fetch_one(store.status_pool())
                 .await
             })
             .await
@@ -685,7 +680,7 @@ async fn backfill_progress_timeout_releases_connection_even_after_caller_cancels
 
     store.backfill_progress().await.expect("status recovers");
     let (timeout,): (String,) = sqlx_core::query_as::query_as("SHOW statement_timeout")
-        .fetch_one(store.read_pool())
+        .fetch_one(store.status_pool())
         .await
         .expect("settings after successful query");
     assert_eq!(timeout, original_timeout);

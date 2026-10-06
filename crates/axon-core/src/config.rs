@@ -157,7 +157,8 @@ pub struct DatabaseConfig {
     /// `[database].url` key in the TOML file.
     pub url: String,
     /// Maximum size of the ordinary connection pool. Defaults to `5`.
-    /// Heavy reads and bulk maintenance each use one additional connection.
+    /// Hot reads have another pool of this size; status, indexing, and maintenance
+    /// each reserve one additional connection.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
     /// Finite SQL and pool deadlines, including slower bulk work.
@@ -171,7 +172,7 @@ pub struct DatabaseConfig {
 pub struct DatabaseTimeouts {
     /// Ordinary statements, including status and authentication. Default: 10.
     pub statement_secs: u32,
-    /// Individual lock waits in every pool. Default: 3.
+    /// Runtime lock waits. Migrations use their longer statement budget. Default: 3.
     pub lock_secs: u32,
     /// Waiting for a pool connection, including connecting. Default: 5.
     pub acquire_secs: u32,

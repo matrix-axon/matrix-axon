@@ -34,9 +34,20 @@ pub async fn get_status(
     State(build_info): State<BuildInfo>,
     State(management): State<ManagementConfig>,
 ) -> Result<ApiResponse<StatusDto>, ApiError> {
-    let progress = store.backfill_progress().await?;
+    let backfill = match store.backfill_progress().await {
+        Ok(progress) => BackfillStatusDto::new(backfill_provider.snapshot(), progress),
+        Err(error) => {
+            tracing::warn!(
+                reason = error.diagnostic_reason(),
+                "status progress unavailable"
+            );
+            let mut snapshot = BackfillStatusDto::new(backfill_provider.snapshot(), Vec::new());
+            snapshot.progress_available = false;
+            snapshot
+        }
+    };
     Ok(ApiResponse::new(StatusDto {
-        backfill: BackfillStatusDto::new(backfill_provider.snapshot(), progress),
+        backfill,
         sync: sync_provider
             .snapshot()
             .into_iter()

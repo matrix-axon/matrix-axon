@@ -11194,7 +11194,8 @@
         "required": [
           "paused",
           "free_bytes",
-          "accounts"
+          "accounts",
+          "progress_available"
         ],
         "properties": {
           "accounts": {
@@ -11213,6 +11214,10 @@
           "paused": {
             "type": "boolean",
             "description": "Whether backfill is currently paused because free disk space is low."
+          },
+          "progress_available": {
+            "type": "boolean",
+            "description": "False when progress could not be read; an empty list then means unavailable."
           },
           "reason": {
             "type": [

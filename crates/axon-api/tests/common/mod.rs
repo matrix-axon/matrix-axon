@@ -105,6 +105,11 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     let mut lock_conn = store.pool().acquire().await.expect("lock connection");
+    lock_conn.close_on_drop();
+    sqlx_core::query::query("SELECT set_config('statement_timeout', '120s', false), set_config('lock_timeout', '120s', false)")
+        .execute(&mut *lock_conn)
+        .await
+        .expect("test serialization deadline");
     sqlx_core::query::query("SELECT pg_advisory_lock(hashtext('axon.test.' || $1::text))")
         .bind(key)
         .execute(&mut *lock_conn)
@@ -146,6 +151,7 @@ where
             .await
             .err()
             .map(|err| err.to_string());
+    lock_conn.close().await.expect("close test lock session");
     if let Some(payload) = panicked {
         std::panic::resume_unwind(payload);
     }
