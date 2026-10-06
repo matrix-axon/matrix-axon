@@ -121,14 +121,9 @@ impl Store {
     /// account with stored events in a joined room. Used by `GET /v1/status` (M10).
     /// Rooms come from the incrementally maintained summaries, so membership is
     /// checked once per room rather than once per event. Exact event counts still
-    /// read the events index; PostgreSQL cancels the query after five seconds,
-    /// even if the HTTP caller disconnects. The timeout is transaction-local so
-    /// pooled connections retain their normal settings after commit or rollback.
+    /// read the events index; the ordinary pool statement deadline bounds them,
+    /// including when a caller disconnects.
     pub async fn backfill_progress(&self) -> Result<Vec<AccountBackfillProgress>, StoreError> {
-        let mut tx = self.pool.begin().await?;
-        sqlx_core::query::query("SET LOCAL statement_timeout = '5s'")
-            .execute(&mut *tx)
-            .await?;
         let rows = sqlx_core::query_as::query_as::<Postgres, AccountBackfillProgress>(
             "WITH joined AS ( \
                  SELECT s.account_id, s.room_id \
@@ -154,9 +149,8 @@ impl Store {
                  ON bf.account_id = j.account_id AND bf.room_id = j.room_id \
              GROUP BY j.account_id",
         )
-        .fetch_all(&mut *tx)
+        .fetch_all(&self.read_pool)
         .await?;
-        tx.commit().await?;
         Ok(rows)
     }
 
@@ -251,7 +245,7 @@ impl Store {
         .bind(account_id)
         .bind(room_id)
         .bind(room_purge_sentinel(room_id))
-        .execute(&self.pool)
+        .execute(&self.maintenance_pool)
         .await?;
         Ok(())
     }

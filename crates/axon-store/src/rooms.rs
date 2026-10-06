@@ -301,7 +301,7 @@ impl Store {
     /// `list_rooms` reads whatever is already persisted. Returns the number of
     /// summary rows written.
     pub async fn rebuild_room_summaries(&self, account_id: Uuid) -> Result<u64, StoreError> {
-        let mut tx: Transaction<'_, Postgres> = self.pool.begin().await?;
+        let mut tx: Transaction<'_, Postgres> = self.maintenance_pool.begin().await?;
         sqlx_core::query::query("DELETE FROM room_summaries WHERE account_id = $1")
             .bind(account_id)
             .execute(&mut *tx)

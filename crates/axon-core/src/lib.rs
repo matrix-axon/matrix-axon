@@ -17,8 +17,8 @@ pub mod secret;
 
 pub use account_actions::{MatrixProfile, PublicRoomSummary, PublicRoomsPage, PublicRoomsQuery};
 pub use config::{
-    AppleOauthConfig, Config, GenericOauthProviderConfig, MatrixOAuthConfig,
-    MatrixOAuthStaticRegistration, MediaConfig, OauthClientConfig, OauthConfig,
+    AppleOauthConfig, Config, DatabaseConfig, DatabaseTimeouts, GenericOauthProviderConfig,
+    MatrixOAuthConfig, MatrixOAuthStaticRegistration, MediaConfig, OauthClientConfig, OauthConfig,
     OauthProvidersConfig, SearchConfig, SyncConfig,
 };
 pub use error::{ConfigError, Error, Result};

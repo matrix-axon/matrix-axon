@@ -802,7 +802,7 @@ impl Store {
         if let Some(cursor) = before {
             q = q.bind(cursor.origin_ts).bind(cursor.id);
         }
-        let rows = q.bind(limit).fetch_all(&self.pool).await?;
+        let rows = q.bind(limit).fetch_all(&self.read_pool).await?;
         Ok(rows)
     }
 
@@ -823,7 +823,7 @@ impl Store {
         let row = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
             .bind(event_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.read_pool)
             .await?;
         Ok(row)
     }
@@ -895,7 +895,7 @@ impl Store {
         let row = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
             .bind(event_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.read_pool)
             .await?;
         Ok(row)
     }
@@ -951,7 +951,7 @@ impl Store {
             .bind(account_id)
             .bind(room_id)
             .bind(&pinned_ids)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.read_pool)
             .await?;
 
         // `= ANY($3)` doesn't preserve array order, so reorder in Rust to match
@@ -1021,7 +1021,7 @@ impl Store {
         let rows = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
             .bind(event_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.read_pool)
             .await?;
         Ok(rows)
     }
@@ -1093,7 +1093,7 @@ impl Store {
         let rows = sqlx_core::query_as::query_as::<Postgres, ReactionTally>(&sql)
             .bind(account_id)
             .bind(event_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.read_pool)
             .await?;
         Ok(rows)
     }
@@ -1124,7 +1124,7 @@ impl Store {
         let rows = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
             .bind(event_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.read_pool)
             .await?;
         Ok(rows)
     }
@@ -1147,11 +1147,11 @@ impl Store {
             "SELECT th.root_event_id, th.reply_count, \
                     th.latest_reply_event_id, th.latest_reply_ts \
              FROM ( \
-                 SELECT relates_to->>'event_id' AS root_event_id, \
-                        COUNT(*)                  AS reply_count, \
-                        (array_agg(event_id ORDER BY origin_ts DESC, id DESC))[1] \
-                            AS latest_reply_event_id, \
-                        MAX(origin_ts)            AS latest_reply_ts \
+                 SELECT DISTINCT ON (relates_to->>'event_id') \
+                        relates_to->>'event_id' AS root_event_id, \
+                        COUNT(*) OVER (PARTITION BY relates_to->>'event_id') AS reply_count, \
+                        event_id AS latest_reply_event_id, \
+                        origin_ts AS latest_reply_ts \
                  FROM events m \
                  WHERE account_id = $1 AND room_id = $2 \
                    AND relates_to->>'rel_type' = 'm.thread' \
@@ -1162,7 +1162,7 @@ impl Store {
                          AND rr.event_type = 'm.room.redaction' \
                          AND rr.redacts = m.event_id \
                    ) \
-                 GROUP BY relates_to->>'event_id' \
+                 ORDER BY relates_to->>'event_id', origin_ts DESC, id DESC \
              ) th \
              ORDER BY th.latest_reply_ts DESC, th.root_event_id \
              LIMIT {RELATION_READ_CAP}"
@@ -1170,7 +1170,7 @@ impl Store {
         let rows = sqlx_core::query_as::query_as::<Postgres, ThreadSummary>(&sql)
             .bind(account_id)
             .bind(room_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.read_pool)
             .await?;
         Ok(rows)
     }
@@ -1207,7 +1207,7 @@ impl Store {
         if let Some(cursor) = before {
             q = q.bind(cursor.origin_ts).bind(cursor.id);
         }
-        let rows = q.bind(limit).fetch_all(&self.pool).await?;
+        let rows = q.bind(limit).fetch_all(&self.read_pool).await?;
         Ok(rows)
     }
 
@@ -1254,7 +1254,7 @@ impl Store {
         let row = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
             .bind(mxc_url)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.read_pool)
             .await?;
         Ok(row)
     }
