@@ -118,16 +118,28 @@ impl Store {
 
     /// Per-account backfill progress across the account's currently-joined rooms
     /// (the ADR-0037 leave/ban predicate, same as `list_rooms`). One row per
-    /// account that has any stored events. Used by `GET /v1/status` (M10).
+    /// account with stored events in a joined room. Used by `GET /v1/status` (M10).
+    /// Rooms come from the incrementally maintained summaries, so membership is
+    /// checked once per room rather than once per event. Exact event counts still
+    /// read the events index; PostgreSQL cancels the query after five seconds,
+    /// even if the HTTP caller disconnects. The timeout is transaction-local so
+    /// pooled connections retain their normal settings after commit or rollback.
     pub async fn backfill_progress(&self) -> Result<Vec<AccountBackfillProgress>, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx_core::query::query("SET LOCAL statement_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
         let rows = sqlx_core::query_as::query_as::<Postgres, AccountBackfillProgress>(
             "WITH joined AS ( \
-                 SELECT DISTINCT e.account_id, e.room_id \
-                 FROM events e \
-                 JOIN accounts ac ON ac.account_id = e.account_id \
-                 WHERE NOT EXISTS ( \
+                 SELECT s.account_id, s.room_id \
+                 FROM room_summaries s \
+                 JOIN accounts ac ON ac.account_id = s.account_id \
+                 WHERE EXISTS ( \
+                     SELECT 1 FROM events e \
+                     WHERE e.account_id = s.account_id AND e.room_id = s.room_id \
+                 ) AND NOT EXISTS ( \
                      SELECT 1 FROM room_state rs \
-                       WHERE rs.account_id = e.account_id AND rs.room_id = e.room_id \
+                       WHERE rs.account_id = s.account_id AND rs.room_id = s.room_id \
                          AND rs.event_type = 'm.room.member' AND rs.state_key = ac.user_id \
                          AND rs.content->>'membership' IN ('leave', 'ban') \
                  ) \
@@ -142,8 +154,9 @@ impl Store {
                  ON bf.account_id = j.account_id AND bf.room_id = j.room_id \
              GROUP BY j.account_id",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(rows)
     }
 
