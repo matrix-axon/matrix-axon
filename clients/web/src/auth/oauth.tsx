@@ -468,6 +468,24 @@ export function createOAuthAuthProvider({
   }
 
   /**
+   * Which tier a session from a sign-in started now belongs in.
+   *
+   * Signed out, that is the Remember me choice on the sign-in screen. Signed
+   * in, it is the tier the current session already lives in: a sign-in started
+   * from inside the app (linking, or the fresh sign-in a credential change
+   * asks for) replaces that session and must not move it. `rememberMe` cannot
+   * answer here, because it is not stored. It is back at its default on every
+   * page load, so reading it would quietly turn a session the user asked not
+   * to be remembered into one kept in `localStorage`.
+   */
+  function signInStorageMode(): AuthStorageMode {
+    return (
+      sessionMode.value ??
+      (persistence.rememberMe.value ? 'persistent' : 'session')
+    )
+  }
+
+  /**
    * POST a form to an OAuth endpoint, classifying failure the way `redeem`
    * needs. Returns the parsed body of a success.
    */
@@ -686,7 +704,7 @@ export function createOAuthAuthProvider({
     },
     async bindApple(bearer: string) {
       const next = await nativeApple('bind', bearer)
-      persist(next, persistence.rememberMe.value ? 'persistent' : 'session')
+      persist(next, signInStorageMode())
       lastSignInAt.value = Date.now()
     },
     async startSignIn(
@@ -700,9 +718,7 @@ export function createOAuthAuthProvider({
         throw new Error('unknown OAuth provider')
       }
       if (entry.native === true) {
-        const storageMode = persistence.rememberMe.value
-          ? 'persistent'
-          : 'session'
+        const storageMode = signInStorageMode()
         persist(await nativeApple('login'), storageMode)
         lastSignInAt.value = Date.now()
         return 'signed-in'
@@ -712,9 +728,7 @@ export function createOAuthAuthProvider({
       const state = randomBase64Url(32)
       const callbackUri =
         redirectUri ?? new URL('/oauth/callback', redirectUriBase).toString()
-      const storageMode = persistence.rememberMe.value
-        ? 'persistent'
-        : 'session'
+      const storageMode = signInStorageMode()
       const pending: PendingOAuth = {
         state,
         codeVerifier,
