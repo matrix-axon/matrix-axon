@@ -1,8 +1,8 @@
 # Room metadata
 
-Axon separates cheap room summaries, typed cached room-state details, and upstream discovery.
+[ADR 0111](adr/0111-cached-progressive-room-metadata.md) records the architecture for cached room metadata and bounded progressive enrichment.
+This guide documents the implemented API, current sync coverage, verification, and remaining work.
 [Tracking issue 618](https://github.com/matrix-axon/matrix-axon/issues/618) records the remaining acquisition, member-count, and client work.
-This extends the typed detail-read approach in ADR 0084 without changing the room-list projection or existing `/info` response.
 
 ## Cached state details
 
@@ -68,7 +68,7 @@ The API deliberately does not hide these gaps with default values or perform a r
 
 Authoritative member counts are [issue 620](https://github.com/matrix-axon/matrix-axon/issues/620); the lazily loaded member list is not an authoritative count.
 Paginated unjoined-room discovery and summary enrichment are [issue 622](https://github.com/matrix-axon/matrix-axon/issues/622).
-Discovery snapshots must stay separate from synced state, remain account-scoped, and yield to synced state after joining, including explicit field removals.
+The discovery cache, progressive updates, and acquisition budgets follow ADR 0111 and are not implemented by the cached state endpoint.
 Web and TUI consumption are [issue 623](https://github.com/matrix-axon/matrix-axon/issues/623) and [issue 624](https://github.com/matrix-axon/matrix-axon/issues/624).
 
 ## Verification
