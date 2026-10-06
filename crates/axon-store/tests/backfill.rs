@@ -570,26 +570,33 @@ async fn backfill_progress_counts_joined_rooms_and_completion() {
 
 /// PostgreSQL must cancel a blocked status query even after its Rust future is
 /// dropped, and the single-connection pool must be usable with its original
-/// statement timeout after either error rollback or cancellation rollback.
+/// statement timeout after either a query error or caller cancellation.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn backfill_progress_timeout_releases_connection_even_after_caller_cancels() {
     use std::time::{Duration, Instant};
 
-    let store =
-        axon_store::Store::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"), 1)
-            .await
-            .expect("single-connection store");
+    let store = axon_store::Store::connect_with_config(&axon_core::DatabaseConfig {
+        url: std::env::var("DATABASE_URL").expect("DATABASE_URL"),
+        max_connections: 1,
+        timeouts: axon_core::DatabaseTimeouts {
+            statement_secs: 1,
+            lock_secs: 2,
+            ..Default::default()
+        },
+    })
+    .await
+    .expect("single-connection store");
     let pool = raw_pool().await;
     let (original_timeout,): (String,) =
         sqlx_core::query_as::query_as("SELECT current_setting('statement_timeout')")
-            .fetch_one(store.pool())
+            .fetch_one(store.read_pool())
             .await
             .expect("original settings");
 
     for cancel_caller in [false, true] {
         let (pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
-            .fetch_one(store.pool())
+            .fetch_one(store.read_pool())
             .await
             .expect("query backend");
         let mut blocker = pool.begin().await.expect("blocker transaction");
@@ -655,14 +662,14 @@ async fn backfill_progress_timeout_releases_connection_even_after_caller_cancels
         .await
         .expect("original PostgreSQL statement stopped");
 
-        // Keep the table locked while verifying pool recovery and SET LOCAL
-        // cleanup, including rollback on a reused connection.
+        // Keep the table locked while verifying pool recovery and deadlines
+        // on either the reused connection or its replacement.
         let (reused_pid, timeout): (i32, String) =
             tokio::time::timeout(Duration::from_secs(7), async {
                 sqlx_core::query_as::query_as(
                     "SELECT pg_backend_pid(), current_setting('statement_timeout')",
                 )
-                .fetch_one(store.pool())
+                .fetch_one(store.read_pool())
                 .await
             })
             .await
@@ -672,14 +679,14 @@ async fn backfill_progress_timeout_releases_connection_even_after_caller_cancels
             assert_eq!(reused_pid, pid);
         }
         assert_eq!(timeout, original_timeout);
-        assert!(started.elapsed() < Duration::from_secs(8));
+        assert!(started.elapsed() < Duration::from_secs(4));
         blocker.rollback().await.expect("release table lock");
     }
 
     store.backfill_progress().await.expect("status recovers");
     let (timeout,): (String,) = sqlx_core::query_as::query_as("SHOW statement_timeout")
-        .fetch_one(store.pool())
+        .fetch_one(store.read_pool())
         .await
-        .expect("settings after successful commit");
+        .expect("settings after successful query");
     assert_eq!(timeout, original_timeout);
 }

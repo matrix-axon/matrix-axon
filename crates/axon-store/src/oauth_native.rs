@@ -1,8 +1,7 @@
 //! Single-use native challenges. All writes on redemption share one transaction.
 use crate::{IssuedOAuthTokenPair, Store, StoreError};
 use chrono::{DateTime, Utc};
-use sqlx_core::{row::Row, transaction::Transaction};
-use sqlx_postgres::Postgres;
+use sqlx_core::row::Row;
 use uuid::Uuid;
 
 /// Shared by challenge storage and the public expires_in response.
@@ -43,7 +42,6 @@ impl Store {
     /// Bound storage even under distributed unauthenticated challenge requests.
     pub async fn create_native_challenge(&self, c: &NativeChallenge) -> Result<bool, StoreError> {
         let mut tx = self.pool.begin().await?;
-        native_timeouts(&mut tx).await?;
         sqlx_core::query::query("SELECT pg_advisory_xact_lock(47085947794270)")
             .execute(&mut *tx)
             .await?;
@@ -93,7 +91,6 @@ impl Store {
         challenge: Option<&NativeChallenge>,
     ) -> Result<Result<IssuedOAuthTokenPair, IdentityRedemptionRejection>, StoreError> {
         let mut tx = self.pool.begin().await?;
-        native_timeouts(&mut tx).await?;
         let purpose = challenge.map_or("login", |c| c.purpose.as_str());
         if purpose == "bootstrap" {
             self.lock_bootstrap(&mut tx).await?;
@@ -181,14 +178,4 @@ impl Store {
         tx.commit().await?;
         Ok(Ok(pair))
     }
-}
-
-async fn native_timeouts(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
-    sqlx_core::query::query("SET LOCAL lock_timeout = '5s'")
-        .execute(&mut **tx)
-        .await?;
-    sqlx_core::query::query("SET LOCAL statement_timeout = '10s'")
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
 }

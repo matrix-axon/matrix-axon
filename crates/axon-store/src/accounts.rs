@@ -393,7 +393,7 @@ impl Store {
              SELECT account_id, '' FROM d",
         )
         .bind(account_id)
-        .execute(&self.pool)
+        .execute(&self.maintenance_pool)
         .await?;
         Ok(())
     }

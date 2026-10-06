@@ -408,10 +408,6 @@ impl Store {
         guard: Option<&[String]>,
     ) -> Result<TokenRevocation, StoreError> {
         let mut tx = self.pool.begin().await?;
-        // Bound the wait for the credential lock, as identity removal does.
-        sqlx_core::query::query("SET LOCAL lock_timeout = '5s'")
-            .execute(&mut *tx)
-            .await?;
         Self::lock_credentials(&mut tx).await?;
         let Some(row) = sqlx_core::query::query(
             "SELECT revoked_at IS NOT NULL AS revoked, expires_at IS NULL AS non_expiring, \

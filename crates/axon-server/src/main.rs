@@ -171,7 +171,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
 
-    let store = Store::connect(&config.database.url, config.database.max_connections)
+    let store = Store::connect_with_config(&config.database)
         .await
         .context("connecting to database")?;
     let bootstrap = maybe_offer_web_bootstrap(&store, &config).await?;

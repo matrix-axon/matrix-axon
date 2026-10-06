@@ -5,6 +5,9 @@ use thiserror::Error;
 /// Errors raised by the storage layer.
 #[derive(Debug, Error)]
 pub enum StoreError {
+    /// Invalid database deadlines or pool sizing.
+    #[error("{0}")]
+    Config(#[from] axon_core::ConfigError),
     /// A connection or query failed.
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx_core::Error),
@@ -48,6 +51,7 @@ impl StoreError {
     /// Allowlisted diagnostic category, never SQL detail, values, or source text.
     pub fn diagnostic_reason(&self) -> &'static str {
         match self {
+            Self::Config(_) => "database_configuration",
             Self::Sqlx(error) => match error {
                 sqlx_core::Error::PoolTimedOut => "pool_timeout",
                 sqlx_core::Error::PoolClosed => "pool_closed",

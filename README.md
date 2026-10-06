@@ -165,6 +165,29 @@ cargo run -p axon-server -- init   # generates a config + store_key, once
 | [AGENTS.md](AGENTS.md)                            | Working conventions and current state, for humans and agents |
 | [ADRs](docs/adr/)                                 | Decisions made during implementation                         |
 
+## Database deadlines
+
+Every server database connection has PostgreSQL statement and lock deadlines, including connections replaced after a request is canceled.
+Ordinary statements default to 10 seconds, lock waits to 3 seconds, and pool acquisition to 5 seconds.
+Expensive status, timeline, and relation projections share one additional connection with the ordinary statement deadline so concurrent slow reads cannot exhaust auth/sync connections.
+Bulk maintenance shares another connection with a 120-second statement deadline; startup migrations and developer database repair use a 600-second statement deadline.
+Idle transactions are terminated after 30 seconds so an abandoned transaction cannot hold locks indefinitely.
+These are per-statement deadlines, not a deadline for an entire multi-step operation.
+A timed-out SQL statement fails and rolls back its writes; a canceled HTTP response does not prove that a write failed to commit.
+
+Configure these values under `[database.timeouts]` in [axon.toml.example](axon.toml.example), or through overrides such as `AXON_DATABASE__TIMEOUTS__STATEMENT_SECS=20` and `AXON_DATABASE__TIMEOUTS__MAINTENANCE_STATEMENT_SECS=240`.
+All deadlines must be between 1 and 86400 seconds; zero is rejected.
+The statement deadlines must satisfy `statement_secs <= maintenance_statement_secs <= migration_statement_secs`.
+Changes take effect after restarting the server.
+On a slow machine, increase the relevant statement deadline while keeping lock and acquisition waits short enough to surface contention promptly.
+The database must allow `max_connections + 2` server connections, plus connections from CLI commands and other database users.
+
+Account deletion, room purge, and room-summary rebuild retain their existing atomic behavior on the maintenance pool.
+Search-index seeding also uses the maintenance pool and its longer deadline.
+Search-outbox pruning commits batches of at most 1000 rows so interruptions leave a safely retryable prefix.
+Stale refresh-token cleanup runs in the background at most once per minute, with one sweep in flight across the server's store handles; cleanup failure does not reject token issuance or rotation.
+Query and pool timeout failures use existing API error responses and request-error logging; cleanup failures log a redacted diagnostic category and retry on later activity.
+
 ## Environment variables
 
 Two kinds of `AXON_`-prefixed environment variables exist:
