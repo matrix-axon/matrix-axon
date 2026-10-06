@@ -4065,7 +4065,8 @@ export interface components {
             room?: number | null;
         };
         RoomPredecessorMetadata: {
-            event_id: string;
+            /** @description Deprecated since Matrix v1.16; room upgrades may omit this field. */
+            event_id?: string | null;
             room_id: string;
         };
         /**

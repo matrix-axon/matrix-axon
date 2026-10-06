@@ -130,7 +130,8 @@ pub struct RoomCreationMetadata {
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct RoomPredecessorMetadata {
     pub room_id: String,
-    pub event_id: String,
+    /// Deprecated since Matrix v1.16; room upgrades may omit this field.
+    pub event_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -299,5 +300,43 @@ impl RoomMetadataDto {
             }
         }
         metadata
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axon_store::RoomStateRow;
+    use serde_json::json;
+
+    #[test]
+    fn creation_snapshot_accepts_predecessor_without_event_id() {
+        let metadata = RoomMetadataDto::from_rows(
+            Uuid::new_v4(),
+            vec![RoomMetadataStateRow {
+                state: RoomStateRow {
+                    room_id: "!replacement:example.org".into(),
+                    event_type: "m.room.create".into(),
+                    state_key: String::new(),
+                    event_id: "$create".into(),
+                    sender: "@creator:example.org".into(),
+                    origin_ts: 1,
+                    content: Some(json!({
+                        "room_version": "12",
+                        "predecessor": {"room_id": "!previous:example.org"}
+                    })),
+                },
+                oversized: false,
+            }],
+        );
+        assert!(matches!(
+            metadata.creation.status,
+            RoomMetadataStatus::Available
+        ));
+        let creation = metadata.creation.content.unwrap();
+        assert_eq!(creation.room_version.as_deref(), Some("12"));
+        let predecessor = creation.predecessor.unwrap();
+        assert_eq!(predecessor.room_id, "!previous:example.org");
+        assert_eq!(predecessor.event_id, None);
     }
 }

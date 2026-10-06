@@ -38,6 +38,7 @@ Only `available` snapshots have non-null content.
 Nullable content fields preserve omission instead of filling Matrix defaults.
 In particular, an unknown encryption snapshot does not mean "unencrypted," and an unknown alias snapshot does not mean "no aliases."
 For available creation state, the enclosing `sender` provides the create-event sender when a room version omits the `creator` content field.
+A creation predecessor can omit `event_id`; its `room_id` remains available.
 Power levels describe configured state, with legacy numeric strings normalized to integers; they are not resolved permissions and must not drive authorization decisions.
 Unknown condition types retain their `type` and optional `room_id`; extension-specific payloads are not exposed by this typed read.
 An empty content object is not itself evidence of redaction: the stored projection does not always retain enough information to establish that distinction.
