@@ -867,6 +867,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/rooms/{room_id}/metadata": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read typed room metadata from account-scoped cached state.
+         *     No upstream requests or membership aggregation occur on this route.
+         *     Missing snapshots remain unknown, including for unjoined/unknown rooms.
+         *     Content is limited to 64 KiB per state tuple before transfer and decoding.
+         *     Re-read after relevant state events and on reconnect; event `origin_ts`
+         *     is provenance, not a last-successful-sync timestamp.
+         */
+        get: operations["room_metadata"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/rooms/{room_id}/name": {
         parameters: {
             query?: never;
@@ -2244,6 +2268,24 @@ export interface components {
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_RoomMetadataDto: {
+            /**
+             * @description Fixed-cost detail read from cached room state. It does not fetch upstream,
+             *     aggregate members, merge discovery results, or change account membership.
+             *     Unknown account/room IDs return unknown snapshots, like existing state reads.
+             */
+            data: {
+                aliases: components["schemas"]["CachedRoomMetadata_RoomAliasesMetadata"];
+                creation: components["schemas"]["CachedRoomMetadata_RoomCreationMetadata"];
+                encryption: components["schemas"]["CachedRoomMetadata_RoomEncryptionMetadata"];
+                guest_access: components["schemas"]["CachedRoomMetadata_RoomGuestAccessMetadata"];
+                history_visibility: components["schemas"]["CachedRoomMetadata_RoomHistoryVisibilityMetadata"];
+                join_rules: components["schemas"]["CachedRoomMetadata_RoomJoinRulesMetadata"];
+                power_levels: components["schemas"]["CachedRoomMetadata_RoomPowerLevelsMetadata"];
+                server_acl: components["schemas"]["CachedRoomMetadata_RoomServerAclMetadata"];
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_RoomUpgradeDto: {
             /**
              * @description Upgrade chain (`GET …/rooms/{room_id}/upgrade`, issue #404, ADR 0084):
@@ -2849,6 +2891,176 @@ export interface components {
             profile: string;
             rustc_version: string;
             version: string;
+        };
+        /**
+         * @description A typed snapshot from Axon's account-scoped `room_state` cache. Nullable
+         *     fields in content preserve omitted values rather than synthesizing Matrix
+         *     defaults. Defaults, if needed for display, apply only to available content.
+         *     Event timestamps identify the event; they do not establish when sync last
+         *     succeeded or when Axon last checked upstream availability.
+         */
+        CachedRoomMetadata_RoomAliasesMetadata: {
+            content?: null | {
+                alias?: string | null;
+                alt_aliases?: string[] | null;
+            };
+            event_id?: string | null;
+            /** Format: int64 */
+            origin_ts?: number | null;
+            sender?: string | null;
+            status: components["schemas"]["RoomMetadataStatus"];
+        };
+        /**
+         * @description A typed snapshot from Axon's account-scoped `room_state` cache. Nullable
+         *     fields in content preserve omitted values rather than synthesizing Matrix
+         *     defaults. Defaults, if needed for display, apply only to available content.
+         *     Event timestamps identify the event; they do not establish when sync last
+         *     succeeded or when Axon last checked upstream availability.
+         */
+        CachedRoomMetadata_RoomCreationMetadata: {
+            content?: null | {
+                additional_creators?: string[] | null;
+                creator?: string | null;
+                federate?: boolean | null;
+                predecessor?: null | components["schemas"]["RoomPredecessorMetadata"];
+                room_type?: string | null;
+                room_version?: string | null;
+            };
+            event_id?: string | null;
+            /** Format: int64 */
+            origin_ts?: number | null;
+            sender?: string | null;
+            status: components["schemas"]["RoomMetadataStatus"];
+        };
+        /**
+         * @description A typed snapshot from Axon's account-scoped `room_state` cache. Nullable
+         *     fields in content preserve omitted values rather than synthesizing Matrix
+         *     defaults. Defaults, if needed for display, apply only to available content.
+         *     Event timestamps identify the event; they do not establish when sync last
+         *     succeeded or when Axon last checked upstream availability.
+         */
+        CachedRoomMetadata_RoomEncryptionMetadata: {
+            content?: null | {
+                algorithm?: string | null;
+                /** Format: int64 */
+                rotation_period_ms?: number | null;
+                /** Format: int64 */
+                rotation_period_msgs?: number | null;
+            };
+            event_id?: string | null;
+            /** Format: int64 */
+            origin_ts?: number | null;
+            sender?: string | null;
+            status: components["schemas"]["RoomMetadataStatus"];
+        };
+        /**
+         * @description A typed snapshot from Axon's account-scoped `room_state` cache. Nullable
+         *     fields in content preserve omitted values rather than synthesizing Matrix
+         *     defaults. Defaults, if needed for display, apply only to available content.
+         *     Event timestamps identify the event; they do not establish when sync last
+         *     succeeded or when Axon last checked upstream availability.
+         */
+        CachedRoomMetadata_RoomGuestAccessMetadata: {
+            content?: null | {
+                guest_access?: string | null;
+            };
+            event_id?: string | null;
+            /** Format: int64 */
+            origin_ts?: number | null;
+            sender?: string | null;
+            status: components["schemas"]["RoomMetadataStatus"];
+        };
+        /**
+         * @description A typed snapshot from Axon's account-scoped `room_state` cache. Nullable
+         *     fields in content preserve omitted values rather than synthesizing Matrix
+         *     defaults. Defaults, if needed for display, apply only to available content.
+         *     Event timestamps identify the event; they do not establish when sync last
+         *     succeeded or when Axon last checked upstream availability.
+         */
+        CachedRoomMetadata_RoomHistoryVisibilityMetadata: {
+            content?: null | {
+                history_visibility?: string | null;
+            };
+            event_id?: string | null;
+            /** Format: int64 */
+            origin_ts?: number | null;
+            sender?: string | null;
+            status: components["schemas"]["RoomMetadataStatus"];
+        };
+        /**
+         * @description A typed snapshot from Axon's account-scoped `room_state` cache. Nullable
+         *     fields in content preserve omitted values rather than synthesizing Matrix
+         *     defaults. Defaults, if needed for display, apply only to available content.
+         *     Event timestamps identify the event; they do not establish when sync last
+         *     succeeded or when Axon last checked upstream availability.
+         */
+        CachedRoomMetadata_RoomJoinRulesMetadata: {
+            content?: null | {
+                /** @description Restriction conditions, preserving namespaced/unknown condition types. */
+                allow?: components["schemas"]["RoomJoinConditionMetadata"][] | null;
+                join_rule?: string | null;
+            };
+            event_id?: string | null;
+            /** Format: int64 */
+            origin_ts?: number | null;
+            sender?: string | null;
+            status: components["schemas"]["RoomMetadataStatus"];
+        };
+        /**
+         * @description A typed snapshot from Axon's account-scoped `room_state` cache. Nullable
+         *     fields in content preserve omitted values rather than synthesizing Matrix
+         *     defaults. Defaults, if needed for display, apply only to available content.
+         *     Event timestamps identify the event; they do not establish when sync last
+         *     succeeded or when Axon last checked upstream availability.
+         */
+        CachedRoomMetadata_RoomPowerLevelsMetadata: {
+            content?: null | {
+                /** Format: int64 */
+                ban?: number | null;
+                events?: {
+                    [key: string]: number;
+                } | null;
+                /** Format: int64 */
+                events_default?: number | null;
+                /** Format: int64 */
+                invite?: number | null;
+                /** Format: int64 */
+                kick?: number | null;
+                notifications?: null | components["schemas"]["RoomNotificationLevelsMetadata"];
+                /** Format: int64 */
+                redact?: number | null;
+                /** Format: int64 */
+                state_default?: number | null;
+                users?: {
+                    [key: string]: number;
+                } | null;
+                /** Format: int64 */
+                users_default?: number | null;
+            };
+            event_id?: string | null;
+            /** Format: int64 */
+            origin_ts?: number | null;
+            sender?: string | null;
+            status: components["schemas"]["RoomMetadataStatus"];
+        };
+        /**
+         * @description A typed snapshot from Axon's account-scoped `room_state` cache. Nullable
+         *     fields in content preserve omitted values rather than synthesizing Matrix
+         *     defaults. Defaults, if needed for display, apply only to available content.
+         *     Event timestamps identify the event; they do not establish when sync last
+         *     succeeded or when Axon last checked upstream availability.
+         */
+        CachedRoomMetadata_RoomServerAclMetadata: {
+            content?: null | {
+                allow?: string[] | null;
+                allow_ip_literals?: boolean | null;
+                deny?: string[] | null;
+            };
+            event_id?: string | null;
+            /** Format: int64 */
+            origin_ts?: number | null;
+            sender?: string | null;
+            status: components["schemas"]["RoomMetadataStatus"];
         };
         /** @description Upstream callback fields, carried in a GET query or URL-encoded POST form. */
         CallbackQuery: {
@@ -3821,6 +4033,40 @@ export interface components {
              *     (`invite`/`public`/`knock`/`restricted`/`knock_restricted`/…).
              */
             join_rule?: string | null;
+        };
+        RoomJoinConditionMetadata: {
+            /** @description Present for `m.room_membership`; other condition types may omit it. */
+            room_id?: string | null;
+            type: string;
+        };
+        /**
+         * @description Fixed-cost detail read from cached room state. It does not fetch upstream,
+         *     aggregate members, merge discovery results, or change account membership.
+         *     Unknown account/room IDs return unknown snapshots, like existing state reads.
+         */
+        RoomMetadataDto: {
+            aliases: components["schemas"]["CachedRoomMetadata_RoomAliasesMetadata"];
+            creation: components["schemas"]["CachedRoomMetadata_RoomCreationMetadata"];
+            encryption: components["schemas"]["CachedRoomMetadata_RoomEncryptionMetadata"];
+            guest_access: components["schemas"]["CachedRoomMetadata_RoomGuestAccessMetadata"];
+            history_visibility: components["schemas"]["CachedRoomMetadata_RoomHistoryVisibilityMetadata"];
+            join_rules: components["schemas"]["CachedRoomMetadata_RoomJoinRulesMetadata"];
+            power_levels: components["schemas"]["CachedRoomMetadata_RoomPowerLevelsMetadata"];
+            server_acl: components["schemas"]["CachedRoomMetadata_RoomServerAclMetadata"];
+        };
+        /**
+         * @description Availability of a particular cached state tuple. An unknown tuple is not
+         *     evidence that a setting is unset, encryption is disabled, or access is public.
+         * @enum {string}
+         */
+        RoomMetadataStatus: "unknown" | "available" | "unavailable" | "invalid" | "too_large";
+        RoomNotificationLevelsMetadata: {
+            /** Format: int64 */
+            room?: number | null;
+        };
+        RoomPredecessorMetadata: {
+            event_id: string;
+            room_id: string;
         };
         /**
          * @description A room-creation preset (see `axon_core::RoomPreset`), mirroring the three
@@ -7293,6 +7539,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiResponse_Vec_MemberDto"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    room_metadata: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Typed cached state snapshots with availability and provenance */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_RoomMetadataDto"];
                 };
             };
             /** @description Missing, malformed, or revoked bearer token */

@@ -88,6 +88,24 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomStateRow {
     }
 }
 
+/// A detail-read state row whose content was bounded in PostgreSQL before
+/// transfer/JSON decoding. Oversized content is withheld without losing the
+/// event's provenance; it must not be mistaken for absent or redacted state.
+#[derive(Debug, Clone)]
+pub struct RoomMetadataStateRow {
+    pub state: RoomStateRow,
+    pub oversized: bool,
+}
+
+impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomMetadataStateRow {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
+        Ok(Self {
+            state: RoomStateRow::from_row(row)?,
+            oversized: row.try_get("oversized")?,
+        })
+    }
+}
+
 /// Columns selected for a [`RoomStateRow`].
 const ROOM_STATE_COLUMNS: &str =
     "room_id, event_type, state_key, event_id, sender, origin_ts, content";
@@ -203,6 +221,37 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row)
+    }
+
+    /// Read the fixed set of singleton state types used by room metadata.
+    /// This performs one account-scoped query, never scans membership or
+    /// performs network I/O, and returns at most eight rows. Each content is
+    /// capped at 64 KiB *before* transfer and JSON decoding, including unknown
+    /// extension fields, so a pathological stored event cannot expand this
+    /// detail read without bound. Missing rows do not prove unset state: the
+    /// SDK may not have requested or hydrated that state type yet.
+    pub async fn room_metadata_states(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<Vec<RoomMetadataStateRow>, StoreError> {
+        let rows = sqlx_core::query_as::query_as::<Postgres, RoomMetadataStateRow>(
+            "SELECT room_id, event_type, state_key, event_id, sender, origin_ts, \
+                    CASE WHEN octet_length(content::text) > 65536 \
+                         THEN NULL ELSE content END AS content, \
+                    COALESCE(octet_length(content::text) > 65536, false) AS oversized \
+             FROM room_state \
+             WHERE account_id = $1 AND room_id = $2 AND state_key = '' \
+               AND event_type IN ('m.room.canonical_alias', 'm.room.create', \
+                   'm.room.join_rules', 'm.room.encryption', 'm.room.power_levels', \
+                   'm.room.server_acl', 'm.room.history_visibility', 'm.room.guest_access') \
+             ORDER BY event_type LIMIT 8",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     /// Read every resolved state tuple of one type in a room, ordered by

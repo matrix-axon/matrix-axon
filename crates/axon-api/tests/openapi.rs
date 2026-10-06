@@ -99,3 +99,52 @@ fn openapi_spec_is_current() {
         "OpenAPI spec drift — regenerate with `UPDATE_OPENAPI=1 cargo test -p axon-api --test openapi`"
     );
 }
+
+#[test]
+fn room_metadata_content_is_nullable_in_every_snapshot_schema() {
+    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schemas = spec["components"]["schemas"].as_object().unwrap();
+    let snapshots: Vec<_> = schemas
+        .iter()
+        .filter(|(name, _)| name.starts_with("CachedRoomMetadata_"))
+        .collect();
+    assert_eq!(snapshots.len(), 8);
+    for (name, schema) in snapshots {
+        let content = &schema["properties"]["content"];
+        assert!(
+            content["oneOf"]
+                .as_array()
+                .is_some_and(|branches| { branches.iter().any(|branch| branch["type"] == "null") }),
+            "{name} must permit the null content returned for unknown/unavailable state: {content}"
+        );
+    }
+}
+
+#[test]
+fn all_local_schema_references_resolve() {
+    fn visit(value: &serde_json::Value, document: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str) {
+                    if let Some(pointer) = reference.strip_prefix('#') {
+                        assert!(
+                            document.pointer(pointer).is_some(),
+                            "unresolved reference {reference}"
+                        );
+                    }
+                }
+                for child in object.values() {
+                    visit(child, document);
+                }
+            }
+            serde_json::Value::Array(array) => {
+                for child in array {
+                    visit(child, document);
+                }
+            }
+            _ => {}
+        }
+    }
+    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    visit(&spec, &spec);
+}
