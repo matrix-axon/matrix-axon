@@ -11,9 +11,10 @@ use crate::room_metadata::RoomMetadataDto;
 /// Read typed room metadata from account-scoped cached state.
 /// No upstream requests or membership aggregation occur on this route.
 /// Missing snapshots remain unknown, including for unjoined/unknown rooms.
-/// Content is limited to 64 KiB per state tuple before transfer and decoding.
-/// Re-read after relevant state events and on reconnect; event `origin_ts`
-/// is provenance, not a last-successful-sync timestamp.
+/// Content is limited to 128 KiB per state tuple before transfer and decoding.
+/// Re-read on reopen/reconnect. Until state invalidation covers required-state
+/// updates, open panels need bounded polling to detect changes without a live
+/// frame. Event `origin_ts` is provenance, not a sync-freshness timestamp.
 #[utoipa::path(
     get,
     path = "/v1/accounts/{account_id}/rooms/{room_id}/metadata",
@@ -30,7 +31,9 @@ pub async fn room_metadata(
     State(store): State<Store>,
     Path((account_id, room_id)): Path<(Uuid, String)>,
 ) -> Result<ApiResponse<RoomMetadataDto>, ApiError> {
-    let rows = store.room_metadata_states(account_id, &room_id).await?;
+    let rows = store
+        .room_metadata_states(account_id, &room_id, RoomMetadataDto::EVENT_TYPES)
+        .await?;
     Ok(ApiResponse::new(RoomMetadataDto::from_rows(
         account_id, rows,
     )))

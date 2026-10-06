@@ -4455,7 +4455,7 @@ async fn room_metadata_invalid_and_oversized_content() {
         ),
         (
             "m.room.server_acl",
-            json!({"allow": ["*"], "org.example.large": "x".repeat(65537)}),
+            json!({"allow": ["*"], "org.example.large": "x".repeat(131073)}),
         ),
         ("m.room.guest_access", json!({"guest_access": "forbidden"})),
         ("m.room.history_visibility", json!(["world_readable"])),
@@ -4475,7 +4475,7 @@ async fn room_metadata_invalid_and_oversized_content() {
             .unwrap();
     }
     let rows = store
-        .room_metadata_states(account_id, &room_id)
+        .room_metadata_states(account_id, &room_id, &["m.room.server_acl"])
         .await
         .unwrap();
     let acl = rows
@@ -4490,15 +4490,37 @@ async fn room_metadata_invalid_and_oversized_content() {
         &format!("/v1/accounts/{account_id}/rooms/{room_id}/metadata"),
     )
     .await;
-    for key in [
-        "aliases",
-        "encryption",
-        "power_levels",
-        "history_visibility",
-    ] {
-        assert_eq!(body["data"][key]["status"], "invalid");
-        assert_eq!(body["data"][key]["content"], Value::Null);
+    for key in ["aliases", "encryption", "power_levels"] {
+        assert_eq!(body["data"][key]["status"], "partial");
+        assert!(body["data"][key]["content"].is_object());
+        assert!(!body["data"][key]["invalid_fields"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
+    assert_eq!(
+        body["data"]["aliases"]["content"]["alt_aliases"],
+        json!(["#good:localhost"])
+    );
+    assert_eq!(
+        body["data"]["encryption"]["content"]["algorithm"],
+        "m.megolm.v1.aes-sha2"
+    );
+    assert_eq!(
+        body["data"]["encryption"]["content"]["rotation_period_msgs"],
+        Value::Null
+    );
+    assert_eq!(body["data"]["history_visibility"]["status"], "invalid");
+    assert_eq!(body["data"]["history_visibility"]["content"], Value::Null);
+    let (_, info) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/info"),
+    )
+    .await;
+    assert_eq!(
+        body["data"]["encryption"]["content"]["algorithm"],
+        info["data"]["encryption_algorithm"]
+    );
     assert_eq!(body["data"]["server_acl"]["status"], "too_large");
     assert_eq!(body["data"]["server_acl"]["content"], Value::Null);
     assert_eq!(body["data"]["guest_access"]["status"], "available");
@@ -4527,6 +4549,42 @@ async fn room_metadata_content_limit_boundary_and_auth() {
     let (status, _) = request(&app, "GET", &uri, None, Some("Bearer invalid")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
+    // A legal compact ACL can exceed 64 KiB in PostgreSQL's spaced rendering.
+    let content = json!({
+        "allow": ["*"],
+        "deny": (0..3600).map(|i| format!("s{i:010}.org")).collect::<Vec<_>>()
+    });
+    assert!(serde_json::to_vec(&content).unwrap().len() < 65536);
+    let rendered_size: i32 =
+        sqlx_core::query_scalar::query_scalar("SELECT octet_length($1::jsonb::text)")
+            .bind(&content)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert!(rendered_size > 65536);
+    store
+        .upsert_room_state(&RoomStateUpsert {
+            account_id,
+            room_id: &room_id,
+            event_type: "m.room.server_acl",
+            state_key: "",
+            event_id: "$large-valid-acl:localhost",
+            sender: "@alice:localhost",
+            origin_ts: 1,
+            content: Some(content),
+        })
+        .await
+        .unwrap();
+    let (_, body) = get(&app, &uri).await;
+    assert_eq!(body["data"]["server_acl"]["status"], "available");
+    assert_eq!(
+        body["data"]["server_acl"]["content"]["deny"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3600
+    );
+
     // Measure PostgreSQL's text representation rather than guessing the
     // difference between compact serde output and JSONB's spacing.
     let overhead: i32 =
@@ -4535,7 +4593,7 @@ async fn room_metadata_content_limit_boundary_and_auth() {
             .fetch_one(store.pool())
             .await
             .unwrap();
-    for (size, expected) in [(65536, "available"), (65537, "too_large")] {
+    for (size, expected) in [(131072, "available"), (131073, "too_large")] {
         let content = json!({
             "alt_aliases": [], "org.example.padding": "x".repeat((size - overhead) as usize)
         });

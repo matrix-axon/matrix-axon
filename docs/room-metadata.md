@@ -9,7 +9,8 @@ This guide documents the implemented API, current sync coverage, verification, a
 `GET /v1/accounts/{account_id}/rooms/{room_id}/metadata` returns eight typed snapshots from that account's cached room state.
 It requires the same bearer authentication as other `/v1/` reads.
 It performs one database query for a fixed set of singleton tuples, with no homeserver request, membership aggregation, or discovery-cache merge.
-Each state's content is limited to 64 KiB in PostgreSQL before transfer and JSON decoding.
+Each state's PostgreSQL-rendered content is limited to 128 KiB before transfer and JSON decoding.
+This is a local transfer budget with headroom for JSONB spacing above Matrix's compact event-size limit; it is not an upstream event-validity check.
 An oversized state keeps its provenance but withholds its content; other fields remain available.
 
 | Snapshot             | State type                  | Detail fields                                                                            |
@@ -30,22 +31,31 @@ Each snapshot includes `status`, `event_id`, `sender`, `origin_ts`, and `content
 | ------------- | ---------------------------------------------------------------------------------------------------- |
 | `unknown`     | No cached tuple; Axon cannot establish that the setting is unset. Provenance and content are `null`. |
 | `available`   | Typed content is available, including explicit empty lists and omitted fields.                       |
-| `unavailable` | A tuple exists but its content is absent, for example after redaction.                               |
+| `unavailable` | A tuple exists but its content was not retained; this is not a redaction indicator.                  |
+| `partial`     | Valid fields and entries remain available; `invalid_fields` identifies withheld malformed data.      |
 | `invalid`     | Stored content has an incompatible shape; content is withheld.                                       |
 | `too_large`   | Stored content exceeded the content-size bound; content is withheld.                                 |
 
-Only `available` snapshots have non-null content.
+Only `available` and `partial` snapshots have non-null content.
+A `partial` snapshot preserves valid fields and entries and reports malformed paths in `invalid_fields` (for example, `rotation_period_msgs`, `allow[]`, or `users.*`).
+Paths use wildcards instead of upstream map keys, are deduplicated, and never contain offending values.
+Clients must not treat a malformed field or a filtered list/map as confirmed absent or complete, or apply defaults to an invalid field.
+All other snapshots have an empty `invalid_fields` list unless typed decoding still fails after field validation.
 Nullable content fields preserve omission instead of filling Matrix defaults.
 In particular, an unknown encryption snapshot does not mean "unencrypted," and an unknown alias snapshot does not mean "no aliases."
 For available creation state, the enclosing `sender` provides the create-event sender when a room version omits the `creator` content field.
 A creation predecessor can omit `event_id`; its `room_id` remains available.
-Power levels describe configured state, with legacy numeric strings normalized to integers; they are not resolved permissions and must not drive authorization decisions.
+Power levels describe configured state, with legacy decimal strings and floats normalized to integers (floats truncate toward zero); they are not resolved permissions and must not drive authorization decisions.
 Unknown condition types retain their `type` and optional `room_id`; extension-specific payloads are not exposed by this typed read.
-An empty content object is not itself evidence of redaction: the stored projection does not always retain enough information to establish that distinction.
+An empty content object is not itself evidence of redaction: the stored projection does not retain a reliable redaction marker.
+Redacted state may therefore be `available` with empty or retained fields; availability describes the cached shape, not whether the original event was redacted.
+The `unavailable` status handles stored NULL content and is not a guarantee that sync identifies redacted events.
 
-A client should re-read after a relevant state event, when reopening the panel, and on reconnect.
-The relevant state types are the eight types in the table above, conveyed through the existing event stream.
-There is no new metadata-specific live frame in this step.
+A client should re-read when reopening the panel, on reconnect, and after relevant timeline state events.
+Required-state-only updates are persisted without a live invalidation frame, so timeline events and reconnect alone cannot keep an open panel fresh.
+Until that gap is closed, clients displaying this endpoint need bounded polling while the panel is visible (for example, one request every 30 seconds, canceled when hidden, with one request in flight and backoff after failures).
+This endpoint does not add a metadata-specific live frame.
+State invalidation covering required-state updates is a prerequisite for replacing that polling, tracked with the acquisition and client follow-ups below.
 Unknown account/room IDs return unknown snapshots with HTTP 200, matching existing cached state-read conventions.
 Cached state from a room the account has left remains historical cached state according to the existing retention policy; this endpoint does not assert current membership or upstream access.
 

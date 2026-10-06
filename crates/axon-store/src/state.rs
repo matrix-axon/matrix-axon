@@ -51,7 +51,8 @@ pub struct RoomStateUpsert<'a> {
     pub sender: &'a str,
     /// `origin_server_ts` in milliseconds — the freshness guard.
     pub origin_ts: i64,
-    /// The state event `content`. `None` for a redacted state event.
+    /// The state event `content`, when retained. Redacted events may still
+    /// contain an empty object or retained fields; `None` is not a redaction flag.
     pub content: Option<Value>,
 }
 
@@ -70,7 +71,7 @@ pub struct RoomStateRow {
     pub sender: String,
     /// `origin_server_ts` in milliseconds.
     pub origin_ts: i64,
-    /// The state `content`, or `None` if redacted.
+    /// The retained state `content`; absence does not establish redaction.
     pub content: Option<Value>,
 }
 
@@ -223,32 +224,34 @@ impl Store {
         Ok(row)
     }
 
-    /// Read the fixed set of singleton state types used by room metadata.
-    /// This performs one account-scoped query, never scans membership or
-    /// performs network I/O, and returns at most eight rows. Each content is
-    /// capped at 64 KiB *before* transfer and JSON decoding, including unknown
-    /// extension fields, so a pathological stored event cannot expand this
-    /// detail read without bound. Missing rows do not prove unset state: the
-    /// SDK may not have requested or hydrated that state type yet.
+    /// Read a caller-defined, trusted set of singleton state types.
+    /// The primary key bounds results to at most one row per requested type.
+    /// Each PostgreSQL-rendered content is capped at 128 KiB before transfer
+    /// and JSON decoding, including unknown extensions. This transfer budget
+    /// allows spacing overhead above Matrix's compact event-size limit; it
+    /// does not validate upstream event sizes. MATERIALIZED computes the
+    /// rendering size once per tuple, even for oversized content.
     pub async fn room_metadata_states(
         &self,
         account_id: Uuid,
         room_id: &str,
+        event_types: &[&str],
     ) -> Result<Vec<RoomMetadataStateRow>, StoreError> {
         let rows = sqlx_core::query_as::query_as::<Postgres, RoomMetadataStateRow>(
-            "SELECT room_id, event_type, state_key, event_id, sender, origin_ts, \
-                    CASE WHEN octet_length(content::text) > 65536 \
-                         THEN NULL ELSE content END AS content, \
-                    COALESCE(octet_length(content::text) > 65536, false) AS oversized \
-             FROM room_state \
-             WHERE account_id = $1 AND room_id = $2 AND state_key = '' \
-               AND event_type IN ('m.room.canonical_alias', 'm.room.create', \
-                   'm.room.join_rules', 'm.room.encryption', 'm.room.power_levels', \
-                   'm.room.server_acl', 'm.room.history_visibility', 'm.room.guest_access') \
-             ORDER BY event_type LIMIT 8",
+            "WITH sized AS MATERIALIZED (\
+                 SELECT room_id, event_type, state_key, event_id, sender, origin_ts, content, \
+                        COALESCE(octet_length(content::text) > 131072, false) AS oversized \
+                 FROM room_state \
+                 WHERE account_id = $1 AND room_id = $2 AND state_key = '' \
+                   AND event_type = ANY($3)\
+             ) \
+             SELECT room_id, event_type, state_key, event_id, sender, origin_ts, \
+                    CASE WHEN oversized THEN NULL ELSE content END AS content, oversized \
+             FROM sized ORDER BY event_type",
         )
         .bind(account_id)
         .bind(room_id)
+        .bind(event_types)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)

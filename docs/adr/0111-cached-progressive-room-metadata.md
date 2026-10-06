@@ -72,7 +72,8 @@ When access is known to have been revoked, invalidate the corresponding discover
 
 ### Availability and freshness are explicit
 
-Typed state reads distinguish unknown, available, unavailable content, invalid shape, and oversized content.
+Typed state reads distinguish unknown, available, partially valid, unavailable content, invalid shape, and oversized content.
+Partially valid snapshots retain valid fields and entries and explicitly identify malformed paths; clients must not interpret filtered data as complete.
 Available empty lists are meaningful values.
 Missing state is not evidence that aliases are absent or encryption is disabled.
 Do not manufacture Matrix defaults or infer redaction from an empty object when the cached projection lacks the necessary evidence.
@@ -82,6 +83,8 @@ Retain event provenance for state snapshots.
 An upstream event timestamp is not a successful-fetch timestamp or a freshness guarantee.
 Discovery refresh state and errors are represented separately from cached values so a failed refresh can leave usable stale data visible where access permits.
 Clients refresh joined state after relevant live events and on reconnect; discovery notifications cause clients to re-read the affected cached summaries.
+Live invalidation must also cover required-state-only sync updates before clients can rely on that mechanism alone.
+The initial cached endpoint lacks that invalidation; the guide specifies bounded visible-panel polling as the interim freshness policy.
 Reopening a panel can request refresh, subject to expiration and coalescing, without blocking its initial display.
 
 ### Alias lists describe their scope

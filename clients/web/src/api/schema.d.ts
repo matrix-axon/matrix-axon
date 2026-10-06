@@ -878,9 +878,10 @@ export interface paths {
          * Read typed room metadata from account-scoped cached state.
          *     No upstream requests or membership aggregation occur on this route.
          *     Missing snapshots remain unknown, including for unjoined/unknown rooms.
-         *     Content is limited to 64 KiB per state tuple before transfer and decoding.
-         *     Re-read after relevant state events and on reconnect; event `origin_ts`
-         *     is provenance, not a last-successful-sync timestamp.
+         *     Content is limited to 128 KiB per state tuple before transfer and decoding.
+         *     Re-read on reopen/reconnect. Until state invalidation covers required-state
+         *     updates, open panels need bounded polling to detect changes without a live
+         *     frame. Event `origin_ts` is provenance, not a sync-freshness timestamp.
          */
         get: operations["room_metadata"];
         put?: never;
@@ -2269,11 +2270,7 @@ export interface components {
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_RoomMetadataDto: {
-            /**
-             * @description Fixed-cost detail read from cached room state. It does not fetch upstream,
-             *     aggregate members, merge discovery results, or change account membership.
-             *     Unknown account/room IDs return unknown snapshots, like existing state reads.
-             */
+            /** @description Bounded local state detail read; no remote acquisition or aggregation. */
             data: {
                 aliases: components["schemas"]["CachedRoomMetadata_RoomAliasesMetadata"];
                 creation: components["schemas"]["CachedRoomMetadata_RoomCreationMetadata"];
@@ -2905,6 +2902,11 @@ export interface components {
                 alt_aliases?: string[] | null;
             };
             event_id?: string | null;
+            /**
+             * @description Paths of malformed fields/entries, with wildcards for list/map entries.
+             *     These are shape diagnostics, not permission or redaction information.
+             */
+            invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
             sender?: string | null;
@@ -2927,6 +2929,11 @@ export interface components {
                 room_version?: string | null;
             };
             event_id?: string | null;
+            /**
+             * @description Paths of malformed fields/entries, with wildcards for list/map entries.
+             *     These are shape diagnostics, not permission or redaction information.
+             */
+            invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
             sender?: string | null;
@@ -2948,6 +2955,11 @@ export interface components {
                 rotation_period_msgs?: number | null;
             };
             event_id?: string | null;
+            /**
+             * @description Paths of malformed fields/entries, with wildcards for list/map entries.
+             *     These are shape diagnostics, not permission or redaction information.
+             */
+            invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
             sender?: string | null;
@@ -2965,6 +2977,11 @@ export interface components {
                 guest_access?: string | null;
             };
             event_id?: string | null;
+            /**
+             * @description Paths of malformed fields/entries, with wildcards for list/map entries.
+             *     These are shape diagnostics, not permission or redaction information.
+             */
+            invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
             sender?: string | null;
@@ -2982,6 +2999,11 @@ export interface components {
                 history_visibility?: string | null;
             };
             event_id?: string | null;
+            /**
+             * @description Paths of malformed fields/entries, with wildcards for list/map entries.
+             *     These are shape diagnostics, not permission or redaction information.
+             */
+            invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
             sender?: string | null;
@@ -3001,6 +3023,11 @@ export interface components {
                 join_rule?: string | null;
             };
             event_id?: string | null;
+            /**
+             * @description Paths of malformed fields/entries, with wildcards for list/map entries.
+             *     These are shape diagnostics, not permission or redaction information.
+             */
+            invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
             sender?: string | null;
@@ -3038,6 +3065,11 @@ export interface components {
                 users_default?: number | null;
             };
             event_id?: string | null;
+            /**
+             * @description Paths of malformed fields/entries, with wildcards for list/map entries.
+             *     These are shape diagnostics, not permission or redaction information.
+             */
+            invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
             sender?: string | null;
@@ -3057,6 +3089,11 @@ export interface components {
                 deny?: string[] | null;
             };
             event_id?: string | null;
+            /**
+             * @description Paths of malformed fields/entries, with wildcards for list/map entries.
+             *     These are shape diagnostics, not permission or redaction information.
+             */
+            invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
             sender?: string | null;
@@ -4039,11 +4076,7 @@ export interface components {
             room_id?: string | null;
             type: string;
         };
-        /**
-         * @description Fixed-cost detail read from cached room state. It does not fetch upstream,
-         *     aggregate members, merge discovery results, or change account membership.
-         *     Unknown account/room IDs return unknown snapshots, like existing state reads.
-         */
+        /** @description Bounded local state detail read; no remote acquisition or aggregation. */
         RoomMetadataDto: {
             aliases: components["schemas"]["CachedRoomMetadata_RoomAliasesMetadata"];
             creation: components["schemas"]["CachedRoomMetadata_RoomCreationMetadata"];
@@ -4059,7 +4092,7 @@ export interface components {
          *     evidence that a setting is unset, encryption is disabled, or access is public.
          * @enum {string}
          */
-        RoomMetadataStatus: "unknown" | "available" | "unavailable" | "invalid" | "too_large";
+        RoomMetadataStatus: "unknown" | "available" | "partial" | "unavailable" | "invalid" | "too_large";
         RoomNotificationLevelsMetadata: {
             /** Format: int64 */
             room?: number | null;

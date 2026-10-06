@@ -26,7 +26,7 @@ mod member_profiles;
 mod oauth;
 mod openapi;
 mod response;
-pub mod room_metadata;
+mod room_metadata;
 mod routes;
 mod search;
 mod sender;

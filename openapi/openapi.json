@@ -4279,7 +4279,7 @@
         "tags": [
           "rooms"
         ],
-        "summary": "Read typed room metadata from account-scoped cached state.\nNo upstream requests or membership aggregation occur on this route.\nMissing snapshots remain unknown, including for unjoined/unknown rooms.\nContent is limited to 64 KiB per state tuple before transfer and decoding.\nRe-read after relevant state events and on reconnect; event `origin_ts`\nis provenance, not a last-successful-sync timestamp.",
+        "summary": "Read typed room metadata from account-scoped cached state.\nNo upstream requests or membership aggregation occur on this route.\nMissing snapshots remain unknown, including for unjoined/unknown rooms.\nContent is limited to 128 KiB per state tuple before transfer and decoding.\nRe-read on reopen/reconnect. Until state invalidation covers required-state\nupdates, open panels need bounded polling to detect changes without a live\nframe. Event `origin_ts` is provenance, not a sync-freshness timestamp.",
         "operationId": "room_metadata",
         "parameters": [
           {
@@ -9467,7 +9467,7 @@
         "properties": {
           "data": {
             "type": "object",
-            "description": "Fixed-cost detail read from cached room state. It does not fetch upstream,\naggregate members, merge discovery results, or change account membership.\nUnknown account/room IDs return unknown snapshots, like existing state reads.",
+            "description": "Bounded local state detail read; no remote acquisition or aggregation.",
             "required": [
               "aliases",
               "creation",
@@ -10712,7 +10712,8 @@
         "type": "object",
         "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
         "required": [
-          "status"
+          "status",
+          "invalid_fields"
         ],
         "properties": {
           "content": {
@@ -10749,6 +10750,13 @@
               "null"
             ]
           },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
           "origin_ts": {
             "type": [
               "integer",
@@ -10771,7 +10779,8 @@
         "type": "object",
         "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
         "required": [
-          "status"
+          "status",
+          "invalid_fields"
         ],
         "properties": {
           "content": {
@@ -10836,6 +10845,13 @@
               "null"
             ]
           },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
           "origin_ts": {
             "type": [
               "integer",
@@ -10858,7 +10874,8 @@
         "type": "object",
         "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
         "required": [
-          "status"
+          "status",
+          "invalid_fields"
         ],
         "properties": {
           "content": {
@@ -10901,6 +10918,13 @@
               "null"
             ]
           },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
           "origin_ts": {
             "type": [
               "integer",
@@ -10923,7 +10947,8 @@
         "type": "object",
         "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
         "required": [
-          "status"
+          "status",
+          "invalid_fields"
         ],
         "properties": {
           "content": {
@@ -10950,6 +10975,13 @@
               "null"
             ]
           },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
           "origin_ts": {
             "type": [
               "integer",
@@ -10972,7 +11004,8 @@
         "type": "object",
         "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
         "required": [
-          "status"
+          "status",
+          "invalid_fields"
         ],
         "properties": {
           "content": {
@@ -10999,6 +11032,13 @@
               "null"
             ]
           },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
           "origin_ts": {
             "type": [
               "integer",
@@ -11021,7 +11061,8 @@
         "type": "object",
         "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
         "required": [
-          "status"
+          "status",
+          "invalid_fields"
         ],
         "properties": {
           "content": {
@@ -11058,6 +11099,13 @@
               "null"
             ]
           },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
           "origin_ts": {
             "type": [
               "integer",
@@ -11080,7 +11128,8 @@
         "type": "object",
         "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
         "required": [
-          "status"
+          "status",
+          "invalid_fields"
         ],
         "properties": {
           "content": {
@@ -11187,6 +11236,13 @@
               "null"
             ]
           },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
           "origin_ts": {
             "type": [
               "integer",
@@ -11209,7 +11265,8 @@
         "type": "object",
         "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
         "required": [
-          "status"
+          "status",
+          "invalid_fields"
         ],
         "properties": {
           "content": {
@@ -11253,6 +11310,13 @@
               "string",
               "null"
             ]
+          },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
           },
           "origin_ts": {
             "type": [
@@ -13064,7 +13128,7 @@
       },
       "RoomMetadataDto": {
         "type": "object",
-        "description": "Fixed-cost detail read from cached room state. It does not fetch upstream,\naggregate members, merge discovery results, or change account membership.\nUnknown account/room IDs return unknown snapshots, like existing state reads.",
+        "description": "Bounded local state detail read; no remote acquisition or aggregation.",
         "required": [
           "aliases",
           "creation",
@@ -13108,6 +13172,7 @@
         "enum": [
           "unknown",
           "available",
+          "partial",
           "unavailable",
           "invalid",
           "too_large"
