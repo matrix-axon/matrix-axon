@@ -525,26 +525,161 @@ async fn backfill_progress_counts_joined_rooms_and_completion() {
     let room_a = format!("!a-{}:localhost", Uuid::new_v4());
     let room_b = format!("!b-{}:localhost", Uuid::new_v4());
     let room_left = format!("!left-{}:localhost", Uuid::new_v4());
+    let room_banned = format!("!banned-{}:localhost", Uuid::new_v4());
+    let room_empty = format!("!empty-{}:localhost", Uuid::new_v4());
 
     insert_message(&store, account_id, &room_a, 1, "a1").await;
     insert_message(&store, account_id, &room_a, 2, "a2").await;
     insert_message(&store, account_id, &room_b, 1, "b1").await;
     insert_message(&store, account_id, &room_left, 1, "gone").await;
-    // Room A fully backfilled; B still ongoing (no row); left room excluded.
+    insert_message(&store, account_id, &room_banned, 1, "banned").await;
+    // A summary without events must not count as a room with stored history.
+    insert_message(&store, account_id, &room_empty, 1, "removed").await;
+    sqlx_core::query::query("DELETE FROM events WHERE account_id = $1 AND room_id = $2")
+        .bind(account_id)
+        .bind(&room_empty)
+        .execute(&pool)
+        .await
+        .expect("remove empty room event");
+    // Room A fully backfilled; B still ongoing (no row); left/banned rooms excluded.
     store
         .save_room_backfill(account_id, &room_a, None, true, 2)
         .await
         .expect("complete a");
     set_membership(&pool, account_id, &room_left, &user_id, "leave").await;
+    set_membership(&pool, account_id, &room_banned, &user_id, "ban").await;
+    store
+        .save_room_backfill(account_id, &room_banned, None, true, 1)
+        .await
+        .expect("complete banned room");
+    let empty_account = test_account(&store, "empty-progress").await;
 
     let progress = store.backfill_progress().await.expect("progress");
+    assert!(progress.iter().all(|p| p.account_id != empty_account));
     let row = progress
         .into_iter()
         .find(|p| p.account_id == account_id)
         .expect("account present");
-    assert_eq!(row.events_total, 4, "all events counted, incl. left room");
-    assert_eq!(row.rooms_total, 2, "left room excluded from joined rooms");
+    assert_eq!(row.events_total, 5, "all events counted, incl. left/ban");
+    assert_eq!(row.rooms_total, 2, "left, banned, and empty rooms excluded");
     assert_eq!(row.rooms_backfilled, 1, "only room A is complete");
 
+    common::cleanup_account(&pool, empty_account).await;
     common::cleanup_account(&pool, account_id).await;
+}
+
+/// PostgreSQL must cancel a blocked status query even after its Rust future is
+/// dropped, and the single-connection pool must be usable with its original
+/// statement timeout after either error rollback or cancellation rollback.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn backfill_progress_timeout_releases_connection_even_after_caller_cancels() {
+    use std::time::{Duration, Instant};
+
+    let store =
+        axon_store::Store::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"), 1)
+            .await
+            .expect("single-connection store");
+    let pool = raw_pool().await;
+    let (original_timeout,): (String,) =
+        sqlx_core::query_as::query_as("SELECT current_setting('statement_timeout')")
+            .fetch_one(store.pool())
+            .await
+            .expect("original settings");
+
+    for cancel_caller in [false, true] {
+        let (pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
+            .fetch_one(store.pool())
+            .await
+            .expect("query backend");
+        let mut blocker = pool.begin().await.expect("blocker transaction");
+        sqlx_core::query::query("LOCK TABLE room_summaries IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .expect("block status query");
+        let started = Instant::now();
+        let caller_store = store.clone();
+        let caller = tokio::spawn(async move { caller_store.backfill_progress().await });
+
+        // Observe the real statement waiting in PostgreSQL before canceling.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (waiting,): (bool,) = sqlx_core::query_as::query_as(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                     WHERE pid = $1 AND state = 'active' AND wait_event_type = 'Lock')",
+                )
+                .bind(pid)
+                .fetch_one(&pool)
+                .await
+                .expect("observe blocked query");
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("query reached PostgreSQL");
+
+        if cancel_caller {
+            caller.abort();
+            assert!(caller.await.expect_err("caller canceled").is_cancelled());
+        } else {
+            let error = tokio::time::timeout(Duration::from_secs(7), caller)
+                .await
+                .expect("database statement bounded")
+                .expect("caller finished")
+                .expect_err("locked query timed out");
+            assert_eq!(error.diagnostic_reason(), "database_query_canceled");
+        }
+
+        // SQLx may discard a connection when the caller is canceled. Check
+        // PostgreSQL itself so a replacement connection cannot hide an orphaned
+        // statement still running on the original backend.
+        tokio::time::timeout(Duration::from_secs(7), async {
+            loop {
+                let (active,): (bool,) = sqlx_core::query_as::query_as(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                     WHERE pid = $1 AND state = 'active')",
+                )
+                .bind(pid)
+                .fetch_one(&pool)
+                .await
+                .expect("observe original backend");
+                if !active {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("original PostgreSQL statement stopped");
+
+        // Keep the table locked while verifying pool recovery and SET LOCAL
+        // cleanup, including rollback on a reused connection.
+        let (reused_pid, timeout): (i32, String) =
+            tokio::time::timeout(Duration::from_secs(7), async {
+                sqlx_core::query_as::query_as(
+                    "SELECT pg_backend_pid(), current_setting('statement_timeout')",
+                )
+                .fetch_one(store.pool())
+                .await
+            })
+            .await
+            .expect("pool connection released")
+            .expect("connection usable after rollback");
+        if !cancel_caller {
+            assert_eq!(reused_pid, pid);
+        }
+        assert_eq!(timeout, original_timeout);
+        assert!(started.elapsed() < Duration::from_secs(8));
+        blocker.rollback().await.expect("release table lock");
+    }
+
+    store.backfill_progress().await.expect("status recovers");
+    let (timeout,): (String,) = sqlx_core::query_as::query_as("SHOW statement_timeout")
+        .fetch_one(store.pool())
+        .await
+        .expect("settings after successful commit");
+    assert_eq!(timeout, original_timeout);
 }
