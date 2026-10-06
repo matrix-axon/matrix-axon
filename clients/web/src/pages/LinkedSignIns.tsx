@@ -93,42 +93,35 @@ function providerName(provider: string): string {
 }
 
 /**
- * Where the user withdraws the provider's own authorization of Axon.
- * Unlinking cannot do it for them (ADR 0109): Axon only forgets the identity.
+ * Where the user removes Axon from the provider's own list of apps. Unlinking
+ * cannot do that for them (ADR 0109): Axon forgets the identity, and the
+ * provider goes on listing Axon until the user removes it there.
  */
 function providerControls(provider: string) {
   switch (provider) {
     case 'apple':
       return (
         <>
-          To remove Axon from your Apple Account as well, open Settings on your
-          iPhone, iPad or Mac, choose your name, then Sign-In &amp; Security,
-          then Sign in with Apple, and remove Axon there.
+          To remove it there too, open Settings on your iPhone, iPad or Mac,
+          choose your name, then Sign in with Apple.
         </>
       )
     case 'google':
       return (
         <>
-          To remove Axon from your Google Account as well, open your Google
-          Account's third-party connections (myaccount.google.com/connections)
-          and remove Axon there.
+          To remove it there too, open your Google Account's third-party
+          connections (myaccount.google.com/connections).
         </>
       )
     case 'microsoft':
       return (
         <>
-          To remove Axon from your Microsoft account as well, open your
-          Microsoft account's privacy settings and remove Axon from the apps and
-          services you have given access to.
+          To remove it there too, open your Microsoft account's privacy settings
+          and look under the apps and services you have given access to.
         </>
       )
     default:
-      return (
-        <>
-          To remove Axon there as well, use {providerName(provider)}'s own
-          account settings.
-        </>
-      )
+      return <>To remove it there too, use that account's own settings.</>
   }
 }
 
@@ -214,6 +207,27 @@ export function LinkedSignIns() {
   useEffect(() => {
     void load()
   }, [load])
+
+  // Ask again when the app comes back to the front. A sign-in unlinked from
+  // another device would otherwise stay listed here until Settings was
+  // reopened. `management` gates it so a server without the list is not
+  // asked on every return.
+  useEffect(() => {
+    if (management !== true) {
+      return
+    }
+    const refresh = () => {
+      if (document.visibilityState === 'visible') {
+        void load()
+      }
+    }
+    document.addEventListener('visibilitychange', refresh)
+    window.addEventListener('focus', refresh)
+    return () => {
+      document.removeEventListener('visibilitychange', refresh)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [management, load])
 
   /** Make the change once. `'step-up'` means the server wants a fresh sign-in. */
   async function perform(change: Change): Promise<'done' | 'step-up'> {
@@ -439,6 +453,10 @@ export function LinkedSignIns() {
       <ul class="linked-sign-ins">
         {listed.map((identity) => {
           const name = providerName(identity.provider)
+          const account =
+            identity.email != null
+              ? `${name} (${identity.email})`
+              : `this ${name} account`
           const asking =
             confirming?.identityId === identity.id ? confirming : null
           return (
@@ -484,14 +502,17 @@ export function LinkedSignIns() {
                     </p>
                   ) : (
                     <p>
-                      Axon will forget this {name} sign-in and end every session
-                      that was started with it
-                      {identity.current && ', including this one'}.
+                      After this, {account} can no longer sign in to this Axon
+                      server, and every device signed in with it is signed out
+                      {identity.current && ', including this one'}. You can
+                      still sign in any other way listed here.
                     </p>
                   )}
                   <p class="muted">
-                    Unlinking does not withdraw the permission you gave Axon at{' '}
-                    {name}. {providerControls(identity.provider)}
+                    This only changes Axon. {name} may keep showing Axon in its
+                    own list of apps you have signed in to, which gives Axon no
+                    access once the sign-in is unlinked here.{' '}
+                    {providerControls(identity.provider)}
                   </p>
                   <button
                     type="button"

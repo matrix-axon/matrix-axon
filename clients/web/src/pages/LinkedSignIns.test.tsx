@@ -149,6 +149,24 @@ describe('LinkedSignIns', () => {
     await view.findByRole('button', { name: 'Unlink Apple' })
   })
 
+  it('drops a sign-in unlinked elsewhere when the app returns to the front', async () => {
+    let listed: Identity[] = [google, apple]
+    server.use(
+      noProviders(),
+      http.get(IDENTITIES_URL, () => HttpResponse.json({ data: listed })),
+    )
+    const view = renderPanel()
+    await view.findByRole('button', { name: 'Unlink Apple' })
+
+    listed = [google]
+    // Inside the wait: the listener is attached by an effect that may not
+    // have run yet on the render the button first appeared in.
+    await waitFor(() => {
+      window.dispatchEvent(new Event('focus'))
+      expect(view.queryByRole('button', { name: 'Unlink Apple' })).toBeNull()
+    })
+  })
+
   it('says so when the list cannot be loaded', async () => {
     server.use(
       noProviders(),
@@ -185,8 +203,14 @@ describe('LinkedSignIns', () => {
     fireEvent.click(await view.findByRole('button', { name: 'Unlink Apple' }))
     // Nothing is sent until the consequence has been read.
     expect(routes.deletes).toHaveLength(0)
-    expect(view.getByText(/does not withdraw the permission/)).toBeTruthy()
-    expect(view.getByText(/Sign in with Apple, and remove Axon/)).toBeTruthy()
+    // Says what it does, then what it leaves alone at the provider.
+    expect(
+      view.getByText(/this Apple account can no longer sign in/),
+    ).toBeTruthy()
+    expect(view.getByText(/This only changes Axon/)).toBeTruthy()
+    expect(
+      view.getByText(/choose your name, then Sign in with Apple\./),
+    ).toBeTruthy()
 
     fireEvent.click(view.getByRole('button', { name: 'Unlink Apple' }))
 
@@ -209,7 +233,7 @@ describe('LinkedSignIns', () => {
     fireEvent.click(await view.findByRole('button', { name: 'Unlink Apple' }))
     fireEvent.click(view.getByRole('button', { name: 'Cancel' }))
 
-    expect(view.queryByText(/does not withdraw/)).toBeNull()
+    expect(view.queryByText(/This only changes Axon/)).toBeNull()
     expect(routes.deletes).toHaveLength(0)
   })
 
