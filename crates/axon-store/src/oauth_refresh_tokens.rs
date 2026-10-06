@@ -188,6 +188,12 @@ impl Store {
         };
 
         let revoked_at: Option<DateTime<Utc>> = existing.try_get("revoked_at")?;
+        let expires_at: DateTime<Utc> = existing.try_get("expires_at")?;
+        let cutoff = Utc::now() - SWEEP_WINDOW;
+        if revoked_at.map_or(expires_at < cutoff, |revoked| revoked < cutoff) {
+            // Retention is semantic, independent of a delayed/failed physical sweep.
+            return Ok(Err(RedeemRefreshTokenError::NotFound));
+        }
         if revoked_at.is_some() {
             let oauth_identity_id: Uuid = existing.try_get("oauth_identity_id")?;
             let client_id: String = existing.try_get("client_id")?;
@@ -252,14 +258,22 @@ impl Store {
     /// is exactly the reuse-detection horizon this sweep must not shorten.
     pub async fn delete_stale_refresh_tokens(&self) -> Result<u64, StoreError> {
         let cutoff = Utc::now() - SWEEP_WINDOW;
-        let result = sqlx_core::query::query(
-            "DELETE FROM oauth_refresh_tokens \
-              WHERE (revoked_at IS NOT NULL AND revoked_at < $1) \
-                 OR (revoked_at IS NULL AND expires_at < $1)",
-        )
-        .bind(cutoff)
-        .execute(&self.maintenance_pool)
-        .await?;
-        Ok(result.rows_affected())
+        let mut deleted = 0;
+        loop {
+            let result = sqlx_core::query::query(
+                "DELETE FROM oauth_refresh_tokens WHERE id IN ( \
+                    SELECT id FROM oauth_refresh_tokens \
+                    WHERE (revoked_at IS NOT NULL AND revoked_at < $1) \
+                       OR (revoked_at IS NULL AND expires_at < $1) LIMIT 1000 \
+                )",
+            )
+            .bind(cutoff)
+            .execute(&self.maintenance_pool)
+            .await?;
+            deleted += result.rows_affected();
+            if result.rows_affected() < 1000 {
+                return Ok(deleted);
+            }
+        }
     }
 }

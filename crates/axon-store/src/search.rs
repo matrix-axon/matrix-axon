@@ -142,7 +142,7 @@ impl Store {
         let rows = sqlx_core::query_as::query_as::<Postgres, IndexableEvent>(&sql)
             .bind(after_id)
             .bind(limit)
-            .fetch_all(&self.maintenance_pool)
+            .fetch_all(&self.index_pool)
             .await?;
         Ok(rows)
     }
@@ -223,9 +223,9 @@ impl Store {
                  )",
             )
             .bind(through_seq)
-            .execute(&self.maintenance_pool)
+            .execute(&self.index_pool)
             .await?;
-            if result.rows_affected() == 0 {
+            if result.rows_affected() < 1000 {
                 return Ok(());
             }
         }

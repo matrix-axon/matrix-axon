@@ -301,11 +301,23 @@ impl Store {
     /// `list_rooms` reads whatever is already persisted. Returns the number of
     /// summary rows written.
     pub async fn rebuild_room_summaries(&self, account_id: Uuid) -> Result<u64, StoreError> {
+        self.rebuild_room_summaries_for(account_id, None).await
+    }
+
+    pub(crate) async fn rebuild_room_summaries_for(
+        &self,
+        account_id: Uuid,
+        room_id: Option<&str>,
+    ) -> Result<u64, StoreError> {
         let mut tx: Transaction<'_, Postgres> = self.maintenance_pool.begin().await?;
-        sqlx_core::query::query("DELETE FROM room_summaries WHERE account_id = $1")
-            .bind(account_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx_core::query::query(
+            "DELETE FROM room_summaries WHERE account_id = $1 \
+             AND ($2::text IS NULL OR room_id = $2)",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .execute(&mut *tx)
+        .await?;
         let content = sqlx_core::query::query(
             "INSERT INTO room_summaries ( \
                  account_id, room_id, last_activity_ts, last_event_id, \
@@ -314,10 +326,11 @@ impl Store {
              SELECT DISTINCT ON (account_id, room_id) \
                  account_id, room_id, origin_ts, event_id, id, TRUE \
              FROM events \
-             WHERE account_id = $1 AND decrypted_body_text IS NOT NULL \
+             WHERE account_id = $1 AND ($2::text IS NULL OR room_id = $2) AND decrypted_body_text IS NOT NULL \
              ORDER BY account_id, room_id, origin_ts DESC, id DESC",
         )
         .bind(account_id)
+        .bind(room_id)
         .execute(&mut *tx)
         .await?;
         let fallback = sqlx_core::query::query(
@@ -328,7 +341,7 @@ impl Store {
              SELECT DISTINCT ON (e.account_id, e.room_id) \
                  e.account_id, e.room_id, e.origin_ts, e.event_id, e.id, FALSE \
              FROM events e \
-             WHERE e.account_id = $1 \
+             WHERE e.account_id = $1 AND ($2::text IS NULL OR e.room_id = $2) \
                AND NOT EXISTS ( \
                    SELECT 1 FROM room_summaries s \
                    WHERE s.account_id = e.account_id AND s.room_id = e.room_id \
@@ -336,6 +349,7 @@ impl Store {
              ORDER BY e.account_id, e.room_id, e.origin_ts DESC, e.id DESC",
         )
         .bind(account_id)
+        .bind(room_id)
         .execute(&mut *tx)
         .await?;
         // Same plpgsql function the live write path uses, so display /
@@ -345,9 +359,10 @@ impl Store {
         // false) before refresh runs (issue #211).
         sqlx_core::query::query(
             "SELECT refresh_room_summary_display(account_id, room_id) \
-             FROM room_summaries WHERE account_id = $1",
+             FROM room_summaries WHERE account_id = $1 AND ($2::text IS NULL OR room_id = $2)",
         )
         .bind(account_id)
+        .bind(room_id)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;

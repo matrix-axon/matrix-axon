@@ -248,6 +248,8 @@ async fn blocked_background_sweep_does_not_block_auth_and_respects_shared_cooldo
         .fetch_one(&mut *blocker)
         .await
         .unwrap();
+    let account = common::test_account(&store, "index-sweep-isolation").await;
+    common::insert_message(&store, account, "!index-sweep:localhost", 1, "seed fixture").await;
     let issued_hash = format!("fresh-{}", Uuid::new_v4());
     tokio::time::timeout(
         Wait::from_millis(500),
@@ -279,6 +281,31 @@ async fn blocked_background_sweep_does_not_block_auth_and_respects_shared_cooldo
     })
     .await
     .expect("cleanup is blocked in PostgreSQL");
+    let (stale_hash,): (String,) =
+        sqlx_core::query_as::query_as("SELECT hash FROM oauth_refresh_tokens WHERE id = $1")
+            .bind(stale)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let result = store
+        .redeem_refresh_token(
+            &stale_hash,
+            Uuid::new_v4(),
+            &format!("unused-{}", Uuid::new_v4()),
+            Utc::now() + Duration::days(1),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, Err(axon_store::RedeemRefreshTokenError::NotFound)),
+        "old tombstones outside retention never revoke current sessions"
+    );
+    tokio::time::timeout(Wait::from_millis(500), async {
+        assert!(!store.events_for_index(0, 100).await.unwrap().is_empty());
+        store.prune_search_outbox(0).await.unwrap();
+    })
+    .await
+    .expect("seed and prune do not queue behind maintenance cleanup");
     for attempt in 0..3 {
         let result = tokio::time::timeout(
             Wait::from_millis(500),
@@ -331,5 +358,6 @@ async fn blocked_background_sweep_does_not_block_auth_and_respects_shared_cooldo
     // the row. If the clone queued another sweep during cooldown, the count
     // would be zero instead of one.
     assert_eq!(store.delete_stale_refresh_tokens().await.unwrap(), 1);
+    common::cleanup_account(&pool, account).await;
     cleanup_identity(&pool, identity.id).await;
 }

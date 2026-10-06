@@ -286,6 +286,29 @@ impl SyncEngine {
         // honored even on an account with no further verify API traffic to drive
         // the lazy sweep. Runs on the same tracker under a child of the engine
         // token, so `shutdown` cancels and joins it with everything else.
+        let purge_store = store.clone();
+        let purge_cancel = cancel.child_token();
+        let purge_index = index.clone();
+        tracker.spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = purge_cancel.cancelled() => break,
+                    _ = ticker.tick() => {
+                        tokio::select! {
+                            _ = purge_cancel.cancelled() => break,
+                            result = purge_store.retry_room_purges() => {
+                                if let Some(index) = &purge_index { index.notify(); }
+                                if let Err(error) = result {
+                                    tracing::warn!(reason = error.diagnostic_reason(), "pending room purges will retry");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
         tracker.spawn(reap_expired_flows(
             verifications.clone(),
             cancel.child_token(),
@@ -1057,17 +1080,12 @@ async fn persist_room_state_event(
             .and_then(|c| c.get("membership"))
             .and_then(serde_json::Value::as_str);
         if matches!(membership, Some("leave") | Some("ban")) {
-            match ctx.store.purge_room(ctx.account_id, &room_id).await {
-                Ok(()) => {
-                    // Wake the indexer so it applies the room-purge obligation
-                    // `purge_room` just enqueued.
-                    if let Some(index) = ctx.index.as_ref() {
-                        index.notify();
-                    }
-                    tracing::info!(account_id = %ctx.account_id, room_id = %room_id, "purged room on leave");
+            match ctx.store.queue_room_purge(ctx.account_id, &room_id).await {
+                Ok(_) => {
+                    tracing::info!(account_id = %ctx.account_id, room_id = %room_id, "queued room purge on leave");
                 }
                 Err(err) => {
-                    tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, error = %err, "failed to purge room on leave");
+                    tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, error = %err, "failed to queue room purge on leave");
                 }
             }
         }

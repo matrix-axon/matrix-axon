@@ -23,13 +23,8 @@ pub async fn run(action: DbAction, config: &Config) -> anyhow::Result<()> {
 }
 
 async fn repair_migrations(config: &Config, apply: bool) -> anyhow::Result<()> {
-    let pool = axon_store::Store::database_pool(
-        &config.database,
-        1,
-        config.database.timeouts.migration_statement_secs,
-        "axon-db-repair",
-    )
-    .context("configuring database repair deadlines")?;
+    let pool = axon_store::Store::migration_pool(&config.database)
+        .context("configuring database repair deadlines")?;
 
     ensure_migrations_table(&pool).await?;
 

@@ -169,8 +169,11 @@ cargo run -p axon-server -- init   # generates a config + store_key, once
 
 Every server database connection has PostgreSQL statement and lock deadlines, including connections replaced after a request is canceled.
 Ordinary statements default to 10 seconds, lock waits to 3 seconds, and pool acquisition to 5 seconds.
-Expensive status, timeline, and relation projections share one additional connection with the ordinary statement deadline so concurrent slow reads cannot exhaust auth/sync connections.
-Bulk maintenance shares another connection with a 120-second statement deadline; startup migrations and developer database repair use a 600-second statement deadline.
+Hot timeline, media, and relation reads use a separate pool with `max_connections` slots.
+Status and search indexing each reserve another connection, so a slow status query or bulk maintenance cannot block those reads or live indexing.
+Status uses exact event totals maintained by database triggers instead of counting the event table on each request.
+If its progress query fails, status still returns build, sync, management, and disk information, with `backfill.progress_available=false`.
+Bulk maintenance shares another connection with a 120-second statement deadline; startup migrations and developer database repair use a 600-second statement and lock deadline.
 Idle transactions are terminated after 30 seconds so an abandoned transaction cannot hold locks indefinitely.
 These are per-statement deadlines, not a deadline for an entire multi-step operation.
 A timed-out SQL statement fails and rolls back its writes; a canceled HTTP response does not prove that a write failed to commit.
@@ -180,12 +183,20 @@ All deadlines must be between 1 and 86400 seconds; zero is rejected.
 The statement deadlines must satisfy `statement_secs <= maintenance_statement_secs <= migration_statement_secs`.
 Changes take effect after restarting the server.
 On a slow machine, increase the relevant statement deadline while keeping lock and acquisition waits short enough to surface contention promptly.
-The database must allow `max_connections + 2` server connections, plus connections from CLI commands and other database users.
+The database must allow `2 * max_connections + 3` server connections, plus connections from CLI commands and other database users.
 
-Account deletion, room purge, and room-summary rebuild retain their existing atomic behavior on the maintenance pool.
-Search-index seeding also uses the maintenance pool and its longer deadline.
+Account deletion and room purge commit event deletions in batches of at most 1000 rows, each with atomic search-cleanup obligations.
+An interrupted account teardown retains its existing `deleting` breadcrumb for boot reconciliation; purge-on-leave queues a durable event watermark for background cleanup every 30 seconds and after restart, without delaying sync on bulk deletion.
+Room cleanup removes only events captured by that watermark and enqueues per-event search removals, preserving later messages and rejoin metadata.
+Room-summary rebuild remains transactional on the maintenance pool; account/session-wide pending-UTD scans use its longer deadline too.
+Sync ingestion writes one event per statement; unread projections operate on one row per room; live search drains use indexed, limited outbox batches with ordinary deadlines.
+Search-index seeding and outbox pruning use their own connection and the longer maintenance deadline.
 Search-outbox pruning commits batches of at most 1000 rows so interruptions leave a safely retryable prefix.
 Stale refresh-token cleanup runs in the background at most once per minute, with one sweep in flight across the server's store handles; cleanup failure does not reject token issuance or rotation.
+Refresh tokens beyond the 30-day retention horizon are treated as unknown even if physical cleanup is delayed.
+Session settings are initialized after connection, supporting direct PostgreSQL and session-mode poolers without a startup `options` parameter.
+For PgBouncer, retain sqlx’s existing `ignore_startup_parameters = extra_float_digits` setting; ignoring `options` is unnecessary.
+Transaction-mode poolers are unsupported: session deadlines and session advisory locks require a stable backend connection, as described in [PgBouncer’s feature matrix](https://www.pgbouncer.org/features.html).
 Query and pool timeout failures use existing API error responses and request-error logging; cleanup failures log a redacted diagnostic category and retry on later activity.
 
 ## Environment variables

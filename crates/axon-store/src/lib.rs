@@ -79,8 +79,10 @@ use tokio::sync::Mutex;
 #[derive(Debug, Clone)]
 pub struct Store {
     pool: PgPool,
-    // Expensive projections share one connection, independently of auth/sync.
+    // Hot reads have the configured concurrency, independently of auth/sync.
     read_pool: PgPool,
+    status_pool: PgPool,
+    index_pool: PgPool,
     // One connection, shared by all clones. Bulk work cannot take ordinary
     // connections away from authentication, sync, or request handlers.
     maintenance_pool: PgPool,
@@ -102,9 +104,10 @@ impl Store {
     /// Migrations run first on a temporary pool with their own longer deadline.
     pub async fn connect_with_config(config: &DatabaseConfig) -> Result<Store, StoreError> {
         config.validate()?;
-        let migration_pool = Self::database_pool(
+        let migration_pool = Self::configured_pool(
             config,
             1,
+            config.timeouts.migration_statement_secs,
             config.timeouts.migration_statement_secs,
             "axon-migrations",
         )?;
@@ -113,23 +116,66 @@ impl Store {
         migration_pool.close().await;
         result?;
 
-        let pool = Self::database_pool(
+        let pool = Self::configured_pool(
             config,
             config.max_connections,
             config.timeouts.statement_secs,
+            config.timeouts.lock_secs,
             "axon",
         )?;
-        // Verify connectivity before reporting a ready store.
-        let connection = pool.acquire().await?;
-        drop(connection);
-        let maintenance_pool = Self::database_pool(
+        let read_pool = Self::configured_pool(
+            config,
+            config.max_connections,
+            config.timeouts.statement_secs,
+            config.timeouts.lock_secs,
+            "axon-reads",
+        )?;
+        let status_pool = Self::configured_pool(
+            config,
+            1,
+            config.timeouts.statement_secs,
+            config.timeouts.lock_secs,
+            "axon-status",
+        )?;
+        let maintenance_pool = Self::configured_pool(
             config,
             1,
             config.timeouts.maintenance_statement_secs,
+            config.timeouts.lock_secs,
             "axon-maintenance",
         )?;
-        let read_pool =
-            Self::database_pool(config, 1, config.timeouts.statement_secs, "axon-reads")?;
+        let index_pool = Self::configured_pool(
+            config,
+            1,
+            config.timeouts.maintenance_statement_secs,
+            config.timeouts.lock_secs,
+            "axon-index",
+        )?;
+        // Reserve the entire configured budget before reporting readiness. Holding
+        // all leases simultaneously detects insufficient PostgreSQL slots at boot.
+        let pools = [
+            &pool,
+            &read_pool,
+            &status_pool,
+            &maintenance_pool,
+            &index_pool,
+        ];
+        let mut leases = Vec::new();
+        for candidate in pools {
+            for _ in 0..candidate.options().get_max_connections() {
+                match candidate.acquire().await {
+                    Ok(connection) => leases.push(connection),
+                    Err(error) => {
+                        drop(leases);
+                        for opened in pools {
+                            opened.close().await;
+                        }
+                        return Err(error.into());
+                    }
+                }
+            }
+        }
+        drop(leases);
         tracing::info!(
             max_connections = config.max_connections,
             statement_secs = config.timeouts.statement_secs,
@@ -138,48 +184,65 @@ impl Store {
             lock_secs = config.timeouts.lock_secs,
             acquire_secs = config.timeouts.acquire_secs,
             idle_transaction_secs = config.timeouts.idle_transaction_secs,
-            "database deadlines configured; heavy reads and bulk maintenance each have one separate connection"
+            "database pools verified; status and indexing isolated from hot reads and maintenance"
         );
 
         Ok(Store {
             pool,
             read_pool,
+            status_pool,
+            index_pool,
             maintenance_pool,
             refresh_sweep: Arc::new(Mutex::new(None)),
         })
     }
 
-    /// Configure limits in the startup packet so every connection, including
-    /// replacements after cancellation, has server-side deadlines from birth.
-    /// Also used by developer repair, which deliberately bypasses migrations.
-    pub fn database_pool(
+    /// Developer repair uses the same longer lock and statement budget as migrations.
+    pub fn migration_pool(config: &DatabaseConfig) -> Result<PgPool, StoreError> {
+        config.validate()?;
+        Self::configured_pool(
+            config,
+            1,
+            config.timeouts.migration_statement_secs,
+            config.timeouts.migration_statement_secs,
+            "axon-db-repair",
+        )
+    }
+
+    // Only called with validated configuration and internal pool sizes/deadlines.
+    fn configured_pool(
         config: &DatabaseConfig,
         max_connections: u32,
         statement_secs: u32,
+        lock_secs: u32,
         application_name: &str,
     ) -> Result<PgPool, StoreError> {
-        config.validate()?;
-        if max_connections == 0 || !(1..=86_400).contains(&statement_secs) {
-            return Err(axon_core::ConfigError::Validation(
-                "database pool size and statement deadline must be positive and bounded".into(),
-            )
-            .into());
-        }
         let options = config
             .url
             .parse::<PgConnectOptions>()?
-            .application_name(application_name)
-            .options([
-                ("statement_timeout", format!("{statement_secs}s")),
-                ("lock_timeout", format!("{}s", config.timeouts.lock_secs)),
-                (
-                    "idle_in_transaction_session_timeout",
-                    format!("{}s", config.timeouts.idle_transaction_secs),
-                ),
-            ]);
+            .application_name(application_name);
+        let idle_secs = config.timeouts.idle_transaction_secs;
         Ok(PgPoolOptions::new()
             .max_connections(max_connections)
             .acquire_timeout(Duration::from_secs(u64::from(config.timeouts.acquire_secs)))
+            .after_connect(move |connection, _| {
+                Box::pin(async move {
+                    // Session initialization avoids poolers' unsupported startup
+                    // `options` parameter. Every replacement passes this hook before
+                    // becoming available to callers; acquisition bounds initialization.
+                    sqlx_core::query::query(
+                        "SELECT set_config('statement_timeout', $1, false), \
+                     set_config('lock_timeout', $2, false), \
+                     set_config('idle_in_transaction_session_timeout', $3, false)",
+                    )
+                    .bind(format!("{statement_secs}s"))
+                    .bind(format!("{lock_secs}s"))
+                    .bind(format!("{idle_secs}s"))
+                    .execute(connection)
+                    .await?;
+                    Ok(())
+                })
+            })
             .connect_lazy_with(options))
     }
 
@@ -188,7 +251,12 @@ impl Store {
         &self.pool
     }
 
-    /// The separate single-connection pool for expensive read projections.
+    /// Isolated status connection; progress cannot queue behind hot message reads.
+    pub fn status_pool(&self) -> &PgPool {
+        &self.status_pool
+    }
+
+    /// Hot-read pool with the same configured concurrency as the ordinary pool.
     /// It uses ordinary statement deadlines and cannot consume auth/sync slots.
     pub fn read_pool(&self) -> &PgPool {
         &self.read_pool

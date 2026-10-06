@@ -624,7 +624,7 @@ impl Store {
             .bind(account_id)
             .bind(room_id)
             .bind(session_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.maintenance_pool)
             .await?;
         Ok(rows)
     }
@@ -643,7 +643,7 @@ impl Store {
         );
         let rows = sqlx_core::query_as::query_as::<Postgres, PendingUtd>(&sql)
             .bind(account_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.maintenance_pool)
             .await?;
         Ok(rows)
     }
@@ -663,7 +663,7 @@ impl Store {
         );
         let rows = sqlx_core::query_as::query_as::<Postgres, PendingUtd>(&sql)
             .bind(account_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.maintenance_pool)
             .await?;
         Ok(rows)
     }

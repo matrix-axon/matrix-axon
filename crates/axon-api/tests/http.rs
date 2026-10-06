@@ -4818,3 +4818,37 @@ async fn room_metadata_content_limit_boundary_and_auth() {
     }
     store.delete_account_row(account_id).await.unwrap();
 }
+
+/// Progress failure must not remove the build/sync/management status surface.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn status_degrades_when_progress_pool_is_unavailable() {
+    let store = Store::connect_with_config(&axon_core::DatabaseConfig {
+        url: std::env::var("DATABASE_URL").unwrap(),
+        max_connections: 1,
+        timeouts: axon_core::DatabaseTimeouts {
+            acquire_secs: 1,
+            ..Default::default()
+        },
+    })
+    .await
+    .unwrap();
+    let held = store.status_pool().acquire().await.unwrap();
+    let app = read_app(store);
+    let (status, _, json) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        request_parts(&app, "GET", "/v1/status", None, Some(&bearer())),
+    )
+    .await
+    .expect("bounded status response");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"]["backfill"]["progress_available"], false);
+    assert_eq!(json["data"]["backfill"]["accounts"], json!([]));
+    for field in ["build", "sync", "management"] {
+        assert!(json["data"].get(field).is_some(), "missing {field}");
+    }
+    drop(held);
+    let (status, _, json) = request_parts(&app, "GET", "/v1/status", None, Some(&bearer())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"]["backfill"]["progress_available"], true);
+}
