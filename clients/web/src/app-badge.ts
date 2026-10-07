@@ -66,15 +66,37 @@ export function requestAppBadgeNotificationPermission(): Promise<NotificationPer
 }
 
 /**
- * Reflect the unread-rooms count onto the app icon (ADR 0080) while
- * `settings.appBadgeEnabled` is on. Mirrors `unreadKeys.size`, the same total
+ * Reflect the unread-rooms count onto the app icon while
+ * `settings.appBadgeEnabled` is on. Mirrors `unreadTotal`, the same total
  * `RoomList` already shows — one definition of "unread" everywhere it's
- * counted. A no-op where the API is unsupported.
+ * counted.
+ *
+ * `setIconBadge` is the shell. Pass `null` in a browser, which then uses the
+ * Badging API (ADR 0080). The packaged webviews either omit that API or
+ * resolve it without painting, so a shell that has its own setter must not
+ * also call `navigator`.
  */
 export function applyAppBadge(
   settings: SettingsStore,
   rooms: RoomsStore,
+  setIconBadge: ((count: number | null) => void | Promise<void>) | null = null,
 ): () => void {
+  if (setIconBadge !== null) {
+    return effect(() => {
+      const count = rooms.unreadTotal.value
+      const shown = settings.appBadgeEnabled.value && count > 0 ? count : null
+      try {
+        const call = setIconBadge(shown)
+        void Promise.resolve(call).catch((cause: unknown) => {
+          console.error('app-badge: shell badge call failed', cause)
+        })
+      } catch (cause) {
+        // Same reason as the browser branch: a throw here escapes into the
+        // write to `unreadTotal`.
+        console.error('app-badge: shell badge call threw', cause)
+      }
+    })
+  }
   if (!appBadgeAvailable()) {
     // Distinguishes "the API is genuinely absent here" from "it's present but
     // silently doing nothing" — indistinguishable from the outside otherwise,

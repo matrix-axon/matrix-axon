@@ -192,6 +192,77 @@ describe('applyAppBadge (ADR 0080)', () => {
   })
 })
 
+describe('applyAppBadge in the shell', () => {
+  afterEach(() => {
+    // @ts-expect-error test-only cleanup of properties this suite defines
+    delete navigator.setAppBadge
+    // @ts-expect-error test-only cleanup of properties this suite defines
+    delete navigator.clearAppBadge
+  })
+
+  it('sets the platform badge and does not call navigator', () => {
+    const setIconBadge = vi.fn().mockResolvedValue(undefined)
+    const setAppBadge = vi.fn().mockResolvedValue(undefined)
+    const clearAppBadge = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { setAppBadge, clearAppBadge })
+
+    const dispose = applyAppBadge(
+      fakeSettings(true),
+      fakeRooms(5),
+      setIconBadge,
+    )
+
+    expect(setIconBadge).toHaveBeenCalledWith(5)
+    expect(setAppBadge).not.toHaveBeenCalled()
+    expect(clearAppBadge).not.toHaveBeenCalled()
+    dispose()
+  })
+
+  it('clears when the setting is off or the total is zero, and grows within one room', () => {
+    const setIconBadge = vi.fn().mockResolvedValue(undefined)
+    const settings = fakeSettings(true)
+    const rooms = fakeRooms(1)
+    const dispose = applyAppBadge(settings, rooms, setIconBadge)
+
+    expect(setIconBadge).toHaveBeenLastCalledWith(1)
+    ;(rooms.unreadTotal as unknown as { value: number }).value = 4
+    expect(setIconBadge).toHaveBeenLastCalledWith(4)
+    ;(rooms.unreadTotal as unknown as { value: number }).value = 0
+    expect(setIconBadge).toHaveBeenLastCalledWith(null)
+
+    settings.appBadgeEnabled.value = true
+    ;(rooms.unreadTotal as unknown as { value: number }).value = 2
+    settings.appBadgeEnabled.value = false
+    expect(setIconBadge).toHaveBeenLastCalledWith(null)
+    dispose()
+  })
+
+  it('contains a throw from the platform badge', () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const rooms = fakeRooms(1)
+    const dispose = applyAppBadge(fakeSettings(true), rooms, () => {
+      throw new Error('badge unavailable')
+    })
+    expect(consoleError).toHaveBeenCalledTimes(1)
+    expect(() => {
+      ;(rooms.unreadTotal as unknown as { value: number }).value = 2
+    }).not.toThrow()
+    expect(consoleError).toHaveBeenCalledTimes(2)
+    consoleError.mockRestore()
+    dispose()
+  })
+
+  it('contains a rejection from the platform badge', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const dispose = applyAppBadge(fakeSettings(true), fakeRooms(3), () =>
+      Promise.reject(new Error('badge rejected')),
+    )
+    await vi.waitFor(() => expect(consoleError).toHaveBeenCalledTimes(1))
+    consoleError.mockRestore()
+    dispose()
+  })
+})
+
 function stubUserAgent(userAgent: string): void {
   vi.stubGlobal('navigator', { ...navigator, userAgent })
 }

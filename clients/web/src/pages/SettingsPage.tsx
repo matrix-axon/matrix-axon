@@ -957,7 +957,7 @@ function MessageNotificationSettings() {
 }
 
 function InstallAppSettings() {
-  const { settings } = useServices()
+  const { settings, platform: appPlatform } = useServices()
   const [installing, setInstalling] = useState(false)
   const platform = detectInstallPlatform()
   const copy = installCopy(platform)
@@ -1046,7 +1046,7 @@ function InstallAppSettings() {
         Badges the app icon with the number of unread messages while installed
         and open in the background. On by default.
       </p>
-      {!badgeAvailable && (
+      {!badgeAvailable && appPlatform.setIconBadge === null && (
         <p class="muted">
           Not available in this browser right now — some browsers (Safari on
           iOS/iPadOS) only support this once Axon is added to your home screen

@@ -201,6 +201,9 @@ describe('AppRoot wiring the transport into the app', () => {
       requestNotificationPermission: () => Promise.resolve('default' as const),
       notify: () => Promise.resolve(),
       onNotificationClick: null,
+      // `null` keeps the browser path. A missing field is `undefined`, and
+      // the badge effect would try to call it.
+      setIconBadge: null,
     }
 
     // A token, so the shell mounts signed-in and actually issues requests.

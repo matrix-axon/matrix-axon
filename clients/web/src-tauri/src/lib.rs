@@ -23,6 +23,8 @@
 //! path it cannot open. This process takes the drag at the window instead and
 //! reads the bytes — see `read_dropped_file`.
 
+mod icon_badge;
+
 /// Wire up and run the shell.
 ///
 /// `pub` and in the library rather than `main.rs` because the mobile targets
@@ -66,7 +68,7 @@ pub fn run() {
 
     let builder = builder
         .manage(DroppedPaths::default())
-        .invoke_handler(tauri::generate_handler![read_dropped_file])
+        .invoke_handler(tauri::generate_handler![read_dropped_file, set_icon_badge])
         // Transport. Both are configured by capability files under
         // `capabilities/`, not here — the allow-list of reachable origins is
         // security-relevant and belongs somewhere reviewable.
@@ -558,6 +560,72 @@ fn watch_dropped_paths<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
 /// there. Refusing it here would reject a drop the page would have taken.
 fn within_upload_limit(size: u64, max_bytes: u64) -> bool {
     size <= max_bytes
+}
+
+/// Set or clear the shell's icon badge.
+///
+/// `None`, zero, and negative clear. The page sends `null` for those, and
+/// this repeats the check so a stray zero cannot paint a "0".
+///
+/// The notification plugin has no badge command. Desktop and iOS go through
+/// `Window::set_badge_count`: the Dock tile on macOS, the Unity launcher
+/// count on Linux (a no-op unless that launcher is running), and
+/// `UIApplication`'s icon number on iOS. Windows ignores that call, so it
+/// gets an overlay picture instead. Android has no badge API in this stack;
+/// the launcher count stays unchanged and that is logged once.
+#[tauri::command(async)]
+fn set_icon_badge(app: tauri::AppHandle, count: Option<i64>) -> Result<(), String> {
+    use tauri::Manager as _;
+
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "icon badge: no main window".to_string())?;
+    let count = icon_badge::visible_count(count);
+
+    #[cfg(target_os = "android")]
+    {
+        let _ = (window, count);
+        note_android_badge_unsupported();
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return paint_windows_badge(&window, count);
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "windows")))]
+    {
+        window
+            .set_badge_count(count)
+            .map_err(|error| format!("icon badge: {error}"))
+    }
+}
+
+/// Android drops the call. Logged once: the page repeats it on every unread
+/// change, and a line per change would bury the one fact that matters.
+#[cfg(target_os = "android")]
+fn note_android_badge_unsupported() {
+    use std::sync::Once;
+
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        eprintln!("icon badge is unsupported on Android; the launcher count is left unchanged");
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn paint_windows_badge(window: &tauri::WebviewWindow, count: Option<i64>) -> Result<(), String> {
+    let icon = count.map(|count| {
+        tauri::image::Image::new_owned(
+            icon_badge::overlay(count),
+            icon_badge::OVERLAY_PX,
+            icon_badge::OVERLAY_PX,
+        )
+    });
+    window
+        .set_overlay_icon(icon)
+        .map_err(|error| format!("icon badge: {error}"))
 }
 
 #[tauri::command(async)]

@@ -361,6 +361,16 @@ export interface Platform {
    */
   onNotificationClick:
     ((handler: (click: NotificationClick) => void) => () => void) | null
+
+  /**
+   * Set the OS icon badge to `count`, or clear it when `count` is `null`.
+   *
+   * `null` as the method means this platform has no icon of its own.
+   * A browser returns that, and `applyAppBadge` uses the Badging API instead
+   * (ADR 0080). The packaged webviews either omit that API or resolve it
+   * without painting, so the shell sets the icon in-process.
+   */
+  setIconBadge: ((count: number | null) => Promise<void>) | null
 }
 
 /** What a native menu item asks the page to do. */
@@ -526,6 +536,8 @@ export function browserPlatform(): Platform {
       return Promise.resolve()
     },
     onNotificationClick: subscribeNotificationClicks,
+    // The page badges through `navigator` here. See `setIconBadge`.
+    setIconBadge: null,
   }
 }
 

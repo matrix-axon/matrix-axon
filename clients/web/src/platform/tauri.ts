@@ -582,6 +582,10 @@ export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
       })
     },
     onNotificationClick: subscribeNotificationClicks,
+    // The notification plugin has no badge command. `set_icon_badge` is the
+    // shell's own: Dock, Unity launcher, iOS icon number, or a Windows
+    // taskbar overlay. Android accepts the call and leaves the launcher alone.
+    setIconBadge: (count) => invoke('set_icon_badge', { count }),
   }
 }
 
