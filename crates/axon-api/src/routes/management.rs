@@ -27,7 +27,7 @@ use crate::dto::{
     StartBindRequest, StartedBindDto,
 };
 use crate::extract::{Json, Path, Query};
-use crate::oauth::bind::BindRefusal;
+use crate::oauth::bind::{BindRefusal, StartBindError};
 use crate::oauth::OAuthRuntime;
 use crate::response::{ApiError, ApiResponse};
 use crate::state::ManagementConfig;
@@ -36,9 +36,8 @@ use crate::state::ManagementConfig;
 /// legitimate one is a token label.
 pub(crate) const MAX_BODY_BYTES: usize = 4 * 1024;
 
-/// The longest token label, in characters. Shared with the first-run
-/// bootstrap, which mints the same kind of token.
-pub(crate) const TOKEN_LABEL_MAX_CHARS: usize = 80;
+/// The longest token label, in characters.
+const TOKEN_LABEL_MAX_CHARS: usize = 80;
 
 /// The most tokens one list response carries. One human creates few tokens on
 /// purpose, but every hour of a signed-in session leaves an expired access
@@ -212,9 +211,35 @@ pub async fn list_tokens(
     Ok(ApiResponse::new(tokens))
 }
 
+/// The prefix of the label Axon generates for an OAuth session's access
+/// token (`oauth:<provider>:<client>`). A person may not pick a label that
+/// starts with it, so a token that claims to be a session really is one.
+const GENERATED_LABEL_PREFIX: &str = "oauth:";
+
+/// Whether `c` may appear in a token label. Labels are printed raw by
+/// `axon token list` and shown in clients, so nothing that can move a cursor,
+/// reorder the text around it, or hide inside it: no control characters, and
+/// none of the invisible format characters (zero-width, bidirectional
+/// overrides and isolates, the soft hyphen, language tags).
+fn label_char_allowed(c: char) -> bool {
+    !(c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E007F}'
+        ))
+}
+
 /// A label fit to store and to print: trimmed, one to
-/// [`TOKEN_LABEL_MAX_CHARS`] characters, no control characters. The CLI
-/// prints labels to a terminal, so an escape sequence in one is not harmless.
+/// [`TOKEN_LABEL_MAX_CHARS`] characters, every one of them
+/// [allowed](label_char_allowed), and not posing as a generated label.
 fn validate_label(label: &str) -> Result<&str, ApiError> {
     let label = label.trim();
     if label.is_empty() {
@@ -225,12 +250,36 @@ fn validate_label(label: &str) -> Result<&str, ApiError> {
             "label must be at most {TOKEN_LABEL_MAX_CHARS} characters"
         )));
     }
-    if label.chars().any(char::is_control) {
+    if !label.chars().all(label_char_allowed) {
         return Err(ApiError::bad_request(
-            "label must not contain control characters",
+            "label must not contain control or invisible formatting characters",
         ));
     }
+    if is_generated_label(label) {
+        return Err(ApiError::bad_request(format!(
+            "label must not start with {GENERATED_LABEL_PREFIX:?}"
+        )));
+    }
     Ok(label)
+}
+
+fn is_generated_label(label: &str) -> bool {
+    label
+        .get(..GENERATED_LABEL_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(GENERATED_LABEL_PREFIX))
+}
+
+/// The label a form field can be made into without asking again: disallowed
+/// characters dropped, trimmed, cut to [`TOKEN_LABEL_MAX_CHARS`]. `None` if
+/// nothing usable is left or it would pose as a generated label, so the
+/// caller falls back to its default. For the first-run bootstrap page, which
+/// has no error path to send a person back through; the API's mint rejects
+/// instead ([`validate_label`]).
+pub(crate) fn sanitize_label(label: &str) -> Option<String> {
+    let cleaned: String = label.chars().filter(|c| label_char_allowed(*c)).collect();
+    let cleaned: String = cleaned.trim().chars().take(TOKEN_LABEL_MAX_CHARS).collect();
+    let cleaned = cleaned.trim_end();
+    (!cleaned.is_empty() && !is_generated_label(cleaned)).then(|| cleaned.to_owned())
 }
 
 /// Mint a bearer token that never expires.
@@ -385,6 +434,7 @@ pub async fn revoke_token(
         (status = 403, description = "`management_disabled`, or `recent_sign_in_required`: sign in again and retry", body = crate::response::ErrorResponse),
         (status = 409, description = "`bind_unavailable`: OAuth is off on this server, or the provider is not enabled for browser sign-in", body = crate::response::ErrorResponse),
         (status = 413, description = "The request body is over 4 KiB", body = crate::response::ErrorResponse),
+        (status = 429, description = "Five binds are already waiting on a sign-in; finish one or let them expire", body = crate::response::ErrorResponse),
     ),
     tag = "management",
 )]
@@ -400,7 +450,10 @@ pub async fn start_bind(
             _ => ApiError::bind_unavailable(refusal.to_string()),
         },
     )?;
-    let started = target.start(&store).await?;
+    let started = target.start(&store).await.map_err(|error| match error {
+        StartBindError::TooManyPending => ApiError::too_many_requests(error.to_string()),
+        StartBindError::Store(error) => error.into(),
+    })?;
     tracing::info!(
         acting_token_id = %caller.id,
         bind_id = %started.request.device_code,
@@ -424,8 +477,10 @@ pub async fn start_bind(
 
 /// Read where an identity bind stands: `pending`, `completed` or `expired`.
 ///
-/// A bind's record is removed some time after it lapses, so a `404` for an id
-/// this server issued means the same as `expired`.
+/// A bind that did not complete is removed once it lapses, so a `404` for an
+/// id this server issued means the same as `expired`. A completed bind stays
+/// readable for a day after that, so a client that polls late still learns it
+/// succeeded.
 #[utoipa::path(
     get,
     path = "/v1/management/oauth/binds/{bind_id}",
@@ -435,7 +490,7 @@ pub async fn start_bind(
     responses(
         (status = 200, description = "The bind's status", body = ApiResponse<BindDto>),
         (status = 403, description = "The management API is disabled (`management_disabled`)", body = crate::response::ErrorResponse),
-        (status = 404, description = "No such bind, or it lapsed and was removed", body = crate::response::ErrorResponse),
+        (status = 404, description = "No such bind, or it lapsed without completing and was removed", body = crate::response::ErrorResponse),
     ),
     tag = "management",
 )]
@@ -468,5 +523,49 @@ mod tests {
     fn a_label_cannot_carry_terminal_escapes() {
         assert!(validate_label("phone\u{1b}[2J").is_err());
         assert!(validate_label("two\nlines").is_err());
+    }
+
+    #[test]
+    fn a_label_cannot_carry_invisible_or_reordering_characters() {
+        for hidden in ['\u{202E}', '\u{200B}', '\u{2066}', '\u{FEFF}', '\u{00AD}'] {
+            assert!(
+                validate_label(&format!("lap{hidden}top")).is_err(),
+                "{hidden:?}"
+            );
+        }
+        // Ordinary non-ASCII text and emoji are fine.
+        assert!(validate_label("Büro-Rechner 💻").is_ok());
+    }
+
+    #[test]
+    fn a_label_cannot_pose_as_a_generated_session_label() {
+        assert!(validate_label("oauth:google:axon-web").is_err());
+        assert!(validate_label("OAuth:anything").is_err());
+        assert!(validate_label("oauthish").is_ok());
+        assert!(
+            validate_label("é").is_ok(),
+            "a short non-ASCII label must not panic"
+        );
+    }
+
+    #[test]
+    fn a_form_label_is_cleaned_rather_than_rejected() {
+        assert_eq!(
+            sanitize_label("  lap\u{1b}top\u{202E} ").as_deref(),
+            Some("laptop")
+        );
+        assert_eq!(
+            sanitize_label(&"x".repeat(200)).unwrap().chars().count(),
+            80
+        );
+        // Truncation can expose trailing whitespace; it is trimmed again.
+        let padded = format!("{}  tail", "x".repeat(79));
+        assert_eq!(
+            sanitize_label(&padded).as_deref(),
+            Some("x".repeat(79).as_str())
+        );
+        for unusable in ["", "  ", "\u{200B}\n", "oauth:google:web"] {
+            assert_eq!(sanitize_label(unusable), None, "{unusable:?}");
+        }
     }
 }

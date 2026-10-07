@@ -90,12 +90,17 @@ async fn bind(store: &Store, config: &Config, provider: &str) -> anyhow::Result<
         let current = store
             .find_bind_request(request.device_code)
             .await
-            .context("polling bind request")?
-            .context("bind request row disappeared")?;
-        match current.status.as_str() {
-            "pending" if current.expires_at > Utc::now() => {
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
+            .context("polling bind request")?;
+        // A lapsed request is swept by the next bind anyone starts, from here
+        // or from a client, so a missing row is an expired one.
+        let status = current
+            .as_ref()
+            .map_or("expired", |current| match current.status.as_str() {
+                "pending" if current.expires_at <= Utc::now() => "expired",
+                status => status,
+            });
+        match status {
+            "pending" => tokio::time::sleep(POLL_INTERVAL).await,
             "completed" => {
                 println!("Bound successfully.");
                 return Ok(());

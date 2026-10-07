@@ -29,12 +29,29 @@ pub enum BindRefusal {
     OauthDisabled,
     #[error("unknown provider (expected apple, google, or microsoft)")]
     UnknownProvider,
-    #[error("the {0} provider is not enabled for browser sign-in; enable it before binding")]
+    #[error("oauth.providers.{0}.enabled = false; enable it before binding")]
     ProviderDisabled(&'static str),
     #[error("{0}")]
     ProviderMisconfigured(String),
     #[error("oauth.external_base_url must be set before binding")]
     ExternalBaseUrlMissing,
+}
+
+/// How many binds may wait on a sign-in at once. Each is a code the
+/// unauthenticated browser leg accepts for ten minutes, so this bounds how far
+/// starting binds can improve a guesser's odds. One owner linking one identity
+/// needs one; the slack is for attempts abandoned in the last few minutes.
+const MAX_PENDING_BINDS: i64 = 5;
+
+/// Why a bind that passed [`check`] was not started.
+#[derive(Debug, thiserror::Error)]
+pub enum StartBindError {
+    #[error(
+        "too many sign-in links are waiting to be used; finish one or wait for them to expire"
+    )]
+    TooManyPending,
+    #[error(transparent)]
+    Store(#[from] StoreError),
 }
 
 /// A provider a bind may be started for, and where its browser leg is served.
@@ -116,11 +133,20 @@ impl BindTarget<'_> {
 
     /// Create the pending bind request and the URL that starts its browser
     /// leg. The request expires [`HANDSHAKE_TTL`] from now.
-    pub async fn start(&self, store: &Store) -> Result<StartedBind, StoreError> {
+    ///
+    /// Refused with [`StartBindError::TooManyPending`] while
+    /// [`MAX_PENDING_BINDS`] are already waiting.
+    pub async fn start(&self, store: &Store) -> Result<StartedBind, StartBindError> {
         let user_code = generate_user_code();
         let request = store
-            .create_bind_request(self.provider, &user_code, Utc::now() + HANDSHAKE_TTL)
-            .await?;
+            .create_bind_request_unless_too_many(
+                self.provider,
+                &user_code,
+                Utc::now() + HANDSHAKE_TTL,
+                MAX_PENDING_BINDS,
+            )
+            .await?
+            .ok_or(StartBindError::TooManyPending)?;
         let url = format!(
             "{}/v1/oauth/bind?user_code={user_code}",
             self.external_base_url

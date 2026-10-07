@@ -317,18 +317,20 @@ impl Store {
 
     /// At most `limit` tokens for the management API's list (ADR 0109): the
     /// ones that still verify first, then everything else, newest first
-    /// within each.
+    /// within each, with the id breaking ties so the cap cuts at the same
+    /// row every time.
     ///
     /// The order is what makes the cap safe. Expired OAuth access tokens are
     /// never deleted and a signed-in client mints one an hour, so on a
     /// long-lived instance they outnumber everything else; a newest-first cap
     /// would eventually push the non-expiring tokens the owner actually needs
-    /// to see off the end of the list.
+    /// to see off the end of the list. Nothing supports this order with an
+    /// index, so it sorts the table; pruning the expired rows is #635.
     pub async fn list_tokens_live_first(&self, limit: i64) -> Result<Vec<Token>, StoreError> {
         let sql = format!(
             "SELECT {TOKEN_COLUMNS} FROM tokens \
              ORDER BY (revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())) DESC, \
-                      created_at DESC \
+                      created_at DESC, id \
              LIMIT $1"
         );
         let tokens = sqlx_core::query_as::query_as::<Postgres, Token>(&sql)

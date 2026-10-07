@@ -932,7 +932,15 @@ async fn a_mint_is_refused_for_a_stale_session_and_for_a_bad_label() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(code(&body), "recent_sign_in_required");
 
-    for label in ["", "   ", &"x".repeat(81), "esc\u{1b}[2J", "two\nlines"] {
+    for label in [
+        "",
+        "   ",
+        &"x".repeat(81),
+        "esc\u{1b}[2J",
+        "two\nlines",
+        "lap\u{202e}top",
+        "oauth:google:test-client",
+    ] {
         let (status, body) = mint(&app, &fresh, label).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{label:?}");
         assert_eq!(code(&body), "bad_request", "{label:?}");
@@ -1261,5 +1269,82 @@ async fn a_lapsed_or_canceled_bind_reads_as_expired() {
         Some(&owner.token),
     )
     .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_completed_bind_outlives_its_expiry_but_pending_binds_are_capped() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let app = app(store.clone(), true, Providers::Browser(&["google"]));
+    let owner = store.issue_token("owner").await.unwrap();
+    let id_of = |body: &Value| Uuid::parse_str(body["data"]["id"].as_str().unwrap()).unwrap();
+    let lapse = |id: Uuid| {
+        let store = store.clone();
+        async move {
+            sqlx_core::query::query(
+                "UPDATE oauth_bind_requests SET expires_at = now() - interval '1 minute' \
+                  WHERE device_code = $1",
+            )
+            .bind(id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        }
+    };
+
+    // A bind that succeeded, read after its ten minutes are up and after
+    // another start has swept the table: still `completed`, not a 404 the
+    // client would have to report as a failure.
+    let (_, body) = start_bind(&app, &owner.token, "google").await;
+    let done = id_of(&body);
+    let bound = store
+        .complete_bind_request(done, "google", "late-poller", None)
+        .await
+        .unwrap()
+        .unwrap();
+    lapse(done).await;
+
+    // Five may wait at once; the sixth is refused and creates nothing.
+    for n in 0..5 {
+        let (status, _) = start_bind(&app, &owner.token, "google").await;
+        assert_eq!(status, StatusCode::CREATED, "bind {n}");
+    }
+    let (status, body) = start_bind(&app, &owner.token, "google").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(code(&body), "too_many_requests");
+
+    let uri = format!("{BINDS}/{done}");
+    let (status, body) = call(&app, Method::GET, &uri, Some(&owner.token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["status"], "completed");
+    assert_eq!(body["data"]["identity_id"], bound.to_string());
+
+    // A pending bind that is used up or lapses frees its place.
+    let pending: Uuid = sqlx_core::row::Row::get(
+        &sqlx_core::query::query(
+            "SELECT device_code FROM oauth_bind_requests WHERE status = 'pending' LIMIT 1",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        "device_code",
+    );
+    lapse(pending).await;
+    let (status, _) = start_bind(&app, &owner.token, "google").await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // The completed record is not kept forever: a day past expiry it goes.
+    sqlx_core::query::query(
+        "UPDATE oauth_bind_requests SET expires_at = now() - interval '25 hours' \
+          WHERE device_code = $1",
+    )
+    .bind(done)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    store.delete_expired_bind_requests().await.unwrap();
+    let (status, _) = call(&app, Method::GET, &uri, Some(&owner.token)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }

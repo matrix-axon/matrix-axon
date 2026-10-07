@@ -1464,8 +1464,10 @@ export interface paths {
         };
         /**
          * Read where an identity bind stands: `pending`, `completed` or `expired`.
-         * @description A bind's record is removed some time after it lapses, so a `404` for an id
-         *     this server issued means the same as `expired`.
+         * @description A bind that did not complete is removed once it lapses, so a `404` for an
+         *     id this server issued means the same as `expired`. A completed bind stays
+         *     readable for a day after that, so a client that polls late still learns it
+         *     succeeded.
          */
         get: operations["bind_status"];
         put?: never;
@@ -9968,6 +9970,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description Five binds are already waiting on a sign-in; finish one or let them expire */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     bind_status: {
@@ -10011,7 +10022,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description No such bind, or it lapsed and was removed */
+            /** @description No such bind, or it lapsed without completing and was removed */
             404: {
                 headers: {
                     [name: string]: unknown;

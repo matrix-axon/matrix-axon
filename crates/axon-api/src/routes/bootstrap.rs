@@ -19,10 +19,6 @@ use crate::response::ApiError;
 use crate::state::BootstrapConfig;
 
 const BOOTSTRAP_TOKEN_LABEL: &str = "bootstrap-web";
-/// Mirrors the setup page's `maxlength="80"` on the label field, which is
-/// HTML-only and does nothing against a raw POST — this is the server-side
-/// backstop. The same cap the management API puts on a label.
-const BOOTSTRAP_TOKEN_LABEL_MAX_LEN: usize = crate::routes::management::TOKEN_LABEL_MAX_CHARS;
 pub(crate) const BOOTSTRAP_CLIENT_ID: &str = "bootstrap-web";
 const BOOTSTRAP_REDIRECT_URI: &str = "urn:axon:bootstrap";
 const BOOTSTRAP_CODE_CHALLENGE: &str = "bootstrap-web";
@@ -63,15 +59,15 @@ pub async fn issue_bearer(
     let bootstrap = ensure_bootstrap_armed(bootstrap)?;
     ensure_access_code(&bootstrap, &code)?;
 
+    // The same rules the management API's mint applies, cleaned instead of
+    // rejected: this page has no way to ask again.
     let label = form
         .label
         .as_deref()
-        .map(str::trim)
-        .filter(|label| !label.is_empty())
-        .map(|label| truncate_chars(label, BOOTSTRAP_TOKEN_LABEL_MAX_LEN))
-        .unwrap_or(BOOTSTRAP_TOKEN_LABEL);
+        .and_then(crate::routes::management::sanitize_label)
+        .unwrap_or_else(|| BOOTSTRAP_TOKEN_LABEL.to_owned());
     let issued = store
-        .issue_first_bootstrap_token(label)
+        .issue_first_bootstrap_token(&label)
         .await?
         .ok_or_else(|| ApiError::conflict("first credential bootstrap is no longer available"))?;
     tracing::info!("first bootstrap bearer token issued");
@@ -458,16 +454,6 @@ fn oauth_token_page(pair: TokenPair, bootstrap: &BootstrapConfig) -> String {
     )
 }
 
-/// Truncate to at most `max_chars` `char`s, cutting on a char boundary
-/// (unlike a raw byte-length slice, which would panic on a multi-byte char
-/// straddling the cut point).
-fn truncate_chars(value: &str, max_chars: usize) -> &str {
-    match value.char_indices().nth(max_chars) {
-        Some((byte_idx, _)) => &value[..byte_idx],
-        None => value,
-    }
-}
-
 pub(crate) fn html_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -536,23 +522,8 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; border-radi
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        bearer_token_page, oauth_token_page, provider_button, truncate_chars, BootstrapConfig,
-    };
+    use super::{bearer_token_page, oauth_token_page, provider_button, BootstrapConfig};
     use crate::oauth::tokens::TokenPair;
-
-    #[test]
-    fn truncate_chars_cuts_at_char_boundary() {
-        assert_eq!(truncate_chars("hello", 80), "hello");
-        assert_eq!(truncate_chars("hello", 5), "hello");
-        assert_eq!(truncate_chars("hello", 3), "hel");
-        assert_eq!(truncate_chars("hello", 0), "");
-        // Multi-byte chars: cutting mid-string must not panic or split a char.
-        let multibyte = "a".repeat(79) + "\u{1F600}\u{1F600}";
-        let truncated = truncate_chars(&multibyte, 80);
-        assert_eq!(truncated.chars().count(), 80);
-        assert!(truncated.is_char_boundary(truncated.len()));
-    }
 
     #[test]
     fn bearer_token_page_escapes_the_token() {

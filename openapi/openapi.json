@@ -7191,6 +7191,16 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "Five binds are already waiting on a sign-in; finish one or let them expire",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -7201,7 +7211,7 @@
           "management"
         ],
         "summary": "Read where an identity bind stands: `pending`, `completed` or `expired`.",
-        "description": "A bind's record is removed some time after it lapses, so a `404` for an id\nthis server issued means the same as `expired`.",
+        "description": "A bind that did not complete is removed once it lapses, so a `404` for an\nid this server issued means the same as `expired`. A completed bind stays\nreadable for a day after that, so a client that polls late still learns it\nsucceeded.",
         "operationId": "bind_status",
         "parameters": [
           {
@@ -7255,7 +7265,7 @@
             }
           },
           "404": {
-            "description": "No such bind, or it lapsed and was removed",
+            "description": "No such bind, or it lapsed without completing and was removed",
             "content": {
               "application/json": {
                 "schema": {

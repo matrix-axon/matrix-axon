@@ -201,7 +201,12 @@ Everything else is one function in `axon-api`: OAuth enabled, the provider one A
 A bind this server cannot start answers `409` with the code `bind_unavailable`: OAuth is off, or the provider is not enabled for browser sign-in.
 Apple with only its native flow enabled is such a case, since there is no browser provider to redirect to.
 A bind's status is `pending`, `completed` or `expired`; a canceled or failed sign-in reads as `expired`, and so does a pending bind past its time.
-The record is swept after it lapses, so a later read is a `404`.
+A bind that did not complete is swept once it lapses, so a later read is a `404`.
+A completed one is kept for a day past its expiry, so a client that polls late (a phone that was in the background) still reads `completed` instead of a missing record it would have to report as a failure.
+
+At most five binds may be pending at once; a sixth answers `429`.
+Each pending bind is a code the unauthenticated browser leg accepts for ten minutes, so the number outstanding multiplies a guesser's odds, and the rate limiter on that leg counts requests, not open codes.
+The cap applies to the CLI verb too, since both go through the same start.
 
 ### Unbinding, and what it cannot do
 
@@ -257,6 +262,8 @@ All additions are new routes or new optional response fields, so the OpenAPI com
 
 Each route crosses the client boundary, so each states its limits.
 A token label is length-capped before it is stored, and request bodies are capped before parsing.
+A label is also refused if it contains control characters or invisible format characters (zero-width, bidirectional overrides), because `axon-server token list` prints labels to a terminal, or if it starts with `oauth:`, the prefix of the label Axon generates for a sign-in session.
+The first-run bootstrap page applies the same rules by cleaning the label instead of refusing it, since that page has no way to ask again.
 The identity and token lists are bounded by what one human creates, and the token list is capped in the query regardless.
 That cap needs an order to be safe.
 Expired OAuth access tokens are never deleted, and a signed-in client leaves one behind every hour, so they come to outnumber everything else.
