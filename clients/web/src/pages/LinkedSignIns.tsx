@@ -337,6 +337,13 @@ export function LinkedSignIns() {
   }
 
   function start(change: Change, resumed = false): void {
+    if (!resumed) {
+      // Whatever was waiting on a sign-in is superseded by what the user has
+      // just asked for. Left in place, it would be finished by the *next*
+      // sign-in of any kind, including the one this action is about to make,
+      // and an unlink confirmed minutes ago would go through unannounced.
+      clearIntent()
+    }
     setBusy(change.kind === 'unlink' ? change.identityId : 'link')
     setError(null)
     setHandedOff(false)
@@ -536,7 +543,12 @@ export function LinkedSignIns() {
                   <button
                     type="button"
                     disabled={busy !== null}
-                    onClick={() => setConfirming(null)}
+                    onClick={() => {
+                      // Also withdraws a confirmation that is still waiting
+                      // on a sign-in the user backed out of.
+                      clearIntent()
+                      setConfirming(null)
+                    }}
                   >
                     Cancel
                   </button>

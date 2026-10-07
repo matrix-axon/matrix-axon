@@ -461,6 +461,75 @@ describe('a change the server wants a fresh sign-in for', () => {
     expect(routes.deletes).toHaveLength(0)
   })
 
+  it('does not finish a waiting unlink on a sign-in made for something else', async () => {
+    // The unlink was refused, the user backed out of the provider's page, and
+    // then linked an Apple ID instead. That sign-in must not complete the
+    // unlink they walked away from.
+    const routes = identityRoutes([{ ...google, current: false }, apple])
+    server.use(
+      providers([], ['apple']),
+      ...routes.handlers,
+      http.post(`${TEST_BASE_URL}/v1/oauth/apple/native/challenge`, () =>
+        HttpResponse.json({ challenge: 'c', nonce: 'n', expires_in: 300 }),
+      ),
+      http.post(`${TEST_BASE_URL}/v1/oauth/apple/native/token`, () =>
+        HttpResponse.json({
+          access_token: 'apple-access',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: 'apple-refresh',
+        }),
+      ),
+    )
+    window.sessionStorage.setItem(
+      RESUME_KEY,
+      JSON.stringify({
+        kind: 'unlink',
+        identityId: GOOGLE,
+        allowLockout: false,
+        current: false,
+        createdAt: Date.now() - 1000,
+      }),
+    )
+    const view = renderPanel(
+      testServices({
+        platform: { appleSignIn: () => Promise.resolve('identity-token') },
+      }),
+    )
+
+    fireEvent.click(
+      await view.findByRole('button', { name: 'Link an Apple ID' }),
+    )
+
+    await waitFor(() =>
+      expect(view.services.auth.oauth.sessionProvider.value).toBe('apple'),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(routes.deletes).toHaveLength(0)
+    expect(window.sessionStorage.getItem(RESUME_KEY)).toBeNull()
+  })
+
+  it('withdraws a waiting unlink on Cancel', async () => {
+    const routes = identityRoutes([apple])
+    server.use(noProviders(), ...routes.handlers)
+    const view = renderPanel()
+    fireEvent.click(await view.findByRole('button', { name: 'Unlink Apple' }))
+    window.sessionStorage.setItem(
+      RESUME_KEY,
+      JSON.stringify({
+        kind: 'unlink',
+        identityId: APPLE,
+        allowLockout: false,
+        current: false,
+        createdAt: Date.now(),
+      }),
+    )
+
+    fireEvent.click(view.getByRole('button', { name: 'Cancel' }))
+
+    expect(window.sessionStorage.getItem(RESUME_KEY)).toBeNull()
+  })
+
   it('says what to do when there is no sign-in to re-run', async () => {
     // A pasted token that expires: not an OAuth session this client holds.
     const routes = identityRoutes([apple], () =>
