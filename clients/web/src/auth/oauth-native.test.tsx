@@ -12,7 +12,7 @@ import {
 } from 'vitest'
 import { NativeSignInCancelled } from '../platform'
 import { memoryStorage } from '../test/memory-storage'
-import { createOAuthAuthProvider, LinkAppleSection } from './oauth'
+import { createOAuthAuthProvider, OAuthStepUpRequiredError } from './oauth'
 
 const BASE_URL = 'http://axon.test'
 const PROVIDERS_URL = `${BASE_URL}/v1/oauth/providers`
@@ -342,65 +342,44 @@ describe('the Apple button', () => {
   })
 })
 
-describe('LinkAppleSection', () => {
-  it('renders nothing where native Apple is not offered', async () => {
-    server.use(providerRoutes(['google'], 'disabled'))
-    const auth = createOAuthAuthProvider({
-      providers: [],
-      baseUrl: BASE_URL,
-      storage: memoryStorage(),
-      appleSignIn: vi.fn(),
-    })
-    const view = render(
-      <LinkAppleSection oauth={auth} bearer={() => 'owner'} />,
+describe('a credential change from an old sign-in', () => {
+  it('reports that binding needs a fresh sign-in, before any sheet', async () => {
+    server.use(
+      providerRoutes([], ['apple']),
+      http.post(CHALLENGE_URL, () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: 'recent_sign_in_required',
+              message: 'sign in again',
+            },
+          },
+          { status: 403 },
+        ),
+      ),
     )
-    await auth.discoverProviders()
-
-    expect(view.container.textContent).toBe('')
-  })
-
-  it('links the Apple ID using the current bearer', async () => {
-    const recorded = newRecorded()
-    server.use(providerRoutes([], ['apple']), ...nativeRoutes(recorded))
-    const auth = createOAuthAuthProvider({
-      providers: [],
-      baseUrl: BASE_URL,
-      storage: memoryStorage(),
-      appleSignIn: () => Promise.resolve('apple-identity-token'),
-    })
-    const view = render(
-      <LinkAppleSection oauth={auth} bearer={() => 'owner-token'} />,
-    )
-
-    fireEvent.click(
-      await view.findByRole('button', { name: 'Link an Apple ID' }),
-    )
-
-    // Linking adopts the Apple session, which is itself the proof of the link.
-    await view.findByText(/You are signed in with Apple/)
-    expect(view.queryByRole('button')).toBeNull()
-    expect(recorded.challenge[0].authorization).toBe('Bearer owner-token')
-  })
-
-  it('offers no link button when already signed in with Apple', async () => {
-    server.use(providerRoutes([], ['apple']))
+    const appleSignIn = vi.fn()
     const storage = memoryStorage({
       'axon.oauth.session': JSON.stringify({
         accessToken: 'a',
         refreshToken: 'r',
         expiresAt: Date.now() + 3_600_000,
-        provider: 'apple',
+        provider: 'google',
       }),
     })
     const auth = createOAuthAuthProvider({
       providers: [],
       baseUrl: BASE_URL,
       storage,
-      appleSignIn: vi.fn(),
+      appleSignIn,
     })
-    const view = render(<LinkAppleSection oauth={auth} bearer={() => 'a'} />)
 
-    await view.findByText(/your Apple ID is linked/)
-    expect(view.queryByRole('button')).toBeNull()
+    await expect(auth.bindApple('a')).rejects.toBeInstanceOf(
+      OAuthStepUpRequiredError,
+    )
+    expect(appleSignIn).not.toHaveBeenCalled()
+    // Not a verdict on the session: it is still there.
+    expect(auth.signedIn.value).toBe(true)
+    expect(auth.lastSignInAt.value).toBeNull()
   })
 })
