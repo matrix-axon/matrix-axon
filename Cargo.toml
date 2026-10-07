@@ -28,7 +28,7 @@ members = [
 exclude = ["clients/web/src-tauri"]
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 # Dictated by the dependency graph, not by anything this workspace writes:
 # matrix-sdk 0.19 and its sibling crates declare `rust-version = "1.96"`, so
