@@ -208,7 +208,8 @@ impl Store {
     /// received after the leave, including a later rejoin.
     /// Global account data (`room_id = ''`) is preserved. Idempotent.
     pub async fn purge_room(&self, account_id: Uuid, room_id: &str) -> Result<(), StoreError> {
-        let through_event_id = self.queue_room_purge(account_id, room_id).await?;
+        let through_event_id =
+            Self::room_purge_watermark(account_id, room_id, false, &self.pool).await?;
         self.delete_event_batches(account_id, Some(room_id), Some(through_event_id))
             .await?;
         self.delete_state_batches(account_id, Some(room_id), Some(through_event_id))
@@ -231,30 +232,62 @@ impl Store {
         Ok(())
     }
     /// Persist a leave obligation without waiting for bulk cleanup. Repeated
-    /// requests preserve the original generation until it finishes.
+    /// leaves advance a pending generation; background retries never advance it.
     pub async fn queue_room_purge(
         &self,
         account_id: Uuid,
         room_id: &str,
     ) -> Result<i64, StoreError> {
+        let through = Self::room_purge_watermark(account_id, room_id, true, &self.pool).await?;
+        self.purge_wakeup.notify_one();
+        Ok(through)
+    }
+
+    /// Wake the supervised purge worker as soon as a leave is durably queued.
+    pub async fn room_purge_notified(&self) {
+        self.purge_wakeup.notified().await;
+    }
+
+    pub(crate) async fn room_purge_watermark<'e, E>(
+        account_id: Uuid,
+        room_id: &str,
+        advance: bool,
+        executor: E,
+    ) -> Result<i64, StoreError>
+    where
+        E: sqlx_core::executor::Executor<'e, Database = Postgres>,
+    {
         let (through_event_id,): (i64,) = sqlx_core::query_as::query_as(
             "INSERT INTO room_purge_intents (account_id, room_id, through_event_id) \
              SELECT $1, $2, last_value FROM events_id_seq \
-             ON CONFLICT (account_id, room_id) DO UPDATE SET room_id = EXCLUDED.room_id \
+             ON CONFLICT (account_id, room_id) DO UPDATE SET through_event_id = \
+             CASE WHEN $3 THEN GREATEST(room_purge_intents.through_event_id, EXCLUDED.through_event_id) \
+                  ELSE room_purge_intents.through_event_id END \
              RETURNING through_event_id",
         )
         .bind(account_id)
         .bind(room_id)
-        .fetch_one(&self.pool)
+        .bind(advance)
+        .fetch_one(executor)
         .await?;
         Ok(through_event_id)
     }
 
     /// Retry a bounded page; failures remain durable and do not stop other rooms.
     pub async fn retry_room_purges(&self) -> Result<(), StoreError> {
+        // Rotate across failed pages instead of letting the first hundred failures
+        // hide every later room. The cursor is shared by all clones; durable intents
+        // survive restart even though fair traversal starts over after restart.
+        let mut cursor = self.purge_retry_cursor.lock().await;
         let pending: Vec<(Uuid, String)> = sqlx_core::query_as::query_as(
-            "SELECT account_id, room_id FROM room_purge_intents ORDER BY account_id, room_id LIMIT 100")
+            "SELECT account_id, room_id FROM room_purge_intents \
+             ORDER BY CASE WHEN $1::uuid IS NULL THEN false \
+                           ELSE (account_id, room_id) <= ($1, $2) END, account_id, room_id LIMIT 100")
+            .bind(cursor.as_ref().map(|(account, _)| *account))
+            .bind(cursor.as_ref().map(|(_, room)| room.as_str()))
             .fetch_all(&self.pool).await?;
+        *cursor = pending.last().cloned();
+        drop(cursor);
         for (account_id, room_id) in pending {
             if let Err(error) = self.purge_room(account_id, &room_id).await {
                 tracing::warn!(%account_id, %room_id, reason = error.diagnostic_reason(), "room purge remains pending");

@@ -444,6 +444,373 @@ async fn room_purge_commits_batches_and_retries_durable_intent() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres"]
+async fn requeued_room_purge_advances_pending_watermark() {
+    let store = bounded_store(DatabaseTimeouts::default()).await;
+    let pool = raw_pool().await;
+    let account = test_account(&store, "leave-rejoin-leave").await;
+    let room = "!repeated-leave:localhost";
+    let (user,): (String,) =
+        sqlx_core::query_as::query_as("SELECT user_id FROM accounts WHERE account_id = $1")
+            .bind(account)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let mut removed = Vec::new();
+    let mut previous = 0;
+    for stint in 1..=2 {
+        for (offset, membership) in [(0, "join"), (1, "leave")] {
+            store
+                .upsert_room_state_for_local_user(
+                    &axon_store::RoomStateUpsert {
+                        account_id: account,
+                        room_id: room,
+                        event_type: "m.room.member",
+                        state_key: &user,
+                        event_id: &format!("$member-{stint}-{offset}"),
+                        sender: &user,
+                        origin_ts: stint * 10 + offset,
+                        content: Some(serde_json::json!({"membership": membership})),
+                    },
+                    Some(&user),
+                )
+                .await
+                .unwrap();
+            if membership == "join" {
+                removed.push(insert_message(&store, account, room, stint, "this stint").await);
+            }
+        }
+        let through = store.queue_room_purge(account, room).await.unwrap();
+        assert!(
+            through > previous,
+            "a new leave must capture the later stint"
+        );
+        previous = through;
+    }
+    tokio::time::timeout(Duration::from_millis(100), store.room_purge_notified())
+        .await
+        .expect("queueing wakes the worker without waiting for its ticker");
+    store.retry_room_purges().await.unwrap();
+    for event in removed {
+        assert!(store.get_event(account, &event).await.unwrap().is_none());
+        let (queued,): (bool,) = sqlx_core::query_as::query_as(
+            "SELECT EXISTS (SELECT 1 FROM search_outbox WHERE account_id = $1 \
+             AND event_id = $2)",
+        )
+        .bind(account)
+        .bind(&event)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(queued, "each stint must have a durable search removal");
+    }
+    let (pending,): (i64,) = sqlx_core::query_as::query_as(
+        "SELECT count(*) FROM room_purge_intents WHERE account_id = $1",
+    )
+    .bind(account)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0);
+    cleanup_account(&pool, account).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn purge_completion_retains_an_intent_advanced_during_cleanup() {
+    let store = bounded_store(DatabaseTimeouts::default()).await;
+    let pool = raw_pool().await;
+    let account = test_account(&store, "advance-during-purge").await;
+    let room = "!advance:localhost";
+    insert_message(&store, account, room, 1, "first stint").await;
+    store.queue_room_purge(account, room).await.unwrap();
+    let fresh = insert_message(&store, account, room, 2, "second stint").await;
+    let (fresh_id,): (i64,) = sqlx_core::query_as::query_as(
+        "SELECT id FROM events WHERE account_id = $1 AND event_id = $2",
+    )
+    .bind(account)
+    .bind(&fresh)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // Deterministically advance the intent after cleanup captured its watermark,
+    // just as a second leave could do before the first cleanup finishes.
+    let function = format!("advance_intent_{}", account.simple());
+    sqlx_core::query::query(&format!(
+        "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+         UPDATE room_purge_intents SET through_event_id = {fresh_id} \
+         WHERE account_id = '{account}'::uuid; RETURN NULL; END $$"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx_core::query::query(&format!(
+        "CREATE TRIGGER {function} AFTER DELETE ON events FOR EACH STATEMENT EXECUTE FUNCTION {function}()"))
+        .execute(&pool).await.unwrap();
+    store.purge_room(account, room).await.unwrap();
+    let (pending,): (i64,) = sqlx_core::query_as::query_as(
+        "SELECT through_event_id FROM room_purge_intents WHERE account_id = $1 AND room_id = $2",
+    )
+    .bind(account)
+    .bind(room)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pending, fresh_id,
+        "old completion must not erase the new obligation"
+    );
+    assert!(store.get_event(account, &fresh).await.unwrap().is_some());
+    sqlx_core::query::query(&format!("DROP TRIGGER {function} ON events"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx_core::query::query(&format!("DROP FUNCTION {function}()"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    store.retry_room_purges().await.unwrap();
+    assert!(store.get_event(account, &fresh).await.unwrap().is_none());
+    cleanup_account(&pool, account).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn leave_state_and_purge_intent_commit_together() {
+    let store = bounded_store(DatabaseTimeouts::default()).await;
+    let pool = raw_pool().await;
+    let account = test_account(&store, "atomic-leave").await;
+    let room = "!atomic-leave:localhost";
+    let (user,): (String,) =
+        sqlx_core::query_as::query_as("SELECT user_id FROM accounts WHERE account_id = $1")
+            .bind(account)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let join = axon_store::RoomStateUpsert {
+        account_id: account,
+        room_id: room,
+        event_type: "m.room.member",
+        state_key: &user,
+        event_id: "$join",
+        sender: &user,
+        origin_ts: 10,
+        content: Some(serde_json::json!({"membership": "join"})),
+    };
+    store
+        .upsert_room_state_with_purge(&join, Some(&user), true)
+        .await
+        .unwrap();
+    let old = insert_message(&store, account, room, 10, "before leave").await;
+    let leave = axon_store::RoomStateUpsert {
+        event_id: "$leave",
+        origin_ts: 20,
+        content: Some(serde_json::json!({"membership": "leave"})),
+        account_id: account,
+        room_id: room,
+        event_type: "m.room.member",
+        state_key: &user,
+        sender: &user,
+    };
+    let function = format!("fail_enqueue_{}", account.simple());
+    sqlx_core::query::query(&format!(
+        "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+         IF NEW.account_id = '{account}'::uuid THEN RAISE EXCEPTION 'enqueue fixture'; END IF; RETURN NEW; END $$"))
+        .execute(&pool).await.unwrap();
+    sqlx_core::query::query(&format!(
+        "CREATE TRIGGER {function} BEFORE INSERT ON room_purge_intents FOR EACH ROW EXECUTE FUNCTION {function}()"))
+        .execute(&pool).await.unwrap();
+    assert!(store
+        .upsert_room_state_with_redaction_and_purge(
+            &leave,
+            Some(&user),
+            axon_store::RoomStateRedaction::Redacted {
+                event_id: Some("$redaction")
+            },
+            true,
+        )
+        .await
+        .is_err());
+    let persisted = store
+        .room_state(account, room, "m.room.member", &user)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted.content.unwrap()["membership"],
+        "join",
+        "enqueue failure rolls back membership"
+    );
+    assert_eq!(
+        persisted.redacted, None,
+        "enqueue failure rolls back evidence"
+    );
+    sqlx_core::query::query(&format!("DROP TRIGGER {function} ON room_purge_intents"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx_core::query::query(&format!("DROP FUNCTION {function}()"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    store
+        .upsert_room_state_with_redaction_and_purge(
+            &leave,
+            Some(&user),
+            axon_store::RoomStateRedaction::Redacted {
+                event_id: Some("$redaction"),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    let persisted = store
+        .room_state(account, room, "m.room.member", &user)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.redacted, Some(true));
+    assert_eq!(persisted.redaction_event_id.as_deref(), Some("$redaction"));
+    let (through,): (i64,) = sqlx_core::query_as::query_as(
+        "SELECT through_event_id FROM room_purge_intents WHERE account_id = $1 AND room_id = $2",
+    )
+    .bind(account)
+    .bind(room)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let fresh = insert_message(&store, account, room, 30, "after rejoin").await;
+    let rejoin = axon_store::RoomStateUpsert {
+        event_id: "$rejoin",
+        origin_ts: 30,
+        ..join
+    };
+    store
+        .upsert_room_state_with_purge(&rejoin, Some(&user), true)
+        .await
+        .unwrap();
+    // An out-of-order replay must not capture the new stint's events.
+    store
+        .upsert_room_state_with_purge(&leave, Some(&user), true)
+        .await
+        .unwrap();
+    let (still_through,): (i64,) = sqlx_core::query_as::query_as(
+        "SELECT through_event_id FROM room_purge_intents WHERE account_id = $1 AND room_id = $2",
+    )
+    .bind(account)
+    .bind(room)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(still_through, through);
+    store.retry_room_purges().await.unwrap();
+    assert!(store.get_event(account, &old).await.unwrap().is_none());
+    assert!(store.get_event(account, &fresh).await.unwrap().is_some());
+    cleanup_account(&pool, account).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn failed_purge_page_does_not_starve_later_rooms() {
+    let store = bounded_store(DatabaseTimeouts::default()).await;
+    let pool = raw_pool().await;
+    let account = test_account(&store, "purge-fairness").await;
+    for n in 0..101 {
+        store
+            .queue_room_purge(account, &format!("!fair-{n:03}:localhost"))
+            .await
+            .unwrap();
+    }
+    let function = format!("fail_intent_{}", account.simple());
+    sqlx_core::query::query(&format!(
+        "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+         IF OLD.account_id = '{account}'::uuid AND OLD.room_id <> '!fair-100:localhost' \
+         THEN RAISE EXCEPTION 'persistent purge failure fixture'; END IF; RETURN OLD; END $$"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx_core::query::query(&format!(
+        "CREATE TRIGGER {function} BEFORE DELETE ON room_purge_intents FOR EACH ROW EXECUTE FUNCTION {function}()"))
+        .execute(&pool).await.unwrap();
+    store.retry_room_purges().await.unwrap();
+    let (remaining,): (i64,) = sqlx_core::query_as::query_as(
+        "SELECT count(*) FROM room_purge_intents WHERE account_id = $1",
+    )
+    .bind(account)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining, 101, "the first page keeps its failed intents");
+    store.clone().retry_room_purges().await.unwrap();
+    let (last_pending,): (bool,) = sqlx_core::query_as::query_as(
+        "SELECT EXISTS (SELECT 1 FROM room_purge_intents WHERE account_id = $1 \
+         AND room_id = '!fair-100:localhost')",
+    )
+    .bind(account)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !last_pending,
+        "the next page reaches the later room despite failures"
+    );
+    sqlx_core::query::query(&format!("DROP TRIGGER {function} ON room_purge_intents"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx_core::query::query(&format!("DROP FUNCTION {function}()"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    cleanup_account(&pool, account).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn concurrent_event_writers_release_account_counter_locks() {
+    let store = bounded_store(DatabaseTimeouts {
+        lock_secs: 1,
+        ..Default::default()
+    })
+    .await;
+    let account = test_account(&store, "counter-writers").await;
+    let mut writers = tokio::task::JoinSet::new();
+    for writer in 0..8 {
+        let store = store.clone();
+        writers.spawn(async move {
+            for event in 0..20 {
+                insert_message(
+                    &store,
+                    account,
+                    "!counter:localhost",
+                    writer * 20 + event,
+                    "concurrent",
+                )
+                .await;
+                // A slow producer must not retain a transaction/account lock
+                // between messages; each upsert is one committed SQL statement.
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        });
+    }
+    while let Some(result) = writers.join_next().await {
+        result.unwrap();
+    }
+    let pool = raw_pool().await;
+    let (maintained, exact): (i64, i64) = sqlx_core::query_as::query_as(
+        "SELECT events_total, (SELECT count(*) FROM events WHERE account_id = $1) \
+         FROM accounts WHERE account_id = $1",
+    )
+    .bind(account)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((maintained, exact), (160, 160));
+    cleanup_account(&pool, account).await;
+}
+
+#[tokio::test]
 #[ignore = "requires disposable Postgres with CREATEROLE"]
 async fn startup_rejects_insufficient_connection_capacity_and_closes_pools() {
     use sqlx_core::connection::ConnectOptions;
@@ -475,6 +842,29 @@ async fn startup_rejects_insufficient_connection_capacity_and_closes_pools() {
         .password("fixture")
         .to_url_lossy()
         .to_string();
+    let cli_config = DatabaseConfig {
+        url: url.clone(),
+        max_connections: 5,
+        timeouts: DatabaseTimeouts {
+            acquire_secs: 1,
+            ..Default::default()
+        },
+    };
+    let cli = Store::connect_for_cli(&cli_config)
+        .await
+        .expect("CLI needs one slot");
+    let (cli_slots,): (i64,) =
+        sqlx_core::query_as::query_as("SELECT count(*) FROM pg_stat_activity WHERE usename = $1")
+            .bind(&role)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        cli_slots, 1,
+        "CLI must not reserve the server's full budget"
+    );
+    cli.pool().close().await;
+    drop(cli);
     let result = Store::connect_with_config(&DatabaseConfig {
         url,
         max_connections: 1,

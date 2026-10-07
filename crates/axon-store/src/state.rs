@@ -195,12 +195,29 @@ impl Store {
         s: &RoomStateUpsert<'_>,
         local_user_id: Option<&str>,
     ) -> Result<(), StoreError> {
-        self.upsert_room_state_with_redaction(s, local_user_id, RoomStateRedaction::Unknown)
+        self.upsert_room_state_with_purge(s, local_user_id, false)
             .await
     }
 
+    /// Persist local leave/ban state and its purge intent atomically when enabled.
+    /// An enqueue failure rolls back the membership write; stale state cannot
+    /// advance an intent. Notification happens only after the transaction commits.
+    pub async fn upsert_room_state_with_purge(
+        &self,
+        s: &RoomStateUpsert<'_>,
+        local_user_id: Option<&str>,
+        purge_on_leave: bool,
+    ) -> Result<(), StoreError> {
+        self.upsert_room_state_with_redaction_and_purge(
+            s,
+            local_user_id,
+            RoomStateRedaction::Unknown,
+            purge_on_leave,
+        )
+        .await
+    }
+
     /// Persist SDK-observed redaction evidence with the state tuple atomically.
-    /// `Unknown` means the caller has no positive evidence of redaction.
     /// Evidence and retained content are monotonic for the same event ID, so an
     /// original replay cannot resurrect content after a redacted delivery.
     /// A different replacement event starts with its own evidence.
@@ -210,8 +227,30 @@ impl Store {
         local_user_id: Option<&str>,
         evidence: RoomStateRedaction<'_>,
     ) -> Result<(), StoreError> {
+        self.upsert_room_state_with_redaction_and_purge(s, local_user_id, evidence, false)
+            .await
+    }
+
+    /// Persist redaction evidence and atomically enqueue cleanup for local leaves.
+    pub async fn upsert_room_state_with_redaction_and_purge(
+        &self,
+        s: &RoomStateUpsert<'_>,
+        local_user_id: Option<&str>,
+        evidence: RoomStateRedaction<'_>,
+        purge_on_leave: bool,
+    ) -> Result<(), StoreError> {
         let (redacted, redaction_event_id) = evidence.columns();
-        sqlx_core::query::query(
+        let purge = purge_on_leave
+            && s.event_type == "m.room.member"
+            && local_user_id == Some(s.state_key)
+            && matches!(
+                s.content
+                    .as_ref()
+                    .and_then(|c| c.get("membership"))
+                    .and_then(serde_json::Value::as_str),
+                Some("leave" | "ban")
+            );
+        let query = sqlx_core::query::query(
             "INSERT INTO room_state \
              (account_id, room_id, event_type, state_key, event_id, sender, origin_ts, content, redacted, redaction_event_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
@@ -240,9 +279,21 @@ impl Store {
         .bind(s.origin_ts)
         .bind(&s.content)
         .bind(redacted)
-        .bind(redaction_event_id)
-        .execute(&self.pool)
-        .await?;
+        .bind(redaction_event_id);
+        if purge {
+            let mut tx = self.pool.begin().await?;
+            let changed = query.execute(&mut *tx).await?.rows_affected() != 0;
+            if changed {
+                Self::room_purge_watermark(s.account_id, s.room_id, true, &mut *tx).await?;
+            }
+            tx.commit().await?;
+            if changed {
+                self.purge_wakeup.notify_one();
+                tracing::info!(account_id = %s.account_id, room_id = %s.room_id, "queued room purge with local leave state");
+            }
+        } else {
+            query.execute(&self.pool).await?;
+        }
         if summary_display_state(s.event_type, s.state_key)
             || (s.event_type == "m.room.member" && local_user_id == Some(s.state_key))
         {
