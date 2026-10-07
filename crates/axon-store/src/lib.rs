@@ -59,7 +59,9 @@ pub use search::{
     SEARCH_OUTBOX_ROOM_PURGE_PREFIX,
 };
 pub use spaces::{SpaceChildRow, SpaceParentRow};
-pub use state::{AccountDataRow, AccountDataUpsert, RoomStateRow, RoomStateUpsert};
+pub use state::{
+    AccountDataRow, AccountDataUpsert, RoomMetadataStateRow, RoomStateRow, RoomStateUpsert,
+};
 pub use tokens::{IssuedOAuthTokenPair, IssuedToken, Token, VerifiedToken};
 
 use sqlx_postgres::{PgPool, PgPoolOptions};

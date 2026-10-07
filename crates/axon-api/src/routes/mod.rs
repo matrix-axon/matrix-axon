@@ -48,6 +48,7 @@ pub mod oauth_native;
 pub mod power_levels;
 pub mod preferences;
 pub mod room_entry;
+pub mod room_metadata;
 pub mod room_settings;
 pub mod rooms;
 pub mod search;

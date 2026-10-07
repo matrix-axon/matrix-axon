@@ -51,7 +51,8 @@ pub struct RoomStateUpsert<'a> {
     pub sender: &'a str,
     /// `origin_server_ts` in milliseconds — the freshness guard.
     pub origin_ts: i64,
-    /// The state event `content`. `None` for a redacted state event.
+    /// The state event `content`, when retained. Redacted events may still
+    /// contain an empty object or retained fields; `None` is not a redaction flag.
     pub content: Option<Value>,
 }
 
@@ -70,7 +71,7 @@ pub struct RoomStateRow {
     pub sender: String,
     /// `origin_server_ts` in milliseconds.
     pub origin_ts: i64,
-    /// The state `content`, or `None` if redacted.
+    /// The retained state `content`; absence does not establish redaction.
     pub content: Option<Value>,
 }
 
@@ -84,6 +85,24 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomStateRow {
             sender: row.try_get("sender")?,
             origin_ts: row.try_get("origin_ts")?,
             content: row.try_get("content")?,
+        })
+    }
+}
+
+/// A detail-read state row whose content was bounded in PostgreSQL before
+/// transfer/JSON decoding. Oversized content is withheld without losing the
+/// event's provenance; it must not be mistaken for absent or redacted state.
+#[derive(Debug, Clone)]
+pub struct RoomMetadataStateRow {
+    pub state: RoomStateRow,
+    pub oversized: bool,
+}
+
+impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomMetadataStateRow {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
+        Ok(Self {
+            state: RoomStateRow::from_row(row)?,
+            oversized: row.try_get("oversized")?,
         })
     }
 }
@@ -203,6 +222,41 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row)
+    }
+
+    /// Read a caller-defined, trusted set of singleton state types.
+    /// The primary key bounds results to at most one row per requested type.
+    /// Each PostgreSQL-rendered content is capped at 128 KiB before transfer
+    /// and JSON decoding, including unknown extensions. This transfer budget
+    /// allows spacing overhead above Matrix's compact event-size limit; it
+    /// does not validate upstream event sizes. MATERIALIZED computes the
+    /// rendering size once per tuple, even for oversized content. Rendering
+    /// itself is not bounded by this transfer cap: PostgreSQL still detoasts
+    /// and renders the full stored value before measuring it.
+    pub async fn room_metadata_states(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_types: &[&str],
+    ) -> Result<Vec<RoomMetadataStateRow>, StoreError> {
+        let rows = sqlx_core::query_as::query_as::<Postgres, RoomMetadataStateRow>(
+            "WITH sized AS MATERIALIZED (\
+                 SELECT room_id, event_type, state_key, event_id, sender, origin_ts, content, \
+                        COALESCE(octet_length(content::text) > 131072, false) AS oversized \
+                 FROM room_state \
+                 WHERE account_id = $1 AND room_id = $2 AND state_key = '' \
+                   AND event_type = ANY($3)\
+             ) \
+             SELECT room_id, event_type, state_key, event_id, sender, origin_ts, \
+                    CASE WHEN oversized THEN NULL ELSE content END AS content, oversized \
+             FROM sized ORDER BY event_type",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .bind(event_types)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     /// Read every resolved state tuple of one type in a room, ordered by
