@@ -1188,7 +1188,7 @@ async fn read_api_end_to_end() {
     assert_eq!(ev["data"]["body"], "first");
     assert_eq!(ev["data"]["state_key"], Value::Null);
     assert_eq!(ev["data"]["prev_content"], Value::Null);
-    assert_eq!(ev["data"]["redacted"], Value::Null);
+    assert_eq!(ev["data"]["redacted"], false);
 
     let (status, member) = get(
         &app,
