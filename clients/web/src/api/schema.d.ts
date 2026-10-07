@@ -2910,8 +2910,8 @@ export interface components {
             /** Format: int64 */
             origin_ts?: number | null;
             /**
-             * @description `true`: known redacted; `false`: observed original with no known redaction;
-             *     `null`: no reliable evidence (including legacy cached state).
+             * @description `true`: the SDK supplied redacted state; `null`: no reliable evidence.
+             *     Absence of a marker does not establish original content; false is not emitted.
              *     Independent of availability: redacted state can retain valid fields.
              */
             redacted?: boolean | null;
@@ -2947,8 +2947,8 @@ export interface components {
             /** Format: int64 */
             origin_ts?: number | null;
             /**
-             * @description `true`: known redacted; `false`: observed original with no known redaction;
-             *     `null`: no reliable evidence (including legacy cached state).
+             * @description `true`: the SDK supplied redacted state; `null`: no reliable evidence.
+             *     Absence of a marker does not establish original content; false is not emitted.
              *     Independent of availability: redacted state can retain valid fields.
              */
             redacted?: boolean | null;
@@ -2981,8 +2981,8 @@ export interface components {
             /** Format: int64 */
             origin_ts?: number | null;
             /**
-             * @description `true`: known redacted; `false`: observed original with no known redaction;
-             *     `null`: no reliable evidence (including legacy cached state).
+             * @description `true`: the SDK supplied redacted state; `null`: no reliable evidence.
+             *     Absence of a marker does not establish original content; false is not emitted.
              *     Independent of availability: redacted state can retain valid fields.
              */
             redacted?: boolean | null;
@@ -3011,8 +3011,8 @@ export interface components {
             /** Format: int64 */
             origin_ts?: number | null;
             /**
-             * @description `true`: known redacted; `false`: observed original with no known redaction;
-             *     `null`: no reliable evidence (including legacy cached state).
+             * @description `true`: the SDK supplied redacted state; `null`: no reliable evidence.
+             *     Absence of a marker does not establish original content; false is not emitted.
              *     Independent of availability: redacted state can retain valid fields.
              */
             redacted?: boolean | null;
@@ -3041,8 +3041,8 @@ export interface components {
             /** Format: int64 */
             origin_ts?: number | null;
             /**
-             * @description `true`: known redacted; `false`: observed original with no known redaction;
-             *     `null`: no reliable evidence (including legacy cached state).
+             * @description `true`: the SDK supplied redacted state; `null`: no reliable evidence.
+             *     Absence of a marker does not establish original content; false is not emitted.
              *     Independent of availability: redacted state can retain valid fields.
              */
             redacted?: boolean | null;
@@ -3073,8 +3073,8 @@ export interface components {
             /** Format: int64 */
             origin_ts?: number | null;
             /**
-             * @description `true`: known redacted; `false`: observed original with no known redaction;
-             *     `null`: no reliable evidence (including legacy cached state).
+             * @description `true`: the SDK supplied redacted state; `null`: no reliable evidence.
+             *     Absence of a marker does not establish original content; false is not emitted.
              *     Independent of availability: redacted state can retain valid fields.
              */
             redacted?: boolean | null;
@@ -3123,8 +3123,8 @@ export interface components {
             /** Format: int64 */
             origin_ts?: number | null;
             /**
-             * @description `true`: known redacted; `false`: observed original with no known redaction;
-             *     `null`: no reliable evidence (including legacy cached state).
+             * @description `true`: the SDK supplied redacted state; `null`: no reliable evidence.
+             *     Absence of a marker does not establish original content; false is not emitted.
              *     Independent of availability: redacted state can retain valid fields.
              */
             redacted?: boolean | null;
@@ -3155,8 +3155,8 @@ export interface components {
             /** Format: int64 */
             origin_ts?: number | null;
             /**
-             * @description `true`: known redacted; `false`: observed original with no known redaction;
-             *     `null`: no reliable evidence (including legacy cached state).
+             * @description `true`: the SDK supplied redacted state; `null`: no reliable evidence.
+             *     Absence of a marker does not establish original content; false is not emitted.
              *     Independent of availability: redacted state can retain valid fields.
              */
             redacted?: boolean | null;

@@ -58,3 +58,5 @@ pub use redecrypt::RedecryptSummary;
 pub use sync_health::{AccountSyncStatus, SyncHealth, SyncState};
 pub use trust::{CurrentTrust, SenderTrustEngine, TrustBundle, TrustError, TrustSnapshot};
 pub use verification::{FlowStage, FlowState, VerificationEngine, VerifyError};
+
+mod state_redaction;

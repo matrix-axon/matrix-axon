@@ -28,7 +28,8 @@ use axon_api::{
     RedecryptUtdsStats,
 };
 use axon_store::{
-    AccountDataUpsert, AccountState, NewEvent, RoomInviteSnapshot, RoomStateUpsert, Store,
+    AccountDataUpsert, AccountState, NewEvent, RoomInviteSnapshot, RoomStateRedaction,
+    RoomStateUpsert, Store,
 };
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -1187,7 +1188,7 @@ async fn read_api_end_to_end() {
     assert_eq!(ev["data"]["body"], "first");
     assert_eq!(ev["data"]["state_key"], Value::Null);
     assert_eq!(ev["data"]["prev_content"], Value::Null);
-    assert_eq!(ev["data"]["redacted"], false);
+    assert_eq!(ev["data"]["redacted"], Value::Null);
 
     let (status, member) = get(
         &app,
@@ -4426,23 +4427,16 @@ async fn room_metadata_replacement_and_unknown_state() {
     }
 }
 
-/// Later redactions reconcile through indexed event-log reads in either arrival
-/// order, without hiding replacement events or crossing account/room boundaries.
+/// Raw timeline redactions alone are not evidence. The SDK-pruned form updates
+/// the shared state projection, including legacy retained content, independently
+/// of which of the log or state writes happened first.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn room_metadata_later_redactions_and_replacements() {
+async fn room_metadata_redaction_reconciliation_and_replacements() {
     let store = store().await;
     let account = store
         .upsert_account(
             &format!("@metadata-redaction-{}:localhost", Uuid::new_v4()),
-            "https://hs.example.org",
-        )
-        .await
-        .unwrap()
-        .account_id;
-    let other = store
-        .upsert_account(
-            &format!("@metadata-other-{}:localhost", Uuid::new_v4()),
             "https://hs.example.org",
         )
         .await
@@ -4454,76 +4448,83 @@ async fn room_metadata_later_redactions_and_replacements() {
         let mut state = RoomStateUpsert {
             account_id: account,
             room_id: &room,
-            event_type: "m.room.canonical_alias",
+            event_type: "m.room.power_levels",
             state_key: "",
             event_id: &event,
             sender: "@alice:localhost",
             origin_ts: 1,
-            content: Some(json!({"alias": "#original:localhost"})),
+            content: Some(json!({"ban": 50})),
         };
         if redaction_first {
             insert_redaction(&store, account, &room, 2, &event).await;
         }
-        store
-            .upsert_room_state_with_redaction(&state, None, Some(false), None)
-            .await
-            .unwrap();
-        let app = read_app(store.clone());
-        let path = format!("/v1/accounts/{account}/rooms/{room}/metadata");
+        // Legacy state may already contain protected redacted fields. Never
+        // withhold it solely because its evidence column is NULL.
+        store.upsert_room_state(&state).await.unwrap();
         if !redaction_first {
-            // Matching event IDs on another account or in another room are not evidence.
-            insert_redaction(&store, other, &room, 2, &event).await;
-            insert_redaction(&store, account, "!other:localhost", 2, &event).await;
-            let (_, body) = get(&app, &path).await;
-            assert_eq!(body["data"]["aliases"]["redacted"], false);
-            assert_eq!(body["data"]["aliases"]["status"], "available");
             insert_redaction(&store, account, &room, 2, &event).await;
         }
+        let app = read_app(store.clone());
+        let path = format!("/v1/accounts/{account}/rooms/{room}/metadata");
         let (_, body) = get(&app, &path).await;
-        let aliases = &body["data"]["aliases"];
-        assert_eq!(aliases["redacted"], true);
-        assert!(aliases["redaction_event_id"]
-            .as_str()
+        assert_eq!(body["data"]["power_levels"]["redacted"], Value::Null);
+        assert_eq!(body["data"]["power_levels"]["content"]["ban"], 50);
+        assert_eq!(body["data"]["power_levels"]["status"], "available");
+        assert!(store
+            .reconcile_redacted_room_state(&state, Some("$confirmed:localhost"))
+            .await
+            .unwrap());
+        assert!(!store
+            .reconcile_redacted_room_state(&state, Some("$confirmed:localhost"))
+            .await
+            .unwrap());
+        let (_, body) = get(&app, &path).await;
+        assert_eq!(body["data"]["power_levels"]["redacted"], true);
+        assert_eq!(
+            body["data"]["power_levels"]["redaction_event_id"],
+            "$confirmed:localhost"
+        );
+        assert_eq!(body["data"]["power_levels"]["content"]["ban"], 50);
+        let row = store
+            .room_state(account, &room, "m.room.power_levels", "")
+            .await
             .unwrap()
-            .starts_with("$red-"));
-        assert_eq!(aliases["status"], "unavailable");
-        assert_eq!(aliases["content"], Value::Null);
-        assert_eq!(aliases["event_id"], event);
-        assert_eq!(body["data"]["encryption"]["redacted"], Value::Null);
-        // Replaying the original cannot bypass a durable later redaction.
-        store
-            .upsert_room_state_with_redaction(&state, None, Some(false), None)
+            .unwrap();
+        let rows = store
+            .room_state_of_type(account, &room, "m.room.power_levels")
             .await
             .unwrap();
+        assert_eq!(row.redacted, Some(true));
+        assert_eq!(rows[0].content, row.content);
+        assert_eq!(rows[0].redacted, row.redacted);
+        // Deterministic redacted-then-marker-free replay cannot restore fields.
+        state.content = Some(json!({"ban": 50, "invite": 99}));
+        store.upsert_room_state(&state).await.unwrap();
         let (_, body) = get(&app, &path).await;
-        assert_eq!(body["data"]["aliases"]["content"], Value::Null);
-        // Sync later supplies the room-version-pruned form: retained fields
-        // can be displayed again without losing the known redaction.
-        state.content = Some(json!({}));
-        store
-            .upsert_room_state_with_redaction(&state, None, Some(true), None)
-            .await
-            .unwrap();
-        let (_, body) = get(&app, &path).await;
-        assert_eq!(body["data"]["aliases"]["redacted"], true);
-        assert_eq!(body["data"]["aliases"]["status"], "available");
-        assert_eq!(body["data"]["aliases"]["content"]["alias"], Value::Null);
+        assert_eq!(
+            body["data"]["power_levels"]["content"]["invite"],
+            Value::Null
+        );
         let replacement = format!("$replacement-{}:localhost", Uuid::new_v4());
         state.event_id = &replacement;
         state.origin_ts = 3;
-        state.content = Some(json!({"alt_aliases": []}));
-        store
-            .upsert_room_state_with_redaction(&state, None, Some(false), None)
-            .await
-            .unwrap();
+        state.content = Some(json!({"ban": 60}));
+        store.upsert_room_state(&state).await.unwrap();
         let (_, body) = get(&app, &path).await;
-        assert_eq!(body["data"]["aliases"]["redacted"], false);
-        assert_eq!(body["data"]["aliases"]["redaction_event_id"], Value::Null);
-        assert_eq!(body["data"]["aliases"]["status"], "available");
-        assert_eq!(body["data"]["aliases"]["content"]["alt_aliases"], json!([]));
+        assert_eq!(body["data"]["power_levels"]["redacted"], Value::Null);
+        assert_eq!(
+            body["data"]["power_levels"]["redaction_event_id"],
+            Value::Null
+        );
+        assert_eq!(body["data"]["power_levels"]["content"]["ban"], 60);
+        // A repair read made before replacement cannot mark or modify its successor.
+        state.event_id = &event;
+        assert!(!store
+            .reconcile_redacted_room_state(&state, Some("$confirmed:localhost"))
+            .await
+            .unwrap());
     }
     store.delete_account_row(account).await.unwrap();
-    store.delete_account_row(other).await.unwrap();
 }
 
 /// SDK-observed redaction is separate from availability and survives replays,
@@ -4552,14 +4553,20 @@ async fn room_metadata_observed_redaction_persistence() {
         content: Some(json!({"ban": 50})),
     };
     first_store
-        .upsert_room_state_with_redaction(&state, None, Some(true), Some("$redaction:localhost"))
+        .upsert_room_state_with_redaction(
+            &state,
+            None,
+            RoomStateRedaction::Redacted {
+                event_id: Some("$redaction:localhost"),
+            },
+        )
         .await
         .unwrap();
     // An original or evidence-free replay of the same event cannot restore fields.
     state.content = Some(json!({"ban": 100, "invite": 99}));
-    for evidence in [Some(false), None] {
+    for _ in 0..2 {
         first_store
-            .upsert_room_state_with_redaction(&state, None, evidence, None)
+            .upsert_room_state_with_redaction(&state, None, RoomStateRedaction::Unknown)
             .await
             .unwrap();
     }
@@ -4578,7 +4585,11 @@ async fn room_metadata_observed_redaction_persistence() {
     state.event_type = "m.room.canonical_alias";
     state.content = Some(json!({}));
     reopened
-        .upsert_room_state_with_redaction(&state, None, Some(true), None)
+        .upsert_room_state_with_redaction(
+            &state,
+            None,
+            RoomStateRedaction::Redacted { event_id: None },
+        )
         .await
         .unwrap();
     state.event_type = "m.room.encryption";
@@ -4594,18 +4605,24 @@ async fn room_metadata_observed_redaction_persistence() {
     state.origin_ts = 11;
     state.content = Some(json!({"ban": 60}));
     reopened
-        .upsert_room_state_with_redaction(&state, None, Some(false), None)
+        .upsert_room_state_with_redaction(&state, None, RoomStateRedaction::Unknown)
         .await
         .unwrap();
     state.event_id = "$observed:localhost";
     state.origin_ts = 10;
     state.content = Some(json!({"ban": 50}));
     reopened
-        .upsert_room_state_with_redaction(&state, None, Some(true), Some("$redaction:localhost"))
+        .upsert_room_state_with_redaction(
+            &state,
+            None,
+            RoomStateRedaction::Redacted {
+                event_id: Some("$redaction:localhost"),
+            },
+        )
         .await
         .unwrap();
     let (_, body) = get(&app, &path).await;
-    assert_eq!(body["data"]["power_levels"]["redacted"], false);
+    assert_eq!(body["data"]["power_levels"]["redacted"], Value::Null);
     assert_eq!(body["data"]["power_levels"]["content"]["ban"], 60);
     reopened.delete_account_row(account).await.unwrap();
 }

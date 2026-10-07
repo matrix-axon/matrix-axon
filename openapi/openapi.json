@@ -10771,7 +10771,7 @@
               "boolean",
               "null"
             ],
-            "description": "`true`: known redacted; `false`: observed original with no known redaction;\n`null`: no reliable evidence (including legacy cached state).\nIndependent of availability: redacted state can retain valid fields."
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
           },
           "redaction_event_id": {
             "type": [
@@ -10882,7 +10882,7 @@
               "boolean",
               "null"
             ],
-            "description": "`true`: known redacted; `false`: observed original with no known redaction;\n`null`: no reliable evidence (including legacy cached state).\nIndependent of availability: redacted state can retain valid fields."
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
           },
           "redaction_event_id": {
             "type": [
@@ -10969,7 +10969,7 @@
               "boolean",
               "null"
             ],
-            "description": "`true`: known redacted; `false`: observed original with no known redaction;\n`null`: no reliable evidence (including legacy cached state).\nIndependent of availability: redacted state can retain valid fields."
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
           },
           "redaction_event_id": {
             "type": [
@@ -11040,7 +11040,7 @@
               "boolean",
               "null"
             ],
-            "description": "`true`: known redacted; `false`: observed original with no known redaction;\n`null`: no reliable evidence (including legacy cached state).\nIndependent of availability: redacted state can retain valid fields."
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
           },
           "redaction_event_id": {
             "type": [
@@ -11111,7 +11111,7 @@
               "boolean",
               "null"
             ],
-            "description": "`true`: known redacted; `false`: observed original with no known redaction;\n`null`: no reliable evidence (including legacy cached state).\nIndependent of availability: redacted state can retain valid fields."
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
           },
           "redaction_event_id": {
             "type": [
@@ -11192,7 +11192,7 @@
               "boolean",
               "null"
             ],
-            "description": "`true`: known redacted; `false`: observed original with no known redaction;\n`null`: no reliable evidence (including legacy cached state).\nIndependent of availability: redacted state can retain valid fields."
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
           },
           "redaction_event_id": {
             "type": [
@@ -11343,7 +11343,7 @@
               "boolean",
               "null"
             ],
-            "description": "`true`: known redacted; `false`: observed original with no known redaction;\n`null`: no reliable evidence (including legacy cached state).\nIndependent of availability: redacted state can retain valid fields."
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
           },
           "redaction_event_id": {
             "type": [
@@ -11432,7 +11432,7 @@
               "boolean",
               "null"
             ],
-            "description": "`true`: known redacted; `false`: observed original with no known redaction;\n`null`: no reliable evidence (including legacy cached state).\nIndependent of availability: redacted state can retain valid fields."
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
           },
           "redaction_event_id": {
             "type": [

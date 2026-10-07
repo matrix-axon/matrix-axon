@@ -22,7 +22,8 @@ pub enum RoomMetadataStatus {
     Available,
     /// Valid fields remain available; invalid fields or entries are identified.
     Partial,
-    /// A row exists but its content was not retained.
+    /// A row exists but its content was not retained (SQL NULL or JSON null).
+    /// Consult `redacted` independently; availability alone is not evidence.
     /// An empty object is not classified as redacted: stored state alone does
     /// not always carry enough evidence to establish redaction.
     Unavailable,
@@ -43,8 +44,8 @@ pub struct CachedRoomMetadata<T: ToSchema> {
     pub event_id: Option<String>,
     pub sender: Option<String>,
     pub origin_ts: Option<i64>,
-    /// `true`: known redacted; `false`: observed original with no known redaction;
-    /// `null`: no reliable evidence (including legacy cached state).
+    /// `true`: the SDK supplied redacted state; `null`: no reliable evidence.
+    /// Absence of a marker does not establish original content; false is not emitted.
     /// Independent of availability: redacted state can retain valid fields.
     pub redacted: Option<bool>,
     /// Redaction event ID when known. A null ID does not negate `redacted`.
