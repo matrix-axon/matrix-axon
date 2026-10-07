@@ -21,12 +21,12 @@ use crate::state::BootstrapConfig;
 const BOOTSTRAP_TOKEN_LABEL: &str = "bootstrap-web";
 /// Mirrors the setup page's `maxlength="80"` on the label field, which is
 /// HTML-only and does nothing against a raw POST — this is the server-side
-/// backstop.
-const BOOTSTRAP_TOKEN_LABEL_MAX_LEN: usize = 80;
+/// backstop. The same cap the management API puts on a label.
+const BOOTSTRAP_TOKEN_LABEL_MAX_LEN: usize = crate::routes::management::TOKEN_LABEL_MAX_CHARS;
 pub(crate) const BOOTSTRAP_CLIENT_ID: &str = "bootstrap-web";
 const BOOTSTRAP_REDIRECT_URI: &str = "urn:axon:bootstrap";
 const BOOTSTRAP_CODE_CHALLENGE: &str = "bootstrap-web";
-const AUTHORIZATION_REQUEST_TTL: ChronoDuration = ChronoDuration::minutes(10);
+const AUTHORIZATION_REQUEST_TTL: ChronoDuration = crate::oauth::HANDSHAKE_TTL;
 
 pub(crate) const BOOTSTRAP_STATE_PREFIX: &str = "bootstrap:";
 

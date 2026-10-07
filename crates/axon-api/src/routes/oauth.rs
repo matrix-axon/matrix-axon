@@ -37,7 +37,7 @@ use crate::routes::bootstrap::{self, BOOTSTRAP_STATE_PREFIX};
 use crate::state::BootstrapConfig;
 
 /// How long a Path A flow (and its axon-minted code) stays redeemable.
-const AUTHORIZATION_REQUEST_TTL: ChronoDuration = ChronoDuration::minutes(10);
+const AUTHORIZATION_REQUEST_TTL: ChronoDuration = crate::oauth::HANDSHAKE_TTL;
 
 /// Tags a bind handshake's outgoing `state` so [`callback`] can tell it apart
 /// from a Path A `state` explicitly, rather than by relying on the two

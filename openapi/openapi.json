@@ -7105,6 +7105,168 @@
         }
       }
     },
+    "/v1/management/oauth/binds": {
+      "post": {
+        "tags": [
+          "management"
+        ],
+        "summary": "Start binding a new sign-in identity to this instance's owner.",
+        "description": "Returns a `url` to open in a browser. Signing in there with the provider\nbinds that identity; poll the bind by its `id` to learn when. The bind\nlapses after ten minutes.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise).",
+        "operationId": "start_bind",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartBindRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The bind was started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_StartedBindDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`management_disabled`, or `recent_sign_in_required`: sign in again and retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`bind_unavailable`: OAuth is off on this server, or the provider is not enabled for browser sign-in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is over 4 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/management/oauth/binds/{bind_id}": {
+      "get": {
+        "tags": [
+          "management"
+        ],
+        "summary": "Read where an identity bind stands: `pending`, `completed` or `expired`.",
+        "description": "A bind's record is removed some time after it lapses, so a `404` for an id\nthis server issued means the same as `expired`.",
+        "operationId": "bind_status",
+        "parameters": [
+          {
+            "name": "bind_id",
+            "in": "path",
+            "description": "The bind's id, from starting it",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The bind's status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_BindDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The management API is disabled (`management_disabled`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such bind, or it lapsed and was removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/management/oauth/identities": {
       "get": {
         "tags": [
@@ -7218,6 +7380,218 @@
           },
           "404": {
             "description": "No such identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`last_credential`: this is the last way to sign in. Nothing was changed; repeat with `allow_lockout=true` to go ahead",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/management/tokens": {
+      "get": {
+        "tags": [
+          "management"
+        ],
+        "summary": "List this instance's bearer tokens, without their secrets.",
+        "description": "Revoked and expired tokens are included, so an entry the owner does not\nrecognize stays visible after it stops working. The tokens that still work\ncome first, then the rest, newest first within each; at most 500 are\nreturned, which only ever drops the oldest dead ones. `current` marks the\ntoken that made this request.",
+        "operationId": "list_tokens",
+        "responses": {
+          "200": {
+            "description": "The tokens, working ones first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_ManagementTokenDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The management API is disabled (`management_disabled`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "management"
+        ],
+        "summary": "Mint a bearer token that never expires.",
+        "description": "The response is the only time the token's secret is available: Axon keeps\nits hash and cannot show it again. It is sent with `Cache-Control:\nno-store`.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise). The new token records which token\nminted it.",
+        "operationId": "mint_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MintTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new token, with its secret, once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_MintedTokenDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The label is empty, over 80 characters, or contains control characters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`management_disabled`, or `recent_sign_in_required`: sign in again and retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is over 4 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/management/tokens/{token_id}": {
+      "delete": {
+        "tags": [
+          "management"
+        ],
+        "summary": "Revoke a token. It stops working at once and stays in the list.",
+        "description": "Revoking the token that made the request is allowed: it is how a device\nsigns itself out. Revoking a token that is already revoked succeeds and\nchanges nothing.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise).",
+        "operationId": "revoke_token",
+        "parameters": [
+          {
+            "name": "token_id",
+            "in": "path",
+            "description": "The token's id, from the list",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "allow_lockout",
+            "in": "query",
+            "description": "Go ahead even if this is the last way to sign in. Without it such a\nrequest is refused with `409 last_credential` and changes nothing.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The token is revoked"
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`management_disabled`, or `recent_sign_in_required`: sign in again and retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such token",
             "content": {
               "application/json": {
                 "schema": {
@@ -8674,6 +9048,51 @@
           }
         }
       },
+      "ApiResponse_BindDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "An identity bind (`GET /v1/management/oauth/binds/{bind_id}`).",
+            "required": [
+              "id",
+              "provider",
+              "status",
+              "expires_at"
+            ],
+            "properties": {
+              "expires_at": {
+                "type": "string",
+                "description": "When a still-pending bind lapses, RFC 3339. The record itself is\nremoved some time after, and reading it then is a `404`."
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "The bind's id, used to read its status."
+              },
+              "identity_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid",
+                "description": "The identity that was bound, once `status` is `completed`. Null if it\nhas since been unbound."
+              },
+              "provider": {
+                "type": "string",
+                "description": "The provider being bound."
+              },
+              "status": {
+                "$ref": "#/components/schemas/BindStatusDto"
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_DeviceListDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -9131,6 +9550,39 @@
               },
               "user_id": {
                 "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_MintedTokenDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A token that was just minted (`POST /v1/management/tokens`). The only\nresponse that ever carries a token's secret.",
+            "required": [
+              "id",
+              "label",
+              "token"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Stable id, used to revoke the token."
+              },
+              "label": {
+                "type": "string",
+                "description": "The label as stored."
+              },
+              "token": {
+                "type": "string",
+                "description": "The bearer token itself. Shown this once and not recoverable: only its\nhash is kept."
               }
             }
           }
@@ -9672,6 +10124,35 @@
           }
         }
       },
+      "ApiResponse_StartedBindDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/BindDto"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "url"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "description": "The URL to open in a browser to sign in with the provider. It works\nonce, until `expires_at`."
+                  }
+                }
+              }
+            ],
+            "description": "A bind that was just started (`POST /v1/management/oauth/binds`)."
+          }
+        }
+      },
       "ApiResponse_StatusDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -10136,6 +10617,98 @@
                     "null"
                   ],
                   "description": "Room topic, if set."
+                }
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_Vec_ManagementTokenDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A bearer token as the management API lists it\n(`GET /v1/management/tokens`). Never the secret: only its hash is stored,\nand a token is shown once, when it is minted.",
+              "required": [
+                "id",
+                "label",
+                "created_at",
+                "current"
+              ],
+              "properties": {
+                "client_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The registered OAuth client that obtained it, if any."
+                },
+                "created_at": {
+                  "type": "string",
+                  "description": "When it was minted, RFC 3339."
+                },
+                "created_by_token_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid",
+                  "description": "The token that minted this one through the management API; null for\none minted from the command line, at setup, or by a sign-in."
+                },
+                "current": {
+                  "type": "boolean",
+                  "description": "Whether this is the token that made the request. Revoking it signs the\ncaller out."
+                },
+                "expires_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "When it stops working, RFC 3339; null for a token that never expires.\nA non-null value marks an OAuth session's access token."
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "Stable id, used to revoke the token."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "The label it was minted with. An OAuth session's is generated."
+                },
+                "last_used_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "When it last authenticated a request, RFC 3339; null if never."
+                },
+                "oauth_identity_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid",
+                  "description": "The bound identity it was minted for, if any. Null once that identity\nis unbound."
+                },
+                "provider": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The upstream provider behind the sign-in that minted it, if any."
+                },
+                "revoked_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "When it was revoked, RFC 3339; null while it has not been."
                 }
               }
             }
@@ -10680,6 +11253,51 @@
           "enabled",
           "downloading",
           "disabling"
+        ]
+      },
+      "BindDto": {
+        "type": "object",
+        "description": "An identity bind (`GET /v1/management/oauth/binds/{bind_id}`).",
+        "required": [
+          "id",
+          "provider",
+          "status",
+          "expires_at"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "string",
+            "description": "When a still-pending bind lapses, RFC 3339. The record itself is\nremoved some time after, and reading it then is a `404`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The bind's id, used to read its status."
+          },
+          "identity_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The identity that was bound, once `status` is `completed`. Null if it\nhas since been unbound."
+          },
+          "provider": {
+            "type": "string",
+            "description": "The provider being bound."
+          },
+          "status": {
+            "$ref": "#/components/schemas/BindStatusDto"
+          }
+        }
+      },
+      "BindStatusDto": {
+        "type": "string",
+        "description": "Where an identity bind stands.",
+        "enum": [
+          "pending",
+          "completed",
+          "expired"
         ]
       },
       "BuildInfoDto": {
@@ -12257,6 +12875,86 @@
           }
         }
       },
+      "ManagementTokenDto": {
+        "type": "object",
+        "description": "A bearer token as the management API lists it\n(`GET /v1/management/tokens`). Never the secret: only its hash is stored,\nand a token is shown once, when it is minted.",
+        "required": [
+          "id",
+          "label",
+          "created_at",
+          "current"
+        ],
+        "properties": {
+          "client_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The registered OAuth client that obtained it, if any."
+          },
+          "created_at": {
+            "type": "string",
+            "description": "When it was minted, RFC 3339."
+          },
+          "created_by_token_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The token that minted this one through the management API; null for\none minted from the command line, at setup, or by a sign-in."
+          },
+          "current": {
+            "type": "boolean",
+            "description": "Whether this is the token that made the request. Revoking it signs the\ncaller out."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it stops working, RFC 3339; null for a token that never expires.\nA non-null value marks an OAuth session's access token."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable id, used to revoke the token."
+          },
+          "label": {
+            "type": "string",
+            "description": "The label it was minted with. An OAuth session's is generated."
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it last authenticated a request, RFC 3339; null if never."
+          },
+          "oauth_identity_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The bound identity it was minted for, if any. Null once that identity\nis unbound."
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The upstream provider behind the sign-in that minted it, if any."
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it was revoked, RFC 3339; null while it has not been."
+          }
+        }
+      },
       "MatrixOAuthQrFlowDto": {
         "type": "object",
         "description": "Replayable, presentation-safe state of one QR login flow. Optional fields\nare omitted unless they belong to the current stage.",
@@ -12473,6 +13171,44 @@
           "user_id": {
             "type": "string",
             "description": "Matrix user ID (the `m.room.member` state key)."
+          }
+        }
+      },
+      "MintTokenRequest": {
+        "type": "object",
+        "description": "Body of `POST /v1/management/tokens`.",
+        "required": [
+          "label"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "What the token is for, e.g. the device that will hold it. One to 80\ncharacters after trimming, with no control characters."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MintedTokenDto": {
+        "type": "object",
+        "description": "A token that was just minted (`POST /v1/management/tokens`). The only\nresponse that ever carries a token's secret.",
+        "required": [
+          "id",
+          "label",
+          "token"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable id, used to revoke the token."
+          },
+          "label": {
+            "type": "string",
+            "description": "The label as stored."
+          },
+          "token": {
+            "type": "string",
+            "description": "The bearer token itself. Shown this once and not recoverable: only its\nhash is kept."
           }
         }
       },
@@ -13756,6 +14492,20 @@
           }
         }
       },
+      "StartBindRequest": {
+        "type": "object",
+        "description": "Body of `POST /v1/management/oauth/binds`.",
+        "required": [
+          "provider"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "The provider to bind an identity from: `\"apple\"`, `\"google\"` or\n`\"microsoft\"`."
+          }
+        },
+        "additionalProperties": false
+      },
       "StartVerifyRequest": {
         "type": "object",
         "description": "Request body for starting a SAS verification\n(`POST /v1/accounts/{account_id}/verify`). Names the verification target:\neither a `device_id` — one of the user's own trusted devices\n(self-verification) — or a `user_id` — another user's identity (cross-user\nverification, ADR 0040). Exactly one must be provided.",
@@ -13788,6 +14538,26 @@
             "description": "The verification transaction id."
           }
         }
+      },
+      "StartedBindDto": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/BindDto"
+          },
+          {
+            "type": "object",
+            "required": [
+              "url"
+            ],
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "The URL to open in a browser to sign in with the provider. It works\nonce, until `expires_at`."
+              }
+            }
+          }
+        ],
+        "description": "A bind that was just started (`POST /v1/management/oauth/binds`)."
       },
       "StatusDto": {
         "type": "object",

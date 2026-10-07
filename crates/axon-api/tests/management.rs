@@ -1,6 +1,6 @@
 //! DB-gated tests for the management API (ADR 0109): the operator's switch,
-//! the step-up rule for credential changes, and listing and unbinding sign-in
-//! identities.
+//! the step-up rule for credential changes, listing and unbinding sign-in
+//! identities, minting, listing and revoking tokens, and starting a bind.
 //!
 //! Needs a disposable database and is `#[ignore]`d by default. The lockout
 //! guard counts every credential on the instance, so these tests clear the
@@ -33,6 +33,8 @@ use uuid::Uuid;
 const CLIENT_ID: &str = "test-client";
 const REDIRECT_URI: &str = "https://client.test/callback";
 const IDENTITIES: &str = "/v1/management/oauth/identities";
+const TOKENS: &str = "/v1/management/tokens";
+const BINDS: &str = "/v1/management/oauth/binds";
 const NATIVE_CHALLENGE: &str = "/v1/oauth/apple/native/challenge";
 
 async fn store() -> Store {
@@ -183,6 +185,42 @@ async fn call(
     (status, body)
 }
 
+/// Send a JSON body, and return the response headers too.
+async fn send_json(
+    app: &axum::Router,
+    uri: &str,
+    bearer: &str,
+    body: String,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let request = Request::post(uri)
+        .header("authorization", format!("Bearer {bearer}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let (status, headers) = (response.status(), response.headers().clone());
+    let bytes = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    (
+        status,
+        headers,
+        serde_json::from_slice(&bytes).expect("JSON body"),
+    )
+}
+
+async fn mint(app: &axum::Router, bearer: &str, label: &str) -> (StatusCode, Value) {
+    let body = serde_json::json!({ "label": label }).to_string();
+    let (status, _, body) = send_json(app, TOKENS, bearer, body).await;
+    (status, body)
+}
+
+async fn start_bind(app: &axum::Router, bearer: &str, provider: &str) -> (StatusCode, Value) {
+    let body = serde_json::json!({ "provider": provider }).to_string();
+    let (status, _, body) = send_json(app, BINDS, bearer, body).await;
+    (status, body)
+}
+
 fn code(body: &Value) -> &str {
     body["error"]["code"].as_str().unwrap_or_default()
 }
@@ -233,8 +271,19 @@ async fn switched_off_every_management_route_is_403_and_status_says_so() {
     let identity = bind(&store, "google", None).await;
     let one = format!("{IDENTITIES}/{identity}");
 
+    let token = format!("{TOKENS}/{}", owner.id);
+    let a_bind = format!("{BINDS}/{}", Uuid::new_v4());
+
     let off = app(store.clone(), false, Providers::Browser(&["google"]));
-    for (method, uri) in [(Method::GET, IDENTITIES), (Method::DELETE, one.as_str())] {
+    for (method, uri) in [
+        (Method::GET, IDENTITIES),
+        (Method::DELETE, one.as_str()),
+        (Method::GET, TOKENS),
+        (Method::POST, TOKENS),
+        (Method::DELETE, token.as_str()),
+        (Method::POST, BINDS),
+        (Method::GET, a_bind.as_str()),
+    ] {
         // The bearer gate still runs first: a stranger learns nothing.
         let (status, _) = call(&off, method.clone(), uri, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {uri}");
@@ -246,6 +295,11 @@ async fn switched_off_every_management_route_is_403_and_status_says_so() {
         store.find_identity_by_id(identity).await.unwrap().is_some(),
         "a disabled management API must not have unbound anything"
     );
+    assert!(
+        store.verify_token(&owner.token).await.unwrap().is_some(),
+        "a disabled management API must not have revoked anything"
+    );
+    assert_eq!(store.list_tokens().await.unwrap().len(), 1);
     let (_, status) = call(&off, Method::GET, "/v1/status", Some(&owner.token)).await;
     assert_eq!(status["data"]["management"]["enabled"], false);
 
@@ -815,4 +869,397 @@ async fn the_browser_flow_carries_the_verified_time_to_code_redemption() {
         let access = pair["access_token"].as_str().unwrap();
         assert_eq!(try_credential_change(&app, &store, access).await, expected);
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn minting_returns_the_secret_once_and_records_who_minted() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let app = app(store.clone(), true, Providers::None);
+    let owner = store.issue_token("owner").await.unwrap();
+
+    let body = serde_json::json!({ "label": "  laptop  " }).to_string();
+    let (status, headers, body) = send_json(&app, TOKENS, &owner.token, body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_eq!(headers["referrer-policy"], "no-referrer");
+    assert_eq!(body["data"]["label"], "laptop", "the label is trimmed");
+    let secret = body["data"]["token"].as_str().unwrap().to_owned();
+    let id = body["data"]["id"].as_str().unwrap().to_owned();
+
+    // It is a working bearer, and the list shows it without the secret.
+    let (status, list) = call(&app, Method::GET, TOKENS, Some(&secret)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !list.to_string().contains(&secret) && !list.to_string().contains("hash"),
+        "the list never carries a secret"
+    );
+    let list = list["data"].as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    let entry = |id: &str| list.iter().find(|token| token["id"] == id).unwrap();
+    let minted = entry(&id);
+    assert_eq!(minted["current"], true);
+    assert_eq!(minted["created_by_token_id"], owner.id.to_string());
+    assert_eq!(minted["expires_at"], Value::Null);
+    assert_eq!(minted["revoked_at"], Value::Null);
+    assert!(DateTime::parse_from_rfc3339(minted["created_at"].as_str().unwrap()).is_ok());
+    assert!(DateTime::parse_from_rfc3339(minted["last_used_at"].as_str().unwrap()).is_ok());
+    let owner_entry = entry(&owner.id.to_string());
+    assert_eq!(owner_entry["current"], false);
+    assert_eq!(owner_entry["created_by_token_id"], Value::Null);
+
+    // Non-expiring, so it may change credentials itself.
+    let (status, _) = mint(&app, &secret, "phone").await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_mint_is_refused_for_a_stale_session_and_for_a_bad_label() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let app = app(store.clone(), true, Providers::Browser(&["google"]));
+    let google = bind(&store, "google", None).await;
+    let stale = session(&store, "google", google, long_ago()).await;
+    let fresh = session(&store, "google", google, just_now()).await;
+
+    let (status, body) = mint(&app, &stale, "laptop").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(code(&body), "recent_sign_in_required");
+    // The step-up check runs before the body is read: no hint about it leaks.
+    let (status, _, body) = send_json(&app, TOKENS, &stale, "not json".to_owned()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(code(&body), "recent_sign_in_required");
+
+    for label in ["", "   ", &"x".repeat(81), "esc\u{1b}[2J", "two\nlines"] {
+        let (status, body) = mint(&app, &fresh, label).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label:?}");
+        assert_eq!(code(&body), "bad_request", "{label:?}");
+    }
+    for body in [
+        r#"{"label":"ok","expires_at":"2099-01-01T00:00:00Z"}"#.to_owned(),
+        "{}".to_owned(),
+    ] {
+        let (status, _, _) = send_json(&app, TOKENS, &fresh, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let huge = serde_json::json!({ "label": "x".repeat(8 * 1024) }).to_string();
+    let (status, _, body) = send_json(&app, TOKENS, &fresh, huge).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(code(&body), "payload_too_large");
+    assert_eq!(
+        store.list_tokens().await.unwrap().len(),
+        2,
+        "nothing was minted by any refused request"
+    );
+
+    let (status, body) = mint(&app, &fresh, &"é".repeat(80)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let minted = Uuid::parse_str(body["data"]["id"].as_str().unwrap()).unwrap();
+    let fresh_id = store.verify_token(&fresh).await.unwrap().unwrap().id;
+    let listed = store.list_tokens().await.unwrap();
+    let row = listed.iter().find(|token| token.id == minted).unwrap();
+    assert_eq!(row.created_by_token_id, Some(fresh_id));
+    assert_eq!(row.expires_at, None);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn revoking_needs_step_up_and_stops_the_token_at_once() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let app = app(store.clone(), true, Providers::Browser(&["google"]));
+    let google = bind(&store, "google", None).await;
+    let stale = session(&store, "google", google, long_ago()).await;
+    let owner = store.issue_token("owner").await.unwrap();
+    let phone = store.issue_token("phone").await.unwrap();
+    let uri = format!("{TOKENS}/{}", phone.id);
+
+    let (status, body) = call(&app, Method::DELETE, &uri, Some(&stale)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(code(&body), "recent_sign_in_required");
+    let (status, _) = call(&app, Method::GET, TOKENS, Some(&phone.token)).await;
+    assert_eq!(status, StatusCode::OK, "a refused revoke changes nothing");
+
+    let (status, _) = call(&app, Method::DELETE, &uri, Some(&owner.token)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(&app, Method::GET, TOKENS, Some(&phone.token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Still listed, as revoked; and revoking it again is not an error.
+    let (_, list) = call(&app, Method::GET, TOKENS, Some(&owner.token)).await;
+    let entry = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|token| token["id"] == phone.id.to_string())
+        .unwrap()
+        .clone();
+    assert!(entry["revoked_at"].is_string());
+    for uri in [uri.clone(), format!("{uri}?allow_lockout=true")] {
+        let (status, _) = call(&app, Method::DELETE, &uri, Some(&owner.token)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{uri}");
+    }
+
+    for uri in [
+        format!("{TOKENS}/{}", Uuid::new_v4()),
+        format!("{TOKENS}/{}?allow_lockout=true", Uuid::new_v4()),
+    ] {
+        let (status, body) = call(&app, Method::DELETE, &uri, Some(&owner.token)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        assert_eq!(code(&body), "not_found", "{uri}");
+    }
+    let (status, _) = call(
+        &app,
+        Method::DELETE,
+        &format!("{TOKENS}/not-a-uuid"),
+        Some(&owner.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn revoking_the_last_credential_is_refused_until_confirmed() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    // No OAuth: tokens are the only credentials there can be.
+    let app = app(store.clone(), true, Providers::None);
+    let owner = store.issue_token("owner").await.unwrap();
+    let spare = store.issue_token("spare").await.unwrap();
+    let own = format!("{TOKENS}/{}", owner.id);
+
+    // With a spare, a device may sign itself out.
+    let (status, _) = call(
+        &app,
+        Method::DELETE,
+        &format!("{TOKENS}/{}", spare.id),
+        Some(&spare.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(&app, Method::GET, TOKENS, Some(&spare.token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Without one, it is the last way in.
+    let (status, body) = call(&app, Method::DELETE, &own, Some(&owner.token)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(code(&body), "last_credential");
+    let (status, _) = call(&app, Method::GET, TOKENS, Some(&owner.token)).await;
+    assert_eq!(status, StatusCode::OK, "refused means untouched");
+
+    let (status, _) = call(
+        &app,
+        Method::DELETE,
+        &format!("{own}?allow_lockout=true"),
+        Some(&owner.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(&app, Method::GET, TOKENS, Some(&owner.token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_token_may_go_when_a_usable_identity_remains_and_sessions_always_may() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let google = bind(&store, "google", None).await;
+    let owner = store.issue_token("owner").await.unwrap();
+    let own = format!("{TOKENS}/{}", owner.id);
+
+    // Google is switched off here, so the identity is no way back in.
+    let off = app(store.clone(), true, Providers::Browser(&["apple"]));
+    let (status, body) = call(&off, Method::DELETE, &own, Some(&owner.token)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(code(&body), "last_credential");
+
+    // A session's own access token was never a survivor: revoking it is not
+    // what would lock the owner out, so it is not refused.
+    let fresh = session(&store, "google", google, just_now()).await;
+    let fresh_id = store.verify_token(&fresh).await.unwrap().unwrap().id;
+    let (status, _) = call(
+        &off,
+        Method::DELETE,
+        &format!("{TOKENS}/{fresh_id}"),
+        Some(&fresh),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let on = app(store.clone(), true, Providers::Browser(&["google"]));
+    let (status, _) = call(&on, Method::DELETE, &own, Some(&owner.token)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_bind_starts_only_for_a_provider_this_server_can_redirect_to() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let owner = store.issue_token("owner").await.unwrap();
+    let pending = || async {
+        sqlx_core::query::query("SELECT 1 FROM oauth_bind_requests")
+            .fetch_all(store.pool())
+            .await
+            .unwrap()
+            .len()
+    };
+
+    let off = app(store.clone(), true, Providers::None);
+    let (status, body) = start_bind(&off, &owner.token, "google").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(code(&body), "bind_unavailable");
+
+    let app = app(store.clone(), true, Providers::Browser(&["google"]));
+    let (status, body) = start_bind(&app, &owner.token, "microsoft").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(code(&body), "bind_unavailable");
+    for unknown in ["github", "Google", ""] {
+        let (status, body) = start_bind(&app, &owner.token, unknown).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{unknown:?}");
+        assert_eq!(code(&body), "bad_request", "{unknown:?}");
+    }
+
+    // Native-only Apple has no browser provider for the bind to redirect to.
+    let native = self::app(store.clone(), true, Providers::NativeApple);
+    let (status, body) = start_bind(&native, &owner.token, "apple").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(code(&body), "bind_unavailable");
+
+    // A stale session may not start one, whatever the provider.
+    let google = bind(&store, "google", None).await;
+    let stale = session(&store, "google", google, long_ago()).await;
+    let (status, body) = start_bind(&app, &stale, "google").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(code(&body), "recent_sign_in_required");
+
+    assert_eq!(pending().await, 0, "no refused request created a bind");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_started_bind_drives_the_existing_browser_leg_and_reports_its_status() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let app = app(store.clone(), true, Providers::Browser(&["google"]));
+    let google = bind(&store, "google", None).await;
+    let fresh = session(&store, "google", google, just_now()).await;
+    let stale = session(&store, "google", google, long_ago()).await;
+
+    let body = serde_json::json!({ "provider": "google" }).to_string();
+    let (status, headers, body) = send_json(&app, BINDS, &fresh, body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(headers["cache-control"], "no-store");
+    let started = &body["data"];
+    assert_eq!(started["provider"], "google");
+    assert_eq!(started["status"], "pending");
+    assert_eq!(started["identity_id"], Value::Null);
+    let id = Uuid::parse_str(started["id"].as_str().unwrap()).unwrap();
+    let expires = DateTime::parse_from_rfc3339(started["expires_at"].as_str().unwrap()).unwrap();
+    let left = expires.with_timezone(&Utc) - Utc::now();
+    assert!(
+        left > Duration::minutes(9) && left <= Duration::minutes(10),
+        "the shared ten-minute handshake lifetime, got {left}"
+    );
+
+    // The URL is the existing unauthenticated browser leg, and it redirects
+    // to the provider with this bind as its state.
+    let url = url::Url::parse(started["url"].as_str().unwrap()).unwrap();
+    assert_eq!(url.origin().ascii_serialization(), "http://axon.test");
+    assert_eq!(url.path(), "/v1/oauth/bind");
+    let mut request = Request::get(format!("{}?{}", url.path(), url.query().unwrap()))
+        .body(Body::empty())
+        .unwrap();
+    let peer: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(peer));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert!(response.status().is_redirection(), "{}", response.status());
+    let location = response.headers()["location"].to_str().unwrap();
+    assert!(location.starts_with("https://fake-idp.test/authorize"));
+    assert!(location.contains(&id.to_string()));
+
+    // Reading status is not a credential change: a stale session may poll.
+    let uri = format!("{BINDS}/{id}");
+    let (status, body) = call(&app, Method::GET, &uri, Some(&stale)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["status"], "pending");
+    assert!(
+        body["data"].get("url").is_none(),
+        "status does not repeat the URL"
+    );
+
+    // The callback's own completion step, as the browser leg would run it.
+    let bound = store
+        .complete_bind_request(id, "google", "new-subject", Some("new@example.com"))
+        .await
+        .unwrap()
+        .expect("still pending");
+    let (_, body) = call(&app, Method::GET, &uri, Some(&stale)).await;
+    assert_eq!(body["data"]["status"], "completed");
+    assert_eq!(body["data"]["identity_id"], bound.to_string());
+
+    let (status, body) = call(
+        &app,
+        Method::GET,
+        &format!("{BINDS}/{}", Uuid::new_v4()),
+        Some(&stale),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(code(&body), "not_found");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_lapsed_or_canceled_bind_reads_as_expired() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let app = app(store.clone(), true, Providers::Browser(&["google"]));
+    let owner = store.issue_token("owner").await.unwrap();
+    let id_of = |body: &Value| Uuid::parse_str(body["data"]["id"].as_str().unwrap()).unwrap();
+
+    // Canceled, as a failed sign-in at the callback leaves it.
+    let (_, body) = start_bind(&app, &owner.token, "google").await;
+    let canceled = id_of(&body);
+    assert!(store.cancel_bind_request(canceled).await.unwrap());
+    // Still `pending` in the table, but past its time: nothing rewrites it.
+    let (_, body) = start_bind(&app, &owner.token, "google").await;
+    let lapsed = id_of(&body);
+    sqlx_core::query::query(
+        "UPDATE oauth_bind_requests SET expires_at = now() - interval '1 second' \
+          WHERE device_code = $1",
+    )
+    .bind(lapsed)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    for id in [canceled, lapsed] {
+        let (status, body) = call(
+            &app,
+            Method::GET,
+            &format!("{BINDS}/{id}"),
+            Some(&owner.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["status"], "expired");
+    }
+
+    // Starting another sweeps the lapsed one away; reading it is then a 404.
+    start_bind(&app, &owner.token, "google").await;
+    let (status, _) = call(
+        &app,
+        Method::GET,
+        &format!("{BINDS}/{lapsed}"),
+        Some(&owner.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
