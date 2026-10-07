@@ -362,6 +362,8 @@ function messageNotificationHarness(options?: {
   roomName?: string | null
   enabled?: boolean
   senderName?: string
+  notificationCount?: number
+  highlightCount?: number
 }) {
   let socket: FakeWebSocket | undefined
   const live = createLiveConnection({
@@ -380,6 +382,8 @@ function messageNotificationHarness(options?: {
         room_id: ROOM,
         name: options?.roomName === undefined ? 'Ops' : options.roomName,
         account_user_id: '@me:server',
+        notification_count: options?.notificationCount,
+        highlight_count: options?.highlightCount,
       },
     ]),
     titles: computed(() => new Map<string, string>()),
@@ -530,28 +534,100 @@ describe('connectMessageNotifications', () => {
       await vi.advanceTimersByTimeAsync(INITIAL_BACKOFF_MS)
       socket().emitOpen()
 
-      // Stamped after the first connect, but well before this one. The cutoff
-      // moved with the reconnect, and the id was already handled.
+      // Stamped after the first connect, but well before the new cutoff.
       socket().emitMessage(
         messageFrame(T0 + 10 * 60_000, { event_id: '$during-gap-old' }),
       )
+      // Already handled this session, so the new stamp does not matter.
       socket().emitMessage(
         messageFrame(clock + 1000, { event_id: `$m-${T0 + 1000}` }),
       )
       await flushNotifications()
       expect(notify).toHaveBeenCalledTimes(1)
 
-      // A message missed while the socket was down is not in the seen set,
-      // and the count frame for it was not replayed.
-      socket().emitMessage(messageFrame(clock + 2000, { event_id: '$gap' }))
+      // Missed while the socket was down: inside the slack, before the
+      // reconnect, and not in the seen set. The count frame was not replayed.
+      const gapTs = clock - 60_000
+      socket().emitMessage(messageFrame(gapTs, { event_id: '$gap' }))
       await flushNotifications()
       expect(notify).toHaveBeenCalledTimes(2)
       expect(notify).toHaveBeenLastCalledWith(
-        postedNotice(clock + 2000, { eventId: '$gap' }),
+        postedNotice(gapTs, { eventId: '$gap' }),
+      )
+
+      // Stamped after the reconnect, so the socket was up and this waits
+      // for a rise. The bypass does not stay on for the rest of the session.
+      socket().emitMessage(messageFrame(clock + 2000, { event_id: '$live' }))
+      await flushNotifications()
+      expect(notify).toHaveBeenCalledTimes(2)
+      socket().emitMessage(countFrame(2))
+      await flushNotifications()
+      expect(notify).toHaveBeenCalledTimes(3)
+      expect(notify).toHaveBeenLastCalledWith(
+        postedNotice(clock + 2000, { eventId: '$live' }),
       )
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('does not treat the room-list count as a new rise', async () => {
+    const { notify, socket } = messageNotificationHarness({
+      now: () => T0,
+      notificationCount: 5,
+    })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    socket().emitMessage(countFrame(5))
+    await flushNotifications()
+    socket().emitMessage(countFrame(3))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+
+    socket().emitMessage(messageFrame(T0 + 2000))
+    socket().emitMessage(countFrame(6))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenLastCalledWith(postedNotice(T0 + 2000))
+  })
+
+  it('still pairs an event and a count a few seconds apart', async () => {
+    let clock = T0
+    const { notify, socket } = messageNotificationHarness({ now: () => clock })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    clock = T0 + 5_000
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not post a notice the count missed, and keeps the rise', async () => {
+    let clock = T0
+    const { notify, socket } = messageNotificationHarness({ now: () => clock })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    clock = T0 + 5_001
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+
+    socket().emitMessage(messageFrame(T0 + 6_000))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenLastCalledWith(postedNotice(T0 + 6_000))
+  })
+
+  it('does not let a stale count rise claim a later message', async () => {
+    let clock = T0
+    const { notify, socket } = messageNotificationHarness({ now: () => clock })
+    socket().emitMessage(countFrame(1))
+    clock = T0 + 5_001
+    socket().emitMessage(messageFrame(T0 + 6_000))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+
+    socket().emitMessage(countFrame(2))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenLastCalledWith(postedNotice(T0 + 6_000))
   })
 
   it("drops the account's own send", async () => {

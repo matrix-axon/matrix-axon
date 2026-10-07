@@ -1449,7 +1449,8 @@ export function createRoomsStore(
   }
 }
 
-function countFromRoom(value: number | null | undefined): number {
+/** A room-list count, or 0 when the field is missing or not a positive integer. */
+export function countFromRoom(value: number | null | undefined): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
     ? value
     : 0

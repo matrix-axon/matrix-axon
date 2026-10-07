@@ -76,7 +76,11 @@ import {
   type VerificationStore,
 } from './stores/verification'
 import { createFavouriteStore, type FavouriteStore } from './stores/favourites'
-import { createRoomsStore, type RoomsStore } from './stores/rooms'
+import {
+  countFromRoom,
+  createRoomsStore,
+  type RoomsStore,
+} from './stores/rooms'
 import {
   createSpaceOrderStore,
   type SpaceOrderStore,
@@ -331,6 +335,13 @@ export function connectLiveThreadUnread(
 /** How many event ids one session remembers, so a replay cannot toast twice. */
 const NOTIFIED_EVENT_LIMIT = 2000
 
+/**
+ * How long an event and its count frame may wait for each other. Longer than
+ * the gap between those two frames on a live socket, and short enough that a
+ * muted room cannot keep a message around for a later, unrelated rise.
+ */
+const NOTIFICATION_PAIR_WINDOW_MS = 5_000
+
 interface PendingNotice {
   title: string
   body: string
@@ -338,6 +349,11 @@ interface PendingNotice {
   roomId: string
   eventId: string
   threadRootId: string | null
+}
+
+interface HeldNotice {
+  notice: PendingNotice
+  at: number
 }
 
 interface ObservedCounts {
@@ -361,10 +377,24 @@ interface ObservedCounts {
  * `notification_count` or `highlight_count` rises (ADR 0070). That count is
  * the server's push-rule answer: a mute, a notice, or a mentions-only miss
  * does not raise it, and a replay does not either. The toast still carries
- * the sender and the message text, because the count frame has neither. The
- * count frame is not replayed across a drop, so after a reconnect an event
- * id this session has not handled, and which is stamped after the new cutoff,
- * is posted on its own.
+ * the sender and the message text, because the count frame has neither.
+ *
+ * The first frame for a room is compared with the count on its room-list row,
+ * not with zero. That row is the list response: a live count frame updates a
+ * separate slot and does not rewrite it, so a list that already says 5 and a
+ * frame that says 5 or 3 is not news. A room the list does not have yet has
+ * no prior count, and that first frame is compared with zero.
+ *
+ * The event and the count can arrive in either order, and each waits five
+ * seconds for the other. A parked notice older than that is dropped, so a
+ * muted room cannot keep a message that a later, unrelated rise would post.
+ * A count that no message claimed expires the same way.
+ *
+ * The count frame is not replayed across a drop. A message this session has
+ * not handled, stamped after the cutoff and strictly before the reconnect,
+ * is one of the messages that drop hid, and it is posted on its own. A
+ * message stamped at or after the reconnect arrived on the new socket and
+ * waits for a rise again.
  *
  * Edits, redactions, empty bodies, and anything other than `m.room.message`
  * are not messages (`isRoomUnreadEvent`). The account's own sends are not
@@ -386,15 +416,14 @@ export function connectMessageNotifications(
   isFocused: () => boolean = () => document.hasFocus(),
 ): () => void {
   let liveSince = now() - LIVE_THREAD_REPLAY_SLACK_MS
-  // Zero until the socket drops and comes back. The first connection's
-  // replay has no count frame — the totals are already on the room list —
-  // so only a later rise may post. A reconnect has missed the rise that
-  // happened while the socket was down.
-  let socketGeneration = 0
+  // Set when the socket drops and comes back. Messages stamped before this
+  // are the ones whose count frame was not replayed. It is not a session-long
+  // bypass: a message stamped at or after it arrived on the new socket.
+  let reconnectedAt: number | null = null
   const seen = new Set<string>()
   const baseline = new Map<string, ObservedCounts>()
-  const pending = new Map<string, PendingNotice>()
-  const owed = new Set<string>()
+  const pending = new Map<string, HeldNotice>()
+  const owed = new Map<string, number>()
   let disposed = false
 
   const disposeReconnects = effect(() => {
@@ -404,7 +433,7 @@ export function connectMessageNotifications(
     // Effects run synchronously on the write, before the new socket delivers
     // its first frame. Same ordering as `connectThreadReceipts`.
     liveSince = now() - LIVE_THREAD_REPLAY_SLACK_MS
-    socketGeneration = live.reconnects.value
+    reconnectedAt = now()
     pending.clear()
     owed.clear()
   })
@@ -447,6 +476,41 @@ export function connectMessageNotifications(
       })
   }
 
+  const countsOnList = (accountId: string, roomId: string): ObservedCounts => {
+    const room = rooms.rooms.value.find(
+      (candidate) =>
+        candidate.account_id === accountId && candidate.room_id === roomId,
+    )
+    return {
+      notification: countFromRoom(room?.notification_count),
+      highlight: countFromRoom(room?.highlight_count),
+    }
+  }
+
+  const takeFreshPending = (key: string): PendingNotice | undefined => {
+    const held = pending.get(key)
+    if (held === undefined) {
+      return undefined
+    }
+    pending.delete(key)
+    if (now() - held.at > NOTIFICATION_PAIR_WINDOW_MS) {
+      return undefined
+    }
+    return held.notice
+  }
+
+  const owesFresh = (key: string): boolean => {
+    const at = owed.get(key)
+    if (at === undefined) {
+      return false
+    }
+    if (now() - at > NOTIFICATION_PAIR_WINDOW_MS) {
+      owed.delete(key)
+      return false
+    }
+    return true
+  }
+
   const onCounts = (
     accountId: string,
     change: {
@@ -460,24 +524,22 @@ export function connectMessageNotifications(
       notification: change.notificationCount,
       highlight: change.highlightCount,
     }
-    const prev = baseline.get(key)
+    const prev = baseline.get(key) ?? countsOnList(accountId, change.roomId)
     baseline.set(key, next)
     const rose =
-      prev === undefined
-        ? next.notification > 0 || next.highlight > 0
-        : next.notification > prev.notification ||
-          next.highlight > prev.highlight
+      next.notification > prev.notification || next.highlight > prev.highlight
     if (!enabled() || !rose || roomIsFocused(accountId, change.roomId)) {
       pending.delete(key)
       owed.delete(key)
       return
     }
-    const notice = pending.get(key)
+    const notice = takeFreshPending(key)
     if (notice === undefined) {
-      owed.add(key)
+      // The rise is real, but it does not belong to a notice that has already
+      // gone stale. The next message in the window is the one it claims.
+      owed.set(key, now())
       return
     }
-    pending.delete(key)
     owed.delete(key)
     post(notice)
   }
@@ -528,15 +590,17 @@ export function connectMessageNotifications(
       eventId: event.event_id,
       threadRootId: threadRootId(event),
     }
-    // After a reconnect the rise may already have been broadcast, and the
-    // bus does not replay it. An id this session has not handled is news.
-    if (socketGeneration > 0 || owed.has(key)) {
+    // A message stamped before the reconnect is the gap whose count frame was
+    // not replayed. Anything stamped later arrived while this socket was up.
+    const missedWhileDown =
+      reconnectedAt !== null && event.origin_ts < reconnectedAt
+    if (missedWhileDown || owesFresh(key)) {
       owed.delete(key)
       pending.delete(key)
       post(notice)
       return
     }
-    pending.set(key, notice)
+    pending.set(key, { notice, at: now() })
   }
 
   const unsubscribe = live.subscribe((frame) => {
