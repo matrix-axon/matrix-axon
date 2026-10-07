@@ -29,7 +29,7 @@ An oversized state keeps its provenance but withholds its content; other fields 
 Creation content maps Matrix `m.federate` to API `federate` and Matrix `type` to API `room_type`.
 These names deliberately differ from the stored Matrix keys.
 
-Each snapshot includes `status`, `event_id`, `sender`, `origin_ts`, and `content`.
+Each snapshot includes `status`, `event_id`, `sender`, `origin_ts`, `redacted`, `redaction_event_id`, and `content`.
 `origin_ts` is the upstream event timestamp, not the time of the last successful sync or an access-freshness guarantee.
 
 | Status        | Meaning                                                                                              |
@@ -53,9 +53,18 @@ A creation predecessor can omit `event_id`; its `room_id` remains available.
 Power levels describe configured state, with legacy decimal strings and floats normalized to integers (floats truncate toward zero); they are not resolved permissions and must not drive authorization decisions.
 Legacy normalization currently does not consult the room version; [issue 632](https://github.com/matrix-axon/matrix-axon/issues/632) tracks version-aware validation or diagnostics.
 Unknown condition types retain their `type` and optional `room_id`; extension-specific payloads are not exposed by this typed read.
-An empty content object is not itself evidence of redaction: the stored projection does not retain a reliable redaction marker.
-Redacted state may therefore be `available` with empty or retained fields; availability describes the cached shape, not whether the original event was redacted.
-The `unavailable` status handles stored NULL content and is not a guarantee that sync identifies redacted events.
+Redaction evidence is independent of content availability, consistent with [Matrix redaction semantics](https://spec.matrix.org/v1.19/client-server-api/#redactions).
+`redacted: true` means sync observed a redacted state event or the cached event log contains a redaction targeting that event in the same account and room.
+`redacted: false` means sync observed the original form and Axon has no known later redaction; it is not a claim about unseen upstream events.
+`redacted: null` means Axon has no reliable evidence, including legacy cached rows and unknown tuples.
+`redaction_event_id` identifies a known redaction when available; a null ID does not negate positive evidence.
+An empty object or NULL content alone never establishes redaction.
+Already-redacted state can retain room-version-protected fields and remain `available` or `partial`.
+If Axon receives a later redaction but has only the original state content, the metadata read withholds that content as `unavailable` until sync supplies its redacted form.
+It does not guess the room version's pruning rules or expose the original fields as current metadata.
+Same-event replays cannot clear positive evidence or restore original content; a new replacement event has independent evidence.
+Later-redaction checks use the existing indexed event log with at most one lookup per selected tuple, so either arrival order and restart reconcile without a background sweep.
+The nullable evidence columns are added by a forward-only migration; older rows are not guessed or rewritten in a bulk backfill.
 
 A client should re-read when reopening the panel, on reconnect, and after relevant timeline state events.
 Required-state-only updates are persisted without a live invalidation frame, so timeline events and reconnect alone cannot keep an open panel fresh.
@@ -91,10 +100,13 @@ Web and TUI consumption are [issue 623](https://github.com/matrix-axon/matrix-ax
 ## Verification
 
 The HTTP integration tests seed real PostgreSQL state and exercise the authenticated router without an upstream service.
+They cover already-redacted state, both later-redaction arrival orders, account/room isolation, replacement events, replay protection, and evidence persistence after reopening the store.
 Use a throwaway database; these tests run migrations and write fixture accounts.
 
 ```sh
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http room_metadata -- --ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-store --test state -- --ignored
+cargo test -p axon-sync --lib state_redaction_tests
 cargo test -p axon-api --test openapi
 ```
 

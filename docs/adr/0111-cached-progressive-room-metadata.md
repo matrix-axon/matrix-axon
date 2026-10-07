@@ -77,6 +77,9 @@ Partially valid snapshots retain valid fields and entries and explicitly identif
 Available empty lists are meaningful values.
 Missing state is not evidence that aliases are absent or encryption is disabled.
 Do not manufacture Matrix defaults or infer redaction from an empty object when the cached projection lacks the necessary evidence.
+Preserve SDK-observed redaction evidence independently of content availability, and consult the account/room-scoped event log for later redactions.
+Legacy state without evidence remains unknown; original content targeted by a later redaction is withheld until a redacted form is available.
+Same-event replay must not remove positive evidence or resurrect original fields.
 Configured power levels are metadata, not resolved authorization decisions.
 
 Retain event provenance for state snapshots.

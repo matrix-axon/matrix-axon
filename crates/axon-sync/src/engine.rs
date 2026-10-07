@@ -949,6 +949,49 @@ async fn persist_event_siblings(
     None
 }
 
+/// Use the SDK/Ruma event form as evidence, never empty or missing content.
+fn state_redaction_evidence<'a>(
+    ev: &AnySyncStateEvent,
+    raw: &'a serde_json::Value,
+) -> (bool, Option<&'a str>) {
+    let redacted = ev.is_redacted();
+    let event_id = if redacted {
+        raw.pointer("/unsigned/redacted_because/event_id")
+            .and_then(serde_json::Value::as_str)
+    } else {
+        None
+    };
+    (redacted, event_id)
+}
+
+#[cfg(test)]
+mod state_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn sdk_state_forms_preserve_redaction_evidence_independent_of_content() {
+        for content in [serde_json::json!({}), serde_json::json!({"ban": 50})] {
+            let mut raw = serde_json::json!({
+                "type": "m.room.power_levels", "state_key": "",
+                "event_id": "$state:localhost", "sender": "@alice:localhost",
+                "origin_server_ts": 10, "content": content,
+            });
+            let original: AnySyncStateEvent = serde_json::from_value(raw.clone()).unwrap();
+            assert_eq!(state_redaction_evidence(&original, &raw), (false, None));
+            raw["unsigned"] = serde_json::json!({"redacted_because": {
+                "type": "m.room.redaction", "event_id": "$redaction:localhost",
+                "sender": "@alice:localhost", "origin_server_ts": 11,
+                "redacts": "$state:localhost", "content": {},
+            }});
+            let redacted: AnySyncStateEvent = serde_json::from_value(raw.clone()).unwrap();
+            assert_eq!(
+                state_redaction_evidence(&redacted, &raw),
+                (true, Some("$redaction:localhost"))
+            );
+        }
+    }
+}
+
 /// Event handler: project a room-state event into the `room_state` table (the
 /// derived current-value view, maintained by upsert). The raw state event is
 /// also persisted to `events` by [`persist_timeline_event`]; this writes the
@@ -976,6 +1019,7 @@ async fn persist_room_state_event(
         .unwrap_or("")
         .to_owned();
     let content = raw_val.get("content").cloned();
+    let (redacted, redaction_event_id) = state_redaction_evidence(&ev, &raw_val);
     let event_id = ev.event_id().as_str().to_owned();
     let sender = ev.sender().as_str().to_owned();
     let origin_ts = saturating_i64(u64::from(ev.origin_server_ts().0));
@@ -993,12 +1037,17 @@ async fn persist_room_state_event(
     };
     if let Err(err) = ctx
         .store
-        .upsert_room_state_for_local_user(&upsert, Some(ctx.local_user_id.as_ref()))
+        .upsert_room_state_with_redaction(
+            &upsert,
+            Some(ctx.local_user_id.as_ref()),
+            Some(redacted),
+            redaction_event_id,
+        )
         .await
     {
         tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), error = %err, "failed to persist room state");
     } else {
-        tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), state_key = state_key.as_str(), "persisted room state");
+        tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), state_key = state_key.as_str(), event_id = %event_id, redacted, redaction_event_id, "persisted room state");
     }
 
     // M10 purge-on-leave (ADR 0044): when this state event is *this account*

@@ -358,3 +358,59 @@ async fn apply_and_remove_room_tag_merges_json() {
 
     common::cleanup_account(&pool, account_id).await;
 }
+
+/// Concurrent handlers serialize on the tuple's ON CONFLICT row lock: neither
+/// arrival order may clear redaction evidence or restore original content.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_state_redaction_concurrent_replay() {
+    let store = common::migrated_store().await;
+    let account_id = test_account(&store, "redaction-race").await;
+    let room_id = format!("!redaction-race-{}:localhost", Uuid::new_v4());
+    let original = RoomStateUpsert {
+        account_id,
+        room_id: &room_id,
+        event_type: "m.room.power_levels",
+        state_key: "",
+        event_id: "$race:localhost",
+        sender: "@alice:localhost",
+        origin_ts: 10,
+        content: Some(json!({"ban": 50, "invite": 99})),
+    };
+    let redacted = RoomStateUpsert {
+        content: Some(json!({"ban": 50})),
+        ..original
+    };
+    let (first, second) = tokio::join!(
+        store.upsert_room_state_with_redaction(&original, None, Some(false), None),
+        store.upsert_room_state_with_redaction(
+            &redacted,
+            None,
+            Some(true),
+            Some("$redaction:localhost")
+        ),
+    );
+    first.unwrap();
+    second.unwrap();
+    let row = store
+        .room_state(account_id, &room_id, "m.room.power_levels", "")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.redacted, Some(true));
+    assert_eq!(
+        row.redaction_event_id.as_deref(),
+        Some("$redaction:localhost")
+    );
+    assert_eq!(row.content, Some(json!({"ban": 50})));
+    // A legacy/evidence-free caller also cannot resurrect the same event.
+    store.upsert_room_state(&original).await.unwrap();
+    let row = store
+        .room_state(account_id, &room_id, "m.room.power_levels", "")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.redacted, Some(true));
+    assert_eq!(row.content, Some(json!({"ban": 50})));
+    store.delete_account_row(account_id).await.unwrap();
+}

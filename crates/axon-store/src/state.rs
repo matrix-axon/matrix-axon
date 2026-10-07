@@ -73,6 +73,11 @@ pub struct RoomStateRow {
     pub origin_ts: i64,
     /// The retained state `content`; absence does not establish redaction.
     pub content: Option<Value>,
+    /// Redaction evidence; legacy rows have no evidence. Metadata reads also
+    /// reconcile this with later redactions in the durable event log.
+    pub redacted: Option<bool>,
+    /// Redaction event ID, when supplied with a redacted state event.
+    pub redaction_event_id: Option<String>,
 }
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomStateRow {
@@ -85,6 +90,8 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomStateRow {
             sender: row.try_get("sender")?,
             origin_ts: row.try_get("origin_ts")?,
             content: row.try_get("content")?,
+            redacted: row.try_get("redacted")?,
+            redaction_event_id: row.try_get("redaction_event_id")?,
         })
     }
 }
@@ -109,7 +116,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomMetadataStateRow {
 
 /// Columns selected for a [`RoomStateRow`].
 const ROOM_STATE_COLUMNS: &str =
-    "room_id, event_type, state_key, event_id, sender, origin_ts, content";
+    "room_id, event_type, state_key, event_id, sender, origin_ts, content, redacted, redaction_event_id";
 
 /// A piece of account data to upsert. `room_id = None` is global (account-wide)
 /// account data; `Some(room_id)` scopes it to a room.
@@ -172,15 +179,40 @@ impl Store {
         s: &RoomStateUpsert<'_>,
         local_user_id: Option<&str>,
     ) -> Result<(), StoreError> {
+        self.upsert_room_state_with_redaction(s, local_user_id, None, None)
+            .await
+    }
+
+    /// Persist SDK-observed redaction evidence with the state tuple atomically.
+    /// `None` means the caller has no evidence, not that the event is original.
+    /// Evidence and retained content are monotonic for the same event ID, so an
+    /// original replay cannot resurrect content after a redacted delivery.
+    /// A different replacement event starts with its own evidence.
+    pub async fn upsert_room_state_with_redaction(
+        &self,
+        s: &RoomStateUpsert<'_>,
+        local_user_id: Option<&str>,
+        redacted: Option<bool>,
+        redaction_event_id: Option<&str>,
+    ) -> Result<(), StoreError> {
         sqlx_core::query::query(
             "INSERT INTO room_state \
-             (account_id, room_id, event_type, state_key, event_id, sender, origin_ts, content) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             (account_id, room_id, event_type, state_key, event_id, sender, origin_ts, content, redacted, redaction_event_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
              ON CONFLICT (account_id, room_id, event_type, state_key) DO UPDATE SET \
                event_id = EXCLUDED.event_id, \
                sender = EXCLUDED.sender, \
                origin_ts = EXCLUDED.origin_ts, \
-               content = EXCLUDED.content \
+               content = CASE WHEN room_state.event_id = EXCLUDED.event_id \
+                   AND room_state.redacted = true AND EXCLUDED.redacted IS DISTINCT FROM true \
+                   THEN room_state.content ELSE EXCLUDED.content END, \
+               redacted = CASE WHEN room_state.event_id = EXCLUDED.event_id \
+                   THEN CASE WHEN room_state.redacted = true THEN true \
+                        ELSE COALESCE(EXCLUDED.redacted, room_state.redacted) END \
+                   ELSE EXCLUDED.redacted END, \
+               redaction_event_id = CASE WHEN room_state.event_id = EXCLUDED.event_id \
+                   THEN COALESCE(room_state.redaction_event_id, EXCLUDED.redaction_event_id) \
+                   ELSE EXCLUDED.redaction_event_id END \
              WHERE EXCLUDED.origin_ts >= room_state.origin_ts",
         )
         .bind(s.account_id)
@@ -191,6 +223,8 @@ impl Store {
         .bind(s.sender)
         .bind(s.origin_ts)
         .bind(&s.content)
+        .bind(redacted)
+        .bind(redaction_event_id)
         .execute(&self.pool)
         .await?;
         if summary_display_state(s.event_type, s.state_key)
@@ -230,8 +264,13 @@ impl Store {
     /// and JSON decoding, including unknown extensions. This transfer budget
     /// allows spacing overhead above Matrix's compact event-size limit; it
     /// does not validate upstream event sizes. MATERIALIZED computes the
-    /// rendering size once per tuple, even for oversized content. Rendering
-    /// itself is not bounded by this transfer cap: PostgreSQL still detoasts
+    /// rendering size once per tuple, even for oversized content.
+    /// Later redactions use the existing `(account_id, redacts)` index, with
+    /// at most one probe per selected tuple. Both arrival orders and concurrent
+    /// state/redaction writes reconcile at read time in one statement snapshot.
+    /// If only an original form is cached, withhold content until sync supplies
+    /// the redacted form; do not guess which room-version fields survive.
+    /// Rendering itself is not bounded by this transfer cap: PostgreSQL still detoasts
     /// and renders the full stored value before measuring it.
     pub async fn room_metadata_states(
         &self,
@@ -240,15 +279,31 @@ impl Store {
         event_types: &[&str],
     ) -> Result<Vec<RoomMetadataStateRow>, StoreError> {
         let rows = sqlx_core::query_as::query_as::<Postgres, RoomMetadataStateRow>(
-            "WITH sized AS MATERIALIZED (\
-                 SELECT room_id, event_type, state_key, event_id, sender, origin_ts, content, \
-                        COALESCE(octet_length(content::text) > 131072, false) AS oversized \
-                 FROM room_state \
-                 WHERE account_id = $1 AND room_id = $2 AND state_key = '' \
-                   AND event_type = ANY($3)\
+            "WITH selected AS MATERIALIZED (\
+                 SELECT s.*, r.event_id AS later_redaction \
+                 FROM room_state s \
+                 LEFT JOIN LATERAL (\
+                     SELECT e.event_id FROM events e \
+                     WHERE e.account_id = s.account_id AND e.room_id = s.room_id \
+                       AND e.redacts = s.event_id AND e.event_type = 'm.room.redaction' \
+                     LIMIT 1\
+                 ) r ON true \
+                 WHERE s.account_id = $1 AND s.room_id = $2 AND s.state_key = '' \
+                   AND s.event_type = ANY($3)\
+             ), retained AS MATERIALIZED (\
+                 SELECT room_id, event_type, state_key, event_id, sender, origin_ts, \
+                     CASE WHEN later_redaction IS NOT NULL AND redacted IS DISTINCT FROM true \
+                          THEN NULL ELSE content END AS content, \
+                     CASE WHEN later_redaction IS NOT NULL THEN true ELSE redacted END AS redacted, \
+                     COALESCE(redaction_event_id, later_redaction) AS redaction_event_id \
+                 FROM selected\
+             ), sized AS MATERIALIZED (\
+                 SELECT *, COALESCE(octet_length(content::text) > 131072, false) AS oversized \
+                 FROM retained\
              ) \
              SELECT room_id, event_type, state_key, event_id, sender, origin_ts, \
-                    CASE WHEN oversized THEN NULL ELSE content END AS content, oversized \
+                    CASE WHEN oversized THEN NULL ELSE content END AS content, oversized, \
+                    redacted, redaction_event_id \
              FROM sized ORDER BY event_type",
         )
         .bind(account_id)

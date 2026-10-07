@@ -2909,6 +2909,14 @@ export interface components {
             invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
+            /**
+             * @description `true`: known redacted; `false`: observed original with no known redaction;
+             *     `null`: no reliable evidence (including legacy cached state).
+             *     Independent of availability: redacted state can retain valid fields.
+             */
+            redacted?: boolean | null;
+            /** @description Redaction event ID when known. A null ID does not negate `redacted`. */
+            redaction_event_id?: string | null;
             sender?: string | null;
             status: components["schemas"]["RoomMetadataStatus"];
         };
@@ -2938,6 +2946,14 @@ export interface components {
             invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
+            /**
+             * @description `true`: known redacted; `false`: observed original with no known redaction;
+             *     `null`: no reliable evidence (including legacy cached state).
+             *     Independent of availability: redacted state can retain valid fields.
+             */
+            redacted?: boolean | null;
+            /** @description Redaction event ID when known. A null ID does not negate `redacted`. */
+            redaction_event_id?: string | null;
             sender?: string | null;
             status: components["schemas"]["RoomMetadataStatus"];
         };
@@ -2964,6 +2980,14 @@ export interface components {
             invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
+            /**
+             * @description `true`: known redacted; `false`: observed original with no known redaction;
+             *     `null`: no reliable evidence (including legacy cached state).
+             *     Independent of availability: redacted state can retain valid fields.
+             */
+            redacted?: boolean | null;
+            /** @description Redaction event ID when known. A null ID does not negate `redacted`. */
+            redaction_event_id?: string | null;
             sender?: string | null;
             status: components["schemas"]["RoomMetadataStatus"];
         };
@@ -2986,6 +3010,14 @@ export interface components {
             invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
+            /**
+             * @description `true`: known redacted; `false`: observed original with no known redaction;
+             *     `null`: no reliable evidence (including legacy cached state).
+             *     Independent of availability: redacted state can retain valid fields.
+             */
+            redacted?: boolean | null;
+            /** @description Redaction event ID when known. A null ID does not negate `redacted`. */
+            redaction_event_id?: string | null;
             sender?: string | null;
             status: components["schemas"]["RoomMetadataStatus"];
         };
@@ -3008,6 +3040,14 @@ export interface components {
             invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
+            /**
+             * @description `true`: known redacted; `false`: observed original with no known redaction;
+             *     `null`: no reliable evidence (including legacy cached state).
+             *     Independent of availability: redacted state can retain valid fields.
+             */
+            redacted?: boolean | null;
+            /** @description Redaction event ID when known. A null ID does not negate `redacted`. */
+            redaction_event_id?: string | null;
             sender?: string | null;
             status: components["schemas"]["RoomMetadataStatus"];
         };
@@ -3032,6 +3072,14 @@ export interface components {
             invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
+            /**
+             * @description `true`: known redacted; `false`: observed original with no known redaction;
+             *     `null`: no reliable evidence (including legacy cached state).
+             *     Independent of availability: redacted state can retain valid fields.
+             */
+            redacted?: boolean | null;
+            /** @description Redaction event ID when known. A null ID does not negate `redacted`. */
+            redaction_event_id?: string | null;
             sender?: string | null;
             status: components["schemas"]["RoomMetadataStatus"];
         };
@@ -3074,6 +3122,14 @@ export interface components {
             invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
+            /**
+             * @description `true`: known redacted; `false`: observed original with no known redaction;
+             *     `null`: no reliable evidence (including legacy cached state).
+             *     Independent of availability: redacted state can retain valid fields.
+             */
+            redacted?: boolean | null;
+            /** @description Redaction event ID when known. A null ID does not negate `redacted`. */
+            redaction_event_id?: string | null;
             sender?: string | null;
             status: components["schemas"]["RoomMetadataStatus"];
         };
@@ -3098,6 +3154,14 @@ export interface components {
             invalid_fields: string[];
             /** Format: int64 */
             origin_ts?: number | null;
+            /**
+             * @description `true`: known redacted; `false`: observed original with no known redaction;
+             *     `null`: no reliable evidence (including legacy cached state).
+             *     Independent of availability: redacted state can retain valid fields.
+             */
+            redacted?: boolean | null;
+            /** @description Redaction event ID when known. A null ID does not negate `redacted`. */
+            redaction_event_id?: string | null;
             sender?: string | null;
             status: components["schemas"]["RoomMetadataStatus"];
         };
