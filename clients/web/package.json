@@ -1,7 +1,7 @@
 {
   "name": "axon-web",
   "private": true,
-  "version": "0.1.6",
+  "version": "0.1.7",
   "type": "module",
   "packageManager": "pnpm@11.25.0+sha256.33dd0748f27e7916c4f1c8b6943461983e3453b06bbda6312a6280130b4881e5",
   "scripts": {
