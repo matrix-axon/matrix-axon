@@ -115,11 +115,14 @@ describe('createOAuthAuthProvider', () => {
         }),
       })
       expect(auth.lastSignInAt.value).toBeNull()
-      await auth.completeRedirect(
+      const result = await auth.completeRedirect(
         new URL(
           'http://localhost:3000/oauth/callback?code=code-1&state=state-123',
         ),
       )
+      // A refused path is ignored, never a reason to fail a sign-in that
+      // worked.
+      expect(result).toEqual({ ok: true })
       expect(auth.lastSignInAt.value).not.toBeNull()
       return window.location.pathname
     }
@@ -127,6 +130,7 @@ describe('createOAuthAuthProvider', () => {
     expect(await land('/settings')).toBe('/settings')
     expect(await land('//evil.example/settings')).toBe('/')
     expect(await land('https://evil.example/')).toBe('/')
+    expect(await land('/\\evil.example/settings')).toBe('/')
   })
 
   it('keeps a session-only sign-in session-only through a re-sign-in', async () => {

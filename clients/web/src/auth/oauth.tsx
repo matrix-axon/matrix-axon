@@ -1057,9 +1057,11 @@ function parsePending(raw: string | null): PendingOAuth | null {
         redirectUri: value.redirectUri,
         createdAt: value.createdAt,
         storageMode: value.storageMode === 'session' ? 'session' : 'persistent',
-        // Same-origin paths only: this value ends up in `replaceState`.
+        // Same-origin paths only: this value ends up in `replaceState`. A
+        // backslash counts as a slash to the URL parser, so `/\host` is as
+        // much another origin as `//host` is.
         ...(typeof value.returnTo === 'string' &&
-        /^\/(?!\/)/.test(value.returnTo)
+        /^\/(?![/\\])/.test(value.returnTo)
           ? { returnTo: value.returnTo }
           : {}),
       }
