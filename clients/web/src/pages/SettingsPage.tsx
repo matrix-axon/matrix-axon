@@ -6,7 +6,6 @@ import {
   notificationPermissionAvailable,
   requestAppBadgeNotificationPermission,
 } from '../app-badge'
-import { LinkAppleSection } from '../auth/oauth'
 import { BUILD_INFO } from '../build-info'
 import { CopyableText } from '../components/CopyableText'
 import { ReactionPicker } from '../components/MessageEventRow'
@@ -26,6 +25,7 @@ import {
 import { isInstalledDisplay } from '../platform'
 import { browserReloadEnvironment, reloadNow } from '../reload'
 import { disconnectFromServer } from '../server-url'
+import { LinkedSignIns } from './LinkedSignIns'
 import { formatTelemetry } from '../stores/telemetry'
 import { resolveApiBaseUrl, useServices } from '../services'
 import { currentPlatform, isApplePlatform } from '../shortcuts'
@@ -302,7 +302,7 @@ function SettingsPageContents() {
         </a>
       </section>
       <ServerSettings />
-      <LinkAppleSection oauth={auth.oauth} bearer={() => auth.getToken()} />
+      <LinkedSignIns />
       <DebugSettings />
       <section class="panel">
         <h2>Session</h2>

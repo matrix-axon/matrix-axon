@@ -87,6 +87,99 @@ describe('createOAuthAuthProvider', () => {
     expect(new URLSearchParams(form).get('code_verifier')).toBe('verifier-123')
   })
 
+  it('returns to a same-origin path only', async () => {
+    server.use(
+      http.post(TOKEN_URL, () =>
+        HttpResponse.json({
+          access_token: 'access-1',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: 'refresh-1',
+        }),
+      ),
+    )
+    const land = async (returnTo: string) => {
+      const auth = createOAuthAuthProvider({
+        providers: [{ provider: 'google', label: 'Google' }],
+        baseUrl: BASE_URL,
+        storage: memoryStorage(),
+        pendingStorage: memoryStorage({
+          'axon.oauth.pending': JSON.stringify({
+            state: 'state-123',
+            codeVerifier: 'verifier-123',
+            provider: 'google',
+            redirectUri: 'http://localhost:3000/oauth/callback',
+            createdAt: Date.now(),
+            returnTo,
+          }),
+        }),
+      })
+      expect(auth.lastSignInAt.value).toBeNull()
+      const result = await auth.completeRedirect(
+        new URL(
+          'http://localhost:3000/oauth/callback?code=code-1&state=state-123',
+        ),
+      )
+      // A refused path is ignored, never a reason to fail a sign-in that
+      // worked.
+      expect(result).toEqual({ ok: true })
+      expect(auth.lastSignInAt.value).not.toBeNull()
+      return window.location.pathname
+    }
+
+    expect(await land('/settings')).toBe('/settings')
+    expect(await land('//evil.example/settings')).toBe('/')
+    expect(await land('https://evil.example/')).toBe('/')
+    expect(await land('/\\evil.example/settings')).toBe('/')
+  })
+
+  it('keeps a session-only sign-in session-only through a re-sign-in', async () => {
+    // Signed in with Remember me off, then a page load later (the checkbox is
+    // back at its default) a sign-in is started from inside the app.
+    const storage = memoryStorage()
+    const sessionStorage = memoryStorage({
+      'axon.oauth.session': JSON.stringify({
+        accessToken: 'old-access',
+        refreshToken: 'old-refresh',
+        expiresAt: Date.now() + 3_600_000,
+        provider: 'google',
+      }),
+    })
+    const pending = memoryStorage()
+    server.use(
+      http.post(TOKEN_URL, () =>
+        HttpResponse.json({
+          access_token: 'fresh-access',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: 'fresh-refresh',
+        }),
+      ),
+    )
+    const auth = createOAuthAuthProvider({
+      providers: [{ provider: 'google', label: 'Google' }],
+      baseUrl: BASE_URL,
+      storage,
+      sessionStorage,
+      pendingStorage: pending,
+      navigate: () => undefined,
+    })
+
+    await auth.startSignIn('google', { returnTo: '/settings' })
+    const { state } = JSON.parse(
+      pending.getItem('axon.oauth.pending') ?? '{}',
+    ) as { state: string }
+    await auth.completeRedirect(
+      new URL(`http://localhost:3000/oauth/callback?code=c&state=${state}`),
+    )
+
+    expect(auth.getToken()).toBe('fresh-access')
+    expect(sessionStorage.getItem('axon.oauth.session')).toContain(
+      'fresh-access',
+    )
+    expect(storage.getItem('axon.oauth.session')).toBeNull()
+  })
+
   it('stores a one-time OAuth session in session storage', async () => {
     const storage = memoryStorage()
     const sessionStorage = memoryStorage()

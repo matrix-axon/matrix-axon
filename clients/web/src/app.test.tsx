@@ -1331,6 +1331,54 @@ describe('App', () => {
     expect(await findByRole('navigation', { name: 'Rooms' })).toBeTruthy()
     expect(services.auth.signedIn.value).toBe(true)
   })
+
+  it('redeems a callback while signed in and returns where it was sent from', async () => {
+    // The sign-in a credential change asked for (ADR 0109): a session already
+    // exists, and the code must still be redeemed rather than routed as a page.
+    let redeemed = 0
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/oauth/token`, () => {
+        redeemed += 1
+        return HttpResponse.json({
+          access_token: 'fresh-access',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: 'fresh-refresh',
+        })
+      }),
+    )
+    const pendingStorage = memoryStorage({
+      'axon.oauth.pending': JSON.stringify({
+        state: 'state-123',
+        codeVerifier: 'verifier-123',
+        provider: 'google',
+        redirectUri: 'http://localhost:3000/oauth/callback',
+        createdAt: Date.now(),
+        returnTo: '/settings',
+      }),
+    })
+    const storage = memoryStorage({
+      'axon.oauth.session': JSON.stringify({
+        accessToken: 'old-access',
+        refreshToken: 'old-refresh',
+        expiresAt: Date.now() + 3_600_000,
+        provider: 'google',
+      }),
+    })
+    const services = testServices({ token: null, storage, pendingStorage })
+    history.replaceState(
+      null,
+      '',
+      '/oauth/callback?code=code-1&state=state-123',
+    )
+
+    const { findByRole } = render(<App services={services} />)
+
+    expect(await findByRole('heading', { name: 'Settings' })).toBeTruthy()
+    expect(window.location.pathname).toBe('/settings')
+    expect(redeemed).toBe(1)
+    expect(await services.auth.getToken()).toBe('fresh-access')
+  })
 })
 
 describe('layoutMode (ADR 0062)', () => {

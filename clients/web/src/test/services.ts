@@ -109,6 +109,8 @@ export function testServices(
      * existing test keeps the behavior it was written against.
      */
     platform?: Partial<Platform>
+    /** The OAuth hand-off, as a shell injects it; absent, sign-in navigates. */
+    navigate?: (url: string) => void | Promise<void>
   } = {},
 ): AppServices & { sockets: FakeWebSocket[] } {
   const storage =
@@ -127,6 +129,8 @@ export function testServices(
     // and leak signed-in state across tests.
     sessionStorage: memoryStorage(),
     pendingStorage: options.pendingStorage ?? memoryStorage(),
+    appleSignIn: options.platform?.appleSignIn,
+    navigate: options.navigate,
   })
   const api = createApiClient(auth, TEST_BASE_URL)
   const media = createMediaService({ auth, baseUrl: TEST_BASE_URL })
