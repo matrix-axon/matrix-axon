@@ -26,6 +26,7 @@ mod member_profiles;
 mod oauth;
 mod openapi;
 mod response;
+mod room_metadata;
 mod routes;
 mod search;
 mod sender;
@@ -265,6 +266,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/info",
             get(routes::rooms::room_info),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/metadata",
+            get(routes::room_metadata::room_metadata),
         )
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/upgrade",

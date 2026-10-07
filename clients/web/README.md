@@ -410,8 +410,17 @@ native_audiences = ["org.matrixaxon.axon"]
 
 Native Apple only finds an Apple ID that is already linked to the owner. Link
 one from the app: sign in any other way (a token from `axon token issue`, or
-Google or Microsoft), then Settings → Sign in with Apple → Link an Apple ID.
+Google or Microsoft), then Settings → Linked sign-ins → Link an Apple ID.
 Linking is by Apple's subject alone, never by email.
+
+The same Settings panel lists every linked sign-in and unlinks one (ADR 0109,
+`/v1/management/oauth/identities`). Unlinking makes Axon forget the identity
+and ends its sessions; it does not withdraw the permission given at the
+provider, and the confirmation says where to do that. The server only accepts
+a credential change from a sign-in in the last ten minutes, so an older session
+is sent through its sign-in again first and the change then finishes on its
+own. With `[server] management_api = false` the list is hidden and only the
+Apple link action remains, under "Sign in with Apple".
 
 Provider buttons are discovered at runtime from `GET /v1/oauth/providers`, so
 a client can be pointed at a server it was not built against and still offer

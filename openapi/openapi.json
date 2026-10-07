@@ -4274,6 +4274,68 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/rooms/{room_id}/metadata": {
+      "get": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "Read typed room metadata from account-scoped cached state.\nNo upstream requests or membership aggregation occur on this route.\nMissing snapshots remain unknown, including for unjoined/unknown rooms.\nContent is limited to 128 KiB per state tuple before transfer and decoding.\nRe-read on reopen/reconnect. Until state invalidation covers required-state\nupdates, open panels need bounded polling to detect changes without a live\nframe. Event `origin_ts` is provenance, not a sync-freshness timestamp.",
+        "operationId": "room_metadata",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Typed cached state snapshots with availability and provenance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_RoomMetadataDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal database failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/rooms/{room_id}/name": {
       "put": {
         "tags": [
@@ -9398,6 +9460,55 @@
           }
         }
       },
+      "ApiResponse_RoomMetadataDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Bounded local state detail read; no remote acquisition or aggregation.",
+            "required": [
+              "aliases",
+              "creation",
+              "join_rules",
+              "encryption",
+              "power_levels",
+              "server_acl",
+              "history_visibility",
+              "guest_access"
+            ],
+            "properties": {
+              "aliases": {
+                "$ref": "#/components/schemas/CachedRoomMetadata_RoomAliasesMetadata"
+              },
+              "creation": {
+                "$ref": "#/components/schemas/CachedRoomMetadata_RoomCreationMetadata"
+              },
+              "encryption": {
+                "$ref": "#/components/schemas/CachedRoomMetadata_RoomEncryptionMetadata"
+              },
+              "guest_access": {
+                "$ref": "#/components/schemas/CachedRoomMetadata_RoomGuestAccessMetadata"
+              },
+              "history_visibility": {
+                "$ref": "#/components/schemas/CachedRoomMetadata_RoomHistoryVisibilityMetadata"
+              },
+              "join_rules": {
+                "$ref": "#/components/schemas/CachedRoomMetadata_RoomJoinRulesMetadata"
+              },
+              "power_levels": {
+                "$ref": "#/components/schemas/CachedRoomMetadata_RoomPowerLevelsMetadata"
+              },
+              "server_acl": {
+                "$ref": "#/components/schemas/CachedRoomMetadata_RoomServerAclMetadata"
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_RoomUpgradeDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -10596,6 +10707,636 @@
           },
           "version": {
             "type": "string"
+          }
+        }
+      },
+      "CachedRoomMetadata_RoomAliasesMetadata": {
+        "type": "object",
+        "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
+        "required": [
+          "status",
+          "invalid_fields"
+        ],
+        "properties": {
+          "content": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "description": "Advertised aliases from `m.room.canonical_alias`, not an exhaustive\nfederation-wide alias list or the account homeserver's alias directory.",
+                "properties": {
+                  "alias": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "alt_aliases": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
+          "origin_ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "sender": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/RoomMetadataStatus"
+          }
+        }
+      },
+      "CachedRoomMetadata_RoomCreationMetadata": {
+        "type": "object",
+        "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
+        "required": [
+          "status",
+          "invalid_fields"
+        ],
+        "properties": {
+          "content": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "description": "Creation details as stored, including version-dependent creator fields.\nFor versions where `creator` is omitted, the create event's sender is\navailable in the enclosing snapshot. No creator/room-version inference is\nmade from missing state or version-dependent omitted fields.",
+                "properties": {
+                  "additional_creators": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "creator": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "federate": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ],
+                    "description": "Reads Matrix `m.federate`; the API emits `federate`."
+                  },
+                  "predecessor": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/RoomPredecessorMetadata"
+                      }
+                    ]
+                  },
+                  "room_type": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Reads Matrix `type`; the API emits `room_type`."
+                  },
+                  "room_version": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
+          "origin_ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "sender": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/RoomMetadataStatus"
+          }
+        }
+      },
+      "CachedRoomMetadata_RoomEncryptionMetadata": {
+        "type": "object",
+        "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
+        "required": [
+          "status",
+          "invalid_fields"
+        ],
+        "properties": {
+          "content": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "algorithm": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "rotation_period_ms": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64",
+                    "minimum": 0
+                  },
+                  "rotation_period_msgs": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64",
+                    "minimum": 0
+                  }
+                }
+              }
+            ]
+          },
+          "event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
+          "origin_ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "sender": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/RoomMetadataStatus"
+          }
+        }
+      },
+      "CachedRoomMetadata_RoomGuestAccessMetadata": {
+        "type": "object",
+        "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
+        "required": [
+          "status",
+          "invalid_fields"
+        ],
+        "properties": {
+          "content": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "guest_access": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
+          "origin_ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "sender": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/RoomMetadataStatus"
+          }
+        }
+      },
+      "CachedRoomMetadata_RoomHistoryVisibilityMetadata": {
+        "type": "object",
+        "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
+        "required": [
+          "status",
+          "invalid_fields"
+        ],
+        "properties": {
+          "content": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "history_visibility": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
+          "origin_ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "sender": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/RoomMetadataStatus"
+          }
+        }
+      },
+      "CachedRoomMetadata_RoomJoinRulesMetadata": {
+        "type": "object",
+        "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
+        "required": [
+          "status",
+          "invalid_fields"
+        ],
+        "properties": {
+          "content": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "allow": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "$ref": "#/components/schemas/RoomJoinConditionMetadata"
+                    },
+                    "description": "Restriction conditions, preserving namespaced/unknown condition types."
+                  },
+                  "join_rule": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
+          "origin_ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "sender": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/RoomMetadataStatus"
+          }
+        }
+      },
+      "CachedRoomMetadata_RoomPowerLevelsMetadata": {
+        "type": "object",
+        "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
+        "required": [
+          "status",
+          "invalid_fields"
+        ],
+        "properties": {
+          "content": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "description": "Configured values, not resolved permissions. Omitted values retain their\nomission; room-version rules (including v12 creator privileges) and Matrix\ndefaults must be applied before these are used for permission decisions.",
+                "properties": {
+                  "ban": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  },
+                  "events": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "additionalProperties": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "propertyNames": {
+                      "type": "string"
+                    }
+                  },
+                  "events_default": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  },
+                  "invite": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  },
+                  "kick": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  },
+                  "notifications": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/RoomNotificationLevelsMetadata"
+                      }
+                    ]
+                  },
+                  "redact": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  },
+                  "state_default": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  },
+                  "users": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "additionalProperties": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "propertyNames": {
+                      "type": "string"
+                    }
+                  },
+                  "users_default": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  }
+                }
+              }
+            ]
+          },
+          "event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
+          "origin_ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "sender": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/RoomMetadataStatus"
+          }
+        }
+      },
+      "CachedRoomMetadata_RoomServerAclMetadata": {
+        "type": "object",
+        "description": "A typed snapshot from Axon's account-scoped `room_state` cache. Nullable\nfields in content preserve omitted values rather than synthesizing Matrix\ndefaults. Defaults, if needed for display, apply only to available content.\nEvent timestamps identify the event; they do not establish when sync last\nsucceeded or when Axon last checked upstream availability.",
+        "required": [
+          "status",
+          "invalid_fields"
+        ],
+        "properties": {
+          "content": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "allow": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "allow_ip_literals": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "deny": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invalid_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths of malformed fields/entries, with wildcards for list/map entries.\nThese are shape diagnostics, not permission or redaction information."
+          },
+          "origin_ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "sender": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/RoomMetadataStatus"
           }
         }
       },
@@ -12368,6 +13109,106 @@
               "null"
             ],
             "description": "`m.room.join_rules` `content.join_rule`\n(`invite`/`public`/`knock`/`restricted`/`knock_restricted`/…)."
+          }
+        }
+      },
+      "RoomJoinConditionMetadata": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "room_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present for `m.room_membership`; other condition types may omit it."
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "RoomMetadataDto": {
+        "type": "object",
+        "description": "Bounded local state detail read; no remote acquisition or aggregation.",
+        "required": [
+          "aliases",
+          "creation",
+          "join_rules",
+          "encryption",
+          "power_levels",
+          "server_acl",
+          "history_visibility",
+          "guest_access"
+        ],
+        "properties": {
+          "aliases": {
+            "$ref": "#/components/schemas/CachedRoomMetadata_RoomAliasesMetadata"
+          },
+          "creation": {
+            "$ref": "#/components/schemas/CachedRoomMetadata_RoomCreationMetadata"
+          },
+          "encryption": {
+            "$ref": "#/components/schemas/CachedRoomMetadata_RoomEncryptionMetadata"
+          },
+          "guest_access": {
+            "$ref": "#/components/schemas/CachedRoomMetadata_RoomGuestAccessMetadata"
+          },
+          "history_visibility": {
+            "$ref": "#/components/schemas/CachedRoomMetadata_RoomHistoryVisibilityMetadata"
+          },
+          "join_rules": {
+            "$ref": "#/components/schemas/CachedRoomMetadata_RoomJoinRulesMetadata"
+          },
+          "power_levels": {
+            "$ref": "#/components/schemas/CachedRoomMetadata_RoomPowerLevelsMetadata"
+          },
+          "server_acl": {
+            "$ref": "#/components/schemas/CachedRoomMetadata_RoomServerAclMetadata"
+          }
+        }
+      },
+      "RoomMetadataStatus": {
+        "type": "string",
+        "description": "Availability of a particular cached state tuple. An unknown tuple is not\nevidence that a setting is unset, encryption is disabled, or access is public.",
+        "enum": [
+          "unknown",
+          "available",
+          "partial",
+          "unavailable",
+          "invalid",
+          "too_large"
+        ]
+      },
+      "RoomNotificationLevelsMetadata": {
+        "type": "object",
+        "properties": {
+          "room": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "RoomPredecessorMetadata": {
+        "type": "object",
+        "required": [
+          "room_id"
+        ],
+        "properties": {
+          "event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Deprecated since Matrix v1.16; room upgrades may omit this field."
+          },
+          "room_id": {
+            "type": "string"
           }
         }
       },

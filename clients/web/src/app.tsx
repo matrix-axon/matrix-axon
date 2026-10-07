@@ -241,6 +241,19 @@ export function App({
     })
   }, [svc])
 
+  // A browser's OAuth callback is redeemed whether or not a session already
+  // exists. Signed out, it is the sign-in. Signed in, it is the sign-in a
+  // credential change asked for (ADR 0109 `recent_sign_in_required`), and
+  // routing it into the shell instead would drop the code on a 404 page.
+  // State rather than a read of `location`: `completeRedirect` rewrites the
+  // URL, and with a session already live nothing else would re-render.
+  const [completingCallback, setCompletingCallback] = useState(
+    () => window.location.pathname === '/oauth/callback',
+  )
+  // Stable, because `OAuthCallback` redeems in an effect that depends on it,
+  // and an authorization code can be redeemed exactly once.
+  const finishCallback = useCallback(() => setCompletingCallback(false), [])
+
   // Take the OAuth authorization code back off the OS (ADR 0102 § 3).
   //
   // A browser gets it as a navigation to `/oauth/callback`, handled by the
@@ -296,10 +309,10 @@ export function App({
 
   return (
     <ServicesContext.Provider value={svc}>
-      {svc.auth.signedIn.value ? (
+      {completingCallback ? (
+        <OAuthCallback onDone={finishCallback} />
+      ) : svc.auth.signedIn.value ? (
         <Shell />
-      ) : window.location.pathname === '/oauth/callback' ? (
-        <OAuthCallback />
       ) : (
         <SignedOut error={oauthDeepLinkError} />
       )}
@@ -663,7 +676,7 @@ function ServerFooter() {
   )
 }
 
-function OAuthCallback() {
+function OAuthCallback({ onDone }: { onDone: () => void }) {
   const { auth } = useServices()
   const [message, setMessage] = useState('Completing sign-in...')
   const [failed, setFailed] = useState(false)
@@ -673,7 +686,11 @@ function OAuthCallback() {
     void auth
       .completeOAuthRedirect(new URL(window.location.href))
       .then((result) => {
-        if (cancelled || result.ok) {
+        if (cancelled) {
+          return
+        }
+        if (result.ok) {
+          onDone()
           return
         }
         setFailed(true)
@@ -682,13 +699,17 @@ function OAuthCallback() {
     return () => {
       cancelled = true
     }
-  }, [auth])
+  }, [auth, onDone])
 
   return (
     <main class="signin">
       <h1>axon</h1>
       <p class={failed ? 'error' : 'muted'}>{message}</p>
-      {failed && <a href="/">Back to sign in</a>}
+      {failed && (
+        <a href="/">
+          {auth.signedIn.value ? 'Back to Axon' : 'Back to sign in'}
+        </a>
+      )}
     </main>
   )
 }

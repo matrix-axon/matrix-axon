@@ -4154,3 +4154,466 @@ async fn space_order_lock_releases_on_panic() {
         "a later with_isolated_preference must not hang on a leaked lock"
     );
 }
+
+/// Drive the typed detail read with real PostgreSQL state. No upstream port
+/// is installed, so this also proves that the metadata read stays local.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_metadata_typed_snapshots() {
+    let store = store().await;
+    let account_id = store
+        .upsert_account(
+            &format!("@metadata-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    let room_id = format!("!metadata-{}:localhost", Uuid::new_v4());
+    let alias_content = json!({
+        "alias": "#main:localhost", "alt_aliases": ["#other:remote.example"],
+        "org.example.unexposed": "not returned"
+    });
+    for (event_type, content) in [
+        ("m.room.canonical_alias", alias_content),
+        (
+            "m.room.create",
+            json!({
+                "room_version": "12", "m.federate": false, "type": "m.space",
+                "additional_creators": ["@bob:localhost"],
+                "predecessor": {"room_id": "!old:localhost", "event_id": "$old:localhost"}
+            }),
+        ),
+        (
+            "m.room.join_rules",
+            json!({
+                "join_rule": "restricted", "allow": [
+                    {"type": "m.room_membership", "room_id": "!parent:localhost"},
+                    {"type": "org.example.condition"}
+                ]
+            }),
+        ),
+        (
+            "m.room.encryption",
+            json!({
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "rotation_period_ms": 86400000, "rotation_period_msgs": 20
+            }),
+        ),
+        (
+            "m.room.power_levels",
+            json!({
+                "users": {"@bob:localhost": "  +60 "},
+                "events": {"m.room.name": "70"}, "notifications": {"room": "80"},
+                "state_default": 90
+            }),
+        ),
+        (
+            "m.room.server_acl",
+            json!({
+                "allow_ip_literals": false, "allow": ["*"], "deny": ["bad.example"]
+            }),
+        ),
+        (
+            "m.room.history_visibility",
+            json!({"history_visibility": "shared"}),
+        ),
+        ("m.room.guest_access", json!({"guest_access": "forbidden"})),
+    ] {
+        store
+            .upsert_room_state(&RoomStateUpsert {
+                account_id,
+                room_id: &room_id,
+                event_type,
+                state_key: "",
+                event_id: &format!("${event_type}:localhost"),
+                sender: "@alice:localhost",
+                origin_ts: 1234,
+                content: Some(content),
+            })
+            .await
+            .unwrap();
+    }
+    // A non-singleton tuple must not be treated as the singleton value.
+    store
+        .upsert_room_state(&RoomStateUpsert {
+            account_id,
+            room_id: &room_id,
+            event_type: "m.room.canonical_alias",
+            state_key: "malformed",
+            event_id: "$non-singleton:localhost",
+            sender: "@alice:localhost",
+            origin_ts: 2000,
+            content: Some(json!({"alias": "#wrong:localhost"})),
+        })
+        .await
+        .unwrap();
+    let app = read_app(store.clone());
+    let (status, body) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/metadata"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let data = &body["data"];
+    for key in [
+        "aliases",
+        "creation",
+        "join_rules",
+        "encryption",
+        "power_levels",
+        "server_acl",
+        "history_visibility",
+        "guest_access",
+    ] {
+        assert_eq!(data[key]["status"], "available");
+        assert_eq!(data[key]["sender"], "@alice:localhost");
+        assert_eq!(data[key]["origin_ts"], 1234);
+        assert!(data[key]["event_id"].as_str().unwrap().starts_with('$'));
+    }
+    assert_eq!(data["aliases"]["content"]["alias"], "#main:localhost");
+    assert_eq!(
+        data["aliases"]["content"]["alt_aliases"],
+        json!(["#other:remote.example"])
+    );
+    assert!(data["aliases"]["content"]
+        .get("org.example.unexposed")
+        .is_none());
+    assert_eq!(data["creation"]["content"]["room_version"], "12");
+    assert_eq!(data["creation"]["content"]["creator"], Value::Null);
+    assert_eq!(
+        data["creation"]["content"]["additional_creators"],
+        json!(["@bob:localhost"])
+    );
+    assert_eq!(data["creation"]["content"]["federate"], false);
+    assert_eq!(data["creation"]["content"]["room_type"], "m.space");
+    assert_eq!(
+        data["creation"]["content"]["predecessor"]["event_id"],
+        "$old:localhost"
+    );
+    assert_eq!(
+        data["join_rules"]["content"]["allow"][0]["room_id"],
+        "!parent:localhost"
+    );
+    assert_eq!(
+        data["join_rules"]["content"]["allow"][1]["type"],
+        "org.example.condition"
+    );
+    assert_eq!(
+        data["encryption"]["content"]["rotation_period_ms"],
+        86400000
+    );
+    assert_eq!(data["encryption"]["content"]["rotation_period_msgs"], 20);
+    assert_eq!(data["power_levels"]["content"]["events"]["m.room.name"], 70);
+    assert_eq!(data["power_levels"]["content"]["notifications"]["room"], 80);
+    assert_eq!(data["power_levels"]["content"]["invite"], Value::Null);
+    assert_eq!(
+        data["server_acl"]["content"]["deny"],
+        json!(["bad.example"])
+    );
+    assert_eq!(
+        data["history_visibility"]["content"]["history_visibility"],
+        "shared"
+    );
+    assert_eq!(data["guest_access"]["content"]["guest_access"], "forbidden");
+    store.delete_account_row(account_id).await.unwrap();
+}
+
+/// Replacements, explicit removals, withheld/redacted content, account
+/// boundaries, and unknown rooms must not reuse or invent metadata values.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_metadata_replacement_and_unknown_state() {
+    let store = store().await;
+    let mut accounts = Vec::new();
+    for _ in 0..2 {
+        accounts.push(
+            store
+                .upsert_account(
+                    &format!("@metadata-{}:localhost", Uuid::new_v4()),
+                    "https://hs.example.org",
+                )
+                .await
+                .unwrap()
+                .account_id,
+        );
+    }
+    let room_id = format!("!metadata-{}:localhost", Uuid::new_v4());
+    let app = read_app(store.clone());
+    for (origin_ts, content, expected_aliases, expected_status) in [
+        (
+            1,
+            Some(json!({"alias": "#main:localhost", "alt_aliases": ["#old:localhost"]})),
+            json!(["#old:localhost"]),
+            "available",
+        ),
+        (2, Some(json!({"alt_aliases": []})), json!([]), "available"),
+        (3, None, Value::Null, "unavailable"),
+        (4, Some(Value::Null), Value::Null, "unavailable"),
+    ] {
+        store
+            .upsert_room_state(&RoomStateUpsert {
+                account_id: accounts[0],
+                room_id: &room_id,
+                event_type: "m.room.canonical_alias",
+                state_key: "",
+                event_id: &format!("$aliases-{origin_ts}:localhost"),
+                sender: "@alice:localhost",
+                origin_ts,
+                content,
+            })
+            .await
+            .unwrap();
+        let (_, body) = get(
+            &app,
+            &format!("/v1/accounts/{}/rooms/{room_id}/metadata", accounts[0]),
+        )
+        .await;
+        let aliases = &body["data"]["aliases"];
+        assert_eq!(aliases["status"], expected_status);
+        assert_eq!(aliases["content"]["alt_aliases"], expected_aliases);
+        assert_eq!(
+            aliases["event_id"],
+            format!("$aliases-{origin_ts}:localhost")
+        );
+        if origin_ts == 2 {
+            assert_eq!(aliases["content"]["alias"], Value::Null);
+        }
+        if origin_ts >= 3 {
+            assert_eq!(aliases["content"], Value::Null);
+        }
+    }
+    // Existing storage contract rejects an older replay; metadata follows it.
+    store
+        .upsert_room_state(&RoomStateUpsert {
+            account_id: accounts[0],
+            room_id: &room_id,
+            event_type: "m.room.canonical_alias",
+            state_key: "",
+            event_id: "$stale:localhost",
+            sender: "@alice:localhost",
+            origin_ts: 1,
+            content: Some(json!({"alias": "#old:localhost"})),
+        })
+        .await
+        .unwrap();
+    let (_, body) = get(
+        &app,
+        &format!("/v1/accounts/{}/rooms/{room_id}/metadata", accounts[0]),
+    )
+    .await;
+    assert_eq!(body["data"]["aliases"]["status"], "unavailable");
+    for (account_id, target) in [
+        (accounts[1], room_id.as_str()),
+        (accounts[0], "!unknown:localhost"),
+        (Uuid::new_v4(), room_id.as_str()),
+    ] {
+        let (status, body) = get(
+            &app,
+            &format!("/v1/accounts/{account_id}/rooms/{target}/metadata"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        for snapshot in body["data"].as_object().unwrap().values() {
+            assert_eq!(snapshot["status"], "unknown");
+            assert_eq!(snapshot["content"], Value::Null);
+            assert_eq!(snapshot["event_id"], Value::Null);
+            assert_eq!(snapshot["origin_ts"], Value::Null);
+        }
+    }
+    for account_id in accounts {
+        store.delete_account_row(account_id).await.unwrap();
+    }
+}
+
+/// Hostile stored content is withheld without poisoning independent fields.
+/// Oversize is detected in SQL before content reaches the typed decoder.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_metadata_invalid_and_oversized_content() {
+    let store = store().await;
+    let account_id = store
+        .upsert_account(
+            &format!("@metadata-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    let room_id = format!("!metadata-{}:localhost", Uuid::new_v4());
+    for (event_type, content) in [
+        (
+            "m.room.canonical_alias",
+            json!({"alt_aliases": ["#good:localhost", 42]}),
+        ),
+        (
+            "m.room.encryption",
+            json!({"algorithm": "m.megolm.v1.aes-sha2", "rotation_period_msgs": -1}),
+        ),
+        (
+            "m.room.power_levels",
+            json!({"events": {"m.room.name": "wrong"}}),
+        ),
+        (
+            "m.room.server_acl",
+            json!({"allow": ["*"], "org.example.large": "x".repeat(131073)}),
+        ),
+        ("m.room.guest_access", json!({"guest_access": "forbidden"})),
+        ("m.room.history_visibility", json!(["world_readable"])),
+    ] {
+        store
+            .upsert_room_state(&RoomStateUpsert {
+                account_id,
+                room_id: &room_id,
+                event_type,
+                state_key: "",
+                event_id: &format!("${event_type}:localhost"),
+                sender: "@alice:localhost",
+                origin_ts: 1,
+                content: Some(content),
+            })
+            .await
+            .unwrap();
+    }
+    let rows = store
+        .room_metadata_states(account_id, &room_id, &["m.room.server_acl"])
+        .await
+        .unwrap();
+    let acl = rows
+        .iter()
+        .find(|row| row.state.event_type == "m.room.server_acl")
+        .unwrap();
+    assert!(acl.oversized);
+    assert!(acl.state.content.is_none());
+    let app = read_app(store.clone());
+    let (_, body) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/metadata"),
+    )
+    .await;
+    for key in ["aliases", "encryption", "power_levels"] {
+        assert_eq!(body["data"][key]["status"], "partial");
+        assert!(body["data"][key]["content"].is_object());
+        assert!(!body["data"][key]["invalid_fields"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+    assert_eq!(
+        body["data"]["aliases"]["content"]["alt_aliases"],
+        json!(["#good:localhost"])
+    );
+    assert_eq!(
+        body["data"]["encryption"]["content"]["algorithm"],
+        "m.megolm.v1.aes-sha2"
+    );
+    assert_eq!(
+        body["data"]["encryption"]["content"]["rotation_period_msgs"],
+        Value::Null
+    );
+    assert_eq!(body["data"]["history_visibility"]["status"], "invalid");
+    assert_eq!(body["data"]["history_visibility"]["content"], Value::Null);
+    let (_, info) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/info"),
+    )
+    .await;
+    assert_eq!(
+        body["data"]["encryption"]["content"]["algorithm"],
+        info["data"]["encryption_algorithm"]
+    );
+    assert_eq!(body["data"]["server_acl"]["status"], "too_large");
+    assert_eq!(body["data"]["server_acl"]["content"], Value::Null);
+    assert_eq!(body["data"]["guest_access"]["status"], "available");
+    assert_eq!(body["data"]["creation"]["status"], "unknown");
+    assert!(serde_json::to_vec(&body).unwrap().len() < 4096);
+    store.delete_account_row(account_id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_metadata_content_limit_boundary_and_auth() {
+    let store = store().await;
+    let account_id = store
+        .upsert_account(
+            &format!("@metadata-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .unwrap()
+        .account_id;
+    let room_id = format!("!metadata-{}:localhost", Uuid::new_v4());
+    let app = read_app(store.clone());
+    let uri = format!("/v1/accounts/{account_id}/rooms/{room_id}/metadata");
+    let (status, _) = request(&app, "GET", &uri, None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = request(&app, "GET", &uri, None, Some("Bearer invalid")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A legal compact ACL can exceed 64 KiB in PostgreSQL's spaced rendering.
+    let content = json!({
+        "allow": ["*"],
+        "deny": (0..3600).map(|i| format!("s{i:010}.org")).collect::<Vec<_>>()
+    });
+    assert!(serde_json::to_vec(&content).unwrap().len() < 65536);
+    let rendered_size: i32 =
+        sqlx_core::query_scalar::query_scalar("SELECT octet_length($1::jsonb::text)")
+            .bind(&content)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert!(rendered_size > 65536);
+    store
+        .upsert_room_state(&RoomStateUpsert {
+            account_id,
+            room_id: &room_id,
+            event_type: "m.room.server_acl",
+            state_key: "",
+            event_id: "$large-valid-acl:localhost",
+            sender: "@alice:localhost",
+            origin_ts: 1,
+            content: Some(content),
+        })
+        .await
+        .unwrap();
+    let (_, body) = get(&app, &uri).await;
+    assert_eq!(body["data"]["server_acl"]["status"], "available");
+    assert_eq!(
+        body["data"]["server_acl"]["content"]["deny"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3600
+    );
+
+    // Measure PostgreSQL's text representation rather than guessing the
+    // difference between compact serde output and JSONB's spacing.
+    let overhead: i32 =
+        sqlx_core::query_scalar::query_scalar("SELECT octet_length($1::jsonb::text)")
+            .bind(json!({"alt_aliases": [], "org.example.padding": ""}))
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    for (size, expected) in [(131072, "available"), (131073, "too_large")] {
+        let content = json!({
+            "alt_aliases": [], "org.example.padding": "x".repeat((size - overhead) as usize)
+        });
+        store
+            .upsert_room_state(&RoomStateUpsert {
+                account_id,
+                room_id: &room_id,
+                event_type: "m.room.canonical_alias",
+                state_key: "",
+                event_id: &format!("$boundary-{size}:localhost"),
+                sender: "@alice:localhost",
+                origin_ts: size.into(),
+                content: Some(content),
+            })
+            .await
+            .unwrap();
+        let (status, body) = get(&app, &uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["aliases"]["status"], expected);
+    }
+    store.delete_account_row(account_id).await.unwrap();
+}
