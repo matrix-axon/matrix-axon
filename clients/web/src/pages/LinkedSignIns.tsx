@@ -367,7 +367,9 @@ export function LinkedSignIns() {
   // since that is someone who backed out of the provider's page.
   const lastSignInAt = oauth.lastSignInAt.value
   useEffect(() => {
-    if (management !== true || lastSignInAt === null) {
+    // Not before the server has said whether it serves management: until
+    // then there is no telling which changes can be made at all.
+    if (management === null || lastSignInAt === null) {
       return
     }
     const intent = readIntent()
@@ -375,6 +377,12 @@ export function LinkedSignIns() {
       return
     }
     clearIntent()
+    // Linking is an OAuth route and goes ahead either way. Unlinking is a
+    // management route; with management off it cannot be done, so the intent
+    // is dropped instead of being left to expire.
+    if (intent.kind === 'unlink' && !management) {
+      return
+    }
     start(intent, true)
     // `start` closes over state setters only; re-running on its identity would
     // repeat a destructive request.

@@ -622,6 +622,113 @@ describe('linking an Apple ID', () => {
     expect(view.queryByRole('heading', { name: 'Linked sign-ins' })).toBeNull()
   })
 
+  it('finishes a link that needed a browser sign-in, with management off', async () => {
+    let challenges = 0
+    server.use(
+      managementOff(),
+      providers(['google'], ['apple']),
+      http.post(`${TEST_BASE_URL}/v1/oauth/apple/native/challenge`, () => {
+        challenges += 1
+        return challenges === 1
+          ? refuse(403, 'recent_sign_in_required')
+          : HttpResponse.json({ challenge: 'c', nonce: 'n', expires_in: 300 })
+      }),
+      http.post(`${TEST_BASE_URL}/v1/oauth/apple/native/token`, () =>
+        HttpResponse.json({
+          access_token: 'apple-access',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: 'apple-refresh',
+        }),
+      ),
+      http.post(`${TEST_BASE_URL}/v1/oauth/token`, () =>
+        HttpResponse.json({
+          access_token: 'fresh-access',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: 'fresh-refresh',
+        }),
+      ),
+    )
+    const pendingStorage = memoryStorage()
+    const view = renderPanel(
+      testServices({
+        token: null,
+        storage: oauthSession('google'),
+        pendingStorage,
+        navigate: vi.fn(),
+        platform: { appleSignIn: () => Promise.resolve('identity-token') },
+      }),
+    )
+
+    fireEvent.click(
+      await view.findByRole('button', { name: 'Link an Apple ID' }),
+    )
+    await view.findByText(/Continue signing in in your browser/)
+    const { state } = JSON.parse(
+      pendingStorage.getItem('axon.oauth.pending') ?? '{}',
+    ) as { state: string }
+    await view.services.auth.completeOAuthRedirect(
+      new URL(`org.matrixaxon.axon:/oauth/callback?code=c&state=${state}`),
+    )
+
+    await view.findByText(/You are signed in with Apple/)
+    expect(challenges).toBe(2)
+    expect(window.sessionStorage.getItem(RESUME_KEY)).toBeNull()
+  })
+
+  it('drops a waiting unlink on a server that no longer serves management', async () => {
+    let deletes = 0
+    server.use(
+      managementOff(),
+      providers(['google']),
+      http.delete(`${IDENTITIES_URL}/:id`, () => {
+        deletes += 1
+        return refuse(403, 'management_disabled')
+      }),
+      http.post(`${TEST_BASE_URL}/v1/oauth/token`, () =>
+        HttpResponse.json({
+          access_token: 'fresh-access',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: 'fresh-refresh',
+        }),
+      ),
+    )
+    const pendingStorage = memoryStorage()
+    const view = renderPanel(
+      testServices({
+        token: null,
+        storage: oauthSession('google'),
+        pendingStorage,
+        navigate: vi.fn(),
+      }),
+    )
+    await view.services.auth.oauth.discoverProviders()
+    await view.services.auth.oauth.startSignIn('google')
+    window.sessionStorage.setItem(
+      RESUME_KEY,
+      JSON.stringify({
+        kind: 'unlink',
+        identityId: APPLE,
+        allowLockout: false,
+        current: false,
+        createdAt: Date.now() - 1000,
+      }),
+    )
+    const { state } = JSON.parse(
+      pendingStorage.getItem('axon.oauth.pending') ?? '{}',
+    ) as { state: string }
+    await view.services.auth.completeOAuthRedirect(
+      new URL(`org.matrixaxon.axon:/oauth/callback?code=c&state=${state}`),
+    )
+
+    await waitFor(() =>
+      expect(window.sessionStorage.getItem(RESUME_KEY)).toBeNull(),
+    )
+    expect(deletes).toBe(0)
+  })
+
   it('offers nothing where native Apple is not available', async () => {
     server.use(managementOff(), noProviders())
     const view = renderPanel(
