@@ -2923,8 +2923,10 @@ export interface components {
             content?: null | {
                 additional_creators?: string[] | null;
                 creator?: string | null;
+                /** @description Reads Matrix `m.federate`; the API emits `federate`. */
                 federate?: boolean | null;
                 predecessor?: null | components["schemas"]["RoomPredecessorMetadata"];
+                /** @description Reads Matrix `type`; the API emits `room_type`. */
                 room_type?: string | null;
                 room_version?: string | null;
             };
@@ -7611,11 +7613,18 @@ export interface operations {
                     "application/json": components["schemas"]["ApiResponse_RoomMetadataDto"];
                 };
             };
-            /** @description Missing, malformed, or revoked bearer token */
+            /** @description Missing or invalid bearer token */
             401: {
                 headers: {
-                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
-                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal database failure */
+            500: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content: {

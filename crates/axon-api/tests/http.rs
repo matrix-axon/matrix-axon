@@ -4349,6 +4349,7 @@ async fn room_metadata_replacement_and_unknown_state() {
         ),
         (2, Some(json!({"alt_aliases": []})), json!([]), "available"),
         (3, None, Value::Null, "unavailable"),
+        (4, Some(Value::Null), Value::Null, "unavailable"),
     ] {
         store
             .upsert_room_state(&RoomStateUpsert {
@@ -4378,7 +4379,7 @@ async fn room_metadata_replacement_and_unknown_state() {
         if origin_ts == 2 {
             assert_eq!(aliases["content"]["alias"], Value::Null);
         }
-        if origin_ts == 3 {
+        if origin_ts >= 3 {
             assert_eq!(aliases["content"], Value::Null);
         }
     }

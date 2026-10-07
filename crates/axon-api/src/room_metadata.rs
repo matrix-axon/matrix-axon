@@ -87,7 +87,18 @@ impl<T: MetadataContent> CachedRoomMetadata<T> {
         if row.oversized {
             snapshot.status = RoomMetadataStatus::TooLarge;
         } else if let Some(content) = row.state.content {
-            if let Value::Object(mut fields) = content {
+            if content.is_null() {
+                // Both SQL NULL and JSON null represent missing retained
+                // content; neither establishes redaction or field removal.
+                snapshot.status = RoomMetadataStatus::Unavailable;
+            } else if !content.is_object() {
+                snapshot.status = RoomMetadataStatus::Invalid;
+            } else if let Ok(content) = T::deserialize(&content) {
+                // The ordinary valid path decodes once, without cloning the
+                // JSON tree or allocating discarded validation DTOs.
+                snapshot.status = RoomMetadataStatus::Available;
+                snapshot.content = Some(content);
+            } else if let Value::Object(mut fields) = content {
                 let mut invalid = BTreeSet::new();
                 T::repair(&mut fields, &mut invalid);
                 snapshot.invalid_fields = invalid.into_iter().collect();
@@ -136,9 +147,10 @@ fn repair_field<T: DeserializeOwned>(
     key: &str,
     invalid: &mut BTreeSet<String>,
 ) {
-    if fields.get(key).is_some_and(|value| {
-        !value.is_null() && serde_json::from_value::<T>(value.clone()).is_err()
-    }) {
+    if fields
+        .get(key)
+        .is_some_and(|value| !value.is_null() && T::deserialize(value).is_err())
+    {
         fields.remove(key);
         invalid.insert(key.into());
     }
@@ -151,7 +163,7 @@ fn repair_list<T: DeserializeOwned>(
 ) {
     if let Some(Value::Array(entries)) = fields.get_mut(key) {
         entries.retain(|value| {
-            let valid = serde_json::from_value::<T>(value.clone()).is_ok();
+            let valid = T::deserialize(value).is_ok();
             if !valid {
                 invalid.insert(format!("{key}[]"));
             }
@@ -165,9 +177,7 @@ fn repair_list<T: DeserializeOwned>(
 fn repair_power_map(fields: &mut Map<String, Value>, key: &str, invalid: &mut BTreeSet<String>) {
     if let Some(Value::Object(entries)) = fields.get_mut(key) {
         entries.retain(|_, value| {
-            let valid = serde_json::from_value::<StoredPowerLevel>(value.clone())
-                .and_then(StoredPowerLevel::into_integer::<serde_json::Error>)
-                .is_ok();
+            let valid = is_valid_power_level(value);
             if !valid {
                 invalid.insert(format!("{key}.*"));
             }
@@ -175,6 +185,22 @@ fn repair_power_map(fields: &mut Map<String, Value>, key: &str, invalid: &mut BT
         });
     } else {
         repair_field::<BTreeMap<String, StoredPowerLevel>>(fields, key, invalid);
+    }
+}
+
+fn is_valid_power_level(value: &Value) -> bool {
+    StoredPowerLevel::deserialize(value)
+        .and_then(StoredPowerLevel::into_integer::<serde_json::Error>)
+        .is_ok()
+}
+
+fn repair_power_field(fields: &mut Map<String, Value>, key: &str, invalid: &mut BTreeSet<String>) {
+    if fields
+        .get(key)
+        .is_some_and(|value| !value.is_null() && !is_valid_power_level(value))
+    {
+        fields.remove(key);
+        invalid.insert(key.into());
     }
 }
 
@@ -207,8 +233,10 @@ pub struct RoomCreationMetadata {
     pub creator: Option<String>,
     pub additional_creators: Option<Vec<String>>,
     pub room_version: Option<String>,
+    /// Reads Matrix `m.federate`; the API emits `federate`.
     #[serde(rename(deserialize = "m.federate"))]
     pub federate: Option<bool>,
+    /// Reads Matrix `type`; the API emits `room_type`.
     #[serde(rename(deserialize = "type"))]
     pub room_type: Option<String>,
     pub predecessor: Option<RoomPredecessorMetadata>,
@@ -384,18 +412,6 @@ metadata_fields!(RoomGuestAccessMetadata {
     "guest_access": repair_field<String>,
 });
 
-fn repair_power_field(fields: &mut Map<String, Value>, key: &str, invalid: &mut BTreeSet<String>) {
-    if fields.get(key).is_some_and(|value| {
-        !value.is_null()
-            && serde_json::from_value::<StoredPowerLevel>(value.clone())
-                .and_then(StoredPowerLevel::into_integer::<serde_json::Error>)
-                .is_err()
-    }) {
-        fields.remove(key);
-        invalid.insert(key.into());
-    }
-}
-
 impl MetadataContent for RoomPowerLevelsMetadata {
     fn repair(fields: &mut Map<String, Value>, invalid: &mut BTreeSet<String>) {
         for key in [
@@ -441,10 +457,16 @@ macro_rules! room_metadata {
 
             pub(crate) fn from_rows(account_id: Uuid, rows: Vec<RoomMetadataStateRow>) -> Self {
                 let mut metadata = Self::default();
+                let mut seen = BTreeSet::new();
                 for row in rows {
+                    debug_assert!(seen.insert(row.state.event_type.clone()), "duplicate room metadata state type");
                     match row.state.event_type.as_str() {
                         $($event_type => metadata.$field = CachedRoomMetadata::from_row(account_id, row),)+
-                        _ => {}
+                        _ => tracing::debug!(
+                            %account_id, room_id = %row.state.room_id,
+                            event_id = %row.state.event_id, event_type = %row.state.event_type,
+                            "ignored unexpected room metadata state type"
+                        ),
                     }
                 }
                 metadata
@@ -470,23 +492,55 @@ mod tests {
     use axon_store::RoomStateRow;
     use serde_json::json;
 
+    fn state_row(event_type: &str, content: Value) -> RoomMetadataStateRow {
+        RoomMetadataStateRow {
+            state: RoomStateRow {
+                room_id: "!test:example.org".into(),
+                event_type: event_type.into(),
+                state_key: String::new(),
+                event_id: "$state".into(),
+                sender: "@creator:example.org".into(),
+                origin_ts: 1,
+                content: Some(content),
+            },
+            oversized: false,
+        }
+    }
+
     fn snapshot(event_type: &str, content: Value) -> Value {
-        let metadata = RoomMetadataDto::from_rows(
+        serde_json::to_value(RoomMetadataDto::from_rows(
             Uuid::new_v4(),
-            vec![RoomMetadataStateRow {
-                state: RoomStateRow {
-                    room_id: "!test:example.org".into(),
-                    event_type: event_type.into(),
-                    state_key: String::new(),
-                    event_id: "$state".into(),
-                    sender: "@creator:example.org".into(),
-                    origin_ts: 1,
-                    content: Some(content),
-                },
-                oversized: false,
-            }],
+            vec![state_row(event_type, content)],
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn json_null_content_is_unavailable_and_unknown_types_are_ignored() {
+        let data = snapshot("m.room.encryption", Value::Null);
+        assert_eq!(data["encryption"]["status"], "unavailable");
+        assert_eq!(data["encryption"]["content"], Value::Null);
+        assert_eq!(data["encryption"]["event_id"], "$state");
+        assert_eq!(data["encryption"]["invalid_fields"], json!([]));
+        let data = snapshot("org.example.unexpected", json!({}));
+        assert!(data
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|s| s["status"] == "unknown"));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "duplicate room metadata state type")]
+    fn duplicate_state_types_are_detected() {
+        RoomMetadataDto::from_rows(
+            Uuid::new_v4(),
+            vec![
+                state_row("m.room.create", json!({})),
+                state_row("m.room.create", json!({})),
+            ],
         );
-        serde_json::to_value(metadata).unwrap()
     }
 
     #[test]

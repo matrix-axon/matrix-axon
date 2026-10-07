@@ -11,6 +11,8 @@ It requires the same bearer authentication as other `/v1/` reads.
 It performs one database query for a fixed set of singleton tuples, with no homeserver request, membership aggregation, or discovery-cache merge.
 Each state's PostgreSQL-rendered content is limited to 128 KiB before transfer and JSON decoding.
 This is a local transfer budget with headroom for JSONB spacing above Matrix's compact event-size limit; it is not an upstream event-validity check.
+PostgreSQL still detoasts and renders the full selected value before measuring it; this cap does not bound database-side rendering work.
+[Issue 631](https://github.com/matrix-axon/matrix-axon/issues/631) tracks that remaining resource bound.
 An oversized state keeps its provenance but withholds its content; other fields remain available.
 
 | Snapshot             | State type                  | Detail fields                                                                            |
@@ -24,6 +26,9 @@ An oversized state keeps its provenance but withholds its content; other fields 
 | `history_visibility` | `m.room.history_visibility` | `history_visibility`                                                                     |
 | `guest_access`       | `m.room.guest_access`       | `guest_access`                                                                           |
 
+Creation content maps Matrix `m.federate` to API `federate` and Matrix `type` to API `room_type`.
+These names deliberately differ from the stored Matrix keys.
+
 Each snapshot includes `status`, `event_id`, `sender`, `origin_ts`, and `content`.
 `origin_ts` is the upstream event timestamp, not the time of the last successful sync or an access-freshness guarantee.
 
@@ -31,7 +36,7 @@ Each snapshot includes `status`, `event_id`, `sender`, `origin_ts`, and `content
 | ------------- | ---------------------------------------------------------------------------------------------------- |
 | `unknown`     | No cached tuple; Axon cannot establish that the setting is unset. Provenance and content are `null`. |
 | `available`   | Typed content is available, including explicit empty lists and omitted fields.                       |
-| `unavailable` | A tuple exists but its content was not retained; this is not a redaction indicator.                  |
+| `unavailable` | A tuple exists with SQL NULL or JSON null content; neither establishes redaction or removal.         |
 | `partial`     | Valid fields and entries remain available; `invalid_fields` identifies withheld malformed data.      |
 | `invalid`     | Stored content has an incompatible shape; content is withheld.                                       |
 | `too_large`   | Stored content exceeded the content-size bound; content is withheld.                                 |
@@ -46,6 +51,7 @@ In particular, an unknown encryption snapshot does not mean "unencrypted," and a
 For available creation state, the enclosing `sender` provides the create-event sender when a room version omits the `creator` content field.
 A creation predecessor can omit `event_id`; its `room_id` remains available.
 Power levels describe configured state, with legacy decimal strings and floats normalized to integers (floats truncate toward zero); they are not resolved permissions and must not drive authorization decisions.
+Legacy normalization currently does not consult the room version; [issue 632](https://github.com/matrix-axon/matrix-axon/issues/632) tracks version-aware validation or diagnostics.
 Unknown condition types retain their `type` and optional `room_id`; extension-specific payloads are not exposed by this typed read.
 An empty content object is not itself evidence of redaction: the stored projection does not retain a reliable redaction marker.
 Redacted state may therefore be `available` with empty or retained fields; availability describes the cached shape, not whether the original event was redacted.

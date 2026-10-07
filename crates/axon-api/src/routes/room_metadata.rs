@@ -24,6 +24,8 @@ use crate::room_metadata::RoomMetadataDto;
     ),
     responses(
         (status = 200, description = "Typed cached state snapshots with availability and provenance", body = ApiResponse<RoomMetadataDto>),
+        (status = 401, description = "Missing or invalid bearer token", body = crate::response::ErrorResponse),
+        (status = 500, description = "Internal database failure", body = crate::response::ErrorResponse),
     ),
     tag = "rooms",
 )]

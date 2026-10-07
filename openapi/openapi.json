@@ -4314,15 +4314,17 @@
             }
           },
           "401": {
-            "description": "Missing, malformed, or revoked bearer token",
-            "headers": {
-              "WWW-Authenticate": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
                 "schema": {
-                  "type": "string"
-                },
-                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
               }
-            },
+            }
+          },
+          "500": {
+            "description": "Internal database failure",
             "content": {
               "application/json": {
                 "schema": {
@@ -10811,7 +10813,8 @@
                     "type": [
                       "boolean",
                       "null"
-                    ]
+                    ],
+                    "description": "Reads Matrix `m.federate`; the API emits `federate`."
                   },
                   "predecessor": {
                     "oneOf": [
@@ -10827,7 +10830,8 @@
                     "type": [
                       "string",
                       "null"
-                    ]
+                    ],
+                    "description": "Reads Matrix `type`; the API emits `room_type`."
                   },
                   "room_version": {
                     "type": [

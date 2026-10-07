@@ -148,3 +148,16 @@ fn all_local_schema_references_resolve() {
     let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
     visit(&spec, &spec);
 }
+
+#[test]
+fn room_metadata_documents_typed_authentication_and_database_errors() {
+    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let responses =
+        &spec["paths"]["/v1/accounts/{account_id}/rooms/{room_id}/metadata"]["get"]["responses"];
+    for status in ["401", "500"] {
+        assert_eq!(
+            responses[status]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ErrorResponse"
+        );
+    }
+}

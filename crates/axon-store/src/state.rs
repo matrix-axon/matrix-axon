@@ -230,7 +230,9 @@ impl Store {
     /// and JSON decoding, including unknown extensions. This transfer budget
     /// allows spacing overhead above Matrix's compact event-size limit; it
     /// does not validate upstream event sizes. MATERIALIZED computes the
-    /// rendering size once per tuple, even for oversized content.
+    /// rendering size once per tuple, even for oversized content. Rendering
+    /// itself is not bounded by this transfer cap: PostgreSQL still detoasts
+    /// and renders the full stored value before measuring it.
     pub async fn room_metadata_states(
         &self,
         account_id: Uuid,
