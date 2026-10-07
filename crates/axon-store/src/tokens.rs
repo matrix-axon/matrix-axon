@@ -358,6 +358,11 @@ impl Store {
     /// so the CLI can report the difference. Idempotent: the first revocation's
     /// timestamp is preserved.
     ///
+    /// Revoking an OAuth session's access token also revokes the refresh
+    /// tokens of that identity and client, so the session cannot renew itself
+    /// (see [`end_sessions_in_tx`](Self::end_sessions_in_tx) for how wide
+    /// that cut is).
+    ///
     /// Takes the credential lock, like every credential-removing write, so a
     /// guarded removal elsewhere never counts this token as a survivor while
     /// it is being revoked.
@@ -407,7 +412,8 @@ impl Store {
             .await?;
         Self::lock_credentials(&mut tx).await?;
         let Some(row) = sqlx_core::query::query(
-            "SELECT revoked_at IS NOT NULL AS revoked, expires_at IS NULL AS non_expiring \
+            "SELECT revoked_at IS NOT NULL AS revoked, expires_at IS NULL AS non_expiring, \
+                    oauth_identity_id, client_id \
                FROM tokens WHERE id = $1 FOR UPDATE",
         )
         .bind(id)
@@ -425,6 +431,14 @@ impl Store {
             .bind(id)
             .execute(&mut *tx)
             .await?;
+        // An OAuth session's access token is half of the session. Left alone,
+        // its refresh token would mint a replacement on the client's next
+        // request and the revoke would have ended nothing.
+        let identity: Option<Uuid> = row.try_get("oauth_identity_id")?;
+        let client: Option<String> = row.try_get("client_id")?;
+        if let (Some(identity), Some(client)) = (identity, client) {
+            Self::end_sessions_in_tx(&mut tx, identity, &client).await?;
+        }
         // Counted on the state this transaction would commit, and only when
         // this token was a survivor to begin with.
         if let Some(usable_providers) = guard {
@@ -437,6 +451,42 @@ impl Store {
         }
         tx.commit().await?;
         Ok(TokenRevocation::Revoked)
+    }
+
+    /// Revoke every active refresh token for one identity and client, so no
+    /// session of that client can renew itself.
+    ///
+    /// Nothing ties an access token to the one refresh chain that minted it,
+    /// only to its identity and client, so this is the narrowest cut there
+    /// is: it ends every session that client holds for that identity, which
+    /// is also what refresh-token reuse detection does. Access tokens those
+    /// sessions already hold are not touched and run out on their own, within
+    /// the access-token lifetime.
+    ///
+    /// Two statements on purpose. A rotation in flight holds its old row's
+    /// lock and has already inserted the replacement, which a single `UPDATE`
+    /// would wait for and then not see. Locking the rows first does the
+    /// waiting; the `UPDATE` then runs on a snapshot that includes whatever
+    /// that rotation committed.
+    async fn end_sessions_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        oauth_identity_id: Uuid,
+        client_id: &str,
+    ) -> Result<(), StoreError> {
+        for sql in [
+            "SELECT id FROM oauth_refresh_tokens \
+              WHERE oauth_identity_id = $1 AND client_id = $2 AND revoked_at IS NULL \
+                FOR UPDATE",
+            "UPDATE oauth_refresh_tokens SET revoked_at = now() \
+              WHERE oauth_identity_id = $1 AND client_id = $2 AND revoked_at IS NULL",
+        ] {
+            sqlx_core::query::query(sql)
+                .bind(oauth_identity_id)
+                .bind(client_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Revoke every still-active token minted for `oauth_identity_id`.

@@ -1513,7 +1513,9 @@ export interface paths {
         /**
          * Unbind a sign-in identity and end every session it was used to start.
          * @description Axon forgets the identity: its access tokens are revoked and its refresh
-         *     tokens deleted, atomically. This does **not** revoke the upstream
+         *     tokens deleted, atomically. So are the non-expiring tokens its sessions
+         *     minted through this API, and any those minted in turn; a token minted from
+         *     the command line or by another identity's session is not affected. This does **not** revoke the upstream
          *     provider's own authorization of Axon; that is the provider's to withdraw.
          *
          *     A credential change, so it needs a non-expiring token or a session whose
@@ -1574,7 +1576,14 @@ export interface paths {
         post?: never;
         /**
          * Revoke a token. It stops working at once and stays in the list.
-         * @description Revoking the token that made the request is allowed: it is how a device
+         * @description Revoking a sign-in session's access token also ends the session's ability
+         *     to renew itself. Axon cannot tell one session of a client from another,
+         *     so this signs out every session that client holds for that identity,
+         *     the caller's included if it is one of them. Access tokens those other
+         *     sessions already hold keep working until they expire, within the hour by
+         *     default.
+         *
+         *     Revoking the token that made the request is allowed: it is how a device
          *     signs itself out. Revoking a token that is already revoked succeeds and
          *     changes nothing.
          *

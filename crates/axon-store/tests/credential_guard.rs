@@ -377,6 +377,175 @@ async fn the_capped_list_keeps_working_tokens_ahead_of_dead_ones() {
     assert_eq!(by(minted.id).expires_at, None, "an API mint never expires");
 }
 
+/// Revoking a session's access token has to stop the session renewing
+/// itself, or the client just refreshes and carries on.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn revoking_a_session_token_revokes_that_clients_refresh_tokens_only() {
+    let store = migrated_store().await;
+    clear_credentials(&raw_pool().await).await;
+    let apple = bind(&store, "apple").await;
+    let google = bind(&store, "google").await;
+    let later = Utc::now() + Duration::days(30);
+    let refresh = |identity: Uuid, client: &'static str| {
+        let store = store.clone();
+        async move {
+            let hash = format!("hash-{}", Uuid::new_v4());
+            store
+                .issue_refresh_token(&hash, identity, client, later, None)
+                .await
+                .unwrap();
+            hash
+        }
+    };
+    let web = refresh(apple, "web").await;
+    let web_again = refresh(apple, "web").await;
+    let desktop = refresh(apple, "desktop").await;
+    let other_identity = refresh(google, "web").await;
+    let session = store
+        .issue_oauth_token(
+            "session",
+            Utc::now() + Duration::hours(1),
+            "apple",
+            apple,
+            "web",
+            None,
+        )
+        .await
+        .unwrap();
+    // A non-expiring token has no session behind it: revoking one must not
+    // touch anybody's refresh tokens.
+    let plain = store.issue_token("plain").await.unwrap();
+    store.issue_token("survivor").await.unwrap();
+    store.revoke_token(plain.id).await.unwrap();
+    let redeems = |hash: String| {
+        let store = store.clone();
+        async move {
+            store
+                .redeem_refresh_token(
+                    &hash,
+                    Uuid::new_v4(),
+                    &format!("hash-{}", Uuid::new_v4()),
+                    later,
+                )
+                .await
+                .unwrap()
+                .is_ok()
+        }
+    };
+    let probe = refresh(apple, "web").await;
+    assert!(redeems(probe).await, "nothing is revoked yet");
+
+    assert_eq!(
+        store
+            .revoke_token_unless_last_credential(session.id, &[])
+            .await
+            .unwrap(),
+        TokenRevocation::Revoked
+    );
+    assert!(!redeems(web).await, "the session's client cannot refresh");
+    assert!(!redeems(web_again).await, "nor can its other sessions");
+    assert!(redeems(desktop).await, "another client is untouched");
+    assert!(
+        redeems(other_identity).await,
+        "another identity is untouched"
+    );
+}
+
+/// A token minted from a session carries no identity of its own. Unbinding
+/// the identity must still take it, and anything it minted, with it.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn unbinding_revokes_what_that_identitys_sessions_minted() {
+    let store = migrated_store().await;
+    clear_credentials(&raw_pool().await).await;
+    let apple = bind(&store, "apple").await;
+    let google = bind(&store, "google").await;
+    let session_of = |identity: Uuid, provider: &'static str| {
+        let store = store.clone();
+        async move {
+            store
+                .issue_oauth_token(
+                    "session",
+                    Utc::now() + Duration::hours(1),
+                    provider,
+                    identity,
+                    "web",
+                    Some(Utc::now()),
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let apple_session = session_of(apple, "apple").await;
+    let google_session = session_of(google, "google").await;
+    let minted = store
+        .issue_token_created_by("from-apple", apple_session.id)
+        .await
+        .unwrap();
+    let grandchild = store
+        .issue_token_created_by("from-that", minted.id)
+        .await
+        .unwrap();
+    let from_google = store
+        .issue_token_created_by("from-google", google_session.id)
+        .await
+        .unwrap();
+    let cli = store.issue_token("cli").await.unwrap();
+    let from_cli = store
+        .issue_token_created_by("from-cli", cli.id)
+        .await
+        .unwrap();
+    let works = |token: String| {
+        let store = store.clone();
+        async move { store.verify_token(&token).await.unwrap().is_some() }
+    };
+
+    // The guard counts what is left after the cascade: with only the Apple
+    // identity's own descendants as non-expiring tokens, and no other usable
+    // identity, this unbind would lock the owner out.
+    store.revoke_token(cli.id).await.unwrap();
+    store.revoke_token(from_cli.id).await.unwrap();
+    store.revoke_token(from_google.id).await.unwrap();
+    assert_eq!(
+        store
+            .delete_identity_unless_last_credential(apple, &providers(&["apple"]))
+            .await
+            .unwrap(),
+        IdentityRemoval::LastCredential,
+        "tokens the unbind would revoke are not survivors"
+    );
+    assert!(
+        works(minted.token.clone()).await,
+        "a refusal changes nothing"
+    );
+
+    let other = store.issue_token("other").await.unwrap();
+    let from_other = store
+        .issue_token_created_by("from-other", other.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .delete_identity_unless_last_credential(apple, &providers(&["apple"]))
+            .await
+            .unwrap(),
+        IdentityRemoval::Removed
+    );
+    assert!(!works(apple_session.token).await);
+    assert!(!works(minted.token).await, "minted by the unbound session");
+    assert!(!works(grandchild.token).await, "and what that minted");
+    assert!(
+        works(google_session.token).await,
+        "another identity's session"
+    );
+    assert!(works(other.token).await);
+    assert!(
+        works(from_other.token).await,
+        "minted by an unrelated token"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn the_sign_in_time_survives_refresh_rotation_unchanged() {

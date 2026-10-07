@@ -7333,7 +7333,7 @@
           "management"
         ],
         "summary": "Unbind a sign-in identity and end every session it was used to start.",
-        "description": "Axon forgets the identity: its access tokens are revoked and its refresh\ntokens deleted, atomically. This does **not** revoke the upstream\nprovider's own authorization of Axon; that is the provider's to withdraw.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise). Unbinding the identity the calling\nsession signed in with ends that session too.",
+        "description": "Axon forgets the identity: its access tokens are revoked and its refresh\ntokens deleted, atomically. So are the non-expiring tokens its sessions\nminted through this API, and any those minted in turn; a token minted from\nthe command line or by another identity's session is not affected. This does **not** revoke the upstream\nprovider's own authorization of Axon; that is the provider's to withdraw.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise). Unbinding the identity the calling\nsession signed in with ends that session too.",
         "operationId": "unbind_identity",
         "parameters": [
           {
@@ -7545,7 +7545,7 @@
           "management"
         ],
         "summary": "Revoke a token. It stops working at once and stays in the list.",
-        "description": "Revoking the token that made the request is allowed: it is how a device\nsigns itself out. Revoking a token that is already revoked succeeds and\nchanges nothing.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise).",
+        "description": "Revoking a sign-in session's access token also ends the session's ability\nto renew itself. Axon cannot tell one session of a client from another,\nso this signs out every session that client holds for that identity,\nthe caller's included if it is one of them. Access tokens those other\nsessions already hold keep working until they expire, within the hour by\ndefault.\n\nRevoking the token that made the request is allowed: it is how a device\nsigns itself out. Revoking a token that is already revoked succeeds and\nchanges nothing.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise).",
         "operationId": "revoke_token",
         "parameters": [
           {

@@ -1348,3 +1348,110 @@ async fn a_completed_bind_outlives_its_expiry_but_pending_binds_are_capped() {
     let (status, _) = call(&app, Method::GET, &uri, Some(&owner.token)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// Revoking a session's access token through the API ends the session: the
+/// client's refresh token no longer buys a new one.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn revoking_a_session_token_stops_the_session_refreshing() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let app = app(store.clone(), true, Providers::Browser(&["google"]));
+    let owner = store.issue_token("owner").await.unwrap();
+    let google = bind(&store, "google", None).await;
+    let refresh = format!("axon_rt_{}", Uuid::new_v4());
+    store
+        .issue_refresh_token(
+            &axon_core::hash_secret(&refresh),
+            google,
+            CLIENT_ID,
+            Utc::now() + Duration::days(30),
+            just_now(),
+        )
+        .await
+        .unwrap();
+    let redeem = |refresh_token: String| {
+        let app = app.clone();
+        async move {
+            post_form(
+                &app,
+                "/v1/oauth/token",
+                &[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", &refresh_token),
+                    ("client_id", CLIENT_ID),
+                ],
+                None,
+            )
+            .await
+        }
+    };
+    // The session as a client holds it: an access token and the refresh
+    // token that would replace it.
+    let (status, body) = redeem(refresh).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let access = body["access_token"].as_str().unwrap().to_owned();
+    let refresh = body["refresh_token"].as_str().unwrap().to_owned();
+    let access_id = store.verify_token(&access).await.unwrap().unwrap().id;
+
+    let (status, _) = call(
+        &app,
+        Method::DELETE,
+        &format!("{TOKENS}/{access_id}"),
+        Some(&owner.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _) = call(&app, Method::GET, TOKENS, Some(&access)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body) = redeem(refresh).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "invalid_grant");
+}
+
+/// A token minted from a session does not outlive unlinking that sign-in.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn unbinding_revokes_tokens_that_identitys_sessions_minted() {
+    let store = store().await;
+    clear_credentials(&store).await;
+    let app = app(store.clone(), true, Providers::Browser(&["google"]));
+    let owner = store.issue_token("owner").await.unwrap();
+    let google = bind(&store, "google", None).await;
+    let fresh = session(&store, "google", google, just_now()).await;
+
+    let (status, body) = mint(&app, &fresh, "minted-from-session").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let minted = body["data"]["token"].as_str().unwrap().to_owned();
+    let (status, body) = mint(&app, &minted, "minted-from-that").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let grandchild = body["data"]["token"].as_str().unwrap().to_owned();
+    let (status, body) = mint(&app, &owner.token, "minted-from-owner").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let unrelated = body["data"]["token"].as_str().unwrap().to_owned();
+
+    let (status, _) = call(
+        &app,
+        Method::DELETE,
+        &format!("{IDENTITIES}/{google}"),
+        Some(&owner.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    for (token, expected, what) in [
+        (&fresh, StatusCode::UNAUTHORIZED, "the session"),
+        (&minted, StatusCode::UNAUTHORIZED, "minted by the session"),
+        (
+            &grandchild,
+            StatusCode::UNAUTHORIZED,
+            "minted by that token",
+        ),
+        (&unrelated, StatusCode::OK, "minted by the owner's token"),
+        (&owner.token, StatusCode::OK, "the owner's token"),
+    ] {
+        let (status, _) = call(&app, Method::GET, TOKENS, Some(token)).await;
+        assert_eq!(status, expected, "{what}");
+    }
+}

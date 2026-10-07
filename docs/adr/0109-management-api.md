@@ -178,6 +178,12 @@ It is how a device signs itself out everywhere.
 Only a token that is itself a surviving credential can be the last one, so only revoking an active non-expiring token is ever refused.
 Revoking an OAuth session's access token always goes through, even on an instance with no survivor left: that token was never a way back in, and refusing would stop the owner ending a session they do not recognize.
 
+Revoking a session's access token has to end the session, and the access token is only half of it: left alone, the refresh token would mint a replacement on the client's next request.
+Nothing ties an access token to the refresh chain that minted it, only to its identity and client, so the revoke also revokes every refresh token for that identity and client.
+That is the cut refresh-token reuse detection already makes (ADR 0054), and it has the same width: every session that client holds for that identity is signed out, the caller's own included if it is one of them.
+Access tokens those sessions already hold are not chased; they expire within the access-token lifetime.
+Ending exactly one session would need a session id carried from the refresh chain onto each access token, which this record does not add.
+
 ### A minted secret crosses the API once
 
 The response to a mint is the one place a raw bearer token appears in an API response.
@@ -211,6 +217,12 @@ The cap applies to the CLI verb too, since both go through the same start.
 ### Unbinding, and what it cannot do
 
 `DELETE /v1/management/oauth/identities/{id}` calls `Store::delete_identity`, which revokes the identity's tokens, deletes its refresh-token chain, and removes the row in one transaction.
+
+Unbinding also revokes the non-expiring tokens that identity's sessions minted through `POST /v1/management/tokens`, and any those tokens minted in turn, followed through `created_by_token_id`.
+A minted token carries no identity of its own, so otherwise a token minted from a session would outlive the unbind meant to end everything that sign-in could do: someone holding a freshly stolen session could mint one and keep it.
+The cost is that a device token the owner minted while signed in with that identity stops working when they unlink it.
+The lockout guard counts after this cascade, so an unbind that would leave nothing but its own descendants is still refused with `last_credential`.
+The CLI's `oauth identities unbind` goes through the same store call and cascades the same way.
 
 This is Axon forgetting the identity.
 It does not revoke the upstream provider's authorization.
