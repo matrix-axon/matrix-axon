@@ -70,7 +70,7 @@ use std::time::{Duration, Instant};
 
 use axon_core::{DatabaseConfig, DatabaseTimeouts};
 use sqlx_postgres::{PgConnectOptions, PgPool, PgPoolOptions};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 /// A handle to the Axon Postgres database.
 ///
@@ -87,22 +87,38 @@ pub struct Store {
     // connections away from authentication, sync, or request handlers.
     maintenance_pool: PgPool,
     refresh_sweep: Arc<Mutex<Option<Instant>>>,
+    purge_retry_cursor: Arc<Mutex<Option<(uuid::Uuid, String)>>>,
+    purge_wakeup: Arc<Notify>,
 }
 
 impl Store {
-    /// Connect a connection pool and run any pending migrations.
+    /// Run migrations and verify an ordinary connection; other pools open lazily.
+    /// Servers use `connect_with_config` to verify their full capacity at startup.
     pub async fn connect(database_url: &str, max_connections: u32) -> Result<Store, StoreError> {
-        Self::connect_with_config(&DatabaseConfig {
-            url: database_url.to_owned(),
-            max_connections,
-            timeouts: DatabaseTimeouts::default(),
-        })
+        Self::connect_inner(
+            &DatabaseConfig {
+                url: database_url.to_owned(),
+                max_connections,
+                timeouts: DatabaseTimeouts::default(),
+            },
+            false,
+        )
         .await
     }
 
     /// Open bounded ordinary, heavy-read, and maintenance pools from configuration.
     /// Migrations run first on a temporary pool with their own longer deadline.
     pub async fn connect_with_config(config: &DatabaseConfig) -> Result<Store, StoreError> {
+        Self::connect_inner(config, true).await
+    }
+
+    /// Short-lived commands need one ordinary connection, not the server budget.
+    /// Other pools stay lazy and keep the same deadlines if used.
+    pub async fn connect_for_cli(config: &DatabaseConfig) -> Result<Store, StoreError> {
+        Self::connect_inner(config, false).await
+    }
+
+    async fn connect_inner(config: &DatabaseConfig, verify_all: bool) -> Result<Store, StoreError> {
         config.validate()?;
         let migration_pool = Self::configured_pool(
             config,
@@ -151,8 +167,9 @@ impl Store {
             config.timeouts.lock_secs,
             "axon-index",
         )?;
-        // Reserve the entire configured budget before reporting readiness. Holding
-        // all leases simultaneously detects insufficient PostgreSQL slots at boot.
+        // Servers reserve the entire configured budget before reporting readiness.
+        // CLI/test connections verify only the ordinary pool and leave others lazy.
+        // Holding all server leases detects insufficient PostgreSQL slots at boot.
         let pools = [
             &pool,
             &read_pool,
@@ -161,8 +178,13 @@ impl Store {
             &index_pool,
         ];
         let mut leases = Vec::new();
-        for candidate in pools {
-            for _ in 0..candidate.options().get_max_connections() {
+        for (index, candidate) in pools.iter().enumerate() {
+            let required = if verify_all {
+                candidate.options().get_max_connections()
+            } else {
+                u32::from(index == 0)
+            };
+            for _ in 0..required {
                 match candidate.acquire().await {
                     Ok(connection) => leases.push(connection),
                     Err(error) => {
@@ -178,6 +200,7 @@ impl Store {
         drop(leases);
         tracing::info!(
             max_connections = config.max_connections,
+            full_capacity_verified = verify_all,
             statement_secs = config.timeouts.statement_secs,
             maintenance_statement_secs = config.timeouts.maintenance_statement_secs,
             migration_statement_secs = config.timeouts.migration_statement_secs,
@@ -194,6 +217,8 @@ impl Store {
             index_pool,
             maintenance_pool,
             refresh_sweep: Arc::new(Mutex::new(None)),
+            purge_retry_cursor: Arc::new(Mutex::new(None)),
+            purge_wakeup: Arc::new(Notify::new()),
         })
     }
 

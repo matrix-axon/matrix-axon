@@ -282,10 +282,8 @@ impl SyncEngine {
             );
         }
 
-        // Background reaper for terminal verification flows, so their grace TTL is
-        // honored even on an account with no further verify API traffic to drive
-        // the lazy sweep. Runs on the same tracker under a child of the engine
-        // token, so `shutdown` cancels and joins it with everything else.
+        // Durable room cleanup runs on the supervised tracker, with immediate
+        // wakeups after a leave and periodic retries after contention or restart.
         let purge_store = store.clone();
         let purge_cancel = cancel.child_token();
         let purge_index = index.clone();
@@ -295,20 +293,21 @@ impl SyncEngine {
             loop {
                 tokio::select! {
                     _ = purge_cancel.cancelled() => break,
-                    _ = ticker.tick() => {
-                        tokio::select! {
-                            _ = purge_cancel.cancelled() => break,
-                            result = purge_store.retry_room_purges() => {
-                                if let Some(index) = &purge_index { index.notify(); }
-                                if let Err(error) = result {
-                                    tracing::warn!(reason = error.diagnostic_reason(), "pending room purges will retry");
-                                }
-                            }
+                    _ = ticker.tick() => {},
+                    _ = purge_store.room_purge_notified() => {},
+                }
+                tokio::select! {
+                    _ = purge_cancel.cancelled() => break,
+                    result = purge_store.retry_room_purges() => {
+                        if let Some(index) = &purge_index { index.notify(); }
+                        if let Err(error) = result {
+                            tracing::warn!(reason = error.diagnostic_reason(), "pending room purges will retry");
                         }
                     }
                 }
             }
         });
+        // Reap terminal verification flows under the same shutdown tracker.
         tracker.spawn(reap_expired_flows(
             verifications.clone(),
             cancel.child_token(),
@@ -1045,7 +1044,12 @@ async fn persist_room_state_event(
     };
     if let Err(err) = ctx
         .store
-        .upsert_room_state_with_redaction(&upsert, Some(ctx.local_user_id.as_ref()), evidence)
+        .upsert_room_state_with_redaction_and_purge(
+            &upsert,
+            Some(ctx.local_user_id.as_ref()),
+            evidence,
+            ctx.purge_on_leave,
+        )
         .await
     {
         tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), error = %err, "failed to persist room state");
@@ -1066,30 +1070,8 @@ async fn persist_room_state_event(
         .await;
     }
 
-    // M10 purge-on-leave (ADR 0044): when this state event is *this account*
-    // leaving or being banned and the operator enabled destructive purge, remove
-    // the room's stored events + search documents. Idempotent — a later re-join
-    // re-backfills. Off by default; when off, left rooms are retained and merely
-    // hidden from search by the membership filter.
-    if ctx.purge_on_leave
-        && event_type == "m.room.member"
-        && state_key.as_str() == &*ctx.local_user_id
-    {
-        let membership = raw_val
-            .get("content")
-            .and_then(|c| c.get("membership"))
-            .and_then(serde_json::Value::as_str);
-        if matches!(membership, Some("leave") | Some("ban")) {
-            match ctx.store.queue_room_purge(ctx.account_id, &room_id).await {
-                Ok(_) => {
-                    tracing::info!(account_id = %ctx.account_id, room_id = %room_id, "queued room purge on leave");
-                }
-                Err(err) => {
-                    tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, error = %err, "failed to queue room purge on leave");
-                }
-            }
-        }
-    }
+    // Local leave/ban and its purge intent commit together in the store. The
+    // supervised worker is notified immediately, keeping bulk cleanup off sync.
 }
 
 /// Event handler: per-room account data (fully-read markers, tags, …) → the

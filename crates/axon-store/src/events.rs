@@ -1147,11 +1147,11 @@ impl Store {
             "SELECT th.root_event_id, th.reply_count, \
                     th.latest_reply_event_id, th.latest_reply_ts \
              FROM ( \
-                 SELECT DISTINCT ON (relates_to->>'event_id') \
-                        relates_to->>'event_id' AS root_event_id, \
-                        COUNT(*) OVER (PARTITION BY relates_to->>'event_id') AS reply_count, \
-                        event_id AS latest_reply_event_id, \
-                        origin_ts AS latest_reply_ts \
+                 SELECT relates_to->>'event_id' AS root_event_id, \
+                        COUNT(*)                  AS reply_count, \
+                        (array_agg(event_id ORDER BY origin_ts DESC, id DESC))[1] \
+                            AS latest_reply_event_id, \
+                        MAX(origin_ts)            AS latest_reply_ts \
                  FROM events m \
                  WHERE account_id = $1 AND room_id = $2 \
                    AND relates_to->>'rel_type' = 'm.thread' \
@@ -1162,7 +1162,7 @@ impl Store {
                          AND rr.event_type = 'm.room.redaction' \
                          AND rr.redacts = m.event_id \
                    ) \
-                 ORDER BY relates_to->>'event_id', origin_ts DESC, id DESC \
+                 GROUP BY relates_to->>'event_id' \
              ) th \
              ORDER BY th.latest_reply_ts DESC, th.root_event_id \
              LIMIT {RELATION_READ_CAP}"

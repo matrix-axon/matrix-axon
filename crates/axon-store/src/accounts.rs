@@ -383,7 +383,10 @@ impl Store {
     /// no FK to `accounts`). The indexer drains it whether or not search is
     /// currently enabled, so an account deleted while search is off, or a crash
     /// before the purge commits to Tantivy, still converges on the next enabled
-    /// boot (ADR 0039). Idempotent: a re-run after the row is gone appends nothing.
+    /// boot (ADR 0039). Retrying interrupted teardown may append more sentinels;
+    /// they are idempotent index operations. Once the account row is gone, a
+    /// re-run appends nothing. Event crypto siblings cascade with each bounded
+    /// event batch; the final maintenance statement cascades room metadata.
     pub async fn delete_account_row(&self, account_id: Uuid) -> Result<(), StoreError> {
         // Teardown has already persisted `deleting` and stopped ingestion.
         // Progress survives a crash: the account breadcrumb stays until the final

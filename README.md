@@ -184,9 +184,13 @@ The statement deadlines must satisfy `statement_secs <= maintenance_statement_se
 Changes take effect after restarting the server.
 On a slow machine, increase the relevant statement deadline while keeping lock and acquisition waits short enough to surface contention promptly.
 The database must allow `2 * max_connections + 3` server connections, plus connections from CLI commands and other database users.
+Short-lived token/OAuth commands verify one ordinary connection and open other pools only if needed; the server still verifies its entire budget before serving.
 
 Account deletion and room purge commit event deletions in batches of at most 1000 rows, each with atomic search-cleanup obligations.
-An interrupted account teardown retains its existing `deleting` breadcrumb for boot reconciliation; purge-on-leave queues a durable event watermark for background cleanup every 30 seconds and after restart, without delaying sync on bulk deletion.
+An interrupted account teardown retains its existing `deleting` breadcrumb for boot reconciliation; purge-on-leave queues a durable event watermark and wakes the supervised cleanup worker immediately, with retries every 30 seconds and after restart, without delaying sync on bulk deletion.
+Local leave state and its purge intent commit together, so an enqueue failure cannot leave a successfully saved leave without its cleanup obligation.
+A later leave advances a pending watermark; retrying an earlier leave keeps its captured watermark so later rejoin events survive.
+Retry pages rotate past persistent failures so the first 100 failing rooms cannot starve all later rooms.
 Room cleanup removes only events captured by that watermark and enqueues per-event search removals, preserving later messages and rejoin metadata.
 Room-summary rebuild remains transactional on the maintenance pool; account/session-wide pending-UTD scans use its longer deadline too.
 Sync ingestion writes one event per statement; unread projections operate on one row per room; live search drains use indexed, limited outbox batches with ordinary deadlines.
@@ -197,6 +201,7 @@ Refresh tokens beyond the 30-day retention horizon are treated as unknown even i
 Session settings are initialized after connection, supporting direct PostgreSQL and session-mode poolers without a startup `options` parameter.
 For PgBouncer, retain sqlx’s existing `ignore_startup_parameters = extra_float_digits` setting; ignoring `options` is unnecessary.
 Transaction-mode poolers are unsupported: session deadlines and session advisory locks require a stable backend connection, as described in [PgBouncer’s feature matrix](https://www.pgbouncer.org/features.html).
+See [ADR 0112](docs/adr/0112-bounded-database-work-and-pool-isolation.md) for the pool topology, transaction audit, and remaining maintenance tradeoffs.
 Query and pool timeout failures use existing API error responses and request-error logging; cleanup failures log a redacted diagnostic category and retry on later activity.
 
 ## Environment variables
