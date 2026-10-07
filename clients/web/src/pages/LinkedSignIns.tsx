@@ -150,12 +150,14 @@ export function LinkedSignIns() {
   const [error, setError] = useState<string | null>(null)
   const [handedOff, setHandedOff] = useState(false)
   const mounted = useRef(true)
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // Set here as well as cleared below, so the flag follows the effect: a
+    // cleanup followed by a re-run must not leave every response ignored.
+    mounted.current = true
+    return () => {
       mounted.current = false
-    },
-    [],
-  )
+    }
+  }, [])
 
   const load = useCallback(async () => {
     try {
