@@ -32,6 +32,7 @@ mod member_profiles;
 mod meta;
 mod reconcile;
 mod redecrypt;
+mod state_redaction;
 mod sync_health;
 mod trust;
 mod verification;
@@ -58,5 +59,3 @@ pub use redecrypt::RedecryptSummary;
 pub use sync_health::{AccountSyncStatus, SyncHealth, SyncState};
 pub use trust::{CurrentTrust, SenderTrustEngine, TrustBundle, TrustError, TrustSnapshot};
 pub use verification::{FlowStage, FlowState, VerificationEngine, VerifyError};
-
-mod state_redaction;

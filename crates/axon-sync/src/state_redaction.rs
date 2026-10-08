@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axon_store::{RoomStateRedaction, RoomStateUpsert};
 use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
-use matrix_sdk::ruma::OwnedRoomId;
+use matrix_sdk::ruma::{events::AnySyncStateEvent, OwnedRoomId, RoomId};
 use matrix_sdk::{Client, RoomState};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -59,7 +59,7 @@ pub(crate) async fn watch(
                         cursor.clone_from(last);
                     } else {
                         cursor.clear();
-                        next_sweep = tokio::time::Instant::now() + Duration::from_secs(30);
+                        next_sweep = tokio::time::Instant::now() + Duration::from_secs(300);
                     }
                     rooms.extend(
                         page.into_iter()
@@ -71,17 +71,7 @@ pub(crate) async fn watch(
                 }
             }
         }
-        let mut hint_rooms = HashSet::new();
-        for _ in 0..32 {
-            let Ok(room) = hints.try_recv() else {
-                break;
-            };
-            if hint_rooms.len() < 4 {
-                hint_rooms.insert(room);
-            }
-            // Dropped overflow is healed by the paced sweep, including restart.
-        }
-        rooms.extend(hint_rooms);
+        rooms.extend(take_hints(&mut hints));
         for room_id in rooms {
             let Some(room) = client.get_room(&room_id) else {
                 continue;
@@ -100,29 +90,105 @@ pub(crate) async fn watch(
     }
 }
 
+/// Stop at the room budget, preserving the channel's tail for the next tick.
+fn take_hints(hints: &mut mpsc::Receiver<OwnedRoomId>) -> HashSet<OwnedRoomId> {
+    let mut rooms = HashSet::new();
+    for _ in 0..32 {
+        if rooms.len() == 4 {
+            break;
+        }
+        let Ok(room) = hints.try_recv() else {
+            break;
+        };
+        rooms.insert(room);
+    }
+    rooms
+}
+
+/// Ordinary message redactions need no SDK singleton reads. A failed filter
+/// conservatively queues a hint; application of redaction is still SDK-only.
+pub(crate) async fn queue_redaction_hint(ctx: &PersistContext, room_id: &RoomId, target: &str) {
+    let matched = tokio::time::timeout(
+        Duration::from_secs(2),
+        ctx.store.is_state_reconciliation_target(
+            ctx.account_id,
+            room_id.as_str(),
+            target,
+            STATE_TYPES,
+        ),
+    )
+    .await;
+    match matched {
+        Ok(Ok(false)) => return,
+        Ok(Ok(true)) => {}
+        _ => {
+            tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, "state redaction hint filter failed; queuing conservative hint")
+        }
+    }
+    let _ = ctx.state_redaction_tx.try_send(room_id.to_owned());
+}
+
+/// Normally hydrated state is already persisted. Read only that singleton to
+/// detect the SDK pruning it without redispatch before the Axon write finished.
+/// This also closes redaction-before-state ordering when the target filter saw
+/// no current row yet, without filling the queue during ordinary initial sync.
+pub(crate) async fn queue_state_hint(
+    ctx: &PersistContext,
+    client: &Client,
+    room_id: &RoomId,
+    event_type: &str,
+    event_id: &str,
+) {
+    match tokio::time::timeout(
+        Duration::from_secs(2),
+        cached_redacted_state(ctx, client, room_id, event_type),
+    )
+    .await
+    {
+        Ok(Some((ev, _))) if ev.event_id().as_str() == event_id => {
+            let _ = ctx.state_redaction_tx.try_send(room_id.to_owned());
+        }
+        Err(_) => {
+            tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, event_type, "SDK cached state hint check timed out; sweep will retry")
+        }
+        _ => {}
+    }
+}
+
+async fn cached_redacted_state(
+    ctx: &PersistContext,
+    client: &Client,
+    room_id: &RoomId,
+    event_type: &str,
+) -> Option<(AnySyncStateEvent, serde_json::Value)> {
+    let raw = match client
+        .state_store()
+        .get_state_event(room_id, event_type.into(), "")
+        .await
+    {
+        Ok(Some(RawAnySyncOrStrippedState::Sync(raw))) => raw,
+        Ok(_) => return None,
+        Err(_) => {
+            tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, event_type, "SDK cached state read failed");
+            return None;
+        }
+    };
+    // Bound our decode before allocating a second JSON representation.
+    if raw.json().get().len() > 131072 {
+        tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type, "SDK cached state exceeds reconciliation budget");
+        return None;
+    }
+    let ev = raw.deserialize().ok()?;
+    if !ev.is_redacted() {
+        return None;
+    }
+    let value = parse_raw_json(raw.json().get(), ctx.account_id, "cached redacted state")?;
+    Some((ev, value))
+}
+
 async fn reconcile_room(ctx: &PersistContext, client: &Client, room_id: &OwnedRoomId) {
     for event_type in STATE_TYPES {
-        let raw = match client
-            .state_store()
-            .get_state_event(room_id, (*event_type).into(), "")
-            .await
-        {
-            Ok(Some(RawAnySyncOrStrippedState::Sync(raw))) => raw,
-            Ok(_) => continue,
-            Err(_) => {
-                tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, event_type, "SDK cached state read failed");
-                continue;
-            }
-        };
-        // Bound our decode before allocating a second JSON representation.
-        if raw.json().get().len() > 131072 {
-            tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type, "SDK cached state exceeds reconciliation budget");
-            continue;
-        }
-        let Ok(ev) = raw.deserialize() else {
-            continue;
-        };
-        let Some(value) = parse_raw_json(raw.json().get(), ctx.account_id, "cached redacted state")
+        let Some((ev, value)) = cached_redacted_state(ctx, client, room_id, event_type).await
         else {
             continue;
         };
@@ -163,6 +229,24 @@ mod tests {
     use matrix_sdk::{RoomInfo, StateChanges};
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn hint_burst_preserves_tail_and_coalesces_duplicates() {
+        let (tx, mut rx) = mpsc::channel(32);
+        let rooms: Vec<OwnedRoomId> = (0..8)
+            .map(|i| format!("!hint-{i}:localhost").parse().unwrap())
+            .collect();
+        for room in [
+            &rooms[0], &rooms[0], &rooms[1], &rooms[2], &rooms[3], &rooms[4], &rooms[5], &rooms[6],
+            &rooms[7],
+        ] {
+            tx.try_send(room.clone()).unwrap();
+        }
+        assert_eq!(take_hints(&mut rx), rooms[..4].iter().cloned().collect());
+        assert_eq!(rx.len(), 4);
+        assert_eq!(take_hints(&mut rx), rooms[4..].iter().cloned().collect());
+        assert!(rx.is_empty());
+    }
 
     #[test]
     fn missing_marker_never_asserts_original_content() {
@@ -220,7 +304,7 @@ mod tests {
             content: Some(raw_value["content"].clone()),
         };
         store.upsert_room_state(&state).await.unwrap();
-        let (state_redaction_tx, _) = mpsc::channel(32);
+        let (state_redaction_tx, mut state_redaction_rx) = mpsc::channel(32);
         let (live_tx, _) = tokio::sync::broadcast::channel(8);
         let ctx = PersistContext {
             store: store.clone(),
@@ -231,6 +315,20 @@ mod tests {
             purge_on_leave: false,
             state_redaction_tx,
         };
+        // Ordinary message redactions and normal initial state do not enqueue
+        // a full room scan. A current singleton target does enqueue one.
+        queue_redaction_hint(&ctx, &room_id, "$message:localhost").await;
+        queue_state_hint(
+            &ctx,
+            &client,
+            &room_id,
+            "m.room.power_levels",
+            state.event_id,
+        )
+        .await;
+        assert!(state_redaction_rx.is_empty());
+        queue_redaction_hint(&ctx, &room_id, state.event_id).await;
+        assert_eq!(state_redaction_rx.try_recv().unwrap(), room_id);
         // A marker-free form does not overwrite or certify existing content.
         reconcile_room(&ctx, &client, &room_id).await;
         assert_eq!(
@@ -260,6 +358,26 @@ mod tests {
             .unwrap(),
         );
         client.state_store().save_changes(&changes).await.unwrap();
+        // If filtering ran before the Axon tuple existed, the later original
+        // state write detects the already-pruned SDK cache and queues recovery.
+        queue_state_hint(
+            &ctx,
+            &client,
+            &room_id,
+            "m.room.power_levels",
+            state.event_id,
+        )
+        .await;
+        assert_eq!(state_redaction_rx.try_recv().unwrap(), room_id);
+        queue_state_hint(
+            &ctx,
+            &client,
+            &room_id,
+            "m.room.power_levels",
+            "$newer:localhost",
+        )
+        .await;
+        assert!(state_redaction_rx.is_empty());
         // This is the worker's actual consumer; no persist_room_state_event call.
         reconcile_room(&ctx, &client, &room_id).await;
         let row = store
@@ -291,6 +409,31 @@ mod tests {
         assert_eq!(row.content, Some(sdk_value["content"].clone()));
         // Repeated repair is idempotent; it cannot recreate purged state.
         reconcile_room(&ctx, &client, &room_id).await;
+        // The SDK cache still holds the old redacted event. Even though its
+        // content differs, it must not touch a newer Axon current-state event.
+        let replacement = RoomStateUpsert {
+            event_id: "$replacement:localhost",
+            origin_ts: 20,
+            content: Some(json!({"ban":80,"invite":40})),
+            ..state
+        };
+        store.upsert_room_state(&replacement).await.unwrap();
+        reconcile_room(&ctx, &client, &room_id).await;
+        let current = store
+            .room_state(
+                account.account_id,
+                room_id.as_str(),
+                "m.room.power_levels",
+                "",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.event_id, replacement.event_id);
+        assert_eq!(current.content, replacement.content);
+        assert_eq!(current.origin_ts, replacement.origin_ts);
+        assert_eq!(current.redacted, None);
+        assert_eq!(current.redaction_event_id, None);
         store
             .purge_room(account.account_id, room_id.as_str())
             .await

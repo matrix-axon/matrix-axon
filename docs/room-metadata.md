@@ -67,11 +67,18 @@ This also avoids withholding legitimate protected fields in pre-migration rows t
 A bounded worker reconciles SDK-redacted singleton state into the shared `room_state` projection.
 It covers the eight metadata types plus name, topic, avatar, and tombstone, so `/metadata`, `/info`, room-list summaries, and space display enrichment use the same retained state.
 It does not enumerate membership or space-link state keys.
-Live redactions and singleton state writes enqueue room hints without waiting for repair.
+Live redactions enqueue a hint only if the target event ID matches a current metadata/display singleton in the same account and room.
+The filter uses fixed primary-key probes, with a two-second deadline; failure conservatively queues a hint, without treating the timeline row as evidence.
+Marker-free singleton state writes check only their own SDK cache entry and enqueue a hint if that same event is already redacted there.
+Ordinary message redactions and normal initial hydration therefore do not enqueue full room scans.
+The state-write check closes redaction-before-state delivery races when the target filter saw no tuple yet.
+These checks wait for bounded local I/O, never for the subsequent repair.
 Each account has one paced worker, a 32-entry hint queue, and at most eight active rooms per tick: four hints and four rooms from a keyset-paged room-summary sweep.
-Duplicate hints coalesce; queue overflow and interrupted jobs heal through subsequent sweeps.
+Duplicate hints coalesce; draining stops at four distinct rooms, leaving the channel tail for the next tick.
+Queue overflow and interrupted jobs heal through subsequent sweeps.
 The worker reads twelve singleton SDK cache entries per room, bounds raw JSON before decoding to 128 KiB, and uses a two-second deadline for each room and each sweep-page read.
-Ticks run once per second with missed ticks skipped; after a complete sweep the next sweep waits thirty seconds.
+Ticks run once per second with missed ticks skipped; after a complete sweep the next sweep waits five minutes.
+That idle interval reduces repeated background SQLite reads; retained non-joined rooms can still occupy cheap sweep-page slots, but the worker checks SDK membership before reading singleton state.
 All acquisition is local SDK cache I/O; this worker makes no homeserver requests.
 One room or field failing is logged and skipped without stopping sync.
 The worker is canceled and joined with its account run.
@@ -118,7 +125,7 @@ Web and TUI consumption are [issue 623](https://github.com/matrix-axon/matrix-ax
 ## Verification
 
 The HTTP integration tests seed real PostgreSQL state and exercise the authenticated router without an upstream service.
-They cover already-redacted state, raw redaction rows without applied evidence, both log/state arrival orders, account/room isolation, replacement events, ordered and concurrent replay protection, shared display projection repair, and evidence persistence after reopening the store.
+The regression suite covers already-redacted state, filtered redaction hints, queued bursts spanning multiple ticks, stale SDK event IDs, raw redaction rows without applied evidence, both log/state arrival orders, account/room isolation, replacement events, ordered and concurrent replay protection, shared display projection repair, and evidence persistence after reopening the store.
 A PostgreSQL-gated SDK-cache test applies a redaction in the real SDK state store, invokes the actual reconciliation consumer without re-dispatching a state event, and verifies retained fields and purge safety.
 Use a throwaway database; these tests run migrations and write fixture accounts.
 

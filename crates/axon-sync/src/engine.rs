@@ -692,8 +692,10 @@ async fn persist_timeline_event(
     let Some(raw_val) = parse_raw_json(raw.get(), ctx.account_id, "timeline event") else {
         return;
     };
-    let is_redaction =
-        raw_val.get("type").and_then(serde_json::Value::as_str) == Some("m.room.redaction");
+    let redaction_target = (raw_val.get("type").and_then(serde_json::Value::as_str)
+        == Some("m.room.redaction"))
+    .then(|| crate::meta::redacts(&raw_val).map(str::to_owned))
+    .flatten();
     // The live sync path: persist and emit the fresh event to `/v1/ws`.
     persist_event_core(
         &ctx,
@@ -704,8 +706,8 @@ async fn persist_timeline_event(
         true,
     )
     .await;
-    if is_redaction {
-        let _ = ctx.state_redaction_tx.try_send(room.room_id().to_owned());
+    if let Some(target) = redaction_target {
+        crate::state_redaction::queue_redaction_hint(&ctx, room.room_id(), &target).await;
     }
 }
 
@@ -1028,8 +1030,17 @@ async fn persist_room_state_event(
         tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), state_key = state_key.as_str(), event_id = %event_id, evidence = ?evidence, "persisted room state");
     }
 
-    if crate::state_redaction::STATE_TYPES.contains(&event_type.as_str()) {
-        let _ = ctx.state_redaction_tx.try_send(room.room_id().to_owned());
+    if matches!(evidence, RoomStateRedaction::Unknown)
+        && crate::state_redaction::STATE_TYPES.contains(&event_type.as_str())
+    {
+        crate::state_redaction::queue_state_hint(
+            &ctx,
+            &room.client(),
+            room.room_id(),
+            &event_type,
+            &event_id,
+        )
+        .await;
     }
 
     // M10 purge-on-leave (ADR 0044): when this state event is *this account*

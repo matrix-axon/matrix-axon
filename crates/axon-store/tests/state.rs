@@ -453,6 +453,51 @@ async fn redacted_state_repair_updates_shared_display_and_pages_rooms() {
         content: Some(json!({"alias":"#fixture:localhost"})),
     };
     store.upsert_room_state(&state).await.unwrap();
+    for (account, room, target, types, expected) in [
+        (
+            account_id,
+            rooms[0].as_str(),
+            "$alias:localhost",
+            vec!["m.room.canonical_alias"],
+            true,
+        ),
+        (
+            other,
+            rooms[0].as_str(),
+            "$alias:localhost",
+            vec!["m.room.canonical_alias"],
+            false,
+        ),
+        (
+            account_id,
+            rooms[1].as_str(),
+            "$alias:localhost",
+            vec!["m.room.canonical_alias"],
+            false,
+        ),
+        (
+            account_id,
+            rooms[0].as_str(),
+            "$message:localhost",
+            vec!["m.room.canonical_alias"],
+            false,
+        ),
+        (
+            account_id,
+            rooms[0].as_str(),
+            "$alias:localhost",
+            vec!["m.room.member"],
+            false,
+        ),
+    ] {
+        assert_eq!(
+            store
+                .is_state_reconciliation_target(account, room, target, &types)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
     assert!(store
         .list_rooms(Some(account_id))
         .await

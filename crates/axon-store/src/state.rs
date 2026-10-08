@@ -323,10 +323,35 @@ impl Store {
         Ok(rows.into_iter().map(|(room,)| room).collect())
     }
 
+    /// Match a live redaction target against a trusted, fixed singleton set.
+    /// Primary-key probes avoid scanning member state or historical events.
+    pub async fn is_state_reconciliation_target(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+        event_types: &[&str],
+    ) -> Result<bool, StoreError> {
+        sqlx_core::query_scalar::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM room_state \
+             WHERE account_id = $1 AND room_id = $2 AND state_key = '' \
+               AND event_id = $3 AND event_type = ANY($4))",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .bind(event_id)
+        .bind(event_types)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     /// Mirror a redacted SDK state form into an existing current tuple only.
     /// The event-ID predicate is the concurrency guard against a replacement,
     /// purge, or account teardown while the SDK cache read was in flight.
     /// This does not insert state or advance freshness from historical data.
+    /// No timestamp/order guard is needed: only the same immutable event ID
+    /// can be repaired. An older SDK event cannot affect a newer current tuple.
     pub async fn reconcile_redacted_room_state(
         &self,
         s: &RoomStateUpsert<'_>,
