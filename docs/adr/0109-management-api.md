@@ -2,7 +2,7 @@
 
 **Status:** Accepted.
 Implemented in steps, tracked in #587; see "Sequence" below.
-Step 2 (the switch, step-up, identity list and unbind) is in.
+Step 2 (the switch, step-up, identity list and unbind) and step 4 (tokens and binds) are in.
 
 ## Context
 
@@ -109,11 +109,11 @@ OIDC keeps the two instants apart, `auth_time` for the authentication and `iat` 
 
 Measured against the real providers on 2026-10-05, comparing the recorded time with the moment the session was minted:
 
-| Provider | Recorded time | What it is |
-| --- | --- | --- |
-| Google (browser) | 0.4 s earlier | `iat`; no `auth_time` |
-| Apple (browser and native) | 1.6 to 2.0 s earlier | within a second or two of the sign-in |
-| Microsoft (browser) | 5 min 0.7 s earlier, twice | `iat`, which Microsoft backdates by five minutes; no `auth_time` |
+| Provider                   | Recorded time              | What it is                                                       |
+| -------------------------- | -------------------------- | ---------------------------------------------------------------- |
+| Google (browser)           | 0.4 s earlier              | `iat`; no `auth_time`                                            |
+| Apple (browser and native) | 1.6 to 2.0 s earlier       | within a second or two of the sign-in                            |
+| Microsoft (browser)        | 5 min 0.7 s earlier, twice | `iat`, which Microsoft backdates by five minutes; no `auth_time` |
 
 Microsoft's second reading was taken by signing in again with its own session still live, and the recorded time moved forward by the same amount as the clock, so it is a backdated issuance and not a remembered authentication.
 The consequence is that a Microsoft session has about five minutes for credential changes rather than ten.
@@ -175,6 +175,17 @@ A hard refusal would make unlinking impossible for a user whose only credential 
 Revoking the token that made the request is otherwise allowed.
 It is how a device signs itself out everywhere.
 
+Only a token that is itself a surviving credential can be the last one, so only revoking an active non-expiring token is ever refused.
+Revoking an OAuth session's access token always goes through, even on an instance with no survivor left: that token was never a way back in, and refusing would stop the owner ending a session they do not recognize.
+
+Revoking a session's access token has to end the session, and the access token is only half of it: left alone, the refresh token would mint a replacement on the client's next request.
+Nothing ties an access token to the refresh chain that minted it, only to its identity and client, so the revoke also revokes every refresh token for that identity and client.
+That is the cut refresh-token reuse detection already makes (ADR 0054), and it has the same width: every session that client holds for that identity is signed out, the caller's own included if it is one of them.
+Access tokens those sessions already hold are not chased; they expire within the access-token lifetime.
+Ending exactly one session would need a session id carried from the refresh chain onto each access token, which this record does not add.
+Revoking a token that is already revoked repeats the refresh-token cut, so a session token revoked by a build that predates this still ends up unable to renew.
+The CLI's `token revoke` goes through the same store call and behaves the same way.
+
 ### A minted secret crosses the API once
 
 The response to a mint is the one place a raw bearer token appears in an API response.
@@ -190,9 +201,41 @@ The browser leg is the existing unauthenticated `GET /v1/oauth/bind`, the upstre
 The validation the CLI does before creating a request (OAuth enabled, the provider enabled and fully configured, `external_base_url` set) and the user-code generator move out of `axon-server` to where both callers can reach them.
 The CLI's separate copy of the ten-minute handshake lifetime goes away with that move.
 
+One question stays with each caller, because the two cannot answer it the same way: whether the provider is ready.
+The running server asks the provider set it built at boot, which is the truth about what the browser leg can redirect to.
+The CLI has no running server to ask and reads the configuration.
+Everything else is one function in `axon-api`: OAuth enabled, the provider one Axon knows, the base URL set, and the order those are checked in.
+
+A bind this server cannot start answers `409` with the code `bind_unavailable`: OAuth is off, or the provider is not enabled for browser sign-in.
+Apple with only its native flow enabled is such a case, since there is no browser provider to redirect to.
+A bind's status is `pending`, `completed` or `expired`; a canceled or failed sign-in reads as `expired`, and so does a pending bind past its time.
+A bind that did not complete is swept once it lapses, so a later read is a `404`.
+A completed one is kept for a day past its expiry, so a client that polls late (a phone that was in the background) still reads `completed` instead of a missing record it would have to report as a failure.
+
+At most five binds may be pending at once; a sixth answers `429`.
+Each pending bind is a code the unauthenticated browser leg accepts for ten minutes, so the number outstanding multiplies a guesser's odds, and the rate limiter on that leg counts requests, not open codes.
+The count and the insert run under one advisory lock, so simultaneous starts cannot each read a count below the cap and all insert.
+The CLI verb is exempt.
+It is the way out when a client has left binds pending, and an operator with a shell should not wait ten minutes for them to lapse; its rows still count against a client's starts.
+
+Reading a bind's status needs only a bearer, and a bind is not tied to the token that started it, so any token can read the provider and the bound identity's id of a bind whose id it knows.
+That is acceptable while one human owns the instance and tokens have no scopes.
+If either changes, a bind needs an owner.
+
 ### Unbinding, and what it cannot do
 
 `DELETE /v1/management/oauth/identities/{id}` calls `Store::delete_identity`, which revokes the identity's tokens, deletes its refresh-token chain, and removes the row in one transaction.
+
+Unbinding also revokes the non-expiring tokens that identity's sessions minted through `POST /v1/management/tokens`, and any those tokens minted in turn, followed through `created_by_token_id`.
+A minted token carries no identity of its own, so otherwise a token minted from a session would outlive the unbind meant to end everything that sign-in could do: someone holding a freshly stolen session could mint one and keep it.
+The cost is that a device token the owner minted while signed in with that identity stops working when they unlink it.
+The lockout guard counts after this cascade, so an unbind that would leave nothing but its own descendants is still refused with `last_credential`.
+The CLI's `oauth identities unbind` goes through the same store call and cascades the same way.
+
+The cascade is only as good as the `created_by_token_id` links it follows.
+Nothing in Axon deletes a token row today, so the links are complete.
+If rows are ever removed, by hand or by the pruning proposed in #635, a minted token whose creator row is gone loses its link (`ON DELETE SET NULL`) and an unbind no longer reaches it.
+Anything that prunes token rows has to keep the rows that minted a live token, or record the originating identity on the minted token first.
 
 This is Axon forgetting the identity.
 It does not revoke the upstream provider's authorization.
@@ -226,17 +269,17 @@ With the existing retry route, a client can show the backlog, offer the retry, a
 
 ### Routes
 
-| Route | Purpose |
-| --- | --- |
-| `GET /v1/management/tokens` | List tokens. No secrets. Marks the caller's own token. |
-| `POST /v1/management/tokens` | Mint a token with a label. Returns the secret once. |
-| `DELETE /v1/management/tokens/{id}` | Revoke a token. |
-| `GET /v1/management/oauth/identities` | List bound identities. |
-| `DELETE /v1/management/oauth/identities/{id}` | Unbind an identity and revoke its sessions. |
-| `POST /v1/management/oauth/binds` | Start a bind for a provider. |
-| `GET /v1/management/oauth/binds/{id}` | Read a bind's status. |
-| `POST /v1/management/search/reindex` | Rebuild the search index. |
-| `GET /v1/management/accounts/{account_id}/utds` | Count the decryption backlog. |
+| Route                                           | Purpose                                                |
+| ----------------------------------------------- | ------------------------------------------------------ |
+| `GET /v1/management/tokens`                     | List tokens. No secrets. Marks the caller's own token. |
+| `POST /v1/management/tokens`                    | Mint a token with a label. Returns the secret once.    |
+| `DELETE /v1/management/tokens/{id}`             | Revoke a token.                                        |
+| `GET /v1/management/oauth/identities`           | List bound identities.                                 |
+| `DELETE /v1/management/oauth/identities/{id}`   | Unbind an identity and revoke its sessions.            |
+| `POST /v1/management/oauth/binds`               | Start a bind for a provider.                           |
+| `GET /v1/management/oauth/binds/{id}`           | Read a bind's status.                                  |
+| `POST /v1/management/search/reindex`            | Rebuild the search index.                              |
+| `GET /v1/management/accounts/{account_id}/utds` | Count the decryption backlog.                          |
 
 All additions are new routes or new optional response fields, so the OpenAPI compatibility guard (ADR 0099) passes without an exception.
 
@@ -244,7 +287,12 @@ All additions are new routes or new optional response fields, so the OpenAPI com
 
 Each route crosses the client boundary, so each states its limits.
 A token label is length-capped before it is stored, and request bodies are capped before parsing.
+A label is also refused if it contains control characters or invisible format characters (zero-width, bidirectional overrides), because `axon-server token list` prints labels to a terminal, or if it starts with `oauth:`, the prefix of the label Axon generates for a sign-in session.
+The first-run bootstrap page applies the same rules by cleaning the label instead of refusing it, since that page has no way to ask again.
 The identity and token lists are bounded by what one human creates, and the token list is capped in the query regardless.
+That cap needs an order to be safe.
+Expired OAuth access tokens are never deleted, and a signed-in client leaves one behind every hour, so they come to outnumber everything else.
+The list therefore returns the tokens that still work first and the dead ones after, newest first within each, and the cap of 500 only ever drops the oldest dead ones.
 Bind requests reuse the existing expiry and sweep.
 A rebuild is single-flight by construction, since one actor owns the writer.
 

@@ -132,6 +132,13 @@ impl ApiError {
         )
     }
 
+    /// `409 Conflict` — an identity bind cannot be started as this server is
+    /// configured (ADR 0109): OAuth is off, or the provider is not enabled for
+    /// browser sign-in. Retrying changes nothing; the operator has to.
+    pub fn bind_unavailable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "bind_unavailable", message)
+    }
+
     /// `409 Conflict` — the request collides with the resource's current state
     /// (e.g. logging in an account that is already active).
     pub fn conflict(message: impl Into<String>) -> Self {

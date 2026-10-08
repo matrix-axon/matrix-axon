@@ -202,6 +202,7 @@ axon-server token revoke --label my-client   # or by label, if it uniquely ident
 ```
 
 Tokens are instance-scoped — one token grants access to all accounts on that Axon instance.
+Revoking a token that belongs to a sign-in session (SSO) also signs out every session that client holds for the same identity, since the session could otherwise renew itself.
 Supply the token to clients via their config file or environment;
 see [`clients/tui/README.md`](clients/tui/README.md) for the TUI.
 
@@ -266,11 +267,12 @@ See [Environment variables](#environment-variables) below for the full list of v
 ### Managing the server from a client
 
 A signed-in client can administer the server through the management API under `/v1/management/` (ADR 0109), so the common jobs do not need a shell on the machine.
-Today that is listing the sign-in identities linked to you and unlinking one;
-tokens, search-index rebuilds and the decryption backlog follow.
+Today that is listing the sign-in identities linked to you, linking another and unlinking one, and listing, minting and revoking the tokens clients sign in with;
+search-index rebuilds and the decryption backlog follow.
+A minted token is shown once, in the response that creates it, exactly as `axon-server token issue` prints it once.
 
 Changing credentials asks for more than being signed in.
-The request must come from a token that never expires (one minted by `axon-server token issue` or `init`), or from a session that signed in with its provider in the last ten minutes;
+The request must come from a token that never expires (one minted by `axon-server token issue`, `init` or the management API itself), or from a session that signed in with its provider in the last ten minutes;
 otherwise the server answers `recent_sign_in_required` and the client signs you in again.
 Removing the last way to sign in is refused until you confirm it.
 

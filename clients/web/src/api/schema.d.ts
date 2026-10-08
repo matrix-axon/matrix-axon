@@ -1429,6 +1429,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/management/oauth/binds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start binding a new sign-in identity to this instance's owner.
+         * @description Returns a `url` to open in a browser. Signing in there with the provider
+         *     binds that identity; poll the bind by its `id` to learn when. The bind
+         *     lapses after ten minutes.
+         *
+         *     A credential change, so it needs a non-expiring token or a session whose
+         *     interactive sign-in was in the last ten minutes (`403
+         *     recent_sign_in_required` otherwise).
+         */
+        post: operations["start_bind"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/management/oauth/binds/{bind_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read where an identity bind stands: `pending`, `completed` or `expired`.
+         * @description A bind that did not complete is removed once it lapses, so a `404` for an
+         *     id this server issued means the same as `expired`. A completed bind stays
+         *     readable for a day after that, so a client that polls late still learns it
+         *     succeeded.
+         */
+        get: operations["bind_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/management/oauth/identities": {
         parameters: {
             query?: never;
@@ -1464,7 +1513,9 @@ export interface paths {
         /**
          * Unbind a sign-in identity and end every session it was used to start.
          * @description Axon forgets the identity: its access tokens are revoked and its refresh
-         *     tokens deleted, atomically. This does **not** revoke the upstream
+         *     tokens deleted, atomically. So are the non-expiring tokens its sessions
+         *     minted through this API, and any those minted in turn; a token minted from
+         *     the command line or by another identity's session is not affected. This does **not** revoke the upstream
          *     provider's own authorization of Axon; that is the provider's to withdraw.
          *
          *     A credential change, so it needs a non-expiring token or a session whose
@@ -1473,6 +1524,75 @@ export interface paths {
          *     session signed in with ends that session too.
          */
         delete: operations["unbind_identity"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/management/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List this instance's bearer tokens, without their secrets.
+         * @description Revoked and expired tokens are included, so an entry the owner does not
+         *     recognize stays visible after it stops working. The tokens that still work
+         *     come first, then the rest, newest first within each; at most 500 are
+         *     returned, which only ever drops the oldest dead ones. `current` marks the
+         *     token that made this request.
+         */
+        get: operations["list_tokens"];
+        put?: never;
+        /**
+         * Mint a bearer token that never expires.
+         * @description The response is the only time the token's secret is available: Axon keeps
+         *     its hash and cannot show it again. It is sent with `Cache-Control:
+         *     no-store`.
+         *
+         *     A credential change, so it needs a non-expiring token or a session whose
+         *     interactive sign-in was in the last ten minutes (`403
+         *     recent_sign_in_required` otherwise). The new token records which token
+         *     minted it.
+         */
+        post: operations["mint_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/management/tokens/{token_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke a token. It stops working at once and stays in the list.
+         * @description Revoking a sign-in session's access token also ends the session's ability
+         *     to renew itself. Axon cannot tell one session of a client from another,
+         *     so this signs out every session that client holds for that identity,
+         *     the caller's included if it is one of them. Access tokens those other
+         *     sessions already hold keep working until they expire, within the hour by
+         *     default.
+         *
+         *     Revoking the token that made the request is allowed: it is how a device
+         *     signs itself out. Revoking a token that is already revoked succeeds; if it
+         *     was a session's access token, the session's ability to renew itself is
+         *     ended again, in case the first revocation left it.
+         *
+         *     A credential change, so it needs a non-expiring token or a session whose
+         *     interactive sign-in was in the last ten minutes (`403
+         *     recent_sign_in_required` otherwise).
+         */
+        delete: operations["revoke_token"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1896,6 +2016,31 @@ export interface components {
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_BindDto: {
+            /** @description An identity bind (`GET /v1/management/oauth/binds/{bind_id}`). */
+            data: {
+                /**
+                 * @description When a still-pending bind lapses, RFC 3339. The record itself is
+                 *     removed some time after, and reading it then is a `404`.
+                 */
+                expires_at: string;
+                /**
+                 * Format: uuid
+                 * @description The bind's id, used to read its status.
+                 */
+                id: string;
+                /**
+                 * Format: uuid
+                 * @description The identity that was bound, once `status` is `completed`. Null if it
+                 *     has since been unbound.
+                 */
+                identity_id?: string | null;
+                /** @description The provider being bound. */
+                provider: string;
+                status: components["schemas"]["BindStatusDto"];
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_DeviceListDto: {
             /**
              * @description Response body for `GET …/devices`: the resolved target user plus their
@@ -2125,6 +2270,27 @@ export interface components {
                 avatar_url?: string | null;
                 display_name?: string | null;
                 user_id: string;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_MintedTokenDto: {
+            /**
+             * @description A token that was just minted (`POST /v1/management/tokens`). The only
+             *     response that ever carries a token's secret.
+             */
+            data: {
+                /**
+                 * Format: uuid
+                 * @description Stable id, used to revoke the token.
+                 */
+                id: string;
+                /** @description The label as stored. */
+                label: string;
+                /**
+                 * @description The bearer token itself. Shown this once and not recoverable: only its
+                 *     hash is kept.
+                 */
+                token: string;
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -2367,6 +2533,17 @@ export interface components {
             data: {
                 /** @description The verification transaction id. */
                 flow_id: string;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_StartedBindDto: {
+            /** @description A bind that was just started (`POST /v1/management/oauth/binds`). */
+            data: components["schemas"]["BindDto"] & {
+                /**
+                 * @description The URL to open in a browser to sign in with the provider. It works
+                 *     once, until `expires_at`.
+                 */
+                url: string;
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -2616,6 +2793,50 @@ export interface components {
                 room_type?: string | null;
                 /** @description Room topic, if set. */
                 topic?: string | null;
+            }[];
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_Vec_ManagementTokenDto: {
+            data: {
+                /** @description The registered OAuth client that obtained it, if any. */
+                client_id?: string | null;
+                /** @description When it was minted, RFC 3339. */
+                created_at: string;
+                /**
+                 * Format: uuid
+                 * @description The token that minted this one through the management API; null for
+                 *     one minted from the command line, at setup, or by a sign-in.
+                 */
+                created_by_token_id?: string | null;
+                /**
+                 * @description Whether this is the token that made the request. Revoking it signs the
+                 *     caller out.
+                 */
+                current: boolean;
+                /**
+                 * @description When it stops working, RFC 3339; null for a token that never expires.
+                 *     A non-null value marks an OAuth session's access token.
+                 */
+                expires_at?: string | null;
+                /**
+                 * Format: uuid
+                 * @description Stable id, used to revoke the token.
+                 */
+                id: string;
+                /** @description The label it was minted with. An OAuth session's is generated. */
+                label: string;
+                /** @description When it last authenticated a request, RFC 3339; null if never. */
+                last_used_at?: string | null;
+                /**
+                 * Format: uuid
+                 * @description The bound identity it was minted for, if any. Null once that identity
+                 *     is unbound.
+                 */
+                oauth_identity_id?: string | null;
+                /** @description The upstream provider behind the sign-in that minted it, if any. */
+                provider?: string | null;
+                /** @description When it was revoked, RFC 3339; null while it has not been. */
+                revoked_at?: string | null;
             }[];
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -2878,6 +3099,33 @@ export interface components {
          * @enum {string}
          */
         BackupStateDto: "unknown" | "creating" | "enabling" | "resuming" | "enabled" | "downloading" | "disabling";
+        /** @description An identity bind (`GET /v1/management/oauth/binds/{bind_id}`). */
+        BindDto: {
+            /**
+             * @description When a still-pending bind lapses, RFC 3339. The record itself is
+             *     removed some time after, and reading it then is a `404`.
+             */
+            expires_at: string;
+            /**
+             * Format: uuid
+             * @description The bind's id, used to read its status.
+             */
+            id: string;
+            /**
+             * Format: uuid
+             * @description The identity that was bound, once `status` is `completed`. Null if it
+             *     has since been unbound.
+             */
+            identity_id?: string | null;
+            /** @description The provider being bound. */
+            provider: string;
+            status: components["schemas"]["BindStatusDto"];
+        };
+        /**
+         * @description Where an identity bind stands.
+         * @enum {string}
+         */
+        BindStatusDto: "pending" | "completed" | "expired";
         /**
          * @description The running binary's build identity, mirroring the fields logged in the
          *     "axon starting" startup line and reported by `axon -V`.
@@ -3642,6 +3890,52 @@ export interface components {
             enabled: boolean;
         };
         /**
+         * @description A bearer token as the management API lists it
+         *     (`GET /v1/management/tokens`). Never the secret: only its hash is stored,
+         *     and a token is shown once, when it is minted.
+         */
+        ManagementTokenDto: {
+            /** @description The registered OAuth client that obtained it, if any. */
+            client_id?: string | null;
+            /** @description When it was minted, RFC 3339. */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The token that minted this one through the management API; null for
+             *     one minted from the command line, at setup, or by a sign-in.
+             */
+            created_by_token_id?: string | null;
+            /**
+             * @description Whether this is the token that made the request. Revoking it signs the
+             *     caller out.
+             */
+            current: boolean;
+            /**
+             * @description When it stops working, RFC 3339; null for a token that never expires.
+             *     A non-null value marks an OAuth session's access token.
+             */
+            expires_at?: string | null;
+            /**
+             * Format: uuid
+             * @description Stable id, used to revoke the token.
+             */
+            id: string;
+            /** @description The label it was minted with. An OAuth session's is generated. */
+            label: string;
+            /** @description When it last authenticated a request, RFC 3339; null if never. */
+            last_used_at?: string | null;
+            /**
+             * Format: uuid
+             * @description The bound identity it was minted for, if any. Null once that identity
+             *     is unbound.
+             */
+            oauth_identity_id?: string | null;
+            /** @description The upstream provider behind the sign-in that minted it, if any. */
+            provider?: string | null;
+            /** @description When it was revoked, RFC 3339; null while it has not been. */
+            revoked_at?: string | null;
+        };
+        /**
          * @description Replayable, presentation-safe state of one QR login flow. Optional fields
          *     are omitted unless they belong to the current stage.
          */
@@ -3730,6 +4024,32 @@ export interface components {
             membership: string;
             /** @description Matrix user ID (the `m.room.member` state key). */
             user_id: string;
+        };
+        /** @description Body of `POST /v1/management/tokens`. */
+        MintTokenRequest: {
+            /**
+             * @description What the token is for, e.g. the device that will hold it. One to 80
+             *     characters after trimming, with no control characters.
+             */
+            label: string;
+        };
+        /**
+         * @description A token that was just minted (`POST /v1/management/tokens`). The only
+         *     response that ever carries a token's secret.
+         */
+        MintedTokenDto: {
+            /**
+             * Format: uuid
+             * @description Stable id, used to revoke the token.
+             */
+            id: string;
+            /** @description The label as stored. */
+            label: string;
+            /**
+             * @description The bearer token itself. Shown this once and not recoverable: only its
+             *     hash is kept.
+             */
+            token: string;
         };
         NativeChallengeRequest: {
             bootstrap_code?: string | null;
@@ -4460,6 +4780,14 @@ export interface components {
              */
             upload_id: string;
         };
+        /** @description Body of `POST /v1/management/oauth/binds`. */
+        StartBindRequest: {
+            /**
+             * @description The provider to bind an identity from: `"apple"`, `"google"` or
+             *     `"microsoft"`.
+             */
+            provider: string;
+        };
         /**
          * @description Request body for starting a SAS verification
          *     (`POST /v1/accounts/{account_id}/verify`). Names the verification target:
@@ -4481,6 +4809,14 @@ export interface components {
         StartVerifyResponse: {
             /** @description The verification transaction id. */
             flow_id: string;
+        };
+        /** @description A bind that was just started (`POST /v1/management/oauth/binds`). */
+        StartedBindDto: components["schemas"]["BindDto"] & {
+            /**
+             * @description The URL to open in a browser to sign in with the provider. It works
+             *     once, until `expires_at`.
+             */
+            url: string;
         };
         /**
          * @description Server status (`GET /v1/status`, M10): the backfill engine's disk-space health
@@ -9575,6 +9911,138 @@ export interface operations {
             };
         };
     };
+    start_bind: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartBindRequest"];
+            };
+        };
+        responses: {
+            /** @description The bind was started */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_StartedBindDto"];
+                };
+            };
+            /** @description Unknown provider */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `management_disabled`, or `recent_sign_in_required`: sign in again and retry */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `bind_unavailable`: OAuth is off on this server, or the provider is not enabled for browser sign-in */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The request body is over 4 KiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Five binds are already waiting on a sign-in; finish one or let them expire */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    bind_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The bind's id, from starting it */
+                bind_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The bind's status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_BindDto"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The management API is disabled (`management_disabled`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such bind, or it lapsed without completing and was removed */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     list_identities: {
         parameters: {
             query?: never;
@@ -9661,6 +10129,173 @@ export interface operations {
                 };
             };
             /** @description No such identity */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `last_credential`: this is the last way to sign in. Nothing was changed; repeat with `allow_lockout=true` to go ahead */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    list_tokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tokens, working ones first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Vec_ManagementTokenDto"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The management API is disabled (`management_disabled`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    mint_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MintTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description The new token, with its secret, once */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_MintedTokenDto"];
+                };
+            };
+            /** @description The label is empty, over 80 characters, or contains control characters */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `management_disabled`, or `recent_sign_in_required`: sign in again and retry */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The request body is over 4 KiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    revoke_token: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Go ahead even if this is the last way to sign in. Without it such a
+                 *     request is refused with `409 last_credential` and changes nothing.
+                 */
+                allow_lockout?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description The token's id, from the list */
+                token_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The token is revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `management_disabled`, or `recent_sign_in_required`: sign in again and retry */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such token */
             404: {
                 headers: {
                     [name: string]: unknown;

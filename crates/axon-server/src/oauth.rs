@@ -10,29 +10,16 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use axon_api::oauth_bind::{self, BindRefusal};
 use axon_core::Config;
 use axon_store::Store;
-use chrono::{Duration as ChronoDuration, Utc};
-use rand::Rng;
+use chrono::Utc;
 
 use crate::cli::{IdentitiesAction, OauthAction};
-
-/// How long a bind handshake stays open before the browser leg must have
-/// completed. Matches `axon_api::routes::oauth::AUTHORIZATION_REQUEST_TTL`'s
-/// value (that constant is private to `axon-api`, so this is a separate copy,
-/// not a shared one — both are "how long is a single-use OAuth flow allowed
-/// to stay pending", not something that needs to be literally the same
-/// constant to stay correct if one changes).
-const BIND_REQUEST_TTL: ChronoDuration = ChronoDuration::minutes(10);
 
 /// How often the CLI re-checks the bind request's status while waiting for
 /// the browser leg to finish.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-/// Unambiguous uppercase alphabet for `user_code` generation — excludes
-/// characters humans commonly mistype or confuse (`0`/`O`, `1`/`I`), the same
-/// concern RFC 8628 §6.1 flags for device-flow user codes.
-const USER_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 /// Run an `oauth` subcommand against the configured database.
 pub async fn run(action: OauthAction, config: &Config) -> anyhow::Result<()> {
@@ -46,66 +33,79 @@ pub async fn run(action: OauthAction, config: &Config) -> anyhow::Result<()> {
     }
 }
 
-/// Start a bind handshake, print the URL for the admin to open, then poll
-/// until it completes or expires. Validates `oauth.enabled` and the named
-/// provider's own `enabled` flag up front — a clear local error beats
-/// printing a URL that's guaranteed to 404.
-async fn bind(store: &Store, config: &Config, provider: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        config.oauth.enabled,
-        "oauth.enabled = false; enable oauth before binding an identity"
-    );
-    match provider {
+/// Whether `provider` is enabled and fully configured, read from the config
+/// file: the CLI's answer to the one question [`oauth_bind::check`] leaves to
+/// its caller. The running server answers it from the providers it built at
+/// boot, by the same [`crate::require_generic_provider_configured`].
+fn provider_configured(
+    config: &axon_core::OauthConfig,
+    provider: &'static str,
+) -> Result<(), BindRefusal> {
+    let generic = match provider {
         "apple" => {
-            anyhow::ensure!(
-                config.oauth.providers.apple.enabled,
-                "Apple OAuth is disabled"
-            );
-            apple_provider(&config.oauth).await?;
-        }
-        "google" | "microsoft" => {
-            let cfg = if provider == "google" {
-                &config.oauth.providers.google
+            return if config.providers.apple.enabled {
+                Ok(())
             } else {
-                &config.oauth.providers.microsoft
+                Err(BindRefusal::ProviderDisabled(provider))
             };
-            anyhow::ensure!(
-                cfg.enabled,
-                "oauth.providers.{provider}.enabled = false; enable it before binding"
-            );
-            crate::require_generic_provider_configured(provider, cfg)?;
         }
-        _ => anyhow::bail!("unknown provider (expected apple, google, or microsoft)"),
+        "google" => &config.providers.google,
+        _ => &config.providers.microsoft,
+    };
+    if !generic.enabled {
+        return Err(BindRefusal::ProviderDisabled(provider));
     }
-    let external_base_url = config
-        .oauth
-        .external_base_url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .context("oauth.external_base_url must be set before binding")?;
+    crate::require_generic_provider_configured(provider, generic)
+        .map(|_| ())
+        .map_err(|error| BindRefusal::ProviderMisconfigured(error.to_string()))
+}
 
-    let user_code = generate_user_code();
-    let expires_at = Utc::now() + BIND_REQUEST_TTL;
-    let request = store
-        .create_bind_request(provider, &user_code, expires_at)
+/// Start a bind handshake, print the URL for the admin to open, then poll
+/// until it completes or expires. The checks and the handshake itself are
+/// the ones the management API's bind runs ([`oauth_bind`]) — a clear local
+/// error beats printing a URL that's guaranteed to 404.
+async fn bind(store: &Store, config: &Config, provider: &str) -> anyhow::Result<()> {
+    let oauth = &config.oauth;
+    let target = oauth_bind::check(
+        oauth.enabled,
+        oauth.external_base_url.as_deref(),
+        provider,
+        |provider| provider_configured(oauth, provider),
+    )?;
+    if target.provider() == "apple" {
+        // Apple's key has to load too, which no config field alone shows.
+        apple_provider(oauth).await?;
+    }
+
+    // Uncapped: shell access is the way out when a client has left binds
+    // pending, so the CLI does not wait for them.
+    let started = target
+        .start(store, oauth_bind::PendingLimit::Unlimited)
         .await
         .context("creating bind request")?;
-
+    let request = started.request;
     println!(
-        "Open {external_base_url}/v1/oauth/bind?user_code={user_code} in any browser and sign \
-         in with {provider}.\nWaiting for sign-in to complete (expires in 10 minutes)..."
+        "Open {} in any browser and sign in with {}.\nWaiting for sign-in to complete (expires in {} minutes)...",
+        started.url,
+        target.provider(),
+        axon_api::OAUTH_HANDSHAKE_TTL.num_minutes(),
     );
 
     loop {
         let current = store
             .find_bind_request(request.device_code)
             .await
-            .context("polling bind request")?
-            .context("bind request row disappeared")?;
-        match current.status.as_str() {
-            "pending" if current.expires_at > Utc::now() => {
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
+            .context("polling bind request")?;
+        // A lapsed request is swept by the next bind anyone starts, from here
+        // or from a client, so a missing row is an expired one.
+        let status = current
+            .as_ref()
+            .map_or("expired", |current| match current.status.as_str() {
+                "pending" if current.expires_at <= Utc::now() => "expired",
+                status => status,
+            });
+        match status {
+            "pending" => tokio::time::sleep(POLL_INTERVAL).await,
             "completed" => {
                 println!("Bound successfully.");
                 return Ok(());
@@ -265,19 +265,6 @@ async fn identities(store: &Store, action: IdentitiesAction) -> anyhow::Result<(
     Ok(())
 }
 
-/// Generate an 8-character human-typeable code, `XXXX-XXXX` shaped, from
-/// [`USER_CODE_ALPHABET`] — RFC 8628-style, not cryptographically load-bearing
-/// on its own (the bind request's short TTL plus `/v1/oauth/*`'s per-`state`
-/// rate limiting is what makes guessing impractical, same as Path A/B's
-/// codes).
-fn generate_user_code() -> String {
-    let mut rng = rand::rng();
-    let chars: String = (0..8)
-        .map(|_| USER_CODE_ALPHABET[rng.random_range(0..USER_CODE_ALPHABET.len())] as char)
-        .collect();
-    format!("{}-{}", &chars[..4], &chars[4..])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,18 +400,5 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("16 KiB"));
-    }
-
-    #[test]
-    fn user_code_is_eight_unambiguous_chars_grouped() {
-        let code = generate_user_code();
-        assert_eq!(code.len(), 9); // 8 chars + 1 separator
-        assert_eq!(code.chars().nth(4), Some('-'));
-        for c in code.chars().filter(|c| *c != '-') {
-            assert!(
-                USER_CODE_ALPHABET.contains(&(c as u8)),
-                "{c} not in the unambiguous alphabet"
-            );
-        }
     }
 }

@@ -63,7 +63,7 @@ pub use state::{
     AccountDataRow, AccountDataUpsert, RoomMetadataStateRow, RoomStateRedaction, RoomStateRow,
     RoomStateUpsert,
 };
-pub use tokens::{IssuedOAuthTokenPair, IssuedToken, Token, VerifiedToken};
+pub use tokens::{IssuedOAuthTokenPair, IssuedToken, Token, TokenRevocation, VerifiedToken};
 
 use sqlx_postgres::{PgPool, PgPoolOptions};
 

@@ -51,6 +51,9 @@ pub struct Token {
     /// The registered OAuth client (`[[oauth.clients]]`) that redeemed the
     /// code/identity-token minting this row, if any.
     pub client_id: Option<String>,
+    /// The token that minted this one through the management API, or `None`
+    /// for a token minted any other way (ADR 0109).
+    pub created_by_token_id: Option<Uuid>,
 }
 
 impl Token {
@@ -58,6 +61,23 @@ impl Token {
     pub fn is_revoked(&self) -> bool {
         self.revoked_at.is_some()
     }
+}
+
+/// What an attempt to revoke a token did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenRevocation {
+    /// A still-active token was revoked.
+    Revoked,
+    /// The token exists and was revoked earlier. The first revocation's
+    /// timestamp stands. If it was a session's access token, that session's
+    /// refresh tokens are revoked now in case the earlier revocation left
+    /// them.
+    AlreadyRevoked,
+    /// No token has that id.
+    NotFound,
+    /// Refused: revoking it would leave no surviving credential. Nothing was
+    /// changed.
+    LastCredential,
 }
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for Token {
@@ -72,6 +92,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for Token {
             provider: row.try_get("provider")?,
             oauth_identity_id: row.try_get("oauth_identity_id")?,
             client_id: row.try_get("client_id")?,
+            created_by_token_id: row.try_get("created_by_token_id")?,
         })
     }
 }
@@ -115,8 +136,8 @@ pub struct IssuedOAuthTokenPair {
 }
 
 /// Columns selected for a [`Token`] (never the `hash`).
-const TOKEN_COLUMNS: &str =
-    "id, label, created_at, last_used_at, revoked_at, expires_at, provider, oauth_identity_id, client_id";
+const TOKEN_COLUMNS: &str = "id, label, created_at, last_used_at, revoked_at, expires_at, \
+     provider, oauth_identity_id, client_id, created_by_token_id";
 
 const BOOTSTRAP_LOCK_KEY: i64 = 0x4158_4f4e_424f_4f54;
 
@@ -146,13 +167,34 @@ impl Store {
     /// store its hash, and return the raw secret once (it is never recoverable
     /// afterward). This is the CLI bootstrap path (`axon token issue`).
     pub async fn issue_token(&self, label: &str) -> Result<IssuedToken, StoreError> {
+        self.insert_token(label, None).await
+    }
+
+    /// [`issue_token`](Self::issue_token), recording `created_by` as the token
+    /// that asked for it: the management API's mint (ADR 0109). The new token
+    /// never expires, exactly like a CLI-minted one.
+    pub async fn issue_token_created_by(
+        &self,
+        label: &str,
+        created_by: Uuid,
+    ) -> Result<IssuedToken, StoreError> {
+        self.insert_token(label, Some(created_by)).await
+    }
+
+    async fn insert_token(
+        &self,
+        label: &str,
+        created_by: Option<Uuid>,
+    ) -> Result<IssuedToken, StoreError> {
         let token = generate_token();
         let hash = hash_token(&token);
         let row = sqlx_core::query::query(
-            "INSERT INTO tokens (label, hash) VALUES ($1, $2) RETURNING id",
+            "INSERT INTO tokens (label, hash, created_by_token_id) VALUES ($1, $2, $3) \
+             RETURNING id",
         )
         .bind(label)
         .bind(&hash)
+        .bind(created_by)
         .fetch_one(&self.pool)
         .await?;
         Ok(IssuedToken {
@@ -275,6 +317,31 @@ impl Store {
         Ok(tokens)
     }
 
+    /// At most `limit` tokens for the management API's list (ADR 0109): the
+    /// ones that still verify first, then everything else, newest first
+    /// within each, with the id breaking ties so the cap cuts at the same
+    /// row every time.
+    ///
+    /// The order is what makes the cap safe. Expired OAuth access tokens are
+    /// never deleted and a signed-in client mints one an hour, so on a
+    /// long-lived instance they outnumber everything else; a newest-first cap
+    /// would eventually push the non-expiring tokens the owner actually needs
+    /// to see off the end of the list. Nothing supports this order with an
+    /// index, so it sorts the table; pruning the expired rows is #635.
+    pub async fn list_tokens_live_first(&self, limit: i64) -> Result<Vec<Token>, StoreError> {
+        let sql = format!(
+            "SELECT {TOKEN_COLUMNS} FROM tokens \
+             ORDER BY (revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())) DESC, \
+                      created_at DESC, id \
+             LIMIT $1"
+        );
+        let tokens = sqlx_core::query_as::query_as::<Postgres, Token>(&sql)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(tokens)
+    }
+
     /// All still-active tokens with the given label — the lookup behind
     /// `axon token revoke --label`. Revoked tokens are excluded since a label
     /// only needs to be unambiguous among tokens that can still be revoked.
@@ -291,27 +358,147 @@ impl Store {
     /// Revoke a token by id (stamp `revoked_at`). Returns `true` if a still-active
     /// token was revoked, `false` if no such id exists or it was already revoked —
     /// so the CLI can report the difference. Idempotent: the first revocation's
-    /// timestamp is preserved (the `revoked_at IS NULL` guard makes a re-revoke a
-    /// no-op).
+    /// timestamp is preserved.
+    ///
+    /// Revoking an OAuth session's access token also revokes the refresh
+    /// tokens of that identity and client, so the session cannot renew itself
+    /// (see [`end_sessions_in_tx`](Self::end_sessions_in_tx) for how wide
+    /// that cut is).
     ///
     /// Takes the credential lock, like every credential-removing write, so a
     /// guarded removal elsewhere never counts this token as a survivor while
     /// it is being revoked.
     pub async fn revoke_token(&self, id: Uuid) -> Result<bool, StoreError> {
+        Ok(self.remove_token(id, None).await? == TokenRevocation::Revoked)
+    }
+
+    /// [`revoke_token`](Self::revoke_token), telling an earlier revocation
+    /// apart from an unknown id: the management API's revoke once the owner
+    /// has confirmed `allow_lockout`.
+    pub async fn revoke_token_allowing_lockout(
+        &self,
+        id: Uuid,
+    ) -> Result<TokenRevocation, StoreError> {
+        self.remove_token(id, None).await
+    }
+
+    /// [`revoke_token`](Self::revoke_token), refused when it would leave the
+    /// owner with no way to sign in (ADR 0109): no other active non-expiring
+    /// token, and no bound identity whose provider is in `usable_providers`.
+    /// A refusal rolls everything back and revokes nothing.
+    ///
+    /// Only a token that is itself a surviving credential, an active one with
+    /// no expiry, can be the last. Revoking an OAuth access token is never
+    /// refused: it was never a way back in, so its removal cannot be what
+    /// locks the owner out, even on an instance that has no survivor already.
+    ///
+    /// The management API's revoke. The CLI keeps the unguarded form: an
+    /// operator with a shell can always mint another token.
+    pub async fn revoke_token_unless_last_credential(
+        &self,
+        id: Uuid,
+        usable_providers: &[String],
+    ) -> Result<TokenRevocation, StoreError> {
+        self.remove_token(id, Some(usable_providers)).await
+    }
+
+    async fn remove_token(
+        &self,
+        id: Uuid,
+        guard: Option<&[String]>,
+    ) -> Result<TokenRevocation, StoreError> {
         let mut tx = self.pool.begin().await?;
         // Bound the wait for the credential lock, as identity removal does.
         sqlx_core::query::query("SET LOCAL lock_timeout = '5s'")
             .execute(&mut *tx)
             .await?;
         Self::lock_credentials(&mut tx).await?;
-        let result = sqlx_core::query::query(
-            "UPDATE tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL",
+        let Some(row) = sqlx_core::query::query(
+            "SELECT revoked_at IS NOT NULL AS revoked, expires_at IS NULL AS non_expiring, \
+                    oauth_identity_id, client_id \
+               FROM tokens WHERE id = $1 FOR UPDATE",
         )
         .bind(id)
-        .execute(&mut *tx)
-        .await?;
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            tx.rollback().await?;
+            return Ok(TokenRevocation::NotFound);
+        };
+        // An OAuth session's access token is half of the session. Left alone,
+        // its refresh token would mint a replacement on the client's next
+        // request and the revoke would have ended nothing.
+        let session = match (
+            row.try_get::<Option<Uuid>, _>("oauth_identity_id")?,
+            row.try_get::<Option<String>, _>("client_id")?,
+        ) {
+            (Some(identity), Some(client)) => Some((identity, client)),
+            _ => None,
+        };
+        if row.try_get::<bool, _>("revoked")? {
+            // Revoked earlier, perhaps by a build that did not end sessions:
+            // asking again must still leave the session unable to renew.
+            if let Some((identity, client)) = &session {
+                Self::end_sessions_in_tx(&mut tx, *identity, client).await?;
+            }
+            tx.commit().await?;
+            return Ok(TokenRevocation::AlreadyRevoked);
+        }
+        sqlx_core::query::query("UPDATE tokens SET revoked_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        if let Some((identity, client)) = &session {
+            Self::end_sessions_in_tx(&mut tx, *identity, client).await?;
+        }
+        // Counted on the state this transaction would commit, and only when
+        // this token was a survivor to begin with.
+        if let Some(usable_providers) = guard {
+            if row.try_get::<bool, _>("non_expiring")?
+                && !Self::surviving_credential_in_tx(&mut tx, usable_providers).await?
+            {
+                tx.rollback().await?;
+                return Ok(TokenRevocation::LastCredential);
+            }
+        }
         tx.commit().await?;
-        Ok(result.rows_affected() > 0)
+        Ok(TokenRevocation::Revoked)
+    }
+
+    /// Revoke every active refresh token for one identity and client, so no
+    /// session of that client can renew itself.
+    ///
+    /// Nothing ties an access token to the one refresh chain that minted it,
+    /// only to its identity and client, so this is the narrowest cut there
+    /// is: it ends every session that client holds for that identity, which
+    /// is also what refresh-token reuse detection does. Access tokens those
+    /// sessions already hold are not touched and run out on their own, within
+    /// the access-token lifetime.
+    ///
+    /// Two statements on purpose. A rotation in flight holds its old row's
+    /// lock and has already inserted the replacement, which a single `UPDATE`
+    /// would wait for and then not see. Locking the rows first does the
+    /// waiting; the `UPDATE` then runs on a snapshot that includes whatever
+    /// that rotation committed.
+    async fn end_sessions_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        oauth_identity_id: Uuid,
+        client_id: &str,
+    ) -> Result<(), StoreError> {
+        for sql in [
+            "SELECT id FROM oauth_refresh_tokens \
+              WHERE oauth_identity_id = $1 AND client_id = $2 AND revoked_at IS NULL \
+                FOR UPDATE",
+            "UPDATE oauth_refresh_tokens SET revoked_at = now() \
+              WHERE oauth_identity_id = $1 AND client_id = $2 AND revoked_at IS NULL",
+        ] {
+            sqlx_core::query::query(sql)
+                .bind(oauth_identity_id)
+                .bind(client_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Revoke every still-active token minted for `oauth_identity_id`.

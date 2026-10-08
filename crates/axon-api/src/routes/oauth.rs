@@ -37,7 +37,7 @@ use crate::routes::bootstrap::{self, BOOTSTRAP_STATE_PREFIX};
 use crate::state::BootstrapConfig;
 
 /// How long a Path A flow (and its axon-minted code) stays redeemable.
-const AUTHORIZATION_REQUEST_TTL: ChronoDuration = ChronoDuration::minutes(10);
+const AUTHORIZATION_REQUEST_TTL: ChronoDuration = crate::oauth::HANDSHAKE_TTL;
 
 /// Tags a bind handshake's outgoing `state` so [`callback`] can tell it apart
 /// from a Path A `state` explicitly, rather than by relying on the two
@@ -548,7 +548,7 @@ async fn fail_callback(
         }
         CallbackFlow::Bind(_, _) | CallbackFlow::Bootstrap(_, _) => {
             let retry = if matches!(flow, CallbackFlow::Bind(_, _)) {
-                "Run axon oauth bind again to retry."
+                "Go back to where you started linking this sign-in and start again."
             } else {
                 "Reopen your original setup URL to retry."
             };
@@ -743,15 +743,17 @@ pub async fn token(
     }
 }
 
-/// `GET /v1/oauth/bind` query parameters — the `user_code` the CLI printed.
+/// `GET /v1/oauth/bind` query parameters — the `user_code` in the URL the
+/// bind's starter was given.
 #[derive(Debug, Deserialize)]
 pub struct BindQuery {
     pub user_code: String,
 }
 
-/// `GET /v1/oauth/bind?user_code=...` — the CLI device-code handshake's
-/// browser leg (`axon oauth bind`, ADR 0054). Looks up the pending request
-/// by its human-typeable `user_code`, reads the CLI-created nonce, and redirects
+/// `GET /v1/oauth/bind?user_code=...` — the browser leg of a bind, whether
+/// `axon oauth bind` (ADR 0054) or `POST /v1/management/oauth/binds` (ADR
+/// 0109) started it. Looks up the pending request by its human-typeable
+/// `user_code`, reads the nonce created with it, and redirects
 /// straight to the upstream provider — the bind request's own `device_code`
 /// doubles as the `state` sent upstream (see [`callback`]).
 pub async fn bind(
@@ -770,12 +772,12 @@ pub async fn bind(
         return Err(ApiError::not_found("unknown or disabled provider"));
     };
 
-    // Created by the CLI before the URL was printed; GET/HEAD never mutate it.
-    // Legacy pending rows without a nonce must restart with the updated CLI.
+    // Created with the request, before its URL was handed out; GET/HEAD
+    // never mutate it. A legacy pending row without one must be restarted.
     let nonce = request
         .upstream_nonce
         .as_deref()
-        .ok_or_else(|| ApiError::bad_request("bind has no nonce; rerun oauth bind"))?;
+        .ok_or_else(|| ApiError::bad_request("bind has no nonce; start the bind again"))?;
 
     let callback_uri = runtime.callback_url(&request.provider);
     let state = format!("{BIND_STATE_PREFIX}{}", request.device_code);
@@ -783,7 +785,7 @@ pub async fn bind(
     Ok(Redirect::to(&redirect_url).into_response())
 }
 
-/// Finish an `axon oauth bind` handshake after shared verification: bind the
+/// Finish a bind handshake after shared verification: bind the
 /// asserted identity (UPSERT — this is specifically how a *new* identity
 /// gets bound, unlike Path A's [`callback`] which requires one already
 /// exists), and mark the bind request complete. Returns a small static page

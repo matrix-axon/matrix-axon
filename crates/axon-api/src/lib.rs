@@ -60,11 +60,13 @@ pub use media::{MediaError, MediaProxy, MediaResource};
 pub use member_profiles::{
     MemberProfile, MemberProfileError, MemberProfileService, NoopMemberProfileService,
 };
+pub use oauth::bind as oauth_bind;
 pub use oauth::{
     authentication_time as oauth_authentication_time, callback_url as oauth_callback_url,
     http_client as oauth_http_client, rate_limit::spawn_sweeper as spawn_oauth_rate_limit_sweeper,
     AppleNativeVerifier, AppleProvider, GenericOidcProvider, NativeIdentityVerifier, OAuthRuntime,
     OidcError, OidcProvider, UpstreamTokens, VerifiedIdentity,
+    HANDSHAKE_TTL as OAUTH_HANDSHAKE_TTL,
 };
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
@@ -163,6 +165,24 @@ pub fn router(state: AppState) -> Router {
             "/v1/management/oauth/identities/{identity_id}",
             axum::routing::delete(routes::management::unbind_identity),
         )
+        .route(
+            "/v1/management/tokens",
+            get(routes::management::list_tokens).post(routes::management::mint_token),
+        )
+        .route(
+            "/v1/management/tokens/{token_id}",
+            axum::routing::delete(routes::management::revoke_token),
+        )
+        .route(
+            "/v1/management/oauth/binds",
+            post(routes::management::start_bind),
+        )
+        .route(
+            "/v1/management/oauth/binds/{bind_id}",
+            get(routes::management::bind_status),
+        )
+        // The largest body here is a token label; cap it before parsing.
+        .layer(DefaultBodyLimit::max(routes::management::MAX_BODY_BYTES))
         .route_layer(from_fn_with_state(
             state.management,
             routes::management::require_enabled,

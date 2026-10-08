@@ -1724,6 +1724,150 @@ impl OauthIdentityDto {
     }
 }
 
+/// A bearer token as the management API lists it
+/// (`GET /v1/management/tokens`). Never the secret: only its hash is stored,
+/// and a token is shown once, when it is minted.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ManagementTokenDto {
+    /// Stable id, used to revoke the token.
+    pub id: Uuid,
+    /// The label it was minted with. An OAuth session's is generated.
+    pub label: String,
+    /// When it was minted, RFC 3339.
+    pub created_at: String,
+    /// When it last authenticated a request, RFC 3339; null if never.
+    pub last_used_at: Option<String>,
+    /// When it was revoked, RFC 3339; null while it has not been.
+    pub revoked_at: Option<String>,
+    /// When it stops working, RFC 3339; null for a token that never expires.
+    /// A non-null value marks an OAuth session's access token.
+    pub expires_at: Option<String>,
+    /// The upstream provider behind the sign-in that minted it, if any.
+    pub provider: Option<String>,
+    /// The bound identity it was minted for, if any. Null once that identity
+    /// is unbound.
+    pub oauth_identity_id: Option<Uuid>,
+    /// The registered OAuth client that obtained it, if any.
+    pub client_id: Option<String>,
+    /// The token that minted this one through the management API; null for
+    /// one minted from the command line, at setup, or by a sign-in.
+    pub created_by_token_id: Option<Uuid>,
+    /// Whether this is the token that made the request. Revoking it signs the
+    /// caller out.
+    pub current: bool,
+}
+
+impl ManagementTokenDto {
+    pub(crate) fn new(token: axon_store::Token, caller: &crate::auth::AuthedToken) -> Self {
+        let rfc3339 = |at: chrono::DateTime<chrono::Utc>| at.to_rfc3339();
+        Self {
+            current: caller.id == token.id,
+            id: token.id,
+            label: token.label,
+            created_at: rfc3339(token.created_at),
+            last_used_at: token.last_used_at.map(rfc3339),
+            revoked_at: token.revoked_at.map(rfc3339),
+            expires_at: token.expires_at.map(rfc3339),
+            provider: token.provider,
+            oauth_identity_id: token.oauth_identity_id,
+            client_id: token.client_id,
+            created_by_token_id: token.created_by_token_id,
+        }
+    }
+}
+
+/// Body of `POST /v1/management/tokens`.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MintTokenRequest {
+    /// What the token is for, e.g. the device that will hold it. One to 80
+    /// characters after trimming, with no control characters.
+    pub label: String,
+}
+
+/// A token that was just minted (`POST /v1/management/tokens`). The only
+/// response that ever carries a token's secret.
+#[derive(Serialize, ToSchema)]
+pub struct MintedTokenDto {
+    /// Stable id, used to revoke the token.
+    pub id: Uuid,
+    /// The label as stored.
+    pub label: String,
+    /// The bearer token itself. Shown this once and not recoverable: only its
+    /// hash is kept.
+    pub token: String,
+}
+
+/// Body of `POST /v1/management/oauth/binds`.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StartBindRequest {
+    /// The provider to bind an identity from: `"apple"`, `"google"` or
+    /// `"microsoft"`.
+    pub provider: String,
+}
+
+/// Where an identity bind stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BindStatusDto {
+    /// Waiting for the owner to finish signing in with the provider.
+    Pending,
+    /// The identity is bound.
+    Completed,
+    /// The bind ran out of time, was canceled, or the sign-in failed. Start a
+    /// new one.
+    Expired,
+}
+
+/// An identity bind (`GET /v1/management/oauth/binds/{bind_id}`).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BindDto {
+    /// The bind's id, used to read its status.
+    pub id: Uuid,
+    /// The provider being bound.
+    pub provider: String,
+    pub status: BindStatusDto,
+    /// When a still-pending bind lapses, RFC 3339. The record itself is
+    /// removed some time after, and reading it then is a `404`.
+    pub expires_at: String,
+    /// The identity that was bound, once `status` is `completed`. Null if it
+    /// has since been unbound.
+    pub identity_id: Option<Uuid>,
+}
+
+impl BindDto {
+    pub(crate) fn new(
+        request: axon_store::BindRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        // A pending row past its expiry has lapsed even though nothing has
+        // rewritten its status yet; anything unrecognized is not usable.
+        let status = match request.status.as_str() {
+            "pending" if request.expires_at > now => BindStatusDto::Pending,
+            "completed" => BindStatusDto::Completed,
+            _ => BindStatusDto::Expired,
+        };
+        Self {
+            id: request.device_code,
+            provider: request.provider,
+            status,
+            expires_at: request.expires_at.to_rfc3339(),
+            identity_id: request.oauth_identity_id,
+        }
+    }
+}
+
+/// A bind that was just started (`POST /v1/management/oauth/binds`).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StartedBindDto {
+    #[serde(flatten)]
+    pub bind: BindDto,
+    /// The URL to open in a browser to sign in with the provider. It works
+    /// once, until `expires_at`.
+    pub url: String,
+}
+
 /// The running binary's build identity, mirroring the fields logged in the
 /// "axon starting" startup line and reported by `axon -V`.
 #[derive(Debug, Serialize, ToSchema)]

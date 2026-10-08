@@ -119,6 +119,8 @@ impl Store {
 
     /// Unbind an identity by id. Returns `true` if a row was deleted.
     /// Atomically revoke and detach access tokens (retaining their audit rows),
+    /// revoke the non-expiring tokens its sessions minted through the
+    /// management API (and any those minted in turn),
     /// remove refresh tokens and authorization requests, then delete the identity.
     /// No caller-side revocation is needed. A failure rolls back all changes.
     pub async fn delete_identity(&self, id: Uuid) -> Result<bool, StoreError> {
@@ -166,6 +168,22 @@ impl Store {
             return Ok(IdentityRemoval::NotFound);
         }
         for sql in [
+            // Tokens this identity's sessions minted through the management
+            // API, and tokens those minted in turn (ADR 0109). They carry no
+            // identity of their own, so without this a non-expiring token
+            // minted from a session would outlive the unbind that was meant
+            // to end everything that sign-in could do. Before the next
+            // statement, which clears the link this one starts from.
+            "WITH RECURSIVE minted AS ( \
+                 SELECT child.id FROM tokens child \
+                   JOIN tokens session ON child.created_by_token_id = session.id \
+                  WHERE session.oauth_identity_id = $1 \
+                 UNION \
+                 SELECT child.id FROM tokens child \
+                   JOIN minted ON child.created_by_token_id = minted.id \
+             ) \
+             UPDATE tokens SET revoked_at = now() \
+              WHERE id IN (SELECT id FROM minted) AND revoked_at IS NULL",
             "UPDATE tokens SET revoked_at = COALESCE(revoked_at, now()), oauth_identity_id = NULL \
              WHERE oauth_identity_id = $1",
             // Delete the entire rotation chain in one statement so its

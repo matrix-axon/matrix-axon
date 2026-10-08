@@ -11,10 +11,12 @@
 //! - [`apple`]: credentialed browser provider and keyless native verifier.
 //! - [`verification`]: shared JWT signature and claim validation.
 //! - [`exchange`]: bounded, redacted authorization-code exchange.
+//! - [`bind`]: starting an identity bind, shared by the CLI and the API.
 //! - [`tokens`]: mint/verify/rotate orchestration atop `axon-store`.
 //! - [`rate_limit`]: the per-IP/per-`state` token-bucket layer.
 
 pub mod apple;
+pub mod bind;
 mod exchange;
 pub mod generic;
 pub mod jwks;
@@ -45,6 +47,12 @@ pub trait NativeIdentityVerifier: Send + Sync {
 /// JWKS, token-exchange) — an unauthenticated surface must never let an
 /// upstream provider hold a connection open indefinitely.
 pub const OUTBOUND_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a single-use OAuth handshake may stay pending: a Path A
+/// authorization request and its code, the first-run bootstrap flow, and an
+/// identity bind. One value, so the CLI, the management API and the browser
+/// routes cannot disagree about when a flow has lapsed.
+pub const HANDSHAKE_TTL: chrono::Duration = chrono::Duration::minutes(10);
 
 /// Hard cap on any single outbound oauth HTTP response body (discovery, JWKS,
 /// or token-exchange), so a compromised or misbehaving upstream endpoint
