@@ -1435,6 +1435,19 @@ async fn room_state_read_endpoints() {
     assert_eq!(pinned[1]["event_id"], e1.as_str());
     assert_eq!(pinned[1]["body"], "first");
 
+    store
+        .set_room_member_counts(
+            account_id,
+            &room_id,
+            Some(axon_store::RoomMemberCounts {
+                joined: 500,
+                invited: 0,
+                observed_at: 1234,
+            }),
+        )
+        .await
+        .unwrap();
+
     // GET .../info -> the four bundled singletons.
     let (status, body) = get(
         &app,
@@ -1443,6 +1456,16 @@ async fn room_state_read_endpoints() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"]["join_rule"], "invite");
+    assert_eq!(
+        body["data"]["member_counts"],
+        json!({"joined":500,"invited":0,"observed_at":1234})
+    );
+    let (_, isolated) = get(
+        &app,
+        &format!("/v1/accounts/{}/rooms/{room_id}/info", Uuid::new_v4()),
+    )
+    .await;
+    assert!(isolated["data"]["member_counts"].is_null());
     assert_eq!(body["data"]["history_visibility"], "shared");
     assert_eq!(body["data"]["guest_access"], "forbidden");
     assert_eq!(body["data"]["encryption_algorithm"], "m.megolm.v1.aes-sha2");
@@ -1490,6 +1513,7 @@ async fn room_state_read_endpoints() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"]["join_rule"], Value::Null);
+    assert!(body["data"]["member_counts"].is_null());
     assert_eq!(body["data"]["encryption_algorithm"], Value::Null);
 
     let (status, body) = get(

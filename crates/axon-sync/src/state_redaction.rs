@@ -37,8 +37,7 @@ pub(crate) async fn watch(
 ) {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut cursor = String::new();
-    let mut next_sweep = tokio::time::Instant::now();
+    let mut sweep = crate::room_sweep::RoomSweep::new();
     // One paced worker per account: 32 queued hints and at most eight active
     // rooms (four sweep + four hint rooms), with 12 local reads per room.
     // Every tick advances the sweep, even under continuous hint traffic.
@@ -48,29 +47,7 @@ pub(crate) async fn watch(
             _ = tick.tick() => {},
         }
         let mut rooms = HashSet::new();
-        if tokio::time::Instant::now() >= next_sweep {
-            let page = tokio::select! {
-                _ = cancel.cancelled() => return,
-                result = tokio::time::timeout(Duration::from_secs(2), ctx.store.state_reconciliation_rooms(ctx.account_id, &cursor)) => result,
-            };
-            match page {
-                Ok(Ok(page)) => {
-                    if let Some(last) = page.last() {
-                        cursor.clone_from(last);
-                    } else {
-                        cursor.clear();
-                        next_sweep = tokio::time::Instant::now() + Duration::from_secs(300);
-                    }
-                    rooms.extend(
-                        page.into_iter()
-                            .filter_map(|id| id.parse::<OwnedRoomId>().ok()),
-                    );
-                }
-                _ => {
-                    tracing::warn!(account_id = %ctx.account_id, "state redaction sweep page failed; will retry")
-                }
-            }
-        }
+        rooms.extend(sweep.page(&ctx.store, ctx.account_id, &cancel).await);
         rooms.extend(take_hints(&mut hints));
         for room_id in rooms {
             let Some(room) = client.get_room(&room_id) else {

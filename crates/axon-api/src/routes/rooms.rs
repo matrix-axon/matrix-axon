@@ -505,7 +505,16 @@ pub async fn room_info(
     )
     .await?;
 
+    let member_counts = store
+        .room_member_counts(account_id, &room_id)
+        .await?
+        .map(|c| crate::dto::RoomMemberCountsDto {
+            joined: c.joined,
+            invited: c.invited,
+            observed_at: c.observed_at,
+        });
     Ok(ApiResponse::new(RoomInfoDto {
+        member_counts,
         join_rule,
         history_visibility,
         guest_access,

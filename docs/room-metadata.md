@@ -2,7 +2,7 @@
 
 [ADR 0111](adr/0111-cached-progressive-room-metadata.md) records the architecture for cached room metadata and bounded progressive enrichment.
 This guide documents the implemented API, current sync coverage, verification, and remaining work.
-[Tracking issue 618](https://github.com/matrix-axon/matrix-axon/issues/618) records the remaining acquisition, member-count, and client work.
+[Tracking issue 618](https://github.com/matrix-axon/matrix-axon/issues/618) records the remaining acquisition, discovery, and client work.
 
 ## Cached state details
 
@@ -99,6 +99,42 @@ State invalidation covering required-state updates is a prerequisite for replaci
 Unknown account/room IDs return unknown snapshots with HTTP 200, matching existing cached state-read conventions.
 Cached state from a room the account has left remains historical cached state according to the existing retention policy; this endpoint does not assert current membership or upstream access.
 
+## Joined-room member counts
+
+`GET /v1/accounts/{account_id}/rooms/{room_id}/info` adds nullable `member_counts`.
+An observed summary contains `joined`, `invited`, and `observed_at` (Unix milliseconds).
+Counts come from an atomic SDK `RoomInfo` summary snapshot, never from the lazily loaded member-list projection.
+The SDK's normalized invited count includes zero; an uninitialized zero joined count is withheld because a joined room must include the account itself.
+A missing SDK room, non-joined membership, uninitialized summary, or count outside signed 64-bit storage range produces `null`, not a guessed count.
+Existing rows start unknown; there is no membership backfill or new room-list aggregation.
+
+`observed_at` is when Axon read its local SDK cache, not when the homeserver last confirmed membership.
+A recent observation can still reflect a disconnected SDK's old summary.
+Consumers must consider account sync health as well as the timestamp; this endpoint does not assert upstream freshness.
+Counts persist across process restarts and remain readable while sync is disconnected.
+A local leave atomically clears the observation; a rejoin needs another joined SDK observation.
+A confirmed upstream `gone` verdict also withholds counts.
+Retained room state after leave remains historical, while this count field becomes unknown.
+
+Each account has one cancelable worker subscribed before startup reconciliation.
+One-second ticks skip missed ticks and process at most four distinct live hints plus four keyset-paged room-summary rows.
+At most 32 SDK notifications are consumed per tick, coalescing duplicates within that budget and preserving the receiver tail.
+Lagged notifications wake a sweep without rewinding its cursor, so continuous traffic cannot starve later rooms.
+Each page and each room observation has a two-second deadline, and every room failure is logged and skipped independently.
+Reconciliation transactions also set PostgreSQL-local statement and lock deadlines of 1.5 seconds and one second, so timed-out awaits cannot leave unbounded database work.
+After a complete sweep, another begins after five minutes; startup begins immediately.
+An offline-to-online transition sends a coalesced wake signal to resume scanning at the next paced tick, including reconnects that do not restart the account task.
+Recovery time scales with the number of cached summaries and local I/O, rather than promising a fixed five-minute completion for every account.
+There is no account-sized in-memory dedup map, unbounded room enumeration, or remote request.
+The worker only updates existing account/room summary rows; purge or account removal cannot be undone by a late completion.
+Its cancellation token and join handle are owned by the account run.
+The keyset traversal is shared with singleton-state redaction repair.
+Existing tracing controls suffice; warnings identify account, room where applicable, and the SDK-summary source without logging private metadata bodies.
+
+Counts have no new live frame.
+Clients can re-read `/info` on reconnect and use bounded visible-panel polling, as for cached state details.
+Server counts complete [issue 620](https://github.com/matrix-axon/matrix-axon/issues/620); web and TUI presentation remain separate follow-ups.
+
 ## Alias scope
 
 Advertised aliases are the canonical `alias` and `alt_aliases` in `m.room.canonical_alias`.
@@ -117,7 +153,7 @@ Even a requested state type can be unknown before room hydration or if no tuple 
 The API deliberately does not hide these gaps with default values or perform a remote fetch on every detail read.
 [Issue 621](https://github.com/matrix-axon/matrix-axon/issues/621) tracks bounded missing-state acquisition and homeserver-only metadata.
 
-Authoritative member counts are [issue 620](https://github.com/matrix-axon/matrix-axon/issues/620); the lazily loaded member list is not an authoritative count.
+Authoritative member counts are cached separately as described above; the lazily loaded member list is not an authoritative count.
 Paginated unjoined-room discovery and summary enrichment are [issue 622](https://github.com/matrix-axon/matrix-axon/issues/622).
 The discovery cache, progressive updates, and acquisition budgets follow ADR 0111 and are not implemented by the cached state endpoint.
 Web and TUI consumption are [issue 623](https://github.com/matrix-axon/matrix-axon/issues/623) and [issue 624](https://github.com/matrix-axon/matrix-axon/issues/624).
@@ -133,6 +169,10 @@ Use a throwaway database; these tests run migrations and write fixture accounts.
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http room_metadata -- --ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-store --test state -- --ignored
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-sync --lib state_redaction -- --include-ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-store --test member_counts -- --ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-sync --lib member_counts -- --include-ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http room_state_read_endpoints -- --ignored
+cargo test -p axon-sync --lib room_sweep
 cargo test -p axon-api --test openapi
 ```
 
