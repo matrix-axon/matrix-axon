@@ -81,6 +81,27 @@ async fn member_counts_restart_transitions_and_account_isolation() {
             .unwrap(),
         MemberCountWrite::Retry
     );
+    // Positive invalidation wins a millisecond tie with a count observation.
+    assert_eq!(
+        store
+            .invalidate_room_member_counts(account, room, counts.observed_at)
+            .await
+            .unwrap(),
+        MemberCountWrite::Applied
+    );
+    assert!(store
+        .room_member_counts(account, room)
+        .await
+        .unwrap()
+        .is_none());
+    let counts = RoomMemberCounts {
+        observed_at: counts.observed_at + 1,
+        ..counts
+    };
+    store
+        .set_room_member_counts(account, room, counts.clone())
+        .await
+        .unwrap();
     // A contended room cannot pin the worker's PostgreSQL connection forever.
     let mut lock = store.pool().begin().await.unwrap();
     sqlx_core::query::query(

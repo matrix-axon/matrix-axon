@@ -41,6 +41,8 @@ fs4 = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+# Pin the patched base and exercise its real MSC4186 response processor.
+matrix-sdk-base = { workspace = true }
 # DB-gated lifecycle tests: seed/clean account rows directly through the pool
 # (the active no-op / deleting-conflict / invalid-MXID branches need no homeserver).
 sqlx-core = { workspace = true }

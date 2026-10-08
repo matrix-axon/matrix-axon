@@ -77,7 +77,8 @@ impl Store {
                 SET joined_member_count = $3, invited_member_count = $4, member_counts_observed_at = $5
                 WHERE account_id = $1 AND room_id = $2
                   AND ($3::bigint IS NULL OR NOT hidden_left)
-                  AND (member_counts_observed_at IS NULL OR member_counts_observed_at < $5)
+                  AND (member_counts_observed_at IS NULL OR member_counts_observed_at < $5
+                      OR ($3::bigint IS NULL AND member_counts_observed_at = $5))
                   AND (joined_member_count, invited_member_count) IS DISTINCT FROM ($3::bigint, $4::bigint)
                 RETURNING 1
              ) SELECT EXISTS (SELECT 1 FROM updated),

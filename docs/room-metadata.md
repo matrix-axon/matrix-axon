@@ -104,9 +104,12 @@ Cached state from a room the account has left remains historical cached state ac
 `GET /v1/accounts/{account_id}/rooms/{room_id}/info` adds nullable `member_counts`.
 An observed summary contains `joined`, `invited`, and `observed_at` (Unix milliseconds).
 Counts come from an atomic SDK `RoomInfo` summary snapshot, never from the lazily loaded member-list projection.
-The SDK's normalized invited count includes zero; an uninitialized zero joined count is withheld because a joined room must include the account itself.
+A temporary, version-pinned SDK base patch preserves whether each count was supplied and invalidates that evidence on membership transitions.
+See `crates/third-party/README.md` for the upstream revision, release checksum, complete patch, and removal criteria.
+A pair is published only when both fields are known; an explicitly supplied zero invited count is valid, while a missing invited field remains unknown.
+A zero joined count is withheld because a joined room must include the account itself.
 A missing SDK room, uninitialized summary, or count outside signed 64-bit storage range leaves the last persisted observation unchanged.
-Positive non-joined membership evidence invalidates it.
+Positive non-joined membership evidence or a known membership transition invalidates it, including a rejoin whose new summary omits counts.
 Existing rows start unknown; there is no membership backfill or new room-list aggregation.
 
 `observed_at` is when Axon read the changed summary from its local SDK cache, not when the homeserver last confirmed membership.
@@ -115,13 +118,13 @@ The database rejects observations older than the persisted observation or invali
 A recent observation can still reflect a disconnected SDK's old summary.
 Consumers must consider account sync health as well as the timestamp; this endpoint does not assert upstream freshness.
 Counts persist across process restarts and remain readable while sync is disconnected.
-A local leave atomically clears the observation; a rejoin needs another joined SDK observation.
+A local leave atomically clears the observation; a rejoin needs both counts supplied in its new membership epoch.
 A confirmed upstream `gone` verdict also withholds counts.
 Retained room state after leave remains historical, while this count field becomes unknown.
 
 Each account has one cancelable worker subscribed before startup reconciliation.
 One-second ticks skip missed ticks and process at most four queued hints or retries plus four keyset-paged room-summary rows.
-A coalesced queue holds at most 32 rooms and retries a projection-order race or transient failure up to four times; overflow and exhausted retries fall back to the progressive sweep.
+A coalesced queue holds at most 32 rooms and makes up to four attempts for a projection-order race or transient failure; overflow and exhausted retries fall back to the progressive sweep.
 At most 32 SDK notifications are consumed per tick, coalescing duplicates within that budget and preserving the receiver tail.
 Lagged notifications wake a sweep without rewinding its cursor, so continuous traffic cannot starve later rooms.
 Each page and each room observation has a two-second deadline, and every room failure is logged and skipped independently.

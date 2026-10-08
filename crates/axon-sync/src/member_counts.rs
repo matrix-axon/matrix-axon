@@ -14,15 +14,20 @@ use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-// A joined room has at least ourselves. The SDK initializes absent summaries
-// to zero: do not publish that sentinel as an authoritative empty room.
+// Only explicitly supplied counts from the current membership epoch qualify.
+// The lazy member list and the SDK's legacy zero defaults are never evidence.
 fn snapshot(info: &RoomInfo) -> Option<RoomMemberCounts> {
-    if info.state() != RoomState::Joined || info.joined_members_count() == 0 {
+    if info.state() != RoomState::Joined {
+        return None;
+    }
+    let (joined, invited) = info.summary_member_counts();
+    let joined = joined?;
+    if joined == 0 {
         return None;
     }
     Some(RoomMemberCounts {
-        joined: info.joined_members_count().try_into().ok()?,
-        invited: info.invited_members_count().try_into().ok()?,
+        joined: joined.try_into().ok()?,
+        invited: invited?.try_into().ok()?,
         observed_at: u64::from(matrix_sdk::ruma::MilliSecondsSinceUnixEpoch::now().get())
             .try_into()
             .ok()?,
@@ -34,7 +39,15 @@ async fn reconcile(client: &Client, store: &Store, account_id: Uuid, room_id: &R
     let Some(room) = client.get_room(room_id) else {
         return false;
     };
-    let info = room.clone_info();
+    persist_snapshot(&room.clone_info(), store, account_id, room_id).await
+}
+
+async fn persist_snapshot(
+    info: &RoomInfo,
+    store: &Store,
+    account_id: Uuid,
+    room_id: &RoomId,
+) -> bool {
     let result = if info.state() != RoomState::Joined {
         store
             .invalidate_room_member_counts(
@@ -43,9 +56,17 @@ async fn reconcile(client: &Client, store: &Store, account_id: Uuid, room_id: &R
                 u64::from(matrix_sdk::ruma::MilliSecondsSinceUnixEpoch::now().get()) as i64,
             )
             .await
-    } else if let Some(counts) = snapshot(&info) {
+    } else if let Some(counts) = snapshot(info) {
         store
             .set_room_member_counts(account_id, room_id.as_str(), counts)
+            .await
+    } else if let Some(invalidated_at) = info.summary_counts_invalidated_at() {
+        store
+            .invalidate_room_member_counts(
+                account_id,
+                room_id.as_str(),
+                u64::from(invalidated_at.get()) as i64,
+            )
             .await
     } else {
         return false;
@@ -53,7 +74,10 @@ async fn reconcile(client: &Client, store: &Store, account_id: Uuid, room_id: &R
     match result {
         Ok(outcome) => {
             tracing::trace!(%account_id, %room_id, source = "sdk_summary", ?outcome, "reconciled member count observation");
-            outcome == MemberCountWrite::Retry
+            matches!(
+                outcome,
+                MemberCountWrite::Retry | MemberCountWrite::Superseded
+            )
         }
         Err(error) => {
             tracing::warn!(%account_id, %room_id, source = "sdk_summary", reason = error.diagnostic_reason(), "member count persistence failed; will retry");
@@ -266,13 +290,189 @@ mod tests {
         info.mark_as_banned();
         assert!(snapshot(&info).is_none());
         info.mark_as_joined();
-        assert_eq!(snapshot(&info).unwrap().joined, 500);
+        assert!(
+            snapshot(&info).is_none(),
+            "rejoin must not reuse pre-leave counts"
+        );
+        let mut summary = RoomSummary::new();
+        summary.joined_member_count = Some(499u32.into());
+        info.update_from_ruma_summary(&summary);
+        assert!(
+            snapshot(&info).is_none(),
+            "missing invited count is unknown"
+        );
+        summary.joined_member_count = None;
+        summary.invited_member_count = Some(0u32.into());
+        info.update_from_ruma_summary(&summary);
+        assert_eq!(snapshot(&info).unwrap().invited, 0);
         assert!(snapshot(&RoomInfo::new(
             room_id!("!empty:localhost"),
             RoomState::Joined
         ))
         .is_none());
         assert_eq!(snapshot(&self::info(499, 0)).unwrap().invited, 0);
+    }
+
+    #[test]
+    fn summary_availability_survives_serialization_and_legacy_is_unknown() {
+        let current = info(500, 0);
+        let encoded = serde_json::to_value(&current).unwrap();
+        let restored: RoomInfo = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(restored.summary_member_counts(), (Some(500), Some(0)));
+        let mut legacy = encoded;
+        for field in [
+            "summary_joined_count_known",
+            "summary_invited_count_known",
+            "summary_counts_invalidated_at",
+        ] {
+            legacy.as_object_mut().unwrap().remove(field);
+        }
+        let restored: RoomInfo = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.joined_members_count(), 500);
+        assert_eq!(restored.summary_member_counts(), (None, None));
+        assert!(snapshot(&restored).is_none());
+        let mut transitioned = current;
+        transitioned.mark_as_left();
+        transitioned.mark_as_joined();
+        let restored: RoomInfo =
+            serde_json::from_value(serde_json::to_value(&transitioned).unwrap()).unwrap();
+        assert!(restored.summary_counts_invalidated_at().is_some());
+        assert!(snapshot(&restored).is_none());
+    }
+
+    #[tokio::test]
+    async fn sliding_sync_counts_preserve_presence_and_invalidate_on_rejoin() {
+        use matrix_sdk::ruma::api::client::sync::sync_events::v5;
+        use matrix_sdk_base::{
+            cross_process_lock::CrossProcessLockConfig, store::StoreConfig, BaseClient,
+            DmRoomDefinition, RequestedRequiredStates, ThreadingSupport,
+        };
+        let client = BaseClient::new(
+            StoreConfig::new(CrossProcessLockConfig::SingleProcess),
+            ThreadingSupport::Disabled,
+            DmRoomDefinition::default(),
+        );
+        client
+            .activate(
+                matrix_sdk_base::SessionMeta {
+                    user_id: user_id!("@counts:localhost").to_owned(),
+                    device_id: "COUNTS".into(),
+                },
+                RoomLoadSettings::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        async fn apply(
+            client: &BaseClient,
+            joined: Option<u32>,
+            invited: Option<u32>,
+            membership: Option<&str>,
+        ) -> RoomInfo {
+            let mut room = v5::response::Room::new();
+            room.joined_count = joined.map(Into::into);
+            room.invited_count = invited.map(Into::into);
+            if let Some(membership) = membership {
+                room.required_state = serde_json::from_value(serde_json::json!([{
+                    "type": "m.room.member", "state_key": "@counts:localhost",
+                    "sender": "@counts:localhost", "event_id": format!("${membership}"),
+                    "origin_server_ts": 1, "content": {"membership": membership}
+                }]))
+                .unwrap();
+            }
+            let mut response = v5::Response::new("fixture".to_owned());
+            response
+                .rooms
+                .insert(room_id!("!counts:localhost").to_owned(), room);
+            client
+                .process_sliding_sync(
+                    &response,
+                    &RequestedRequiredStates::default(),
+                    &client.state_store_lock().lock().await,
+                )
+                .await
+                .unwrap();
+            client
+                .get_room(room_id!("!counts:localhost"))
+                .unwrap()
+                .clone_info()
+        }
+
+        let info = apply(&client, Some(500), None, Some("join")).await;
+        assert_eq!(info.summary_member_counts(), (Some(500), None));
+        assert!(
+            snapshot(&info).is_none(),
+            "omitted invites are not authoritative zero"
+        );
+        let info = apply(&client, None, Some(0), None).await;
+        assert_eq!(snapshot(&info).unwrap().invited, 0);
+        let info = apply(&client, None, None, None).await;
+        assert_eq!(
+            snapshot(&info).unwrap().joined,
+            500,
+            "same-epoch deltas retain known fields"
+        );
+        let info = apply(&client, None, None, Some("leave")).await;
+        assert_eq!(info.state(), RoomState::Left);
+        assert!(snapshot(&info).is_none());
+        let info = apply(&client, None, None, Some("join")).await;
+        assert_eq!(info.summary_member_counts(), (None, None));
+        assert!(info.summary_counts_invalidated_at().is_some());
+        assert!(snapshot(&info).is_none());
+        assert!(snapshot(&apply(&client, Some(499), None, None).await).is_none());
+        let info = apply(&client, None, Some(2), None).await;
+        let counts = snapshot(&info).unwrap();
+        assert_eq!((counts.joined, counts.invited), (499, 2));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn joined_epoch_without_counts_invalidates_previous_projection() {
+        let store = Store::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
+            .await
+            .unwrap();
+        let account = store
+            .upsert_account(
+                &format!("@epoch-{}:localhost", Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .unwrap();
+        sqlx_core::query::query("INSERT INTO room_summaries (account_id, room_id, last_activity_ts, last_event_id, last_event_row_id, last_activity_is_content) VALUES ($1, '!counts:localhost', 1, '$fixture', 1, false)")
+            .bind(account.account_id).execute(store.pool()).await.unwrap();
+        let mut info = info(500, 3);
+        assert!(
+            !persist_snapshot(
+                &info,
+                &store,
+                account.account_id,
+                room_id!("!counts:localhost")
+            )
+            .await
+        );
+        assert!(store
+            .room_member_counts(account.account_id, "!counts:localhost")
+            .await
+            .unwrap()
+            .is_some());
+        info.mark_as_left();
+        info.mark_as_joined();
+        assert!(
+            !persist_snapshot(
+                &info,
+                &store,
+                account.account_id,
+                room_id!("!counts:localhost")
+            )
+            .await
+        );
+        assert!(store
+            .room_member_counts(account.account_id, "!counts:localhost")
+            .await
+            .unwrap()
+            .is_none());
+        store.delete_account_row(account.account_id).await.unwrap();
     }
 
     // Real SDK cache -> actual watcher -> real PostgreSQL, including startup

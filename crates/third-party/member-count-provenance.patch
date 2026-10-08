@@ -1,0 +1,132 @@
+--- a/src/room/room_info.rs
++++ b/src/room/room_info.rs
+@@ -11,6 +11,8 @@
+ // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
++
++// Axon modification: preserve summary count availability and membership-epoch invalidation.
+ 
+ use std::{
+     collections::{BTreeMap, BTreeSet, HashSet},
+@@ -610,6 +612,18 @@
+     /// The summary of this room.
+     pub(crate) summary: RoomSummary,
+ 
++    /// Whether each server summary field was supplied in this membership epoch.
++    /// Legacy caches deliberately deserialize as unknown.
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub(crate) summary_joined_count_known: bool,
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub(crate) summary_invited_count_known: bool,
++
++    /// Local time of the last observed membership transition. This fences
++    /// observations from earlier membership epochs, not upstream sync age.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub(crate) summary_counts_invalidated_at: Option<ruma::MilliSecondsSinceUnixEpoch>,
++
+     /// Flag remembering if the room members are synced.
+     pub(crate) members_synced: bool,
+ 
+@@ -680,6 +694,9 @@
+             room_state,
+             notification_counts: Default::default(),
+             summary: Default::default(),
++            summary_joined_count_known: false,
++            summary_invited_count_known: false,
++            summary_counts_invalidated_at: None,
+             members_synced: false,
+             last_prev_batch: None,
+             sync_info: SyncInfo::NoState,
+@@ -721,6 +738,11 @@
+ 
+     /// Set the membership RoomState of this Room
+     pub fn set_state(&mut self, room_state: RoomState) {
++        if self.room_state != room_state {
++            self.summary_joined_count_known = false;
++            self.summary_invited_count_known = false;
++            self.summary_counts_invalidated_at = Some(ruma::MilliSecondsSinceUnixEpoch::now());
++        }
+         self.room_state = room_state;
+     }
+ 
+@@ -954,12 +976,12 @@
+             }
+ 
+             if let Some(joined) = summary.joined_member_count {
+-                self.summary.joined_member_count = joined.into();
++                self.update_joined_member_count(joined.into());
+                 changed = true;
+             }
+ 
+             if let Some(invited) = summary.invited_member_count {
+-                self.summary.invited_member_count = invited.into();
++                self.update_invited_member_count(invited.into());
+                 changed = true;
+             }
+         }
+@@ -974,11 +996,33 @@
+     /// Updates the joined member count.
+     pub(crate) fn update_joined_member_count(&mut self, count: u64) {
+         self.summary.joined_member_count = count;
++        self.summary_joined_count_known = true;
+     }
+ 
+     /// Updates the invited member count.
+     pub(crate) fn update_invited_member_count(&mut self, count: u64) {
+         self.summary.invited_member_count = count;
++        self.summary_invited_count_known = true;
++    }
++
++    /// Server-supplied joined and invited counts for the current membership
++    /// epoch. Missing fields retain known values within an epoch; transitions
++    /// invalidate both. Legacy serialized summaries have no availability
++    /// evidence and return `(None, None)` until fresh fields arrive.
++    ///
++    /// Unlike the legacy numeric getters, these values never infer zero from
++    /// an omitted field. They do not imply that sync is currently connected.
++    pub fn summary_member_counts(&self) -> (Option<u64>, Option<u64>) {
++        (
++            self.summary_joined_count_known.then_some(self.summary.joined_member_count),
++            self.summary_invited_count_known.then_some(self.summary.invited_member_count),
++        )
++    }
++
++    /// Local time at which a membership transition invalidated summary counts.
++    /// A cold or legacy cache with no observed transition returns `None`.
++    pub fn summary_counts_invalidated_at(&self) -> Option<ruma::MilliSecondsSinceUnixEpoch> {
++        self.summary_counts_invalidated_at
+     }
+ 
+     /// Updates the room heroes.
+@@ -1574,6 +1618,9 @@
+                 invited_member_count: 0,
+                 active_service_members: None,
+             },
++            summary_joined_count_known: false,
++            summary_invited_count_known: false,
++            summary_counts_invalidated_at: None,
+             members_synced: true,
+             last_prev_batch: Some("pb".to_owned()),
+             sync_info: SyncInfo::FullySynced,
+--- a/src/store/migration_helpers.rs
++++ b/src/store/migration_helpers.rs
+@@ -13,6 +13,8 @@
+ // limitations under the License.
+ 
+ //! Data migration helpers for StateStore implementations.
++
++// Axon modification: keep legacy summary count availability unknown.
+ 
+ use std::{collections::HashSet, sync::Arc};
+ 
+@@ -105,6 +107,9 @@
+             room_state: room_type,
+             notification_counts,
+             summary,
++            summary_joined_count_known: false,
++            summary_invited_count_known: false,
++            summary_counts_invalidated_at: None,
+             members_synced,
+             last_prev_batch,
+             sync_info,
