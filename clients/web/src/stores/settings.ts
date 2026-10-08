@@ -158,10 +158,10 @@ export interface SettingsV1 {
   pageScrollReset: boolean
   /**
    * Whether the installed app's icon shows a badge with the number of unread
-   * messages (ADR 0080, Badging API). On by default, matching how other
-   * messaging apps badge without asking: the API needs no permission prompt
-   * and touches nothing off-device. Also on by default because there is no
-   * way for this preference to reach a fresh install anyway — iOS gives a
+   * messages. On by default, matching how other messaging apps badge without
+   * asking. A browser uses the Badging API (ADR 0080), which needs no
+   * permission prompt and touches nothing off-device. The shell sets the icon
+   * itself. It stays on by default for a fresh install too: iOS gives a
    * newly added home-screen web app its own storage, separate from the
    * Safari tab it was added from, so a setting toggled beforehand can never
    * carry over.

@@ -90,6 +90,15 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSDictionary", "NSString", "NSUserDefaults", "NSValue"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder"] }
 
+# The iOS home-screen number. `WebviewWindow::set_badge_count` is compiled
+# only into Tauri's desktop builds, so an iOS build cannot call it. This is
+# the same `objc2` Tao already uses for that call.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"
+# The badge completion handler is a block. `objc2` encodes a null object and
+# a null block differently, and a debug build checks that.
+block2 = "0.6"
+
 [target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 

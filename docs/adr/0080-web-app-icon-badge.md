@@ -103,6 +103,19 @@ volume is what a badge conventionally means.
   unread count on the app icon", with a note shown only when
   `!appBadgeAvailable()` explaining the install requirement rather than
   implying the browser lacks the feature outright.
+- **The packaged shell does not use that bridge where the webview does not paint.**
+  `Platform.setIconBadge` is `null` in a browser and on Android, where this stack has no launcher-badge API.
+  macOS, Linux, Windows, and iOS pass their own setter.
+  The command runs on the main thread, in arrival order.
+  The page sends one value per turn, and only after `rooms.loading` has been false once, so the store's initial zero is not a clear.
+  A clear is sent only after a number has been painted in this session, so a launch with nothing unread does not call the setter.
+  On iOS 15 that call would remove delivered notifications.
+  A paint that throws or rejects is forgotten, so the next run retries it unless a later value has already been sent.
+  macOS sets the Dock tile.
+  Linux sets the Unity launcher count, which leaves the icon unchanged on other desktops.
+  Windows draws a taskbar overlay.
+  iOS 16 uses `UNUserNotificationCenter.setBadgeCount`, so a clear does not remove delivered notifications.
+  iOS 15 falls back to `UIApplication`'s icon number.
 - **New `RoomsStore.unreadTotal` signal** (`stores/rooms.ts`), maintained
   alongside `unreadKeys` inside `setUnreadCounts`: each call that changes a
   room's `notificationCount` adds the delta (`next - previous`) to a running

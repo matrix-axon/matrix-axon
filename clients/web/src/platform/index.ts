@@ -361,7 +361,26 @@ export interface Platform {
    */
   onNotificationClick:
     ((handler: (click: NotificationClick) => void) => () => void) | null
+
+  /**
+   * Set the OS icon badge to `count`, or clear it when `count` is `null`.
+   *
+   * `null` as the method means this platform has no icon of its own.
+   * A browser returns that, and so does the Android shell: this stack has
+   * no launcher-badge API there. `applyAppBadge` then uses the Badging API
+   * (ADR 0080). The other packaged webviews either omit that API or resolve
+   * it without painting, so those shells set the icon in-process.
+   */
+  setIconBadge: IconBadgeSetter | null
 }
+
+/**
+ * Paint `count` on the OS icon, or clear it when `count` is `null`.
+ *
+ * `void` covers a Badging API implementation that returns nothing. The shell
+ * command returns a promise. Callers treat both the same way.
+ */
+export type IconBadgeSetter = (count: number | null) => void | Promise<void>
 
 /** What a native menu item asks the page to do. */
 export const MENU_COMMANDS = [
@@ -526,6 +545,8 @@ export function browserPlatform(): Platform {
       return Promise.resolve()
     },
     onNotificationClick: subscribeNotificationClicks,
+    // The page badges through `navigator` here. See `setIconBadge`.
+    setIconBadge: null,
   }
 }
 
@@ -570,6 +591,23 @@ export function isTauriRuntime(): boolean {
   return (
     typeof window !== 'undefined' &&
     '__TAURI_INTERNALS__' in (window as unknown as Record<string, unknown>)
+  )
+}
+
+/**
+ * Whether this shell is the iOS or Android build. An iPad's webview may report
+ * a desktop Mac user agent, so a Mac with a touch screen counts as one.
+ *
+ * Lives here, not in `tauri.ts`, so a browser page can ask without pulling
+ * the Tauri plugins into its boot path.
+ */
+export function isMobileShell(
+  userAgent = navigator.userAgent,
+  touchPoints = navigator.maxTouchPoints ?? 0,
+): boolean {
+  return (
+    /Android|iPhone|iPad|iPod/.test(userAgent) ||
+    (/Macintosh/.test(userAgent) && touchPoints > 1)
   )
 }
 
