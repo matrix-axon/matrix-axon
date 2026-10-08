@@ -829,6 +829,29 @@ describe('the app icon badge', () => {
     expect(queryByText(/Unity unread count/)).toBeNull()
   })
 
+  it('does not read notification permission for a badge note that ignores it', async () => {
+    asUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36')
+    const notificationPermission = vi.fn(() =>
+      Promise.resolve('default' as const),
+    )
+    render(
+      <ServicesContext.Provider
+        value={testServices({
+          platform: {
+            browserCanAdoptApp: false,
+            setIconBadge: () => Promise.resolve(),
+            notificationPermission,
+          },
+        })}
+      >
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    // Message notifications still read it once. The badge section must not
+    // add a second call on a desktop shell.
+    await waitFor(() => expect(notificationPermission).toHaveBeenCalledTimes(1))
+  })
+
   it('says a Linux shell badges only through a Unity launcher', () => {
     asUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36')
     const { getByText, queryByText } = render(

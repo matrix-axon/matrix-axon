@@ -72,27 +72,6 @@ export function requestAppBadgeNotificationPermission(): Promise<NotificationPer
  * `null` is only the browser path's "absent" answer. A shell passes its own
  * setter and never reaches this.
  */
-/**
- * Read the inputs the effect has to follow.
- *
- * A bare property read is an unused expression, and the flush below reads
- * the signals again so a burst keeps only its last value. Calling this is
- * what subscribes the effect.
- */
-function watchBadgeInputs(
-  unread: number,
-  enabled: boolean,
-  loading: boolean,
-): void {
-  if (
-    typeof unread === 'number' &&
-    typeof enabled === 'boolean' &&
-    typeof loading === 'boolean'
-  ) {
-    return
-  }
-}
-
 function navigatorBadge(): IconBadgeSetter | null {
   if (!appBadgeAvailable()) {
     return null
@@ -117,7 +96,9 @@ function navigatorBadge(): IconBadgeSetter | null {
  * initial 0 from before the list has loaded. The flush waits until `loading`
  * has been false once — that first 0 is "not loaded", not "nothing unread" —
  * and sends only the last value of the turn, so a burst cannot paint an
- * intermediate total.
+ * intermediate total. A clear waits until a number has been painted in this
+ * session. The first settled 0 would otherwise be sent at every launch, and
+ * on iOS 15 that clear also removes delivered notifications.
  */
 export function applyAppBadge(
   settings: SettingsStore,
@@ -141,17 +122,19 @@ export function applyAppBadge(
   let disposed = false
   let scheduled = false
   // `undefined` means nothing has been sent yet, which is not the same as a
-  // clear. The first settled 0 still has to be delivered.
+  // clear. A failed paint sets it back to `undefined` so the next run retries,
+  // unless a later value has already taken its place.
   let lastSent: number | null | undefined
+  // A launch at zero, or with the setting already off, must not clear. On
+  // iOS 15 the clear also removes delivered notifications.
+  let paintedNumber = false
   let sawSettled = false
   const stop = effect(() => {
-    // Read during the effect so a later write reschedules. The flush reads
-    // them again and keeps only the last value of this turn.
-    watchBadgeInputs(
-      rooms.unreadTotal.value,
-      settings.appBadgeEnabled.value,
-      rooms.loading.value,
-    )
+    // Subscribe. The flush reads the signals again so a burst keeps only its
+    // last value. `void` marks the read as intentional.
+    void rooms.unreadTotal.value
+    void settings.appBadgeEnabled.value
+    void rooms.loading.value
     if (scheduled) {
       return
     }
@@ -162,9 +145,8 @@ export function applyAppBadge(
         return
       }
       // The store starts at 0 with `loading` still true. Sending that would
-      // clear the icon before the list exists, and on iOS a badge of 0 also
-      // removes delivered notifications. A later clear, including sign-out,
-      // still sends: by then the total has been settled once.
+      // clear the icon before the list exists. A later clear, including
+      // sign-out, still sends once a number has been painted.
       if (!sawSettled) {
         if (rooms.loading.value) {
           return
@@ -176,7 +158,18 @@ export function applyAppBadge(
       if (shown === lastSent) {
         return
       }
+      if (shown === null && !paintedNumber) {
+        return
+      }
       lastSent = shown
+      if (typeof shown === 'number') {
+        paintedNumber = true
+      }
+      const forgetIfStale = () => {
+        if (lastSent === shown) {
+          lastSent = undefined
+        }
+      }
       try {
         const call = paint(shown)
         // A rejection is environmental, not the Notification-permission gate
@@ -184,12 +177,14 @@ export function applyAppBadge(
         // `Promise.resolve` because an implementation that returns nothing
         // would make a bare `.catch` throw.
         void Promise.resolve(call).catch((cause: unknown) => {
+          forgetIfStale()
           console.error('app-badge: badge call failed', cause)
         })
       } catch (cause) {
         // Nothing thrown by a decorative badge is worth propagating. This
         // effect re-runs on every unread-count change, so a throw escapes
         // into whatever wrote `unreadTotal` — the sync path (#435).
+        forgetIfStale()
         console.error('app-badge: badge call threw', cause)
       }
     })

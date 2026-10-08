@@ -108,6 +108,9 @@ volume is what a badge conventionally means.
   macOS, Linux, Windows, and iOS pass their own setter.
   The command runs on the main thread, in arrival order.
   The page sends one value per turn, and only after `rooms.loading` has been false once, so the store's initial zero is not a clear.
+  A clear is sent only after a number has been painted in this session, so a launch with nothing unread does not call the setter.
+  On iOS 15 that call would remove delivered notifications.
+  A paint that throws or rejects is forgotten, so the next run retries it unless a later value has already been sent.
   macOS sets the Dock tile.
   Linux sets the Unity launcher count, which leaves the icon unchanged on other desktops.
   Windows draws a taskbar overlay.

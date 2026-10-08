@@ -1001,6 +1001,12 @@ function AppIconBadgeFields() {
     )
 
   useEffect(() => {
+    // Message notifications already read this for the whole page. The badge
+    // notes use the answer only on the iOS shell and for Safari's permission
+    // prompt, so every other Settings visit skips the extra round-trip.
+    if (!iosShell && !needsNotificationPermission) {
+      return
+    }
     let cancelled = false
     const apply = (state: NotificationPermissionState) => {
       if (!cancelled && isBadgePermission(state)) {
@@ -1015,7 +1021,7 @@ function AppIconBadgeFields() {
       cancelled = true
       unsubscribe()
     }
-  }, [appPlatform])
+  }, [appPlatform, iosShell, needsNotificationPermission])
 
   const requestBadgePermission = () => {
     // Must run synchronously inside this click handler, with no `await`

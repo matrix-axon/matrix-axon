@@ -650,6 +650,9 @@ fn set_ios_application_badge(count: isize) {
     // `UIApplication.setApplicationIconBadgeNumber:0` also clears Notification
     // Center, which a badge clear is not. The shell still supports iOS 15,
     // where that older setter is the only one.
+    // Already on the main thread. `notification_center` returns an
+    // autoreleased singleton and does not retain it, so the pointer is used
+    // for this one message and then dropped.
     unsafe {
         if let Some(center) = notification_center() {
             let selector = Sel::register(
@@ -657,7 +660,10 @@ fn set_ios_application_badge(count: isize) {
             );
             let responds: Bool = msg_send![center, respondsToSelector: selector];
             if responds.as_bool() {
-                let handler: *mut AnyObject = std::ptr::null_mut();
+                // `None` is a null block (`@?`). A null object pointer is a
+                // different encoding, and objc2's debug build rejects that
+                // mismatch when the selector's parameter is a block.
+                let handler: Option<&block2::Block<dyn Fn(*mut AnyObject)>> = None;
                 let _: () = msg_send![center, setBadgeCount: count, withCompletionHandler: handler];
                 return;
             }
@@ -681,8 +687,10 @@ fn set_ios_application_badge(count: isize) {
 ///
 /// # Safety
 ///
-/// The caller is on the main thread. The pointer is only used to send a
-/// badge message before the next turn, and it is not freed.
+/// The caller is on the main thread and uses the pointer for one message
+/// before returning. `currentNotificationCenter` returns an autoreleased
+/// singleton owned by UIKit. This function does not retain it, so the
+/// pointer must not be stored or used after the call returns.
 #[cfg(target_os = "ios")]
 unsafe fn notification_center() -> Option<*mut objc2::runtime::AnyObject> {
     use std::ffi::CStr;
