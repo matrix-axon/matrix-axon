@@ -576,8 +576,6 @@ fn within_upload_limit(size: u64, max_bytes: u64) -> bool {
 /// unchanged and that is logged once.
 #[tauri::command(async)]
 fn set_icon_badge(app: tauri::AppHandle, count: Option<i64>) -> Result<(), String> {
-    use tauri::Manager as _;
-
     let count = icon_badge::visible_count(count);
 
     // Each arm is the function's value. A `return` would be
@@ -597,6 +595,11 @@ fn set_icon_badge(app: tauri::AppHandle, count: Option<i64>) -> Result<(), Strin
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
+        // Only this arm asks the window for a handle. Importing `Manager`
+        // above the arms is an unused import on Android and iOS, which the
+        // Android bundle job rejects (`-D warnings`).
+        use tauri::Manager as _;
+
         let window = app
             .get_webview_window("main")
             .ok_or_else(|| "icon badge: no main window".to_string())?;
