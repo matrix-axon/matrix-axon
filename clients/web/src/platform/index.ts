@@ -1,12 +1,28 @@
+import {
+  deliverNotificationClick,
+  notificationPermissionState,
+  publishNotificationPermission,
+  subscribeNotificationClicks,
+  type MessageNotification,
+  type NotificationClick,
+  type NotificationPermissionState,
+} from './notifications'
+
+export type {
+  MessageNotification,
+  NotificationClick,
+  NotificationPermissionState,
+} from './notifications'
+
 /**
  * The platform seam (ADR 0102 § 2).
  *
  * Everything the client does that leaves the page goes through here, so a
- * packaged build can do it in the shell process instead of the webview. Today
- * that is transport only: the HTTP client, the media service, the OAuth token
- * exchange and the live socket. `browserPlatform()` is the web implementation
- * and is what every existing call site gets by default, so the browser build
- * behaves exactly as it did before this seam existed.
+ * packaged build can do it in the shell process instead of the webview: the
+ * HTTP client, the media service, the OAuth token exchange, the live socket,
+ * and local message notifications. `browserPlatform()` is the web
+ * implementation and is what every existing call site gets by default, so the
+ * browser build behaves exactly as it did before this seam existed.
  *
  * Why the shell needs it at all: a packaged app loads from a custom scheme, so
  * every `/v1` call is cross-origin, and the server serves no CORS headers
@@ -305,6 +321,46 @@ export interface Platform {
    */
   onMenuCommand:
     ((handler: (command: MenuCommand) => void) => () => void) | null
+
+  /**
+   * Whether this app may post a local notification right now.
+   *
+   * `'default'` means the user has not been asked. A desktop shell is granted
+   * without a prompt. A browser with no Notification API reports `'denied'`.
+   */
+  notificationPermission(): Promise<NotificationPermissionState>
+
+  /**
+   * Ask for notification permission.
+   *
+   * Must be called from a click, with no `await` before it: iOS, Android and
+   * Safari only count the request as a user gesture when it starts inside the
+   * click. A desktop shell resolves `'granted'` without a sheet.
+   */
+  requestNotificationPermission(): Promise<NotificationPermissionState>
+
+  /**
+   * Post a local notification for one new message.
+   *
+   * A no-op when permission is not granted or this platform cannot post.
+   * The shell must not construct `window.Notification`: on Linux the webview
+   * denies that permission request, and the plugin's own helper is that
+   * constructor. The shell invokes the plugin command instead.
+   */
+  notify(message: MessageNotification): Promise<void>
+
+  /**
+   * Subscribe to a tap on a notification this app posted, or `null` when a
+   * tap cannot be observed.
+   *
+   * The shell registers its listener when the platform is built, not when a
+   * page effect runs, and keeps a tap that reaches the page before the
+   * signed-in shell subscribes. A cold start can still drop the tap: Android
+   * fires it before the page listens, and iOS drops it when its in-memory
+   * map is empty. Desktop 2.5 does not emit a tap. Returns an unsubscribe.
+   */
+  onNotificationClick:
+    ((handler: (click: NotificationClick) => void) => () => void) | null
 }
 
 /** What a native menu item asks the page to do. */
@@ -351,6 +407,39 @@ export function bearerSubprotocols(token: string): string[] {
 }
 
 export function browserPlatform(): Platform {
+  // Latched for this platform object. Probing with `new Notification` while
+  // permission is already granted would show a toast, so that case is learned
+  // from the first real post instead.
+  let constructable: boolean | null = null
+  let warnedConstructor = false
+
+  const canConstruct = (): boolean => {
+    if (typeof Notification === 'undefined') {
+      return false
+    }
+    if (constructable !== null) {
+      return constructable
+    }
+    if (Notification.permission === 'granted') {
+      return true
+    }
+    try {
+      const probe = new Notification('')
+      probe.close()
+      constructable = true
+    } catch (error) {
+      constructable = !illegalNotificationConstructor(error)
+    }
+    return constructable
+  }
+
+  const readPermission = (): NotificationPermissionState => {
+    if (typeof Notification === 'undefined' || !canConstruct()) {
+      return 'unsupported'
+    }
+    return notificationPermissionState(Notification.permission)
+  }
+
   return {
     fetch: (...args) => globalThis.fetch(...args),
     openSocket: (url, token) => new WebSocket(url, bearerSubprotocols(token)),
@@ -381,7 +470,69 @@ export function browserPlatform(): Platform {
     setZoom: null,
     // The browser's menus are its own.
     onMenuCommand: null,
+    notificationPermission: () => Promise.resolve(readPermission()),
+    requestNotificationPermission: () => {
+      // Called synchronously. An `async` function would be fine only until
+      // its first await; keeping the request itself out of one makes the
+      // gesture impossible to regress by inserting a line above it.
+      if (typeof Notification === 'undefined' || !canConstruct()) {
+        return Promise.resolve('unsupported')
+      }
+      return Promise.resolve(Notification.requestPermission()).then((state) =>
+        notificationPermissionState(state),
+      )
+    },
+    notify: (message) => {
+      if (
+        typeof Notification === 'undefined' ||
+        !canConstruct() ||
+        Notification.permission !== 'granted'
+      ) {
+        return Promise.resolve()
+      }
+      try {
+        // `tag` is the event id, so two tabs posting the same message
+        // collapse to one toast instead of stacking.
+        const shown = new Notification(message.title, {
+          body: message.body,
+          tag: message.eventId,
+        })
+        shown.onclick = () => {
+          window.focus()
+          deliverNotificationClick({
+            accountId: message.accountId,
+            roomId: message.roomId,
+            eventId: message.eventId,
+            threadRootId: message.threadRootId,
+          })
+        }
+      } catch (error) {
+        if (illegalNotificationConstructor(error)) {
+          constructable = false
+          publishNotificationPermission('unsupported')
+          if (!warnedConstructor) {
+            warnedConstructor = true
+            console.warn(
+              'this browser cannot show a page notification',
+              error instanceof Error ? error.message : String(error),
+            )
+          }
+          return Promise.resolve()
+        }
+        return Promise.reject(
+          error instanceof Error ? error : new Error(String(error)),
+        )
+      }
+      return Promise.resolve()
+    },
+    onNotificationClick: subscribeNotificationClicks,
   }
+}
+
+function illegalNotificationConstructor(error: unknown): boolean {
+  return (
+    error instanceof TypeError && /illegal constructor/i.test(error.message)
+  )
 }
 
 /**

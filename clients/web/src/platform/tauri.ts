@@ -5,6 +5,12 @@ import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
+import {
+  createChannel,
+  Importance,
+  onAction,
+  removeChannel,
+} from '@tauri-apps/plugin-notification'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import WebSocketClient from '@tauri-apps/plugin-websocket'
 import { fileFromPath } from '../media/dropped-file'
@@ -13,6 +19,15 @@ import { basename } from '../media/filename'
 import { isMenuCommand } from './index'
 import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 import { NO_NATIVE_AUTH, type NativeAuth } from './native-auth'
+import {
+  deliverNotificationClick,
+  notificationClickFromPayload,
+  notificationPermissionState,
+  readNotificationTargets,
+  rememberNotificationTarget,
+  subscribeNotificationClicks,
+  type NotificationPermissionState,
+} from './notifications'
 
 export { loadNativeAuth } from './native-auth'
 
@@ -321,6 +336,35 @@ async function readDroppedFiles(paths: readonly string[]): Promise<File[]> {
  * it is async and this is not; `main.tsx` awaits it before the first render.
  */
 export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
+  startMessageNotifications()
+  // One read per platform object. A Settings request replaces it, so a grant
+  // applies to the next message and a denial does not stick across that request.
+  let permissionRead: Promise<NotificationPermissionState> | null = null
+  const readPermission = (): Promise<NotificationPermissionState> => {
+    if (permissionRead !== null) {
+      return permissionRead
+    }
+    const cached = invoke<boolean | null>(
+      'plugin:notification|is_permission_granted',
+    )
+      .then((granted) => {
+        if (granted === true) {
+          return 'granted' as const
+        }
+        if (granted === false) {
+          return 'denied' as const
+        }
+        return 'default' as const
+      })
+      .catch((error: unknown) => {
+        if (permissionRead === cached) {
+          permissionRead = null
+        }
+        throw error
+      })
+    permissionRead = cached
+    return cached
+  }
   return {
     secureStorage: native.secureStorage,
     appleSignIn: native.appleSignIn,
@@ -500,7 +544,155 @@ export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
         void ready.then((unlisten) => unlisten()).catch(() => {})
       }
     },
+    notificationPermission() {
+      return readPermission()
+    },
+    requestNotificationPermission() {
+      // The invoke starts before this function awaits anything. iOS and
+      // Android only count a permission sheet that begins inside the click.
+      const pending = invoke<string>(
+        'plugin:notification|request_permission',
+      ).then((state) => notificationPermissionState(state))
+      // A second chain so a rejection can drop this cache entry. The caller
+      // handles `pending`; this one must not reject on its own, and it must
+      // not clear a newer read that replaced it.
+      const cached = pending.then(
+        (state) => state,
+        (error: unknown) => {
+          if (permissionRead === cached) {
+            permissionRead = null
+          }
+          throw error
+        },
+      )
+      permissionRead = cached
+      void cached.catch(() => {})
+      return pending
+    },
+    notify(message) {
+      // Remember the id before the post. An iOS tap returns the id and not
+      // `extra`; the map turns it back into a room. Desktop 2.5 ignores both.
+      const id = rememberNotificationTarget(localStorage, {
+        accountId: message.accountId,
+        roomId: message.roomId,
+        eventId: message.eventId,
+        threadRootId: message.threadRootId,
+      })
+      return invoke<void>('plugin:notification|notify', {
+        options: {
+          id,
+          title: message.title,
+          body: message.body,
+          channelId: MESSAGE_CHANNEL_ID,
+          extra: {
+            accountId: message.accountId,
+            roomId: message.roomId,
+            eventId: message.eventId,
+            threadRootId: message.threadRootId,
+          },
+          autoCancel: true,
+        },
+      })
+    },
+    onNotificationClick: subscribeNotificationClicks,
   }
+}
+
+/**
+ * Listen for a tap on the phones, and make sure Android has a channel to
+ * post into. Runs once: each call used to register another listener.
+ *
+ * The shared bus holds a tap that reaches the page before the signed-in
+ * shell subscribes. It does not recover one the plugin already fired.
+ * Android emits the launch tap inside plugin load, before the page listens,
+ * and an iOS cold start drops the event when its in-memory map is empty.
+ * Desktop 2.5 does not emit a tap at all — notify-rust drops the payload and
+ * the handle — so this does not register a listener there. That registration
+ * is also the command desktop rejects, and the rejection is not a failure.
+ *
+ * An installed macOS build still registers under System Settings, because
+ * that happens inside the plugin's own show.
+ *
+ * `create_channel` exists only on Android. The other targets are not asked.
+ * A failure on Android is reported, including an ACL denial: swallowing it
+ * left every later post with nowhere to go.
+ *
+ * High importance is the level a person-to-person message uses: a sound, a
+ * banner, and a higher place in the shade. The same channel covers a visible
+ * window and a hidden one. The open room is skipped before anything is posted,
+ * and only while that window is focused.
+ *
+ * Android keeps the importance from the first time a channel id is created.
+ * The first builds created `messages` at Default, which cannot be raised, so
+ * posts use a new id. The old id is deleted so it does not stay behind as a
+ * second category.
+ */
+const MESSAGE_CHANNEL_ID = 'messages-v2'
+const RETIRED_MESSAGE_CHANNEL_ID = 'messages'
+
+let messageNotificationsStarted = false
+
+/** Tests build the platform more than once. A page does not. */
+export function resetMessageNotificationStartupForTests(): void {
+  messageNotificationsStarted = false
+}
+
+function startMessageNotifications(): void {
+  if (messageNotificationsStarted) {
+    return
+  }
+  messageNotificationsStarted = true
+
+  // iOS and Android have `register_listener`. Desktop does not, and calling
+  // it logs a rejection on every launch.
+  if (isMobileShell()) {
+    void onAction((notification) => {
+      const click = notificationClickFromPayload(
+        notification,
+        readNotificationTargets(localStorage),
+      )
+      if (click !== null) {
+        deliverNotificationClick(click)
+      }
+    }).catch((error: unknown) => {
+      console.warn(
+        'could not listen for notification taps',
+        errorMessage(error),
+      )
+    })
+  }
+
+  if (!isAndroidShell()) {
+    return
+  }
+
+  void removeChannel(RETIRED_MESSAGE_CHANNEL_ID).catch((error: unknown) => {
+    console.warn(
+      'could not remove the retired messages channel',
+      errorMessage(error),
+    )
+  })
+
+  void createChannel({
+    id: MESSAGE_CHANNEL_ID,
+    name: 'Messages',
+    description: 'New messages',
+    importance: Importance.High,
+  }).catch((error: unknown) => {
+    console.warn(
+      'could not create the messages notification channel',
+      errorMessage(error),
+    )
+  })
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** Channel commands exist only on Android. iOS is a mobile shell and is not. */
+function isAndroidShell(userAgent = navigator.userAgent): boolean {
+  return /Android/i.test(userAgent)
 }
 
 /** The event `forward_menu_command` in src-tauri/src/lib.rs emits. */

@@ -43,7 +43,8 @@ export function notificationPermissionAvailable(): boolean {
 
 /**
  * Ask for Notification permission purely to unlock Safari's badge-rendering
- * gate — Axon never shows a notification through this grant. Returns `null`
+ * gate. The grant does not turn on message notifications; that is a separate
+ * Settings choice. Returns `null`
  * without prompting when the permission is already decided (`granted` or
  * `denied`, which JS cannot re-prompt for) or the API doesn't exist.
  *

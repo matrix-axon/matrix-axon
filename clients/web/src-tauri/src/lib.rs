@@ -78,6 +78,11 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         // External links, opened in the user's browser rather than in place.
         .plugin(tauri_plugin_opener::init())
+        // Local notifications while this process is running. One plugin for
+        // every OS the shell ships; the capability file grants the check, the
+        // request, the post, the click listener and the Android channel, and
+        // not the plugin's full default set.
+        .plugin(tauri_plugin_notification::init())
         // The OAuth callback. Sign-in happens in the user's real browser
         // (RFC 8252), which redirects to this app's registered scheme.
         .plugin(tauri_plugin_deep_link::init())
@@ -410,7 +415,9 @@ fn forward_menu_command<R: tauri::Runtime>(app: &tauri::AppHandle<R>, id: &str) 
 ///
 /// Narrow twice over. Only user-media requests are answered, so geolocation,
 /// notifications and the rest keep WebKit's deny-by-default; and within those,
-/// only video.
+/// only video. System notifications do not come through this request. The
+/// shell posts them with `tauri-plugin-notification`, whose commands do not
+/// ask WebKit, so this deny stays.
 #[cfg(target_os = "linux")]
 fn allow_camera_capture<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
     use webkit2gtk::glib::Cast as _;
