@@ -1852,6 +1852,20 @@ async fn run_account(
             oauth_session_cancel.clone(),
         ))
     });
+    // SDK summary counts are reconciled locally with paced startup/recovery
+    // sweeps; this run owns both cancellation and shutdown. Start before sync
+    // and the awaited startup UTD sweep: that sweep can wait on backup requests,
+    // while membership updates and cached summaries must reconcile independently.
+    let member_counts_cancel = cancel.child_token();
+    let member_counts_refresh = Arc::new(tokio::sync::Notify::new());
+    let member_counts_handle = tokio::spawn(crate::member_counts::watch(
+        client.clone(),
+        store.clone(),
+        account.account_id,
+        member_counts_cancel.clone(),
+        member_counts_refresh.clone(),
+    ));
+
     sync_service.start().await;
     tracing::info!(account_id = %account.account_id, "sync service started");
 
@@ -1959,18 +1973,6 @@ async fn run_account(
         account.account_id,
         live_tx.clone(),
         trust_cancel.clone(),
-    ));
-
-    // SDK summary counts are reconciled locally with paced startup/recovery
-    // sweeps; this run owns both cancellation and shutdown.
-    let member_counts_cancel = cancel.child_token();
-    let member_counts_refresh = Arc::new(tokio::sync::Notify::new());
-    let member_counts_handle = tokio::spawn(crate::member_counts::watch(
-        client.clone(),
-        store.clone(),
-        account.account_id,
-        member_counts_cancel.clone(),
-        member_counts_refresh.clone(),
     ));
 
     // SDK-derived unread-counts watcher (issue #313, ADR 0070): capture

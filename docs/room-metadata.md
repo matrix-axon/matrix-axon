@@ -122,7 +122,9 @@ A local leave atomically clears the observation; a rejoin needs both counts supp
 A confirmed upstream `gone` verdict also withholds counts.
 Retained room state after leave remains historical, while this count field becomes unknown.
 
-Each account has one cancelable worker subscribed before startup reconciliation.
+Each account has one cancelable worker started before sync and before the awaited startup decryption sweep.
+A slow key-backup request cannot hold up local member-count reconciliation.
+The worker subscribes before startup reconciliation.
 One-second ticks skip missed ticks and process at most four queued hints or retries plus four keyset-paged room-summary rows.
 A coalesced queue holds at most 32 rooms and makes up to four attempts for a projection-order race or transient failure; overflow and exhausted retries fall back to the progressive sweep.
 At most 32 SDK notifications are consumed per tick, coalescing duplicates within that budget and preserving the receiver tail.
@@ -137,6 +139,9 @@ The worker only updates existing account/room summary rows; purge or account rem
 Its cancellation token and join handle are owned by the account run.
 The keyset traversal is shared with singleton-state redaction repair.
 Existing tracing controls suffice; warnings identify the worker, account, room where applicable, and an allowlisted database failure category or deadline without logging private metadata bodies.
+Set `RUST_LOG=warn,axon_sync::room_sweep=debug` to see `local SDK reconciliation sweep started` and `local SDK reconciliation sweep completed` for each account and worker.
+Completion includes the number of room-summary rows visited, elapsed seconds, and whether another pass was requested during traversal.
+Completion means every page was traversed; rooms whose SDK counts remain unknown can still have no observation.
 
 Counts have no new live frame.
 Clients can re-read `/info` on reconnect and use bounded visible-panel polling, as for cached state details.

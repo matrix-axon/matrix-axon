@@ -58,6 +58,8 @@ pub(crate) struct RoomSweep {
     cursor: String,
     next: tokio::time::Instant,
     repeat: bool,
+    started: Option<tokio::time::Instant>,
+    visited: u64,
 }
 
 impl RoomSweep {
@@ -66,6 +68,8 @@ impl RoomSweep {
             cursor: String::new(),
             next: tokio::time::Instant::now(),
             repeat: false,
+            started: None,
+            visited: 0,
         }
     }
 
@@ -105,12 +109,25 @@ impl RoomSweep {
         if self.is_idle() {
             return Vec::new();
         }
+        if self.started.is_none() {
+            self.started = Some(tokio::time::Instant::now());
+            self.visited = 0;
+            tracing::debug!(%account_id, worker, source = "sdk_cache", "local SDK reconciliation sweep started");
+        }
         let result = tokio::select! {
             _ = cancel.cancelled() => return Vec::new(),
             result = tokio::time::timeout(Duration::from_secs(2), store.state_reconciliation_rooms(account_id, &self.cursor)) => result,
         };
         match result {
             Ok(Ok(page)) => {
+                self.visited = self.visited.saturating_add(page.len() as u64);
+                if page.is_empty() {
+                    let elapsed_seconds = self
+                        .started
+                        .take()
+                        .map_or(0.0, |start| start.elapsed().as_secs_f64());
+                    tracing::debug!(%account_id, worker, source = "sdk_cache", rooms_visited = self.visited, elapsed_seconds, repeat_requested = self.repeat, "local SDK reconciliation sweep completed");
+                }
                 self.advance(&page);
                 page.into_iter().filter_map(|id| id.parse().ok()).collect()
             }
