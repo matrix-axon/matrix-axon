@@ -619,7 +619,7 @@ pub struct RoomInfo {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) summary_invited_count_known: bool,
 
-    /// Local time of the last observed membership transition. This fences
+    /// Local time of the last membership transition or initial-response reset. This fences
     /// observations from earlier membership epochs, not upstream sync age.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) summary_counts_invalidated_at: Option<ruma::MilliSecondsSinceUnixEpoch>,
@@ -739,11 +739,17 @@ impl RoomInfo {
     /// Set the membership RoomState of this Room
     pub fn set_state(&mut self, room_state: RoomState) {
         if self.room_state != room_state {
-            self.summary_joined_count_known = false;
-            self.summary_invited_count_known = false;
-            self.summary_counts_invalidated_at = Some(ruma::MilliSecondsSinceUnixEpoch::now());
+            self.invalidate_summary_member_counts();
         }
         self.room_state = room_state;
+    }
+
+    /// Invalidate provenance when a membership transition or an initial sync
+    /// replacement starts a new summary epoch. Keep legacy getters unchanged.
+    pub(crate) fn invalidate_summary_member_counts(&mut self) {
+        self.summary_joined_count_known = false;
+        self.summary_invited_count_known = false;
+        self.summary_counts_invalidated_at = Some(ruma::MilliSecondsSinceUnixEpoch::now());
     }
 
     /// Mark this Room as having all the members synced.
@@ -1006,7 +1012,8 @@ impl RoomInfo {
     }
 
     /// Server-supplied joined and invited counts for the current membership
-    /// epoch. Missing fields retain known values within an epoch; transitions
+    /// epoch. Missing fields retain known values within an epoch; membership changes
+    /// and initial sync replacements
     /// invalidate both. Legacy serialized summaries have no availability
     /// evidence and return `(None, None)` until fresh fields arrive.
     ///
@@ -1019,7 +1026,8 @@ impl RoomInfo {
         )
     }
 
-    /// Local time at which a membership transition invalidated summary counts.
+    /// Local time at which a membership change or initial sync replacement
+    /// invalidated summary counts.
     /// A cold or legacy cache with no observed transition returns `None`.
     pub fn summary_counts_invalidated_at(&self) -> Option<ruma::MilliSecondsSinceUnixEpoch> {
         self.summary_counts_invalidated_at

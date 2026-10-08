@@ -14,6 +14,8 @@
 
 pub mod extensions;
 
+// Axon modification: reset count provenance on initial room replacements.
+
 use std::collections::BTreeMap;
 #[cfg(feature = "e2e-encryption")]
 use std::collections::BTreeSet;
@@ -321,6 +323,12 @@ fn properties(
     room_info: &mut RoomInfo,
     is_new_room: bool,
 ) {
+    // MSC4186 initial responses replace room data: an omitted count is unset,
+    // whereas an omitted incremental count leaves the previous value intact.
+    if room_response.initial == Some(true) {
+        room_info.invalidate_summary_member_counts();
+    }
+
     // Handle the room's avatar.
     //
     // It can be updated via the state events, or via the

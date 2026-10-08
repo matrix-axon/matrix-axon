@@ -104,7 +104,7 @@ Cached state from a room the account has left remains historical cached state ac
 `GET /v1/accounts/{account_id}/rooms/{room_id}/info` adds nullable `member_counts`.
 An observed summary contains `joined`, `invited`, and `observed_at` (Unix milliseconds).
 Counts come from an atomic SDK `RoomInfo` summary snapshot, never from the lazily loaded member-list projection.
-A temporary, version-pinned SDK base patch preserves whether each count was supplied and invalidates that evidence on membership transitions.
+A temporary, version-pinned SDK base patch preserves whether each count was supplied and invalidates that evidence on membership transitions and `initial: true` room replacements.
 See `crates/third-party/README.md` for the upstream revision, release checksum, complete patch, and removal criteria.
 A pair is published only when both fields are known; an explicitly supplied zero invited count is valid, while a missing invited field remains unknown.
 A zero joined count is withheld because a joined room must include the account itself.

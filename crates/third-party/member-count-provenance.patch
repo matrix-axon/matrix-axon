@@ -20,7 +20,7 @@
 +    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
 +    pub(crate) summary_invited_count_known: bool,
 +
-+    /// Local time of the last observed membership transition. This fences
++    /// Local time of the last membership transition or initial-response reset. This fences
 +    /// observations from earlier membership epochs, not upstream sync age.
 +    #[serde(default, skip_serializing_if = "Option::is_none")]
 +    pub(crate) summary_counts_invalidated_at: Option<ruma::MilliSecondsSinceUnixEpoch>,
@@ -38,19 +38,26 @@
              members_synced: false,
              last_prev_batch: None,
              sync_info: SyncInfo::NoState,
-@@ -721,6 +738,11 @@
+@@ -721,7 +738,18 @@
  
      /// Set the membership RoomState of this Room
      pub fn set_state(&mut self, room_state: RoomState) {
 +        if self.room_state != room_state {
-+            self.summary_joined_count_known = false;
-+            self.summary_invited_count_known = false;
-+            self.summary_counts_invalidated_at = Some(ruma::MilliSecondsSinceUnixEpoch::now());
++            self.invalidate_summary_member_counts();
 +        }
          self.room_state = room_state;
++    }
++
++    /// Invalidate provenance when a membership transition or an initial sync
++    /// replacement starts a new summary epoch. Keep legacy getters unchanged.
++    pub(crate) fn invalidate_summary_member_counts(&mut self) {
++        self.summary_joined_count_known = false;
++        self.summary_invited_count_known = false;
++        self.summary_counts_invalidated_at = Some(ruma::MilliSecondsSinceUnixEpoch::now());
      }
  
-@@ -954,12 +976,12 @@
+     /// Mark this Room as having all the members synced.
+@@ -954,12 +982,12 @@
              }
  
              if let Some(joined) = summary.joined_member_count {
@@ -65,7 +72,7 @@
                  changed = true;
              }
          }
-@@ -974,11 +996,33 @@
+@@ -974,11 +1002,35 @@
      /// Updates the joined member count.
      pub(crate) fn update_joined_member_count(&mut self, count: u64) {
          self.summary.joined_member_count = count;
@@ -79,7 +86,8 @@
 +    }
 +
 +    /// Server-supplied joined and invited counts for the current membership
-+    /// epoch. Missing fields retain known values within an epoch; transitions
++    /// epoch. Missing fields retain known values within an epoch; membership changes
++    /// and initial sync replacements
 +    /// invalidate both. Legacy serialized summaries have no availability
 +    /// evidence and return `(None, None)` until fresh fields arrive.
 +    ///
@@ -92,14 +100,15 @@
 +        )
 +    }
 +
-+    /// Local time at which a membership transition invalidated summary counts.
++    /// Local time at which a membership change or initial sync replacement
++    /// invalidated summary counts.
 +    /// A cold or legacy cache with no observed transition returns `None`.
 +    pub fn summary_counts_invalidated_at(&self) -> Option<ruma::MilliSecondsSinceUnixEpoch> {
 +        self.summary_counts_invalidated_at
      }
  
      /// Updates the room heroes.
-@@ -1574,6 +1618,9 @@
+@@ -1574,6 +1626,9 @@
                  invited_member_count: 0,
                  active_service_members: None,
              },
@@ -130,3 +139,27 @@
              members_synced,
              last_prev_batch,
              sync_info,
+--- a/src/response_processors/room/msc4186/mod.rs
++++ b/src/response_processors/room/msc4186/mod.rs
+@@ -13,6 +13,8 @@
+ // limitations under the License.
+ 
+ pub mod extensions;
++
++// Axon modification: reset count provenance on initial room replacements.
+ 
+ use std::collections::BTreeMap;
+ #[cfg(feature = "e2e-encryption")]
+@@ -321,6 +323,12 @@
+     room_info: &mut RoomInfo,
+     is_new_room: bool,
+ ) {
++    // MSC4186 initial responses replace room data: an omitted count is unset,
++    // whereas an omitted incremental count leaves the previous value intact.
++    if room_response.initial == Some(true) {
++        room_info.invalidate_summary_member_counts();
++    }
++
+     // Handle the room's avatar.
+     //
+     // It can be updated via the state events, or via the

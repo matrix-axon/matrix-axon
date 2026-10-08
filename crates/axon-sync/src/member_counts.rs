@@ -369,10 +369,12 @@ mod tests {
             joined: Option<u32>,
             invited: Option<u32>,
             membership: Option<&str>,
+            initial: Option<bool>,
         ) -> RoomInfo {
             let mut room = v5::response::Room::new();
             room.joined_count = joined.map(Into::into);
             room.invited_count = invited.map(Into::into);
+            room.initial = initial;
             if let Some(membership) = membership {
                 room.required_state = serde_json::from_value(serde_json::json!([{
                     "type": "m.room.member", "state_key": "@counts:localhost",
@@ -399,31 +401,50 @@ mod tests {
                 .clone_info()
         }
 
-        let info = apply(&client, Some(500), None, Some("join")).await;
+        let info = apply(&client, Some(500), None, Some("join"), None).await;
         assert_eq!(info.summary_member_counts(), (Some(500), None));
         assert!(
             snapshot(&info).is_none(),
             "omitted invites are not authoritative zero"
         );
-        let info = apply(&client, None, Some(0), None).await;
+        let info = apply(&client, None, Some(0), None, None).await;
         assert_eq!(snapshot(&info).unwrap().invited, 0);
-        let info = apply(&client, None, None, None).await;
+        let info = apply(&client, None, None, None, None).await;
         assert_eq!(
             snapshot(&info).unwrap().joined,
             500,
             "same-epoch deltas retain known fields"
         );
-        let info = apply(&client, None, None, Some("leave")).await;
+        let info = apply(&client, None, None, Some("leave"), None).await;
         assert_eq!(info.state(), RoomState::Left);
         assert!(snapshot(&info).is_none());
-        let info = apply(&client, None, None, Some("join")).await;
+        let info = apply(&client, None, None, Some("join"), None).await;
         assert_eq!(info.summary_member_counts(), (None, None));
         assert!(info.summary_counts_invalidated_at().is_some());
         assert!(snapshot(&info).is_none());
-        assert!(snapshot(&apply(&client, Some(499), None, None).await).is_none());
-        let info = apply(&client, None, Some(2), None).await;
+        assert!(snapshot(&apply(&client, Some(499), None, None, None).await).is_none());
+        let info = apply(&client, None, Some(2), None, None).await;
         let counts = snapshot(&info).unwrap();
         assert_eq!((counts.joined, counts.invited), (499, 2));
+        let info = apply(&client, None, None, None, Some(false)).await;
+        assert_eq!(info.summary_member_counts(), (Some(499), Some(2)));
+        // An initial replacement starts a new epoch even without a membership
+        // change. Only counts actually present in that response remain known.
+        let info = apply(&client, Some(498), None, None, Some(true)).await;
+        assert_eq!(info.summary_member_counts(), (Some(498), None));
+        assert!(info.summary_counts_invalidated_at().is_some());
+        assert!(snapshot(&info).is_none());
+        assert_eq!(
+            snapshot(&apply(&client, None, Some(0), None, None).await)
+                .unwrap()
+                .invited,
+            0
+        );
+        let info = apply(&client, None, None, None, Some(true)).await;
+        assert_eq!(info.summary_member_counts(), (None, None));
+        assert!(snapshot(&info).is_none());
+        let info = apply(&client, Some(497), Some(1), None, Some(true)).await;
+        assert_eq!(info.summary_member_counts(), (Some(497), Some(1)));
     }
 
     #[tokio::test]
