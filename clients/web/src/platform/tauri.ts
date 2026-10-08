@@ -16,7 +16,7 @@ import WebSocketClient from '@tauri-apps/plugin-websocket'
 import { fileFromPath } from '../media/dropped-file'
 import { MAX_UPLOAD_BYTES } from '../media/media-service'
 import { basename } from '../media/filename'
-import { isMenuCommand } from './index'
+import { isMenuCommand, isMobileShell } from './index'
 import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 import { NO_NATIVE_AUTH, type NativeAuth } from './native-auth'
 import {
@@ -30,6 +30,7 @@ import {
 } from './notifications'
 
 export { loadNativeAuth } from './native-auth'
+export { isMobileShell }
 
 /**
  * The packaged-build platform (ADR 0102 § 2).
@@ -584,8 +585,11 @@ export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
     onNotificationClick: subscribeNotificationClicks,
     // The notification plugin has no badge command. `set_icon_badge` is the
     // shell's own: Dock, Unity launcher, iOS icon number, or a Windows
-    // taskbar overlay. Android accepts the call and leaves the launcher alone.
-    setIconBadge: (count) => invoke('set_icon_badge', { count }),
+    // taskbar overlay. Android has no launcher-badge API here, so `null`
+    // tells the page this platform has no icon of its own.
+    setIconBadge: isAndroidShell()
+      ? null
+      : (count) => invoke('set_icon_badge', { count }),
   }
 }
 
@@ -688,17 +692,3 @@ function isAndroidShell(userAgent = navigator.userAgent): boolean {
 
 /** The event `forward_menu_command` in src-tauri/src/lib.rs emits. */
 const MENU_EVENT = 'axon://menu'
-
-/**
- * Whether this shell is the iOS or Android build. An iPad's webview may report
- * a desktop Mac user agent, so a Mac with a touch screen counts as one.
- */
-export function isMobileShell(
-  userAgent = navigator.userAgent,
-  touchPoints = navigator.maxTouchPoints ?? 0,
-): boolean {
-  return (
-    /Android|iPhone|iPad|iPod/.test(userAgent) ||
-    (/Macintosh/.test(userAgent) && touchPoints > 1)
-  )
-}

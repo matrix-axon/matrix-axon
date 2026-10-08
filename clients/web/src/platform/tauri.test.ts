@@ -535,6 +535,14 @@ describe('message notifications in the shell', () => {
     )
   })
 
+  it('has no icon badge of its own on Android', () => {
+    asAndroid()
+    const invoke = vi.fn(() => Promise.resolve(null))
+    installInvoke(invoke)
+    expect(tauriPlatform().setIconBadge).toBeNull()
+    expect(invoke).not.toHaveBeenCalled()
+  })
+
   it('posts through the plugin command, not window.Notification', async () => {
     const invoke = vi.fn((...args: unknown[]) =>
       Promise.resolve(args[0] ?? null),

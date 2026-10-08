@@ -567,14 +567,21 @@ fn within_upload_limit(size: u64, max_bytes: u64) -> bool {
 /// `None`, zero, and negative clear. The page sends `null` for those, and
 /// this repeats the check so a stray zero cannot paint a "0".
 ///
+/// Synchronous on purpose. `#[tauri::command(async)]` runs the body on the
+/// blocking pool, so two calls in flight can post their window messages out
+/// of order and the icon keeps the older total. A plain command runs on the
+/// main thread in arrival order. That is also the thread the Dock tile, the
+/// taskbar overlay, and UIKit expect, so iOS does not hop again.
+///
 /// The notification plugin has no badge command. macOS and Linux call
 /// `WebviewWindow::set_badge_count`: the Dock tile, or the Unity launcher
 /// count (a no-op unless that launcher is running). That method is compiled
-/// only into Tauri's desktop builds, so iOS sets `UIApplication`'s icon
-/// number itself. Windows ignores the count and gets an overlay picture
-/// instead. Android has no badge API in this stack; the launcher count stays
-/// unchanged and that is logged once.
-#[tauri::command(async)]
+/// only into Tauri's desktop builds. iOS sets the icon number itself.
+/// Windows ignores the count and gets an overlay picture instead. Android
+/// has no badge API in this stack. The page does not call this there
+/// (`setIconBadge` is null); the arm exists so this target does not type-check
+/// a method it cannot see.
+#[tauri::command]
 fn set_icon_badge(app: tauri::AppHandle, count: Option<i64>) -> Result<(), String> {
     let count = icon_badge::visible_count(count);
 
@@ -584,13 +591,13 @@ fn set_icon_badge(app: tauri::AppHandle, count: Option<i64>) -> Result<(), Strin
     #[cfg(target_os = "android")]
     {
         let _ = (app, count);
-        note_android_badge_unsupported();
         Ok(())
     }
 
     #[cfg(target_os = "ios")]
     {
-        paint_ios_badge(&app, count)
+        let _ = app;
+        paint_ios_badge(count)
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -619,34 +626,48 @@ fn set_icon_badge(app: tauri::AppHandle, count: Option<i64>) -> Result<(), Strin
     }
 }
 
-/// iOS keeps the number on `UIApplication`, not on the window.
+/// iOS keeps the number on the process, not on the window.
 ///
 /// `WebviewWindow::set_badge_count` is behind Tauri's `desktop` cfg, which an
-/// iOS build does not set, so the call does not compile there (`tauri ios
-/// build` on a Mac). This is the same `UIApplication` message Tao sends for
-/// that method. Zero clears. The command runs off the main thread, and
-/// UIKit requires this message on it.
+/// iOS build does not set, so the call does not compile there. The command
+/// is already on the main thread. `NSInteger` is `isize` on every iOS target;
+/// passing `i32` leaves the upper half of the argument register unspecified.
 #[cfg(target_os = "ios")]
-fn paint_ios_badge(app: &tauri::AppHandle, count: Option<i64>) -> Result<(), String> {
-    let shown = count.map_or(0, |count| count.min(i32::MAX as i64) as i32);
-    app.run_on_main_thread(move || set_ios_application_badge(shown))
-        .map_err(|error| format!("icon badge: {error}"))
+fn paint_ios_badge(count: Option<i64>) -> Result<(), String> {
+    let shown = count.map_or(0, |count| count.min(isize::MAX as i64) as isize);
+    set_ios_application_badge(shown);
+    Ok(())
 }
 
 #[cfg(target_os = "ios")]
-fn set_ios_application_badge(count: i32) {
+fn set_ios_application_badge(count: isize) {
     use std::ffi::CStr;
 
     use objc2::msg_send;
-    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
 
-    let Some(class) = AnyClass::get(CStr::from_bytes_with_nul(b"UIApplication\0").unwrap()) else {
-        eprintln!("icon badge: UIApplication is unavailable");
-        return;
-    };
-    // The replacement, `UNUserNotificationCenter.setBadgeCount`, is iOS 16.
-    // The shell supports iOS 15, and Tao sends this same message.
+    // iOS 16 sets the number without removing delivered notifications.
+    // `UIApplication.setApplicationIconBadgeNumber:0` also clears Notification
+    // Center, which a badge clear is not. The shell still supports iOS 15,
+    // where that older setter is the only one.
     unsafe {
+        if let Some(center) = notification_center() {
+            let selector = Sel::register(
+                CStr::from_bytes_with_nul(b"setBadgeCount:withCompletionHandler:\0").unwrap(),
+            );
+            let responds: Bool = msg_send![center, respondsToSelector: selector];
+            if responds.as_bool() {
+                let handler: *mut AnyObject = std::ptr::null_mut();
+                let _: () = msg_send![center, setBadgeCount: count, withCompletionHandler: handler];
+                return;
+            }
+        }
+
+        let Some(class) = AnyClass::get(CStr::from_bytes_with_nul(b"UIApplication\0").unwrap())
+        else {
+            eprintln!("icon badge: UIApplication is unavailable");
+            return;
+        };
         let app: *mut AnyObject = msg_send![class, sharedApplication];
         if app.is_null() {
             eprintln!("icon badge: UIApplication.sharedApplication returned null");
@@ -656,16 +677,27 @@ fn set_ios_application_badge(count: i32) {
     }
 }
 
-/// Android drops the call. Logged once: the page repeats it on every unread
-/// change, and a line per change would bury the one fact that matters.
-#[cfg(target_os = "android")]
-fn note_android_badge_unsupported() {
-    use std::sync::Once;
+/// The process-wide notification center, or `None` when it cannot be reached.
+///
+/// # Safety
+///
+/// The caller is on the main thread. The pointer is only used to send a
+/// badge message before the next turn, and it is not freed.
+#[cfg(target_os = "ios")]
+unsafe fn notification_center() -> Option<*mut objc2::runtime::AnyObject> {
+    use std::ffi::CStr;
 
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        eprintln!("icon badge is unsupported on Android; the launcher count is left unchanged");
-    });
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    let class = AnyClass::get(CStr::from_bytes_with_nul(b"UNUserNotificationCenter\0").unwrap())?;
+    let center: *mut AnyObject = msg_send![class, currentNotificationCenter];
+    if center.is_null() {
+        eprintln!("icon badge: UNUserNotificationCenter.currentNotificationCenter returned null");
+        None
+    } else {
+        Some(center)
+    }
 }
 
 #[cfg(target_os = "windows")]

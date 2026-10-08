@@ -786,3 +786,177 @@ describe('message notifications', () => {
     expect(services.settings.messageNotifications.value).toBe(false)
   })
 })
+
+describe('the app icon badge', () => {
+  let restoreNavigator: (() => void) | null = null
+
+  afterEach(() => {
+    restoreNavigator?.()
+    restoreNavigator = null
+  })
+
+  function asUserAgent(userAgent: string, touchPoints?: number): void {
+    const restoreAgent = mockNavigatorProperty('userAgent', userAgent)
+    const restoreTouch =
+      touchPoints === undefined
+        ? null
+        : mockNavigatorProperty('maxTouchPoints', touchPoints)
+    restoreNavigator = () => {
+      restoreTouch?.()
+      restoreAgent()
+    }
+  }
+
+  it('says the Android launcher cannot show the count', () => {
+    asUserAgent(
+      'Mozilla/5.0 (Linux; Android 14; sdk_gphone64_x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+    )
+    const { getByText, queryByText } = render(
+      <ServicesContext.Provider
+        value={testServices({
+          platform: { browserCanAdoptApp: false, setIconBadge: null },
+        })}
+      >
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    expect(
+      getByText(
+        'Not available on Android. The launcher does not show this count.',
+      ),
+    ).toBeTruthy()
+    expect(queryByText(/Not available in this browser/)).toBeNull()
+    expect(queryByText(/Unity unread count/)).toBeNull()
+  })
+
+  it('says a Linux shell badges only through a Unity launcher', () => {
+    asUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36')
+    const { getByText, queryByText } = render(
+      <ServicesContext.Provider
+        value={testServices({
+          platform: {
+            browserCanAdoptApp: false,
+            setIconBadge: () => Promise.resolve(),
+          },
+        })}
+      >
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    expect(
+      getByText(
+        'Shown when the desktop launcher supports a Unity unread count. Other desktops leave the icon unchanged.',
+      ),
+    ).toBeTruthy()
+    expect(queryByText(/Not available in this browser/)).toBeNull()
+  })
+
+  it('asks an iOS shell for notification permission without enabling message notifications', async () => {
+    asUserAgent(
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+    )
+    const requestNotificationPermission = vi.fn(() =>
+      Promise.resolve('granted' as const),
+    )
+    const services = testServices({
+      platform: {
+        browserCanAdoptApp: false,
+        setIconBadge: () => Promise.resolve(),
+        notificationPermission: () => Promise.resolve('default'),
+        requestNotificationPermission,
+      },
+    })
+    const { findByRole, findByText, queryByRole, queryByText } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    expect(queryByText(/Safari only displays this badge/)).toBeNull()
+    expect(
+      await findByText(/does not turn on message notifications/),
+    ).toBeTruthy()
+    fireEvent.click(
+      await findByRole('button', {
+        name: 'Allow notifications to enable the badge',
+      }),
+    )
+    expect(requestNotificationPermission).toHaveBeenCalledTimes(1)
+    expect(services.settings.messageNotifications.value).toBe(false)
+    await waitFor(() =>
+      expect(
+        queryByRole('button', {
+          name: 'Allow notifications to enable the badge',
+        }),
+      ).toBeNull(),
+    )
+  })
+
+  it('points a denied iOS shell at Settings', async () => {
+    asUserAgent(
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+    )
+    const { findByText, queryByRole } = render(
+      <ServicesContext.Provider
+        value={testServices({
+          platform: {
+            browserCanAdoptApp: false,
+            setIconBadge: () => Promise.resolve(),
+            notificationPermission: () => Promise.resolve('denied'),
+          },
+        })}
+      >
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    expect(
+      await findByText(
+        'Enable notifications for Axon in Settings, then reopen Axon.',
+      ),
+    ).toBeTruthy()
+    expect(
+      queryByRole('button', {
+        name: 'Allow notifications to enable the badge',
+      }),
+    ).toBeNull()
+  })
+
+  it('treats a touch Mac shell as able to badge like iOS', async () => {
+    asUserAgent(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+      5,
+    )
+    const { findByRole, queryByText } = render(
+      <ServicesContext.Provider
+        value={testServices({
+          platform: {
+            browserCanAdoptApp: false,
+            setIconBadge: () => Promise.resolve(),
+            notificationPermission: () => Promise.resolve('default'),
+          },
+        })}
+      >
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    expect(
+      await findByRole('button', {
+        name: 'Allow notifications to enable the badge',
+      }),
+    ).toBeTruthy()
+    expect(queryByText(/Safari only displays this badge/)).toBeNull()
+    expect(queryByText(/Not available in this browser/)).toBeNull()
+  })
+
+  it('shows the browser note when the setter field is missing', () => {
+    const { getByText } = render(
+      <ServicesContext.Provider
+        value={testServices({
+          platform: { setIconBadge: undefined },
+        })}
+      >
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    expect(getByText(/Not available in this browser right now/)).toBeTruthy()
+  })
+})

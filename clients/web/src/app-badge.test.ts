@@ -16,8 +16,16 @@ function fakeSettings(appBadgeEnabled: boolean): SettingsStore {
   } as unknown as SettingsStore
 }
 
-function fakeRooms(unreadTotal: number): RoomsStore {
-  return { unreadTotal: signal(unreadTotal) } as unknown as RoomsStore
+function fakeRooms(unreadTotal: number, loading = false): RoomsStore {
+  return {
+    unreadTotal: signal(unreadTotal),
+    loading: signal(loading),
+  } as unknown as RoomsStore
+}
+
+/** The effect paints on a microtask, after the turn's last unread write. */
+function flushBadge(): Promise<void> {
+  return Promise.resolve()
 }
 
 describe('appBadgeAvailable', () => {
@@ -75,7 +83,7 @@ describe('applyAppBadge (ADR 0080)', () => {
     dispose()
   })
 
-  it('sets the badge to the summed unread-message total while enabled and nonzero', () => {
+  it('sets the badge to the summed unread-message total while enabled and nonzero', async () => {
     const setAppBadge = vi.fn().mockResolvedValue(undefined)
     const clearAppBadge = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { setAppBadge, clearAppBadge })
@@ -84,12 +92,13 @@ describe('applyAppBadge (ADR 0080)', () => {
     const rooms = fakeRooms(5)
     const dispose = applyAppBadge(settings, rooms)
 
+    await flushBadge()
     expect(setAppBadge).toHaveBeenCalledWith(5)
     expect(clearAppBadge).not.toHaveBeenCalled()
     dispose()
   })
 
-  it('clears the badge when the setting is off', () => {
+  it('clears the badge when the setting is off', async () => {
     const setAppBadge = vi.fn().mockResolvedValue(undefined)
     const clearAppBadge = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { setAppBadge, clearAppBadge })
@@ -98,12 +107,13 @@ describe('applyAppBadge (ADR 0080)', () => {
     const rooms = fakeRooms(2)
     const dispose = applyAppBadge(settings, rooms)
 
+    await flushBadge()
     expect(clearAppBadge).toHaveBeenCalled()
     expect(setAppBadge).not.toHaveBeenCalled()
     dispose()
   })
 
-  it('clears the badge when the unread total drops to zero', () => {
+  it('clears the badge when the unread total drops to zero', async () => {
     const setAppBadge = vi.fn().mockResolvedValue(undefined)
     const clearAppBadge = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { setAppBadge, clearAppBadge })
@@ -111,9 +121,11 @@ describe('applyAppBadge (ADR 0080)', () => {
     const settings = fakeSettings(true)
     const rooms = fakeRooms(1)
     const dispose = applyAppBadge(settings, rooms)
+    await flushBadge()
     expect(setAppBadge).toHaveBeenCalledWith(1)
 
     ;(rooms.unreadTotal as unknown as { value: number }).value = 0
+    await flushBadge()
     expect(clearAppBadge).toHaveBeenCalled()
     dispose()
   })
@@ -135,7 +147,7 @@ describe('applyAppBadge (ADR 0080)', () => {
     dispose()
   })
 
-  it('contains a synchronous throw from a badge call', () => {
+  it('contains a synchronous throw from a badge call', async () => {
     // Belt to the detection's braces: whatever a runtime does at call time,
     // nothing decorative should escape into the signal write.
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -150,13 +162,14 @@ describe('applyAppBadge (ADR 0080)', () => {
     expect(() => {
       ;(rooms.unreadTotal as unknown as { value: number }).value = 2
     }).not.toThrow()
+    await flushBadge()
     expect(setAppBadge).toHaveBeenCalledWith(2)
     expect(consoleError).toHaveBeenCalled()
     consoleError.mockRestore()
     dispose()
   })
 
-  it('tolerates an implementation that returns no promise', () => {
+  it('tolerates an implementation that returns no promise', async () => {
     // `.catch` on a bare `undefined` return would itself throw.
     const setAppBadge = vi.fn(() => undefined)
     const clearAppBadge = vi.fn().mockResolvedValue(undefined)
@@ -166,11 +179,12 @@ describe('applyAppBadge (ADR 0080)', () => {
     expect(() => {
       dispose = applyAppBadge(fakeSettings(true), fakeRooms(4))
     }).not.toThrow()
+    await flushBadge()
     expect(setAppBadge).toHaveBeenCalledWith(4)
     dispose()
   })
 
-  it('grows the badge as further messages arrive in an already-unread room', () => {
+  it('grows the badge as further messages arrive in an already-unread room', async () => {
     // Regression: an earlier version of this effect used the *count of
     // unread rooms*, which stayed stuck at 1 while more messages piled up in
     // the same room (reported as "badge appears but isn't increasing").
@@ -181,12 +195,15 @@ describe('applyAppBadge (ADR 0080)', () => {
     const settings = fakeSettings(true)
     const rooms = fakeRooms(1)
     const dispose = applyAppBadge(settings, rooms)
+    await flushBadge()
     expect(setAppBadge).toHaveBeenLastCalledWith(1)
 
     ;(rooms.unreadTotal as unknown as { value: number }).value = 2
+    await flushBadge()
     expect(setAppBadge).toHaveBeenLastCalledWith(2)
 
     ;(rooms.unreadTotal as unknown as { value: number }).value = 3
+    await flushBadge()
     expect(setAppBadge).toHaveBeenLastCalledWith(3)
     dispose()
   })
@@ -200,7 +217,7 @@ describe('applyAppBadge in the shell', () => {
     delete navigator.clearAppBadge
   })
 
-  it('sets the platform badge and does not call navigator', () => {
+  it('sets the platform badge and does not call navigator', async () => {
     const setIconBadge = vi.fn().mockResolvedValue(undefined)
     const setAppBadge = vi.fn().mockResolvedValue(undefined)
     const clearAppBadge = vi.fn().mockResolvedValue(undefined)
@@ -212,41 +229,89 @@ describe('applyAppBadge in the shell', () => {
       setIconBadge,
     )
 
+    await flushBadge()
     expect(setIconBadge).toHaveBeenCalledWith(5)
     expect(setAppBadge).not.toHaveBeenCalled()
     expect(clearAppBadge).not.toHaveBeenCalled()
     dispose()
   })
 
-  it('clears when the setting is off or the total is zero, and grows within one room', () => {
+  it('sends one value for a burst of unread totals in the same turn', async () => {
+    const setIconBadge = vi.fn().mockResolvedValue(undefined)
+    const rooms = fakeRooms(0)
+    const dispose = applyAppBadge(fakeSettings(true), rooms, setIconBadge)
+    ;(rooms.unreadTotal as unknown as { value: number }).value = 3
+    ;(rooms.unreadTotal as unknown as { value: number }).value = 5
+    ;(rooms.unreadTotal as unknown as { value: number }).value = 12
+    await flushBadge()
+    expect(setIconBadge).toHaveBeenCalledTimes(1)
+    expect(setIconBadge).toHaveBeenCalledWith(12)
+    dispose()
+  })
+
+  it('does not clear before the room list has loaded, then clears on sign-out', async () => {
+    const setIconBadge = vi.fn().mockResolvedValue(undefined)
+    const rooms = fakeRooms(0, true)
+    const dispose = applyAppBadge(fakeSettings(true), rooms, setIconBadge)
+    await flushBadge()
+    expect(setIconBadge).not.toHaveBeenCalled()
+
+    ;(rooms.loading as unknown as { value: boolean }).value = false
+    ;(rooms.unreadTotal as unknown as { value: number }).value = 7
+    await flushBadge()
+    expect(setIconBadge).toHaveBeenCalledTimes(1)
+    expect(setIconBadge).toHaveBeenCalledWith(7)
+
+    // Sign-out walks the total to zero and then marks the store loading again.
+    // That later zero is a real clear.
+    ;(rooms.loading as unknown as { value: boolean }).value = true
+    ;(rooms.unreadTotal as unknown as { value: number }).value = 0
+    await flushBadge()
+    expect(setIconBadge).toHaveBeenLastCalledWith(null)
+    dispose()
+  })
+
+  it('clears when the setting is off or the total is zero, and grows within one room', async () => {
     const setIconBadge = vi.fn().mockResolvedValue(undefined)
     const settings = fakeSettings(true)
     const rooms = fakeRooms(1)
     const dispose = applyAppBadge(settings, rooms, setIconBadge)
 
+    await flushBadge()
     expect(setIconBadge).toHaveBeenLastCalledWith(1)
     ;(rooms.unreadTotal as unknown as { value: number }).value = 4
+    await flushBadge()
     expect(setIconBadge).toHaveBeenLastCalledWith(4)
     ;(rooms.unreadTotal as unknown as { value: number }).value = 0
+    await flushBadge()
     expect(setIconBadge).toHaveBeenLastCalledWith(null)
 
     settings.appBadgeEnabled.value = true
     ;(rooms.unreadTotal as unknown as { value: number }).value = 2
+    await flushBadge()
+    expect(setIconBadge).toHaveBeenLastCalledWith(2)
     settings.appBadgeEnabled.value = false
+    await flushBadge()
     expect(setIconBadge).toHaveBeenLastCalledWith(null)
+    // The setting is still off, so another unread write is the same clear.
+    ;(rooms.unreadTotal as unknown as { value: number }).value = 8
+    await flushBadge()
+    expect(setIconBadge).toHaveBeenCalledTimes(5)
     dispose()
   })
 
-  it('contains a throw from the platform badge', () => {
+  it('contains a throw from the platform badge', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
     const rooms = fakeRooms(1)
     const dispose = applyAppBadge(fakeSettings(true), rooms, () => {
       throw new Error('badge unavailable')
     })
+    await flushBadge()
     expect(consoleError).toHaveBeenCalledTimes(1)
     expect(() => {
       ;(rooms.unreadTotal as unknown as { value: number }).value = 2
     }).not.toThrow()
+    await flushBadge()
     expect(consoleError).toHaveBeenCalledTimes(2)
     consoleError.mockRestore()
     dispose()
