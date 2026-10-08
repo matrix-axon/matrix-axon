@@ -49,6 +49,7 @@ Join our public discussion room [#axon-developer:bostoncoop.net](https://matrix.
 
 See [`docs/mvp/prd.md`](docs/mvp/prd.md) for a more complete product description, [`docs/mvp/tech-spec.md`](docs/mvp/tech-spec.md) for the architecture, and [https://matrix-axon.github.io/matrix-axon/api.html](https://matrix-axon.github.io/matrix-axon/api.html) for the latest OpenAPI specification.
 Typed cached room-state details are available through the [room metadata API](docs/room-metadata.md), including advertised alternative aliases and creation, access, encryption, and power-level settings.
+Snapshots distinguish content availability from redaction evidence; legacy state without evidence remains unknown.
 Web and TUI presentation of these additional details is tracked separately in that guide.
 
 ## User quick start with Docker

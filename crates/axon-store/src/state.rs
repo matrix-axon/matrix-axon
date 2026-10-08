@@ -56,6 +56,23 @@ pub struct RoomStateUpsert<'a> {
     pub content: Option<Value>,
 }
 
+/// Positive redaction evidence. An absent SDK marker does not prove that a
+/// homeserver supplied original rather than pruned/censored content.
+#[derive(Clone, Copy, Debug)]
+pub enum RoomStateRedaction<'a> {
+    Unknown,
+    Redacted { event_id: Option<&'a str> },
+}
+
+impl<'a> RoomStateRedaction<'a> {
+    fn columns(self) -> (Option<bool>, Option<&'a str>) {
+        match self {
+            Self::Unknown => (None, None),
+            Self::Redacted { event_id } => (Some(true), event_id),
+        }
+    }
+}
+
 /// One resolved room-state row as read back from the store.
 #[derive(Debug, Clone)]
 pub struct RoomStateRow {
@@ -73,6 +90,10 @@ pub struct RoomStateRow {
     pub origin_ts: i64,
     /// The retained state `content`; absence does not establish redaction.
     pub content: Option<Value>,
+    /// Positive SDK redaction evidence; legacy rows have no evidence.
+    pub redacted: Option<bool>,
+    /// Redaction event ID, when supplied with a redacted state event.
+    pub redaction_event_id: Option<String>,
 }
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomStateRow {
@@ -85,6 +106,8 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomStateRow {
             sender: row.try_get("sender")?,
             origin_ts: row.try_get("origin_ts")?,
             content: row.try_get("content")?,
+            redacted: row.try_get("redacted")?,
+            redaction_event_id: row.try_get("redaction_event_id")?,
         })
     }
 }
@@ -109,7 +132,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomMetadataStateRow {
 
 /// Columns selected for a [`RoomStateRow`].
 const ROOM_STATE_COLUMNS: &str =
-    "room_id, event_type, state_key, event_id, sender, origin_ts, content";
+    "room_id, event_type, state_key, event_id, sender, origin_ts, content, redacted, redaction_event_id";
 
 /// A piece of account data to upsert. `room_id = None` is global (account-wide)
 /// account data; `Some(room_id)` scopes it to a room.
@@ -172,15 +195,40 @@ impl Store {
         s: &RoomStateUpsert<'_>,
         local_user_id: Option<&str>,
     ) -> Result<(), StoreError> {
+        self.upsert_room_state_with_redaction(s, local_user_id, RoomStateRedaction::Unknown)
+            .await
+    }
+
+    /// Persist SDK-observed redaction evidence with the state tuple atomically.
+    /// `Unknown` means the caller has no positive evidence of redaction.
+    /// Evidence and retained content are monotonic for the same event ID, so an
+    /// original replay cannot resurrect content after a redacted delivery.
+    /// A different replacement event starts with its own evidence.
+    pub async fn upsert_room_state_with_redaction(
+        &self,
+        s: &RoomStateUpsert<'_>,
+        local_user_id: Option<&str>,
+        evidence: RoomStateRedaction<'_>,
+    ) -> Result<(), StoreError> {
+        let (redacted, redaction_event_id) = evidence.columns();
         sqlx_core::query::query(
             "INSERT INTO room_state \
-             (account_id, room_id, event_type, state_key, event_id, sender, origin_ts, content) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             (account_id, room_id, event_type, state_key, event_id, sender, origin_ts, content, redacted, redaction_event_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
              ON CONFLICT (account_id, room_id, event_type, state_key) DO UPDATE SET \
                event_id = EXCLUDED.event_id, \
                sender = EXCLUDED.sender, \
                origin_ts = EXCLUDED.origin_ts, \
-               content = EXCLUDED.content \
+               content = CASE WHEN room_state.event_id = EXCLUDED.event_id \
+                   AND room_state.redacted = true AND EXCLUDED.redacted IS DISTINCT FROM true \
+                   THEN room_state.content ELSE EXCLUDED.content END, \
+               redacted = CASE WHEN room_state.event_id = EXCLUDED.event_id \
+                   THEN CASE WHEN room_state.redacted = true THEN true \
+                        ELSE COALESCE(EXCLUDED.redacted, room_state.redacted) END \
+                   ELSE EXCLUDED.redacted END, \
+               redaction_event_id = CASE WHEN room_state.event_id = EXCLUDED.event_id \
+                   THEN COALESCE(room_state.redaction_event_id, EXCLUDED.redaction_event_id) \
+                   ELSE EXCLUDED.redaction_event_id END \
              WHERE EXCLUDED.origin_ts >= room_state.origin_ts",
         )
         .bind(s.account_id)
@@ -191,6 +239,8 @@ impl Store {
         .bind(s.sender)
         .bind(s.origin_ts)
         .bind(&s.content)
+        .bind(redacted)
+        .bind(redaction_event_id)
         .execute(&self.pool)
         .await?;
         if summary_display_state(s.event_type, s.state_key)
@@ -224,15 +274,10 @@ impl Store {
         Ok(row)
     }
 
-    /// Read a caller-defined, trusted set of singleton state types.
-    /// The primary key bounds results to at most one row per requested type.
-    /// Each PostgreSQL-rendered content is capped at 128 KiB before transfer
-    /// and JSON decoding, including unknown extensions. This transfer budget
-    /// allows spacing overhead above Matrix's compact event-size limit; it
-    /// does not validate upstream event sizes. MATERIALIZED computes the
-    /// rendering size once per tuple, even for oversized content. Rendering
-    /// itself is not bounded by this transfer cap: PostgreSQL still detoasts
-    /// and renders the full stored value before measuring it.
+    /// Fixed singleton detail read with content capped before transfer/decoding.
+    /// Redaction evidence and retained fields come from the shared projection,
+    /// never from the mere existence of a redaction row in the timeline log.
+    /// The transfer cap still does not bound PostgreSQL detoast/rendering work.
     pub async fn room_metadata_states(
         &self,
         account_id: Uuid,
@@ -242,14 +287,15 @@ impl Store {
         let rows = sqlx_core::query_as::query_as::<Postgres, RoomMetadataStateRow>(
             "WITH sized AS MATERIALIZED (\
                  SELECT room_id, event_type, state_key, event_id, sender, origin_ts, content, \
+                        redacted, redaction_event_id, \
                         COALESCE(octet_length(content::text) > 131072, false) AS oversized \
                  FROM room_state \
                  WHERE account_id = $1 AND room_id = $2 AND state_key = '' \
                    AND event_type = ANY($3)\
              ) \
              SELECT room_id, event_type, state_key, event_id, sender, origin_ts, \
-                    CASE WHEN oversized THEN NULL ELSE content END AS content, oversized \
-             FROM sized ORDER BY event_type",
+                    CASE WHEN oversized THEN NULL ELSE content END AS content, oversized, \
+                    redacted, redaction_event_id FROM sized ORDER BY event_type",
         )
         .bind(account_id)
         .bind(room_id)
@@ -257,6 +303,88 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
+    }
+
+    /// Keyset-page room IDs without materializing all rooms or member state.
+    /// The room_summaries primary key supports the account/cursor lookup.
+    pub async fn state_reconciliation_rooms(
+        &self,
+        account_id: Uuid,
+        after: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx_core::query_as::query_as::<Postgres, (String,)>(
+            "SELECT room_id FROM room_summaries WHERE account_id = $1 AND room_id > $2 \
+             ORDER BY room_id LIMIT 4",
+        )
+        .bind(account_id)
+        .bind(after)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(room,)| room).collect())
+    }
+
+    /// Match a live redaction target against a trusted, fixed singleton set.
+    /// Primary-key probes avoid scanning member state or historical events.
+    pub async fn is_state_reconciliation_target(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+        event_types: &[&str],
+    ) -> Result<bool, StoreError> {
+        sqlx_core::query_scalar::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM room_state \
+             WHERE account_id = $1 AND room_id = $2 AND state_key = '' \
+               AND event_id = $3 AND event_type = ANY($4))",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .bind(event_id)
+        .bind(event_types)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Mirror a redacted SDK state form into an existing current tuple only.
+    /// The event-ID predicate is the concurrency guard against a replacement,
+    /// purge, or account teardown while the SDK cache read was in flight.
+    /// This does not insert state or advance freshness from historical data.
+    /// No timestamp/order guard is needed: only the same immutable event ID
+    /// can be repaired. An older SDK event cannot affect a newer current tuple.
+    pub async fn reconcile_redacted_room_state(
+        &self,
+        s: &RoomStateUpsert<'_>,
+        redaction_event_id: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx_core::query::query(
+            "UPDATE room_state SET content = $6, redacted = true, \
+                 redaction_event_id = COALESCE(redaction_event_id, $7) \
+             WHERE account_id = $1 AND room_id = $2 AND event_type = $3 \
+               AND state_key = $4 AND event_id = $5 \
+               AND (redacted IS DISTINCT FROM true OR content IS DISTINCT FROM $6 \
+                    OR (redaction_event_id IS NULL AND $7::text IS NOT NULL))",
+        )
+        .bind(s.account_id)
+        .bind(s.room_id)
+        .bind(s.event_type)
+        .bind(s.state_key)
+        .bind(s.event_id)
+        .bind(&s.content)
+        .bind(redaction_event_id)
+        .execute(&mut *tx)
+        .await?;
+        let changed = result.rows_affected() != 0;
+        if changed && summary_display_state(s.event_type, s.state_key) {
+            sqlx_core::query::query("SELECT refresh_room_summary_display($1, $2)")
+                .bind(s.account_id)
+                .bind(s.room_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(changed)
     }
 
     /// Read every resolved state tuple of one type in a room, ordered by

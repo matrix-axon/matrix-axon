@@ -77,6 +77,12 @@ Partially valid snapshots retain valid fields and entries and explicitly identif
 Available empty lists are meaningful values.
 Missing state is not evidence that aliases are absent or encryption is disabled.
 Do not manufacture Matrix defaults or infer redaction from an empty object when the cached projection lacks the necessary evidence.
+Preserve SDK-observed redaction evidence independently of content availability.
+A bounded, account-scoped worker mirrors SDK-pruned singleton state into the shared projection after live redaction hints and through paced startup/recovery sweeps.
+A raw timeline redaction row alone is not proof that a redaction was applied.
+Legacy state without evidence remains unknown; a missing redaction marker must not be labeled proof of original content.
+Repair must compare the current event ID, update display projections atomically, and never insert missing state or resurrect a removed room/account.
+Same-event replay must not remove positive evidence or resurrect original fields.
 Configured power levels are metadata, not resolved authorization decisions.
 
 Retain event provenance for state snapshots.

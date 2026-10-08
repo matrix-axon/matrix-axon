@@ -32,6 +32,7 @@ mod member_profiles;
 mod meta;
 mod reconcile;
 mod redecrypt;
+mod state_redaction;
 mod sync_health;
 mod trust;
 mod verification;

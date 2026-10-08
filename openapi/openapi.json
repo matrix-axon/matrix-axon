@@ -10766,6 +10766,20 @@
             ],
             "format": "int64"
           },
+          "redacted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
+          },
+          "redaction_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Redaction event ID when known. A null ID does not negate `redacted`."
+          },
           "sender": {
             "type": [
               "string",
@@ -10863,6 +10877,20 @@
             ],
             "format": "int64"
           },
+          "redacted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
+          },
+          "redaction_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Redaction event ID when known. A null ID does not negate `redacted`."
+          },
           "sender": {
             "type": [
               "string",
@@ -10936,6 +10964,20 @@
             ],
             "format": "int64"
           },
+          "redacted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
+          },
+          "redaction_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Redaction event ID when known. A null ID does not negate `redacted`."
+          },
           "sender": {
             "type": [
               "string",
@@ -10993,6 +11035,20 @@
             ],
             "format": "int64"
           },
+          "redacted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
+          },
+          "redaction_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Redaction event ID when known. A null ID does not negate `redacted`."
+          },
           "sender": {
             "type": [
               "string",
@@ -11049,6 +11105,20 @@
               "null"
             ],
             "format": "int64"
+          },
+          "redacted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
+          },
+          "redaction_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Redaction event ID when known. A null ID does not negate `redacted`."
           },
           "sender": {
             "type": [
@@ -11116,6 +11186,20 @@
               "null"
             ],
             "format": "int64"
+          },
+          "redacted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
+          },
+          "redaction_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Redaction event ID when known. A null ID does not negate `redacted`."
           },
           "sender": {
             "type": [
@@ -11254,6 +11338,20 @@
             ],
             "format": "int64"
           },
+          "redacted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
+          },
+          "redaction_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Redaction event ID when known. A null ID does not negate `redacted`."
+          },
           "sender": {
             "type": [
               "string",
@@ -11328,6 +11426,20 @@
               "null"
             ],
             "format": "int64"
+          },
+          "redacted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true`: the SDK supplied redacted state; `null`: no reliable evidence.\nAbsence of a marker does not establish original content; false is not emitted.\nIndependent of availability: redacted state can retain valid fields."
+          },
+          "redaction_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Redaction event ID when known. A null ID does not negate `redacted`."
           },
           "sender": {
             "type": [

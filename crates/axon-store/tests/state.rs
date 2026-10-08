@@ -11,7 +11,7 @@
 
 mod common;
 
-use axon_store::{AccountDataUpsert, RoomStateUpsert};
+use axon_store::{AccountDataUpsert, RoomStateRedaction, RoomStateUpsert};
 use common::test_account;
 use serde_json::json;
 use sqlx_core::row::Row;
@@ -357,4 +357,220 @@ async fn apply_and_remove_room_tag_merges_json() {
         .is_none());
 
     common::cleanup_account(&pool, account_id).await;
+}
+
+/// Concurrent handlers serialize on the tuple's ON CONFLICT row lock: neither
+/// arrival order may clear redaction evidence or restore original content.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_state_redaction_concurrent_replay() {
+    let store = common::migrated_store().await;
+    let account_id = test_account(&store, "redaction-race").await;
+    let room_id = format!("!redaction-race-{}:localhost", Uuid::new_v4());
+    let original = RoomStateUpsert {
+        account_id,
+        room_id: &room_id,
+        event_type: "m.room.power_levels",
+        state_key: "",
+        event_id: "$race:localhost",
+        sender: "@alice:localhost",
+        origin_ts: 10,
+        content: Some(json!({"ban": 50, "invite": 99})),
+    };
+    let redacted = RoomStateUpsert {
+        content: Some(json!({"ban": 50})),
+        ..original
+    };
+    let (first, second) = tokio::join!(
+        store.upsert_room_state_with_redaction(&original, None, RoomStateRedaction::Unknown),
+        store.upsert_room_state_with_redaction(
+            &redacted,
+            None,
+            RoomStateRedaction::Redacted {
+                event_id: Some("$redaction:localhost")
+            }
+        ),
+    );
+    first.unwrap();
+    second.unwrap();
+    let row = store
+        .room_state(account_id, &room_id, "m.room.power_levels", "")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.redacted, Some(true));
+    assert_eq!(
+        row.redaction_event_id.as_deref(),
+        Some("$redaction:localhost")
+    );
+    assert_eq!(row.content, Some(json!({"ban": 50})));
+    // A legacy/evidence-free caller also cannot resurrect the same event.
+    store.upsert_room_state(&original).await.unwrap();
+    let row = store
+        .room_state(account_id, &room_id, "m.room.power_levels", "")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.redacted, Some(true));
+    assert_eq!(row.content, Some(json!({"ban": 50})));
+    store.delete_account_row(account_id).await.unwrap();
+}
+
+/// Keyset sweeps stay bounded/account-scoped, and SDK repair updates both the
+/// state and its shared room-list display projection without resurrecting rows.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn redacted_state_repair_updates_shared_display_and_pages_rooms() {
+    let store = common::migrated_store().await;
+    let account_id = test_account(&store, "redaction-display").await;
+    let other = test_account(&store, "redaction-other").await;
+    let mut rooms = Vec::new();
+    for _ in 0..5 {
+        let room = format!("!redaction-display-{}:localhost", Uuid::new_v4());
+        common::insert_message(&store, account_id, &room, 1, "fixture").await;
+        rooms.push(room);
+    }
+    common::insert_message(&store, other, "!other:localhost", 1, "fixture").await;
+    rooms.sort();
+    let first = store
+        .state_reconciliation_rooms(account_id, "")
+        .await
+        .unwrap();
+    assert_eq!(first, rooms[..4]);
+    let second = store
+        .state_reconciliation_rooms(account_id, first.last().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(second, rooms[4..]);
+    let mut state = RoomStateUpsert {
+        account_id,
+        room_id: &rooms[0],
+        event_type: "m.room.canonical_alias",
+        state_key: "",
+        event_id: "$alias:localhost",
+        sender: "@alice:localhost",
+        origin_ts: 2,
+        content: Some(json!({"alias":"#fixture:localhost"})),
+    };
+    store.upsert_room_state(&state).await.unwrap();
+    for (account, room, target, types, expected) in [
+        (
+            account_id,
+            rooms[0].as_str(),
+            "$alias:localhost",
+            vec!["m.room.canonical_alias"],
+            true,
+        ),
+        (
+            other,
+            rooms[0].as_str(),
+            "$alias:localhost",
+            vec!["m.room.canonical_alias"],
+            false,
+        ),
+        (
+            account_id,
+            rooms[1].as_str(),
+            "$alias:localhost",
+            vec!["m.room.canonical_alias"],
+            false,
+        ),
+        (
+            account_id,
+            rooms[0].as_str(),
+            "$message:localhost",
+            vec!["m.room.canonical_alias"],
+            false,
+        ),
+        (
+            account_id,
+            rooms[0].as_str(),
+            "$alias:localhost",
+            vec!["m.room.member"],
+            false,
+        ),
+    ] {
+        assert_eq!(
+            store
+                .is_state_reconciliation_target(account, room, target, &types)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    assert!(store
+        .list_rooms(Some(account_id))
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.canonical_alias.as_deref() == Some("#fixture:localhost")));
+    state.content = Some(json!({}));
+    assert!(store
+        .reconcile_redacted_room_state(&state, Some("$redaction:localhost"))
+        .await
+        .unwrap());
+    assert!(store
+        .list_rooms(Some(account_id))
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.canonical_alias.is_none()));
+    // Neither another account nor a missing tuple can be inserted by repair.
+    state.account_id = other;
+    assert!(!store
+        .reconcile_redacted_room_state(&state, None)
+        .await
+        .unwrap());
+    assert!(store
+        .room_state(other, &rooms[0], "m.room.canonical_alias", "")
+        .await
+        .unwrap()
+        .is_none());
+    store.delete_account_row(account_id).await.unwrap();
+    store.delete_account_row(other).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_state_redaction_both_ordered_deliveries() {
+    let store = common::migrated_store().await;
+    let account_id = test_account(&store, "redaction-ordered").await;
+    for redacted_first in [false, true] {
+        let room = format!("!ordered-{}:localhost", Uuid::new_v4());
+        for redacted in [redacted_first, !redacted_first] {
+            let state = RoomStateUpsert {
+                account_id,
+                room_id: &room,
+                event_type: "m.room.power_levels",
+                state_key: "",
+                event_id: "$ordered:localhost",
+                sender: "@alice:localhost",
+                origin_ts: 2,
+                content: Some(if redacted {
+                    json!({"ban":50})
+                } else {
+                    json!({"ban":50,"invite":99})
+                }),
+            };
+            let evidence = if redacted {
+                RoomStateRedaction::Redacted {
+                    event_id: Some("$redaction:localhost"),
+                }
+            } else {
+                RoomStateRedaction::Unknown
+            };
+            store
+                .upsert_room_state_with_redaction(&state, None, evidence)
+                .await
+                .unwrap();
+        }
+        let row = store
+            .room_state(account_id, &room, "m.room.power_levels", "")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.redacted, Some(true));
+        assert_eq!(row.content, Some(json!({"ban":50})));
+    }
+    store.delete_account_row(account_id).await.unwrap();
 }

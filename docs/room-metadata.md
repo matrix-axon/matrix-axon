@@ -29,7 +29,7 @@ An oversized state keeps its provenance but withholds its content; other fields 
 Creation content maps Matrix `m.federate` to API `federate` and Matrix `type` to API `room_type`.
 These names deliberately differ from the stored Matrix keys.
 
-Each snapshot includes `status`, `event_id`, `sender`, `origin_ts`, and `content`.
+Each snapshot includes `status`, `event_id`, `sender`, `origin_ts`, `redacted`, `redaction_event_id`, and `content`.
 `origin_ts` is the upstream event timestamp, not the time of the last successful sync or an access-freshness guarantee.
 
 | Status        | Meaning                                                                                              |
@@ -53,11 +53,45 @@ A creation predecessor can omit `event_id`; its `room_id` remains available.
 Power levels describe configured state, with legacy decimal strings and floats normalized to integers (floats truncate toward zero); they are not resolved permissions and must not drive authorization decisions.
 Legacy normalization currently does not consult the room version; [issue 632](https://github.com/matrix-axon/matrix-axon/issues/632) tracks version-aware validation or diagnostics.
 Unknown condition types retain their `type` and optional `room_id`; extension-specific payloads are not exposed by this typed read.
-An empty content object is not itself evidence of redaction: the stored projection does not retain a reliable redaction marker.
-Redacted state may therefore be `available` with empty or retained fields; availability describes the cached shape, not whether the original event was redacted.
-The `unavailable` status handles stored NULL content and is not a guarantee that sync identifies redacted events.
+Redaction evidence is independent of content availability, consistent with [Matrix redaction semantics](https://spec.matrix.org/v1.19/client-server-api/#redactions).
+`redacted: true` means the SDK supplied a redacted state form.
+`redacted: null` means Axon has no positive redaction evidence, including legacy rows and unknown tuples.
+Absence of the SDK marker does not prove that content is original rather than server-pruned or censored, so Axon does not emit `false`.
+`redaction_event_id` identifies a known redaction when available; a null ID does not negate positive evidence.
+An empty object or NULL content alone never establishes redaction.
+Already-redacted state can retain room-version-protected fields and remain `available` or `partial`.
+Axon uses the SDK's retained content instead of implementing its own pruning rules.
+A raw timeline redaction row alone never changes the metadata's evidence or withholds its content.
+This also avoids withholding legitimate protected fields in pre-migration rows that already contain a redacted form.
 
-A client should re-read when reopening the panel, on reconnect, and after relevant timeline state events.
+A bounded worker reconciles SDK-redacted singleton state into the shared `room_state` projection.
+It covers the eight metadata types plus name, topic, avatar, and tombstone, so `/metadata`, `/info`, room-list summaries, and space display enrichment use the same retained state.
+It does not enumerate membership or space-link state keys.
+Live redactions enqueue a hint only if the target event ID matches a current metadata/display singleton in the same account and room.
+The filter uses fixed primary-key probes, with a two-second deadline; failure conservatively queues a hint, without treating the timeline row as evidence.
+Marker-free singleton state writes check only their own SDK cache entry and enqueue a hint if that same event is already redacted there.
+Ordinary message redactions and normal initial hydration therefore do not enqueue full room scans.
+The state-write check closes redaction-before-state delivery races when the target filter saw no tuple yet.
+These checks wait for bounded local I/O, never for the subsequent repair.
+Each account has one paced worker, a 32-entry hint queue, and at most eight active rooms per tick: four hints and four rooms from a keyset-paged room-summary sweep.
+Duplicate hints coalesce; draining stops at four distinct rooms, leaving the channel tail for the next tick.
+Queue overflow and interrupted jobs heal through subsequent sweeps.
+The worker reads twelve singleton SDK cache entries per room, bounds raw JSON before decoding to 128 KiB, and uses a two-second deadline for each room and each sweep-page read.
+Ticks run once per second with missed ticks skipped; after a complete sweep the next sweep waits five minutes.
+That idle interval reduces repeated background SQLite reads; retained non-joined rooms can still occupy cheap sweep-page slots, but the worker checks SDK membership before reading singleton state.
+All acquisition is local SDK cache I/O; this worker makes no homeserver requests.
+One room or field failing is logged and skipped without stopping sync.
+The worker is canceled and joined with its account run.
+
+Repair updates only an existing tuple whose event ID still matches the SDK form.
+It cannot overwrite a replacement, advance state from historical data, or recreate a purged room or removed account.
+A repaired display tuple and its room-summary projection commit in the same transaction.
+Same-event replays cannot clear positive evidence or restore original content; a new replacement event has independent evidence.
+Startup sweeps repair a crash between the SDK cache commit and Axon's projection update without a cold resync or re-dispatched state event.
+The nullable evidence columns are added by a forward-only migration; older rows are not guessed or rewritten in a bulk backfill.
+
+A client should re-read when reopening the panel, on reconnect, after relevant timeline state events, and after timeline redactions.
+Redaction repair is asynchronous, so the first read after a redaction frame may precede reconciliation; bounded visible-panel polling also covers that interval.
 Required-state-only updates are persisted without a live invalidation frame, so timeline events and reconnect alone cannot keep an open panel fresh.
 Until that gap is closed, clients displaying this endpoint need bounded polling while the panel is visible (for example, one request every 30 seconds, canceled when hidden, with one request in flight and backoff after failures).
 This endpoint does not add a metadata-specific live frame.
@@ -91,10 +125,14 @@ Web and TUI consumption are [issue 623](https://github.com/matrix-axon/matrix-ax
 ## Verification
 
 The HTTP integration tests seed real PostgreSQL state and exercise the authenticated router without an upstream service.
+The regression suite covers already-redacted state, filtered redaction hints, queued bursts spanning multiple ticks, stale SDK event IDs, raw redaction rows without applied evidence, both log/state arrival orders, account/room isolation, replacement events, ordered and concurrent replay protection, shared display projection repair, and evidence persistence after reopening the store.
+A PostgreSQL-gated SDK-cache test applies a redaction in the real SDK state store, invokes the actual reconciliation consumer without re-dispatching a state event, and verifies retained fields and purge safety.
 Use a throwaway database; these tests run migrations and write fixture accounts.
 
 ```sh
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-api --test http room_metadata -- --ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-store --test state -- --ignored
+DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon_test cargo test -p axon-sync --lib state_redaction -- --include-ignored
 cargo test -p axon-api --test openapi
 ```
 
@@ -102,3 +140,25 @@ For a running instance, call the new endpoint for a joined room with advertised 
 Replace the alias state with a newer event that removes the canonical alias and empties `alt_aliases`; the next read must contain the replacement event ID and empty list.
 Query a different account or unknown room and verify that missing tuples remain `unknown`.
 Do not paste bearer tokens, raw event bodies, or private room identifiers into verification logs.
+
+### Disposable live acceptance
+
+Use an isolated Synapse/PostgreSQL/Axon stack with disposable Matrix accounts and persistent SDK storage.
+Do not point these tests at an operator database or use production credentials.
+
+1. Create rooms using room versions 10 and 11, and set power levels with distinct `ban` and `invite` thresholds and restricted join rules with an `allow` condition.
+2. Wait for `/metadata` to report the state event IDs, then redact each power-level and join-rule event through Matrix.
+   Poll until Axon reports positive evidence and the matching redaction ID.
+   The `ban` threshold and restricted join conditions must survive; `invite` is removed in version 10 and retained in version 11.
+   Check that `/info` uses the same retained join rule.
+3. Redact the current room-name event and check that `/v1/rooms` clears its name after reconciliation.
+4. Replace the power-level state, then redact its predecessor again.
+   The replacement must keep its own event ID, content, and unknown evidence.
+5. In the disposable database only, restore the original power-level content and clear its evidence while preserving the current event ID.
+   The paced sweep must restore the SDK-pruned content without another state write.
+   Repeat with Axon stopped, then restart against the same SDK store and verify startup recovery.
+6. Redact power-level state before a second account joins the room.
+   Its first hydrated snapshot must preserve protected fields and report positive evidence.
+
+The fixture homeserver may reject creation-event redactions; verify that a rejected request leaves Axon's evidence unchanged rather than treating the attempt as an applied redaction.
+These small-room checks validate reconciliation and recovery, not throughput for hundreds of rooms.

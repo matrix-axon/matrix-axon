@@ -22,7 +22,8 @@ pub enum RoomMetadataStatus {
     Available,
     /// Valid fields remain available; invalid fields or entries are identified.
     Partial,
-    /// A row exists but its content was not retained.
+    /// A row exists but its content was not retained (SQL NULL or JSON null).
+    /// Consult `redacted` independently; availability alone is not evidence.
     /// An empty object is not classified as redacted: stored state alone does
     /// not always carry enough evidence to establish redaction.
     Unavailable,
@@ -43,6 +44,12 @@ pub struct CachedRoomMetadata<T: ToSchema> {
     pub event_id: Option<String>,
     pub sender: Option<String>,
     pub origin_ts: Option<i64>,
+    /// `true`: the SDK supplied redacted state; `null`: no reliable evidence.
+    /// Absence of a marker does not establish original content; false is not emitted.
+    /// Independent of availability: redacted state can retain valid fields.
+    pub redacted: Option<bool>,
+    /// Redaction event ID when known. A null ID does not negate `redacted`.
+    pub redaction_event_id: Option<String>,
     /// Paths of malformed fields/entries, with wildcards for list/map entries.
     /// These are shape diagnostics, not permission or redaction information.
     pub invalid_fields: Vec<String>,
@@ -68,6 +75,8 @@ impl<T: ToSchema> Default for CachedRoomMetadata<T> {
             event_id: None,
             sender: None,
             origin_ts: None,
+            redacted: None,
+            redaction_event_id: None,
             content: None,
             invalid_fields: Vec::new(),
         }
@@ -81,6 +90,8 @@ impl<T: MetadataContent> CachedRoomMetadata<T> {
             event_id: Some(row.state.event_id.clone()),
             sender: Some(row.state.sender),
             origin_ts: Some(row.state.origin_ts),
+            redacted: row.state.redacted,
+            redaction_event_id: row.state.redaction_event_id,
             content: None,
             invalid_fields: Vec::new(),
         };
@@ -501,6 +512,8 @@ mod tests {
                 event_id: "$state".into(),
                 sender: "@creator:example.org".into(),
                 origin_ts: 1,
+                redacted: None,
+                redaction_event_id: None,
                 content: Some(content),
             },
             oversized: false,
@@ -664,6 +677,8 @@ mod tests {
                     event_id: "$create".into(),
                     sender: "@creator:example.org".into(),
                     origin_ts: 1,
+                    redacted: None,
+                    redaction_event_id: None,
                     content: Some(json!({
                         "room_version": "12",
                         "predecessor": {"room_id": "!previous:example.org"}

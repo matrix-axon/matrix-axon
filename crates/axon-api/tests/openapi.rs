@@ -110,6 +110,14 @@ fn room_metadata_content_is_nullable_in_every_snapshot_schema() {
         .collect();
     assert_eq!(snapshots.len(), 8);
     for (name, schema) in snapshots {
+        let redacted = &schema["properties"]["redacted"]["type"];
+        assert_eq!(redacted, &serde_json::json!(["boolean", "null"]), "{name}");
+        let redaction_id = &schema["properties"]["redaction_event_id"]["type"];
+        assert_eq!(
+            redaction_id,
+            &serde_json::json!(["string", "null"]),
+            "{name}"
+        );
         let content = &schema["properties"]["content"];
         assert!(
             content["oneOf"]

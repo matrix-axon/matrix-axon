@@ -60,7 +60,8 @@ pub use search::{
 };
 pub use spaces::{SpaceChildRow, SpaceParentRow};
 pub use state::{
-    AccountDataRow, AccountDataUpsert, RoomMetadataStateRow, RoomStateRow, RoomStateUpsert,
+    AccountDataRow, AccountDataUpsert, RoomMetadataStateRow, RoomStateRedaction, RoomStateRow,
+    RoomStateUpsert,
 };
 pub use tokens::{IssuedOAuthTokenPair, IssuedToken, Token, VerifiedToken};
 

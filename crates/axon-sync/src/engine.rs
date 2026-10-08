@@ -20,7 +20,7 @@ use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
 use axon_store::{
     Account, AccountAuthKind, AccountDataUpsert, EventCiphertext, NewEvent, RoomInviteSnapshot,
-    RoomStateUpsert, Store,
+    RoomStateRedaction, RoomStateUpsert, Store,
 };
 use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::event_handler::{Ctx, RawEvent};
@@ -648,6 +648,7 @@ pub(crate) struct PersistContext {
     /// When set, a leave/ban of the local user destructively purges the room's
     /// stored events + search documents (ADR 0044). Off by default.
     pub(crate) purge_on_leave: bool,
+    pub(crate) state_redaction_tx: tokio::sync::mpsc::Sender<OwnedRoomId>,
 }
 
 /// Parse an event's raw JSON text into a [`serde_json::Value`], logging (with
@@ -656,7 +657,11 @@ pub(crate) struct PersistContext {
 /// handler below that needs generic field access (`type`/`content`/…) a typed
 /// `Ev` doesn't expose uniformly — extracted so a fix to this parse/log/skip
 /// shape (e.g. a size cap) only needs to land once.
-fn parse_raw_json(json: &str, account_id: Uuid, what: &'static str) -> Option<serde_json::Value> {
+pub(crate) fn parse_raw_json(
+    json: &str,
+    account_id: Uuid,
+    what: &'static str,
+) -> Option<serde_json::Value> {
     match serde_json::from_str(json) {
         Ok(v) => Some(v),
         Err(err) => {
@@ -687,6 +692,10 @@ async fn persist_timeline_event(
     let Some(raw_val) = parse_raw_json(raw.get(), ctx.account_id, "timeline event") else {
         return;
     };
+    let redaction_target = (raw_val.get("type").and_then(serde_json::Value::as_str)
+        == Some("m.room.redaction"))
+    .then(|| crate::meta::redacts(&raw_val).map(str::to_owned))
+    .flatten();
     // The live sync path: persist and emit the fresh event to `/v1/ws`.
     persist_event_core(
         &ctx,
@@ -697,6 +706,9 @@ async fn persist_timeline_event(
         true,
     )
     .await;
+    if let Some(target) = redaction_target {
+        crate::state_redaction::queue_redaction_hint(&ctx, room.room_id(), &target).await;
+    }
 }
 
 /// Persist one event fetched by history backfill (M10). Back-pagination
@@ -949,6 +961,22 @@ async fn persist_event_siblings(
     None
 }
 
+/// A missing redacted_because marker is not proof of original content.
+pub(crate) fn state_redaction_evidence<'a>(
+    ev: &AnySyncStateEvent,
+    raw: &'a serde_json::Value,
+) -> RoomStateRedaction<'a> {
+    if ev.is_redacted() {
+        RoomStateRedaction::Redacted {
+            event_id: raw
+                .pointer("/unsigned/redacted_because/event_id")
+                .and_then(serde_json::Value::as_str),
+        }
+    } else {
+        RoomStateRedaction::Unknown
+    }
+}
+
 /// Event handler: project a room-state event into the `room_state` table (the
 /// derived current-value view, maintained by upsert). The raw state event is
 /// also persisted to `events` by [`persist_timeline_event`]; this writes the
@@ -976,6 +1004,7 @@ async fn persist_room_state_event(
         .unwrap_or("")
         .to_owned();
     let content = raw_val.get("content").cloned();
+    let evidence = state_redaction_evidence(&ev, &raw_val);
     let event_id = ev.event_id().as_str().to_owned();
     let sender = ev.sender().as_str().to_owned();
     let origin_ts = saturating_i64(u64::from(ev.origin_server_ts().0));
@@ -993,12 +1022,25 @@ async fn persist_room_state_event(
     };
     if let Err(err) = ctx
         .store
-        .upsert_room_state_for_local_user(&upsert, Some(ctx.local_user_id.as_ref()))
+        .upsert_room_state_with_redaction(&upsert, Some(ctx.local_user_id.as_ref()), evidence)
         .await
     {
         tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), error = %err, "failed to persist room state");
     } else {
-        tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), state_key = state_key.as_str(), "persisted room state");
+        tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), state_key = state_key.as_str(), event_id = %event_id, evidence = ?evidence, "persisted room state");
+    }
+
+    if matches!(evidence, RoomStateRedaction::Unknown)
+        && crate::state_redaction::STATE_TYPES.contains(&event_type.as_str())
+    {
+        crate::state_redaction::queue_state_hint(
+            &ctx,
+            &room.client(),
+            room.room_id(),
+            &event_type,
+            &event_id,
+        )
+        .await;
     }
 
     // M10 purge-on-leave (ADR 0044): when this state event is *this account*
@@ -1696,6 +1738,7 @@ async fn run_account(
 
     // Register event persistence before starting the sync service so no events
     // are missed between SyncService::start() and handler registration.
+    let (state_redaction_tx, state_redaction_rx) = tokio::sync::mpsc::channel(32);
     let persist_ctx = PersistContext {
         store: store.clone(),
         account_id: account.account_id,
@@ -1703,6 +1746,7 @@ async fn run_account(
         index: index.cloned(),
         local_user_id: Arc::from(account.user_id.as_str()),
         purge_on_leave: config.purge_on_leave,
+        state_redaction_tx,
     };
     // Clone before the handler context takes ownership: the backfill task persists
     // paged events through the same path (M10), reusing this context.
@@ -1870,7 +1914,7 @@ async fn run_account(
     let backfill_handle = if config.backfill_enabled {
         Some(tokio::spawn(backfill::run(
             client.clone(),
-            backfill_ctx,
+            backfill_ctx.clone(),
             BackfillParams::from_config(config),
             backfill_health.clone(),
             backfill_cancel.clone(),
@@ -1895,6 +1939,14 @@ async fn run_account(
         account.account_id,
         verify_lock,
         verify_cancel.clone(),
+    ));
+
+    let state_redaction_cancel = cancel.child_token();
+    let state_redaction_handle = tokio::spawn(crate::state_redaction::watch(
+        client.clone(),
+        backfill_ctx.clone(),
+        state_redaction_rx,
+        state_redaction_cancel.clone(),
     ));
 
     // Sender-trust overlay watcher (M7c): push `sender_trust.violation` frames when
@@ -2060,6 +2112,11 @@ async fn run_account(
         }
     };
     verification_rooms.unregister(account.account_id, verification_room_run_id);
+
+    state_redaction_cancel.cancel();
+    if let Err(err) = state_redaction_handle.await {
+        tracing::warn!(account_id = %account.account_id, error = %err, "state redaction worker did not shut down cleanly");
+    }
 
     // Always drain the service so its SQLite store flushes before we drop it,
     // then stop and join the re-decryption queue so it doesn't outlive this run
