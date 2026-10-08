@@ -582,16 +582,19 @@ fn set_icon_badge(app: tauri::AppHandle, count: Option<i64>) -> Result<(), Strin
         .ok_or_else(|| "icon badge: no main window".to_string())?;
     let count = icon_badge::visible_count(count);
 
+    // Each arm is the function's value. `return` here is clippy::needless_return
+    // on Android and Windows, where the other arms are compiled out and this
+    // is the whole body (the Android bundle job, `-D warnings`).
     #[cfg(target_os = "android")]
     {
         let _ = (window, count);
         note_android_badge_unsupported();
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "windows")]
     {
-        return paint_windows_badge(&window, count);
+        paint_windows_badge(&window, count)
     }
 
     #[cfg(not(any(target_os = "android", target_os = "windows")))]
