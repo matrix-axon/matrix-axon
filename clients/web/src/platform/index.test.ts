@@ -2,6 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { browserPlatform, needsCameraCaptureButtons } from './index'
 
 describe('browserPlatform', () => {
+  it('leaves the icon badge to the Badging API', () => {
+    expect(browserPlatform().setIconBadge).toBeNull()
+  })
+
   it('calls the global fetch, with the right receiver', async () => {
     // An unbound `globalThis.fetch` reference throws "Illegal invocation" in a
     // browser once it is passed around as a value — which is exactly what this

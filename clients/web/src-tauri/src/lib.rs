@@ -23,6 +23,8 @@
 //! path it cannot open. This process takes the drag at the window instead and
 //! reads the bytes — see `read_dropped_file`.
 
+mod icon_badge;
+
 /// Wire up and run the shell.
 ///
 /// `pub` and in the library rather than `main.rs` because the mobile targets
@@ -66,7 +68,7 @@ pub fn run() {
 
     let builder = builder
         .manage(DroppedPaths::default())
-        .invoke_handler(tauri::generate_handler![read_dropped_file])
+        .invoke_handler(tauri::generate_handler![read_dropped_file, set_icon_badge])
         // Transport. Both are configured by capability files under
         // `capabilities/`, not here — the allow-list of reachable origins is
         // security-relevant and belongs somewhere reviewable.
@@ -558,6 +560,166 @@ fn watch_dropped_paths<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
 /// there. Refusing it here would reject a drop the page would have taken.
 fn within_upload_limit(size: u64, max_bytes: u64) -> bool {
     size <= max_bytes
+}
+
+/// Set or clear the shell's icon badge.
+///
+/// `None`, zero, and negative clear. The page sends `null` for those, and
+/// this repeats the check so a stray zero cannot paint a "0".
+///
+/// Synchronous on purpose. `#[tauri::command(async)]` runs the body on the
+/// blocking pool, so two calls in flight can post their window messages out
+/// of order and the icon keeps the older total. A plain command runs on the
+/// main thread in arrival order. That is also the thread the Dock tile, the
+/// taskbar overlay, and UIKit expect, so iOS does not hop again.
+///
+/// The notification plugin has no badge command. macOS and Linux call
+/// `WebviewWindow::set_badge_count`: the Dock tile, or the Unity launcher
+/// count (a no-op unless that launcher is running). That method is compiled
+/// only into Tauri's desktop builds. iOS sets the icon number itself.
+/// Windows ignores the count and gets an overlay picture instead. Android
+/// has no badge API in this stack. The page does not call this there
+/// (`setIconBadge` is null); the arm exists so this target does not type-check
+/// a method it cannot see.
+#[tauri::command]
+fn set_icon_badge(app: tauri::AppHandle, count: Option<i64>) -> Result<(), String> {
+    let count = icon_badge::visible_count(count);
+
+    // Each arm is the function's value. A `return` would be
+    // `clippy::needless_return` on the targets where the other arms are
+    // compiled out (the Android bundle job, `-D warnings`).
+    #[cfg(target_os = "android")]
+    {
+        let _ = (app, count);
+        Ok(())
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        let _ = app;
+        paint_ios_badge(count)
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        // Only this arm asks the window for a handle. Importing `Manager`
+        // above the arms is an unused import on Android and iOS, which the
+        // Android bundle job rejects (`-D warnings`).
+        use tauri::Manager as _;
+
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| "icon badge: no main window".to_string())?;
+
+        #[cfg(target_os = "windows")]
+        {
+            paint_windows_badge(&window, count)
+        }
+
+        // macOS and Linux. `set_badge_count` exists on these targets.
+        #[cfg(not(target_os = "windows"))]
+        {
+            window
+                .set_badge_count(count)
+                .map_err(|error| format!("icon badge: {error}"))
+        }
+    }
+}
+
+/// iOS keeps the number on the process, not on the window.
+///
+/// `WebviewWindow::set_badge_count` is behind Tauri's `desktop` cfg, which an
+/// iOS build does not set, so the call does not compile there. The command
+/// is already on the main thread. `NSInteger` is `isize` on every iOS target;
+/// passing `i32` leaves the upper half of the argument register unspecified.
+#[cfg(target_os = "ios")]
+fn paint_ios_badge(count: Option<i64>) -> Result<(), String> {
+    let shown = count.map_or(0, |count| count.min(isize::MAX as i64) as isize);
+    set_ios_application_badge(shown);
+    Ok(())
+}
+
+#[cfg(target_os = "ios")]
+fn set_ios_application_badge(count: isize) {
+    use std::ffi::CStr;
+
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
+
+    // iOS 16 sets the number without removing delivered notifications.
+    // `UIApplication.setApplicationIconBadgeNumber:0` also clears Notification
+    // Center, which a badge clear is not. The shell still supports iOS 15,
+    // where that older setter is the only one.
+    // Already on the main thread. `notification_center` returns an
+    // autoreleased singleton and does not retain it, so the pointer is used
+    // for this one message and then dropped.
+    unsafe {
+        if let Some(center) = notification_center() {
+            let selector = Sel::register(
+                CStr::from_bytes_with_nul(b"setBadgeCount:withCompletionHandler:\0").unwrap(),
+            );
+            let responds: Bool = msg_send![center, respondsToSelector: selector];
+            if responds.as_bool() {
+                // `None` is a null block (`@?`). A null object pointer is a
+                // different encoding, and objc2's debug build rejects that
+                // mismatch when the selector's parameter is a block.
+                let handler: Option<&block2::Block<dyn Fn(*mut AnyObject)>> = None;
+                let _: () = msg_send![center, setBadgeCount: count, withCompletionHandler: handler];
+                return;
+            }
+        }
+
+        let Some(class) = AnyClass::get(CStr::from_bytes_with_nul(b"UIApplication\0").unwrap())
+        else {
+            eprintln!("icon badge: UIApplication is unavailable");
+            return;
+        };
+        let app: *mut AnyObject = msg_send![class, sharedApplication];
+        if app.is_null() {
+            eprintln!("icon badge: UIApplication.sharedApplication returned null");
+            return;
+        }
+        let _: () = msg_send![app, setApplicationIconBadgeNumber: count];
+    }
+}
+
+/// The process-wide notification center, or `None` when it cannot be reached.
+///
+/// # Safety
+///
+/// The caller is on the main thread and uses the pointer for one message
+/// before returning. `currentNotificationCenter` returns an autoreleased
+/// singleton owned by UIKit. This function does not retain it, so the
+/// pointer must not be stored or used after the call returns.
+#[cfg(target_os = "ios")]
+unsafe fn notification_center() -> Option<*mut objc2::runtime::AnyObject> {
+    use std::ffi::CStr;
+
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    let class = AnyClass::get(CStr::from_bytes_with_nul(b"UNUserNotificationCenter\0").unwrap())?;
+    let center: *mut AnyObject = msg_send![class, currentNotificationCenter];
+    if center.is_null() {
+        eprintln!("icon badge: UNUserNotificationCenter.currentNotificationCenter returned null");
+        None
+    } else {
+        Some(center)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn paint_windows_badge(window: &tauri::WebviewWindow, count: Option<i64>) -> Result<(), String> {
+    let icon = count.map(|count| {
+        tauri::image::Image::new_owned(
+            icon_badge::overlay(count),
+            icon_badge::OVERLAY_PX,
+            icon_badge::OVERLAY_PX,
+        )
+    });
+    window
+        .set_overlay_icon(icon)
+        .map_err(|error| format!("icon badge: {error}"))
 }
 
 #[tauri::command(async)]

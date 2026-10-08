@@ -200,7 +200,10 @@ export function App({
       svc.settings.zoom.value = level
     },
   })
-  useEffect(() => applyAppBadge(svc.settings, svc.rooms), [svc])
+  useEffect(
+    () => applyAppBadge(svc.settings, svc.rooms, svc.platform.setIconBadge),
+    [svc],
+  )
   // The stored preference drives instrumentation; `?perf=1` still wins for a
   // single session, since `perfEnabled` latches it before this runs.
   useEffect(() => {

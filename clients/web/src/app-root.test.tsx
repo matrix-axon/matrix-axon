@@ -201,6 +201,11 @@ describe('AppRoot wiring the transport into the app', () => {
       requestNotificationPermission: () => Promise.resolve('default' as const),
       notify: () => Promise.resolve(),
       onNotificationClick: null,
+      // `null` is the browser path. `applyAppBadge` also treats a missing
+      // field as `null` — its default parameter replaces `undefined` — so
+      // this fixture states that contract. Settings uses `== null`, because
+      // an omitted field must still count as unavailable.
+      setIconBadge: null,
     }
 
     // A token, so the shell mounts signed-in and actually issues requests.
