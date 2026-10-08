@@ -586,6 +586,56 @@ describe('message notifications in the shell', () => {
     )
   })
 
+  it('drops a rejected permission request without an unhandled rejection', async () => {
+    const invoke = vi.fn((cmd: string) =>
+      String(cmd).endsWith('request_permission')
+        ? Promise.reject(new Error('no sheet'))
+        : Promise.resolve(null),
+    )
+    installInvoke(invoke)
+    const platform = tauriPlatform()
+    await expect(platform.requestNotificationPermission()).rejects.toThrow(
+      'no sheet',
+    )
+    await Promise.resolve()
+    await expect(platform.notificationPermission()).resolves.toBe('default')
+    expect(
+      invoke.mock.calls.filter((call) =>
+        String(call[0]).endsWith('is_permission_granted'),
+      ),
+    ).toHaveLength(1)
+  })
+
+  it('keeps a newer permission read when an older request rejects', async () => {
+    let rejectFirst: ((error: Error) => void) | undefined
+    const invoke = vi.fn((cmd: string) => {
+      if (!String(cmd).endsWith('request_permission')) {
+        return Promise.resolve(null)
+      }
+      if (rejectFirst === undefined) {
+        return new Promise<string>((_resolve, reject) => {
+          rejectFirst = reject
+        })
+      }
+      return Promise.resolve('granted')
+    })
+    installInvoke(invoke)
+    const platform = tauriPlatform()
+    const first = platform.requestNotificationPermission()
+    await expect(platform.requestNotificationPermission()).resolves.toBe(
+      'granted',
+    )
+    rejectFirst?.(new Error('late'))
+    await expect(first).rejects.toThrow('late')
+    await Promise.resolve()
+    await expect(platform.notificationPermission()).resolves.toBe('granted')
+    expect(
+      invoke.mock.calls.filter((call) =>
+        String(call[0]).endsWith('is_permission_granted'),
+      ),
+    ).toHaveLength(0)
+  })
+
   it('routes an Android tap and ignores a dismiss', () => {
     asAndroid()
     let listener: ((payload: unknown) => void) | undefined

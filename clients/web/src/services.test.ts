@@ -615,6 +615,33 @@ describe('connectMessageNotifications', () => {
     expect(notify).toHaveBeenLastCalledWith(postedNotice(T0 + 6_000))
   })
 
+  it('posts two back-to-back messages in order, one rise each', async () => {
+    const { notify, socket } = messageNotificationHarness({ now: () => T0 })
+    socket().emitMessage(
+      messageFrame(T0 + 1000, { event_id: '$a', body: 'one' }),
+    )
+    socket().emitMessage(
+      messageFrame(T0 + 1001, { event_id: '$b', body: 'two' }),
+    )
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenLastCalledWith(
+      postedNotice(T0 + 1000, { eventId: '$a', body: '@alice: one' }),
+    )
+
+    socket().emitMessage(countFrame(2))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(2)
+    expect(notify).toHaveBeenLastCalledWith(
+      postedNotice(T0 + 1001, { eventId: '$b', body: '@alice: two' }),
+    )
+
+    socket().emitMessage(messageFrame(T0 + 1002, { event_id: '$c' }))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(2)
+  })
+
   it('does not let a stale count rise claim a later message', async () => {
     let clock = T0
     const { notify, socket } = messageNotificationHarness({ now: () => clock })

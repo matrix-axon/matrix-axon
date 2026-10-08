@@ -341,7 +341,10 @@ export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
   // applies to the next message and a denial does not stick across that request.
   let permissionRead: Promise<NotificationPermissionState> | null = null
   const readPermission = (): Promise<NotificationPermissionState> => {
-    permissionRead ??= invoke<boolean | null>(
+    if (permissionRead !== null) {
+      return permissionRead
+    }
+    const cached = invoke<boolean | null>(
       'plugin:notification|is_permission_granted',
     )
       .then((granted) => {
@@ -354,10 +357,13 @@ export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
         return 'default' as const
       })
       .catch((error: unknown) => {
-        permissionRead = null
+        if (permissionRead === cached) {
+          permissionRead = null
+        }
         throw error
       })
-    return permissionRead
+    permissionRead = cached
+    return cached
   }
   return {
     secureStorage: native.secureStorage,
@@ -547,13 +553,20 @@ export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
       const pending = invoke<string>(
         'plugin:notification|request_permission',
       ).then((state) => notificationPermissionState(state))
-      permissionRead = pending.then(
+      // A second chain so a rejection can drop this cache entry. The caller
+      // handles `pending`; this one must not reject on its own, and it must
+      // not clear a newer read that replaced it.
+      const cached = pending.then(
         (state) => state,
         (error: unknown) => {
-          permissionRead = null
+          if (permissionRead === cached) {
+            permissionRead = null
+          }
           throw error
         },
       )
+      permissionRead = cached
+      void cached.catch(() => {})
       return pending
     },
     notify(message) {

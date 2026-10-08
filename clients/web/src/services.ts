@@ -342,6 +342,13 @@ const NOTIFIED_EVENT_LIMIT = 2000
  */
 const NOTIFICATION_PAIR_WINDOW_MS = 5_000
 
+/**
+ * How many notices one room may park while it waits for count frames. A
+ * burst before the first frame is a few messages, not a backlog. Past this,
+ * a newer message waits for a later rise instead of replacing an older one.
+ */
+const PENDING_PER_ROOM = 4
+
 interface PendingNotice {
   title: string
   body: string
@@ -386,15 +393,20 @@ interface ObservedCounts {
  * no prior count, and that first frame is compared with zero.
  *
  * The event and the count can arrive in either order, and each waits five
- * seconds for the other. A parked notice older than that is dropped, so a
- * muted room cannot keep a message that a later, unrelated rise would post.
- * A count that no message claimed expires the same way.
+ * seconds for the other. A room parks a few notices, oldest first, so a
+ * second message does not replace the first; a rise posts the oldest. A
+ * parked notice older than five seconds is dropped, so a muted room cannot
+ * keep a message that a later, unrelated rise would post. A count that no
+ * message claimed expires the same way.
  *
  * The count frame is not replayed across a drop. A message this session has
  * not handled, stamped after the cutoff and strictly before the reconnect,
  * is one of the messages that drop hid, and it is posted on its own. A
- * message stamped at or after the reconnect arrived on the new socket and
- * waits for a rise again.
+ * message stamped at or after the reconnect waits for a rise. `reconnectedAt`
+ * is this client's clock and `origin_ts` is the homeserver's, so a homeserver
+ * running behind, but still inside the five-minute slack, makes a message
+ * that arrived on the new socket look like one of those gap messages. That
+ * window is the skew, not the rest of the session.
  *
  * Edits, redactions, empty bodies, and anything other than `m.room.message`
  * are not messages (`isRoomUnreadEvent`). The account's own sends are not
@@ -416,13 +428,14 @@ export function connectMessageNotifications(
   isFocused: () => boolean = () => document.hasFocus(),
 ): () => void {
   let liveSince = now() - LIVE_THREAD_REPLAY_SLACK_MS
-  // Set when the socket drops and comes back. Messages stamped before this
-  // are the ones whose count frame was not replayed. It is not a session-long
-  // bypass: a message stamped at or after it arrived on the new socket.
+  // Set when the socket drops and comes back, on this client's clock.
+  // Messages stamped before this are the ones whose count frame was not
+  // replayed. A homeserver clock behind this one, within the slack, still
+  // treats a newly arrived message as part of that gap.
   let reconnectedAt: number | null = null
   const seen = new Set<string>()
   const baseline = new Map<string, ObservedCounts>()
-  const pending = new Map<string, HeldNotice>()
+  const pending = new Map<string, HeldNotice[]>()
   const owed = new Map<string, number>()
   let disposed = false
 
@@ -487,16 +500,33 @@ export function connectMessageNotifications(
     }
   }
 
+  const freshPending = (key: string): HeldNotice[] =>
+    (pending.get(key) ?? []).filter(
+      (held) => now() - held.at <= NOTIFICATION_PAIR_WINDOW_MS,
+    )
+
   const takeFreshPending = (key: string): PendingNotice | undefined => {
-    const held = pending.get(key)
-    if (held === undefined) {
-      return undefined
+    const queue = freshPending(key)
+    const next = queue.shift()
+    if (queue.length === 0) {
+      pending.delete(key)
+    } else {
+      pending.set(key, queue)
     }
-    pending.delete(key)
-    if (now() - held.at > NOTIFICATION_PAIR_WINDOW_MS) {
-      return undefined
+    return next?.notice
+  }
+
+  const park = (key: string, notice: PendingNotice) => {
+    const queue = freshPending(key)
+    // Keep the notices already waiting. Replacing the first with this one
+    // would post the wrong message, and the count frame for the one we
+    // dropped would then mark the room owed.
+    if (queue.length >= PENDING_PER_ROOM) {
+      pending.set(key, queue)
+      return
     }
-    return held.notice
+    queue.push({ notice, at: now() })
+    pending.set(key, queue)
   }
 
   const owesFresh = (key: string): boolean => {
@@ -591,7 +621,8 @@ export function connectMessageNotifications(
       threadRootId: threadRootId(event),
     }
     // A message stamped before the reconnect is the gap whose count frame was
-    // not replayed. Anything stamped later arrived while this socket was up.
+    // not replayed. The stamp is the homeserver clock, so skew inside the
+    // slack can include a message that actually arrived on this socket.
     const missedWhileDown =
       reconnectedAt !== null && event.origin_ts < reconnectedAt
     if (missedWhileDown || owesFresh(key)) {
@@ -600,7 +631,7 @@ export function connectMessageNotifications(
       post(notice)
       return
     }
-    pending.set(key, { notice, at: now() })
+    park(key, notice)
   }
 
   const unsubscribe = live.subscribe((frame) => {
