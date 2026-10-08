@@ -1439,11 +1439,11 @@ async fn room_state_read_endpoints() {
         .set_room_member_counts(
             account_id,
             &room_id,
-            Some(axon_store::RoomMemberCounts {
+            axon_store::RoomMemberCounts {
                 joined: 500,
                 invited: 0,
                 observed_at: 1234,
-            }),
+            },
         )
         .await
         .unwrap();

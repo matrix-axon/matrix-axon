@@ -1,9 +1,58 @@
 //! Shared bounded room-summary traversal for local SDK reconciliation.
 use axon_store::Store;
 use matrix_sdk::ruma::OwnedRoomId;
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+pub(crate) enum HintRead {
+    Room(OwnedRoomId),
+    Empty,
+    Closed,
+    Lagged,
+}
+
+pub(crate) struct HintBatch {
+    pub(crate) rooms: HashSet<OwnedRoomId>,
+    pub(crate) closed: bool,
+    pub(crate) lagged: bool,
+}
+
+/// Both local-reconciliation workers use the same bounded receive policy.
+/// Stop at four distinct rooms or 32 receives, preserving the channel tail.
+pub(crate) fn take_hints(mut receive: impl FnMut() -> HintRead) -> HintBatch {
+    let mut batch = HintBatch {
+        rooms: HashSet::new(),
+        closed: false,
+        lagged: false,
+    };
+    for _ in 0..32 {
+        if batch.rooms.len() == 4 {
+            break;
+        }
+        match receive() {
+            HintRead::Room(room) => {
+                batch.rooms.insert(room);
+            }
+            HintRead::Empty => break,
+            HintRead::Closed => {
+                batch.closed = true;
+                break;
+            }
+            HintRead::Lagged => {
+                batch.lagged = true;
+                break;
+            }
+        }
+    }
+    batch
+}
+
+pub(crate) fn interval() -> tokio::time::Interval {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tick
+}
 
 pub(crate) struct RoomSweep {
     cursor: String,
@@ -42,13 +91,18 @@ impl RoomSweep {
         }
     }
 
+    pub(crate) fn is_idle(&self) -> bool {
+        self.cursor.is_empty() && tokio::time::Instant::now() < self.next
+    }
+
     pub(crate) async fn page(
         &mut self,
         store: &Store,
         account_id: Uuid,
         cancel: &CancellationToken,
+        worker: &'static str,
     ) -> Vec<OwnedRoomId> {
-        if tokio::time::Instant::now() < self.next {
+        if self.is_idle() {
             return Vec::new();
         }
         let result = tokio::select! {
@@ -60,8 +114,12 @@ impl RoomSweep {
                 self.advance(&page);
                 page.into_iter().filter_map(|id| id.parse().ok()).collect()
             }
-            _ => {
-                tracing::warn!(%account_id, source = "sdk_cache", "local SDK reconciliation sweep page failed; will retry");
+            Ok(Err(error)) => {
+                tracing::warn!(%account_id, worker, source = "sdk_cache", reason = error.diagnostic_reason(), "local SDK reconciliation sweep page failed; will retry");
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::warn!(%account_id, worker, source = "sdk_cache", reason = "deadline", "local SDK reconciliation sweep page timed out; will retry");
                 Vec::new()
             }
         }

@@ -46,7 +46,7 @@ pub use matrix_oauth_acquire::{
     CommitMatrixOAuthAcquire, MatrixOAuthAcquireBreadcrumb, MatrixOAuthAcquireFinalization,
 };
 pub use media_uploads::{MediaUpload, MediaUploadKind, MediaUploadState, NewMediaUpload};
-pub use member_counts::RoomMemberCounts;
+pub use member_counts::{MemberCountWrite, RoomMemberCounts};
 pub use migrations::{embedded_migrations, EmbeddedMigration};
 pub use oauth_authorization_requests::{AuthorizationRequest, NewAuthorizationRequest};
 pub use oauth_bind_requests::BindRequest;

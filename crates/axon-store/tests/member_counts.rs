@@ -1,6 +1,6 @@
 //! Persistent summary observations and lifecycle invalidation.
 mod common;
-use axon_store::{RoomMemberCounts, RoomStateUpsert};
+use axon_store::{MemberCountWrite, RoomMemberCounts, RoomStateUpsert};
 use serde_json::json;
 
 #[tokio::test]
@@ -16,14 +16,71 @@ async fn member_counts_restart_transitions_and_account_isolation() {
     let counts = RoomMemberCounts {
         joined: 500,
         invited: 3,
-        observed_at: 1234,
+        observed_at: chrono::Utc::now().timestamp_millis() - 10000,
     };
     assert_eq!(store.room_member_counts(account, room).await.unwrap(), None);
     store
-        .set_room_member_counts(account, room, Some(counts.clone()))
+        .set_room_member_counts(account, room, counts.clone())
         .await
         .unwrap();
     assert_eq!(store.room_member_counts(other, room).await.unwrap(), None);
+    let version: (String,) = sqlx_core::query_as::query_as(
+        "SELECT xmin::text FROM room_summaries WHERE account_id = $1 AND room_id = $2",
+    )
+    .bind(account)
+    .bind(room)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    let identical = RoomMemberCounts {
+        observed_at: counts.observed_at + 10,
+        ..counts.clone()
+    };
+    assert_eq!(
+        store
+            .set_room_member_counts(account, room, identical)
+            .await
+            .unwrap(),
+        MemberCountWrite::Unchanged
+    );
+    let after: (String,) = sqlx_core::query_as::query_as(
+        "SELECT xmin::text FROM room_summaries WHERE account_id = $1 AND room_id = $2",
+    )
+    .bind(account)
+    .bind(room)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        version, after,
+        "identical observations must not rewrite the wide summary row"
+    );
+    let stale = RoomMemberCounts {
+        joined: 499,
+        observed_at: counts.observed_at - 1,
+        ..counts.clone()
+    };
+    assert_eq!(
+        store
+            .set_room_member_counts(account, room, stale)
+            .await
+            .unwrap(),
+        MemberCountWrite::Superseded
+    );
+    assert_eq!(
+        store
+            .invalidate_room_member_counts(account, room, counts.observed_at - 1)
+            .await
+            .unwrap(),
+        MemberCountWrite::Superseded
+    );
+    assert_eq!(
+        store
+            .set_room_member_counts(account, "!missing:localhost", counts.clone())
+            .await
+            .unwrap(),
+        MemberCountWrite::Retry
+    );
     // A contended room cannot pin the worker's PostgreSQL connection forever.
     let mut lock = store.pool().begin().await.unwrap();
     sqlx_core::query::query(
@@ -36,7 +93,15 @@ async fn member_counts_restart_transitions_and_account_isolation() {
     .unwrap();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        store.set_room_member_counts(account, room, Some(counts.clone())),
+        store.set_room_member_counts(
+            account,
+            room,
+            RoomMemberCounts {
+                joined: 501,
+                observed_at: counts.observed_at + 1,
+                ..counts.clone()
+            },
+        ),
     )
     .await
     .unwrap();
@@ -74,14 +139,28 @@ async fn member_counts_restart_transitions_and_account_isolation() {
         assert_eq!(store.room_member_counts(account, room).await.unwrap(), None);
         if membership != "join" {
             store
-                .set_room_member_counts(account, room, Some(counts.clone()))
+                .set_room_member_counts(
+                    account,
+                    room,
+                    RoomMemberCounts {
+                        observed_at: chrono::Utc::now().timestamp_millis() + 1000,
+                        ..counts.clone()
+                    },
+                )
                 .await
                 .unwrap();
             assert_eq!(store.room_member_counts(account, room).await.unwrap(), None);
         }
         if event == "$joined" {
             store
-                .set_room_member_counts(account, room, Some(counts.clone()))
+                .set_room_member_counts(
+                    account,
+                    room,
+                    RoomMemberCounts {
+                        observed_at: chrono::Utc::now().timestamp_millis() + 1000,
+                        ..counts.clone()
+                    },
+                )
                 .await
                 .unwrap();
         }
@@ -90,10 +169,10 @@ async fn member_counts_restart_transitions_and_account_isolation() {
     let next = RoomMemberCounts {
         joined: 499,
         invited: 0,
-        observed_at: 5678,
+        observed_at: chrono::Utc::now().timestamp_millis() + 2000,
     };
     store
-        .set_room_member_counts(account, room, Some(next.clone()))
+        .set_room_member_counts(account, room, next.clone())
         .await
         .unwrap();
     assert_eq!(
@@ -117,7 +196,7 @@ async fn member_counts_restart_transitions_and_account_isolation() {
         .await
         .unwrap();
     store
-        .set_room_member_counts(account, room, Some(counts.clone()))
+        .set_room_member_counts(account, room, counts.clone())
         .await
         .unwrap();
     assert!(store
@@ -127,7 +206,7 @@ async fn member_counts_restart_transitions_and_account_isolation() {
         .is_empty());
     store.delete_account_row(account).await.unwrap();
     store
-        .set_room_member_counts(account, room, Some(counts))
+        .set_room_member_counts(account, room, counts)
         .await
         .unwrap();
     common::cleanup_account(store.pool(), other).await;

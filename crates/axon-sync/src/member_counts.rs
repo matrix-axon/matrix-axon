@@ -1,7 +1,11 @@
 //! Paced reconciliation of SDK summary counts (ADR 0111, issue #620).
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
 
-use axon_store::{RoomMemberCounts, Store};
+use axon_store::{MemberCountWrite, RoomMemberCounts, Store};
 use matrix_sdk::{
     ruma::{OwnedRoomId, RoomId},
     Client, RoomInfo, RoomState,
@@ -25,24 +29,112 @@ fn snapshot(info: &RoomInfo) -> Option<RoomMemberCounts> {
     })
 }
 
-async fn reconcile(client: &Client, store: &Store, account_id: Uuid, room_id: &RoomId) {
-    // One atomic RoomInfo snapshot; no remote I/O or membership enumeration.
-    let counts = client
-        .get_room(room_id)
-        .and_then(|room| snapshot(&room.clone_info()));
-    let outcome = if counts.is_some() {
-        "observed"
-    } else {
-        "unknown"
+/// Unknown/cold SDK state leaves the last timestamped observation intact.
+async fn reconcile(client: &Client, store: &Store, account_id: Uuid, room_id: &RoomId) -> bool {
+    let Some(room) = client.get_room(room_id) else {
+        return false;
     };
-    if store
-        .set_room_member_counts(account_id, room_id.as_str(), counts)
-        .await
-        .is_err()
-    {
-        tracing::warn!(%account_id, %room_id, source = "sdk_summary", "member count persistence failed; sweep will retry");
+    let info = room.clone_info();
+    let result = if info.state() != RoomState::Joined {
+        store
+            .invalidate_room_member_counts(
+                account_id,
+                room_id.as_str(),
+                u64::from(matrix_sdk::ruma::MilliSecondsSinceUnixEpoch::now().get()) as i64,
+            )
+            .await
+    } else if let Some(counts) = snapshot(&info) {
+        store
+            .set_room_member_counts(account_id, room_id.as_str(), counts)
+            .await
     } else {
-        tracing::trace!(%account_id, %room_id, source = "sdk_summary", outcome, "reconciled member count observation");
+        return false;
+    };
+    match result {
+        Ok(outcome) => {
+            tracing::trace!(%account_id, %room_id, source = "sdk_summary", ?outcome, "reconciled member count observation");
+            outcome == MemberCountWrite::Retry
+        }
+        Err(error) => {
+            tracing::warn!(%account_id, %room_id, source = "sdk_summary", reason = error.diagnostic_reason(), "member count persistence failed; will retry");
+            true
+        }
+    }
+}
+
+/// A fixed queue closes SDK-before-projection races without retaining a map
+/// proportional to account size. Overflow and exhausted retries fall back to
+/// the progressive sweep; each retry recaptures current SDK state.
+#[derive(Default)]
+struct Pending(VecDeque<(OwnedRoomId, u8)>);
+
+impl Pending {
+    fn push(&mut self, room: OwnedRoomId, attempts: u8) {
+        if attempts < 4 && self.0.len() < 32 && !self.0.iter().any(|(id, _)| id == &room) {
+            self.0.push_back((room, attempts));
+        }
+    }
+}
+
+struct Worker {
+    sweep: crate::room_sweep::RoomSweep,
+    pending: Pending,
+}
+
+impl Worker {
+    fn new() -> Self {
+        Self {
+            sweep: crate::room_sweep::RoomSweep::new(),
+            pending: Pending::default(),
+        }
+    }
+
+    async fn step(
+        &mut self,
+        client: &Client,
+        store: &Store,
+        account_id: Uuid,
+        cancel: &CancellationToken,
+        receive: impl FnMut() -> Result<OwnedRoomId, broadcast::error::TryRecvError>,
+    ) -> bool {
+        let Some(hinted) = take_hints(receive, &mut self.sweep) else {
+            return false;
+        };
+        for room in hinted {
+            self.pending.push(room, 0);
+        }
+        let mut rooms = self
+            .pending
+            .0
+            .drain(..self.pending.0.len().min(4))
+            .collect::<Vec<_>>();
+        for room in self
+            .sweep
+            .page(store, account_id, cancel, "member_counts")
+            .await
+        {
+            if !rooms.iter().any(|(id, _)| id == &room) {
+                rooms.push((room, 0));
+            }
+        }
+        for (room_id, attempts) in rooms {
+            let retry = tokio::select! {
+                _ = cancel.cancelled() => return false,
+                result = tokio::time::timeout(Duration::from_secs(2), reconcile(client, store, account_id, &room_id)) => {
+                    match result {
+                        Ok(retry) => retry,
+                        Err(_) => {
+                            tracing::warn!(%account_id, %room_id, source = "sdk_summary", reason = "deadline", "member count observation timed out; will retry");
+                            true
+                        }
+                    }
+                }
+            };
+            if retry {
+                self.pending.push(room_id, attempts + 1);
+            }
+        }
+        true
     }
 }
 
@@ -56,34 +148,21 @@ pub(crate) async fn watch(
     // Subscribe before the first page; receiver capacity is SDK-owned. Never
     // drain an unbounded update burst or retain an account-sized dedup map.
     let mut updates = client.room_info_notable_update_receiver();
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut sweep = crate::room_sweep::RoomSweep::new();
+    let mut tick = crate::room_sweep::interval();
+    let mut worker = Worker::new();
     loop {
         tokio::select! {
             _ = cancel.cancelled() => return,
-            _ = refresh.notified() => { sweep.wake(); continue; },
+            _ = refresh.notified() => { worker.sweep.wake(); continue; },
             _ = tick.tick() => {},
         }
-        let mut rooms = HashSet::new();
-        // Advance four keyset slots even under continuous live traffic.
-        rooms.extend(sweep.page(&store, account_id, &cancel).await);
-        let Some(hinted) = take_hints(
-            || updates.try_recv().map(|update| update.room_id),
-            &mut sweep,
-        ) else {
+        if !worker
+            .step(&client, &store, account_id, &cancel, || {
+                updates.try_recv().map(|update| update.room_id)
+            })
+            .await
+        {
             return;
-        };
-        rooms.extend(hinted);
-        for room_id in rooms {
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                result = tokio::time::timeout(Duration::from_secs(2), reconcile(&client, &store, account_id, &room_id)) => {
-                    if result.is_err() {
-                        tracing::warn!(%account_id, %room_id, source = "sdk_summary", "member count observation timed out; sweep will retry");
-                    }
-                }
-            }
         }
     }
 }
@@ -93,24 +172,21 @@ fn take_hints(
     mut receive: impl FnMut() -> Result<OwnedRoomId, broadcast::error::TryRecvError>,
     sweep: &mut crate::room_sweep::RoomSweep,
 ) -> Option<HashSet<OwnedRoomId>> {
-    let mut hinted = HashSet::new();
-    for _ in 0..32 {
-        if hinted.len() == 4 {
-            break;
-        }
-        match receive() {
-            Ok(room) => {
-                hinted.insert(room);
-            }
-            Err(broadcast::error::TryRecvError::Lagged(_)) => {
-                sweep.wake();
-                break;
-            }
-            Err(broadcast::error::TryRecvError::Empty) => break,
-            Err(broadcast::error::TryRecvError::Closed) => return None,
-        }
+    use crate::room_sweep::HintRead;
+    let batch = crate::room_sweep::take_hints(|| match receive() {
+        Ok(room) => HintRead::Room(room),
+        Err(broadcast::error::TryRecvError::Lagged(_)) => HintRead::Lagged,
+        Err(broadcast::error::TryRecvError::Empty) => HintRead::Empty,
+        Err(broadcast::error::TryRecvError::Closed) => HintRead::Closed,
+    });
+    if batch.lagged {
+        sweep.wake();
     }
-    Some(hinted)
+    if batch.closed {
+        None
+    } else {
+        Some(batch.rooms)
+    }
 }
 
 #[cfg(test)]
@@ -150,6 +226,21 @@ mod tests {
         }
         assert!(take_hints(|| rx.try_recv(), &mut sweep).unwrap().is_empty());
         assert_eq!(take_hints(|| rx.try_recv(), &mut sweep).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn retries_are_coalesced_and_bounded() {
+        let mut pending = Pending::default();
+        for i in 0..100 {
+            pending.push(format!("!retry-{i}:localhost").parse().unwrap(), 0);
+        }
+        assert_eq!(pending.0.len(), 32);
+        let id = pending.0.front().unwrap().0.clone();
+        pending.push(id, 0);
+        assert_eq!(pending.0.len(), 32);
+        pending.0.clear();
+        pending.push(room_id!("!exhausted:localhost").to_owned(), 4);
+        assert!(pending.0.is_empty());
     }
 
     fn info(joined: u32, invited: u32) -> RoomInfo {
@@ -214,6 +305,10 @@ mod tests {
         let client = build().await.unwrap();
         let mut changes = StateChanges::default();
         changes.add_room(info(500, 3));
+        changes.add_room(RoomInfo::new(
+            room_id!("!counts-0:localhost"),
+            RoomState::Joined,
+        ));
         client.state_store().save_changes(&changes).await.unwrap();
         drop(client);
         // Reopen the persistent SDK cache before restoring the session.
@@ -240,60 +335,117 @@ mod tests {
             sqlx_core::query::query("INSERT INTO room_summaries (account_id, room_id, last_activity_ts, last_event_id, last_event_row_id, last_activity_is_content) VALUES ($1, $2, 1, '$fixture', 1, false)")
                 .bind(account.account_id).bind(format!("!counts-{i}:localhost")).execute(store.pool()).await.unwrap();
         }
+        let cancel = CancellationToken::new();
+        let mut worker = Worker::new();
+        let empty = || Err(broadcast::error::TryRecvError::Empty);
+        // SDK update before Axon's projection: retain a bounded retry.
+        let mut hint = Some(room_id!("!counts:localhost").to_owned());
+        assert!(
+            worker
+                .step(&client, &store, account.account_id, &cancel, || hint
+                    .take()
+                    .ok_or(broadcast::error::TryRecvError::Empty))
+                .await
+        );
+        assert_eq!(worker.pending.0.len(), 1);
         sqlx_core::query::query("INSERT INTO room_summaries (account_id, room_id, last_activity_ts, last_event_id, last_event_row_id, last_activity_is_content) VALUES ($1, '!counts:localhost', 1, '$fixture', 1, false)")
             .bind(account.account_id).execute(store.pool()).await.unwrap();
-        let cancel = CancellationToken::new();
-        let refresh = Arc::new(Notify::new());
-        let task = tokio::spawn(watch(
-            client.clone(),
-            store.clone(),
-            account.account_id,
-            cancel.clone(),
-            refresh.clone(),
-        ));
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if let Some(counts) = store
-                    .room_member_counts(account.account_id, "!counts:localhost")
+        // Both a cold SDK summary and a missing SDK room preserve cached counts.
+        for room in ["!counts-0:localhost", "!counts-1:localhost"] {
+            store
+                .set_room_member_counts(
+                    account.account_id,
+                    room,
+                    RoomMemberCounts {
+                        joined: 23,
+                        invited: 1,
+                        observed_at: 1,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        for _ in 0..4 {
+            assert!(
+                worker
+                    .step(&client, &store, account.account_id, &cancel, empty)
+                    .await
+            );
+        }
+        assert!(worker.pending.0.is_empty());
+        for room in ["!counts-0:localhost", "!counts-1:localhost"] {
+            assert_eq!(
+                store
+                    .room_member_counts(account.account_id, room)
                     .await
                     .unwrap()
-                {
-                    assert_eq!((counts.joined, counts.invited), (500, 3));
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .unwrap();
-        // Let the bounded scan become idle, then simulate the account run's
-        // offline -> online signal with a lost projection write.
-        tokio::time::sleep(Duration::from_millis(1200)).await;
-        store
-            .set_room_member_counts(account.account_id, "!counts:localhost", None)
-            .await
-            .unwrap();
-        refresh.notify_one();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if store
-                    .room_member_counts(account.account_id, "!counts:localhost")
-                    .await
                     .unwrap()
-                    .is_some()
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .unwrap();
-        cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(1), task)
+                    .observed_at,
+                1
+            );
+        }
+        assert!(worker.sweep.is_idle());
+        let counts = store
+            .room_member_counts(account.account_id, "!counts:localhost")
             .await
             .unwrap()
             .unwrap();
+        assert_eq!((counts.joined, counts.invited), (500, 3));
+        // Rejoin SDK update before the local membership handler: a hidden
+        // summary must retain its hint until the projection becomes joined.
+        sqlx_core::query::query("UPDATE room_summaries SET hidden_left = true WHERE account_id = $1 AND room_id = '!counts:localhost'")
+            .bind(account.account_id).execute(store.pool()).await.unwrap();
+        let mut hint = Some(room_id!("!counts:localhost").to_owned());
+        assert!(
+            worker
+                .step(&client, &store, account.account_id, &cancel, || hint
+                    .take()
+                    .ok_or(broadcast::error::TryRecvError::Empty))
+                .await
+        );
+        assert_eq!(worker.pending.0.len(), 1);
+        let (watermark,): (i64,) = sqlx_core::query_as::query_as("SELECT member_counts_observed_at FROM room_summaries WHERE account_id = $1 AND room_id = '!counts:localhost'")
+            .bind(account.account_id).fetch_one(store.pool()).await.unwrap();
+        sqlx_core::query::query("UPDATE room_summaries SET hidden_left = false WHERE account_id = $1 AND room_id = '!counts:localhost'")
+            .bind(account.account_id).execute(store.pool()).await.unwrap();
+        // Wait for the timestamp precondition, not an assumed worker schedule.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while u64::from(matrix_sdk::ruma::MilliSecondsSinceUnixEpoch::now().get())
+                <= watermark as u64
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            worker
+                .step(&client, &store, account.account_id, &cancel, empty)
+                .await
+        );
+        assert!(worker.pending.0.is_empty());
+        assert!(store
+            .room_member_counts(account.account_id, "!counts:localhost")
+            .await
+            .unwrap()
+            .is_some());
+        // Simulate a lost projection while the actual consumer is proven idle.
+        sqlx_core::query::query("UPDATE room_summaries SET joined_member_count = NULL, invited_member_count = NULL, member_counts_observed_at = NULL WHERE account_id = $1 AND room_id = '!counts:localhost'")
+            .bind(account.account_id).execute(store.pool()).await.unwrap();
+        worker.sweep.wake();
+        assert!(!worker.sweep.is_idle());
+        for _ in 0..4 {
+            assert!(
+                worker
+                    .step(&client, &store, account.account_id, &cancel, empty)
+                    .await
+            );
+        }
+        assert!(store
+            .room_member_counts(account.account_id, "!counts:localhost")
+            .await
+            .unwrap()
+            .is_some());
         store.delete_account_row(account.account_id).await.unwrap();
         reconcile(
             &client,
