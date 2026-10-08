@@ -363,13 +363,27 @@ export interface Platform {
     ((handler: (click: NotificationClick) => void) => () => void) | null
 
   /**
+   * How this platform paints an unread count, and which Settings note that
+   * calls for.
+   *
+   * The shell sets this from the target it was built for. Settings reads it
+   * and does not sniff the user agent. `'web'` is a browser, which uses the
+   * Badging API (ADR 0080). `'native'` is a desktop shell that paints with no
+   * caveat (the macOS Dock, the Windows overlay). `'launcher-dependent'` is
+   * Linux. `'permission'` is iOS. `'none'` is Android.
+   */
+  iconBadgeSupport: IconBadgeSupport
+
+  /**
    * Set the OS icon badge to `count`, or clear it when `count` is `null`.
    *
    * `null` as the method means this platform has no icon of its own.
    * A browser returns that, and so does the Android shell: this stack has
-   * no launcher-badge API there. `applyAppBadge` then uses the Badging API
-   * (ADR 0080). The other packaged webviews either omit that API or resolve
-   * it without painting, so those shells set the icon in-process.
+   * no launcher-badge API there (`iconBadgeSupport` is `'web'` or `'none'`).
+   * `applyAppBadge` then uses the Badging API (ADR 0080). The other packaged
+   * webviews either omit that API or resolve it without painting, so those
+   * shells set the icon in-process. Which note to show is `iconBadgeSupport`,
+   * not this null.
    */
   setIconBadge: IconBadgeSetter | null
 }
@@ -381,6 +395,40 @@ export interface Platform {
  * command returns a promise. Callers treat both the same way.
  */
 export type IconBadgeSetter = (count: number | null) => void | Promise<void>
+
+/**
+ * Which note Settings shows for the app-icon badge.
+ *
+ * `'none'`, `'launcher-dependent'`, and `'permission'` are the shell caveats
+ * (Android, Linux, iOS). `'native'` is a desktop shell that paints with
+ * nothing to explain. `'web'` is a browser.
+ */
+export type IconBadgeSupport =
+  'none' | 'launcher-dependent' | 'permission' | 'native' | 'web'
+
+/**
+ * Badge support for one Tauri build target.
+ *
+ * `target` is `TAURI_ENV_PLATFORM`: the OS field of the triple the CLI is
+ * building. That is `linux`, `windows`, `darwin`, `ios`, `android`, or
+ * `androideabi` (the armv7 Android triple keeps that OS name). An empty
+ * string is a browser build or a unit test that did not pass a target, and
+ * answers `'native'` so a shell constructed without one still has a setter.
+ * A production shell build always receives the variable.
+ */
+export function iconBadgeSupportFor(target: string): IconBadgeSupport {
+  switch (target) {
+    case 'android':
+    case 'androideabi':
+      return 'none'
+    case 'linux':
+      return 'launcher-dependent'
+    case 'ios':
+      return 'permission'
+    default:
+      return 'native'
+  }
+}
 
 /** What a native menu item asks the page to do. */
 export const MENU_COMMANDS = [
@@ -546,6 +594,7 @@ export function browserPlatform(): Platform {
     },
     onNotificationClick: subscribeNotificationClicks,
     // The page badges through `navigator` here. See `setIconBadge`.
+    iconBadgeSupport: 'web',
     setIconBadge: null,
   }
 }

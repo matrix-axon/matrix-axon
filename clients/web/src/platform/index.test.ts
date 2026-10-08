@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { browserPlatform, needsCameraCaptureButtons } from './index'
+import {
+  browserPlatform,
+  iconBadgeSupportFor,
+  needsCameraCaptureButtons,
+} from './index'
 
 describe('browserPlatform', () => {
   it('leaves the icon badge to the Badging API', () => {
+    expect(browserPlatform().iconBadgeSupport).toBe('web')
     expect(browserPlatform().setIconBadge).toBeNull()
   })
 
@@ -243,6 +248,20 @@ describe('browser message notifications', () => {
     })
     expect(warn).toHaveBeenCalledTimes(1)
     warn.mockRestore()
+  })
+})
+
+describe('iconBadgeSupportFor', () => {
+  it('names each shell target the Tauri CLI reports', () => {
+    expect(iconBadgeSupportFor('android')).toBe('none')
+    // armv7-linux-androideabi keeps `androideabi` as the OS field.
+    expect(iconBadgeSupportFor('androideabi')).toBe('none')
+    expect(iconBadgeSupportFor('linux')).toBe('launcher-dependent')
+    expect(iconBadgeSupportFor('ios')).toBe('permission')
+    expect(iconBadgeSupportFor('darwin')).toBe('native')
+    expect(iconBadgeSupportFor('windows')).toBe('native')
+    // A browser build and vitest do not set the variable.
+    expect(iconBadgeSupportFor('')).toBe('native')
   })
 })
 

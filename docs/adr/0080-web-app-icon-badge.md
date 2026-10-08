@@ -116,6 +116,14 @@ volume is what a badge conventionally means.
   Windows draws a taskbar overlay.
   iOS 16 uses `UNUserNotificationCenter.setBadgeCount`, so a clear does not remove delivered notifications.
   iOS 15 falls back to `UIApplication`'s icon number.
+- **Settings names the shell note from `Platform.iconBadgeSupport`.**
+  The shell sets it from `TAURI_ENV_PLATFORM`, the OS field of the target triple the Tauri CLI already passes to the frontend build.
+  `'none'` is Android, which has no launcher-badge API in this stack.
+  `'launcher-dependent'` is Linux, where the count reaches a Unity launcher.
+  `'permission'` is iOS, where the icon number needs notification permission.
+  `'native'` is the macOS Dock and the Windows overlay.
+  `'web'` is a browser, which still uses the Badging API and the Safari permission note.
+  An iPad shell reports `'permission'` because that bundle was built for iOS, including when its webview claims to be a Mac.
 - **New `RoomsStore.unreadTotal` signal** (`stores/rooms.ts`), maintained
   alongside `unreadKeys` inside `setUnreadCounts`: each call that changes a
   room's `notificationCount` adds the delta (`next - previous`) to a running

@@ -535,12 +535,34 @@ describe('message notifications in the shell', () => {
     )
   })
 
-  it('has no icon badge of its own on Android', () => {
+  it('does not decide the icon badge from the user agent', () => {
     asAndroid()
     const invoke = vi.fn(() => Promise.resolve(null))
     installInvoke(invoke)
-    expect(tauriPlatform().setIconBadge).toBeNull()
+    // vitest bakes no `TAURI_ENV_PLATFORM`, so an Android user agent is still
+    // the desktop default. The target is what names the shell.
+    const platform = tauriPlatform()
+    expect(platform.iconBadgeSupport).toBe('native')
+    expect(platform.setIconBadge).toBeTypeOf('function')
     expect(invoke).not.toHaveBeenCalled()
+  })
+
+  it('names badge support from the build target', () => {
+    expect(tauriPlatform(undefined, 'android').iconBadgeSupport).toBe('none')
+    expect(tauriPlatform(undefined, 'android').setIconBadge).toBeNull()
+    expect(tauriPlatform(undefined, 'androideabi').iconBadgeSupport).toBe(
+      'none',
+    )
+    expect(tauriPlatform(undefined, 'linux').iconBadgeSupport).toBe(
+      'launcher-dependent',
+    )
+    expect(tauriPlatform(undefined, 'linux').setIconBadge).toBeTypeOf(
+      'function',
+    )
+    expect(tauriPlatform(undefined, 'ios').iconBadgeSupport).toBe('permission')
+    expect(tauriPlatform(undefined, 'ios').setIconBadge).toBeTypeOf('function')
+    expect(tauriPlatform(undefined, 'darwin').iconBadgeSupport).toBe('native')
+    expect(tauriPlatform(undefined, 'windows').iconBadgeSupport).toBe('native')
   })
 
   it('posts through the plugin command, not window.Notification', async () => {
