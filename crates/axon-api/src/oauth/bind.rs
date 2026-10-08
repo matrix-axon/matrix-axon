@@ -43,6 +43,22 @@ pub enum BindRefusal {
 /// needs one; the slack is for attempts abandoned in the last few minutes.
 const MAX_PENDING_BINDS: i64 = 5;
 
+/// How many user codes to draw before giving up on a collision. One is
+/// enough in practice: the space is 32^8 and the table holds a handful.
+const USER_CODE_ATTEMPTS: u32 = 3;
+
+/// Whether a start counts against [`MAX_PENDING_BINDS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingLimit {
+    /// Refuse while too many binds are pending. For a start that a bearer
+    /// authorized over the network.
+    Capped,
+    /// Always start. For the CLI: an operator with a shell is the way out
+    /// when a client has left binds lying around, and must not have to wait
+    /// ten minutes for them to lapse.
+    Unlimited,
+}
+
 /// Why a bind that passed [`check`] was not started.
 #[derive(Debug, thiserror::Error)]
 pub enum StartBindError {
@@ -134,22 +150,45 @@ impl BindTarget<'_> {
     /// Create the pending bind request and the URL that starts its browser
     /// leg. The request expires [`HANDSHAKE_TTL`] from now.
     ///
-    /// Refused with [`StartBindError::TooManyPending`] while
-    /// [`MAX_PENDING_BINDS`] are already waiting.
-    pub async fn start(&self, store: &Store) -> Result<StartedBind, StartBindError> {
-        let user_code = generate_user_code();
-        let request = store
-            .create_bind_request_unless_too_many(
-                self.provider,
-                &user_code,
-                Utc::now() + HANDSHAKE_TTL,
-                MAX_PENDING_BINDS,
-            )
-            .await?
-            .ok_or(StartBindError::TooManyPending)?;
+    /// With [`PendingLimit::Capped`] it is refused with
+    /// [`StartBindError::TooManyPending`] while [`MAX_PENDING_BINDS`] are
+    /// already waiting.
+    pub async fn start(
+        &self,
+        store: &Store,
+        limit: PendingLimit,
+    ) -> Result<StartedBind, StartBindError> {
+        let mut attempt = 0;
+        let request = loop {
+            attempt += 1;
+            let user_code = generate_user_code();
+            let expires_at = Utc::now() + HANDSHAKE_TTL;
+            let created = match limit {
+                PendingLimit::Capped => store
+                    .create_bind_request_unless_too_many(
+                        self.provider,
+                        &user_code,
+                        expires_at,
+                        MAX_PENDING_BINDS,
+                    )
+                    .await
+                    .map(|request| request.ok_or(StartBindError::TooManyPending)),
+                PendingLimit::Unlimited => store
+                    .create_bind_request(self.provider, &user_code, expires_at)
+                    .await
+                    .map(Ok),
+            };
+            match created {
+                Ok(request) => break request?,
+                // The code is taken, by a pending bind or a completed one
+                // still on record. Another draw is all it needs.
+                Err(error) if error.is_unique_violation() && attempt < USER_CODE_ATTEMPTS => {}
+                Err(error) => return Err(error.into()),
+            }
+        };
         let url = format!(
-            "{}/v1/oauth/bind?user_code={user_code}",
-            self.external_base_url
+            "{}/v1/oauth/bind?user_code={}",
+            self.external_base_url, request.user_code
         );
         Ok(StartedBind { request, url })
     }

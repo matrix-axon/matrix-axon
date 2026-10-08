@@ -183,6 +183,8 @@ Nothing ties an access token to the refresh chain that minted it, only to its id
 That is the cut refresh-token reuse detection already makes (ADR 0054), and it has the same width: every session that client holds for that identity is signed out, the caller's own included if it is one of them.
 Access tokens those sessions already hold are not chased; they expire within the access-token lifetime.
 Ending exactly one session would need a session id carried from the refresh chain onto each access token, which this record does not add.
+Revoking a token that is already revoked repeats the refresh-token cut, so a session token revoked by a build that predates this still ends up unable to renew.
+The CLI's `token revoke` goes through the same store call and behaves the same way.
 
 ### A minted secret crosses the API once
 
@@ -212,7 +214,13 @@ A completed one is kept for a day past its expiry, so a client that polls late (
 
 At most five binds may be pending at once; a sixth answers `429`.
 Each pending bind is a code the unauthenticated browser leg accepts for ten minutes, so the number outstanding multiplies a guesser's odds, and the rate limiter on that leg counts requests, not open codes.
-The cap applies to the CLI verb too, since both go through the same start.
+The count and the insert run under one advisory lock, so simultaneous starts cannot each read a count below the cap and all insert.
+The CLI verb is exempt.
+It is the way out when a client has left binds pending, and an operator with a shell should not wait ten minutes for them to lapse; its rows still count against a client's starts.
+
+Reading a bind's status needs only a bearer, and a bind is not tied to the token that started it, so any token can read the provider and the bound identity's id of a bind whose id it knows.
+That is acceptable while one human owns the instance and tokens have no scopes.
+If either changes, a bind needs an owner.
 
 ### Unbinding, and what it cannot do
 
@@ -223,6 +231,11 @@ A minted token carries no identity of its own, so otherwise a token minted from 
 The cost is that a device token the owner minted while signed in with that identity stops working when they unlink it.
 The lockout guard counts after this cascade, so an unbind that would leave nothing but its own descendants is still refused with `last_credential`.
 The CLI's `oauth identities unbind` goes through the same store call and cascades the same way.
+
+The cascade is only as good as the `created_by_token_id` links it follows.
+Nothing in Axon deletes a token row today, so the links are complete.
+If rows are ever removed, by hand or by the pruning proposed in #635, a minted token whose creator row is gone loses its link (`ON DELETE SET NULL`) and an unbind no longer reaches it.
+Anything that prunes token rows has to keep the rows that minted a live token, or record the originating identity on the minted token first.
 
 This is Axon forgetting the identity.
 It does not revoke the upstream provider's authorization.

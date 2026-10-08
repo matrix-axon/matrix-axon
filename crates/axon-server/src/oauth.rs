@@ -77,7 +77,12 @@ async fn bind(store: &Store, config: &Config, provider: &str) -> anyhow::Result<
         apple_provider(oauth).await?;
     }
 
-    let started = target.start(store).await.context("creating bind request")?;
+    // Uncapped: shell access is the way out when a client has left binds
+    // pending, so the CLI does not wait for them.
+    let started = target
+        .start(store, oauth_bind::PendingLimit::Unlimited)
+        .await
+        .context("creating bind request")?;
     let request = started.request;
     println!(
         "Open {} in any browser and sign in with {}.\nWaiting for sign-in to complete (expires in {} minutes)...",

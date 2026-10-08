@@ -202,6 +202,7 @@ axon-server token revoke --label my-client   # or by label, if it uniquely ident
 ```
 
 Tokens are instance-scoped — one token grants access to all accounts on that Axon instance.
+Revoking a token that belongs to a sign-in session (SSO) also signs out every session that client holds for the same identity, since the session could otherwise renew itself.
 Supply the token to clients via their config file or environment;
 see [`clients/tui/README.md`](clients/tui/README.md) for the TUI.
 

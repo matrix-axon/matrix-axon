@@ -27,7 +27,7 @@ use crate::dto::{
     StartBindRequest, StartedBindDto,
 };
 use crate::extract::{Json, Path, Query};
-use crate::oauth::bind::{BindRefusal, StartBindError};
+use crate::oauth::bind::{BindRefusal, PendingLimit, StartBindError};
 use crate::oauth::OAuthRuntime;
 use crate::response::{ApiError, ApiResponse};
 use crate::state::ManagementConfig;
@@ -354,8 +354,9 @@ pub struct RevokeQuery {
 /// default.
 ///
 /// Revoking the token that made the request is allowed: it is how a device
-/// signs itself out. Revoking a token that is already revoked succeeds and
-/// changes nothing.
+/// signs itself out. Revoking a token that is already revoked succeeds; if it
+/// was a session's access token, the session's ability to renew itself is
+/// ended again, in case the first revocation left it.
 ///
 /// A credential change, so it needs a non-expiring token or a session whose
 /// interactive sign-in was in the last ten minutes (`403
@@ -459,10 +460,14 @@ pub async fn start_bind(
             _ => ApiError::bind_unavailable(refusal.to_string()),
         },
     )?;
-    let started = target.start(&store).await.map_err(|error| match error {
-        StartBindError::TooManyPending => ApiError::too_many_requests(error.to_string()),
-        StartBindError::Store(error) => error.into(),
-    })?;
+    let started =
+        target
+            .start(&store, PendingLimit::Capped)
+            .await
+            .map_err(|error| match error {
+                StartBindError::TooManyPending => ApiError::too_many_requests(error.to_string()),
+                StartBindError::Store(error) => error.into(),
+            })?;
     tracing::info!(
         acting_token_id = %caller.id,
         bind_id = %started.request.device_code,

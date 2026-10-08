@@ -68,8 +68,10 @@ impl Token {
 pub enum TokenRevocation {
     /// A still-active token was revoked.
     Revoked,
-    /// The token exists and was revoked earlier. Nothing was changed, and the
-    /// first revocation's timestamp stands.
+    /// The token exists and was revoked earlier. The first revocation's
+    /// timestamp stands. If it was a session's access token, that session's
+    /// refresh tokens are revoked now in case the earlier revocation left
+    /// them.
     AlreadyRevoked,
     /// No token has that id.
     NotFound,
@@ -423,21 +425,31 @@ impl Store {
             tx.rollback().await?;
             return Ok(TokenRevocation::NotFound);
         };
+        // An OAuth session's access token is half of the session. Left alone,
+        // its refresh token would mint a replacement on the client's next
+        // request and the revoke would have ended nothing.
+        let session = match (
+            row.try_get::<Option<Uuid>, _>("oauth_identity_id")?,
+            row.try_get::<Option<String>, _>("client_id")?,
+        ) {
+            (Some(identity), Some(client)) => Some((identity, client)),
+            _ => None,
+        };
         if row.try_get::<bool, _>("revoked")? {
-            tx.rollback().await?;
+            // Revoked earlier, perhaps by a build that did not end sessions:
+            // asking again must still leave the session unable to renew.
+            if let Some((identity, client)) = &session {
+                Self::end_sessions_in_tx(&mut tx, *identity, client).await?;
+            }
+            tx.commit().await?;
             return Ok(TokenRevocation::AlreadyRevoked);
         }
         sqlx_core::query::query("UPDATE tokens SET revoked_at = now() WHERE id = $1")
             .bind(id)
             .execute(&mut *tx)
             .await?;
-        // An OAuth session's access token is half of the session. Left alone,
-        // its refresh token would mint a replacement on the client's next
-        // request and the revoke would have ended nothing.
-        let identity: Option<Uuid> = row.try_get("oauth_identity_id")?;
-        let client: Option<String> = row.try_get("client_id")?;
-        if let (Some(identity), Some(client)) = (identity, client) {
-            Self::end_sessions_in_tx(&mut tx, identity, &client).await?;
+        if let Some((identity, client)) = &session {
+            Self::end_sessions_in_tx(&mut tx, *identity, client).await?;
         }
         // Counted on the state this transaction would commit, and only when
         // this token was a survivor to begin with.

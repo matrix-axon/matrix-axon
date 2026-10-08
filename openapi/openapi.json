@@ -7545,7 +7545,7 @@
           "management"
         ],
         "summary": "Revoke a token. It stops working at once and stays in the list.",
-        "description": "Revoking a sign-in session's access token also ends the session's ability\nto renew itself. Axon cannot tell one session of a client from another,\nso this signs out every session that client holds for that identity,\nthe caller's included if it is one of them. Access tokens those other\nsessions already hold keep working until they expire, within the hour by\ndefault.\n\nRevoking the token that made the request is allowed: it is how a device\nsigns itself out. Revoking a token that is already revoked succeeds and\nchanges nothing.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise).",
+        "description": "Revoking a sign-in session's access token also ends the session's ability\nto renew itself. Axon cannot tell one session of a client from another,\nso this signs out every session that client holds for that identity,\nthe caller's included if it is one of them. Access tokens those other\nsessions already hold keep working until they expire, within the hour by\ndefault.\n\nRevoking the token that made the request is allowed: it is how a device\nsigns itself out. Revoking a token that is already revoked succeeds; if it\nwas a session's access token, the session's ability to renew itself is\nended again, in case the first revocation left it.\n\nA credential change, so it needs a non-expiring token or a session whose\ninteractive sign-in was in the last ten minutes (`403\nrecent_sign_in_required` otherwise).",
         "operationId": "revoke_token",
         "parameters": [
           {

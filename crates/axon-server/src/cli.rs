@@ -312,6 +312,13 @@ pub enum TokenAction {
     /// List all tokens with their status (never prints any secret).
     List,
     /// Revoke a token by id or by label (see `list`).
+    ///
+    /// Revoking a sign-in session's access token (one that has an expiry)
+    /// also revokes that session's refresh tokens, so it cannot renew
+    /// itself. Axon cannot tell one session of a client from another, so
+    /// every session that client holds for the same sign-in identity is
+    /// signed out. Revoking a token minted by `token issue` affects only
+    /// that token.
     #[command(group(clap::ArgGroup::new("target").args(["id", "label"]).required(true)))]
     Revoke {
         /// The token's id.

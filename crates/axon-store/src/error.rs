@@ -38,6 +38,13 @@ impl From<StoreError> for axon_core::Error {
 }
 
 impl StoreError {
+    /// Whether the database refused the write because a value that must be
+    /// unique is already taken. A caller that generated the value can pick
+    /// another and try again.
+    pub fn is_unique_violation(&self) -> bool {
+        matches!(self, Self::Sqlx(sqlx_core::Error::Database(error)) if error.is_unique_violation())
+    }
+
     /// Allowlisted diagnostic category, never SQL detail, values, or source text.
     pub fn diagnostic_reason(&self) -> &'static str {
         match self {

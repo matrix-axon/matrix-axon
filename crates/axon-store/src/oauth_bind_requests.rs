@@ -29,8 +29,26 @@ pub struct BindRequest {
     pub upstream_nonce: Option<String>,
 }
 
-const BIND_REQUEST_COLUMNS: &str = "device_code, user_code, provider, status, created_at, \
-     expires_at, oauth_identity_id, upstream_nonce";
+/// Serializes capped bind starts, so the pending count one of them reads is
+/// still true when it inserts.
+const BIND_START_LOCK_KEY: i64 = 0x4158_4f4e_4249_4e44;
+
+// A macro, not a constant, so the insert below can be assembled at compile
+// time from the one list of columns.
+macro_rules! bind_request_columns {
+    () => {
+        "device_code, user_code, provider, status, created_at, \
+         expires_at, oauth_identity_id, upstream_nonce"
+    };
+}
+
+const BIND_REQUEST_COLUMNS: &str = bind_request_columns!();
+
+const INSERT_BIND_REQUEST: &str = concat!(
+    "INSERT INTO oauth_bind_requests (user_code, provider, expires_at, upstream_nonce) \
+     VALUES ($1, $2, $3, $4) RETURNING ",
+    bind_request_columns!()
+);
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for BindRequest {
     fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
@@ -62,17 +80,21 @@ impl Store {
     /// [`create_authorization_request`](Self::create_authorization_request):
     /// this table has no other write path and starting a bind is
     /// owner-initiated, not a hot path.
+    ///
+    /// `user_code` is unique across the table, retained completed rows
+    /// included; a taken code fails with an error for which
+    /// [`StoreError::is_unique_violation`] is true.
     pub async fn create_bind_request(
         &self,
         provider: &str,
         user_code: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<BindRequest, StoreError> {
-        let request = self
-            .insert_bind_request(provider, user_code, expires_at, None)
+        self.delete_expired_bind_requests().await?;
+        let request = Self::insert_bind_request(provider, user_code, expires_at)
+            .fetch_one(&self.pool)
             .await?;
-        // With no cap the insert's condition is always true.
-        request.ok_or(StoreError::Sqlx(sqlx_core::Error::RowNotFound))
+        Ok(request)
     }
 
     /// [`create_bind_request`](Self::create_bind_request), refused with
@@ -80,9 +102,11 @@ impl Store {
     ///
     /// Every pending row is a code the unauthenticated browser leg will
     /// accept, so the number outstanding multiplies a guesser's odds. The
-    /// count and the insert are one statement but not serialized against a
-    /// concurrent start, so two racing requests can overshoot by one; the cap
-    /// bounds the odds, it is not an exact quota.
+    /// count and the insert run under one transaction-scoped advisory lock,
+    /// so any number of simultaneous capped starts still leave at most
+    /// `max_pending` rows between them. An uncapped
+    /// [`create_bind_request`](Self::create_bind_request) does not take the
+    /// lock and is counted here but never refused.
     pub async fn create_bind_request_unless_too_many(
         &self,
         provider: &str,
@@ -90,35 +114,44 @@ impl Store {
         expires_at: DateTime<Utc>,
         max_pending: i64,
     ) -> Result<Option<BindRequest>, StoreError> {
-        self.insert_bind_request(provider, user_code, expires_at, Some(max_pending))
-            .await
+        self.delete_expired_bind_requests().await?;
+        let mut tx: Transaction<'_, Postgres> = self.pool.begin().await?;
+        // Bound the wait: a start queues behind other starts only.
+        sqlx_core::query::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx_core::query::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(BIND_START_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
+        let pending: i64 = sqlx_core::query::query(
+            "SELECT count(*) AS pending FROM oauth_bind_requests \
+              WHERE status = 'pending' AND expires_at > now()",
+        )
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get("pending")?;
+        if pending >= max_pending {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let request = Self::insert_bind_request(provider, user_code, expires_at)
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(Some(request))
     }
 
-    async fn insert_bind_request(
-        &self,
-        provider: &str,
-        user_code: &str,
+    fn insert_bind_request<'q>(
+        provider: &'q str,
+        user_code: &'q str,
         expires_at: DateTime<Utc>,
-        max_pending: Option<i64>,
-    ) -> Result<Option<BindRequest>, StoreError> {
-        self.delete_expired_bind_requests().await?;
-        let sql = format!(
-            "INSERT INTO oauth_bind_requests (user_code, provider, expires_at, upstream_nonce) \
-             SELECT $1, $2, $3, $4 \
-              WHERE $5::BIGINT IS NULL \
-                 OR (SELECT count(*) FROM oauth_bind_requests \
-                      WHERE status = 'pending' AND expires_at > now()) < $5 \
-             RETURNING {BIND_REQUEST_COLUMNS}"
-        );
-        let request = sqlx_core::query_as::query_as::<Postgres, BindRequest>(&sql)
+    ) -> sqlx_core::query_as::QueryAs<'q, Postgres, BindRequest, sqlx_postgres::PgArguments> {
+        sqlx_core::query_as::query_as::<Postgres, BindRequest>(INSERT_BIND_REQUEST)
             .bind(user_code)
             .bind(provider)
             .bind(expires_at)
             .bind(axon_core::generate_opaque_secret())
-            .bind(max_pending)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(request)
     }
 
     /// Look up a still-redeemable bind request by the code the admin typed

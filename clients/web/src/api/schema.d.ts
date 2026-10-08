@@ -1584,8 +1584,9 @@ export interface paths {
          *     default.
          *
          *     Revoking the token that made the request is allowed: it is how a device
-         *     signs itself out. Revoking a token that is already revoked succeeds and
-         *     changes nothing.
+         *     signs itself out. Revoking a token that is already revoked succeeds; if it
+         *     was a session's access token, the session's ability to renew itself is
+         *     ended again, in case the first revocation left it.
          *
          *     A credential change, so it needs a non-expiring token or a session whose
          *     interactive sign-in was in the last ten minutes (`403

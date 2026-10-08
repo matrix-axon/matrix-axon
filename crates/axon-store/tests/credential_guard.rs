@@ -546,6 +546,117 @@ async fn unbinding_revokes_what_that_identitys_sessions_minted() {
     );
 }
 
+/// A session token revoked by something that did not end the session (a
+/// build before the revoke did) must not make a later revoke a no-op.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn revoking_an_already_revoked_session_token_still_ends_the_session() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    clear_credentials(&pool).await;
+    let apple = bind(&store, "apple").await;
+    let later = Utc::now() + Duration::days(30);
+    let refresh = format!("hash-{}", Uuid::new_v4());
+    store
+        .issue_refresh_token(&refresh, apple, "web", later, None)
+        .await
+        .unwrap();
+    let session = store
+        .issue_oauth_token(
+            "session",
+            Utc::now() + Duration::hours(1),
+            "apple",
+            apple,
+            "web",
+            None,
+        )
+        .await
+        .unwrap();
+    sqlx_core::query::query(
+        "UPDATE tokens SET revoked_at = now() - interval '1 day' WHERE id = $1",
+    )
+    .bind(session.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        store
+            .revoke_token_unless_last_credential(session.id, &[])
+            .await
+            .unwrap(),
+        TokenRevocation::AlreadyRevoked
+    );
+    let redeemed = store
+        .redeem_refresh_token(
+            &refresh,
+            Uuid::new_v4(),
+            &format!("hash-{}", Uuid::new_v4()),
+            later,
+        )
+        .await
+        .unwrap();
+    assert!(redeemed.is_err(), "the session can no longer renew itself");
+}
+
+/// Many starts at once. Without one lock around the count and the insert,
+/// each reads a count below the cap and all of them insert.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Postgres"]
+async fn simultaneous_capped_bind_starts_cannot_exceed_the_cap() {
+    let store = Store::connect(
+        &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests"),
+        16,
+    )
+    .await
+    .unwrap();
+    let pool = raw_pool().await;
+    let expires = Utc::now() + Duration::minutes(10);
+    for round in 0..5 {
+        clear_credentials(&pool).await;
+        let starts: Vec<_> = (0..12)
+            .map(|_| {
+                let store = store.clone();
+                tokio::spawn(async move {
+                    store
+                        .create_bind_request_unless_too_many(
+                            "google",
+                            &Uuid::new_v4().to_string(),
+                            expires,
+                            5,
+                        )
+                        .await
+                        .unwrap()
+                        .is_some()
+                })
+            })
+            .collect();
+        let mut started = 0;
+        for start in starts {
+            started += usize::from(start.await.unwrap());
+        }
+        assert_eq!(started, 5, "round {round}");
+    }
+
+    // The uncapped form, the CLI's, is never refused, and a code that is
+    // already on record is reported as one a caller can redraw.
+    let code = Uuid::new_v4().to_string();
+    store
+        .create_bind_request("google", &code, expires)
+        .await
+        .expect("an uncapped start goes through past the cap");
+    let taken = store
+        .create_bind_request("google", &code, expires)
+        .await
+        .unwrap_err();
+    assert!(taken.is_unique_violation());
+    let taken = store
+        .create_bind_request_unless_too_many("google", &code, expires, 100)
+        .await
+        .unwrap_err();
+    assert!(taken.is_unique_violation());
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn the_sign_in_time_survives_refresh_rotation_unchanged() {
