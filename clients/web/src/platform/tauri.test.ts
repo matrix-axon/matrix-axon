@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const tauriFetch = vi.fn<
   (input: unknown, init?: RequestInit) => Promise<Response>
@@ -19,12 +19,33 @@ vi.mock('@tauri-apps/plugin-deep-link', () => ({
   getCurrent: vi.fn(() => Promise.resolve(null)),
   onOpenUrl: vi.fn(() => Promise.resolve(() => {})),
 }))
+const createChannel = vi.fn((channel: unknown) =>
+  Promise.resolve(channel).then(() => undefined),
+)
+const removeChannel = vi.fn((id: unknown) =>
+  Promise.resolve(id).then(() => undefined),
+)
+const onAction = vi.fn<(cb: (payload: unknown) => void) => Promise<() => void>>(
+  () => Promise.resolve(() => {}),
+)
+vi.mock('@tauri-apps/plugin-notification', () => ({
+  createChannel: (channel: unknown) => createChannel(channel),
+  removeChannel: (id: unknown) => removeChannel(id),
+  onAction: (cb: (payload: unknown) => void) => onAction(cb),
+  Importance: { None: 0, Min: 1, Low: 2, Default: 3, High: 4 },
+}))
 
 import { listen } from '@tauri-apps/api/event'
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { save } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
-import { adapt, boundedSignal, isMobileShell, tauriPlatform } from './tauri'
+import {
+  adapt,
+  boundedSignal,
+  isMobileShell,
+  resetMessageNotificationStartupForTests,
+  tauriPlatform,
+} from './tauri'
 
 /**
  * A stand-in for the websocket plugin's client. Only `addListener` and
@@ -414,5 +435,251 @@ describe('native menu commands (ADR 0107)', () => {
       ['zoom-reset'],
     ])
     unsubscribe()
+  })
+})
+
+describe('message notifications in the shell', () => {
+  const shell = () => window as unknown as Record<string, unknown>
+  const ANDROID =
+    'Mozilla/5.0 (Linux; Android 14; sdk_gphone64_x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+
+  beforeEach(() => {
+    resetMessageNotificationStartupForTests()
+    createChannel.mockClear()
+    removeChannel.mockClear()
+    onAction.mockClear()
+  })
+
+  afterEach(() => {
+    delete shell().__TAURI_INTERNALS__
+    vi.unstubAllGlobals()
+    // Node's experimental localStorage stub has no Storage methods. The posts
+    // under test already swallow a store that cannot be written.
+    if (typeof localStorage?.removeItem === 'function') {
+      localStorage.removeItem('axon.notification-targets')
+    }
+  })
+
+  function asAndroid(): void {
+    vi.stubGlobal('navigator', { userAgent: ANDROID, maxTouchPoints: 1 })
+  }
+
+  function installInvoke(
+    invoke: (cmd: string, args?: unknown) => Promise<unknown>,
+  ) {
+    shell().__TAURI_INTERNALS__ = {
+      invoke,
+      transformCallback: () => 0,
+    }
+  }
+
+  it('opens a high-importance messages channel on Android', async () => {
+    asAndroid()
+    tauriPlatform()
+    await vi.waitFor(() => expect(createChannel).toHaveBeenCalled())
+    expect(removeChannel).toHaveBeenCalledWith('messages')
+    expect(createChannel).toHaveBeenCalledWith({
+      id: 'messages-v2',
+      name: 'Messages',
+      description: 'New messages',
+      importance: 4,
+    })
+    expect(onAction).toHaveBeenCalledTimes(1)
+    tauriPlatform()
+    expect(onAction).toHaveBeenCalledTimes(1)
+    expect(createChannel).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not register a desktop tap listener or an Android channel', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    tauriPlatform()
+    await Promise.resolve()
+    expect(onAction).not.toHaveBeenCalled()
+    expect(createChannel).not.toHaveBeenCalled()
+    expect(removeChannel).not.toHaveBeenCalled()
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('reports an Android channel failure instead of swallowing it', async () => {
+    asAndroid()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    createChannel.mockRejectedValueOnce(
+      new Error('notification.create_channel not allowed'),
+    )
+    tauriPlatform()
+    await vi.waitFor(() => expect(warn).toHaveBeenCalled())
+    expect(
+      warn.mock.calls.some((call) => String(call[1]).includes('not allowed')),
+    ).toBe(true)
+    warn.mockRestore()
+  })
+
+  it('posts through the plugin command, not window.Notification', async () => {
+    const invoke = vi.fn((...args: unknown[]) =>
+      Promise.resolve(args[0] ?? null),
+    )
+    installInvoke(invoke)
+    const platform = tauriPlatform()
+    await platform.notify({
+      title: 'Ops',
+      body: '@alice: hello',
+      accountId: 'acct',
+      roomId: '!room:server',
+      eventId: '$evt',
+      threadRootId: '$root',
+    })
+    expect(invoke).toHaveBeenCalledWith(
+      'plugin:notification|notify',
+      expect.objectContaining({
+        options: expect.objectContaining({
+          title: 'Ops',
+          body: '@alice: hello',
+          channelId: 'messages-v2',
+          extra: {
+            accountId: 'acct',
+            roomId: '!room:server',
+            eventId: '$evt',
+            threadRootId: '$root',
+          },
+          autoCancel: true,
+        }),
+      }),
+      undefined,
+    )
+    const posted = invoke.mock.calls[0]?.[1] as
+      { options: { id: number } } | undefined
+    expect(posted?.options.id).toBeGreaterThan(0)
+  })
+
+  it('asks the plugin directly for permission', async () => {
+    const invoke = vi.fn((cmd: string) =>
+      Promise.resolve(cmd.endsWith('request_permission') ? 'prompt' : null),
+    )
+    installInvoke(invoke)
+    const platform = tauriPlatform()
+    await expect(platform.notificationPermission()).resolves.toBe('default')
+    await expect(platform.notificationPermission()).resolves.toBe('default')
+    expect(
+      invoke.mock.calls.filter((call) =>
+        String(call[0]).endsWith('is_permission_granted'),
+      ),
+    ).toHaveLength(1)
+    await expect(platform.requestNotificationPermission()).resolves.toBe(
+      'default',
+    )
+    await expect(platform.notificationPermission()).resolves.toBe('default')
+    expect(
+      invoke.mock.calls.filter((call) =>
+        String(call[0]).endsWith('is_permission_granted'),
+      ),
+    ).toHaveLength(1)
+    expect(invoke).toHaveBeenCalledWith(
+      'plugin:notification|is_permission_granted',
+      {},
+      undefined,
+    )
+    expect(invoke).toHaveBeenCalledWith(
+      'plugin:notification|request_permission',
+      {},
+      undefined,
+    )
+  })
+
+  it('drops a rejected permission request without an unhandled rejection', async () => {
+    const invoke = vi.fn((cmd: string) =>
+      String(cmd).endsWith('request_permission')
+        ? Promise.reject(new Error('no sheet'))
+        : Promise.resolve(null),
+    )
+    installInvoke(invoke)
+    const platform = tauriPlatform()
+    await expect(platform.requestNotificationPermission()).rejects.toThrow(
+      'no sheet',
+    )
+    await Promise.resolve()
+    await expect(platform.notificationPermission()).resolves.toBe('default')
+    expect(
+      invoke.mock.calls.filter((call) =>
+        String(call[0]).endsWith('is_permission_granted'),
+      ),
+    ).toHaveLength(1)
+  })
+
+  it('keeps a newer permission read when an older request rejects', async () => {
+    let rejectFirst: ((error: Error) => void) | undefined
+    const invoke = vi.fn((cmd: string) => {
+      if (!String(cmd).endsWith('request_permission')) {
+        return Promise.resolve(null)
+      }
+      if (rejectFirst === undefined) {
+        return new Promise<string>((_resolve, reject) => {
+          rejectFirst = reject
+        })
+      }
+      return Promise.resolve('granted')
+    })
+    installInvoke(invoke)
+    const platform = tauriPlatform()
+    const first = platform.requestNotificationPermission()
+    await expect(platform.requestNotificationPermission()).resolves.toBe(
+      'granted',
+    )
+    rejectFirst?.(new Error('late'))
+    await expect(first).rejects.toThrow('late')
+    await Promise.resolve()
+    await expect(platform.notificationPermission()).resolves.toBe('granted')
+    expect(
+      invoke.mock.calls.filter((call) =>
+        String(call[0]).endsWith('is_permission_granted'),
+      ),
+    ).toHaveLength(0)
+  })
+
+  it('routes an Android tap and ignores a dismiss', () => {
+    asAndroid()
+    let listener: ((payload: unknown) => void) | undefined
+    onAction.mockImplementation((cb) => {
+      listener = cb
+      return Promise.resolve(() => {})
+    })
+    const platform = tauriPlatform()
+    const seen: {
+      accountId: string
+      roomId: string
+      eventId: string | null
+      threadRootId: string | null
+    }[] = []
+    const unsubscribe = platform.onNotificationClick?.((click) => {
+      seen.push(click)
+    })
+    try {
+      listener?.({
+        actionId: 'tap',
+        notification: {
+          extra: {
+            accountId: 'acct',
+            roomId: '!r:s',
+            eventId: '$evt',
+            threadRootId: '$root',
+          },
+        },
+      })
+      listener?.({
+        actionId: 'dismiss',
+        notification: { extra: { accountId: 'acct', roomId: '!r:s' } },
+      })
+      expect(seen).toEqual([
+        {
+          accountId: 'acct',
+          roomId: '!r:s',
+          eventId: '$evt',
+          threadRootId: '$root',
+        },
+      ])
+    } finally {
+      unsubscribe?.()
+      onAction.mockImplementation(() => Promise.resolve(() => {}))
+    }
   })
 })

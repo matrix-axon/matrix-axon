@@ -11,6 +11,7 @@ import {
   connectAttachmentReset,
   connectLiveRooms,
   connectLiveThreadUnread,
+  connectMessageNotifications,
   connectReadMarkers,
   connectTimelineCacheReset,
   connectUnreadCounts,
@@ -21,10 +22,15 @@ import {
   type ActiveThread,
 } from './stores/thread-unread'
 import type { AccountsStore } from './stores/accounts'
+import { roomKey, userIdDisplay } from './stores/room-list'
+import type { RoomsStore } from './stores/rooms'
 import { setPerfEnabled } from './perf'
 import { createMemoryCacheStore } from './stores/cache-store'
 import { createDeviceStateStore } from './stores/device-state'
-import { createLiveConnection } from './stores/live-connection'
+import {
+  createLiveConnection,
+  INITIAL_BACKOFF_MS,
+} from './stores/live-connection'
 import { createTimelineStoreCache } from './stores/timeline-cache'
 import { createUpdateChecker } from './stores/update-check'
 import { FakeWebSocket } from './test/fake-socket'
@@ -145,6 +151,7 @@ function roomsStub() {
     createDm: () => Promise.resolve({ ok: true as const, roomId: ROOM }),
     preview: () => undefined,
     unreadCount: () => 0,
+    senderDisplay: (...ids: string[]) => ids[2] ?? '',
     hydratePreview: () => {},
     noteActivity: (accountId: string, roomId: string, ts: number) => {
       noted.push([accountId, roomId, ts])
@@ -344,6 +351,430 @@ describe('connectLiveThreadUnread', () => {
     const { threadUnread, socket } = threadUnreadHarness(() => T0)
     socket().emitMessage(threadReplyFrame(T0 - 365 * 24 * 60 * 60_000))
     expect(threadUnread.count.value).toBe(0)
+  })
+})
+
+function messageNotificationHarness(options?: {
+  now?: () => number
+  isFocused?: () => boolean
+  activeRoom?: string | null
+  permission?: 'granted' | 'denied' | 'default'
+  roomName?: string | null
+  enabled?: boolean
+  senderName?: string
+  notificationCount?: number
+  highlightCount?: number
+}) {
+  let socket: FakeWebSocket | undefined
+  const live = createLiveConnection({
+    socketFactory: () => {
+      socket = new FakeWebSocket()
+      return socket.asWebSocket()
+    },
+  })
+  const accounts = {
+    accounts: computed(() => [{ account_id: ACCT, user_id: '@me:server' }]),
+  } as unknown as AccountsStore
+  const rooms = {
+    rooms: computed(() => [
+      {
+        account_id: ACCT,
+        room_id: ROOM,
+        name: options?.roomName === undefined ? 'Ops' : options.roomName,
+        account_user_id: '@me:server',
+        notification_count: options?.notificationCount,
+        highlight_count: options?.highlightCount,
+      },
+    ]),
+    titles: computed(() => new Map<string, string>()),
+    senderDisplay: (accountId: string, roomId: string, userId: string) =>
+      options?.senderName ?? userIdDisplay(userId || accountId || roomId),
+  } as unknown as RoomsStore
+  const notify = vi.fn(() => Promise.resolve())
+  connectMessageNotifications(
+    live,
+    rooms,
+    accounts,
+    signal(options?.activeRoom ?? null),
+    {
+      notificationPermission: () =>
+        Promise.resolve(options?.permission ?? 'granted'),
+      notify,
+    },
+    () => options?.enabled !== false,
+    options?.now,
+    options?.isFocused,
+  )
+  live.start()
+  socket!.emitOpen()
+  return { notify, socket: () => socket! }
+}
+
+const messageFrame = (originTs: number, patch: Record<string, unknown> = {}) =>
+  JSON.stringify({
+    type: TIMELINE_EVENT,
+    account_id: ACCT,
+    payload: {
+      event_id: `$m-${originTs}`,
+      account_id: ACCT,
+      room_id: ROOM,
+      sender: '@alice:server',
+      origin_ts: originTs,
+      arrival_order: originTs,
+      type: 'm.room.message',
+      body: 'hello',
+      redacted: false,
+      relates_to: null,
+      ...patch,
+    },
+  })
+
+const countFrame = (notification: number, highlight = 0) =>
+  JSON.stringify({
+    type: UNREAD_COUNTS_CHANGED,
+    account_id: ACCT,
+    payload: {
+      room_id: ROOM,
+      notification_count: notification,
+      highlight_count: highlight,
+    },
+  })
+
+async function flushNotifications(): Promise<void> {
+  await Promise.resolve()
+  await Promise.resolve()
+}
+
+const postedNotice = (
+  originTs: number,
+  patch: Record<string, unknown> = {},
+) => ({
+  title: 'Ops',
+  body: '@alice: hello',
+  accountId: ACCT,
+  roomId: ROOM,
+  eventId: `$m-${originTs}`,
+  threadRootId: null,
+  ...patch,
+})
+
+describe('connectMessageNotifications', () => {
+  const T0 = 1_700_000_000_000
+
+  it('notifies once the room unread count rises', async () => {
+    const { notify, socket } = messageNotificationHarness({ now: () => T0 })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledWith(postedNotice(T0 + 1000))
+  })
+
+  it('posts a message that arrives after the count rise', async () => {
+    const { notify, socket } = messageNotificationHarness({ now: () => T0 })
+    socket().emitMessage(countFrame(1))
+    socket().emitMessage(messageFrame(T0 + 1000))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledWith(postedNotice(T0 + 1000))
+  })
+
+  it('does not notify when the unread count stays put', async () => {
+    const { notify, socket } = messageNotificationHarness({ now: () => T0 })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    socket().emitMessage(messageFrame(T0 + 2000))
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(1)
+  })
+
+  it('notifies when only the highlight count rises', async () => {
+    const { notify, socket } = messageNotificationHarness({ now: () => T0 })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    socket().emitMessage(countFrame(0, 1))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledOnce()
+  })
+
+  it('does not notify the same event again', async () => {
+    const { notify, socket } = messageNotificationHarness({ now: () => T0 })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    socket().emitMessage(messageFrame(T0 + 1000))
+    socket().emitMessage(countFrame(2))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops a dormant-room message replayed on a gappy resync', async () => {
+    const { notify, socket } = messageNotificationHarness({ now: () => T0 })
+    socket().emitMessage(messageFrame(T0 - 365 * 24 * 60 * 60_000))
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('does not renotify history when the socket reconnects', async () => {
+    vi.useFakeTimers()
+    try {
+      let clock = T0
+      const { notify, socket } = messageNotificationHarness({
+        now: () => clock,
+      })
+      socket().emitMessage(messageFrame(T0 + 1000))
+      socket().emitMessage(countFrame(1))
+      await flushNotifications()
+      expect(notify).toHaveBeenCalledTimes(1)
+
+      clock = T0 + 60 * 60_000
+      socket().emitClose()
+      await vi.advanceTimersByTimeAsync(INITIAL_BACKOFF_MS)
+      socket().emitOpen()
+
+      // Stamped after the first connect, but well before the new cutoff.
+      socket().emitMessage(
+        messageFrame(T0 + 10 * 60_000, { event_id: '$during-gap-old' }),
+      )
+      // Already handled this session, so the new stamp does not matter.
+      socket().emitMessage(
+        messageFrame(clock + 1000, { event_id: `$m-${T0 + 1000}` }),
+      )
+      await flushNotifications()
+      expect(notify).toHaveBeenCalledTimes(1)
+
+      // Missed while the socket was down: inside the slack, before the
+      // reconnect, and not in the seen set. The count frame was not replayed.
+      const gapTs = clock - 60_000
+      socket().emitMessage(messageFrame(gapTs, { event_id: '$gap' }))
+      await flushNotifications()
+      expect(notify).toHaveBeenCalledTimes(2)
+      expect(notify).toHaveBeenLastCalledWith(
+        postedNotice(gapTs, { eventId: '$gap' }),
+      )
+
+      // Stamped after the reconnect, so the socket was up and this waits
+      // for a rise. The bypass does not stay on for the rest of the session.
+      socket().emitMessage(messageFrame(clock + 2000, { event_id: '$live' }))
+      await flushNotifications()
+      expect(notify).toHaveBeenCalledTimes(2)
+      socket().emitMessage(countFrame(2))
+      await flushNotifications()
+      expect(notify).toHaveBeenCalledTimes(3)
+      expect(notify).toHaveBeenLastCalledWith(
+        postedNotice(clock + 2000, { eventId: '$live' }),
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not treat the room-list count as a new rise', async () => {
+    const { notify, socket } = messageNotificationHarness({
+      now: () => T0,
+      notificationCount: 5,
+    })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    socket().emitMessage(countFrame(5))
+    await flushNotifications()
+    socket().emitMessage(countFrame(3))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+
+    socket().emitMessage(messageFrame(T0 + 2000))
+    socket().emitMessage(countFrame(6))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenLastCalledWith(postedNotice(T0 + 2000))
+  })
+
+  it('still pairs an event and a count a few seconds apart', async () => {
+    let clock = T0
+    const { notify, socket } = messageNotificationHarness({ now: () => clock })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    clock = T0 + 5_000
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not post a notice the count missed, and keeps the rise', async () => {
+    let clock = T0
+    const { notify, socket } = messageNotificationHarness({ now: () => clock })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    clock = T0 + 5_001
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+
+    socket().emitMessage(messageFrame(T0 + 6_000))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenLastCalledWith(postedNotice(T0 + 6_000))
+  })
+
+  it('posts two back-to-back messages in order, one rise each', async () => {
+    const { notify, socket } = messageNotificationHarness({ now: () => T0 })
+    socket().emitMessage(
+      messageFrame(T0 + 1000, { event_id: '$a', body: 'one' }),
+    )
+    socket().emitMessage(
+      messageFrame(T0 + 1001, { event_id: '$b', body: 'two' }),
+    )
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenLastCalledWith(
+      postedNotice(T0 + 1000, { eventId: '$a', body: '@alice: one' }),
+    )
+
+    socket().emitMessage(countFrame(2))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(2)
+    expect(notify).toHaveBeenLastCalledWith(
+      postedNotice(T0 + 1001, { eventId: '$b', body: '@alice: two' }),
+    )
+
+    socket().emitMessage(messageFrame(T0 + 1002, { event_id: '$c' }))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not let a stale count rise claim a later message', async () => {
+    let clock = T0
+    const { notify, socket } = messageNotificationHarness({ now: () => clock })
+    socket().emitMessage(countFrame(1))
+    clock = T0 + 5_001
+    socket().emitMessage(messageFrame(T0 + 6_000))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+
+    socket().emitMessage(countFrame(2))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenLastCalledWith(postedNotice(T0 + 6_000))
+  })
+
+  it("drops the account's own send", async () => {
+    const { notify, socket } = messageNotificationHarness({ now: () => T0 })
+    socket().emitMessage(messageFrame(T0 + 1000, { sender: '@me:server' }))
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('drops a message in the focused room', async () => {
+    const { notify, socket } = messageNotificationHarness({
+      now: () => T0,
+      activeRoom: roomKey({ account_id: ACCT, room_id: ROOM }),
+      isFocused: () => true,
+    })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('does not notify a focused message again after the window blurs', async () => {
+    let focused = true
+    const { notify, socket } = messageNotificationHarness({
+      now: () => T0,
+      activeRoom: roomKey({ account_id: ACCT, room_id: ROOM }),
+      isFocused: () => focused,
+    })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    focused = false
+    socket().emitMessage(messageFrame(T0 + 1000))
+    socket().emitMessage(countFrame(2))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('notifies for the open room when the window is not focused', async () => {
+    const { notify, socket } = messageNotificationHarness({
+      now: () => T0,
+      activeRoom: roomKey({ account_id: ACCT, room_id: ROOM }),
+      isFocused: () => false,
+    })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledWith(postedNotice(T0 + 1000))
+  })
+
+  it('drops an edit, a redaction, a reaction, and a blank body', async () => {
+    const { notify, socket } = messageNotificationHarness({ now: () => T0 })
+    socket().emitMessage(
+      messageFrame(T0 + 1000, {
+        relates_to: { rel_type: 'm.replace', event_id: '$old' },
+      }),
+    )
+    socket().emitMessage(messageFrame(T0 + 1001, { redacted: true }))
+    socket().emitMessage(messageFrame(T0 + 1002, { type: 'm.reaction' }))
+    socket().emitMessage(messageFrame(T0 + 1003, { body: '   ' }))
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('opens a thread reply on the thread, and uses the roster name', async () => {
+    const { notify, socket } = messageNotificationHarness({
+      now: () => T0,
+      senderName: 'Ada',
+    })
+    socket().emitMessage(
+      messageFrame(T0 + 1000, {
+        body: '[Bob](https://matrix.to/#/@bob:server) hi',
+        relates_to: { rel_type: 'm.thread', event_id: '$root' },
+      }),
+    )
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledWith(
+      postedNotice(T0 + 1000, {
+        body: 'Ada: Bob hi',
+        threadRootId: '$root',
+      }),
+    )
+  })
+
+  it('does not notify when permission is not granted', async () => {
+    const { notify, socket } = messageNotificationHarness({
+      now: () => T0,
+      permission: 'default',
+    })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('stays quiet until message notifications are turned on', async () => {
+    const { notify, socket } = messageNotificationHarness({
+      now: () => T0,
+      enabled: false,
+    })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('uses a plain title when the room has no name', async () => {
+    const { notify, socket } = messageNotificationHarness({
+      now: () => T0,
+      roomName: null,
+    })
+    socket().emitMessage(messageFrame(T0 + 1000))
+    socket().emitMessage(countFrame(1))
+    await flushNotifications()
+    expect(notify).toHaveBeenCalledWith(
+      postedNotice(T0 + 1000, { title: 'New message' }),
+    )
   })
 })
 

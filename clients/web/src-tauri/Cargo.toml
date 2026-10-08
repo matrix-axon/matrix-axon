@@ -24,7 +24,9 @@ name = "axon"
 # re-sync it in the runner's checkout before the build.
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.86"
+# `tauri-plugin-notification` 2.5 requires 1.90. The repo toolchain is 1.96.1
+# (`rust-toolchain.toml`). This crate's floor was 1.86, which that plugin rejects.
+rust-version = "1.90"
 license = "Apache-2.0"
 description = "Axon desktop client"
 publish = false
@@ -53,6 +55,12 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-http = "~2.5"
+# Same pin shape as http, and the same reason: stay on 2.5 so the Rust crate
+# and `@tauri-apps/plugin-notification` agree on major.minor without taking a
+# release pnpm's minimumReleaseAge guard will refuse. 2.5 requires Rust 1.90
+# (see `rust-version` above) and fixes the Windows permission check that 2.4
+# short-circuited to denied.
+tauri-plugin-notification = "~2.5"
 # In-repo: Sign in with Apple and Keychain token storage on iOS (ADR 0054).
 tauri-plugin-native-auth = { path = "native-auth" }
 tauri-plugin-opener = "2"

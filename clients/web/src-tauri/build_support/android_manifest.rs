@@ -4,9 +4,13 @@
 //! a test target) and `tests/android_manifest.rs` both include the same code
 //! with `#[path]`.
 
-/// Opens and closes the block this build script owns. The same comment the
-/// deep-link plugin brackets its intent filter with, so a reader recognises it.
+/// Opens and closes the camera block this build script owns. The same comment
+/// the deep-link plugin brackets its intent filter with, so a reader recognises
+/// it.
 pub const MARKER: &str = "<!-- CAMERA. AUTO-GENERATED. DO NOT REMOVE. -->";
+
+/// Opens and closes the notification-permission block.
+pub const NOTIFICATION_MARKER: &str = "<!-- NOTIFICATIONS. AUTO-GENERATED. DO NOT REMOVE. -->";
 
 /// `manifest` with the camera block placed just before `</manifest>`, and any
 /// earlier copy of it removed.
@@ -31,10 +35,44 @@ pub const MARKER: &str = "<!-- CAMERA. AUTO-GENERATED. DO NOT REMOVE. -->";
 /// file" would drop everything after it, `</manifest>` included, and leave an
 /// invalid manifest that fails much later with an obscure aapt error.
 pub fn with_camera_block(manifest: &str) -> Result<String, String> {
+    with_marked_block(
+        manifest,
+        MARKER,
+        &[
+            r#"    <uses-permission android:name="android.permission.CAMERA" />"#,
+            r#"    <uses-feature android:name="android.hardware.camera" android:required="false" />"#,
+        ],
+    )
+}
+
+/// `manifest` with `POST_NOTIFICATIONS` declared just before `</manifest>`.
+///
+/// Android 13 and newer refuse to post a notification unless the app manifest
+/// declares this permission; the runtime prompt cannot grant what was never
+/// declared. `tauri-plugin-notification` also declares it in its own library
+/// manifest, which the Gradle merger folds in later. This copy lives in the
+/// app manifest so the declaration does not depend on that merger, and so the
+/// camera rewrite — which drops only its own marker block — cannot be the
+/// thing that removes it. A second copy of the same permission merges into one.
+pub fn with_post_notifications(manifest: &str) -> Result<String, String> {
+    with_marked_block(
+        manifest,
+        NOTIFICATION_MARKER,
+        &[r#"    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />"#],
+    )
+}
+
+/// Replace one marked block, placed just before `</manifest>`.
+///
+/// An odd number of marker lines (a hand edit that removed one, or a merge
+/// conflict) is an error: reading it as "inside the block until the end of the
+/// file" would drop everything after it, `</manifest>` included, and leave an
+/// invalid manifest that fails much later with an obscure aapt error.
+fn with_marked_block(manifest: &str, marker: &str, lines: &[&str]) -> Result<String, String> {
     let mut out = Vec::new();
     let mut inside = false;
     for line in manifest.split('\n') {
-        if line.contains(MARKER) {
+        if line.contains(marker) {
             inside = !inside;
             continue;
         }
@@ -42,19 +80,17 @@ pub fn with_camera_block(manifest: &str) -> Result<String, String> {
             continue;
         }
         if line.contains("</manifest>") {
-            out.push(format!("    {MARKER}"));
-            out.push(r#"    <uses-permission android:name="android.permission.CAMERA" />"#.into());
-            out.push(
-                r#"    <uses-feature android:name="android.hardware.camera" android:required="false" />"#
-                    .into(),
-            );
-            out.push(format!("    {MARKER}"));
+            out.push(format!("    {marker}"));
+            for block_line in lines {
+                out.push((*block_line).to_string());
+            }
+            out.push(format!("    {marker}"));
         }
         out.push(line.to_string());
     }
     if inside {
         return Err(format!(
-            "AndroidManifest.xml has an unbalanced `{MARKER}` marker; delete the marker lines and the block between them, or regenerate gen/android"
+            "AndroidManifest.xml has an unbalanced `{marker}` marker; delete the marker lines and the block between them, or regenerate gen/android"
         ));
     }
     Ok(out.join("\n"))

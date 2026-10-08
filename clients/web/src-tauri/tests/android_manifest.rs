@@ -5,7 +5,9 @@
 #[path = "../build_support/android_manifest.rs"]
 mod android_manifest;
 
-use android_manifest::{with_backup_disabled, with_camera_block, MARKER};
+use android_manifest::{
+    with_backup_disabled, with_camera_block, with_post_notifications, MARKER, NOTIFICATION_MARKER,
+};
 
 const BARE: &str = "<manifest>\n    <application />\n</manifest>";
 
@@ -113,8 +115,33 @@ fn an_unterminated_value_or_tag_is_an_error() {
 #[test]
 fn both_rewrites_compose() {
     let out = with_camera_block(APP)
+        .and_then(|m| with_post_notifications(&m))
         .and_then(|m| with_backup_disabled(&m))
         .unwrap();
     assert!(out.contains("android.permission.CAMERA"));
+    assert!(out.contains("android.permission.POST_NOTIFICATIONS"));
     assert!(out.contains("android:allowBackup=\"false\""));
+}
+
+#[test]
+fn post_notifications_is_declared_once_and_a_second_run_matches() {
+    let once = with_post_notifications(BARE).unwrap();
+    assert_eq!(once.matches(NOTIFICATION_MARKER).count(), 2);
+    assert!(once
+        .contains(r#"<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />"#));
+    let block = once.find(NOTIFICATION_MARKER).unwrap();
+    assert!(block < once.find("</manifest>").unwrap());
+    assert_eq!(with_post_notifications(&once).unwrap(), once);
+}
+
+#[test]
+fn the_camera_rewrite_keeps_a_post_notifications_line() {
+    // The plugin's library manifest also declares this permission, and a
+    // merger may already have copied it into the app manifest before this
+    // script runs. The camera block drops only its own markers.
+    let declared = "<manifest>\n    <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\" />\n    <application />\n</manifest>";
+    let out = with_camera_block(declared).unwrap();
+    assert!(out.contains("android.permission.POST_NOTIFICATIONS"));
+    assert!(out.contains("android.permission.CAMERA"));
+    assert_eq!(out.matches("POST_NOTIFICATIONS").count(), 1);
 }

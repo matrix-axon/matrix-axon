@@ -124,6 +124,124 @@ describe('browserPlatform saving a file', () => {
   })
 })
 
+describe('browser message notifications', () => {
+  const original = globalThis.Notification
+
+  afterEach(() => {
+    if (original === undefined) {
+      delete (globalThis as { Notification?: unknown }).Notification
+    } else {
+      globalThis.Notification = original
+    }
+    vi.restoreAllMocks()
+  })
+
+  it('tags a toast with the event id and routes the click', () => {
+    const constructed: { title: string; options: NotificationOptions }[] = []
+    const shown: FakeNotification[] = []
+    class FakeNotification {
+      static permission: NotificationPermission = 'granted'
+      static requestPermission(): Promise<NotificationPermission> {
+        return Promise.resolve('granted')
+      }
+      onclick: (() => void) | null = null
+      constructor(title: string, options?: NotificationOptions) {
+        constructed.push({ title, options: options ?? {} })
+        shown.push(this)
+      }
+      close(): void {}
+    }
+    globalThis.Notification = FakeNotification as unknown as typeof Notification
+    const platform = browserPlatform()
+    const seen: {
+      accountId: string
+      roomId: string
+      eventId: string | null
+      threadRootId: string | null
+    }[] = []
+    const stop = platform.onNotificationClick?.((click) => {
+      seen.push(click)
+    })
+    return platform
+      .notify({
+        title: 'Ops',
+        body: 'Ada: hi',
+        accountId: 'acct',
+        roomId: '!room:server',
+        eventId: '$evt',
+        threadRootId: '$root',
+      })
+      .then(() => {
+        expect(constructed).toEqual([
+          {
+            title: 'Ops',
+            options: { body: 'Ada: hi', tag: '$evt' },
+          },
+        ])
+        shown[0]?.onclick?.()
+        expect(seen).toEqual([
+          {
+            accountId: 'acct',
+            roomId: '!room:server',
+            eventId: '$evt',
+            threadRootId: '$root',
+          },
+        ])
+        stop?.()
+      })
+  })
+
+  it('reports a missing Notification API as unsupported, not denied', async () => {
+    delete (globalThis as { Notification?: unknown }).Notification
+    const platform = browserPlatform()
+    await expect(platform.notificationPermission()).resolves.toBe('unsupported')
+    await expect(platform.requestNotificationPermission()).resolves.toBe(
+      'unsupported',
+    )
+  })
+
+  it('warns once when the constructor is illegal, then stays quiet', async () => {
+    class IllegalNotification {
+      static permission: NotificationPermission = 'default'
+      static requestPermission(): Promise<NotificationPermission> {
+        return Promise.resolve('granted')
+      }
+      constructor() {
+        throw new TypeError(
+          "Failed to construct 'Notification': Illegal constructor",
+        )
+      }
+    }
+    globalThis.Notification =
+      IllegalNotification as unknown as typeof Notification
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const platform = browserPlatform()
+    await expect(platform.notificationPermission()).resolves.toBe('unsupported')
+    IllegalNotification.permission = 'granted'
+    // A granted page cannot be probed without showing a toast. The first post
+    // is what learns the constructor throws.
+    const granted = browserPlatform()
+    await granted.notify({
+      title: 'Ops',
+      body: 'hi',
+      accountId: 'acct',
+      roomId: '!room:server',
+      eventId: '$a',
+      threadRootId: null,
+    })
+    await granted.notify({
+      title: 'Ops',
+      body: 'hi',
+      accountId: 'acct',
+      roomId: '!room:server',
+      eventId: '$b',
+      threadRootId: null,
+    })
+    expect(warn).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+})
+
 describe('needsCameraCaptureButtons', () => {
   const ANDROID_WEBVIEW =
     'Mozilla/5.0 (Linux; Android 13; SM-G781U1 Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/155.0.8059.30 Mobile Safari/537.36'

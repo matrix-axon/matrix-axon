@@ -52,6 +52,30 @@
     {
       "identifier": "native-auth:default",
       "comment": "Sign in with Apple and Keychain storage for Axon's own tokens, implemented on iOS only (native-auth/src/lib.rs). Elsewhere `capabilities` answers false and the page calls nothing else. Apple's identity token passes through to the page once and is never stored; the Keychain holds only Axon-issued credentials."
+    },
+    {
+      "identifier": "notification:allow-is-permission-granted",
+      "comment": "Read whether this app may post a local notification. Not `notification:default`: that set also grants batch, cancel, pending, active, channels listing and action-type registration, none of which the page calls."
+    },
+    {
+      "identifier": "notification:allow-request-permission",
+      "comment": "Ask for notification permission. The page calls this only from the Settings click, because a permission sheet counts from a user gesture. Desktop resolves granted without a prompt; iOS and Android show the system sheet."
+    },
+    {
+      "identifier": "notification:allow-notify",
+      "comment": "Post one local notification. The command is `notify`. `allow-show` is a different mobile command and is not granted."
+    },
+    {
+      "identifier": "notification:allow-register-listener",
+      "comment": "Receive a tap on a notification this app posted (`actionPerformed`) while the process is already running. A cold start can drop the tap: Android fires it before the page listens, and iOS drops it when its in-memory map is empty. Desktop does not emit a tap."
+    },
+    {
+      "identifier": "notification:allow-create-channel",
+      "comment": "Create the Android `messages-v2` channel at startup, at high importance. The page calls this only on Android and logs a failure, including an ACL denial: Android 8 and newer drop every post when the channel is missing. The id is new because Android keeps the importance from the first time an id is created, and test builds already created `messages` at Default."
+    },
+    {
+      "identifier": "notification:allow-delete-channel",
+      "comment": "Delete the retired Android `messages` channel, which was created at Default importance and cannot be raised. The page calls this only on Android and logs a failure instead of posting into a channel that cannot alert."
     }
   ]
 }

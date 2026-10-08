@@ -18,6 +18,7 @@ import {
   needsDerivedTitle,
   roomKey,
   roomTitle,
+  userIdDisplay,
   type MemberDto,
   type RoomDto,
 } from './room-list'
@@ -193,6 +194,11 @@ export interface RoomsStore {
   preview(key: string): RoomPreview | undefined
   /** Server-derived unread notification count for one room. */
   unreadCount(key: string): number
+  /**
+   * Display name for a sender when this room's roster is already loaded.
+   * `@localpart` until then, the same fallback `memberDisplay` uses.
+   */
+  senderDisplay(accountId: string, roomId: string, userId: string): string
   /** Fetch the latest-message preview for one room, if it is not cached. */
   hydratePreview(room: RoomDto): void
   /**
@@ -252,6 +258,8 @@ export function createRoomsStore(
   const unreadSlots = new Map<string, Signal<RoomUnreadCounts>>()
   /** Member lists by `roomKey(room)`, shared by every preview for that room. */
   const members = new Map<string, Promise<MemberDto[]>>()
+  /** Rosters that have already resolved, so a notification can name the sender. */
+  const resolvedMembers = new Map<string, readonly MemberDto[]>()
   /** Rooms this session successfully left/forgot before sync caught up. */
   const locallyHiddenRooms = new Set<string>()
   /**
@@ -484,7 +492,11 @@ export function createRoomsStore(
           path: { account_id: room.account_id, room_id: room.room_id },
         },
       })
-      .then((result) => result.data?.data ?? [])
+      .then((result) => {
+        const list = result.data?.data ?? []
+        resolvedMembers.set(key, list)
+        return list
+      })
       .catch(() => {
         // Don't cache a failure: the next preview may as well try again.
         members.delete(key)
@@ -1418,6 +1430,14 @@ export function createRoomsStore(
     createDm,
     preview: (key) => previewSlot(key).value,
     unreadCount: (key) => unreadSlot(key).value.notificationCount,
+    senderDisplay(accountId, roomId, userId) {
+      const member = resolvedMembers
+        .get(roomKey({ account_id: accountId, room_id: roomId }))
+        ?.find((candidate) => candidate.user_id === userId)
+      return member === undefined
+        ? userIdDisplay(userId)
+        : memberDisplay(member)
+    },
     hydratePreview,
     noteActivity,
     noteTimelineEvent,
@@ -1429,7 +1449,8 @@ export function createRoomsStore(
   }
 }
 
-function countFromRoom(value: number | null | undefined): number {
+/** A room-list count, or 0 when the field is missing or not a positive integer. */
+export function countFromRoom(value: number | null | undefined): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
     ? value
     : 0

@@ -177,6 +177,15 @@ export interface SettingsV1 {
    * opt-in decision in phase 3; nothing here writes them.
    */
   cacheRoomList: boolean
+  /**
+   * Whether Axon posts a local notification for a new message.
+   *
+   * Off until the user turns it on. OS notification permission is a second
+   * gate, not this choice: a desktop shell reports permission as granted
+   * without asking, and a browser grant used only for the app-icon badge
+   * must not start posting messages.
+   */
+  messageNotifications: boolean
 }
 
 const DEFAULTS: SettingsV1 = {
@@ -206,6 +215,7 @@ const DEFAULTS: SettingsV1 = {
   pageScrollReset: false,
   appBadgeEnabled: true,
   cacheRoomList: true,
+  messageNotifications: false,
 }
 
 const MAX_RECENT_REACTIONS = 3
@@ -397,6 +407,10 @@ function parse(raw: string | null): SettingsV1 {
       typeof v1.cacheRoomList === 'boolean'
         ? v1.cacheRoomList
         : DEFAULTS.cacheRoomList,
+    messageNotifications:
+      typeof v1.messageNotifications === 'boolean'
+        ? v1.messageNotifications
+        : DEFAULTS.messageNotifications,
   }
 }
 
@@ -426,6 +440,7 @@ export interface SettingsStore {
   pageScrollReset: Signal<boolean>
   appBadgeEnabled: Signal<boolean>
   cacheRoomList: Signal<boolean>
+  messageNotifications: Signal<boolean>
   /**
    * Pin a room key, or re-pin an already-pinned one to the top — most
    * recently pinned first (ADR 0038).
@@ -482,6 +497,7 @@ export function createSettingsStore(
   const pageScrollReset = signal<boolean>(initial.pageScrollReset)
   const appBadgeEnabled = signal<boolean>(initial.appBadgeEnabled)
   const cacheRoomList = signal<boolean>(initial.cacheRoomList)
+  const messageNotifications = signal<boolean>(initial.messageNotifications)
 
   effect(() => {
     const envelope: SettingsV1 = {
@@ -511,6 +527,7 @@ export function createSettingsStore(
       pageScrollReset: pageScrollReset.value,
       appBadgeEnabled: appBadgeEnabled.value,
       cacheRoomList: cacheRoomList.value,
+      messageNotifications: messageNotifications.value,
     }
     try {
       storage.setItem(STORAGE_KEY, JSON.stringify(envelope))
@@ -546,6 +563,7 @@ export function createSettingsStore(
     pageScrollReset,
     appBadgeEnabled,
     cacheRoomList,
+    messageNotifications,
     pinRoom(key: string) {
       pinnedRooms.value = [key, ...pinnedRooms.value.filter((k) => k !== key)]
     },
