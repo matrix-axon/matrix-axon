@@ -567,41 +567,89 @@ fn within_upload_limit(size: u64, max_bytes: u64) -> bool {
 /// `None`, zero, and negative clear. The page sends `null` for those, and
 /// this repeats the check so a stray zero cannot paint a "0".
 ///
-/// The notification plugin has no badge command. Desktop and iOS go through
-/// `Window::set_badge_count`: the Dock tile on macOS, the Unity launcher
-/// count on Linux (a no-op unless that launcher is running), and
-/// `UIApplication`'s icon number on iOS. Windows ignores that call, so it
-/// gets an overlay picture instead. Android has no badge API in this stack;
-/// the launcher count stays unchanged and that is logged once.
+/// The notification plugin has no badge command. macOS and Linux call
+/// `WebviewWindow::set_badge_count`: the Dock tile, or the Unity launcher
+/// count (a no-op unless that launcher is running). That method is compiled
+/// only into Tauri's desktop builds, so iOS sets `UIApplication`'s icon
+/// number itself. Windows ignores the count and gets an overlay picture
+/// instead. Android has no badge API in this stack; the launcher count stays
+/// unchanged and that is logged once.
 #[tauri::command(async)]
 fn set_icon_badge(app: tauri::AppHandle, count: Option<i64>) -> Result<(), String> {
     use tauri::Manager as _;
 
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "icon badge: no main window".to_string())?;
     let count = icon_badge::visible_count(count);
 
-    // Each arm is the function's value. `return` here is clippy::needless_return
-    // on Android and Windows, where the other arms are compiled out and this
-    // is the whole body (the Android bundle job, `-D warnings`).
+    // Each arm is the function's value. A `return` would be
+    // `clippy::needless_return` on the targets where the other arms are
+    // compiled out (the Android bundle job, `-D warnings`).
     #[cfg(target_os = "android")]
     {
-        let _ = (window, count);
+        let _ = (app, count);
         note_android_badge_unsupported();
         Ok(())
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(target_os = "ios")]
     {
-        paint_windows_badge(&window, count)
+        paint_ios_badge(&app, count)
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "windows")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        window
-            .set_badge_count(count)
-            .map_err(|error| format!("icon badge: {error}"))
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| "icon badge: no main window".to_string())?;
+
+        #[cfg(target_os = "windows")]
+        {
+            paint_windows_badge(&window, count)
+        }
+
+        // macOS and Linux. `set_badge_count` exists on these targets.
+        #[cfg(not(target_os = "windows"))]
+        {
+            window
+                .set_badge_count(count)
+                .map_err(|error| format!("icon badge: {error}"))
+        }
+    }
+}
+
+/// iOS keeps the number on `UIApplication`, not on the window.
+///
+/// `WebviewWindow::set_badge_count` is behind Tauri's `desktop` cfg, which an
+/// iOS build does not set, so the call does not compile there (`tauri ios
+/// build` on a Mac). This is the same `UIApplication` message Tao sends for
+/// that method. Zero clears. The command runs off the main thread, and
+/// UIKit requires this message on it.
+#[cfg(target_os = "ios")]
+fn paint_ios_badge(app: &tauri::AppHandle, count: Option<i64>) -> Result<(), String> {
+    let shown = count.map_or(0, |count| count.min(i32::MAX as i64) as i32);
+    app.run_on_main_thread(move || set_ios_application_badge(shown))
+        .map_err(|error| format!("icon badge: {error}"))
+}
+
+#[cfg(target_os = "ios")]
+fn set_ios_application_badge(count: i32) {
+    use std::ffi::CStr;
+
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    let Some(class) = AnyClass::get(CStr::from_bytes_with_nul(b"UIApplication\0").unwrap()) else {
+        eprintln!("icon badge: UIApplication is unavailable");
+        return;
+    };
+    // The replacement, `UNUserNotificationCenter.setBadgeCount`, is iOS 16.
+    // The shell supports iOS 15, and Tao sends this same message.
+    unsafe {
+        let app: *mut AnyObject = msg_send![class, sharedApplication];
+        if app.is_null() {
+            eprintln!("icon badge: UIApplication.sharedApplication returned null");
+            return;
+        }
+        let _: () = msg_send![app, setApplicationIconBadgeNumber: count];
     }
 }
 
