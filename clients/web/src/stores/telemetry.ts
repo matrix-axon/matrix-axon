@@ -27,7 +27,7 @@ const ENTRY_LIMIT = 200
  * The marks that reach disk, as an explicit allow-list of *names*.
  *
  * Every one of these is a reduced summary: numbers, plus a few enumerated
- * strings (`phase`, `via`, `nav`, `pending`, `outcome`, `stage`) and a route
+ * strings (`phase`, `via`, `nav`, `pending`, `outcome`, `stage`, `kind`) and a route
  * shape whose ids are already collapsed by `shortRoute`. None carries an
  * identifier.
  *
@@ -45,7 +45,13 @@ export const PERSISTED_MARKS: readonly string[] = [
   'boot:room-open:req',
   'boot:room-open:api',
   'api:deadline',
+  'api:failed',
   'api:late',
+  // The socket's lifecycle, with no detail beyond `reconnect`. Next to an
+  // `api:failed` line these say whether the link itself went away or one
+  // request failed on a connection that was otherwise up.
+  'live:open',
+  'live:close',
   'transition:back',
 ]
 
@@ -111,7 +117,7 @@ export interface TelemetryStore {
  * Values that must never reach disk even from an allow-listed mark.
  *
  * A name allow-list stops a *mark* leaking; it does not stop a field being
- * added to one of these four later. Matrix identifiers and UUIDs have distinct
+ * added to one of these later. Matrix identifiers and UUIDs have distinct
  * shapes, so they can be rejected on sight — the same "mechanism, not a
  * promise" reasoning behind `room-list-cache.ts`'s projection.
  */

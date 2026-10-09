@@ -177,11 +177,11 @@ async function fetchWithinDeadline(
     return deadline === null ? byCaller : withinDeadline(byCaller, deadline)
   }
   const fail = (error: unknown): never => {
-    trace?.end(outcomeOf(deadline, request.signal))
+    trace?.end(outcomeOf(deadline, request.signal), failureKind(error))
     throw error
   }
   trace?.sent()
-  const pending = fetch(request)
+  const pending = fetch(request).catch(asTransportFailure)
   let response: Response
   try {
     response = await bounded(pending)
@@ -205,7 +205,7 @@ async function fetchWithinDeadline(
   const reader = response.body.getReader()
   let body: Uint8Array<ArrayBuffer>
   try {
-    body = await bounded(readAll(reader))
+    body = await bounded(readAll(reader).catch(asTransportFailure))
   } catch (error) {
     // Settles the pending read as done, so `readAll` returns into a race that
     // is already decided rather than leaving anything unhandled.
@@ -214,6 +214,60 @@ async function fetchWithinDeadline(
   }
   trace?.end('ok')
   return rebuilt(response, body)
+}
+
+/**
+ * Rethrow a transport's rejection as the `TypeError` the fetch contract
+ * promises for one.
+ *
+ * `tauri-plugin-http` does not keep that contract. Its Rust side serialises a
+ * failed request to a bare string (`reqwest`'s "error sending request for url
+ * (…)"), and the plugin rejects with that string as it stands. Nothing
+ * downstream recognised it, so `requestFailureMessage` fell through to the
+ * raw text, and an iPhone on a poor link showed a banner quoting a full
+ * request URL in place of "Could not reach Axon".
+ *
+ * Anything carrying a `name` is left alone: that is an `Error` or a
+ * `DOMException` (not an `Error` under jsdom, see `causeField`), and
+ * the classification below already reads it. The original text is kept as
+ * the message, which is what `failureKind` reads for the readout.
+ */
+function asTransportFailure(error: unknown): never {
+  if (causeField(error, 'name') !== null) {
+    throw error
+  }
+  throw new TypeError(typeof error === 'string' ? error : 'request failed', {
+    cause: error,
+  })
+}
+
+/**
+ * What kind of failure ended a request, as one of a few fixed words.
+ *
+ * For the readout (`api:failed` in `perf.ts`), which may be kept on disk and
+ * so cannot carry the message itself: `reqwest` quotes the request URL, and
+ * the URL names an account and a room. The words are `reqwest`'s own
+ * categories where the shell produced the error, since those are the only
+ * distinction it lets through:
+ *
+ * - `send` — never got a response: DNS, connect, TLS, or a connection lost
+ *   before the headers.
+ * - `body` — headers arrived and the body did not finish.
+ * - `cancelled` — the transport's own word for an abort.
+ * - `fetch` — a browser's `TypeError`, which says no more than that.
+ */
+export function failureKind(error: unknown): string {
+  const message = causeField(error, 'message') ?? ''
+  if (message.startsWith('error sending request')) {
+    return 'send'
+  }
+  if (/body/i.test(message) && message.startsWith('error ')) {
+    return 'body'
+  }
+  if (/cancell?ed/i.test(message)) {
+    return 'cancelled'
+  }
+  return causeField(error, 'name') === 'TypeError' ? 'fetch' : 'other'
 }
 
 /**
@@ -450,7 +504,7 @@ export function createApiClient(
             ? await pending
             : await withinDeadline(pending, deadline)
       } catch (error) {
-        trace?.end(outcomeOf(deadline, request.signal))
+        trace?.end(outcomeOf(deadline, request.signal), failureKind(error))
         throw error
       }
       if (token !== null) {

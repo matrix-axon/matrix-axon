@@ -600,6 +600,56 @@ describe('request telemetry', () => {
     )
   })
 
+  /**
+   * `tauri-plugin-http` rejects with a bare string: `reqwest`'s message, URL
+   * and all. Unrecognised, it reached the banner verbatim on an iPhone.
+   */
+  it('rewords a shell transport failure and reports it without the url', async () => {
+    const failing: typeof globalThis.fetch = (input) =>
+      Promise.reject(
+        `error sending request for url (${(input as Request).url})`,
+      )
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, {
+      fetch: failing,
+    })
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow(
+      REQUEST_UNREACHABLE_MESSAGE,
+    )
+
+    const failed = marks.filter((mark) => mark.name === 'api:failed')
+    expect(failed).toHaveLength(1)
+    expect(failed[0].detail).toMatchObject({
+      route: 'accounts',
+      kind: 'send',
+      stage: 'headers',
+    })
+    expect(JSON.stringify(failed[0].detail)).not.toContain(BASE_URL)
+  })
+
+  it('reports a body the shell failed to finish as a body failure', async () => {
+    const truncating: typeof globalThis.fetch = async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            controller.error('error decoding response body')
+          },
+        }),
+        { status: 200 },
+      )
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, {
+      fetch: truncating,
+    })
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow(
+      REQUEST_UNREACHABLE_MESSAGE,
+    )
+
+    expect(
+      marks.find((mark) => mark.name === 'api:failed')?.detail,
+    ).toMatchObject({ kind: 'body', stage: 'body' })
+  })
+
   it("does not call a caller's own abort a deadline", async () => {
     server.use(http.get(`${BASE_URL}/v1/accounts`, () => new Promise(() => {})))
     const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 5_000)

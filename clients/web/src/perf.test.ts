@@ -675,6 +675,7 @@ describe('room-open summary', () => {
             stage: 'body',
             hdr: 640,
             after: 20_000,
+            inflight: 1,
           },
         ],
         [
@@ -684,6 +685,7 @@ describe('room-open summary', () => {
             stage: 'token',
             hdr: null,
             after: 20_000,
+            inflight: 1,
           },
         ],
         [
@@ -693,6 +695,7 @@ describe('room-open summary', () => {
             stage: 'headers',
             hdr: null,
             after: 20_000,
+            inflight: 1,
           },
         ],
         [
@@ -700,6 +703,96 @@ describe('room-open summary', () => {
           { route: 'accounts/{account}/rooms/{id}/timeline', after: 25_000 },
         ],
       ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /**
+   * The reading the 2026-10-09 iPhone report needed and did not have: a
+   * banner said a request failed, and nothing said how, how quickly, or how
+   * many others were in flight beside it.
+   */
+  it('marks an outright failure with its kind and the crowd it failed in', () => {
+    vi.useFakeTimers()
+    try {
+      const marks = captured(() => {
+        const others = [1, 2, 3].map(() => perfTraceRequest(timelineUrl(ROOM))!)
+        const failing = perfTraceRequest(timelineUrl(ROOM))!
+        failing.sent()
+        vi.advanceTimersByTime(180)
+        failing.end('failed', 'send')
+        others.forEach((other) => other.end('ok'))
+
+        const alone = perfTraceRequest(timelineUrl(ROOM))!
+        alone.end('aborted') // a caller's own abort is not a failure
+        alone.end('failed', 'send')
+      })
+
+      expect(
+        marks
+          .filter((mark) => mark.name === 'api:failed')
+          .map((mark) => mark.detail),
+      ).toEqual([
+        {
+          route: 'accounts/{account}/rooms/{id}/timeline',
+          kind: 'send',
+          stage: 'headers',
+          hdr: null,
+          after: 180,
+          inflight: 4,
+          online: true,
+          hidden: false,
+          resumed: null,
+          skipped: 0,
+        },
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('says how long after a return to the foreground a request failed', () => {
+    vi.useFakeTimers()
+    try {
+      const marks = captured(() => {
+        const trace = perfTraceRequest(timelineUrl(ROOM))!
+        document.dispatchEvent(new Event('visibilitychange'))
+        vi.advanceTimersByTime(35)
+        trace.end('failed', 'send')
+      })
+
+      expect(
+        marks.find((mark) => mark.name === 'api:failed')?.detail,
+      ).toMatchObject({ resumed: 35 })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /**
+   * Failures arrive in crowds, and a mark each would evict every other mark
+   * from the ring and from the stored session.
+   */
+  it('caps a burst of failures and carries the overflow on the next mark', () => {
+    vi.useFakeTimers()
+    try {
+      const marks = captured(() => {
+        const burst = Array.from({ length: 12 }, () =>
+          perfTraceRequest(timelineUrl(ROOM))!,
+        )
+        burst.forEach((trace) => trace.end('failed', 'send'))
+        vi.advanceTimersByTime(10_000)
+        perfTraceRequest(timelineUrl(ROOM))!.end('failed', 'send')
+      })
+
+      const failed = marks.filter((mark) => mark.name === 'api:failed')
+      expect(
+        failed.map((mark) => (mark.detail as { skipped: number }).skipped),
+      ).toEqual([0, 0, 0, 0, 0, 7])
+      expect(
+        failed.map((mark) => (mark.detail as { inflight: number }).inflight),
+      ).toEqual([12, 11, 10, 9, 8, 1])
     } finally {
       vi.useRealTimers()
     }
