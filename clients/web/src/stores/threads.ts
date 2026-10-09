@@ -33,7 +33,31 @@ export interface ThreadsStore {
 
   /** Fetch the room's thread summaries and resolve their root events. */
   refresh(): Promise<void>
+  /**
+   * Drop the root events still waiting to be fetched; call on leaving the
+   * room. Requests already sent finish, and a later `refresh` asks again for
+   * whatever was dropped.
+   */
+  stop(): void
 }
+
+/**
+ * How many root events are fetched at once.
+ *
+ * There is one `GET …/events/{id}` per thread and no batch form, and this
+ * used to send them all together. A room with about 300 threads therefore
+ * issued about 300 requests inside a second on every open (#662). A browser
+ * multiplexes those over one connection. The packaged app does not: its
+ * transport opens a connection per request (#663), so that was about 300
+ * simultaneous TLS handshakes from a phone, and the timeline page of whatever
+ * room was opened next failed outright among them.
+ *
+ * Six is a browser's own per-host limit over HTTP/1.1, and the media
+ * service's (`MAX_CONCURRENT`). The cost is that a long thread list fills in
+ * over a few seconds rather than at once, which is why the queue is ordered:
+ * see `resolveRoots`.
+ */
+export const ROOT_FETCH_CONCURRENCY = 6
 
 /**
  * One room's threads (ADR 0046, M-W7; ADR 0032 M8 read model): the summary
@@ -49,15 +73,23 @@ export function createThreadsStore(
   const roots = signal<ReadonlyMap<string, EventDto>>(new Map())
   const loading = signal(true)
   const error = signal<string | null>(null)
-  /** Root ids fetched (or in flight); misses are not retried this session. */
+  /**
+   * Root ids fetched, in flight, or queued; misses are not retried this
+   * session.
+   */
   const requestedRoots = new Set<string>()
+  /** Root ids waiting for a slot, next first. */
+  let queue: string[] = []
+  let fetching = 0
 
-  function resolveRoots(rootIds: string[]): void {
-    for (const id of rootIds) {
-      if (requestedRoots.has(id)) {
-        continue
+  /** Start queued fetches until `ROOT_FETCH_CONCURRENCY` are in flight. */
+  function pump(): void {
+    while (fetching < ROOT_FETCH_CONCURRENCY) {
+      const id = queue.shift()
+      if (id === undefined) {
+        return
       }
-      requestedRoots.add(id)
+      fetching += 1
       inBackground(
         api
           .GET('/v1/accounts/{account_id}/events/{event_id}', {
@@ -67,9 +99,36 @@ export function createThreadsStore(
             if (data !== undefined) {
               roots.value = new Map(roots.value).set(id, data.data)
             }
+          })
+          .finally(() => {
+            fetching -= 1
+            pump()
           }),
       )
     }
+  }
+
+  /**
+   * Queue the roots not yet asked for, most recently active thread first.
+   *
+   * The order is the thread list's own, newest reply at the top, so the rows
+   * a reader can see get their previews first and the tail of a long list is
+   * what waits. The whole queue is re-sorted, not only the additions: a
+   * refresh after a live reply must put that thread ahead of older ones still
+   * waiting from the first pass.
+   */
+  function resolveRoots(threads: readonly ThreadSummaryDto[]): void {
+    for (const { root_event_id: id } of threads) {
+      if (!requestedRoots.has(id)) {
+        requestedRoots.add(id)
+        queue.push(id)
+      }
+    }
+    const latest = new Map(
+      threads.map((each) => [each.root_event_id, each.latest_reply_ts ?? 0]),
+    )
+    queue.sort((a, b) => (latest.get(b) ?? 0) - (latest.get(a) ?? 0))
+    pump()
   }
 
   return {
@@ -98,7 +157,7 @@ export function createThreadsStore(
           next.set(summary.root_event_id, summary)
         }
         summaries.value = next
-        resolveRoots([...next.keys()])
+        resolveRoots(data.data)
       } catch (cause) {
         error.value = cause instanceof Error ? cause.message : String(cause)
       } finally {
@@ -109,6 +168,14 @@ export function createThreadsStore(
           ok: error.value === null,
         })
       }
+    },
+
+    stop() {
+      // Forgotten as well as dropped, so they are not mistaken for misses.
+      for (const id of queue) {
+        requestedRoots.delete(id)
+      }
+      queue = []
     },
   }
 }
