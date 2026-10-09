@@ -35,8 +35,9 @@ Several constraints shape the decision:
   use this path.
 - **Push notifications (APNs/FCM/web push) are out of scope for the iOS
   MVP**, not a day-one client concern — see ADR 0053, which corrects this
-  bullet's original framing. No device-token endpoint or push router is
-  commissioned until a dedicated future ADR scopes it.
+  bullet's original framing.
+  [ADR 0113](0113-remote-push-for-suspended-mobile-clients.md) scopes the device-token route and the push router.
+  The code stays unbuilt until #604.
 - **OpenAPI spec is the contract.** The spec is checked into the repo and is
   the source of truth for every `/v1/` operation. No Swift SDK stubs exist
   yet as of ADR 0053 — this bullet's original claim that they "already ship
@@ -154,8 +155,9 @@ and Swift stubs exist — was already wrong on both counts per ADR 0053.)*
   OAuth lands.
 - Push notification support requires server-side additions (APNs/FCM
   integration, device-token registration endpoint) before mobile clients can
-  deliver notifications. Client code should stub the registration path and
-  activate it when the server ships the feature.
+  deliver notifications.
+  [ADR 0113](0113-remote-push-for-suspended-mobile-clients.md) is that server design.
+  The client registers only after #604 lands, and it does not stub the route ahead of that.
 - Media URLs are axon-proxied; clients must not construct homeserver media URLs
   directly. The `matrix-api-media-proxy` branch establishes this contract.
 - The web-framework choice is the one unsettled decision. It must be resolved —
