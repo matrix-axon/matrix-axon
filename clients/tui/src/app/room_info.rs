@@ -6,6 +6,8 @@ use chrono::{Local, TimeZone};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
+use tokio::task::AbortHandle;
+use unicode_width::UnicodeWidthChar;
 
 use super::render::format_time;
 use super::{App, RoomKey};
@@ -64,8 +66,20 @@ pub(crate) struct RoomInfoState {
 pub(crate) struct RoomInfoCache {
     pub(crate) state: Option<RoomInfoState>,
     generation: u64,
+    /// The newest batch of reads. Aborted before another batch starts, so
+    /// moving between rooms on a slow axon cannot pile up open requests: the
+    /// generation check alone would drop their results but leave them running.
+    reads: Vec<AbortHandle>,
     /// `None` until the main loop wires the channel (and in unit tests).
     pub(crate) tx: Option<mpsc::UnboundedSender<RoomInfoOutcome>>,
+}
+
+impl RoomInfoCache {
+    fn abort_reads(&mut self) {
+        for read in self.reads.drain(..) {
+            read.abort();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -100,6 +114,7 @@ impl App {
         {
             return;
         }
+        cache.abort_reads();
         cache.generation += 1;
         let generation = cache.generation;
         match cache.state.as_mut().filter(|state| state.key == key) {
@@ -120,9 +135,10 @@ impl App {
         }
 
         // One task per read, so a slow one does not hold back the others.
-        let spawn_read = |read: fn(AxonClient, RoomKey) -> ReadFuture| {
+        let mut reads = Vec::with_capacity(usize::from(ROOM_INFO_READS));
+        let mut spawn_read = |read: fn(AxonClient, RoomKey) -> ReadFuture| {
             let (client, tx, key) = (self.client.clone(), tx.clone(), key.clone());
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let part = read(client, key.clone()).await;
                 let _ = tx.send(RoomInfoOutcome {
                     key,
@@ -130,6 +146,7 @@ impl App {
                     part,
                 });
             });
+            reads.push(task.abort_handle());
         };
         spawn_read(|client, key| {
             Box::pin(async move {
@@ -149,6 +166,7 @@ impl App {
                 RoomInfoPart::Upgrade(read.ok())
             })
         });
+        self.room_info.reads = reads;
     }
 
     /// Apply one completed read. A result for a room the popup has moved on
@@ -177,6 +195,7 @@ impl App {
             .as_ref()
             .is_some_and(|state| &state.key == key)
         {
+            self.room_info.abort_reads();
             self.room_info.state = None;
         }
     }
@@ -747,6 +766,48 @@ pub(crate) fn styled_line(line: String, colors: &ColorScheme) -> Line<'static> {
         Span::styled(format!("{label}: "), label_style),
         Span::styled(value.to_owned(), value_style),
     ])
+}
+
+/// Break one styled line into rows no wider than `width`, at a space where
+/// the row has one and mid-word otherwise.
+///
+/// The popup pages by row, so a long list left as one logical line would be
+/// skipped whole by a single Down, and its tail could never be scrolled into
+/// view once it wrapped past the popup's height.
+pub(crate) fn wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut row: Vec<(char, Style)> = Vec::new();
+    let mut row_width = 0;
+    for span in &line.spans {
+        for ch in span.content.chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            if row_width > 0 && row_width + ch_width > width {
+                // Carry the unfinished word down, unless it fills the row.
+                let carried = match row.iter().rposition(|(cell, _)| *cell == ' ') {
+                    Some(space) if ch != ' ' => row.split_off(space + 1),
+                    _ => Vec::new(),
+                };
+                rows.push(std::mem::replace(&mut row, carried));
+                row_width = row.iter().map(|(cell, _)| cell.width().unwrap_or(0)).sum();
+            }
+            row.push((ch, span.style));
+            row_width += ch_width;
+        }
+    }
+    rows.push(row);
+    rows.into_iter()
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (ch, style) in row {
+                match spans.last_mut() {
+                    Some(span) if span.style == style => span.content.to_mut().push(ch),
+                    _ => spans.push(Span::styled(ch.to_string(), style)),
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1359,6 +1420,158 @@ mod tests {
         ] {
             assert_eq!(spans(plain), [(plain.to_owned(), Style::default())]);
         }
+    }
+
+    #[test]
+    fn wrapping_keeps_words_styles_and_every_character() {
+        let label = Style::default().fg(ratatui::style::Color::Cyan);
+        let line = Line::from(vec![
+            Span::styled("Advertised aliases: ", label),
+            Span::raw("#one:example.com, #two:example.com, #three:example.com"),
+        ]);
+        let text = line.to_string();
+
+        let rows = wrap_styled_line(line, 30);
+
+        assert!(rows.len() > 1);
+        assert!(rows.iter().all(|row| row.width() <= 30), "{rows:#?}");
+        // Nothing is dropped or reordered, and no alias is split.
+        let joined: String = rows.iter().map(|row| row.to_string()).collect();
+        assert_eq!(joined, text);
+        assert!(rows
+            .iter()
+            .any(|row| row.to_string().trim_end() == "#two:example.com,"));
+        // The label keeps its colour; continuation rows are plain value text.
+        assert_eq!(rows[0].spans[0].style, label);
+        assert_eq!(rows[1].spans[0].style, Style::default());
+
+        // A word wider than the row is broken rather than overflowing.
+        let rows = wrap_styled_line(Line::from("x".repeat(25)), 10);
+        assert_eq!(
+            rows.iter().map(|row| row.width()).collect::<Vec<_>>(),
+            [10, 10, 5]
+        );
+        assert_eq!(wrap_styled_line(Line::from(""), 10).len(), 1);
+    }
+
+    #[test]
+    fn a_field_taller_than_the_popup_can_be_scrolled_to_its_end() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut aliases: Vec<String> = (0..200).map(|n| format!("#a{n}:example.com")).collect();
+        aliases.push("#FINALALIAS:example.com".to_owned());
+        let mut metadata = all_unknown();
+        metadata.aliases = serde_json::from_value(snapshot(
+            "available",
+            json!({ "alias": "#ops:example.com", "alt_aliases": aliases }),
+        ))
+        .unwrap();
+        let mut app = app();
+        app.room_info.state = Some(loaded(Some(metadata), None, None));
+        app.mode = crate::app::Mode::Popup(crate::app::PopupKind::RoomInfo);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        let mut seen_at = None;
+        let mut rows = 0;
+        for scroll in 0..2000 {
+            app.popup_scroll = scroll;
+            let frame = terminal
+                .draw(|frame| {
+                    crate::ui::prepare(&mut app, frame.area());
+                    crate::ui::draw(frame, &mut app);
+                })
+                .unwrap();
+            let screen: String = frame
+                .buffer
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            if screen.contains("FINALALIAS") {
+                seen_at.get_or_insert(scroll);
+            }
+            rows = app.frame.popup.as_ref().unwrap().lines.len();
+            if app.popup_scroll < scroll {
+                break; // clamped: every offset has been drawn
+            }
+        }
+
+        assert!(
+            seen_at.is_some(),
+            "the final advertised alias never appears at any popup scroll offset"
+        );
+        // Paged row by row: the list spans several 22-row pages.
+        assert!(
+            rows > 60,
+            "expected the alias list as many rows, got {rows}"
+        );
+    }
+
+    /// Hold every connection open and report how many are open at once.
+    async fn stalled_axon() -> (
+        AxonClient,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = AxonClient::new(format!("http://{}", listener.local_addr().unwrap()), None);
+        let (open, accepted) = (
+            std::sync::Arc::new(AtomicUsize::new(0)),
+            std::sync::Arc::new(AtomicUsize::new(0)),
+        );
+        let counters = (open.clone(), accepted.clone());
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (open, accepted) = counters.clone();
+                open.fetch_add(1, Ordering::SeqCst);
+                accepted.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    // Never answer; a read of 0 (or an error) is the client hanging up.
+                    let mut chunk = [0; 1024];
+                    while matches!(socket.read(&mut chunk).await, Ok(read) if read > 0) {}
+                    open.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        (client, open, accepted)
+    }
+
+    #[tokio::test]
+    async fn changing_rooms_does_not_accumulate_pending_reads() {
+        use std::sync::atomic::Ordering;
+        let (client, open, accepted) = stalled_axon().await;
+        let mut app = app();
+        app.client = client;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.room_info.tx = Some(tx);
+        let reads = usize::from(ROOM_INFO_READS);
+        let mut other = key();
+        other.room_id = "!other:example.com".to_owned();
+        let settle = |target: usize, counter: std::sync::Arc<std::sync::atomic::AtomicUsize>| async move {
+            for _ in 0..500 {
+                if counter.load(Ordering::SeqCst) == target {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+
+        // A, B, A while axon answers nothing: each batch must reach the server
+        // before the next replaces it, or the abort would be untested.
+        for (round, room) in [key(), other, key()].into_iter().enumerate() {
+            app.request_room_info(room);
+            settle((round + 1) * reads, accepted.clone()).await;
+            assert_eq!(accepted.load(Ordering::SeqCst), (round + 1) * reads);
+        }
+        settle(reads, open.clone()).await;
+
+        assert_eq!(
+            open.load(Ordering::SeqCst),
+            reads,
+            "one fetch should bound live reads to {reads}"
+        );
     }
 
     #[test]

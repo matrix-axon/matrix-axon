@@ -534,9 +534,16 @@ fn prepare_popup(app: &mut App, screen: Rect) {
         }
         PopupKind::RoomInfo => (
             "Room Info  (Esc to close, Up/Down scroll)",
+            // Wrapped here rather than by the widget: scrolling counts rows,
+            // so a field that wraps must already be the rows it will occupy.
             popup_room_info_lines(app)
                 .into_iter()
-                .map(|line| crate::app::room_info::styled_line(line, &app.colors))
+                .flat_map(|line| {
+                    crate::app::room_info::wrap_styled_line(
+                        crate::app::room_info::styled_line(line, &app.colors),
+                        usize::from(area.width.saturating_sub(2)),
+                    )
+                })
                 .collect(),
         ),
         PopupKind::Status => (
