@@ -10,6 +10,15 @@ on:
 permissions:
   contents: read
 
+# A new push to a PR cancels the run for the commit it replaced. release-plz
+# pushes its release commit and then force-pushes an amended one carrying the
+# bundle version (release-plz.yml); the first commit fails check-bundle-version
+# by design, and left running it leaves a red check on the PR beside the green
+# one for the head. Runs on main are never cancelled, so each merge keeps its own.
+concurrency:
+  group: lint-and-clippy-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   CARGO_TERM_COLOR: always
