@@ -180,6 +180,39 @@ describe('createThreadsStore', () => {
     }
   })
 
+  /**
+   * `stop()` used to empty only the queue that existed. A summaries response
+   * still on its way refilled it, and all 20 roots were then fetched for a
+   * room the reader had already left.
+   */
+  it('ignores a summary response that arrives after the room is left', async () => {
+    const room = manyThreads(20)
+    let answer!: () => void
+    server.use(
+      http.get(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads`,
+        async () => {
+          await new Promise<void>((resolve) => (answer = resolve))
+          return HttpResponse.json({
+            data: [{ root_event_id: '$late', reply_count: 1 }],
+          })
+        },
+      ),
+    )
+    const store = makeStore()
+    const refreshing = store.refresh()
+    await vi.waitFor(() => expect(answer).toBeDefined())
+
+    store.stop()
+    answer()
+    await refreshing
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(room.asked).toEqual([])
+    expect(store.summaries.value.size).toBe(0)
+    expect(store.loading.value).toBe(false)
+  })
+
   it('surfaces list errors', async () => {
     server.use(
       http.get(`${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads`, () =>

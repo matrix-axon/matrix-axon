@@ -81,6 +81,12 @@ export function createThreadsStore(
   /** Root ids waiting for a slot, next first. */
   let queue: string[] = []
   let fetching = 0
+  /**
+   * Bumped by `stop()`. A `refresh` whose summaries arrive after one is
+   * discarded: applying it would refill the queue that `stop()` just emptied
+   * and start the old room's fetches after the reader had left it.
+   */
+  let generation = 0
 
   /** Start queued fetches until `ROOT_FETCH_CONCURRENCY` are in flight. */
   function pump(): void {
@@ -142,11 +148,15 @@ export function createThreadsStore(
       // same reason as the members list, which is that on a weak link the
       // question is which of them the timeline page is competing with.
       perfMark('threads:refresh:start', { roomId })
+      const startedIn = generation
       try {
         const { data, error: apiError } = await api.GET(
           '/v1/accounts/{account_id}/rooms/{room_id}/threads',
           { params: { path: { account_id: accountId, room_id: roomId } } },
         )
+        if (generation !== startedIn) {
+          return
+        }
         if (apiError !== undefined) {
           error.value = apiErrorMessage(apiError)
           return
@@ -159,7 +169,9 @@ export function createThreadsStore(
         summaries.value = next
         resolveRoots(data.data)
       } catch (cause) {
-        error.value = cause instanceof Error ? cause.message : String(cause)
+        if (generation === startedIn) {
+          error.value = cause instanceof Error ? cause.message : String(cause)
+        }
       } finally {
         loading.value = false
         perfMark('threads:refresh:end', {
@@ -171,6 +183,7 @@ export function createThreadsStore(
     },
 
     stop() {
+      generation += 1
       // Forgotten as well as dropped, so they are not mistaken for misses.
       for (const id of queue) {
         requestedRoots.delete(id)
