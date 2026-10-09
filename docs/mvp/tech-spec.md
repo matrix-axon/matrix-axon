@@ -183,6 +183,9 @@ First run logs the agent in as a new Matrix device and runs a fresh sliding sync
 
 No APNs / FCM / web push code paths in MVP. The event store schema and the event-emit surface inside the agent are designed so a push router can be added later without schema changes. Push is the highest-priority post-MVP track (see Roadmap signposts).
 
+[ADR 0113](../adr/0113-remote-push-for-suspended-mobile-clients.md) is that later design.
+It adds no code, and the non-goal in `implementation.md` stays until the router lands.
+
 ## Open decisions
 
 Almost every architectural question was resolved during planning. The table below maps each resolution. One question remains genuinely open and is called out separately.
@@ -193,7 +196,7 @@ Almost every architectural question was resolved during planning. The table belo
 | Sliding sync vs legacy sync fallback | Simplified Sliding Sync only.                                                                                                                                            |
 | Event store schema                   | Hybrid hot-columns + JSONB.                                                                                                                                              |
 | Search analyzer defaults             | Single language-agnostic analyzer for MVP.                                                                                                                               |
-| Push payload format                  | Push deferred entirely; revisit as a P0 post-MVP track.                                                                                                                  |
+| Push payload format                  | ADR 0113. Per device, an opaque activity ping by default. Sender and room, or a 140-character preview, are opt-in.                                                       |
 | OAuth implementation                 | Bearer tokens for MVP; OAuth 2.0 + PKCE was planned post-MVP but shipped ahead of freeze (M14, ADR 0054).                                                                |
 | Live-update transport                | WebSocket with custom envelope.                                                                                                                                          |
 | API versioning policy                | Path-prefix `/v1/`, SemVer; previous major supported two minor releases after next major GA.                                                                             |
@@ -208,7 +211,8 @@ Almost every architectural question was resolved during planning. The table belo
 
 ## Threat model summary
 
-(Flag for what changes when push lands.)
+Push disclosure is decided in [ADR 0113](../adr/0113-remote-push-for-suspended-mobile-clients.md).
+The bullet below says what a provider can see.
 
 - **Operator trust.** The Axon operator can read all decrypted content for the human it hosts. For Axon this is the human themself, since one Axon hosts one human. Self-hosting is the story.
 - **Disk compromise.** Event store and search index live on the same disk and inherit filesystem-level encryption (operator's choice: LUKS / dm-crypt / ZFS / encrypted cloud volumes). Application-level encryption of decrypted content (per-account content-encryption keys) is deferred to v2 — search becomes a research problem at that point.
@@ -216,8 +220,17 @@ Almost every architectural question was resolved during planning. The table belo
 - **Network — client ↔ agent.** TLS required; bearer tokens scoped per device, revocable individually.
 - **Client compromise.** Per-device tokens limit blast radius. Revocation invalidates a single device. Already-pulled history is out of the agent's hands — same as any Matrix client.
 - **Compromised agent process.** Worst case: all data for the human owner. Mitigations: process isolation, principle of least privilege, audit logging. Not solved at v1.
-
-**Changes when push lands:** APNs / FCM payload privacy levels become a user-facing setting. The push router becomes another process with access to decrypted content. Threat-model section will need updating in the push design doc.
+- **Push providers.**
+  ADR 0113.
+  A registered iOS, iPadOS, or Android device receives an alert through APNs or FCM when the OS has suspended the client.
+  The default alert is the fixed text "New activity" and carries no sender, room name, or message body.
+  The user can opt that device into naming the sender and the room, or into a preview clipped at 140 characters.
+  Apple or Google can read whichever level the device is set to, plus the account, room, and event identifiers a tap needs in order to open that room.
+  The router runs inside the Axon process.
+  It is not a second host.
+  It sees decrypted content only to build an alert the device's setting allows, and it does not write that alert to the log.
+  Provider credentials live in config.
+  Device tokens live in `push_registrations` and nowhere else.
 
 ## Federation deferral
 
@@ -235,7 +248,7 @@ We do not build any federation code in v1.
 
 Originally post-MVP, roughly in priority order — several of these have since shipped or begun ahead of MVP freeze, noted inline:
 
-1. **Push** (APNs first, then FCM and web push). P0 immediately after MVP. _(Not started.)_
+1. **Push** (APNs and FCM together; web push after that). P0 immediately after MVP. _(Designed in [ADR 0113](../adr/0113-remote-push-for-suspended-mobile-clients.md). Not started.)_
 2. ~~Full OAuth 2.0 + PKCE.~~ _(Shipped ahead of freeze — M14, ADR 0054.)_
 3. **Bridge metadata normalization.** _(Not started.)_
 4. **Import-from-existing-client onboarding** (Element X store reader, maybe gomuks). _(Not started.)_
