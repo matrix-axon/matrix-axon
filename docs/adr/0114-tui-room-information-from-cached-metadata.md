@@ -34,8 +34,9 @@ The server's snapshot status is mirrored with a catch-all variant, so a status a
 
 `/whereami` opens the popup immediately from the room summary.
 It then spawns the reads and applies their results through the main-loop outcome channel; nothing is awaited from key handling or drawing.
-State is cached per account and room, with each of the four parts independently loading, loaded, or failed.
-At most one fetch per room is in flight, a result for a room that is no longer shown is dropped, and a failed refresh keeps the last good data and marks it as possibly stale.
+State is held for the one room the popup last showed, with each read independently loading, loaded, or failed.
+Holding a single room bounds the cache without an eviction policy, and reopening the same room shows its earlier data while the refresh runs.
+At most one fetch is in flight, a result for a room that is no longer shown or from a superseded request is dropped, and a failed refresh keeps the last good data and marks it as possibly stale.
 
 `/metadata` is the source for join rule, history visibility, guest access, and encryption, because it distinguishes unknown from unset.
 `/info` is read only for member counts.
@@ -107,7 +108,7 @@ Step 1 depends on PR 645 for `member_counts`.
 `/whereami` becomes honest about uncertainty: several lines will read "unknown" for rooms whose state is not hydrated, and guest access and server ACL will usually be unknown until issue 621.
 A large room shows a short member list under a large count until issue 659 provides a complete, paginated source; search finds only loaded members until then.
 An open popup issues four small local reads every 30 seconds; none contacts a homeserver.
-The TUI gains per-room room-information state that must be evicted with the room and bounded like its other per-room caches.
+The TUI holds room-information state for one room at a time and drops it when that room leaves the room list.
 
 ## Verification
 
