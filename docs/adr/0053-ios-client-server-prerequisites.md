@@ -136,3 +136,11 @@ similar) namespace at that point. No new server design is commissioned here.
   revisit if cross-client visibility becomes a real requirement later.
 - **Owner and timeline for each item**: not assigned. This ADR scopes the
   work; it does not schedule or staff it.
+
+## Amendment — remote push (2026-10-09, ADR 0113)
+
+The push bullets above still describe this list.
+They do not commission a device-token endpoint, a router, or APNs.
+[ADR 0113](0113-remote-push-for-suspended-mobile-clients.md) is the design this list deferred.
+It adds no code.
+Implementation is tracked in #604 and #605.
