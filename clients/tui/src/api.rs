@@ -1156,6 +1156,16 @@ fn decode_ws_frame(text: &str) -> Option<LiveFrame> {
                 payload,
             })
         }
+        "unread_counts.changed" => {
+            let payload: UnreadCountsChangedDto = match serde_json::from_value(envelope.payload) {
+                Ok(payload) => payload,
+                Err(err) => return Some(LiveFrame::ProtocolError(err.to_string())),
+            };
+            Some(LiveFrame::UnreadCounts {
+                account_id: envelope.account_id,
+                payload,
+            })
+        }
         "preferences.changed" => match serde_json::from_value(envelope.payload) {
             Ok(payload) => Some(LiveFrame::Preferences(payload)),
             Err(err) => Some(LiveFrame::ProtocolError(err.to_string())),
@@ -1208,6 +1218,12 @@ pub enum LiveFrame {
     AccountData {
         account_id: Uuid,
         payload: AccountDataChangedDto,
+    },
+    /// An `unread_counts.changed` frame (ADR 0070, ADR 0115): a room's
+    /// server-derived unread counts.
+    UnreadCounts {
+        account_id: Uuid,
+        payload: UnreadCountsChangedDto,
     },
 }
 
@@ -1782,6 +1798,15 @@ pub struct RoomTag {
     pub order: Option<f64>,
 }
 
+/// Wire payload for `unread_counts.changed`; the account is on the envelope.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UnreadCountsChangedDto {
+    pub room_id: String,
+    pub notification_count: u64,
+    #[serde(default)]
+    pub highlight_count: u64,
+}
+
 /// Wire payload for `account_data.changed`. `room_id` is omitted for global
 /// account data (`m.direct`).
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -1807,6 +1832,14 @@ pub struct RoomDto {
     pub room_type: Option<String>,
     pub last_activity_ts: i64,
     pub last_event_id: Option<String>,
+    /// Server-derived unread notification count (ADR 0070, ADR 0115): the one
+    /// source of a room's unread badge. Absent from an older server, where `0`
+    /// reads as "nothing unread".
+    #[serde(default)]
+    pub notification_count: u64,
+    /// Server-derived highlight (mention) count. Carried, not yet styled.
+    #[serde(default)]
+    pub highlight_count: u64,
     /// This account's `m.tag` entries. Omitted when empty on the wire.
     #[serde(default)]
     pub tags: Vec<RoomTag>,
@@ -2757,6 +2790,27 @@ mod tests {
                 );
             }
             other => panic!("expected ephemeral frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demux_routes_unread_counts_changed_frame() {
+        let body = r#"{
+            "type": "unread_counts.changed",
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "payload": {
+                "room_id": "!r:x",
+                "notification_count": 5,
+                "highlight_count": 1
+            }
+        }"#;
+        match decode_ws_frame(body) {
+            Some(LiveFrame::UnreadCounts { payload, .. }) => {
+                assert_eq!(payload.room_id, "!r:x");
+                assert_eq!(payload.notification_count, 5);
+                assert_eq!(payload.highlight_count, 1);
+            }
+            other => panic!("expected an unread-counts frame, got {other:?}"),
         }
     }
 

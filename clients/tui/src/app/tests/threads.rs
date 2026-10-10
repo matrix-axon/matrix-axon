@@ -299,7 +299,7 @@ fn live_thread_member_marks_thread_unread_when_panel_closed() {
 }
 
 #[test]
-fn live_thread_member_for_unselected_room_marks_room_and_thread_unread() {
+fn live_thread_member_for_unselected_room_marks_thread_unread_not_room() {
     let unread_room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
     let other = room(
         "!other:example.com",
@@ -314,7 +314,9 @@ fn live_thread_member_for_unselected_room_marks_room_and_thread_unread() {
     live.sender = "@bob:example.com".to_owned();
     app.handle_live_frame(LiveFrame::Timeline(Box::new(live)));
 
-    assert_eq!(app.rooms.unread.get(&key).copied(), Some(1));
+    // The room badge is the server's count (ADR 0115); only the thread badge
+    // is derived from the live event.
+    assert_eq!(app.rooms.unread.get(&key).copied(), None);
     assert_eq!(
         app.unread_threads[&key]["$root:example.com"].unread_count,
         1

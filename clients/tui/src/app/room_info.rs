@@ -920,6 +920,8 @@ mod tests {
             room_type: None,
             last_activity_ts: 0,
             last_event_id: None,
+            notification_count: 0,
+            highlight_count: 0,
             tags: Vec::new(),
             is_direct: false,
         }

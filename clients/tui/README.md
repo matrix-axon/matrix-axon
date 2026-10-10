@@ -28,7 +28,7 @@ The server URL is read from `--base-url`, then `AXON_BASE_URL`, then
 - Lists rooms returned by `GET /v1/rooms`.
 - Shows the latest timeline page for the selected room.
 - Appends live events from `/v1/ws` for the selected room.
-- Tracks unread counts for live events in other rooms.
+- Shows each room's unread badge from the server's notification count, the same number the web client shows, so reactions, joins, leaves and edits never raise one.
 - Hides most state events by default, while still showing room membership changes such as joins and leaves.
 - Sends messages to the selected room (`POST /v1/.../send`).
 - Edits the selected message (`PUT /v1/.../events/{event_id}`).
@@ -44,7 +44,7 @@ The server URL is read from `--base-url`, then `AXON_BASE_URL`, then
 - Renders Matrix `formatted_body` HTML for timeline messages when present, with sanitized support for common inline and block formatting.
 - Renders image and sticker thumbnails inline, with an explicit larger preview for the selected image.
 - Syncs per-room message drafts across devices through Axon's device-state API (M12): a draft typed here appears on the user's other clients within about a second, survives restarts, and clearing or sending it clears it everywhere. Each install mints a device UUID on first run, stored in `device-id` next to the config file.
-- Syncs per-room read markers across devices through the same API: reading a room here clears its unread badge on the user's other clients, and rooms with activity newer than their marker show as unread again after a restart (rooms never marked read are left alone). Markers only move forward — a stale marker from an offline device never resurrects a cleared badge.
+- Syncs per-room read markers across devices through the same API: reading a room here clears its unread badge on the user's other clients, and a room read elsewhere clears here at once. Markers only move forward — a stale marker from an offline device never clears a badge.
 - Tracks unread threads: thread roots show a bold `N new` count with a latest-reply preview, and the `/unreadthreads` picker (`Alt-T`) lists every thread with unseen replies across rooms and jumps straight into its panel. Opening the thread panel is what marks a thread read; unseen replies are found both live and, via the room read marker, on room entry after a restart.
 
 ## Not Yet Implemented
