@@ -188,6 +188,9 @@ Short-lived token/OAuth commands verify one ordinary connection and open other p
 
 Account deletion and room purge commit event deletions in batches of at most 1000 rows, each with atomic search-cleanup obligations.
 An interrupted account teardown retains its existing `deleting` breadcrumb for boot reconciliation; purge-on-leave queues a durable event watermark and wakes the supervised cleanup worker immediately, with retries every 30 seconds and after restart, without delaying sync on bulk deletion.
+Wakeups schedule a bounded page of pending rooms; a backlog or slow maintenance operation can delay a particular room.
+When purge-on-leave is enabled, ingestion skips events from rooms the SDK has marked left, including the leave batch, so late callbacks cannot recreate purged data.
+Cleanup resets the history-backfill cursor even if a rejoin preserves the room, allowing deleted history to be fetched again.
 Local leave state and its purge intent commit together, so an enqueue failure cannot leave a successfully saved leave without its cleanup obligation.
 A later leave advances a pending watermark; retrying an earlier leave keeps its captured watermark so later rejoin events survive.
 Retry pages rotate past persistent failures so the first 100 failing rooms cannot starve all later rooms.

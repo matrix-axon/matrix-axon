@@ -693,6 +693,16 @@ pub(crate) fn parse_raw_json(
     }
 }
 
+/// SDK membership is updated before event dispatch; it remains available after
+/// PostgreSQL room metadata is purged. Rejoined rooms accept their new events.
+fn skip_left_room_ingestion(ctx: &PersistContext, room: &Room) -> bool {
+    let skip = ctx.purge_on_leave && room.state() == RoomState::Left;
+    if skip {
+        tracing::debug!(account_id = %ctx.account_id, room_id = %room.room_id(), "skipping ingestion for purged left room");
+    }
+    skip
+}
+
 /// Event handler: persist every synced timeline event to Postgres.
 ///
 /// For E2EE rooms, matrix-rust-sdk decrypts the megolm payload before
@@ -711,6 +721,12 @@ async fn persist_timeline_event(
     enc_info: Option<EncryptionInfo>,
     Ctx(ctx): Ctx<PersistContext>,
 ) {
+    // The SDK updates room membership before dispatching a sync batch. Do not
+    // retain its leave/trailing events after the leave handler captures a purge
+    // watermark, even if the worker has already finished deleting room state.
+    if skip_left_room_ingestion(&ctx, &room) {
+        return;
+    }
     let Some(raw_val) = parse_raw_json(raw.get(), ctx.account_id, "timeline event") else {
         return;
     };
@@ -745,6 +761,9 @@ pub(crate) async fn persist_backfilled_event(
     room: &Room,
     tev: &matrix_sdk::deserialized_responses::TimelineEvent,
 ) {
+    if skip_left_room_ingestion(ctx, room) {
+        return;
+    }
     let raw = tev.raw();
     let ev: AnySyncTimelineEvent = match raw.deserialize() {
         Ok(ev) => ev,
@@ -1042,6 +1061,13 @@ async fn persist_room_state_event(
         origin_ts,
         content,
     };
+    // The local leave still writes its durable obligation. Other state from
+    // the same left-room batch must not recreate metadata after cleanup.
+    if !upsert.is_local_departure(Some(ctx.local_user_id.as_ref()))
+        && skip_left_room_ingestion(&ctx, &room)
+    {
+        return;
+    }
     if let Err(err) = ctx
         .store
         .upsert_room_state_with_redaction_and_purge(
@@ -1082,6 +1108,9 @@ async fn persist_room_account_data(
     raw: RawEvent,
     Ctx(ctx): Ctx<PersistContext>,
 ) {
+    if skip_left_room_ingestion(&ctx, &room) {
+        return;
+    }
     let room_id = room.room_id().as_str().to_owned();
     persist_account_data(&ctx, Some(&room_id), &raw).await;
 }
@@ -3951,5 +3980,255 @@ mod pending_receipt_tests {
         let evidence = FakeEvidence::new(true, true);
         assert!(!pending_receipts_stale(&evidence, &receipts(None)).await);
         assert!(evidence.asked.borrow().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod purge_ingestion_tests {
+    use super::*;
+    use axum::{extract::Request, response::IntoResponse, Json, Router};
+    use matrix_sdk::authentication::matrix::MatrixSession;
+    use matrix_sdk::store::RoomLoadSettings;
+    use matrix_sdk::{SessionMeta, SessionTokens};
+    use serde_json::json;
+
+    /// Real Sliding Sync updates the SDK room to Left before dispatch. Force
+    /// both Axon handler orders, and run cleanup between them in the state-first
+    /// case, so the test also catches late writes after all metadata is gone.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn sliding_sync_leave_purges_both_handler_orders() {
+        let store = Store::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
+            .await
+            .unwrap();
+        for purge_on_leave in [false, true] {
+            for state_first in [false, true] {
+                let user = format!("@purge-{}:localhost", Uuid::new_v4());
+                let account = store
+                    .upsert_account(&user, "http://localhost")
+                    .await
+                    .unwrap();
+                let room_id: OwnedRoomId = format!("!purge-{}:localhost", Uuid::new_v4())
+                    .parse()
+                    .unwrap();
+                let member = |membership: &str, id: &str, ts: u64| {
+                    json!({
+                        "type":"m.room.member", "state_key":user, "sender":user,
+                        "event_id":id, "origin_server_ts":ts, "content":{"membership":membership}
+                    })
+                };
+                let message = |id: &str, ts: u64| {
+                    json!({
+                        "type":"m.room.message", "sender":user, "event_id":id,
+                        "origin_server_ts":ts, "content":{"msgtype":"m.text","body":"fixture"}
+                    })
+                };
+                let responses =
+                    Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+                        json!({"pos":"1","lists":{},"rooms":{(room_id.as_str()):{
+                            "initial":true,"required_state":[member("join","$join",1)],
+                            "timeline":[member("join","$join",1),message("$old",2)]
+                        }}}),
+                        json!({"pos":"2","lists":{},"rooms":{(room_id.as_str()):{
+                            "required_state":[member("leave","$leave",3)],
+                            "timeline":[member("leave","$leave",3),message("$trailing",4)]
+                        }}}),
+                    ])));
+                let app = Router::new().fallback(move |request: Request| {
+                    let responses = responses.clone();
+                    async move {
+                        if request.method() == axum::http::Method::POST
+                            && request.uri().path().ends_with("/sync")
+                        {
+                            Json(
+                                responses
+                                    .lock()
+                                    .unwrap()
+                                    .pop_front()
+                                    .expect("two sync requests"),
+                            )
+                            .into_response()
+                        } else {
+                            (
+                                axum::http::StatusCode::NOT_FOUND,
+                                Json(json!({"errcode":"M_NOT_FOUND","error":"fixture"})),
+                            )
+                                .into_response()
+                        }
+                    }
+                });
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                let client = Client::builder()
+                    .homeserver_url(format!("http://{address}"))
+                    .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11])
+                    .request_config(matrix_sdk::config::RequestConfig::new().disable_retry())
+                    .build()
+                    .await
+                    .unwrap();
+                client
+                    .matrix_auth()
+                    .restore_session(
+                        MatrixSession {
+                            meta: SessionMeta {
+                                user_id: user.parse().unwrap(),
+                                device_id: "PURGETEST".into(),
+                            },
+                            tokens: SessionTokens {
+                                access_token: "fixture-token".to_owned(),
+                                refresh_token: None,
+                            },
+                        },
+                        RoomLoadSettings::default(),
+                    )
+                    .await
+                    .unwrap();
+                let (live_tx, _) = broadcast::channel(8);
+                let (state_redaction_tx, _) = tokio::sync::mpsc::channel(32);
+                client.add_event_handler_context(PersistContext {
+                    store: store.clone(),
+                    account_id: account.account_id,
+                    live_tx,
+                    index: None,
+                    local_user_id: Arc::from(user.as_str()),
+                    purge_on_leave,
+                    state_redaction_tx,
+                });
+                client.add_event_handler(
+                    move |ev: AnySyncTimelineEvent,
+                          room: Room,
+                          raw: RawEvent,
+                          Ctx(ctx): Ctx<PersistContext>| async move {
+                        let value: serde_json::Value = serde_json::from_str(raw.get()).unwrap();
+                        let state: Option<AnySyncStateEvent> = value
+                            .get("state_key")
+                            .and_then(|_| serde_json::from_value(value.clone()).ok());
+                        if value["content"]["membership"] == "leave" {
+                            assert_eq!(
+                                room.state(),
+                                RoomState::Left,
+                                "SDK applies membership before dispatch"
+                            );
+                        }
+                        if state_first {
+                            if let Some(state) = state {
+                                persist_room_state_event(
+                                    state,
+                                    room.clone(),
+                                    RawEvent(raw.0.clone()),
+                                    Ctx(ctx.clone()),
+                                )
+                                .await;
+                                if value["content"]["membership"] == "leave" && ctx.purge_on_leave {
+                                    ctx.store.retry_room_purges().await.unwrap();
+                                }
+                            }
+                            persist_timeline_event(ev, room, raw, None, Ctx(ctx)).await;
+                        } else {
+                            persist_timeline_event(
+                                ev,
+                                room.clone(),
+                                RawEvent(raw.0.clone()),
+                                None,
+                                Ctx(ctx.clone()),
+                            )
+                            .await;
+                            if let Some(state) = state {
+                                persist_room_state_event(state, room, raw, Ctx(ctx)).await;
+                            }
+                        }
+                    },
+                );
+                let sync = client
+                    .sliding_sync("purge-test")
+                    .unwrap()
+                    .build()
+                    .await
+                    .unwrap();
+                sync.add_room_subscriptions(&[&room_id], None, false);
+                tokio::time::timeout(Duration::from_secs(10), sync.sync_once())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(store
+                    .get_event(account.account_id, "$old")
+                    .await
+                    .unwrap()
+                    .is_some());
+                // Remove the ingestion obligation to prove cleanup queues a
+                // fresh search removal for the pre-leave message.
+                sqlx_core::query::query("DELETE FROM search_outbox WHERE account_id = $1")
+                    .bind(account.account_id)
+                    .execute(store.pool())
+                    .await
+                    .unwrap();
+                store
+                    .save_room_backfill(
+                        account.account_id,
+                        room_id.as_str(),
+                        Some("old-token"),
+                        true,
+                        1,
+                    )
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(10), sync.sync_once())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                store.retry_room_purges().await.unwrap();
+                for event in ["$old", "$leave", "$trailing"] {
+                    assert_eq!(
+                        store
+                            .get_event(account.account_id, event)
+                            .await
+                            .unwrap()
+                            .is_none(),
+                        purge_on_leave
+                    );
+                }
+                assert_eq!(
+                    store
+                        .room_state(account.account_id, room_id.as_str(), "m.room.member", &user)
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    purge_on_leave
+                );
+                assert_eq!(
+                    store
+                        .get_room_backfill(account.account_id, room_id.as_str())
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    purge_on_leave
+                );
+                for table in ["room_summaries", "room_purge_intents"] {
+                    let count: i64 = sqlx_core::query_scalar::query_scalar(&format!(
+                        "SELECT count(*) FROM {table} WHERE account_id = $1 AND room_id = $2"
+                    ))
+                    .bind(account.account_id)
+                    .bind(room_id.as_str())
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        count,
+                        if !purge_on_leave && table == "room_summaries" {
+                            1
+                        } else {
+                            0
+                        }
+                    );
+                }
+                let removal:bool = sqlx_core::query_scalar::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM search_outbox WHERE account_id = $1 AND event_id = '$old')")
+                    .bind(account.account_id).fetch_one(store.pool()).await.unwrap();
+                assert_eq!(removal, purge_on_leave, "cleanup enqueues search removal");
+                store.delete_account_row(account.account_id).await.unwrap();
+                server.abort();
+            }
+        }
     }
 }

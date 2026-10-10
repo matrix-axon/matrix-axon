@@ -601,6 +601,10 @@ async fn leave_state_and_purge_intent_commit_together() {
         .upsert_room_state_with_purge(&join, Some(&user), true)
         .await
         .unwrap();
+    store
+        .save_room_backfill(account, room, Some("complete-token"), true, 7)
+        .await
+        .unwrap();
     let old = insert_message(&store, account, room, 10, "before leave").await;
     let leave = axon_store::RoomStateUpsert {
         event_id: "$leave",
@@ -706,6 +710,14 @@ async fn leave_state_and_purge_intent_commit_together() {
     store.retry_room_purges().await.unwrap();
     assert!(store.get_event(account, &old).await.unwrap().is_none());
     assert!(store.get_event(account, &fresh).await.unwrap().is_some());
+    assert!(
+        store
+            .get_room_backfill(account, room)
+            .await
+            .unwrap()
+            .is_none(),
+        "a rejoined room must backfill again after its previous history is purged"
+    );
     cleanup_account(&pool, account).await;
 }
 
