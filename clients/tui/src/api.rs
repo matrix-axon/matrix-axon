@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::time::Duration;
 
@@ -36,6 +36,11 @@ const MAX_MEDIA_BYTES: usize = 20 * 1024 * 1024;
 /// bounded by the whole file's transfer time, not a single small JSON body),
 /// so it gets its own, more generous timeout.
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+/// `/metadata` carries eight snapshots the server caps at 128 KiB each
+/// (docs/room-metadata.md), so the whole response gets headroom above that.
+const ROOM_METADATA_LIMIT: usize = 2 * 1024 * 1024;
+/// `/info` and `/upgrade` are a handful of short strings and numbers.
+const ROOM_SUMMARY_READ_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct AxonClient {
@@ -304,6 +309,54 @@ impl AxonClient {
         // client doesn't consume (server-clock LWW).
         let _: Value = self.send(read_request(request)).await?;
         Ok(())
+    }
+
+    /// Typed cached state snapshots for `/whereami` (ADR 0114). A local read
+    /// on the server; nothing here contacts a homeserver.
+    pub async fn room_metadata(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<RoomMetadataDto, ApiError> {
+        self.room_read(account_id, room_id, "metadata", ROOM_METADATA_LIMIT)
+            .await
+    }
+
+    /// `GET …/info`, read only for its `member_counts`; `/metadata` is the
+    /// source for the state fields because it tells unknown from unset.
+    pub async fn room_info(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<RoomInfoDto, ApiError> {
+        self.room_read(account_id, room_id, "info", ROOM_SUMMARY_READ_LIMIT)
+            .await
+    }
+
+    pub async fn room_upgrade(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<RoomUpgradeDto, ApiError> {
+        self.room_read(account_id, room_id, "upgrade", ROOM_SUMMARY_READ_LIMIT)
+            .await
+    }
+
+    /// One byte-capped `GET …/rooms/{room_id}/{resource}` cached-state read.
+    async fn room_read<T: DeserializeOwned>(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        resource: &str,
+        limit: usize,
+    ) -> Result<T, ApiError> {
+        let request = self.http.get(format!(
+            "{}/v1/accounts/{}/rooms/{}/{resource}",
+            self.base_url,
+            account_id,
+            path_segment(room_id)
+        ));
+        self.send_bounded(read_request(request), limit).await
     }
 
     pub async fn room_members(
@@ -1493,6 +1546,228 @@ pub struct MemberDto {
     pub user_id: String,
     #[serde(default)]
     pub display_name: Option<String>,
+}
+
+/// Availability of one cached state snapshot from `GET …/metadata` (ADR 0111).
+/// `Unknown` is not evidence that a setting is unset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotStatus {
+    #[default]
+    Unknown,
+    Available,
+    Partial,
+    Unavailable,
+    Invalid,
+    TooLarge,
+    /// A status this build does not know; shown as such rather than failing
+    /// the whole read.
+    #[serde(other)]
+    Unrecognized,
+}
+
+/// One typed snapshot. `content` is present only for `Available`/`Partial`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct MetadataSnapshot<T> {
+    #[serde(default)]
+    pub status: SnapshotStatus,
+    /// The state event's sender; the creator for versions whose create content
+    /// omits `creator`.
+    #[serde(default)]
+    pub sender: Option<String>,
+    /// Upstream event time, not a sync-freshness timestamp.
+    #[serde(default)]
+    pub origin_ts: Option<i64>,
+    /// `Some(true)` is positive redaction evidence; the server never sends
+    /// `false`, and `None` proves nothing.
+    #[serde(default)]
+    pub redacted: Option<bool>,
+    /// Paths of malformed fields the server withheld, with `[]`/`.*` for list
+    /// and map entries.
+    #[serde(default)]
+    pub invalid_fields: Vec<String>,
+    #[serde(default = "Option::default")]
+    pub content: Option<T>,
+}
+
+impl<T> Default for MetadataSnapshot<T> {
+    fn default() -> Self {
+        Self {
+            status: SnapshotStatus::Unknown,
+            sender: None,
+            origin_ts: None,
+            redacted: None,
+            invalid_fields: Vec::new(),
+            content: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RoomAliasesContent {
+    #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default)]
+    pub alt_aliases: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RoomCreationContent {
+    #[serde(default)]
+    pub creator: Option<String>,
+    #[serde(default)]
+    pub additional_creators: Option<Vec<String>>,
+    #[serde(default)]
+    pub room_version: Option<String>,
+    #[serde(default)]
+    pub federate: Option<bool>,
+    #[serde(default)]
+    pub room_type: Option<String>,
+    #[serde(default)]
+    pub predecessor: Option<RoomPredecessorContent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RoomPredecessorContent {
+    pub room_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RoomJoinRulesContent {
+    #[serde(default)]
+    pub join_rule: Option<String>,
+    #[serde(default)]
+    pub allow: Option<Vec<RoomJoinCondition>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RoomJoinCondition {
+    #[serde(rename = "type")]
+    pub condition_type: String,
+    #[serde(default)]
+    pub room_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RoomEncryptionContent {
+    #[serde(default)]
+    pub algorithm: Option<String>,
+    #[serde(default)]
+    pub rotation_period_ms: Option<u64>,
+    #[serde(default)]
+    pub rotation_period_msgs: Option<u64>,
+}
+
+/// Configured values as stored, not resolved permissions: omitted fields stay
+/// omitted, and room-v12 creator privilege is not represented (#324).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RoomPowerLevelsContent {
+    #[serde(default)]
+    pub ban: Option<i64>,
+    #[serde(default)]
+    pub invite: Option<i64>,
+    #[serde(default)]
+    pub kick: Option<i64>,
+    #[serde(default)]
+    pub redact: Option<i64>,
+    #[serde(default)]
+    pub events_default: Option<i64>,
+    #[serde(default)]
+    pub state_default: Option<i64>,
+    #[serde(default)]
+    pub users_default: Option<i64>,
+    #[serde(default)]
+    pub users: Option<BTreeMap<String, i64>>,
+    #[serde(default)]
+    pub events: Option<BTreeMap<String, i64>>,
+    #[serde(default)]
+    pub notifications: Option<RoomNotificationLevels>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RoomNotificationLevels {
+    #[serde(default)]
+    pub room: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RoomServerAclContent {
+    #[serde(default)]
+    pub allow_ip_literals: Option<bool>,
+    #[serde(default)]
+    pub allow: Option<Vec<String>>,
+    #[serde(default)]
+    pub deny: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RoomHistoryVisibilityContent {
+    #[serde(default)]
+    pub history_visibility: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RoomGuestAccessContent {
+    #[serde(default)]
+    pub guest_access: Option<String>,
+}
+
+/// `GET …/rooms/{room_id}/metadata`. A snapshot a server omits reads as
+/// `Unknown`, the same as one it has no cached tuple for.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RoomMetadataDto {
+    #[serde(default)]
+    pub aliases: MetadataSnapshot<RoomAliasesContent>,
+    #[serde(default)]
+    pub creation: MetadataSnapshot<RoomCreationContent>,
+    #[serde(default)]
+    pub join_rules: MetadataSnapshot<RoomJoinRulesContent>,
+    #[serde(default)]
+    pub encryption: MetadataSnapshot<RoomEncryptionContent>,
+    #[serde(default)]
+    pub power_levels: MetadataSnapshot<RoomPowerLevelsContent>,
+    #[serde(default)]
+    pub server_acl: MetadataSnapshot<RoomServerAclContent>,
+    #[serde(default)]
+    pub history_visibility: MetadataSnapshot<RoomHistoryVisibilityContent>,
+    #[serde(default)]
+    pub guest_access: MetadataSnapshot<RoomGuestAccessContent>,
+}
+
+/// The part of `GET …/rooms/{room_id}/info` the TUI reads.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RoomInfoDto {
+    /// `None` when the server sent no such field (it predates member counts
+    /// and never will observe one); `Some(None)` for `null`, not observed yet.
+    #[serde(default, deserialize_with = "present")]
+    pub member_counts: Option<Option<RoomMemberCountsDto>>,
+}
+
+/// Keeps a present-but-null field apart from an absent one.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RoomMemberCountsDto {
+    pub joined: i64,
+    pub invited: i64,
+    /// When this pair last changed in Axon's cache (Unix ms). An unchanged
+    /// confirmation keeps it, so it is not a freshness signal.
+    pub observed_at: i64,
+}
+
+/// `GET …/rooms/{room_id}/upgrade`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RoomUpgradeDto {
+    #[serde(default)]
+    pub tombstoned_to: Option<String>,
+    #[serde(default)]
+    pub upgraded_from: Option<String>,
 }
 
 /// Matrix `m.favourite` — the durable meaning of a TUI pin (ADR 0103).
