@@ -650,6 +650,49 @@ describe('request telemetry', () => {
     ).toMatchObject({ kind: 'body', stage: 'body' })
   })
 
+  /**
+   * The plugin's Rust side answers an abort with a string as well. It must
+   * not be dressed as a dead network.
+   */
+  it("keeps the shell's cancel an abort, not an unreachable server", async () => {
+    const cancelling: typeof globalThis.fetch = () =>
+      Promise.reject('Request canceled')
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, {
+      fetch: cancelling,
+    })
+
+    await expect(api.GET('/v1/accounts')).rejects.toThrow(
+      REQUEST_TIMEOUT_MESSAGE,
+    )
+    expect(
+      marks.find((mark) => mark.name === 'api:failed')?.detail,
+    ).toMatchObject({ kind: 'cancelled' })
+  })
+
+  /**
+   * A trace that never ends leaves `inflight` one too high for good. The
+   * token wait was covered; setting the header was not, and it throws on a
+   * token that is not a legal header value.
+   */
+  it('ends the trace when the request cannot even be signed', async () => {
+    const unsignable = createApiClient(stubAuth('bad\ntoken'), BASE_URL)
+    await expect(unsignable.GET('/v1/accounts')).rejects.toThrow()
+
+    const failing: typeof globalThis.fetch = () =>
+      Promise.reject(new TypeError('Load failed'))
+    const api = createApiClient(stubAuth('tok-123'), BASE_URL, {
+      fetch: failing,
+    })
+    await expect(api.GET('/v1/accounts')).rejects.toThrow()
+
+    const failed = marks.filter((mark) => mark.name === 'api:failed')
+    expect(failed.map((mark) => mark.detail.inflight)).toEqual([1, 1])
+    expect(failed.map((mark) => mark.detail.stage)).toEqual([
+      'token',
+      'headers',
+    ])
+  })
+
   it("does not call a caller's own abort a deadline", async () => {
     server.use(http.get(`${BASE_URL}/v1/accounts`, () => new Promise(() => {})))
     const api = createApiClient(stubAuth('tok-123'), BASE_URL, undefined, 5_000)

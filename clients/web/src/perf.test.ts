@@ -770,6 +770,48 @@ describe('room-open summary', () => {
     }
   })
 
+  it('reports no resume once it is too long ago to be the cause', () => {
+    vi.useFakeTimers()
+    try {
+      const marks = captured(() => {
+        const trace = perfTraceRequest(timelineUrl(ROOM))!
+        document.dispatchEvent(new Event('visibilitychange'))
+        vi.advanceTimersByTime(30_001)
+        trace.end('failed', 'send')
+      })
+
+      expect(
+        marks.find((mark) => mark.name === 'api:failed')?.detail,
+      ).toMatchObject({ resumed: null })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /**
+   * Turning marks off zeroes the count with requests still in flight. Their
+   * late `end` used to come off the next session's count, clamped at zero, so
+   * a crowd of five could read as one.
+   */
+  it('does not let a request from before marks were turned off lower the count', () => {
+    const stale = [1, 2, 3].map(() => perfTraceRequest(timelineUrl(ROOM))!)
+    setPerfEnabled(false)
+    setPerfEnabled(true)
+
+    const marks = captured(() => {
+      const current = [1, 2].map(() => perfTraceRequest(timelineUrl(ROOM))!)
+      stale.forEach((trace) => trace.end('failed', 'send'))
+      current[0].end('failed', 'send')
+      current[1].end('ok')
+    })
+
+    expect(
+      marks
+        .filter((mark) => mark.name === 'api:failed')
+        .map((mark) => (mark.detail as { inflight: number }).inflight),
+    ).toEqual([2])
+  })
+
   /**
    * Failures arrive in crowds, and a mark each would evict every other mark
    * from the ring and from the stored session.

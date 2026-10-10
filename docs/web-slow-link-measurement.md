@@ -153,7 +153,7 @@ A kept capture also carries the socket's `live:open` and `live:close`, which say
   `kind` is one fixed word: `send` (the packaged app never got a response: DNS, connect, TLS, or a connection lost before the headers), `body` (headers arrived, the body did not finish), `cancelled`, `fetch` (a browser's `TypeError`, which says no more), or `other`.
   `inflight` is how many `/v1` requests were unsettled at that moment, the failed one included.
   The packaged app opens a new connection for every request, so a failure with `inflight` in the hundreds is the client crowding its own link, and one with `inflight=1` is the network.
-  `resumed` is the milliseconds since the app last returned to the foreground (`null` if it never left): a failure a few milliseconds after a resume is iOS having reclaimed a suspended app's sockets.
+  `resumed` is the milliseconds since the app last returned to the foreground (`null` if it never left, or if that was more than 30 s ago): a failure a few milliseconds after a resume is iOS having reclaimed a suspended app's sockets.
   `online` and `hidden` are the browser's own view of the link and of the page.
   At most five are written per ten seconds; `skipped` on a line counts the failures dropped since the previous line.
 - `api:late` — headers arrived for a request the client had already given up on.

@@ -2,6 +2,7 @@ import createClient, { type Client, type Middleware } from 'openapi-fetch'
 import type { AuthProvider } from '../auth/provider'
 import {
   perfTraceRequest,
+  type FailureKind,
   type RequestOutcome,
   type RequestTrace,
 } from '../perf'
@@ -216,6 +217,9 @@ async function fetchWithinDeadline(
   return rebuilt(response, body)
 }
 
+/** The plugin's wording for an abort, in either spelling it uses. */
+const CANCELLED = /cancell?ed/i
+
 /**
  * Rethrow a transport's rejection as the `TypeError` the fetch contract
  * promises for one.
@@ -236,6 +240,18 @@ function asTransportFailure(error: unknown): never {
   if (causeField(error, 'name') !== null) {
     throw error
   }
+  // The plugin's Rust side answers an abort with a string too ("Request
+  // canceled"). That is an abort and must stay one: as a `TypeError` it would
+  // tell the reader the network was down when a deadline had fired. The race
+  // in `fetchWithinDeadline` normally settles first, since it hears the
+  // signal synchronously and this arrives over IPC, but nothing here should
+  // depend on that ordering.
+  if (typeof error === 'string' && CANCELLED.test(error)) {
+    // A named `Error`, not a `DOMException`: under jsdom that is not an
+    // `Error` (see `causeField`), and `withinDeadline` would rewrap it and
+    // lose the name this exists to carry.
+    throw Object.assign(new Error(error), { name: 'AbortError' })
+  }
   throw new TypeError(typeof error === 'string' ? error : 'request failed', {
     cause: error,
   })
@@ -253,10 +269,16 @@ function asTransportFailure(error: unknown): never {
  * - `send` — never got a response: DNS, connect, TLS, or a connection lost
  *   before the headers.
  * - `body` — headers arrived and the body did not finish.
- * - `cancelled` — the transport's own word for an abort.
+ * - `cancelled` — the transport's own word for an abort. Only recorded when
+ *   neither of this client's signals had fired, since `outcomeOf` calls those
+ *   `timeout` or `aborted` and neither is a failure. What is left is a cancel
+ *   the transport decided on, which is rare and worth telling apart.
  * - `fetch` — a browser's `TypeError`, which says no more than that.
+ *
+ * The return type is the allow-list (`FailureKind` in `perf.ts`), so the
+ * compiler and not this comment is what keeps a message out of the readout.
  */
-export function failureKind(error: unknown): string {
+export function failureKind(error: unknown): FailureKind {
   const message = causeField(error, 'message') ?? ''
   if (message.startsWith('error sending request')) {
     return 'send'
@@ -264,7 +286,7 @@ export function failureKind(error: unknown): string {
   if (/body/i.test(message) && message.startsWith('error ')) {
     return 'body'
   }
-  if (/cancell?ed/i.test(message)) {
+  if (CANCELLED.test(message)) {
     return 'cancelled'
   }
   return causeField(error, 'name') === 'TypeError' ? 'fetch' : 'other'
@@ -503,17 +525,22 @@ export function createApiClient(
           deadline === null || !isThenable(pending)
             ? await pending
             : await withinDeadline(pending, deadline)
+        if (token !== null) {
+          request.headers.set('authorization', `Bearer ${token}`)
+        }
+        // Last, so the rebuilt request carries the header just set on it.
+        const signed = withDeadline(request, deadline)
+        flights.set(signed, { deadline, trace })
+        return signed
       } catch (error) {
+        // Everything between the trace starting and the request reaching
+        // `fetchWithinDeadline` is inside this `try`, not only the token
+        // wait. A token that is not a legal header value makes `headers.set`
+        // throw, and a trace that never ends would leave the readout's
+        // `inflight` one too high for the rest of the session.
         trace?.end(outcomeOf(deadline, request.signal), failureKind(error))
         throw error
       }
-      if (token !== null) {
-        request.headers.set('authorization', `Bearer ${token}`)
-      }
-      // Last, so the rebuilt request carries the header just set on it.
-      const signed = withDeadline(request, deadline)
-      flights.set(signed, { deadline, trace })
-      return signed
     },
     onResponse({ response }) {
       if (response.status === 401) {

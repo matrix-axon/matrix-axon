@@ -1225,8 +1225,10 @@ h2 {
 }
 
 /* A flex item will not shrink below its longest word without this, so the
-   wrap above would never get the chance to apply. */
-.banner > span {
+   wrap above would never get the chance to apply. The message only: the
+   update banner's second span holds its buttons, which must keep their
+   width. */
+.banner > span:first-child {
   min-width: 0;
 }
 

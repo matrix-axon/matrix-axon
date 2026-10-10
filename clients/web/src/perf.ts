@@ -34,8 +34,9 @@ export function setPerfEnabled(on: boolean): void {
     perfOverlayEntries.value = []
     recentMarks = []
     // Traces handed out while marks were on are still live and will still
-    // call `end`, which floors at zero rather than going negative.
+    // call `end`; the epoch is how they know not to count themselves out.
     openRequests = 0
+    traceEpoch += 1
     failedWindowStart = Number.NEGATIVE_INFINITY
     failedInWindow = 0
     failedSkipped = 0
@@ -1052,6 +1053,16 @@ function headsOf(open: RoomOpen): string | null {
 export type RequestOutcome = 'ok' | 'timeout' | 'aborted' | 'failed'
 
 /**
+ * What kind of failure it was; `failureKind` in `api/client.ts` chooses.
+ *
+ * A closed set on purpose. The value is written to disk with `api:failed`,
+ * and the obvious thing to pass instead, the error's message, quotes a URL
+ * that names an account and a room. As a plain `string` only a comment stood
+ * in the way of that.
+ */
+export type FailureKind = 'send' | 'body' | 'cancelled' | 'fetch' | 'other'
+
+/**
  * Where a request was when it ended, or where it is now if it has not.
  * `token` is before it was sent at all: `getToken()` can be a network round
  * trip of its own (an OAuth refresh), and the deadline covers it.
@@ -1079,7 +1090,7 @@ export interface RequestTrace {
    * Settled: the body is in, or it failed. `kind` is the client's one-word
    * classification of a failure (`failureKind` in `api/client.ts`).
    */
-  end(outcome: RequestOutcome, kind?: string): void
+  end(outcome: RequestOutcome, kind?: FailureKind): void
   /**
    * Headers arrived after the request had already been given up on.
    *
@@ -1110,6 +1121,7 @@ export function perfTraceRequest(url: string): RequestTrace | null {
   }
   watchVisibility()
   openRequests += 1
+  const epoch = traceEpoch
   const record: RequestRecord = {
     url,
     start: performance.now(),
@@ -1138,10 +1150,16 @@ export function perfTraceRequest(url: string): RequestTrace | null {
       }
       record.endAt = performance.now()
       record.outcome = outcome
+      if (epoch !== traceEpoch) {
+        // Marks were turned off since this request began, and perhaps on
+        // again. It was never counted in the present session's
+        // `openRequests`, so it must not be taken out of it.
+        return
+      }
       // Read before this request leaves the count, so a failure reports the
       // crowd it failed in, itself included.
       const inflight = openRequests
-      openRequests = Math.max(0, openRequests - 1)
+      openRequests -= 1
       if (outcome === 'timeout') {
         perfMark('api:deadline', {
           route: shortRoute(url),
@@ -1172,6 +1190,17 @@ export function perfTraceRequest(url: string): RequestTrace | null {
  */
 let openRequests = 0
 
+/**
+ * Which stretch of instrumentation a trace belongs to; bumped whenever marks
+ * are turned off.
+ *
+ * Turning them off zeroes `openRequests` while requests are still in flight.
+ * Without this, each of those would later take one off a count it was no
+ * longer part of, and five real requests could read as one. `inflight` is the
+ * figure a failure is judged by, so it has to be exact, not clamped.
+ */
+let traceEpoch = 0
+
 /** At most this many `api:failed` marks per window; the rest are counted. */
 const FAILED_MARKS_PER_WINDOW = 5
 const FAILED_MARKS_WINDOW_MS = 10_000
@@ -1182,6 +1211,14 @@ let failedSkipped = 0
 
 /** When the document last came back to the foreground, if it ever left it. */
 let shownAt: number | null = null
+
+/**
+ * How long after a return to the foreground a failure is still reported as
+ * following it. Past this `resumed` is `null`: the reading exists to catch
+ * sockets lost to a suspend, which fail at once, and a figure that kept
+ * growing for hours after one app switch said nothing and looked like data.
+ */
+const RESUMED_WINDOW_MS = 30_000
 let watchingVisibility = false
 
 /**
@@ -1217,7 +1254,7 @@ function watchVisibility(): void {
  */
 function markFailure(
   record: RequestRecord,
-  kind: string,
+  kind: FailureKind,
   after: number,
   inflight: number,
 ): void {
@@ -1242,7 +1279,10 @@ function markFailure(
     inflight,
     online: navigator.onLine,
     hidden: document.visibilityState === 'hidden',
-    resumed: shownAt === null ? null : Math.round(at - shownAt),
+    resumed:
+      shownAt === null || at - shownAt > RESUMED_WINDOW_MS
+        ? null
+        : Math.round(at - shownAt),
     skipped,
   })
 }
