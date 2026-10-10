@@ -730,10 +730,10 @@ function TelemetrySettings() {
         Keep performance summaries on this device
       </label>
       <p class="muted">
-        Stores the summary lines — timings only, no room or account identifiers
-        — so a slow load can be read back afterwards instead of needing a screen
-        recording at the moment it happens. Requires performance
-        instrumentation. Cleared on sign-out.
+        Stores the summary lines — timings and failed requests, no room or
+        account identifiers — so a slow load or a connection error can be read
+        back afterwards instead of needing a screen recording at the moment it
+        happens. Requires performance instrumentation. Cleared on sign-out.
       </p>
       <div class="setting-row">
         <button

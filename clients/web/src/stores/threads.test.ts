@@ -10,7 +10,11 @@ import {
   vi,
 } from 'vitest'
 import { createApiClient } from '../api/client'
-import { createThreadsStore, threadRootId } from './threads'
+import {
+  createThreadsStore,
+  ROOT_FETCH_CONCURRENCY,
+  threadRootId,
+} from './threads'
 import type { EventDto } from './timeline'
 
 const BASE_URL = 'http://axon.test'
@@ -81,6 +85,136 @@ describe('createThreadsStore', () => {
       expect(store.roots.value.get('$root2')).toBeDefined()
     })
     expect(store.loading.value).toBe(false)
+  })
+
+  /**
+   * A room of many threads, with root fetches that stay open until released,
+   * so the number in flight is something the test can read.
+   */
+  function manyThreads(count: number) {
+    const asked: string[] = []
+    const release: (() => void)[] = []
+    let open = 0
+    let peak = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads`, () =>
+        HttpResponse.json({
+          data: Array.from({ length: count }, (_, i) => ({
+            root_event_id: `$root${String(i)}`,
+            reply_count: 1,
+            // Oldest first on the wire, so the order asserted is the store's.
+            latest_reply_ts: i,
+          })),
+        }),
+      ),
+      http.get(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        async ({ params }) => {
+          asked.push(String(params.eventId))
+          open += 1
+          peak = Math.max(peak, open)
+          await new Promise<void>((resolve) => release.push(resolve))
+          open -= 1
+          return HttpResponse.json({
+            data: { event_id: params.eventId, room_id: ROOM },
+          })
+        },
+      ),
+    )
+    return {
+      asked,
+      peak: () => peak,
+      /** Let every request now open finish. */
+      releaseOpen: () => release.splice(0).forEach((done) => done()),
+    }
+  }
+
+  /**
+   * #662: a room with about 300 threads sent about 300 requests at once on
+   * every open, which in the packaged app is as many TLS handshakes.
+   */
+  it('fetches roots a few at a time, most recently active thread first', async () => {
+    const room = manyThreads(20)
+    const store = makeStore()
+    await store.refresh()
+
+    await vi.waitFor(() =>
+      expect(room.asked).toHaveLength(ROOT_FETCH_CONCURRENCY),
+    )
+    expect(room.asked.slice().sort()).toEqual(
+      ['$root19', '$root18', '$root17', '$root16', '$root15', '$root14'].sort(),
+    )
+
+    while (store.roots.value.size < 20) {
+      room.releaseOpen()
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    expect(room.asked).toHaveLength(20)
+    expect(room.peak()).toBe(ROOT_FETCH_CONCURRENCY)
+  })
+
+  it('stops asking once the room is left, and asks again on a later refresh', async () => {
+    const room = manyThreads(20)
+    const store = makeStore()
+    await store.refresh()
+    await vi.waitFor(() =>
+      expect(room.asked).toHaveLength(ROOT_FETCH_CONCURRENCY),
+    )
+
+    store.stop()
+    // The six in flight were aborted, so answering them now changes nothing.
+    room.releaseOpen()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(store.roots.value.size).toBe(0)
+    expect(room.asked).toHaveLength(ROOT_FETCH_CONCURRENCY)
+
+    // Aborted is not missed: the same six newest roots are asked for again.
+    await store.refresh()
+    await vi.waitFor(() =>
+      expect(room.asked).toHaveLength(2 * ROOT_FETCH_CONCURRENCY),
+    )
+    expect(room.asked.slice(ROOT_FETCH_CONCURRENCY).sort()).toEqual(
+      room.asked.slice(0, ROOT_FETCH_CONCURRENCY).sort(),
+    )
+    while (store.roots.value.size < 20) {
+      room.releaseOpen()
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  })
+
+  /**
+   * `stop()` used to empty only the queue that existed. A summaries response
+   * still on its way refilled it, and all 20 roots were then fetched for a
+   * room the reader had already left.
+   */
+  it('ignores a summary response that arrives after the room is left', async () => {
+    const room = manyThreads(20)
+    let answer!: () => void
+    server.use(
+      http.get(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads`,
+        async () => {
+          await new Promise<void>((resolve) => (answer = resolve))
+          return HttpResponse.json({
+            data: [{ root_event_id: '$late', reply_count: 1 }],
+          })
+        },
+      ),
+    )
+    const store = makeStore()
+    const refreshing = store.refresh()
+    await vi.waitFor(() => expect(answer).toBeDefined())
+
+    store.stop()
+    answer()
+    await refreshing
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(room.asked).toEqual([])
+    expect(store.summaries.value.size).toBe(0)
+    // Still waiting, as far as this store knows: the answer it got was for a
+    // question `stop()` withdrew, and a newer refresh may be in flight.
+    expect(store.loading.value).toBe(true)
   })
 
   it('surfaces list errors', async () => {
