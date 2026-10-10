@@ -156,6 +156,16 @@ jobs:
       - name: Take the bundle version from the release version
         run: scripts/bundle-version.sh sync
 
+      # Name the build for the commit, not the tree. vite.config.ts appends
+      # `-dirty` to the build id when `git status` is non-empty for clients/web,
+      # and the sync above edits package.json in this checkout, which can leave
+      # the tree reporting as modified (seen on the Windows runner), so the
+      # build would ship as `<hash>-dirty`. The override
+      # is the one vite.config.ts already honours. Exported to later steps
+      # through $GITHUB_ENV; same pin as `.github/actions/tauri-build`.
+      - name: Pin the build id to the commit
+        run: echo "VITE_AXON_WEB_VERSION=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+
       # `generate_context!()` embeds `../dist` at compile time, so the frontend
       # has to exist before the crate will compile, including for clippy.
       - name: Build the frontend the crate embeds

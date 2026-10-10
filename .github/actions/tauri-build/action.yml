@@ -53,12 +53,22 @@ runs:
     # The list is every credential any platform's build reads, not only the
     # ones a given job sets: the loop is harmless for a variable that was never
     # there, and a per-platform list is what let the earlier copies drift.
+    #
+    # **The build id is pinned to the commit.** `vite.config.ts` appends
+    # `-dirty` to the id when `git status` is non-empty for `clients/web`, and
+    # the sync step above deliberately edits `package.json` in this checkout.
+    # On the Windows runner that leaves the tree reporting ` M package.json`
+    # before the build starts (Linux and macOS stay clean), so the build shipped
+    # as `<hash>-dirty`. A release build is the commit it was cut from; naming
+    # it otherwise is wrong. `-dirty` stays a development-only marker.
     - name: Build bundles
       shell: bash
       working-directory: clients/web
       env:
         TAURI_BUILD_ARGS: ${{ inputs.args }}
       run: |
+        VITE_AXON_WEB_VERSION=$(git rev-parse --short=12 HEAD)
+        export VITE_AXON_WEB_VERSION
         for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
                    APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD \
                    APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY \
