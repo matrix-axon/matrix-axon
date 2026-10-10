@@ -455,6 +455,17 @@ export default defineConfig({
     __AXON_WEB_RELEASE__: JSON.stringify(RELEASE),
     __AXON_WEB_VERSION__: JSON.stringify(VERSION),
     __AXON_WEB_BUILT_AT__: JSON.stringify(BUILT_AT),
+    // The Tauri CLI sets `TAURI_ENV_PLATFORM` for `beforeDevCommand` and
+    // `beforeBuildCommand` (the OS field of the target triple). A browser
+    // `pnpm build` and vitest leave it unset. The shell reads the baked
+    // value for `iconBadgeSupport` instead of sniffing the user agent.
+    // A running shell throws when that value is empty, so a `dist` from a
+    // plain `pnpm build` cannot claim a desktop badge. `beforeDevCommand`
+    // is `pnpm dev --strictPort`, so `tauri dev` does not attach to a
+    // server that was started without the variable.
+    __AXON_TAURI_PLATFORM__: JSON.stringify(
+      process.env.TAURI_ENV_PLATFORM ?? '',
+    ),
   },
   server: {
     // `false` rather than undefined: that is Vite's "loopback only", and it is

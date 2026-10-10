@@ -1493,6 +1493,7 @@ limitations under the License.
 ================================================================================
 LICENSE: Apache License 2.0 (SPDX ID: Apache-2.0)
 USED BY:
+  - matrix-sdk-base 0.19.1
   - aws-lc-sys 0.45.0
   - blake3 1.8.7
   - constant_time_eq 0.4.2
@@ -1500,7 +1501,6 @@ USED BY:
   - dunce 1.0.5
   - matrix-pickle-derive 0.2.3
   - matrix-pickle 0.2.3
-  - matrix-sdk-base 0.19.1
   - matrix-sdk-common 0.19.1
   - matrix-sdk-crypto 0.19.1
   - matrix-sdk-sqlite 0.19.1

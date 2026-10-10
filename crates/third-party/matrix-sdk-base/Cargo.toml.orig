@@ -1,0 +1,134 @@
+[package]
+authors = ["Damir Jelić <poljar@termina.org.uk>"]
+description = "The base component to build a Matrix client library."
+edition = "2024"
+keywords = ["matrix", "chat", "messaging", "ruma", "nio"]
+license = "Apache-2.0"
+name = "matrix-sdk-base"
+repository = "https://github.com/matrix-org/matrix-rust-sdk"
+rust-version.workspace = true
+version = "0.19.1"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs", "--generate-link-to-definition"]
+
+[package.metadata.cargo-machete]
+# serde_bytes is only used in `#[serde(with = "...")]` attributes.
+ignored = ["serde_bytes"]
+
+[features]
+default = []
+e2e-encryption = ["dep:matrix-sdk-crypto"]
+js = [
+    "matrix-sdk-common/js",
+    "matrix-sdk-crypto?/js",
+    "ruma/js",
+    "matrix-sdk-store-encryption/js",
+]
+qrcode = ["matrix-sdk-crypto?/qrcode"]
+automatic-room-key-forwarding = [
+    "matrix-sdk-crypto?/automatic-room-key-forwarding",
+]
+experimental-send-custom-to-device = [
+    "matrix-sdk-crypto?/experimental-send-custom-to-device",
+]
+
+# Enable experimental support for encrypting state events; see
+# https://github.com/matrix-org/matrix-rust-sdk/issues/5397.
+experimental-encrypted-state-events = [
+    "e2e-encryption",
+    "ruma/unstable-msc4362",
+    "matrix-sdk-crypto?/experimental-encrypted-state-events"
+]
+
+# Enable experimental support for pushing secrets
+experimental-push-secrets = [
+    "e2e-encryption",
+    "matrix-sdk-crypto?/experimental-push-secrets"
+]
+
+uniffi = ["dep:uniffi", "matrix-sdk-crypto?/uniffi", "matrix-sdk-common/uniffi"]
+
+# Private feature, see
+# https://github.com/matrix-org/matrix-rust-sdk/pull/3749#issuecomment-2312939823 for the gory
+# details.
+test-send-sync = [
+    "matrix-sdk-common/test-send-sync",
+    "matrix-sdk-crypto?/test-send-sync",
+]
+
+# helpers for testing features build upon this
+testing = [
+    "dep:assert_matches",
+    "dep:assert_matches2",
+    "dep:http",
+    "dep:matrix-sdk-test",
+    "matrix-sdk-crypto?/testing",
+]
+
+# Add support for inline media galleries via msgtypes
+unstable-msc4274 = []
+
+# Add support for user status profile fields (m.status, m.call).
+unstable-msc4426 = ["ruma/unstable-msc4426"]
+
+experimental-element-recent-emojis = []
+experimental-x509-identity-verification = ["e2e-encryption", "matrix-sdk-crypto/experimental-x509-identity-verification"]
+
+[dependencies]
+as_variant.workspace = true
+assert_matches = { workspace = true, optional = true }
+assert_matches2 = { workspace = true, optional = true }
+async-trait.workspace = true
+bitflags = { workspace = true, features = ["serde"] }
+decancer = { version = "3.3.3", default-features = false }
+eyeball = { workspace = true, features = ["async-lock"] }
+eyeball-im.workspace = true
+futures-util.workspace = true
+growable-bloom-filter.workspace = true
+http = { workspace = true, optional = true }
+matrix-sdk-common.workspace = true
+matrix-sdk-crypto = { workspace = true, optional = true }
+matrix-sdk-store-encryption.workspace = true
+matrix-sdk-test = { workspace = true, optional = true }
+regex.workspace = true
+ruma = { workspace = true, features = [
+    "unstable-msc2867",
+    "unstable-msc3381",
+    "unstable-msc4186",
+    "unstable-msc4262",
+    "rand",
+] }
+serde = { workspace = true, features = ["rc"] }
+serde_bytes.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+unicode-normalization.workspace = true
+uniffi = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyhow.workspace = true
+assert_matches.workspace = true
+assert_matches2.workspace = true
+assign = "1.1.1"
+futures-executor.workspace = true
+http.workspace = true
+matrix-sdk-test.workspace = true
+matrix-sdk-test-utils.workspace = true
+proptest.workspace = true
+similar-asserts.workspace = true
+stream_assert.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[target.'cfg(target_family = "wasm")'.dev-dependencies]
+wasm-bindgen-test.workspace = true
+getrandom3 = { version = "0.3.4", package = "getrandom", default-features = false, features = ["wasm_js"] }
+gloo-timers = { workspace = true, features = ["futures"] }
+
+[lints]
+workspace = true

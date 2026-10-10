@@ -25,7 +25,7 @@ members = [
 # the pre-push gate, none of which should need webkit2gtk or should be building
 # a desktop app. Listed here so cargo treats the nested package as excluded on
 # purpose rather than reporting it as an unlisted workspace member.
-exclude = ["clients/web/src-tauri"]
+exclude = ["clients/web/src-tauri", "crates/third-party/matrix-sdk-base"]
 
 [workspace.package]
 version = "0.1.7"
@@ -82,8 +82,9 @@ fs4 = { version = "0.13" }
 # Matrix. Keep the SDK's default features (they carry its intended TLS/HTTP
 # stack — 0.19 exposes no standalone tls feature). Extra features are added at
 # the crate level.
-matrix-sdk    = { version = "0.19" }
-matrix-sdk-ui = { version = "0.19" }
+matrix-sdk    = { version = "=0.19.1" }
+matrix-sdk-ui = { version = "=0.19.1" }
+matrix-sdk-base = { version = "=0.19.1" }
 
 # Platform-standard data/config/cache directory resolution (XDG on Linux,
 # ~/Library on macOS, Known Folders on Windows) for the on-disk store defaults.
@@ -151,3 +152,7 @@ tracing            = { version = "0.1" }
 tracing-subscriber = { version = "0.3", default-features = false }
 tower-http         = { version = "0.6" }
 dotenvy            = { version = "0.15" }
+
+# Temporary, reproducible SDK provenance fix; see the vendored patch README.
+[patch.crates-io]
+matrix-sdk-base = { path = "crates/third-party/matrix-sdk-base" }

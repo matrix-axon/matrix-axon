@@ -9888,7 +9888,7 @@
         "properties": {
           "data": {
             "type": "object",
-            "description": "Room info (`GET …/rooms/{room_id}/info`, issue #404, ADR 0084): four small\n\"what kind of room is this\" singleton state reads bundled into one call.\nEach field is `None` when the room has no such state set (or is unknown\nto Axon) — an unknown room reads as all-`None`, not a 404.",
+            "description": "Room info (`GET …/rooms/{room_id}/info`, issue #404, ADR 0084): four small\n\"what kind of room is this\" singleton state reads and cached SDK counts.\nEach state field is `None` when the room has no such state set (or is unknown\nto Axon) — an unknown room reads as all-`None`, not a 404.",
             "properties": {
               "encryption_algorithm": {
                 "type": [
@@ -9917,6 +9917,17 @@
                   "null"
                 ],
                 "description": "`m.room.join_rules` `content.join_rule`\n(`invite`/`public`/`knock`/`restricted`/`knock_restricted`/…)."
+              },
+              "member_counts": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/RoomMemberCountsDto",
+                    "description": "SDK summary counts; null before observation or after loss of membership."
+                  }
+                ]
               }
             }
           }
@@ -13938,7 +13949,7 @@
       },
       "RoomInfoDto": {
         "type": "object",
-        "description": "Room info (`GET …/rooms/{room_id}/info`, issue #404, ADR 0084): four small\n\"what kind of room is this\" singleton state reads bundled into one call.\nEach field is `None` when the room has no such state set (or is unknown\nto Axon) — an unknown room reads as all-`None`, not a 404.",
+        "description": "Room info (`GET …/rooms/{room_id}/info`, issue #404, ADR 0084): four small\n\"what kind of room is this\" singleton state reads and cached SDK counts.\nEach state field is `None` when the room has no such state set (or is unknown\nto Axon) — an unknown room reads as all-`None`, not a 404.",
         "properties": {
           "encryption_algorithm": {
             "type": [
@@ -13967,6 +13978,17 @@
               "null"
             ],
             "description": "`m.room.join_rules` `content.join_rule`\n(`invite`/`public`/`knock`/`restricted`/`knock_restricted`/…)."
+          },
+          "member_counts": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RoomMemberCountsDto",
+                "description": "SDK summary counts; null before observation or after loss of membership."
+              }
+            ]
           }
         }
       },
@@ -13985,6 +14007,30 @@
           },
           "type": {
             "type": "string"
+          }
+        }
+      },
+      "RoomMemberCountsDto": {
+        "type": "object",
+        "description": "Cached SDK summary, independent of the partial member list.",
+        "required": [
+          "joined",
+          "invited",
+          "observed_at"
+        ],
+        "properties": {
+          "invited": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "joined": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "observed_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Database-clock time in Unix milliseconds when this count pair changed locally.\nUnchanged confirmations retain this timestamp; it is not a freshness signal."
           }
         }
       },

@@ -573,11 +573,13 @@ impl From<SpaceParentRow> for SpaceParentDto {
 }
 
 /// Room info (`GET …/rooms/{room_id}/info`, issue #404, ADR 0084): four small
-/// "what kind of room is this" singleton state reads bundled into one call.
-/// Each field is `None` when the room has no such state set (or is unknown
+/// "what kind of room is this" singleton state reads and cached SDK counts.
+/// Each state field is `None` when the room has no such state set (or is unknown
 /// to Axon) — an unknown room reads as all-`None`, not a 404.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RoomInfoDto {
+    /// SDK summary counts; null before observation or after loss of membership.
+    pub member_counts: Option<RoomMemberCountsDto>,
     /// `m.room.join_rules` `content.join_rule`
     /// (`invite`/`public`/`knock`/`restricted`/`knock_restricted`/…).
     pub join_rule: Option<String>,
@@ -589,6 +591,16 @@ pub struct RoomInfoDto {
     /// unencrypted. Matrix has no mechanism to turn encryption back off, so
     /// once this is `Some` it stays `Some`.
     pub encryption_algorithm: Option<String>,
+}
+
+/// Cached SDK summary, independent of the partial member list.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RoomMemberCountsDto {
+    pub joined: i64,
+    pub invited: i64,
+    /// Database-clock time in Unix milliseconds when this count pair changed locally.
+    /// Unchanged confirmations retain this timestamp; it is not a freshness signal.
+    pub observed_at: i64,
 }
 
 /// Upgrade chain (`GET …/rooms/{room_id}/upgrade`, issue #404, ADR 0084):

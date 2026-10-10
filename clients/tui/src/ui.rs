@@ -534,9 +534,16 @@ fn prepare_popup(app: &mut App, screen: Rect) {
         }
         PopupKind::RoomInfo => (
             "Room Info  (Esc to close, Up/Down scroll)",
+            // Wrapped here rather than by the widget: scrolling counts rows,
+            // so a field that wraps must already be the rows it will occupy.
             popup_room_info_lines(app)
                 .into_iter()
-                .map(Line::from)
+                .flat_map(|line| {
+                    crate::app::room_info::wrap_styled_line(
+                        crate::app::room_info::styled_line(line, &app.colors),
+                        usize::from(area.width.saturating_sub(2)),
+                    )
+                })
                 .collect(),
         ),
         PopupKind::Status => (
@@ -2657,11 +2664,6 @@ pub(crate) fn popup_room_info_lines(app: &App) -> Vec<String> {
     let Some(room) = app.selected_room() else {
         return vec!["No room selected.".to_owned()];
     };
-    let aliases = room
-        .canonical_alias
-        .as_deref()
-        .map(str::to_owned)
-        .unwrap_or_else(|| "unavailable (API support needed for alias list)".to_owned());
     let account_user_id = room
         .account_user_id
         .as_deref()
@@ -2674,7 +2676,6 @@ pub(crate) fn popup_room_info_lines(app: &App) -> Vec<String> {
         format!("Matrix ID: {}", room.room_id),
         format!("Account ID: {}", room.account_id),
         format!("Your Matrix ID: {account_user_id}"),
-        format!("Aliases: {aliases}"),
         format!("Topic: {topic}"),
         format!("Avatar: {avatar}"),
         format!(
@@ -2682,12 +2683,15 @@ pub(crate) fn popup_room_info_lines(app: &App) -> Vec<String> {
             format_time(room.last_activity_ts, app.display.time_format)
         ),
         format!("Last event: {last_event}"),
-        "Encryption: unavailable (API support needed)".to_owned(),
-        "Access: unavailable (API support needed)".to_owned(),
-        "Room type/version: unavailable (API support needed)".to_owned(),
         "".to_owned(),
-        "Members from loaded timeline:".to_owned(),
     ];
+    lines.extend(crate::app::room_info::detail_lines(
+        room,
+        app.room_info.state.as_ref(),
+        app.display.time_format,
+    ));
+    lines.push("".to_owned());
+    lines.push("Members from loaded timeline:".to_owned());
 
     // For an unnamed room (e.g. a DM), the `Name:` line above is the raw room id.
     // Surface the member-derived display name too, once one has been resolved.
@@ -2697,7 +2701,7 @@ pub(crate) fn popup_room_info_lines(app: &App) -> Vec<String> {
 
     let members = known_room_members(app);
     if members.is_empty() {
-        lines.push("  unavailable (API support needed for complete room members)".to_owned());
+        lines.push("  none in the loaded timeline".to_owned());
     } else {
         lines.extend(members.into_iter().map(|member| {
             let display_name = member
@@ -2711,7 +2715,7 @@ pub(crate) fn popup_room_info_lines(app: &App) -> Vec<String> {
         }));
         lines.push("".to_owned());
         lines.push(
-            "Complete member list requires API support; this list only reflects loaded timeline state."
+            "This list only reflects loaded timeline events; the count above is authoritative."
                 .to_owned(),
         );
     }
@@ -4498,9 +4502,11 @@ mod tests {
 
         assert!(text.contains("Name: Ops"));
         assert!(text.contains("Matrix ID: !room:example.com"));
-        assert!(text.contains("Aliases: #ops:example.com"));
+        assert!(text.contains("Canonical alias: #ops:example.com"));
         assert!(text.contains("Topic: Daily operations"));
         assert!(text.contains("Alice  @alice:example.com  (join)"));
-        assert!(text.contains("Encryption: unavailable"));
+        // Nothing has been fetched in this test: the summary still renders.
+        assert!(text.contains("Advertised aliases: not loaded"));
+        assert!(text.contains("Members: not loaded"));
     }
 }

@@ -89,6 +89,7 @@ impl App {
         self.rooms_without_derived_title.remove(key);
         self.drafts_written_since_fetch.remove(key);
         self.unread_threads.remove(key);
+        self.prune_room_info(key);
     }
 
     /// Kick off background `/members` reads for the rooms **on screen** that have
