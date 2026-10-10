@@ -16,7 +16,7 @@ import WebSocketClient from '@tauri-apps/plugin-websocket'
 import { fileFromPath } from '../media/dropped-file'
 import { MAX_UPLOAD_BYTES } from '../media/media-service'
 import { basename } from '../media/filename'
-import { isMenuCommand, isMobileShell } from './index'
+import { iconBadgeSupportFor, isMenuCommand, isMobileShell } from './index'
 import type { LiveSocket, Platform, SaveOutcome, SaveRequest } from './index'
 import { NO_NATIVE_AUTH, type NativeAuth } from './native-auth'
 import {
@@ -335,8 +335,18 @@ async function readDroppedFiles(paths: readonly string[]): Promise<File[]> {
  * `native` is what `loadNativeAuth` found: the Keychain and the Apple sheet on
  * iOS, neither anywhere else. Passed in rather than loaded here because loading
  * it is async and this is not; `main.tsx` awaits it before the first render.
+ *
+ * `shellPlatform` is `TAURI_ENV_PLATFORM` for the target this bundle was built
+ * for, baked as `__AXON_TAURI_PLATFORM__`. Tests pass it. Empty is a browser
+ * build or vitest; a running shell throws in `main.tsx` before it gets here.
+ * The user agent is not a source for the icon badge: an iPad shell is `ios`
+ * at build time, even when its webview claims to be a Mac.
  */
-export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
+export function tauriPlatform(
+  native: NativeAuth = NO_NATIVE_AUTH,
+  shellPlatform: string = __AXON_TAURI_PLATFORM__,
+): Platform {
+  const iconBadgeSupport = iconBadgeSupportFor(shellPlatform)
   startMessageNotifications()
   // One read per platform object. A Settings request replaces it, so a grant
   // applies to the next message and a denial does not stick across that request.
@@ -598,11 +608,15 @@ export function tauriPlatform(native: NativeAuth = NO_NATIVE_AUTH): Platform {
     onNotificationClick: subscribeNotificationClicks,
     // The notification plugin has no badge command. `set_icon_badge` is the
     // shell's own: Dock, Unity launcher, iOS icon number, or a Windows
-    // taskbar overlay. Android has no launcher-badge API here, so `null`
-    // tells the page this platform has no icon of its own.
-    setIconBadge: isAndroidShell()
-      ? null
-      : (count) => invoke('set_icon_badge', { count }),
+    // taskbar overlay. Android (`iconBadgeSupport === 'none'`) has no
+    // launcher-badge API here, so the setter is `null` and the page does not
+    // call the command. The note Settings shows is the capability, not a
+    // guess from the user agent.
+    iconBadgeSupport,
+    setIconBadge:
+      iconBadgeSupport === 'none'
+        ? null
+        : (count) => invoke('set_icon_badge', { count }),
   }
 }
 
@@ -698,7 +712,18 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** Channel commands exist only on Android. iOS is a mobile shell and is not. */
+/**
+ * Channel commands exist only on the Android binary. iOS is a mobile shell
+ * and is not.
+ *
+ * This reads the user agent, not `iconBadgeSupport`. The badge follows the
+ * frontend's build target, because an iPad webview can claim to be a Mac.
+ * The channel follows the running webview, because a `dist` built without
+ * `TAURI_ENV_PLATFORM` can still be embedded in an Android shell, and the
+ * plugin command is in that binary. `'none'` means this stack has no
+ * launcher badge, not "this process is Android", so the channel must not
+ * follow it.
+ */
 function isAndroidShell(userAgent = navigator.userAgent): boolean {
   return /Android/i.test(userAgent)
 }

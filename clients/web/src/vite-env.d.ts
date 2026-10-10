@@ -3,6 +3,11 @@
 declare const __AXON_WEB_RELEASE__: string
 declare const __AXON_WEB_VERSION__: string
 declare const __AXON_WEB_BUILT_AT__: string
+/**
+ * OS field of the Tauri target triple (`TAURI_ENV_PLATFORM`), or `""` when
+ * this bundle was not built for a shell. See `iconBadgeSupportFor`.
+ */
+declare const __AXON_TAURI_PLATFORM__: string
 
 interface ImportMetaEnv {
   /** Cross-origin server base for separately-hosted deployments (M-W1.5). */
