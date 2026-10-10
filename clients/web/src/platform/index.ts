@@ -377,13 +377,17 @@ export interface Platform {
   /**
    * Set the OS icon badge to `count`, or clear it when `count` is `null`.
    *
-   * `null` as the method means this platform has no icon of its own.
-   * A browser returns that, and so does the Android shell: this stack has
-   * no launcher-badge API there (`iconBadgeSupport` is `'web'` or `'none'`).
-   * `applyAppBadge` then uses the Badging API (ADR 0080). The other packaged
-   * webviews either omit that API or resolve it without painting, so those
-   * shells set the icon in-process. Which note to show is `iconBadgeSupport`,
-   * not this null.
+   * `null` exactly when `iconBadgeSupport` is `'web'` or `'none'`.
+   * Every other value has a setter. Both fields stay on `Platform` so a
+   * test can pass a partial, and so `applyAppBadge` can follow the setter
+   * without reading the note. This app builds no platform that pairs
+   * `'native'` with null, or `'none'` with a setter.
+   *
+   * A browser returns null, and so does the Android shell: this stack has
+   * no launcher-badge API there. `applyAppBadge` then uses the Badging API
+   * (ADR 0080). The other packaged webviews either omit that API or resolve
+   * it without painting, so those shells set the icon in-process. Which note
+   * to show is `iconBadgeSupport`, not this null.
    */
   setIconBadge: IconBadgeSetter | null
 }
@@ -412,9 +416,10 @@ export type IconBadgeSupport =
  * `target` is `TAURI_ENV_PLATFORM`: the OS field of the triple the CLI is
  * building. That is `linux`, `windows`, `darwin`, `ios`, `android`, or
  * `androideabi` (the armv7 Android triple keeps that OS name). An empty
- * string is a browser build or a unit test that did not pass a target, and
- * answers `'native'` so a shell constructed without one still has a setter.
- * A production shell build always receives the variable.
+ * string is a browser build or a unit test, and answers `'native'`.
+ * A running shell does not use that answer: `assertBakedShellTarget`
+ * throws first. Any other OS field throws, so a typo cannot claim a
+ * desktop badge.
  */
 export function iconBadgeSupportFor(target: string): IconBadgeSupport {
   switch (target) {
@@ -425,9 +430,30 @@ export function iconBadgeSupportFor(target: string): IconBadgeSupport {
       return 'launcher-dependent'
     case 'ios':
       return 'permission'
-    default:
+    case 'darwin':
+    case 'windows':
       return 'native'
+    case '':
+      return 'native'
+    default:
+      throw new Error(`unknown TAURI_ENV_PLATFORM '${target}'`)
   }
+}
+
+/**
+ * Refuse a shell whose frontend was built without `TAURI_ENV_PLATFORM`.
+ *
+ * That bundle would otherwise claim `'native'` and hide the Android note.
+ * Browser builds and vitest leave the variable unset on purpose, so
+ * `main.tsx` calls this only after `isTauriRuntime()`.
+ */
+export function assertBakedShellTarget(target: string): void {
+  if (target !== '') {
+    return
+  }
+  throw new Error(
+    'This shell was built without TAURI_ENV_PLATFORM, so it could not tell which icon badge it has. Build it with pnpm tauri build or pnpm tauri dev.',
+  )
 }
 
 /** What a native menu item asks the page to do. */

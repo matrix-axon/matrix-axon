@@ -332,27 +332,19 @@ async function readDroppedFiles(paths: readonly string[]): Promise<File[]> {
 }
 
 /**
- * OS field of the target triple this bundle was built for.
- *
- * Empty in a browser build and under vitest. `tauriPlatform` lets a test pass
- * the target instead.
- */
-function bakedShellPlatform(): string {
-  return __AXON_TAURI_PLATFORM__
-}
-
-/**
  * `native` is what `loadNativeAuth` found: the Keychain and the Apple sheet on
  * iOS, neither anywhere else. Passed in rather than loaded here because loading
  * it is async and this is not; `main.tsx` awaits it before the first render.
  *
  * `shellPlatform` is `TAURI_ENV_PLATFORM` for the target this bundle was built
- * for. Tests pass it. The user agent is not a source for the icon badge: an
- * iPad shell is `ios` at build time, even when its webview claims to be a Mac.
+ * for, baked as `__AXON_TAURI_PLATFORM__`. Tests pass it. Empty is a browser
+ * build or vitest; a running shell throws in `main.tsx` before it gets here.
+ * The user agent is not a source for the icon badge: an iPad shell is `ios`
+ * at build time, even when its webview claims to be a Mac.
  */
 export function tauriPlatform(
   native: NativeAuth = NO_NATIVE_AUTH,
-  shellPlatform: string = bakedShellPlatform(),
+  shellPlatform: string = __AXON_TAURI_PLATFORM__,
 ): Platform {
   const iconBadgeSupport = iconBadgeSupportFor(shellPlatform)
   startMessageNotifications()
@@ -720,7 +712,18 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** Channel commands exist only on Android. iOS is a mobile shell and is not. */
+/**
+ * Channel commands exist only on the Android binary. iOS is a mobile shell
+ * and is not.
+ *
+ * This reads the user agent, not `iconBadgeSupport`. The badge follows the
+ * frontend's build target, because an iPad webview can claim to be a Mac.
+ * The channel follows the running webview, because a `dist` built without
+ * `TAURI_ENV_PLATFORM` can still be embedded in an Android shell, and the
+ * plugin command is in that binary. `'none'` means this stack has no
+ * launcher badge, not "this process is Android", so the channel must not
+ * follow it.
+ */
 function isAndroidShell(userAgent = navigator.userAgent): boolean {
   return /Android/i.test(userAgent)
 }

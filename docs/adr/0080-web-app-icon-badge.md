@@ -124,6 +124,9 @@ volume is what a badge conventionally means.
   `'native'` is the macOS Dock and the Windows overlay.
   `'web'` is a browser, which still uses the Badging API and the Safari permission note.
   An iPad shell reports `'permission'` because that bundle was built for iOS, including when its webview claims to be a Mac.
+  A shell whose bundle has an empty target throws at boot instead of claiming `'native'`.
+  `darwin` and `windows` are named, and any other OS field throws.
+  An empty string is only the answer for a browser build and for unit tests.
 - **New `RoomsStore.unreadTotal` signal** (`stores/rooms.ts`), maintained
   alongside `unreadKeys` inside `setUnreadCounts`: each call that changes a
   room's `notificationCount` adds the delta (`next - previous`) to a running

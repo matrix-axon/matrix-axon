@@ -474,6 +474,8 @@ describe('message notifications in the shell', () => {
   }
 
   it('opens a high-importance messages channel on Android', async () => {
+    // The channel follows the webview, not the baked badge target. An empty
+    // target still creates the channel when the user agent is Android.
     asAndroid()
     tauriPlatform()
     await vi.waitFor(() => expect(createChannel).toHaveBeenCalled())
@@ -539,9 +541,9 @@ describe('message notifications in the shell', () => {
     asAndroid()
     const invoke = vi.fn(() => Promise.resolve(null))
     installInvoke(invoke)
-    // vitest bakes no `TAURI_ENV_PLATFORM`, so an Android user agent is still
-    // the desktop default. The target is what names the shell.
-    const platform = tauriPlatform()
+    // The target is passed in, so this does not depend on what an empty bake
+    // answers. An Android user agent does not change a darwin shell.
+    const platform = tauriPlatform(undefined, 'darwin')
     expect(platform.iconBadgeSupport).toBe('native')
     expect(platform.setIconBadge).toBeTypeOf('function')
     expect(invoke).not.toHaveBeenCalled()
