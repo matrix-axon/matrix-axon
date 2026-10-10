@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axon_store::Store;
 use axum::extract::State;
-use futures_util::future::{try_join, try_join4};
+use futures_util::future::{try_join, try_join5};
 use serde::Deserialize;
 use serde_json::Value;
 use utoipa::IntoParams;
@@ -473,39 +473,52 @@ pub async fn room_info(
     State(store): State<Store>,
     Path((account_id, room_id)): Path<(Uuid, String)>,
 ) -> Result<ApiResponse<RoomInfoDto>, ApiError> {
-    let (join_rule, history_visibility, guest_access, encryption_algorithm) = try_join4(
-        singleton_state_field(
-            &store,
-            account_id,
-            &room_id,
-            "m.room.join_rules",
-            "join_rule",
-        ),
-        singleton_state_field(
-            &store,
-            account_id,
-            &room_id,
-            "m.room.history_visibility",
-            "history_visibility",
-        ),
-        singleton_state_field(
-            &store,
-            account_id,
-            &room_id,
-            "m.room.guest_access",
-            "guest_access",
-        ),
-        singleton_state_field(
-            &store,
-            account_id,
-            &room_id,
-            "m.room.encryption",
-            "algorithm",
-        ),
-    )
-    .await?;
+    let (join_rule, history_visibility, guest_access, encryption_algorithm, member_counts) =
+        try_join5(
+            singleton_state_field(
+                &store,
+                account_id,
+                &room_id,
+                "m.room.join_rules",
+                "join_rule",
+            ),
+            singleton_state_field(
+                &store,
+                account_id,
+                &room_id,
+                "m.room.history_visibility",
+                "history_visibility",
+            ),
+            singleton_state_field(
+                &store,
+                account_id,
+                &room_id,
+                "m.room.guest_access",
+                "guest_access",
+            ),
+            singleton_state_field(
+                &store,
+                account_id,
+                &room_id,
+                "m.room.encryption",
+                "algorithm",
+            ),
+            async {
+                store
+                    .room_member_counts(account_id, &room_id)
+                    .await
+                    .map_err(ApiError::from)
+            },
+        )
+        .await?;
 
+    let member_counts = member_counts.map(|c| crate::dto::RoomMemberCountsDto {
+        joined: c.joined,
+        invited: c.invited,
+        observed_at: c.observed_at,
+    });
     Ok(ApiResponse::new(RoomInfoDto {
+        member_counts,
         join_rule,
         history_visibility,
         guest_access,

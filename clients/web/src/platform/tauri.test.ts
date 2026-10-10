@@ -474,6 +474,8 @@ describe('message notifications in the shell', () => {
   }
 
   it('opens a high-importance messages channel on Android', async () => {
+    // The channel follows the webview, not the baked badge target. An empty
+    // target still creates the channel when the user agent is Android.
     asAndroid()
     tauriPlatform()
     await vi.waitFor(() => expect(createChannel).toHaveBeenCalled())
@@ -535,12 +537,34 @@ describe('message notifications in the shell', () => {
     )
   })
 
-  it('has no icon badge of its own on Android', () => {
+  it('does not decide the icon badge from the user agent', () => {
     asAndroid()
     const invoke = vi.fn(() => Promise.resolve(null))
     installInvoke(invoke)
-    expect(tauriPlatform().setIconBadge).toBeNull()
+    // The target is passed in, so this does not depend on what an empty bake
+    // answers. An Android user agent does not change a darwin shell.
+    const platform = tauriPlatform(undefined, 'darwin')
+    expect(platform.iconBadgeSupport).toBe('native')
+    expect(platform.setIconBadge).toBeTypeOf('function')
     expect(invoke).not.toHaveBeenCalled()
+  })
+
+  it('names badge support from the build target', () => {
+    expect(tauriPlatform(undefined, 'android').iconBadgeSupport).toBe('none')
+    expect(tauriPlatform(undefined, 'android').setIconBadge).toBeNull()
+    expect(tauriPlatform(undefined, 'androideabi').iconBadgeSupport).toBe(
+      'none',
+    )
+    expect(tauriPlatform(undefined, 'linux').iconBadgeSupport).toBe(
+      'launcher-dependent',
+    )
+    expect(tauriPlatform(undefined, 'linux').setIconBadge).toBeTypeOf(
+      'function',
+    )
+    expect(tauriPlatform(undefined, 'ios').iconBadgeSupport).toBe('permission')
+    expect(tauriPlatform(undefined, 'ios').setIconBadge).toBeTypeOf('function')
+    expect(tauriPlatform(undefined, 'darwin').iconBadgeSupport).toBe('native')
+    expect(tauriPlatform(undefined, 'windows').iconBadgeSupport).toBe('native')
   })
 
   it('posts through the plugin command, not window.Notification', async () => {

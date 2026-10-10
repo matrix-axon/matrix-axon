@@ -2412,8 +2412,8 @@ export interface components {
         ApiResponse_RoomInfoDto: {
             /**
              * @description Room info (`GET …/rooms/{room_id}/info`, issue #404, ADR 0084): four small
-             *     "what kind of room is this" singleton state reads bundled into one call.
-             *     Each field is `None` when the room has no such state set (or is unknown
+             *     "what kind of room is this" singleton state reads and cached SDK counts.
+             *     Each state field is `None` when the room has no such state set (or is unknown
              *     to Axon) — an unknown room reads as all-`None`, not a 404.
              */
             data: {
@@ -2432,6 +2432,7 @@ export interface components {
                  *     (`invite`/`public`/`knock`/`restricted`/`knock_restricted`/…).
                  */
                 join_rule?: string | null;
+                member_counts?: null | components["schemas"]["RoomMemberCountsDto"];
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -4436,8 +4437,8 @@ export interface components {
         };
         /**
          * @description Room info (`GET …/rooms/{room_id}/info`, issue #404, ADR 0084): four small
-         *     "what kind of room is this" singleton state reads bundled into one call.
-         *     Each field is `None` when the room has no such state set (or is unknown
+         *     "what kind of room is this" singleton state reads and cached SDK counts.
+         *     Each state field is `None` when the room has no such state set (or is unknown
          *     to Axon) — an unknown room reads as all-`None`, not a 404.
          */
         RoomInfoDto: {
@@ -4456,11 +4457,25 @@ export interface components {
              *     (`invite`/`public`/`knock`/`restricted`/`knock_restricted`/…).
              */
             join_rule?: string | null;
+            member_counts?: null | components["schemas"]["RoomMemberCountsDto"];
         };
         RoomJoinConditionMetadata: {
             /** @description Present for `m.room_membership`; other condition types may omit it. */
             room_id?: string | null;
             type: string;
+        };
+        /** @description Cached SDK summary, independent of the partial member list. */
+        RoomMemberCountsDto: {
+            /** Format: int64 */
+            invited: number;
+            /** Format: int64 */
+            joined: number;
+            /**
+             * Format: int64
+             * @description Database-clock time in Unix milliseconds when this count pair changed locally.
+             *     Unchanged confirmations retain this timestamp; it is not a freshness signal.
+             */
+            observed_at: number;
         };
         /** @description Bounded local state detail read; no remote acquisition or aggregation. */
         RoomMetadataDto: {

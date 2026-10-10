@@ -1,7 +1,7 @@
 # ADR 0111 — Cached room metadata with bounded progressive enrichment
 
 **Status:** Accepted; implementation proceeds through [issue 618](https://github.com/matrix-axon/matrix-axon/issues/618).
-The first step adds typed cached state reads; acquisition, discovery, member counts, and client consumption are follow-up work.
+Typed cached state reads and authoritative SDK member-count observations are implemented; acquisition, discovery, and client consumption are follow-up work.
 
 ## Context
 

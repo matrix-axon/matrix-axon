@@ -2,7 +2,11 @@ import { render } from 'preact'
 import './index.css'
 import { installAbortSignalAny } from './abort-signal-any.ts'
 import { AppRoot } from './app-root.tsx'
-import { browserPlatform, isTauriRuntime } from './platform/index.ts'
+import {
+  assertBakedShellTarget,
+  browserPlatform,
+  isTauriRuntime,
+} from './platform/index.ts'
 import { BUILD_INFO } from './build-info.ts'
 import {
   browserReloadEnvironment,
@@ -51,6 +55,9 @@ const root = document.getElementById('app')!
  * it was. Only the shell pays for its own plugins, and only it waits a tick.
  */
 if (isTauriRuntime()) {
+  // Before the shell platform is built. An empty bake claims `'native'`
+  // and would hide the Android note. The browser branch leaves this unset.
+  assertBakedShellTarget(__AXON_TAURI_PLATFORM__)
   void import('./platform/tauri.ts').then(
     async ({ tauriPlatform, loadNativeAuth }) => {
       // The Keychain is read before the first render, because auth reads its
