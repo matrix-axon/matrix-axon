@@ -1881,6 +1881,20 @@ async fn run_account(
             oauth_session_cancel.clone(),
         ))
     });
+    // SDK summary counts are reconciled locally with paced startup/recovery
+    // sweeps; this run owns both cancellation and shutdown. Start before sync
+    // and the awaited startup UTD sweep: that sweep can wait on backup requests,
+    // while membership updates and cached summaries must reconcile independently.
+    let member_counts_cancel = cancel.child_token();
+    let member_counts_refresh = Arc::new(tokio::sync::Notify::new());
+    let member_counts_handle = tokio::spawn(crate::member_counts::watch(
+        client.clone(),
+        store.clone(),
+        account.account_id,
+        member_counts_cancel.clone(),
+        member_counts_refresh.clone(),
+    ));
+
     sync_service.start().await;
     tracing::info!(account_id = %account.account_id, "sync service started");
 
@@ -2119,6 +2133,7 @@ async fn run_account(
                     }
                     if was_offline {
                         was_offline = false;
+                        member_counts_refresh.notify_one();
                         tracing::info!(account_id = %account.account_id, "sync service back online");
                     }
                     continue;
@@ -2141,6 +2156,11 @@ async fn run_account(
         }
     };
     verification_rooms.unregister(account.account_id, verification_room_run_id);
+
+    member_counts_cancel.cancel();
+    if let Err(err) = member_counts_handle.await {
+        tracing::warn!(account_id = %account.account_id, error = %err, "member count worker did not shut down cleanly");
+    }
 
     state_redaction_cancel.cancel();
     if let Err(err) = state_redaction_handle.await {

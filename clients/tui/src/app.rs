@@ -43,6 +43,7 @@ mod reactions;
 mod relations;
 mod render;
 mod room_actions;
+pub(crate) mod room_info;
 mod rooms;
 mod search_flow;
 pub(crate) mod spaces;
@@ -967,6 +968,8 @@ pub(crate) struct App {
     /// display names for live messages from unknown senders. `None` until the
     /// main loop wires it up (and in unit tests).
     pub(crate) members_tx: Option<mpsc::UnboundedSender<timeline::MembersOutcome>>,
+    /// Cached-state reads behind the `/whereami` popup (ADR 0114).
+    pub(crate) room_info: room_info::RoomInfoCache,
     /// Earliest instant a room may trigger another background `/members` refresh,
     /// rate-limiting the live unknown-sender path (see `spawn_members_refresh`).
     members_refresh_after: HashMap<RoomKey, std::time::Instant>,
@@ -1250,6 +1253,7 @@ impl App {
             relation_refresh_latest: HashMap::new(),
             relations_tx: None,
             members_tx: None,
+            room_info: room_info::RoomInfoCache::default(),
             members_refresh_after: HashMap::new(),
             rooms_without_derived_title: HashSet::new(),
             members_workers: Arc::new(Semaphore::new(MEMBERS_WORKERS)),
@@ -2094,11 +2098,14 @@ impl App {
         self.open_popup(PopupKind::MediaPreview);
     }
 
+    /// Paint the popup from the room summary now and let the cached-state
+    /// reads fill it in; a slow axon must not delay the popup (ADR 0114).
     fn show_whereami(&mut self) {
-        if self.selected_room().is_none() {
+        let Some(key) = self.selected_room().map(RoomKey::from) else {
             self.status = Status::Info("select a room before using /whereami".to_owned());
             return;
-        }
+        };
+        self.request_room_info(key);
         self.open_popup(PopupKind::RoomInfo);
     }
 

@@ -35,44 +35,29 @@ pub(crate) async fn watch(
     mut hints: mpsc::Receiver<OwnedRoomId>,
     cancel: CancellationToken,
 ) {
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut cursor = String::new();
-    let mut next_sweep = tokio::time::Instant::now();
+    let mut tick = crate::room_sweep::interval();
+    let mut sweep = crate::room_sweep::RoomSweep::new();
     // One paced worker per account: 32 queued hints and at most eight active
     // rooms (four sweep + four hint rooms), with 12 local reads per room.
     // Every tick advances the sweep, even under continuous hint traffic.
     loop {
         tokio::select! {
+            biased;
             _ = cancel.cancelled() => return,
             _ = tick.tick() => {},
         }
-        let mut rooms = HashSet::new();
-        if tokio::time::Instant::now() >= next_sweep {
-            let page = tokio::select! {
-                _ = cancel.cancelled() => return,
-                result = tokio::time::timeout(Duration::from_secs(2), ctx.store.state_reconciliation_rooms(ctx.account_id, &cursor)) => result,
-            };
-            match page {
-                Ok(Ok(page)) => {
-                    if let Some(last) = page.last() {
-                        cursor.clone_from(last);
-                    } else {
-                        cursor.clear();
-                        next_sweep = tokio::time::Instant::now() + Duration::from_secs(300);
-                    }
-                    rooms.extend(
-                        page.into_iter()
-                            .filter_map(|id| id.parse::<OwnedRoomId>().ok()),
-                    );
-                }
-                _ => {
-                    tracing::warn!(account_id = %ctx.account_id, "state redaction sweep page failed; will retry")
-                }
-            }
-        }
+        let Some(page) = sweep
+            .page(&ctx.store, ctx.account_id, &cancel, "state_redaction")
+            .await
+        else {
+            return;
+        };
+        let mut rooms: HashSet<_> = page.into_iter().collect();
         rooms.extend(take_hints(&mut hints));
         for room_id in rooms {
+            if cancel.is_cancelled() {
+                return;
+            }
             let Some(room) = client.get_room(&room_id) else {
                 continue;
             };
@@ -80,6 +65,7 @@ pub(crate) async fn watch(
                 continue;
             }
             let outcome = tokio::select! {
+                biased;
                 _ = cancel.cancelled() => return,
                 result = tokio::time::timeout(Duration::from_secs(2), reconcile_room(&ctx, &client, &room_id)) => result,
             };
@@ -92,17 +78,13 @@ pub(crate) async fn watch(
 
 /// Stop at the room budget, preserving the channel's tail for the next tick.
 fn take_hints(hints: &mut mpsc::Receiver<OwnedRoomId>) -> HashSet<OwnedRoomId> {
-    let mut rooms = HashSet::new();
-    for _ in 0..32 {
-        if rooms.len() == 4 {
-            break;
-        }
-        let Ok(room) = hints.try_recv() else {
-            break;
-        };
-        rooms.insert(room);
-    }
-    rooms
+    use crate::room_sweep::HintRead;
+    crate::room_sweep::take_hints(|| match hints.try_recv() {
+        Ok(room) => HintRead::Room(room),
+        Err(mpsc::error::TryRecvError::Empty) => HintRead::Empty,
+        Err(mpsc::error::TryRecvError::Disconnected) => HintRead::Closed,
+    })
+    .rooms
 }
 
 /// Ordinary message redactions need no SDK singleton reads. A failed filter

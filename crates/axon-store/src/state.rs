@@ -369,14 +369,16 @@ impl Store {
         account_id: Uuid,
         after: &str,
     ) -> Result<Vec<String>, StoreError> {
+        let mut tx = self.reconciliation_transaction().await?;
         let rows = sqlx_core::query_as::query_as::<Postgres, (String,)>(
             "SELECT room_id FROM room_summaries WHERE account_id = $1 AND room_id > $2 \
              ORDER BY room_id LIMIT 4",
         )
         .bind(account_id)
         .bind(after)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(rows.into_iter().map(|(room,)| room).collect())
     }
 
