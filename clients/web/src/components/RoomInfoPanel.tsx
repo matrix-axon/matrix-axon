@@ -16,6 +16,7 @@ import { useServices } from '../services'
 import type { MembersStore } from '../stores/members'
 import {
   memberDisplay,
+  membershipLabel,
   roomKey,
   roomListAvatarUrl,
   roomTitle,
@@ -32,6 +33,7 @@ import { RoomAvatar, roomAvatarColor } from './RoomAvatar'
 import { RoomSettingsForm } from './RoomSettingsForm'
 import { ErrorBanner } from './ErrorBanner'
 import { useModalFocus } from './use-modal-focus'
+import { useStartDm } from './use-start-dm'
 import { UserAvatar } from './UserAvatar'
 
 type RoomInfoDto = components['schemas']['RoomInfoDto']
@@ -96,8 +98,18 @@ export function RoomInfoPanel({
   const inviteInput = useRef<HTMLInputElement>(null)
   const { status: copyStatus, copy } = useCopyFeedback()
   const [filter, setFilter] = useState('')
-  const [dmUserId, setDmUserId] = useState<string | null>(null)
-  const [dmError, setDmError] = useState<string | null>(null)
+  const {
+    startDm,
+    pendingUserId: dmUserId,
+    error: dmError,
+    invalidate: invalidateDm,
+  } = useStartDm(accountId, (startedRoomId) => {
+    location.route(localRoomHref(accountId, startedRoomId, null))
+    onClose()
+  })
+  useEffect(() => {
+    invalidateDm()
+  }, [roomId, invalidateDm])
   const [inviteOpen, setInviteOpen] = useState(false)
   const [inviteValue, setInviteValue] = useState('')
   const [inviteStatus, setInviteStatus] = useState<string | null>(null)
@@ -380,21 +392,6 @@ export function RoomInfoPanel({
     await copy(href)
   }
 
-  const startDm = async (userId: string) => {
-    if (dmUserId !== null) {
-      return
-    }
-    setDmError(null)
-    setDmUserId(userId)
-    const result = await rooms.createDm(accountId, userId)
-    setDmUserId(null)
-    if (!result.ok) {
-      setDmError(`Could not start DM with ${userId}: ${result.message}`)
-      return
-    }
-    location.route(localRoomHref(accountId, result.roomId, null))
-    onClose()
-  }
   const submitInvite = async (event: Event) => {
     event.preventDefault()
     setInviteStatus(null)
@@ -1443,21 +1440,6 @@ function filteredMembers(members: MemberDto[], filter: string): MemberDto[] {
         }) || left.user_id.localeCompare(right.user_id)
       )
     })
-}
-
-function membershipLabel(membership: string): string {
-  switch (membership) {
-    case 'join':
-      return 'Joined'
-    case 'invite':
-      return 'Invited'
-    case 'leave':
-      return 'Left'
-    case 'ban':
-      return 'Banned'
-    default:
-      return membership || 'Unknown'
-  }
 }
 
 function isOnlyJoinedMember(

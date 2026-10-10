@@ -3887,6 +3887,15 @@ span.composer-attachment-thumb {
   padding-bottom: calc(1rem + var(--safe-bottom));
 }
 
+/* User information covers a thread that stays mounted. Below 64rem both
+   drawers share z-index 70, and a swipe transform would let the thread paint
+   through a later sibling. At 64rem the covered thread is hidden so it does
+   not become a fourth column; below that it stays painted so a back swipe
+   can reveal it. */
+#user-info-panel {
+  z-index: 71;
+}
+
 @media (max-width: 47.99rem) {
   .mobile-back-surface {
     position: relative;
@@ -3972,6 +3981,10 @@ span.composer-attachment-thumb {
 
   .room-stream {
     min-width: 22rem;
+  }
+
+  .thread-panel.thread-panel-covered {
+    display: none;
   }
 }
 

@@ -163,7 +163,9 @@ it('shows the room profile in the header and a differing global profile as detai
   expect(detail('Matrix ID')).toBe(ALICE)
   expect(detail('Membership')).toBe('Joined')
   expect(requestedUser).toBe(ALICE)
-  expect(getByRole('listitem').textContent).toContain('Phone')
+  await waitFor(() =>
+    expect(getByRole('listitem').textContent).toContain('Phone'),
+  )
   expect(getByRole('listitem').textContent).toContain('ALICEPHONE')
   expect(getByRole('listitem').textContent).toContain('Verified')
   expect(getByRole('listitem').textContent).toContain(
@@ -192,13 +194,14 @@ it('omits a global name that matches the room and says when no devices are track
 
 it('falls back to the global profile when the user is not in the room', async () => {
   server.use(profileHandler('Alice Global', null), deviceHandler())
-  renderPanel({ rows: [] })
+  const { queryByRole } = renderPanel({ rows: [] })
   await waitFor(() =>
     expect(
       document.querySelector('.room-info-identity-name')?.textContent,
     ).toBe('Alice Global'),
   )
   expect(detail('Membership')).toBe('Not in this room')
+  expect(queryByRole('button', { name: 'Copy Membership' })).toBeNull()
   expect(detail('Display name')).toBe('Alice Global')
   expect(detail('Room display name')).toBe('')
 })
@@ -305,9 +308,213 @@ it('reports a profile read failure and still lists devices', async () => {
     deviceHandler(),
   )
   const { findByRole, findByText } = renderPanel()
+  expect(document.activeElement?.textContent).toBe('Close')
   expect((await findByRole('alert')).textContent).toBe('profile down')
   await findByText('Axon has not tracked any devices for this user.')
   expect(document.querySelector('.room-info-identity-name')?.textContent).toBe(
     'Alice in room',
   )
+})
+
+const PHONE = {
+  device_id: 'ALICEPHONE',
+  display_name: 'Phone',
+  algorithms: ['m.megolm.v1.aes-sha2'],
+  is_verified: false,
+  is_cross_signed_by_owner: true,
+  local_trust_state: 'unset',
+}
+
+it('lists devices when the profile read throws', async () => {
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/users/:userId/profile`,
+      () => HttpResponse.error(),
+    ),
+    deviceHandler([PHONE]),
+  )
+  const { findByText, findByRole } = renderPanel()
+  await findByText('Phone')
+  const alert = await findByRole('alert')
+  expect(alert.textContent).not.toContain('Phone')
+  expect(alert.textContent?.length).toBeGreaterThan(0)
+})
+
+it('shows devices while the global profile is still loading', async () => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/users/:userId/profile`,
+      async () => {
+        await gate
+        return HttpResponse.json({
+          data: {
+            user_id: ALICE,
+            display_name: 'Later',
+            avatar_url: null,
+          },
+        })
+      },
+    ),
+    deviceHandler([PHONE]),
+  )
+  const view = renderPanel()
+  await view.findByText('Phone')
+  expect(detail('Global profile')).toBe('Loading…')
+  release()
+  await waitFor(() => expect(detail('Global display name')).toBe('Later'))
+})
+
+it('drops a direct-message result after the panel moves to another user', async () => {
+  let posted = false
+  let release!: (response: Response) => void
+  server.use(
+    profileHandler('Alice Global'),
+    deviceHandler(),
+    http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+      HttpResponse.json({ data: [] }),
+    ),
+    http.post(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/dm`, () => {
+      posted = true
+      return new Promise<Response>((resolve) => {
+        release = resolve
+      })
+    }),
+  )
+  const onClose = vi.fn()
+  const services = testServices()
+  function Panel({ userId }: { userId: string }) {
+    return (
+      <ServicesContext.Provider value={services}>
+        <LocationProvider>
+          <UserInfoPanel
+            accountId={ACCOUNT}
+            userId={userId}
+            ownUserId={ME}
+            members={membersStore([
+              member(ALICE, 'Alice'),
+              member('@bob:hs', 'Bob'),
+            ])}
+            onClose={onClose}
+          />
+        </LocationProvider>
+      </ServicesContext.Provider>
+    )
+  }
+  const view = render(<Panel userId={ALICE} />)
+  fireEvent.click(await view.findByRole('button', { name: 'Direct message' }))
+  await waitFor(() => expect(posted).toBe(true))
+  expect(
+    view.getByRole('button', { name: 'Starting…' }).hasAttribute('disabled'),
+  ).toBe(true)
+  view.rerender(<Panel userId="@bob:hs" />)
+  await view.findByRole('button', { name: 'Direct message' })
+  release(HttpResponse.json({ data: { room_id: CREATED } }))
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  expect(onClose).not.toHaveBeenCalled()
+  expect(decodeURIComponent(window.location.pathname)).not.toContain(CREATED)
+  expect(view.queryByRole('alert')).toBeNull()
+})
+
+it('copies a display name of None and does not copy membership', async () => {
+  server.use(profileHandler('Other'), deviceHandler())
+  const view = renderPanel({
+    rows: [member(ALICE, 'None', { membership: 'knock' })],
+  })
+  await waitFor(() => expect(detail('Membership')).toBe('Knocking'))
+  expect(detail('Room display name')).toBe('None')
+  expect(
+    view.getByRole('button', { name: 'Copy Room display name' }),
+  ).toBeTruthy()
+  expect(view.queryByRole('button', { name: 'Copy Membership' })).toBeNull()
+})
+
+it('keeps shown devices and an open avatar when a reconnect refresh fails', async () => {
+  server.use(
+    profileHandler('Alice Global'),
+    http.get(`${TEST_BASE_URL}/v1/media/:account/:server/:id`, () =>
+      HttpResponse.arrayBuffer(new ArrayBuffer(8), {
+        headers: { 'content-type': 'image/png' },
+      }),
+    ),
+    deviceHandler([PHONE]),
+    http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+      HttpResponse.json({ data: [] }),
+    ),
+    http.get(`${TEST_BASE_URL}/v1/invites`, () =>
+      HttpResponse.json({ data: [] }),
+    ),
+    http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
+      HttpResponse.json({ data: [] }),
+    ),
+  )
+  const services = testServices()
+  const view = render(
+    <ServicesContext.Provider value={services}>
+      <LocationProvider>
+        <UserInfoPanel
+          accountId={ACCOUNT}
+          userId={ALICE}
+          ownUserId={ME}
+          members={membersStore([
+            member(ALICE, 'Alice in room', { avatar_url: 'mxc://hs/room' }),
+          ])}
+          onClose={vi.fn()}
+        />
+      </LocationProvider>
+    </ServicesContext.Provider>,
+  )
+  await view.findByText('Phone')
+  fireEvent.click(
+    view.getByRole('button', {
+      name: 'View the Alice in room avatar at full size',
+    }),
+  )
+  expect(
+    view.getByRole('dialog', { name: 'Alice in room avatar' }),
+  ).toBeTruthy()
+
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/users/:userId/profile`,
+      () =>
+        HttpResponse.json(
+          { error: { code: 'unavailable', message: 'profile down' } },
+          { status: 503 },
+        ),
+    ),
+    http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/devices`, () =>
+      HttpResponse.json(
+        { error: { code: 'unavailable', message: 'devices down' } },
+        { status: 503 },
+      ),
+    ),
+  )
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  try {
+    services.live.start()
+    services.sockets[0].emitOpen()
+    services.sockets[0].emitClose()
+    await vi.advanceTimersByTimeAsync(1000)
+    services.sockets.at(-1)!.emitOpen()
+    await vi.advanceTimersByTimeAsync(0)
+  } finally {
+    vi.useRealTimers()
+  }
+  try {
+    await waitFor(() => {
+      const alerts = view.getAllByRole('alert').map((node) => node.textContent)
+      expect(alerts).toContain('profile down')
+      expect(alerts).toContain('devices down')
+    })
+    expect(view.getByText('Phone')).toBeTruthy()
+    expect(
+      view.getByRole('dialog', { name: 'Alice in room avatar' }),
+    ).toBeTruthy()
+  } finally {
+    services.live.stop()
+  }
 })

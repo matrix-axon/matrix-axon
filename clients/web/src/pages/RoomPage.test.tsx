@@ -4651,6 +4651,116 @@ describe('RoomPage', () => {
       expect(await findByText('body of $jump')).toBeTruthy()
     })
   })
+
+  it('keeps a covered thread mounted and closes user information when the room or thread changes', async () => {
+    const OTHER = '!other:hs'
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: {
+              events: [
+                event('$reply', T0 + 1, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'inside the thread',
+                  content: { msgtype: 'm.text', body: 'inside the thread' },
+                }),
+              ],
+              next_cursor: null,
+            },
+          }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`, () =>
+        HttpResponse.json({ data: event('$root', T0) }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/users/:userId/profile`,
+        () =>
+          HttpResponse.json({
+            data: {
+              user_id: '@alice:hs',
+              display_name: 'Alice Global',
+              avatar_url: null,
+            },
+          }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/devices`, () =>
+        HttpResponse.json({
+          data: { user_id: '@alice:hs', devices: [] },
+        }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(OTHER)}/timeline`,
+        () => HttpResponse.json({ data: { events: [], next_cursor: null } }),
+      ),
+    )
+    const { findByRole, findByText, getByRole } = renderRoom(
+      [event('$root', T0)],
+      {
+        members: [member('@alice:hs', 'join', 'Alice')],
+        url: `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=${encodeURIComponent('$root')}`,
+      },
+    )
+    expect(await findByText('inside the thread')).toBeTruthy()
+    const thread = getByRole('complementary', { name: 'Thread' })
+    expect(thread.hasAttribute('inert')).toBe(false)
+    const [name] = await within(thread).findAllByRole('button', {
+      name: 'Alice',
+    })
+    fireEvent.click(name)
+    expect(
+      await findByRole('complementary', { name: 'User information' }),
+    ).toBeTruthy()
+    expect(thread.isConnected).toBe(true)
+    expect(thread.hasAttribute('inert')).toBe(true)
+    expect(thread.classList.contains('thread-panel-covered')).toBe(true)
+    expect(document.activeElement?.textContent).toBe('Close')
+
+    window.history.pushState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    expect(
+      await findByRole('complementary', { name: 'User information' }),
+    ).toBeTruthy()
+    await waitFor(() =>
+      expect(document.querySelector('.thread-panel')).toBeNull(),
+    )
+
+    window.history.pushState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=${encodeURIComponent('$other')}`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await waitFor(() =>
+      expect(document.getElementById('user-info-panel')).toBeNull(),
+    )
+    const nextThread = document.querySelector('.thread-panel')
+    expect(nextThread).not.toBeNull()
+    expect(nextThread!.hasAttribute('inert')).toBe(false)
+
+    const [reopened] = await within(nextThread as HTMLElement).findAllByRole(
+      'button',
+      { name: 'Alice' },
+    )
+    fireEvent.click(reopened)
+    expect(
+      await findByRole('complementary', { name: 'User information' }),
+    ).toBeTruthy()
+    window.history.pushState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(OTHER)}`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await waitFor(() =>
+      expect(document.getElementById('user-info-panel')).toBeNull(),
+    )
+  })
 })
 
 /**

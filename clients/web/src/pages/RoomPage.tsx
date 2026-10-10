@@ -245,6 +245,14 @@ export function RoomPage() {
   >(null)
   const [roomInfoOpen, setRoomInfoOpen] = useState(false)
   const [userInfoUserId, setUserInfoUserId] = useState<string | null>(null)
+  /** The sender control that opened User information, restored on close. */
+  const userInfoOpener = useRef<HTMLElement | null>(null)
+  // The page does not remount on a route change, so an open user panel would
+  // otherwise keep describing the previous room's sender against this room's
+  // roster (or another account's profile read).
+  useEffect(() => {
+    setUserInfoUserId(null)
+  }, [accountId, roomId])
   const [jumpOpen, setJumpOpen] = useState(false)
   const [dateJumpStart, setDateJumpStart] = useState<number | null>(null)
   const [roomEntryStatus, setRoomEntryStatus] = useState<string | null>(null)
@@ -270,6 +278,17 @@ export function RoomPage() {
     loading: false,
   })
   const openThread = typeof query.thread === 'string' ? query.thread : null
+  const seenThread = useRef(openThread)
+  useEffect(() => {
+    const previous = seenThread.current
+    seenThread.current = openThread
+    // A thread that arrives by the route — a permalink, a notification, a
+    // search hit — has to be the thing on screen. Opening the panel itself
+    // does not change this param, so it stays up over the thread it covered.
+    if (openThread !== null && openThread !== previous) {
+      setUserInfoUserId(null)
+    }
+  }, [openThread])
   /**
    * Whether every thread in this room is known read — the room-list badge waits
    * on it. `threads`/`read_markers`/`thread_read_markers` must all have arrived
@@ -1803,7 +1822,37 @@ export function RoomPage() {
     setRoomInfoOpen(true)
   }, [setThreadParam])
 
+  const closeUserInfo = useCallback(
+    (restore: 'opener' | 'composer') => {
+      setUserInfoUserId(null)
+      const opener = userInfoOpener.current
+      userInfoOpener.current = null
+      if (restore === 'composer') {
+        composerFocus.value += 1
+        return
+      }
+      // After paint, so a thread that was inert while covered can take focus.
+      requestAnimationFrame(() => {
+        if (
+          opener !== null &&
+          opener.isConnected &&
+          !opener.inert &&
+          opener.getAttribute('aria-hidden') !== 'true'
+        ) {
+          opener.focus()
+          if (document.activeElement === opener) {
+            return
+          }
+        }
+        composerFocus.value += 1
+      })
+    },
+    [composerFocus],
+  )
+
   const openUserInfo = useCallback((userId: string) => {
+    const active = document.activeElement
+    userInfoOpener.current = active instanceof HTMLElement ? active : null
     setRoomInfoOpen(false)
     setUserInfoUserId(userId)
   }, [])
@@ -1814,18 +1863,19 @@ export function RoomPage() {
   }, [openRoomInfo, setRoomChrome, title])
 
   const navigateBackOneMobilePane = () => {
-    const userInfoOverThread = userInfoUserId !== null && openThread !== null
     perfMark('room-page:mobile-back', {
-      target: userInfoOverThread
-        ? 'user-info-close'
-        : openThread !== null
-          ? 'thread-close'
-          : 'room-list',
+      target:
+        userInfoUserId !== null
+          ? 'user-info-close'
+          : openThread !== null
+            ? 'thread-close'
+            : 'room-list',
     })
     // User information keeps `?thread=` so closing it restores the thread.
-    // A back swipe has to dismiss that panel first; otherwise it would clear
-    // the thread the panel is covering.
-    if (userInfoOverThread) {
+    // A back swipe dismisses the panel first. With a thread open, the
+    // preview destination is that thread; otherwise it is the timeline.
+    if (userInfoUserId !== null) {
+      userInfoOpener.current = null
       setUserInfoUserId(null)
     } else if (openThread !== null) {
       setThreadParam(null)
@@ -1837,12 +1887,16 @@ export function RoomPage() {
 
   const mobileSwipeBack = useMobileSwipeBack<HTMLDivElement>({
     getPresentation: (surface) => {
-      if (userInfoUserId !== null && openThread !== null) {
+      if (userInfoUserId !== null) {
         const foreground =
           surface.querySelector<HTMLElement>('#user-info-panel')
-        return foreground === null || roomStream.current === null
+        const destination =
+          openThread !== null
+            ? surface.querySelector<HTMLElement>('.thread-panel')
+            : roomStream.current
+        return foreground === null || destination === null
           ? null
-          : { foreground, destination: roomStream.current }
+          : { foreground, destination }
       }
       if (openThread === null) {
         return roomListBackPresentation(surface, roomStream.current)
@@ -1907,14 +1961,18 @@ export function RoomPage() {
         event.preventDefault()
         if (action !== null) {
           setAction(null)
+          composerFocus.value += 1
         } else if (userInfoUserId !== null) {
-          setUserInfoUserId(null)
+          closeUserInfo('composer')
         } else if (roomInfoOpen) {
           setRoomInfoOpen(false)
+          composerFocus.value += 1
         } else if (openThread !== null) {
           setThreadParam(null)
+          composerFocus.value += 1
+        } else {
+          composerFocus.value += 1
         }
-        composerFocus.value += 1
       },
     },
     // Escape has to reach us from inside the composer too — that is where the
@@ -2096,8 +2154,9 @@ export function RoomPage() {
           />
         </div>
 
-        {openThread !== null && !roomInfoOpen && userInfoUserId === null && (
+        {openThread !== null && !roomInfoOpen && (
           <ThreadPanel
+            covered={userInfoUserId !== null}
             key={`${accountId}:${roomId}:${openThread}`}
             accountId={accountId}
             roomId={roomId}
@@ -2127,7 +2186,7 @@ export function RoomPage() {
             userId={userInfoUserId}
             ownUserId={ownUserId}
             members={members}
-            onClose={() => setUserInfoUserId(null)}
+            onClose={() => closeUserInfo('opener')}
           />
         )}
         {roomInfoOpen && (

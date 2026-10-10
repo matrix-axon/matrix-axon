@@ -66,6 +66,24 @@ export function userIdDisplay(userId: string): string {
   return local !== undefined ? `@${local}` : userId
 }
 
+/** A room-membership value as a short status. Unknown values pass through. */
+export function membershipLabel(membership: string): string {
+  switch (membership) {
+    case 'join':
+      return 'Joined'
+    case 'invite':
+      return 'Invited'
+    case 'knock':
+      return 'Knocking'
+    case 'leave':
+      return 'Left'
+    case 'ban':
+      return 'Banned'
+    default:
+      return membership || 'Unknown'
+  }
+}
+
 /** A member's display name, falling back to `@localpart`, then the user id. */
 export function memberDisplay(member: MemberDto): string {
   const name = member.display_name?.trim()

@@ -1,13 +1,12 @@
 import type { MemberDto } from '../stores/room-list'
 import { UserAvatar } from './UserAvatar'
 
-export function userInfoLabel(displayName: string): string {
-  return `User information for ${displayName}`
-}
-
 /**
  * Sender name on a timeline row, a reply quote, or a compact thread root.
  * Without `onOpenUser` it stays the plain label those rows always had.
+ *
+ * The accessible name is the visible name. A separate "User information for…"
+ * label hid the sender from the row's announcement.
  */
 export function UserOpenName({
   userId,
@@ -25,7 +24,6 @@ export function UserOpenName({
     <button
       type="button"
       class="event-sender"
-      aria-label={userInfoLabel(displayName)}
       onClick={(event) => {
         event.stopPropagation()
         onOpenUser(userId)
@@ -37,8 +35,8 @@ export function UserOpenName({
 }
 
 /**
- * Avatar beside that name. The button is the accessible control: `UserAvatar`
- * itself stays presentational.
+ * Avatar beside that name. A pointer target only: the name is the one tab
+ * stop, and `UserAvatar` stays presentational.
  */
 export function UserOpenAvatar({
   accountId,
@@ -68,7 +66,8 @@ export function UserOpenAvatar({
     <button
       type="button"
       class="event-person"
-      aria-label={userInfoLabel(displayName)}
+      tabIndex={-1}
+      aria-hidden="true"
       onClick={(event) => {
         event.stopPropagation()
         onOpenUser(userId)

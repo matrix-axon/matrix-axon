@@ -85,12 +85,14 @@ afterEach(() => {
 it('opens user information from the sender name and avatar without the action bar', () => {
   const onOpenUser = vi.fn()
   const view = renderRow(event(), onOpenUser)
-  const buttons = view.getAllByRole('button', {
-    name: 'User information for Alice',
-  })
-  expect(buttons).toHaveLength(2)
-  fireEvent.click(buttons[0])
-  fireEvent.click(buttons[1])
+  const name = view.getByRole('button', { name: 'Alice' })
+  const avatar = view.container.querySelector('.event-person')
+  expect(avatar).not.toBeNull()
+  expect(avatar!.getAttribute('tabindex')).toBe('-1')
+  expect(avatar!.getAttribute('aria-hidden')).toBe('true')
+  expect(view.getAllByRole('button', { name: 'Alice' })).toHaveLength(1)
+  fireEvent.click(name)
+  fireEvent.click(avatar!)
   expect(onOpenUser).toHaveBeenCalledTimes(2)
   expect(onOpenUser).toHaveBeenCalledWith(ALICE)
   expect(view.onOpenActions).not.toHaveBeenCalled()

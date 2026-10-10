@@ -656,10 +656,7 @@ test('narrow: user information opens from a sender and a DM uncovers the timelin
 
   await page.goto(ROOM_URL)
   await expect(page.locator('.timeline')).toBeVisible()
-  await page
-    .getByRole('button', { name: 'User information for @bob:hs' })
-    .first()
-    .click()
+  await page.getByRole('button', { name: '@bob:hs' }).first().click()
   const panel = page.getByRole('complementary', { name: 'User information' })
   await expect(panel).toBeVisible()
   await expect(panel.getByRole('button', { name: 'Verify' })).toBeDisabled()
@@ -672,6 +669,57 @@ test('narrow: user information opens from a sender and a DM uncovers the timelin
   )
   await expect(panel).toHaveCount(0)
   await expect(page.locator('.timeline')).toBeVisible()
+  await expectPaneCenterUncovered(page, '.timeline')
+})
+
+test('narrow: user information covers a thread that stays mounted', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.route(/\/threads\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          events: [
+            {
+              account_id: ACCOUNT_ID,
+              event_id: '$reply',
+              room_id: ROOM_ID,
+              sender: '@bob:hs',
+              origin_ts: 2_000,
+              arrival_order: 2_000,
+              type: 'm.room.message',
+              body: 'inside the thread',
+              content: { msgtype: 'm.text', body: 'inside the thread' },
+              redacted: false,
+              edited: false,
+              edit_count: 0,
+              relates_to: { rel_type: 'm.thread', event_id: '$root' },
+            },
+          ],
+          next_cursor: null,
+        },
+      },
+    }),
+  )
+  await page.goto(`${ROOM_URL}?thread=${encodeURIComponent('$root')}`)
+  const thread = page.locator('.thread-panel')
+  await expect(thread.getByText('inside the thread')).toBeVisible()
+  await thread.getByRole('button', { name: '@bob:hs' }).click()
+  const panel = page.locator('#user-info-panel')
+  await expect(panel).toBeVisible()
+  await expect(thread).toBeAttached()
+  await expect(thread).toHaveAttribute('inert', '')
+  await expect(thread).toHaveClass(/thread-panel-covered/)
+  expect(
+    await panel.evaluate((element) => getComputedStyle(element).zIndex),
+  ).toBe('71')
+  await expectPaneCenterUncovered(page, '#user-info-panel')
+
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await expect(thread).toBeHidden()
+  await expect(panel).toBeVisible()
   await expectPaneCenterUncovered(page, '.timeline')
 })
 

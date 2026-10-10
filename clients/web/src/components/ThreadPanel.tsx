@@ -117,6 +117,7 @@ export function ThreadPanel({
   roomCompletions,
   onClose,
   onOpenUser,
+  covered = false,
   highlightedEventId = null,
 }: {
   accountId: string
@@ -149,6 +150,12 @@ export function ThreadPanel({
   onClose: () => void
   /** Opens User information for a sender in this thread. */
   onOpenUser?: (userId: string) => void
+  /**
+   * User information is open over this thread. The panel stays mounted so its
+   * scroll and composer survive. `inert` takes it out of the tab order, and
+   * wide layouts hide it so it does not become a fourth column.
+   */
+  covered?: boolean
   /** An event in this thread to fetch, reveal, and highlight. */
   highlightedEventId?: string | null
 }) {
@@ -580,8 +587,9 @@ export function ThreadPanel({
 
   return (
     <aside
-      class="thread-panel"
+      class={`thread-panel${covered ? ' thread-panel-covered' : ''}`}
       aria-label="Thread"
+      inert={covered}
       {...(attachable ? dropHandlers : {})}
     >
       {dropProblem !== null && !dragging && (

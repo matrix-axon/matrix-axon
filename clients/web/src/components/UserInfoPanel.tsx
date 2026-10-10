@@ -1,13 +1,18 @@
 import { useLocation } from 'preact-iso'
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { apiErrorMessage } from '../api/client'
 import type { components } from '../api/schema'
 import { localRoomHref } from '../matrix-to'
 import { useServices } from '../services'
 import type { MembersStore } from '../stores/members'
-import { memberDisplay, type MemberDto } from '../stores/room-list'
+import {
+  memberDisplay,
+  membershipLabel,
+  type MemberDto,
+} from '../stores/room-list'
 import { DetailRow } from './DetailRow'
 import { Lightbox, LightboxImage } from './Lightbox'
+import { useStartDm } from './use-start-dm'
 import { UserAvatar } from './UserAvatar'
 
 type MatrixProfileDto = components['schemas']['MatrixProfileDto']
@@ -16,26 +21,19 @@ type DeviceDto = components['schemas']['DeviceDto']
 type Remote<T> =
   | { status: 'loading' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; value: T }
+  | { status: 'ready'; value: T; refreshError: string | null }
+
+/** A failed refresh keeps data that is already on screen. */
+function keepShown<T>(current: Remote<T>, message: string): Remote<T> {
+  if (current.status === 'ready') {
+    return { status: 'ready', value: current.value, refreshError: message }
+  }
+  return { status: 'error', message }
+}
 
 function blankToNull(value: string | null | undefined): string | null {
   const trimmed = value?.trim() ?? ''
   return trimmed === '' ? null : trimmed
-}
-
-function membershipLabel(membership: string): string {
-  switch (membership) {
-    case 'join':
-      return 'Joined'
-    case 'invite':
-      return 'Invited'
-    case 'leave':
-      return 'Left'
-    case 'ban':
-      return 'Banned'
-    default:
-      return membership || 'Unknown'
-  }
 }
 
 function localTrustLabel(state: string): string {
@@ -96,8 +94,9 @@ export function UserInfoPanel({
   onClose: () => void
 }) {
   const location = useLocation()
-  const { api, rooms, live } = useServices()
+  const { api, live } = useServices()
   const reconnects = live.reconnects.value
+  const closeButton = useRef<HTMLButtonElement>(null)
   const [profile, setProfile] = useState<Remote<MatrixProfileDto>>({
     status: 'loading',
   })
@@ -105,63 +104,104 @@ export function UserInfoPanel({
     status: 'loading',
   })
   const [avatarOpen, setAvatarOpen] = useState(false)
-  const [startingDm, setStartingDm] = useState(false)
-  const [dmError, setDmError] = useState<string | null>(null)
+  const {
+    startDm,
+    pendingUserId,
+    error: dmError,
+    invalidate,
+  } = useStartDm(accountId, (roomId) => {
+    location.route(localRoomHref(accountId, roomId, null))
+    onClose()
+  })
 
-  // Membership and the room profile come from the room's members store, which
-  // the room page refreshes on open and on reconnect. The global profile and
-  // the device list are read here, again when the socket reconnects. An empty
-  // device list means Axon has never tracked that user.
+  // The close control is the landing spot. The name button keeps the visible
+  // name as its accessible name, so opening the panel has to move focus here
+  // or the keyboard stays on the timeline (and on a covered thread, on a
+  // control that is no longer reachable).
   useEffect(() => {
-    let cancelled = false
+    closeButton.current?.focus()
+  }, [userId])
+
+  // A new subject discards what the previous one showed. A reconnect does not:
+  // the reads below refresh in place, and an open avatar stays open.
+  useEffect(() => {
     setProfile({ status: 'loading' })
     setDevices({ status: 'loading' })
     setAvatarOpen(false)
+    invalidate()
+  }, [accountId, userId, invalidate])
+
+  // Membership and the room profile come from the room's members store, which
+  // the room page refreshes on open and on reconnect. The global profile is a
+  // homeserver read. The device list is the local crypto cache and must not
+  // wait on that read. An empty device list means Axon has never tracked that
+  // user. Each read retries when the socket reconnects without blanking a
+  // value that is already on screen.
+  useEffect(() => {
+    let cancelled = false
     void (async () => {
       try {
-        const [profileResult, deviceResult] = await Promise.all([
-          api.GET('/v1/accounts/{account_id}/users/{user_id}/profile', {
+        const result = await api.GET(
+          '/v1/accounts/{account_id}/users/{user_id}/profile',
+          {
             params: { path: { account_id: accountId, user_id: userId } },
-          }),
-          api.GET('/v1/accounts/{account_id}/devices', {
-            params: {
-              path: { account_id: accountId },
-              query: { user_id: userId },
-            },
-          }),
-        ])
+          },
+        )
         if (cancelled) {
           return
         }
-        if (
-          profileResult.error !== undefined ||
-          profileResult.data === undefined
-        ) {
-          setProfile({
-            status: 'error',
-            message: apiErrorMessage(profileResult.error),
-          })
-        } else {
-          setProfile({ status: 'ready', value: profileResult.data.data })
+        if (result.error !== undefined || result.data === undefined) {
+          const message = apiErrorMessage(result.error)
+          setProfile((current) => keepShown(current, message))
+          return
         }
-        if (
-          deviceResult.error !== undefined ||
-          deviceResult.data === undefined
-        ) {
-          setDevices({
-            status: 'error',
-            message: apiErrorMessage(deviceResult.error),
-          })
-        } else {
-          setDevices({ status: 'ready', value: deviceResult.data.data.devices })
-        }
+        setProfile({
+          status: 'ready',
+          value: result.data.data,
+          refreshError: null,
+        })
       } catch (cause) {
         if (cancelled) {
           return
         }
         const message = cause instanceof Error ? cause.message : String(cause)
-        setProfile({ status: 'error', message })
-        setDevices({ status: 'error', message })
+        setProfile((current) => keepShown(current, message))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [api, accountId, userId, reconnects])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const result = await api.GET('/v1/accounts/{account_id}/devices', {
+          params: {
+            path: { account_id: accountId },
+            query: { user_id: userId },
+          },
+        })
+        if (cancelled) {
+          return
+        }
+        if (result.error !== undefined || result.data === undefined) {
+          const message = apiErrorMessage(result.error)
+          setDevices((current) => keepShown(current, message))
+          return
+        }
+        setDevices({
+          status: 'ready',
+          value: result.data.data.devices,
+          refreshError: null,
+        })
+      } catch (cause) {
+        if (cancelled) {
+          return
+        }
+        const message = cause instanceof Error ? cause.message : String(cause)
+        setDevices((current) => keepShown(current, message))
       }
     })()
     return () => {
@@ -182,22 +222,7 @@ export function UserInfoPanel({
   const roomAvatar = blankToNull(roomMember?.avatar_url)
   const globalName = blankToNull(readyProfile?.display_name)
   const globalAvatar = blankToNull(readyProfile?.avatar_url)
-
-  const startDm = async () => {
-    if (startingDm) {
-      return
-    }
-    setDmError(null)
-    setStartingDm(true)
-    const result = await rooms.createDm(accountId, userId)
-    setStartingDm(false)
-    if (!result.ok) {
-      setDmError(`Could not start DM with ${userId}: ${result.message}`)
-      return
-    }
-    location.route(localRoomHref(accountId, result.roomId, null))
-    onClose()
-  }
+  const startingDm = pendingUserId !== null
 
   return (
     <aside
@@ -207,7 +232,7 @@ export function UserInfoPanel({
     >
       <div class="overlay-head">
         <h2>User information</h2>
-        <button type="button" class="ghost" onClick={onClose}>
+        <button ref={closeButton} type="button" class="ghost" onClick={onClose}>
           Close
         </button>
       </div>
@@ -243,9 +268,10 @@ export function UserInfoPanel({
       <section class="room-info-section" aria-labelledby="user-info-details">
         <h3 id="user-info-details">Details</h3>
         <dl class="detail-list">
-          <DetailRow label="Matrix ID" value={userId} code />
+          <DetailRow label="Matrix ID" value={userId} code copyable />
           <DetailRow
             label="Membership"
+            copyable={false}
             value={
               members.loading.value && roomMember === undefined
                 ? 'Loading…'
@@ -255,19 +281,41 @@ export function UserInfoPanel({
             }
           />
           {roomMember !== undefined && (
-            <DetailRow label="Room display name" value={roomName ?? 'None'} />
+            <DetailRow
+              label="Room display name"
+              value={roomName ?? 'None'}
+              copyable={roomName !== null}
+            />
           )}
           {roomMember !== undefined && (
-            <DetailRow label="Room avatar" value={roomAvatar ?? 'None'} code />
+            <DetailRow
+              label="Room avatar"
+              value={roomAvatar ?? 'None'}
+              code
+              copyable={roomAvatar !== null}
+            />
           )}
           {profile.status === 'loading' && (
-            <DetailRow label="Global profile" value="Loading…" />
+            <DetailRow
+              label="Global profile"
+              value="Loading…"
+              copyable={false}
+            />
           )}
           {roomMember === undefined && profile.status === 'ready' && (
-            <DetailRow label="Display name" value={globalName ?? 'None'} />
+            <DetailRow
+              label="Display name"
+              value={globalName ?? 'None'}
+              copyable={globalName !== null}
+            />
           )}
           {roomMember === undefined && profile.status === 'ready' && (
-            <DetailRow label="Avatar" value={globalAvatar ?? 'None'} code />
+            <DetailRow
+              label="Avatar"
+              value={globalAvatar ?? 'None'}
+              code
+              copyable={globalAvatar !== null}
+            />
           )}
           {roomMember !== undefined &&
             profile.status === 'ready' &&
@@ -275,6 +323,7 @@ export function UserInfoPanel({
               <DetailRow
                 label="Global display name"
                 value={globalName ?? 'None'}
+                copyable={globalName !== null}
               />
             )}
           {roomMember !== undefined &&
@@ -284,12 +333,18 @@ export function UserInfoPanel({
                 label="Global avatar"
                 value={globalAvatar ?? 'None'}
                 code
+                copyable={globalAvatar !== null}
               />
             )}
         </dl>
         {profile.status === 'error' && (
           <p class="error" role="alert">
             {profile.message}
+          </p>
+        )}
+        {profile.status === 'ready' && profile.refreshError !== null && (
+          <p class="error" role="alert">
+            {profile.refreshError}
           </p>
         )}
       </section>
@@ -331,6 +386,11 @@ export function UserInfoPanel({
             })}
           </ul>
         )}
+        {devices.status === 'ready' && devices.refreshError !== null && (
+          <p class="error" role="alert">
+            {devices.refreshError}
+          </p>
+        )}
       </section>
 
       <section class="room-info-section" aria-labelledby="user-info-actions">
@@ -349,7 +409,7 @@ export function UserInfoPanel({
               <button
                 type="button"
                 disabled={startingDm}
-                onClick={() => void startDm()}
+                onClick={() => void startDm(userId)}
               >
                 {startingDm ? 'Starting…' : 'Direct message'}
               </button>
