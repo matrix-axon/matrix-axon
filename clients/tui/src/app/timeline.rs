@@ -119,6 +119,10 @@ impl App {
                 self.apply_account_data_changed(account_id, payload);
                 LiveFrameAction::None
             }
+            LiveFrame::UnreadCounts {
+                account_id,
+                payload,
+            } => self.apply_unread_counts(account_id, &payload),
         }
     }
 
@@ -384,13 +388,13 @@ impl App {
             self.rooms.unread.remove(&key);
             LiveFrameAction::None
         } else {
-            if should_show_event(&event, &self.display) {
-                if let Some(root) = event.thread_relation().map(str::to_owned) {
-                    if self.thread_event_counts_as_unread(&event, None) {
-                        self.mark_thread_unread_from_event(&key, &root, &event);
-                    }
+            // The room badge is the server's count (ADR 0115) and arrives as an
+            // `unread_counts.changed` frame; only the thread badge is derived
+            // from the event here.
+            if let Some(root) = event.thread_relation().map(str::to_owned) {
+                if self.thread_event_counts_as_unread(&event, None) {
+                    self.mark_thread_unread_from_event(&key, &root, &event);
                 }
-                *self.rooms.unread.entry(key).or_default() += 1;
             }
             if known_room {
                 LiveFrameAction::None
@@ -424,7 +428,8 @@ impl App {
         event: &EventDto,
         open_thread_root: Option<&str>,
     ) -> bool {
-        should_show_event(event, &self.display)
+        event.counts_as_unread()
+            && should_show_event(event, &self.display)
             && open_thread_root != event.thread_relation()
             && !self.is_own_event(event)
     }
