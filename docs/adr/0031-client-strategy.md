@@ -35,9 +35,8 @@ Several constraints shape the decision:
   use this path.
 - **Push notifications (APNs/FCM/web push) are out of scope for the iOS
   MVP**, not a day-one client concern — see ADR 0053, which corrects this
-  bullet's original framing.
-  [ADR 0113](0113-remote-push-for-suspended-mobile-clients.md) scopes the device-token route and the push router.
-  The code stays unbuilt until #604.
+  bullet's original framing. No device-token endpoint or push router is
+  commissioned until a dedicated future ADR scopes it.
 - **OpenAPI spec is the contract.** The spec is checked into the repo and is
   the source of truth for every `/v1/` operation. No Swift SDK stubs exist
   yet as of ADR 0053 — this bullet's original claim that they "already ship
@@ -155,11 +154,18 @@ and Swift stubs exist — was already wrong on both counts per ADR 0053.)*
   OAuth lands.
 - Push notification support requires server-side additions (APNs/FCM
   integration, device-token registration endpoint) before mobile clients can
-  deliver notifications.
-  [ADR 0113](0113-remote-push-for-suspended-mobile-clients.md) is that server design.
-  The client registers only after #604 lands, and it does not stub the route ahead of that.
+  deliver notifications. Client code should stub the registration path and
+  activate it when the server ships the feature.
 - Media URLs are axon-proxied; clients must not construct homeserver media URLs
   directly. The `matrix-api-media-proxy` branch establishes this contract.
 - The web-framework choice is the one unsettled decision. It must be resolved —
   and recorded as a follow-on ADR or amendment here — before `clients/web/`
   work begins. *(Resolved by ADR 0046: Preact.)*
+
+## Amendment — remote push (2026-10-09, ADR 0113)
+
+The push bullets above are the decision this ADR made.
+[ADR 0113](0113-remote-push-for-suspended-mobile-clients.md) is the later design they deferred.
+It adds no code.
+#604 implements the server half, and #605 implements the client half after that.
+The client does not stub the registration route ahead of #604.

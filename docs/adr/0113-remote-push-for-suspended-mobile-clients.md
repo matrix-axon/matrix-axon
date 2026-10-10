@@ -71,6 +71,9 @@ The message is eligible when all of these hold:
 - `content` is present.
   A still-undecryptable event does not wake anyone.
   Re-decryption does not re-emit a live frame, so a later back-fill does not send the push the UTD skipped.
+  That drop is the normal case for an encrypted room whose key arrives after the event.
+  #666 tracks the follow-up: an `activity` alert with no body, or a wake when re-decryption fills one.
+  v1 does not do either.
 - The sender is not the account's own user id.
 - `relates_to.rel_type` is not `m.replace`.
   An edit does not wake, including an edit of a thread reply.
@@ -133,10 +136,21 @@ Two limits are deliberate, so a later change does not have to break the route:
   Adding it is an extension of the eligibility list, not a new policy engine.
 
 The count can be held back while the SDK has unmatched receipts (ADR 0070).
-The router keeps the latest eligible message per account and room in memory, and sends it if the rise is released while it is still held.
+The router keeps one slot per account and room.
+The slot may hold only an eligible message whose push actions include notify.
+The ingest path passes those actions through.
+The router does not evaluate the ruleset a second time.
+An eligible message whose actions do not notify clears the slot and does not fill it.
+An event that is not an eligible message, including an invite, a call, a receipt, and a UTD, neither fills the slot, nor clears it, nor releases it.
+
+The slot records the `notification_count` observed when it was filled.
+It is released only when that count later rises and the slot is still occupied.
+A rise that happened before the fill does not release it.
+A rise with an empty slot sends nothing.
+The released payload is the slotted message, which the rules already marked as notifying.
 The slot is dropped, unsent, at the unread resweep interval (five minutes).
 The slot is not durable.
-A crash loses at most the wakes in flight, and the next eligible message wakes the device.
+A crash loses at most the wakes in flight, and the next notifying message wakes the device.
 
 The router does not consult WebSocket presence.
 A suspended phone can leave a socket the server still considers open, and that is the case this push exists to cover.
@@ -195,7 +209,13 @@ Several banners from one burst are acceptable.
 
 ### Registration
 
-Two additive routes, both behind the existing bearer gate:
+Two additive routes.
+Both require a bearer `TokenVerifier` already accepts.
+Any such bearer may register, including an OAuth access token, a token from `axon token issue`, and a token the management API minted for a second device.
+Push does not widen what that bearer can already read through `/v1/`.
+A narrower allow-list would reject those device credentials.
+An unverified bearer is the existing `401`.
+There is no separate rejection code.
 
 - `PUT /v1/push/registrations`
 - `DELETE /v1/push/registrations/{id}`
@@ -213,18 +233,35 @@ Two additive routes, both behind the existing bearer gate:
 - `environment`: `sandbox` or `production`, required for `apns` and omitted for `fcm`.
 
 `PUT` is an upsert on `(provider, token)`.
-A repeat with the same pair updates `disclosure`, `environment`, and the owning bearer, and returns the same row.
+A repeat from the same session updates `disclosure`, `environment`, and the access token that last wrote the row, and returns the same row.
+A repeat from a different session re-homes the row onto that session.
+That is a sign-out followed by a sign-in on the same phone.
 The response is the row's `id`, `provider`, `disclosure`, and `environment`.
 It does not echo the token.
 
-`DELETE` removes the row when the calling bearer owns that `id`.
-An id that is absent, or that belongs to another bearer, also answers `204`, so the route is idempotent and does not reveal other devices.
+`DELETE` removes the row when the caller's session owns that `id`.
+An id that is absent, or that belongs to another session, also answers `204`, so the route is idempotent and does not reveal other devices.
 A client that has forgotten the id calls `PUT` again and deletes the returned id.
+
+Ownership is a credential session, not the access token's `tokens.id`.
+An OAuth access token expires, and refresh mints a new row (ADR 0054).
+Keying the registration on that id would make `DELETE` after refresh a silent no-op, and the server would keep pushing.
+Treating expiry as revocation would wipe the registration on every refresh.
+
+#604 adds `session_id` to `tokens` and to `oauth_refresh_tokens`.
+OAuth sign-in mints one session id and stores it on the first access token and the first refresh token.
+Every refresh copies that same id onto the new access token and the new refresh token.
+A non-expiring credential, whether issued by the CLI or by the management API, uses its own `tokens.id` as its session id.
+Those credentials do not rotate.
+The session id is not `oauth_identity_id` and not `client_id`.
+Both of those are shared by every device of the same person.
 
 The row lives in `push_registrations`:
 
 - `id` UUID primary key.
-- `token_id` UUID, the `tokens.id` of the bearer that wrote it.
+- `session_id` UUID, the credential session that owns the row.
+- `token_id` UUID, the access token that last wrote the row.
+  Authorization does not use it.
 - `provider`, `token`, `environment`, `disclosure`.
 - `created_at` and `updated_at`, the latter maintained by the shared `updated_at` trigger.
 - Unique `(provider, token)`.
@@ -240,13 +277,22 @@ Their local toast already shows the preview, and that text never leaves the devi
 One row covers every Matrix account on the instance.
 The payload's `account_id` says which one the tap opens.
 Signing out of a single Matrix account does not delete the row.
-The client deletes it when message notifications are turned off, and when the Axon session that owns the bearer ends.
+Removing a Matrix account drops queued wakes and the count-rise slot for that `account_id`.
+The device registration stays, because it still covers every account that remains.
+A per-account opt-out is a later additive field and is not in v1.
+The client deletes the registration when message notifications are turned off, and when the Axon session ends.
 
 A failed `DELETE` leaves the local setting off and retries.
 The client does not turn the setting back on to match a row the server still has.
 
-Revoking a bearer deletes that bearer's registrations in the same transaction that sets `revoked_at`.
-Boot also deletes registrations whose bearer is already revoked, so a crash between the two writes cannot leave a live route.
+The client also re-PUTs after a successful refresh, so `token_id` and `disclosure` stay current.
+A missed re-PUT does not make `DELETE` a no-op, because the refreshed access token carries the same session id.
+
+Revoking a session deletes its registrations in the same transaction.
+For a non-expiring credential, that is the transaction that sets `revoked_at`.
+For an OAuth session, that is the transaction that revokes the refresh token and the access tokens of that session.
+Boot deletes a registration whose session has no unrevoked unexpired access token and no unrevoked unexpired refresh token.
+An expired access token with a live refresh token does not reap the row.
 The foreign key uses `ON DELETE CASCADE` for a token row that is actually removed.
 Revocation itself is not a delete, which is why the transaction and the boot pass both exist.
 
@@ -294,7 +340,12 @@ These two routes do not log their request bodies.
 A provider failure records the HTTP status and, when the body parses as one, APNs `reason` or FCM `error.status`.
 It does not record the raw response body.
 
-An APNs `410` with reason `Unregistered`, or an APNs `400` with reason `BadDeviceToken`, deletes that registration.
+An APNs `410` with reason `Unregistered` deletes that registration only when the response `timestamp` is strictly later than the row's `updated_at`.
+That timestamp is milliseconds since the epoch, the last time APNs confirmed the token was no longer valid for the topic, and the body includes it only on a 410.
+A missing timestamp does not delete.
+A timestamp earlier than or equal to `updated_at` does not delete.
+A device that re-registers the same token bumps `updated_at`, so a 410 from a send already in flight cannot remove the new row.
+An APNs `400` with reason `BadDeviceToken` deletes that registration.
 Any other APNs `400` does not.
 `PayloadTooLarge` and `BadTopic` are our bug, not a dead device.
 FCM status `UNREGISTERED` (HTTP 404) deletes that registration.
@@ -342,9 +393,18 @@ The registrations stay.
 - A tap uses the listener #606 registered and opens the room.
 - While the process is in the foreground, the client does not present the remote alert.
   The local notifier owns that toast.
-- An event id the system already showed is written into the handled-id set #606 keeps, and that set survives a cold start, still capped at 2000.
+- No app code runs when an alert is delivered to a suspended process.
+  v1 does not enable the `remote-notification` background mode, and it does not add a notification service extension, in order to record that delivery.
+- On becoming active, before the reconnect slack posts, the client reads the notifications the system is still showing.
+  Apple uses `UNUserNotificationCenter.getDeliveredNotifications`.
+  Android uses the active notifications for this package, and the event id is the `event_id` extra from the data payload.
+  Each of those ids is written into the handled-id set #606 keeps.
+  That set survives a cold start and stays capped at 2000.
   The reconnect slack must not post those ids again.
-  Becoming active does not clear the system notification on its own.
+- An alert that coalesce replaced is no longer delivered, so its event id was never shown.
+  The local notifier may still toast it when it falls inside the reconnect slack.
+  That is the first time the user sees it.
+- Becoming active does not clear the system notification on its own.
 
 ### Web Push
 
@@ -357,7 +417,7 @@ A service worker is part of that later cut and is not added now.
 ## Consequences
 
 - #604 is `crates/` only, plus the mechanical `clients/web/src/api/schema.d.ts` regeneration ADR 0099's exception already allows.
-  It adds the migration, the routes, the config, the router, and the status field.
+  It adds the migration, including `session_id` on the credential tables, the routes, the config, the router, and the status field.
   OpenAPI stays compatible: both routes and the status field are new.
 - #605 is `clients/web/`, including `src-tauri/`.
   It does not start until #604 has landed.
