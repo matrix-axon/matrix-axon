@@ -33,7 +33,31 @@ export interface ThreadsStore {
 
   /** Fetch the room's thread summaries and resolve their root events. */
   refresh(): Promise<void>
+  /**
+   * Drop the root events still waiting to be fetched and abort the ones in
+   * flight; call on leaving the room. A later `refresh` asks again for
+   * whatever was dropped or aborted.
+   */
+  stop(): void
 }
+
+/**
+ * How many root events are fetched at once.
+ *
+ * There is one `GET …/events/{id}` per thread and no batch form, and this
+ * used to send them all together. A room with about 300 threads therefore
+ * issued about 300 requests inside a second on every open (#662). A browser
+ * multiplexes those over one connection. The packaged app does not: its
+ * transport opens a connection per request (#663), so that was about 300
+ * simultaneous TLS handshakes from a phone, and the timeline page of whatever
+ * room was opened next failed outright among them.
+ *
+ * Six is a browser's own per-host limit over HTTP/1.1, and the media
+ * service's (`MAX_CONCURRENT`). The cost is that a long thread list fills in
+ * over a few seconds rather than at once, which is why the queue is ordered:
+ * see `resolveRoots`.
+ */
+export const ROOT_FETCH_CONCURRENCY = 6
 
 /**
  * One room's threads (ADR 0046, M-W7; ADR 0032 M8 read model): the summary
@@ -49,27 +73,82 @@ export function createThreadsStore(
   const roots = signal<ReadonlyMap<string, EventDto>>(new Map())
   const loading = signal(true)
   const error = signal<string | null>(null)
-  /** Root ids fetched (or in flight); misses are not retried this session. */
+  /**
+   * Root ids fetched, in flight, or queued; misses are not retried this
+   * session.
+   */
   const requestedRoots = new Set<string>()
+  /** Root ids waiting for a slot, next first. */
+  let queue: string[] = []
+  let fetching = 0
+  /** Root ids whose request is out and unanswered, for `stop()` to forget. */
+  let sent = new Set<string>()
+  /** Aborts the requests in `sent`; replaced by `stop()`. */
+  let leaving = new AbortController()
+  /**
+   * Bumped by `stop()`. A `refresh` whose summaries arrive after one is
+   * discarded: applying it would refill the queue that `stop()` just emptied
+   * and start the old room's fetches after the reader had left it.
+   */
+  let generation = 0
 
-  function resolveRoots(rootIds: string[]): void {
-    for (const id of rootIds) {
-      if (requestedRoots.has(id)) {
-        continue
+  /** Start queued fetches until `ROOT_FETCH_CONCURRENCY` are in flight. */
+  function pump(): void {
+    while (fetching < ROOT_FETCH_CONCURRENCY) {
+      const id = queue.shift()
+      if (id === undefined) {
+        return
       }
-      requestedRoots.add(id)
+      fetching += 1
+      const batch = sent
+      batch.add(id)
       inBackground(
         api
           .GET('/v1/accounts/{account_id}/events/{event_id}', {
             params: { path: { account_id: accountId, event_id: id } },
+            signal: leaving.signal,
           })
           .then(({ data }) => {
             if (data !== undefined) {
               roots.value = new Map(roots.value).set(id, data.data)
             }
+          })
+          // A slot cannot be held forever: every typed call is failed by
+          // `API_REQUEST_TIMEOUT_MS` (`api/client.ts`) if nothing else ends
+          // it, and a rejection lands here like any other settle.
+          .finally(() => {
+            fetching -= 1
+            // The set this request went out in, which `stop()` may since
+            // have replaced. Deleting from the current one instead would
+            // un-track a fresh request for the same root.
+            batch.delete(id)
+            pump()
           }),
       )
     }
+  }
+
+  /**
+   * Queue the roots not yet asked for, most recently active thread first.
+   *
+   * The order is the thread list's own, newest reply at the top, so the rows
+   * a reader can see get their previews first and the tail of a long list is
+   * what waits. The whole queue is re-sorted, not only the additions: a
+   * refresh after a live reply must put that thread ahead of older ones still
+   * waiting from the first pass.
+   */
+  function resolveRoots(threads: readonly ThreadSummaryDto[]): void {
+    for (const { root_event_id: id } of threads) {
+      if (!requestedRoots.has(id)) {
+        requestedRoots.add(id)
+        queue.push(id)
+      }
+    }
+    const latest = new Map(
+      threads.map((each) => [each.root_event_id, each.latest_reply_ts ?? 0]),
+    )
+    queue.sort((a, b) => (latest.get(b) ?? 0) - (latest.get(a) ?? 0))
+    pump()
   }
 
   return {
@@ -83,11 +162,15 @@ export function createThreadsStore(
       // same reason as the members list, which is that on a weak link the
       // question is which of them the timeline page is competing with.
       perfMark('threads:refresh:start', { roomId })
+      const startedIn = generation
       try {
         const { data, error: apiError } = await api.GET(
           '/v1/accounts/{account_id}/rooms/{room_id}/threads',
           { params: { path: { account_id: accountId, room_id: roomId } } },
         )
+        if (generation !== startedIn) {
+          return
+        }
         if (apiError !== undefined) {
           error.value = apiErrorMessage(apiError)
           return
@@ -98,17 +181,38 @@ export function createThreadsStore(
           next.set(summary.root_event_id, summary)
         }
         summaries.value = next
-        resolveRoots([...next.keys()])
+        resolveRoots(data.data)
       } catch (cause) {
-        error.value = cause instanceof Error ? cause.message : String(cause)
+        if (generation === startedIn) {
+          error.value = cause instanceof Error ? cause.message : String(cause)
+        }
       } finally {
-        loading.value = false
-        perfMark('threads:refresh:end', {
-          roomId,
-          threads: summaries.value.size,
-          ok: error.value === null,
-        })
+        // A refresh that `stop()` overtook has nothing to report. Clearing
+        // `loading` here would also end the wait of a newer refresh still in
+        // flight on the same store.
+        if (generation === startedIn) {
+          loading.value = false
+          perfMark('threads:refresh:end', {
+            roomId,
+            threads: summaries.value.size,
+            ok: error.value === null,
+          })
+        }
       }
+    },
+
+    stop() {
+      generation += 1
+      // Forgotten as well as dropped, so they are not mistaken for misses.
+      for (const id of [...queue, ...sent]) {
+        requestedRoots.delete(id)
+      }
+      queue = []
+      sent = new Set()
+      // On a phone each of these is a connection of its own (#663), and the
+      // next room's requests are about to want the link.
+      leaving.abort()
+      leaving = new AbortController()
     },
   }
 }
