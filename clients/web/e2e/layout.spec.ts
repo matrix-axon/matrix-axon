@@ -645,6 +645,36 @@ test('narrow: starting a DM from room information uncovers the new timeline', as
   await expectPaneCenterUncovered(page, '.timeline')
 })
 
+test('narrow: user information opens from a sender and a DM uncovers the timeline', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.route(/\/rooms\/dm$/, (route) =>
+    route.fulfill({ json: { data: { room_id: '!dm:hs' } } }),
+  )
+
+  await page.goto(ROOM_URL)
+  await expect(page.locator('.timeline')).toBeVisible()
+  await page
+    .getByRole('button', { name: 'User information for @bob:hs' })
+    .first()
+    .click()
+  const panel = page.getByRole('complementary', { name: 'User information' })
+  await expect(panel).toBeVisible()
+  await expect(panel.getByRole('button', { name: 'Verify' })).toBeDisabled()
+  await expect(panel.getByRole('button', { name: 'Ignore' })).toBeDisabled()
+  await expect(panel.getByRole('button', { name: 'Call' })).toHaveCount(0)
+  await panel.getByRole('button', { name: 'Direct message' }).click()
+
+  await expect(page).toHaveURL(
+    `/${ACCOUNT_ID}/rooms/${encodeURIComponent('!dm:hs')}`,
+  )
+  await expect(panel).toHaveCount(0)
+  await expect(page.locator('.timeline')).toBeVisible()
+  await expectPaneCenterUncovered(page, '.timeline')
+})
+
 test('room information derives a parent space from its child relationship', async ({
   page,
 }) => {

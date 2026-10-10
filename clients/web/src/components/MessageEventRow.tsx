@@ -28,6 +28,7 @@ import { EditHistory } from './EditHistory'
 import { EventBody } from './EventBody'
 import { EventTime, FailedSend } from './EventStatus'
 import { UserAvatar } from './UserAvatar'
+import { UserOpenAvatar, UserOpenName } from './UserOpenTarget'
 import { useModalFocus } from './use-modal-focus'
 import type { MembersStore } from '../stores/members'
 import { EventActionIcon } from './EventActionIcon'
@@ -277,6 +278,7 @@ export function MessageEventRow({
   showThreadAction = true,
   threadRootId,
   onReplyContextJump,
+  onOpenUser,
   onMutation,
 }: {
   event: TimelineEvent
@@ -306,6 +308,8 @@ export function MessageEventRow({
   threadRootId?: string
   /** Let a thread timeline load a reply target without closing its panel. */
   onReplyContextJump?: (eventId: string) => void
+  /** Opens User information for this sender. Absent, the name stays a label. */
+  onOpenUser?: (userId: string) => void
   /** Clears transient UI state after a successful event mutation. */
   onMutation?: () => void
 }) {
@@ -483,15 +487,20 @@ export function MessageEventRow({
         runGestureAction(doubleClickAction)
       }}
     >
-      <UserAvatar
+      <UserOpenAvatar
         accountId={accountId}
         userId={event.sender}
         displayName={senderDisplay}
         member={members.members.value.get(event.sender)}
+        onOpenUser={onOpenUser}
       />
       <div class="event-content">
         <div class="event-head">
-          <span class="event-sender">{senderDisplay}</span>
+          <UserOpenName
+            userId={event.sender}
+            displayName={senderDisplay}
+            onOpenUser={onOpenUser}
+          />
           <EventTime
             event={event}
             format={settings.timeFormat.value}
@@ -609,6 +618,7 @@ export function MessageEventRow({
             targetId={replyTo}
             members={members}
             onJump={onReplyContextJump}
+            onOpenUser={onOpenUser}
           />
         )}
         <div class="event-body">
@@ -1456,6 +1466,7 @@ function ReplyContext({
   targetId,
   members,
   onJump,
+  onOpenUser,
 }: {
   accountId: string
   roomId: string
@@ -1464,6 +1475,7 @@ function ReplyContext({
   targetId: string
   members: MembersStore
   onJump: ((eventId: string) => void) | undefined
+  onOpenUser?: (userId: string) => void
 }) {
   const href =
     threadRootId === undefined
@@ -1515,14 +1527,19 @@ function ReplyContext({
           }
         }}
       />
-      <UserAvatar
+      <UserOpenAvatar
         accountId={accountId}
         userId={target.sender}
         displayName={senderDisplay}
         member={members.members.value.get(target.sender)}
+        onOpenUser={onOpenUser}
       />
       <span class="reply-context-copy">
-        <span class="event-sender">{senderDisplay}</span>{' '}
+        <UserOpenName
+          userId={target.sender}
+          displayName={senderDisplay}
+          onOpenUser={onOpenUser}
+        />{' '}
         <span class="muted reply-context-body">
           <ReplyContextBody event={target} senderDisplay={senderDisplay} />
         </span>

@@ -24,6 +24,7 @@ import {
   MessageEventRow,
 } from '../components/MessageEventRow'
 import { RoomInfoPanel } from '../components/RoomInfoPanel'
+import { UserInfoPanel } from '../components/UserInfoPanel'
 import { ThreadPanel } from '../components/ThreadPanel'
 import {
   literalMessage,
@@ -243,6 +244,7 @@ export function RoomPage() {
     string | null
   >(null)
   const [roomInfoOpen, setRoomInfoOpen] = useState(false)
+  const [userInfoUserId, setUserInfoUserId] = useState<string | null>(null)
   const [jumpOpen, setJumpOpen] = useState(false)
   const [dateJumpStart, setDateJumpStart] = useState<number | null>(null)
   const [roomEntryStatus, setRoomEntryStatus] = useState<string | null>(null)
@@ -1784,6 +1786,7 @@ export function RoomPage() {
     (rootId: string | null) => {
       if (rootId !== null) {
         setRoomInfoOpen(false)
+        setUserInfoUserId(null)
       }
       const base = location.path
       location.route(
@@ -1795,9 +1798,15 @@ export function RoomPage() {
   )
 
   const openRoomInfo = useCallback(() => {
+    setUserInfoUserId(null)
     setThreadParam(null)
     setRoomInfoOpen(true)
   }, [setThreadParam])
+
+  const openUserInfo = useCallback((userId: string) => {
+    setRoomInfoOpen(false)
+    setUserInfoUserId(userId)
+  }, [])
 
   useEffect(() => {
     setRoomChrome(title, openRoomInfo)
@@ -1805,10 +1814,20 @@ export function RoomPage() {
   }, [openRoomInfo, setRoomChrome, title])
 
   const navigateBackOneMobilePane = () => {
+    const userInfoOverThread = userInfoUserId !== null && openThread !== null
     perfMark('room-page:mobile-back', {
-      target: openThread !== null ? 'thread-close' : 'room-list',
+      target: userInfoOverThread
+        ? 'user-info-close'
+        : openThread !== null
+          ? 'thread-close'
+          : 'room-list',
     })
-    if (openThread !== null) {
+    // User information keeps `?thread=` so closing it restores the thread.
+    // A back swipe has to dismiss that panel first; otherwise it would clear
+    // the thread the panel is covering.
+    if (userInfoOverThread) {
+      setUserInfoUserId(null)
+    } else if (openThread !== null) {
       setThreadParam(null)
     } else {
       perfMarkFrames('room-page:before-route-room-list')
@@ -1818,6 +1837,13 @@ export function RoomPage() {
 
   const mobileSwipeBack = useMobileSwipeBack<HTMLDivElement>({
     getPresentation: (surface) => {
+      if (userInfoUserId !== null && openThread !== null) {
+        const foreground =
+          surface.querySelector<HTMLElement>('#user-info-panel')
+        return foreground === null || roomStream.current === null
+          ? null
+          : { foreground, destination: roomStream.current }
+      }
       if (openThread === null) {
         return roomListBackPresentation(surface, roomStream.current)
       }
@@ -1867,8 +1893,9 @@ export function RoomPage() {
   /**
    * The staged Escape (ADR 0078). The edit-history modal claims it first in the
    * capture phase, and the focused composer claims it to cancel its own banner.
-   * What is left lands here: cancel a reply/edit, else close the thread panel,
-   * and either way hand the keyboard back to the composer.
+   * What is left lands here: cancel a reply/edit, else close user information,
+   * else room information, else the thread panel, and either way hand the
+   * keyboard back to the composer.
    *
    * The banner is cancelled here as well as in the composer because focus is
    * briefly on `<body>` while the composer remounts into edit mode — an Escape
@@ -1880,6 +1907,8 @@ export function RoomPage() {
         event.preventDefault()
         if (action !== null) {
           setAction(null)
+        } else if (userInfoUserId !== null) {
+          setUserInfoUserId(null)
         } else if (roomInfoOpen) {
           setRoomInfoOpen(false)
         } else if (openThread !== null) {
@@ -1992,6 +2021,7 @@ export function RoomPage() {
                 onReply={(event) => setAction({ kind: 'reply', event })}
                 onEdit={(event) => setAction({ kind: 'edit', event })}
                 onOpenThread={setThreadParam}
+                onOpenUser={openUserInfo}
                 onMutation={search.clear}
               />
             </MediaViewerProvider>
@@ -2066,7 +2096,7 @@ export function RoomPage() {
           />
         </div>
 
-        {openThread !== null && !roomInfoOpen && (
+        {openThread !== null && !roomInfoOpen && userInfoUserId === null && (
           <ThreadPanel
             key={`${accountId}:${roomId}:${openThread}`}
             accountId={accountId}
@@ -2088,6 +2118,16 @@ export function RoomPage() {
             onCommand={handleThreadComposerCommand}
             roomCompletions={roomCompletions}
             onClose={() => setThreadParam(null)}
+            onOpenUser={openUserInfo}
+          />
+        )}
+        {userInfoUserId !== null && (
+          <UserInfoPanel
+            accountId={accountId}
+            userId={userInfoUserId}
+            ownUserId={ownUserId}
+            members={members}
+            onClose={() => setUserInfoUserId(null)}
           />
         )}
         {roomInfoOpen && (
@@ -2134,6 +2174,7 @@ function Timeline({
   onReply,
   onEdit,
   onOpenThread,
+  onOpenUser,
   onMutation,
 }: {
   timeline: TimelineStore
@@ -2157,6 +2198,7 @@ function Timeline({
   onReply: (event: EventDto) => void
   onEdit: (event: EventDto) => void
   onOpenThread: (rootId: string) => void
+  onOpenUser: (userId: string) => void
   onMutation: () => void
 }) {
   const topSentinel = useRef<HTMLDivElement>(null)
@@ -2906,6 +2948,7 @@ function Timeline({
       onReply={onReply}
       onEdit={onEdit}
       onOpenThread={onOpenThread}
+      onOpenUser={onOpenUser}
       onMutation={onMutation}
     />
   )

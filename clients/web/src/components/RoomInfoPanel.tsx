@@ -25,7 +25,8 @@ import {
 import { useShortcuts } from '../shortcuts'
 import { formatInviteeList, inviteErrorMessage } from '../invite'
 import { BodyPortal } from './BodyPortal'
-import { CopyableText, useCopyFeedback } from './CopyableText'
+import { useCopyFeedback } from './CopyableText'
+import { DetailRow } from './DetailRow'
 import { Lightbox, LightboxImage } from './Lightbox'
 import { RoomAvatar, roomAvatarColor } from './RoomAvatar'
 import { RoomSettingsForm } from './RoomSettingsForm'
@@ -1416,45 +1417,6 @@ function LeaveRoomDialog({
         </div>
       </div>
     </BodyPortal>
-  )
-}
-
-/** Placeholders are not worth copying; real IDs, names, and state are. */
-function isPopulatedDetail(value: string | null | undefined): value is string {
-  return (
-    typeof value === 'string' &&
-    value !== '' &&
-    value !== 'None' &&
-    value !== 'Unavailable' &&
-    value !== 'Loading…' &&
-    !value.startsWith('Unavailable from')
-  )
-}
-
-function DetailRow({
-  label,
-  value,
-  code = false,
-}: {
-  label: string
-  value: string | null | undefined
-  code?: boolean
-}) {
-  const text = value ?? ''
-  const displayed = code ? <code>{text}</code> : text
-  return (
-    <>
-      <dt>{label}</dt>
-      <dd>
-        {isPopulatedDetail(value) ? (
-          <CopyableText text={value} label={label}>
-            {displayed}
-          </CopyableText>
-        ) : (
-          displayed
-        )}
-      </dd>
-    </>
   )
 }
 
