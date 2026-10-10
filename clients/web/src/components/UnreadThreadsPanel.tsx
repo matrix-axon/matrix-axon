@@ -43,6 +43,7 @@ export function UnreadThreadsPanel({ onClose }: { onClose: () => void }) {
     }
     return createThreadsStore(api, roomAccountId, roomId)
   }, [api, roomAccountId, roomId])
+  useEffect(() => () => threads?.stop(), [threads])
   const [preferRoomThreads, setPreferRoomThreads] = useState(false)
   const showingRoomThreads =
     room !== null && (unreadEntries.length === 0 || preferRoomThreads)

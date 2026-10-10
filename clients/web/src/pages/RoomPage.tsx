@@ -229,6 +229,9 @@ export function RoomPage() {
     () => createThreadsStore(api, accountId, roomId),
     [api, accountId, roomId],
   )
+  // A long thread list is still fetching its roots when the reader moves on;
+  // the next room's requests should not queue behind this one's (#662).
+  useEffect(() => () => threads.stop(), [threads])
   const members = useMemo(
     () => createMembersStore(api, accountId, roomId),
     [api, accountId, roomId],
