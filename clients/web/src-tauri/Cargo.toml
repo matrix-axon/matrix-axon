@@ -99,6 +99,21 @@ objc2 = "0.6"
 # a null block differently, and a debug build checks that.
 block2 = "0.6"
 
+# The taskbar overlay's accessible name. Tauri's `set_overlay_icon` cannot
+# carry one. `ITaskbarList3::SetOverlayIcon` can.
+# `windows` 0.62 is the range tao 0.37.1 and tauri 2.12.1 already require.
+# Cargo.lock resolves all three to 0.62.2, so `WebviewWindow::hwnd` is this
+# crate's `HWND`. A later bump that resolves a second copy fails the Windows
+# build at that call. `tauri-plugin-opener` keeps its own `windows` 0.61.3
+# for a different call. That copy is not this type.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
 [target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
