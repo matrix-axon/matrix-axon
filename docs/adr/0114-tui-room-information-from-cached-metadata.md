@@ -14,7 +14,7 @@ The server went a different way, and most of the data now exists:
 | Read                                           | Provides                                                                                                                     | Limits                                                                                                              |
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `GET …/rooms/{room_id}/metadata` (ADR 0111)    | Eight typed snapshots: aliases, creation, join rules, encryption, power levels, server ACL, history visibility, guest access | Each snapshot carries a status; `unknown` is not "unset". Guest access and server ACL are not in the sync defaults. |
-| `GET …/rooms/{room_id}/info` (ADR 0084, 0111)  | `member_counts {joined, invited, observed_at}`                                                                               | Null until observed; `observed_at` is a local cache read time, not upstream freshness.                              |
+| `GET …/rooms/{room_id}/info` (ADR 0084, 0111)  | `member_counts {joined, invited, observed_at}`                                                                               | Null until observed; `observed_at` is when the pair last changed locally, not upstream freshness.                              |
 | `GET …/rooms/{room_id}/upgrade` (ADR 0084)     | Successor room from the tombstone                                                                                            | The predecessor is also in the creation snapshot.                                                                   |
 | `GET …/rooms/{room_id}/members`                | User ID, display name, membership, avatar                                                                                    | Reads the lazily loaded member projection, so a large room returns a partial list. Unbounded response.              |
 
@@ -46,7 +46,7 @@ At most one fetch is in flight, a result for a room that is no longer shown or f
 The popup keeps its identity lines and replaces every "API support needed" line:
 
 - **Aliases:** the canonical alias and "Advertised aliases". The phrase "full alias list" is retired; homeserver-local aliases wait for [issue 621](https://github.com/matrix-axon/matrix-axon/issues/621).
-- **Members:** joined and invited counts with the observation time, or "unknown".
+- **Members:** joined and invited counts with the time the pair last changed in Axon's cache (not a freshness signal), or "unknown".
 - **Encryption:** algorithm and rotation periods. An unknown snapshot reads "no encryption state cached", never "unencrypted".
 - **Access:** join rule with its allow conditions, history visibility, and guest access.
 - **Room:** type, version, creator (the create event's sender when the content omits `creator`), creation time, federation, predecessor, and successor.

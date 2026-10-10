@@ -12,8 +12,8 @@ use unicode_width::UnicodeWidthChar;
 use super::render::format_time;
 use super::{App, RoomKey};
 use crate::api::{
-    AxonClient, MetadataSnapshot, RoomCreationContent, RoomDto, RoomInfoDto, RoomJoinRulesContent,
-    RoomMetadataDto, RoomPowerLevelsContent, RoomUpgradeDto, SnapshotStatus,
+    ApiError, AxonClient, MetadataSnapshot, RoomCreationContent, RoomDto, RoomInfoDto,
+    RoomJoinRulesContent, RoomMetadataDto, RoomPowerLevelsContent, RoomUpgradeDto, SnapshotStatus,
 };
 use crate::config::{ColorScheme, TimeFormat};
 
@@ -25,26 +25,46 @@ const ROOM_INFO_READS: u8 = 3;
 #[derive(Debug)]
 pub(crate) struct Part<T> {
     pub(crate) value: Option<T>,
-    pub(crate) failed: bool,
+    /// How the newest read failed; cleared while a retry is in flight.
+    pub(crate) failure: Option<ReadFailure>,
+}
+
+/// Why a read produced nothing. The popup words these differently: retrying
+/// helps one and not the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadFailure {
+    /// HTTP 404: this axon predates the endpoint.
+    Unsupported,
+    /// Transport error, timeout, oversized or undecodable response.
+    Failed,
+}
+
+impl From<ApiError> for ReadFailure {
+    fn from(err: ApiError) -> Self {
+        match err.is_not_found() {
+            true => ReadFailure::Unsupported,
+            false => ReadFailure::Failed,
+        }
+    }
 }
 
 impl<T> Default for Part<T> {
     fn default() -> Self {
         Self {
             value: None,
-            failed: false,
+            failure: None,
         }
     }
 }
 
 impl<T> Part<T> {
-    fn settle(&mut self, result: Option<T>) {
+    fn settle(&mut self, result: Result<T, ReadFailure>) {
         match result {
-            Some(value) => {
+            Ok(value) => {
                 self.value = Some(value);
-                self.failed = false;
+                self.failure = None;
             }
-            None => self.failed = true,
+            Err(failure) => self.failure = Some(failure),
         }
     }
 }
@@ -85,12 +105,12 @@ impl RoomInfoCache {
 #[derive(Debug)]
 pub(crate) enum RoomInfoPart {
     /// Boxed: eight snapshots dwarf the other two reads.
-    Metadata(Option<Box<RoomMetadataDto>>),
-    Info(Option<RoomInfoDto>),
-    Upgrade(Option<RoomUpgradeDto>),
+    Metadata(Result<Box<RoomMetadataDto>, ReadFailure>),
+    Info(Result<RoomInfoDto, ReadFailure>),
+    Upgrade(Result<RoomUpgradeDto, ReadFailure>),
 }
 
-/// One completed read; `None` inside the part is a failed request.
+/// One completed read.
 #[derive(Debug)]
 pub(crate) struct RoomInfoOutcome {
     pub(crate) key: RoomKey,
@@ -121,6 +141,10 @@ impl App {
             Some(state) => {
                 state.generation = generation;
                 state.in_flight = ROOM_INFO_READS;
+                // A retry is pending again: say "loading", not the old failure.
+                state.metadata.failure = None;
+                state.info.failure = None;
+                state.upgrade.failure = None;
             }
             None => {
                 cache.state = Some(RoomInfoState {
@@ -151,19 +175,19 @@ impl App {
         spawn_read(|client, key| {
             Box::pin(async move {
                 let read = client.room_metadata(key.account_id, &key.room_id).await;
-                RoomInfoPart::Metadata(read.ok().map(Box::new))
+                RoomInfoPart::Metadata(read.map(Box::new).map_err(ReadFailure::from))
             })
         });
         spawn_read(|client, key| {
             Box::pin(async move {
                 let read = client.room_info(key.account_id, &key.room_id).await;
-                RoomInfoPart::Info(read.ok())
+                RoomInfoPart::Info(read.map_err(ReadFailure::from))
             })
         });
         spawn_read(|client, key| {
             Box::pin(async move {
                 let read = client.room_upgrade(key.account_id, &key.room_id).await;
-                RoomInfoPart::Upgrade(read.ok())
+                RoomInfoPart::Upgrade(read.map_err(ReadFailure::from))
             })
         });
         self.room_info.reads = reads;
@@ -208,6 +232,7 @@ enum View<'a, T> {
     Loaded(&'a T),
     Loading,
     Failed,
+    Unsupported,
     NotRequested,
 }
 
@@ -217,6 +242,7 @@ impl<T> View<'_, T> {
             View::Loaded(_) => "",
             View::Loading => "loading…",
             View::Failed => "unavailable (request failed)",
+            View::Unsupported => "unavailable (this axon server does not provide it)",
             View::NotRequested => "not loaded",
         }
     }
@@ -232,7 +258,8 @@ fn view<'a, T>(
     let part = part(state);
     match &part.value {
         Some(value) => View::Loaded(value),
-        None if part.failed => View::Failed,
+        None if part.failure == Some(ReadFailure::Unsupported) => View::Unsupported,
+        None if part.failure.is_some() => View::Failed,
         None if state.in_flight > 0 => View::Loading,
         None => View::NotRequested,
     }
@@ -363,14 +390,18 @@ fn member_count_line(info: &View<'_, RoomInfoDto>, time_format: TimeFormat) -> S
         return format!("Members: {}", info.pending_phrase());
     };
     match &info.member_counts {
-        Some(counts) => format!(
-            "Members: {} joined, {} invited (observed {})",
+        Some(Some(counts)) => format!(
+            // `observed_at` is when the pair last changed locally, not a
+            // confirmation time, so do not word it as freshness.
+            "Members: {} joined, {} invited (last changed {})",
             counts.joined,
             counts.invited,
             format_datetime(counts.observed_at, time_format)
         ),
         // Null is "not observed yet", never zero.
-        None => "Members: unknown (not yet observed)".to_owned(),
+        Some(None) => "Members: unknown (not yet observed)".to_owned(),
+        // No field at all: this server will never observe one.
+        None => "Members: unavailable (this axon server does not report member counts)".to_owned(),
     }
 }
 
@@ -522,6 +553,8 @@ fn upgrade_lines(
             scalar(snapshot, "predecessor", None, "none")
         }
         (None, Some(snapshot)) => no_content_phrase(snapshot).to_owned(),
+        // `/upgrade` cannot tell "no predecessor" from "none cached" either.
+        (None, None) if loaded.is_some() => "none known".to_owned(),
         (None, None) => upgrade.pending_phrase().to_owned(),
     };
     let successor = match loaded {
@@ -718,9 +751,9 @@ pub(crate) fn detail_lines(
         }
     }
     let stale = state.is_some_and(|state| {
-        (state.metadata.failed && state.metadata.value.is_some())
-            || (state.info.failed && state.info.value.is_some())
-            || (state.upgrade.failed && state.upgrade.value.is_some())
+        (state.metadata.failure.is_some() && state.metadata.value.is_some())
+            || (state.info.failure.is_some() && state.info.value.is_some())
+            || (state.upgrade.failure.is_some() && state.upgrade.value.is_some())
     });
     if stale {
         lines.push(String::new());
@@ -741,6 +774,36 @@ const GAP_PREFIXES: [&str; 8] = [
     "redacted",
 ];
 
+/// Summary rows whose values come from the room itself (a topic may well
+/// begin "unavailable …"), so they are never dimmed as gaps.
+const SUMMARY_LABELS: [&str; 9] = [
+    "Name",
+    "DM name",
+    "Matrix ID",
+    "Account ID",
+    "Your Matrix ID",
+    "Topic",
+    "Avatar",
+    "Last activity",
+    "Last event",
+];
+
+/// Room state is written by other people. Keep control characters out of the
+/// terminal and off the row count: whitespace ones become a space, the rest
+/// a visible replacement.
+fn printable(line: String) -> String {
+    if !line.contains(char::is_control) {
+        return line;
+    }
+    line.chars()
+        .map(|ch| match ch {
+            '\n' | '\r' | '\t' => ' ',
+            ch if ch.is_control() => char::REPLACEMENT_CHARACTER,
+            ch => ch,
+        })
+        .collect()
+}
+
 /// Colour one popup line: the field name in the heading colour, and a value
 /// that only reports a gap dimmed, so real data stands out from both.
 ///
@@ -748,6 +811,7 @@ const GAP_PREFIXES: [&str; 8] = [
 /// rows are list entries whose text (a display name, say) may itself contain
 /// a colon.
 pub(crate) fn styled_line(line: String, colors: &ColorScheme) -> Line<'static> {
+    let line = printable(line);
     let label_style = Style::default().fg(colors.selected_room);
     if line.starts_with(' ') {
         return Line::from(line);
@@ -758,7 +822,9 @@ pub(crate) fn styled_line(line: String, colors: &ColorScheme) -> Line<'static> {
             false => Line::from(line),
         };
     };
-    let value_style = match GAP_PREFIXES.iter().any(|gap| value.starts_with(gap)) {
+    let is_gap =
+        !SUMMARY_LABELS.contains(&label) && GAP_PREFIXES.iter().any(|gap| value.starts_with(gap));
+    let value_style = match is_gap {
         true => Style::default().fg(colors.input_hint),
         false => Style::default(),
     };
@@ -769,31 +835,55 @@ pub(crate) fn styled_line(line: String, colors: &ColorScheme) -> Line<'static> {
 }
 
 /// Break one styled line into rows no wider than `width`, at a space where
-/// the row has one and mid-word otherwise.
+/// the row has one and mid-word otherwise. Continuation rows hang two columns
+/// inside the line's own indent, so a wrapped entry reads as one entry.
 ///
 /// The popup pages by row, so a long list left as one logical line would be
 /// skipped whole by a single Down, and its tail could never be scrolled into
 /// view once it wrapped past the popup's height.
 pub(crate) fn wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
+    let cells: Vec<(char, Style)> = line
+        .spans
+        .iter()
+        .flat_map(|span| span.content.chars().map(|ch| (ch, span.style)))
+        .collect();
+    let cell_width = |cells: &[(char, Style)]| -> usize {
+        cells.iter().map(|(ch, _)| ch.width().unwrap_or(0)).sum()
+    };
+    let indent = cells.iter().take_while(|(ch, _)| *ch == ' ').count();
+    // No hanging indent once it would leave nothing to write in.
+    let hang = match indent + 2 < width {
+        true => indent + 2,
+        false => 0,
+    };
+    let hanging_row = || vec![(' ', Style::default()); hang];
+
     let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
     let mut row: Vec<(char, Style)> = Vec::new();
-    let mut row_width = 0;
-    for span in &line.spans {
-        for ch in span.content.chars() {
-            let ch_width = ch.width().unwrap_or(0);
-            if row_width > 0 && row_width + ch_width > width {
-                // Carry the unfinished word down, unless it fills the row.
-                let carried = match row.iter().rposition(|(cell, _)| *cell == ' ') {
-                    Some(space) if ch != ' ' => row.split_off(space + 1),
-                    _ => Vec::new(),
-                };
-                rows.push(std::mem::replace(&mut row, carried));
-                row_width = row.iter().map(|(cell, _)| cell.width().unwrap_or(0)).sum();
+    // Cells before this index are indentation, never a place to break.
+    let mut text_start = indent;
+    for (ch, style) in cells {
+        let ch_width = ch.width().unwrap_or(0);
+        if row.len() > text_start && cell_width(&row) + ch_width > width {
+            let mut next = hanging_row();
+            // Carry the unfinished word down, unless it would not fit there
+            // either; the space that overflowed is the break itself.
+            let word_start = row[text_start..]
+                .iter()
+                .rposition(|(cell, _)| *cell == ' ')
+                .map(|space| text_start + space + 1)
+                .filter(|start| ch != ' ' && hang + cell_width(&row[*start..]) + ch_width <= width);
+            if let Some(start) = word_start {
+                next.extend(row.split_off(start));
             }
-            row.push((ch, span.style));
-            row_width += ch_width;
+            rows.push(std::mem::replace(&mut row, next));
+            text_start = hang;
+            if ch == ' ' {
+                continue;
+            }
         }
+        row.push((ch, style));
     }
     rows.push(row);
     rows.into_iter()
@@ -864,15 +954,15 @@ mod tests {
             in_flight: 0,
             metadata: Part {
                 value: metadata,
-                failed: false,
+                failure: None,
             },
             info: Part {
                 value: info,
-                failed: false,
+                failure: None,
             },
             upgrade: Part {
                 value: upgrade,
-                failed: false,
+                failure: None,
             },
         }
     }
@@ -963,11 +1053,11 @@ mod tests {
         let state = loaded(
             Some(full_metadata()),
             Some(RoomInfoDto {
-                member_counts: Some(RoomMemberCountsDto {
+                member_counts: Some(Some(RoomMemberCountsDto {
                     joined: 412,
                     invited: 3,
                     observed_at: 1_700_000_000_000,
-                }),
+                })),
             }),
             Some(RoomUpgradeDto {
                 tombstoned_to: Some("!new:example.com".to_owned()),
@@ -984,7 +1074,9 @@ mod tests {
             line(&lines, "Advertised aliases:"),
             "Advertised aliases: #operations:example.com, #ops:other.example"
         );
-        assert!(line(&lines, "Members:").starts_with("Members: 412 joined, 3 invited (observed "));
+        assert!(
+            line(&lines, "Members:").starts_with("Members: 412 joined, 3 invited (last changed ")
+        );
         assert_eq!(
             line(&lines, "Encryption:"),
             "Encryption: m.megolm.v1.aes-sha2; key rotation every 7d or 100 messages"
@@ -1032,7 +1124,7 @@ mod tests {
         let state = loaded(
             Some(all_unknown()),
             Some(RoomInfoDto {
-                member_counts: None,
+                member_counts: Some(None),
             }),
             Some(RoomUpgradeDto::default()),
         );
@@ -1232,11 +1324,18 @@ mod tests {
             serde_json::from_value(json!({ "join_rule": "public", "encryption_algorithm": null }))
                 .unwrap();
         assert_eq!(info.member_counts, None);
+        assert_eq!(
+            member_count_line(&View::Loaded(&info), TimeFormat::H24),
+            "Members: unavailable (this axon server does not report member counts)"
+        );
         let info: RoomInfoDto = serde_json::from_value(json!({
             "member_counts": { "joined": 2, "invited": 0, "observed_at": 5 },
         }))
         .unwrap();
-        assert_eq!(info.member_counts.map(|counts| counts.joined), Some(2));
+        assert_eq!(
+            info.member_counts.flatten().map(|counts| counts.joined),
+            Some(2)
+        );
 
         // A snapshot the server does not send reads as unknown.
         let metadata: RoomMetadataDto = serde_json::from_value(json!({})).unwrap();
@@ -1436,22 +1535,181 @@ mod tests {
         assert!(rows.len() > 1);
         assert!(rows.iter().all(|row| row.width() <= 30), "{rows:#?}");
         // Nothing is dropped or reordered, and no alias is split.
-        let joined: String = rows.iter().map(|row| row.to_string()).collect();
-        assert_eq!(joined, text);
+        let words = |text: &str| {
+            text.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let joined = rows
+            .iter()
+            .map(|row| row.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(words(&joined), words(&text));
         assert!(rows
             .iter()
-            .any(|row| row.to_string().trim_end() == "#two:example.com,"));
-        // The label keeps its colour; continuation rows are plain value text.
+            .any(|row| row.to_string().trim() == "#two:example.com,"));
+        // The label keeps its colour; continuation rows hang two columns in,
+        // unstyled, and never start with the space that was broken at.
         assert_eq!(rows[0].spans[0].style, label);
-        assert_eq!(rows[1].spans[0].style, Style::default());
+        for row in &rows[1..] {
+            let text = row.to_string();
+            assert!(
+                text.starts_with("  ") && !text.starts_with("   "),
+                "{text:?}"
+            );
+            assert_eq!(row.spans[0].style, Style::default());
+        }
 
         // A word wider than the row is broken rather than overflowing.
         let rows = wrap_styled_line(Line::from("x".repeat(25)), 10);
         assert_eq!(
             rows.iter().map(|row| row.width()).collect::<Vec<_>>(),
-            [10, 10, 5]
+            [10, 10, 9]
         );
         assert_eq!(wrap_styled_line(Line::from(""), 10).len(), 1);
+        // Too narrow to hang an indent, or to hold one wide character: still
+        // terminates, one character per row.
+        assert_eq!(wrap_styled_line(Line::from("ab"), 1).len(), 2);
+        assert_eq!(wrap_styled_line(Line::from("日本"), 1).len(), 2);
+    }
+
+    #[test]
+    fn wrapping_an_indented_entry_never_emits_a_blank_row() {
+        // The only spaces before the overflow are the entry's own indent.
+        let entry = format!("    @{}:example.com  100", "u".repeat(40));
+
+        let rows: Vec<String> = wrap_styled_line(Line::from(entry.clone()), 30)
+            .iter()
+            .map(|row| row.to_string())
+            .collect();
+
+        assert!(rows.iter().all(|row| !row.trim().is_empty()), "{rows:#?}");
+        assert!(rows
+            .iter()
+            .all(|row| Line::from(row.as_str()).width() <= 30));
+        assert!(rows[0].starts_with("    @uuu"));
+        // Continuations sit two columns inside the entry's indent.
+        assert!(rows[1..]
+            .iter()
+            .all(|row| row.starts_with("      ") && !row.starts_with("       ")));
+        let unwrapped: String = rows.concat().replace(' ', "");
+        assert_eq!(unwrapped, entry.replace(' ', ""));
+
+        // Too narrow to hang an indent: the indent's own spaces must still
+        // not be taken as the place to break.
+        let narrow: Vec<String> = wrap_styled_line(Line::from("    abcdef"), 6)
+            .iter()
+            .map(|row| row.to_string())
+            .collect();
+        assert_eq!(narrow, ["    ab", "cdef"]);
+    }
+
+    #[test]
+    fn room_supplied_text_is_neither_dimmed_as_a_gap_nor_sent_raw() {
+        let colors = TuiConfig::test_default().colors;
+        let gap = Style::default().fg(colors.input_hint);
+
+        // A topic that happens to start like a gap phrase is still a topic.
+        let topic = styled_line("Topic: unavailable on weekends".to_owned(), &colors);
+        assert_eq!(topic.spans[1].style, Style::default());
+        let detail = styled_line(
+            "Guest access: unavailable (malformed state)".to_owned(),
+            &colors,
+        );
+        assert_eq!(detail.spans[1].style, gap);
+
+        // Escape sequences and line breaks from room state never reach the
+        // terminal, and cannot add rows the pager did not count.
+        let hostile = styled_line(
+            "Advertised aliases: #a\u{1b}[2J:x\nName: spoofed".to_owned(),
+            &colors,
+        );
+        let text = hostile.to_string();
+        assert!(!text.contains(char::is_control), "{text:?}");
+        assert_eq!(text, "Advertised aliases: #a\u{fffd}[2J:x Name: spoofed");
+    }
+
+    #[test]
+    fn a_loaded_upgrade_read_never_leaves_an_empty_value() {
+        // `/upgrade` answered; `/metadata` has not, or failed.
+        for failure in [None, Some(ReadFailure::Failed)] {
+            let mut state = loaded(None, None, Some(RoomUpgradeDto::default()));
+            state.in_flight = 1;
+            state.metadata.failure = failure;
+            let lines = lines(&state);
+
+            assert_eq!(line(&lines, "Upgraded from:"), "Upgraded from: none known");
+            assert!(lines.iter().all(|line| !line.ends_with(": ")), "{lines:#?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_retry_reads_as_loading_until_it_settles() {
+        let mut app = app();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.room_info.tx = Some(tx);
+        let mut state = loaded(Some(full_metadata()), None, None);
+        state.metadata.failure = Some(ReadFailure::Failed);
+        state.info.failure = Some(ReadFailure::Failed);
+        app.room_info.state = Some(state);
+        let before = crate::ui::popup_room_info_lines(&app);
+        assert_eq!(
+            line(&before, "Members:"),
+            "Members: unavailable (request failed)"
+        );
+        assert!(before
+            .iter()
+            .any(|line| line.starts_with("Latest refresh failed")));
+
+        app.request_room_info(key());
+
+        let during = crate::ui::popup_room_info_lines(&app);
+        assert_eq!(line(&during, "Members:"), "Members: loading…");
+        assert!(!during
+            .iter()
+            .any(|line| line.starts_with("Latest refresh failed")));
+        // The data it already had stays up while the retry runs.
+        assert_eq!(line(&during, "Room version:"), "Room version: 11");
+    }
+
+    #[tokio::test]
+    async fn an_older_server_without_the_endpoint_is_not_a_failed_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = AxonClient::new(format!("http://{}", listener.local_addr().unwrap()), None);
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut chunk = [0; 2048];
+                let _ = socket.read(&mut chunk).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .await;
+            }
+        });
+        let mut app = app();
+        app.client = client;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.room_info.tx = Some(tx);
+
+        app.request_room_info(key());
+        for _ in 0..ROOM_INFO_READS {
+            let outcome = rx.recv().await.expect("each read reports back");
+            app.apply_room_info_outcome(outcome);
+        }
+
+        let lines = crate::ui::popup_room_info_lines(&app);
+        assert_eq!(
+            line(&lines, "Members:"),
+            "Members: unavailable (this axon server does not provide it)"
+        );
+        assert_eq!(
+            line(&lines, "Encryption, access"),
+            "Encryption, access, and room details: unavailable (this axon server does not provide it)"
+        );
     }
 
     #[test]
@@ -1581,7 +1839,7 @@ mod tests {
         state.generation = 2;
         state.in_flight = ROOM_INFO_READS;
         app.room_info.state = Some(state);
-        let info = || RoomInfoPart::Info(Some(RoomInfoDto::default()));
+        let info = || RoomInfoPart::Info(Ok(RoomInfoDto::default()));
 
         let mut other = key();
         other.room_id = "!other:example.com".to_owned();
@@ -1615,7 +1873,7 @@ mod tests {
         app.apply_room_info_outcome(RoomInfoOutcome {
             key: key(),
             generation: 0,
-            part: RoomInfoPart::Metadata(None),
+            part: RoomInfoPart::Metadata(Err(ReadFailure::Failed)),
         });
 
         let lines = crate::ui::popup_room_info_lines(&app);

@@ -318,13 +318,7 @@ impl AxonClient {
         account_id: Uuid,
         room_id: &str,
     ) -> Result<RoomMetadataDto, ApiError> {
-        let request = self.http.get(format!(
-            "{}/v1/accounts/{}/rooms/{}/metadata",
-            self.base_url,
-            account_id,
-            path_segment(room_id)
-        ));
-        self.send_bounded(read_request(request), ROOM_METADATA_LIMIT)
+        self.room_read(account_id, room_id, "metadata", ROOM_METADATA_LIMIT)
             .await
     }
 
@@ -335,13 +329,7 @@ impl AxonClient {
         account_id: Uuid,
         room_id: &str,
     ) -> Result<RoomInfoDto, ApiError> {
-        let request = self.http.get(format!(
-            "{}/v1/accounts/{}/rooms/{}/info",
-            self.base_url,
-            account_id,
-            path_segment(room_id)
-        ));
-        self.send_bounded(read_request(request), ROOM_SUMMARY_READ_LIMIT)
+        self.room_read(account_id, room_id, "info", ROOM_SUMMARY_READ_LIMIT)
             .await
     }
 
@@ -350,14 +338,25 @@ impl AxonClient {
         account_id: Uuid,
         room_id: &str,
     ) -> Result<RoomUpgradeDto, ApiError> {
+        self.room_read(account_id, room_id, "upgrade", ROOM_SUMMARY_READ_LIMIT)
+            .await
+    }
+
+    /// One byte-capped `GET …/rooms/{room_id}/{resource}` cached-state read.
+    async fn room_read<T: DeserializeOwned>(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        resource: &str,
+        limit: usize,
+    ) -> Result<T, ApiError> {
         let request = self.http.get(format!(
-            "{}/v1/accounts/{}/rooms/{}/upgrade",
+            "{}/v1/accounts/{}/rooms/{}/{resource}",
             self.base_url,
             account_id,
             path_segment(room_id)
         ));
-        self.send_bounded(read_request(request), ROOM_SUMMARY_READ_LIMIT)
-            .await
+        self.send_bounded(read_request(request), limit).await
     }
 
     pub async fn room_members(
@@ -1735,19 +1734,30 @@ pub struct RoomMetadataDto {
     pub guest_access: MetadataSnapshot<RoomGuestAccessContent>,
 }
 
-/// The part of `GET …/rooms/{room_id}/info` the TUI reads. `member_counts` is
-/// absent on a server that predates it and `null` until observed.
+/// The part of `GET …/rooms/{room_id}/info` the TUI reads.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct RoomInfoDto {
-    #[serde(default)]
-    pub member_counts: Option<RoomMemberCountsDto>,
+    /// `None` when the server sent no such field (it predates member counts
+    /// and never will observe one); `Some(None)` for `null`, not observed yet.
+    #[serde(default, deserialize_with = "present")]
+    pub member_counts: Option<Option<RoomMemberCountsDto>>,
+}
+
+/// Keeps a present-but-null field apart from an absent one.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RoomMemberCountsDto {
     pub joined: i64,
     pub invited: i64,
-    /// When Axon read its local cache (Unix ms), not upstream freshness.
+    /// When this pair last changed in Axon's cache (Unix ms). An unchanged
+    /// confirmation keeps it, so it is not a freshness signal.
     pub observed_at: i64,
 }
 
