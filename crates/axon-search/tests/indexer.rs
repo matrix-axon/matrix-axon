@@ -398,3 +398,55 @@ async fn fresh_index_seeds_from_corpus() {
         "a marked, fully-seeded index reopens in place"
     );
 }
+
+/// A durable leave watermark must not delete messages or search documents from
+/// a later rejoin, even when physical cleanup was delayed until after ingestion.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Postgres"]
+async fn delayed_room_purge_preserves_later_messages_and_search_documents() {
+    let _serial = INDEXER_SERIAL.lock().await;
+    let store = Store::connect(&db_url(), 5).await.unwrap();
+    let account = new_account(&store).await;
+    let room = format!("!room-{}:localhost", Uuid::new_v4());
+    let dir = tempfile::tempdir().unwrap();
+    let (index, _) = SearchIndex::open(dir.path()).unwrap();
+    let handles = spawn(&store, &index);
+    insert(
+        &store,
+        account,
+        &room,
+        "$before-leave",
+        100,
+        "m.room.message",
+        msg("historicmessage"),
+        None,
+        None,
+    )
+    .await;
+    handles.handle.notify();
+    wait_for_count(&index, account, "historicmessage", 1).await;
+    store.queue_room_purge(account, &room).await.unwrap();
+    insert(
+        &store,
+        account,
+        &room,
+        "$after-rejoin",
+        200,
+        "m.room.message",
+        msg("freshmessage"),
+        None,
+        None,
+    )
+    .await;
+    handles.handle.notify();
+    wait_for_count(&index, account, "freshmessage", 1).await;
+    store.retry_room_purges().await.unwrap();
+    handles.handle.flush().await;
+    wait_for_count(&index, account, "historicmessage", 0).await;
+    wait_for_count(&index, account, "freshmessage", 1).await;
+    let summary = store.list_rooms(Some(account)).await.unwrap();
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].last_event_id.as_deref(), Some("$after-rejoin"));
+    store.delete_account_row(account).await.unwrap();
+    handles.handle.flush().await;
+}

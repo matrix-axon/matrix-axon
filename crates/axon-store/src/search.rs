@@ -95,7 +95,8 @@ impl Store {
     ///
     /// Keyset pagination (`id > $1`) rather than `OFFSET` so the bulk build holds
     /// at most one connection at a time and each batch is a bounded indexed scan,
-    /// leaving the shared pool headroom for live sync and API reads.
+    /// using the maintenance pool and its longer deadline so live sync and API
+    /// reads retain their own connections.
     ///
     /// The result mirrors what the live indexing path would derive event-by-event
     /// (`axon_search`'s `indexable`), so a from-scratch rebuild converges with
@@ -141,7 +142,7 @@ impl Store {
         let rows = sqlx_core::query_as::query_as::<Postgres, IndexableEvent>(&sql)
             .bind(after_id)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.index_pool)
             .await?;
         Ok(rows)
     }
@@ -212,11 +213,22 @@ impl Store {
     /// source is `events`, never the outbox — pruning can never remove information
     /// needed to reconstruct the index. Idempotent.
     pub async fn prune_search_outbox(&self, through_seq: i64) -> Result<(), StoreError> {
-        sqlx_core::query::query("DELETE FROM search_outbox WHERE seq <= $1")
+        // Each committed batch releases its connection and row locks. A crash
+        // or timeout leaves an already-applied prefix that the next prune can
+        // safely retry, without replaying or losing search work.
+        loop {
+            let result = sqlx_core::query::query(
+                "DELETE FROM search_outbox WHERE seq IN ( \
+                     SELECT seq FROM search_outbox WHERE seq <= $1 ORDER BY seq LIMIT 1000 \
+                 )",
+            )
             .bind(through_seq)
-            .execute(&self.pool)
+            .execute(&self.index_pool)
             .await?;
-        Ok(())
+            if result.rows_affected() < 1000 {
+                return Ok(());
+            }
+        }
     }
 }
 

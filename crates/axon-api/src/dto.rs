@@ -1946,6 +1946,8 @@ pub struct BackfillStatusDto {
     /// Per-account backfill progress, so a client can tell whether history backfill
     /// is still running or done.
     pub accounts: Vec<AccountBackfillDto>,
+    /// False when progress could not be read; an empty list then means unavailable.
+    pub progress_available: bool,
 }
 
 /// One account's backfill progress (M10).
@@ -1986,6 +1988,7 @@ impl BackfillStatusDto {
             reason: snapshot.paused_low_disk.then(|| "low_disk".to_owned()),
             free_bytes: snapshot.free_bytes,
             accounts: accounts.into_iter().map(AccountBackfillDto::from).collect(),
+            progress_available: true,
         }
     }
 }

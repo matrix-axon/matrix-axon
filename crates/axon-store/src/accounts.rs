@@ -369,7 +369,7 @@ impl Store {
 
     /// Hard-delete the account row. The FK cascades (`ON DELETE CASCADE` on
     /// `events`, `room_state`, `account_data`, and the event crypto siblings)
-    /// remove all of its Postgres-resident data in the same statement. Idempotent:
+    /// remove remaining metadata after committed event/state batches. Idempotent:
     /// deleting an already-gone row affects zero rows and is not an error.
     ///
     /// This is the **last** step of the account-delete teardown (in `axon-sync`) —
@@ -378,13 +378,21 @@ impl Store {
     /// runs first and the row is dropped only once it has (ADR 0024).
     ///
     /// The **search index** is handled differently: its purge obligation is
-    /// appended to `search_outbox` in the *same statement* that drops the row, so
+    /// appended to `search_outbox` in each event batch and the final delete, so
     /// it commits atomically and — crucially — *outlives* the row (the outbox has
     /// no FK to `accounts`). The indexer drains it whether or not search is
     /// currently enabled, so an account deleted while search is off, or a crash
     /// before the purge commits to Tantivy, still converges on the next enabled
-    /// boot (ADR 0039). Idempotent: a re-run after the row is gone appends nothing.
+    /// boot (ADR 0039). Retrying interrupted teardown may append more sentinels;
+    /// they are idempotent index operations. Once the account row is gone, a
+    /// re-run appends nothing. Event crypto siblings cascade with each bounded
+    /// event batch; the final maintenance statement cascades room metadata.
     pub async fn delete_account_row(&self, account_id: Uuid) -> Result<(), StoreError> {
+        // Teardown has already persisted `deleting` and stopped ingestion.
+        // Progress survives a crash: the account breadcrumb stays until the final
+        // cascade, while each event batch atomically enqueues an index purge.
+        self.delete_event_batches(account_id, None, None).await?;
+        self.delete_state_batches(account_id, None, None).await?;
         sqlx_core::query::query(
             "WITH d AS ( \
                DELETE FROM accounts WHERE account_id = $1 RETURNING account_id \
@@ -393,7 +401,7 @@ impl Store {
              SELECT account_id, '' FROM d",
         )
         .bind(account_id)
-        .execute(&self.pool)
+        .execute(&self.maintenance_pool)
         .await?;
         Ok(())
     }
@@ -592,6 +600,64 @@ impl Store {
             .bind(sync_token)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+    /// Shared account/room event deletion. Fixed-size committed batches release
+    /// row locks and pool slots between attempts; every partial deletion carries
+    /// an atomic index obligation. Account teardown enqueues its purge sentinel;
+    /// room cleanup enqueues deleted event IDs so a later rejoin is preserved.
+    pub(crate) async fn delete_event_batches(
+        &self,
+        account_id: Uuid,
+        room_id: Option<&str>,
+        through_event_id: Option<i64>,
+    ) -> Result<(), StoreError> {
+        loop {
+            let count: i64 = sqlx_core::query_scalar::query_scalar(
+                "WITH deleted AS ( \
+                    DELETE FROM events WHERE id IN ( \
+                        SELECT id FROM events WHERE account_id = $1 \
+                        AND ($2::text IS NULL OR room_id = $2) \
+                        AND ($3::bigint IS NULL OR id <= $3) LIMIT 1000 \
+                    ) RETURNING event_id \
+                 ), obligation AS ( \
+                    INSERT INTO search_outbox (account_id, event_id) \
+                    SELECT DISTINCT $1, CASE WHEN $2::text IS NULL THEN '' ELSE event_id END FROM deleted \
+                 ) SELECT count(*) FROM deleted",
+            )
+            .bind(account_id)
+            .bind(room_id)
+            .bind(through_event_id)
+            .fetch_one(&self.maintenance_pool)
+            .await?;
+            if count < 1000 {
+                return Ok(());
+            }
+        }
+    }
+    pub(crate) async fn delete_state_batches(
+        &self,
+        account_id: Uuid,
+        room_id: Option<&str>,
+        through_event_id: Option<i64>,
+    ) -> Result<(), StoreError> {
+        for table in ["room_state", "account_data"] {
+            loop {
+                let result = sqlx_core::query::query(&format!(
+                    "DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} \
+                     WHERE account_id = $1 AND ($2::text IS NULL OR (room_id = $2 \
+                     AND NOT preserve_room_after_purge($1, $2, $3))) LIMIT 1000)"
+                ))
+                .bind(account_id)
+                .bind(room_id)
+                .bind(through_event_id)
+                .execute(&self.maintenance_pool)
+                .await?;
+                if result.rows_affected() < 1000 {
+                    break;
+                }
+            }
+        }
         Ok(())
     }
 }

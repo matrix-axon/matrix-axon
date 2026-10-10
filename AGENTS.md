@@ -201,6 +201,15 @@ this table is the orientation copy.
   never size a buffer or allocation directly from a number the peer controls.
   (4) **Concurrency** — name the shared mutable state and the lock/owner guarding it (the cold-connect gate vs. live-task severing in 7a is the model), and state which lost-update/reconnect race is closed and how.
   (5) **Partial failure** — one account/room/event failing is logged and skipped, never fatal to the loop (the established "best-effort, never fatal to sync" philosophy).
+- **Database deadlines and bulk isolation.**
+  All server SQL uses centrally initialized session statement, lock, acquisition, and idle-transaction deadlines from `[database.timeouts]`.
+  Direct PostgreSQL and session-mode poolers are supported; transaction-mode poolers cannot preserve session deadlines or advisory locks.
+  Ordinary writes/authentication and hot reads have separate pools of `database.max_connections` slots each.
+  Status, indexing, and bulk maintenance each reserve one additional connection; startup verifies the full `2 * max_connections + 3` budget.
+  Migrations and repair use their longer statement budget for lock waits too.
+  Large event deletions commit bounded batches with atomic search obligations and durable retry state.
+  Status event totals are maintained by database triggers; progress failure must not discard build, sync, management, or disk status.
+
 - **Secrets never reach logs, errors, or disk.**
   No log line, error message, or file may contain a password, access token, recovery key, or bearer token.
   The one sanctioned exception is a value the _developer_ explicitly surfaces for the end user to consume once — `axon token issue` printing the raw bearer token to stdout, or `axon init` emitting a generated secret — and even then only at the moment of issue, never re-logged afterward.

@@ -148,10 +148,6 @@ impl Store {
         guard: Option<&[String]>,
     ) -> Result<IdentityRemoval, StoreError> {
         let mut tx = self.pool.begin().await?;
-        // Bound waits, including contention with an in-flight token rotation.
-        sqlx_core::query::query("SET LOCAL lock_timeout = '5s'")
-            .execute(&mut *tx)
-            .await?;
         // Before any row lock, and before the guard counts: every
         // credential-removing write queues here, in one order.
         Self::lock_credentials(&mut tx).await?;

@@ -235,12 +235,26 @@ impl Indexer {
                 .drain_search_outbox(cursor, self.opts.batch_size)
                 .await?;
             let Some(last_seq) = batch.last().map(|e| e.seq) else {
+                // Retry deferred reclamation even when no new events arrive.
+                if let Err(error) = self.store.prune_search_outbox(cursor).await {
+                    tracing::warn!(
+                        reason = error.diagnostic_reason(),
+                        "search outbox pruning deferred"
+                    );
+                }
                 break; // outbox drained
             };
             self.apply_batch(&batch).await?;
             self.writer.commit()?;
             self.store.set_search_outbox_cursor(last_seq).await?;
-            self.store.prune_search_outbox(last_seq).await?;
+            // Pruning is reclamation, not part of committing index progress.
+            // A slow cleanup must not stop applying subsequent outbox batches.
+            if let Err(error) = self.store.prune_search_outbox(last_seq).await {
+                tracing::warn!(
+                    reason = error.diagnostic_reason(),
+                    "search outbox pruning deferred"
+                );
+            }
             if (batch.len() as i64) < self.opts.batch_size {
                 break;
             }

@@ -13,7 +13,7 @@ use crate::cli::TokenAction;
 
 /// Run a `token` subcommand against the configured database.
 pub async fn run(action: TokenAction, config: &Config) -> anyhow::Result<()> {
-    let store = Store::connect(&config.database.url, config.database.max_connections)
+    let store = Store::connect_for_cli(&config.database)
         .await
         .context("connecting to database")?;
 

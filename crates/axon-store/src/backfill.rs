@@ -16,7 +16,6 @@ use sqlx_core::row::Row;
 use sqlx_postgres::{PgRow, Postgres};
 use uuid::Uuid;
 
-use crate::search::room_purge_sentinel;
 use crate::{Store, StoreError};
 
 /// A room's backfill progress: where backward paging has reached and whether the
@@ -118,16 +117,23 @@ impl Store {
 
     /// Per-account backfill progress across the account's currently-joined rooms
     /// (the ADR-0037 leave/ban predicate, same as `list_rooms`). One row per
-    /// account that has any stored events. Used by `GET /v1/status` (M10).
+    /// account with stored events in a joined room. Used by `GET /v1/status` (M10).
+    /// Rooms come from the incrementally maintained summaries, so membership is
+    /// checked once per room rather than once per event. Exact event counts are
+    /// maintained by database triggers; the isolated status deadline bounds queries,
+    /// including when a caller disconnects.
     pub async fn backfill_progress(&self) -> Result<Vec<AccountBackfillProgress>, StoreError> {
         let rows = sqlx_core::query_as::query_as::<Postgres, AccountBackfillProgress>(
             "WITH joined AS ( \
-                 SELECT DISTINCT e.account_id, e.room_id \
-                 FROM events e \
-                 JOIN accounts ac ON ac.account_id = e.account_id \
-                 WHERE NOT EXISTS ( \
+                 SELECT s.account_id, s.room_id, ac.events_total \
+                 FROM room_summaries s \
+                 JOIN accounts ac ON ac.account_id = s.account_id \
+                 WHERE EXISTS ( \
+                     SELECT 1 FROM events e \
+                     WHERE e.account_id = s.account_id AND e.room_id = s.room_id \
+                 ) AND NOT EXISTS ( \
                      SELECT 1 FROM room_state rs \
-                       WHERE rs.account_id = e.account_id AND rs.room_id = e.room_id \
+                       WHERE rs.account_id = s.account_id AND rs.room_id = s.room_id \
                          AND rs.event_type = 'm.room.member' AND rs.state_key = ac.user_id \
                          AND rs.content->>'membership' IN ('leave', 'ban') \
                  ) \
@@ -135,14 +141,13 @@ impl Store {
              SELECT j.account_id, \
                     count(*) AS rooms_total, \
                     count(*) FILTER (WHERE bf.complete) AS rooms_backfilled, \
-                    (SELECT count(*) FROM events e2 WHERE e2.account_id = j.account_id) \
-                        AS events_total \
+                    max(j.events_total) AS events_total \
              FROM joined j \
              LEFT JOIN room_backfill bf \
                  ON bf.account_id = j.account_id AND bf.room_id = j.room_id \
              GROUP BY j.account_id",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&self.status_pool)
         .await?;
         Ok(rows)
     }
@@ -196,50 +201,143 @@ impl Store {
         Ok(())
     }
 
-    /// Destructively remove every stored trace of `room_id` for `account_id` and
-    /// enqueue removal of the room's search documents. One atomic statement: the
-    /// event deletes cascade to their crypto siblings (FK `ON DELETE CASCADE`), and
-    /// the room-purge obligation is appended to `search_outbox` in the same
-    /// transaction — so the store deletion and the index obligation commit together
-    /// (the outbox has no FK, so the breadcrumb survives to be applied even if the
-    /// indexer is offline). Used by purge-on-leave (ADR 0044).
-    ///
-    /// `account_data` for the room is deleted by matching `room_id` exactly, which
-    /// never touches the global-scope rows (`room_id = ''`).
-    ///
-    /// Idempotent and cheap to re-run: the search-purge obligation is enqueued
-    /// **only when an event was actually deleted**, so re-triggering a purge on an
-    /// already-empty room (e.g. the leave state re-observed on a later sync) adds
-    /// no `search_outbox` rows and does no indexing work. The matching
-    /// `room_summaries` row (ADR 0095) is deleted in the same statement so the
-    /// room disappears from `list_rooms` the way deleting its events used to.
+    /// Purge a room in committed event batches, with an atomic search obligation
+    /// per batch. A durable intent survives interruption and is retried by the sync
+    /// engine. Room metadata and the intent are removed together after the events.
+    /// The durable event watermark and per-event index obligations preserve data
+    /// received after the leave, including a later rejoin.
+    /// Global account data (`room_id = ''`) is preserved. Idempotent.
     pub async fn purge_room(&self, account_id: Uuid, room_id: &str) -> Result<(), StoreError> {
+        let through_event_id =
+            Self::room_purge_watermark(account_id, room_id, false, &self.pool).await?;
+        // Clear before deleting history, even if a rejoin preserves metadata.
+        // A crash or a delayed retry must not leave a completed cursor over a hole.
+        self.delete_room_backfill(account_id, room_id).await?;
+        self.delete_event_batches(account_id, Some(room_id), Some(through_event_id))
+            .await?;
+        self.delete_state_batches(account_id, Some(room_id), Some(through_event_id))
+            .await?;
+        // Re-derive activity from remaining events, including a later rejoin.
+        self.rebuild_room_summaries_for(account_id, Some(room_id))
+            .await?;
         sqlx_core::query::query(
-            "WITH \
-                 del_events AS ( \
-                     DELETE FROM events WHERE account_id = $1 AND room_id = $2 RETURNING 1 \
-                 ), \
-                 del_state AS ( \
-                     DELETE FROM room_state WHERE account_id = $1 AND room_id = $2 \
-                 ), \
-                 del_data AS ( \
-                     DELETE FROM account_data WHERE account_id = $1 AND room_id = $2 \
-                 ), \
-                 del_backfill AS ( \
-                     DELETE FROM room_backfill WHERE account_id = $1 AND room_id = $2 \
-                 ), \
-                 del_summaries AS ( \
-                     DELETE FROM room_summaries \
-                     WHERE account_id = $1 AND room_id = $2 \
-                 ) \
-             INSERT INTO search_outbox (account_id, event_id) \
-             SELECT $1, $3 WHERE EXISTS (SELECT 1 FROM del_events)",
+            "WITH del_backfill AS ( \
+                DELETE FROM room_backfill WHERE account_id = $1 AND room_id = $2 \
+                AND NOT preserve_room_after_purge($1, $2, $3) \
+             ) DELETE FROM room_purge_intents WHERE account_id = $1 AND room_id = $2 \
+             AND through_event_id = $3",
         )
         .bind(account_id)
         .bind(room_id)
-        .bind(room_purge_sentinel(room_id))
-        .execute(&self.pool)
+        .bind(through_event_id)
+        .execute(&self.maintenance_pool)
         .await?;
         Ok(())
+    }
+    /// Persist a leave obligation without waiting for bulk cleanup. Repeated
+    /// leaves advance a pending generation; background retries never advance it.
+    pub async fn queue_room_purge(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<i64, StoreError> {
+        let through = Self::room_purge_watermark(account_id, room_id, true, &self.pool).await?;
+        self.purge_wakeup.notify_one();
+        Ok(through)
+    }
+
+    /// Wake the supervised purge worker as soon as a leave is durably queued.
+    pub async fn room_purge_notified(&self) {
+        self.purge_wakeup.notified().await;
+    }
+
+    pub(crate) async fn room_purge_watermark<'e, E>(
+        account_id: Uuid,
+        room_id: &str,
+        advance: bool,
+        executor: E,
+    ) -> Result<i64, StoreError>
+    where
+        E: sqlx_core::executor::Executor<'e, Database = Postgres>,
+    {
+        let (through_event_id,): (i64,) = sqlx_core::query_as::query_as(
+            "INSERT INTO room_purge_intents (account_id, room_id, through_event_id) \
+             SELECT $1, $2, CASE WHEN is_called THEN last_value ELSE 0 END FROM events_id_seq \
+             ON CONFLICT (account_id, room_id) DO UPDATE SET through_event_id = \
+             CASE WHEN $3 THEN GREATEST(room_purge_intents.through_event_id, EXCLUDED.through_event_id) \
+                  ELSE room_purge_intents.through_event_id END \
+             RETURNING through_event_id",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .bind(advance)
+        .fetch_one(executor)
+        .await?;
+        Ok(through_event_id)
+    }
+
+    /// Retry a bounded page; failures remain durable and do not stop other rooms.
+    pub async fn retry_room_purges(&self) -> Result<(), StoreError> {
+        // Rotate across failed pages instead of letting the first hundred failures
+        // hide every later room. The cursor is shared by all clones; durable intents
+        // survive restart even though fair traversal starts over after restart.
+        let mut cursor = self.purge_retry_cursor.lock().await;
+        let pending: Vec<(Uuid, String)> = sqlx_core::query_as::query_as(
+            "SELECT account_id, room_id FROM room_purge_intents \
+             ORDER BY CASE WHEN $1::uuid IS NULL THEN false \
+                           ELSE (account_id, room_id) <= ($1, $2) END, account_id, room_id LIMIT 100")
+            .bind(cursor.as_ref().map(|(account, _)| *account))
+            .bind(cursor.as_ref().map(|(_, room)| room.as_str()))
+            .fetch_all(&self.pool).await?;
+        *cursor = pending.last().cloned();
+        drop(cursor);
+        for (account_id, room_id) in pending {
+            if let Err(error) = self.purge_room(account_id, &room_id).await {
+                tracing::warn!(%account_id, %room_id, reason = error.diagnostic_reason(), "room purge remains pending");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod purge_watermark_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unused_sequence_watermark_is_zero() {
+        let store = Store::connect(&std::env::var("DATABASE_URL").unwrap(), 1)
+            .await
+            .unwrap();
+        let account = store
+            .upsert_account(
+                &format!("@sequence-{}:localhost", Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .unwrap();
+        let mut tx = store.pool().begin().await.unwrap();
+        // RESTART is transactional, unlike setval: rollback restores the shared
+        // sequence even when an assertion fails and drops the transaction.
+        sqlx_core::query::query("ALTER SEQUENCE events_id_seq RESTART WITH 1")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let through =
+            Store::room_purge_watermark(account.account_id, "!empty:localhost", true, &mut *tx)
+                .await
+                .unwrap();
+        assert_eq!(through, 0);
+        let first: i64 = sqlx_core::query_scalar::query_scalar("SELECT nextval('events_id_seq')")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert!(
+            first > through,
+            "the first post-leave event is outside the purge generation"
+        );
+        tx.rollback().await.unwrap();
+        store.delete_account_row(account.account_id).await.unwrap();
     }
 }
