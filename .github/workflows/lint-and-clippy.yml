@@ -14,9 +14,12 @@ permissions:
 # pushes its release commit and then force-pushes an amended one carrying the
 # bundle version (release-plz.yml); the first commit fails check-bundle-version
 # by design, and left running it leaves a red check on the PR beside the green
-# one for the head. Runs on main are never cancelled, so each merge keeps its own.
+# one for the head. Every other event is keyed on its SHA, so each push to main
+# (and each manual run) has a group to itself and is never cancelled or replaced
+# while pending: a shared group holds one running and one pending run, and a
+# newer pending run would drop the one for a middle commit.
 concurrency:
-  group: lint-and-clippy-${{ github.ref }}
+  group: lint-and-clippy-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
