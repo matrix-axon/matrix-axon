@@ -236,6 +236,7 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::dto::SpaceChildDto,
         crate::dto::SpaceParentDto,
         crate::dto::RoomInfoDto,
+        crate::dto::RoomMemberCountsDto,
         crate::room_metadata::RoomPredecessorMetadata,
         crate::room_metadata::RoomJoinConditionMetadata,
         crate::room_metadata::RoomNotificationLevelsMetadata,

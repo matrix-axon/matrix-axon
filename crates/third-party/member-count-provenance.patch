@@ -1,0 +1,165 @@
+--- a/src/room/room_info.rs
++++ b/src/room/room_info.rs
+@@ -11,6 +11,8 @@
+ // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
++
++// Axon modification: preserve summary count availability and membership-epoch invalidation.
+ 
+ use std::{
+     collections::{BTreeMap, BTreeSet, HashSet},
+@@ -610,6 +612,18 @@
+     /// The summary of this room.
+     pub(crate) summary: RoomSummary,
+ 
++    /// Whether each server summary field was supplied in this membership epoch.
++    /// Legacy caches deliberately deserialize as unknown.
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub(crate) summary_joined_count_known: bool,
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub(crate) summary_invited_count_known: bool,
++
++    /// Local time of the last membership transition or initial-response reset. This fences
++    /// observations from earlier membership epochs, not upstream sync age.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub(crate) summary_counts_invalidated_at: Option<ruma::MilliSecondsSinceUnixEpoch>,
++
+     /// Flag remembering if the room members are synced.
+     pub(crate) members_synced: bool,
+ 
+@@ -680,6 +694,9 @@
+             room_state,
+             notification_counts: Default::default(),
+             summary: Default::default(),
++            summary_joined_count_known: false,
++            summary_invited_count_known: false,
++            summary_counts_invalidated_at: None,
+             members_synced: false,
+             last_prev_batch: None,
+             sync_info: SyncInfo::NoState,
+@@ -721,7 +738,18 @@
+ 
+     /// Set the membership RoomState of this Room
+     pub fn set_state(&mut self, room_state: RoomState) {
++        if self.room_state != room_state {
++            self.invalidate_summary_member_counts();
++        }
+         self.room_state = room_state;
++    }
++
++    /// Invalidate provenance when a membership transition or an initial sync
++    /// replacement starts a new summary epoch. Keep legacy getters unchanged.
++    pub(crate) fn invalidate_summary_member_counts(&mut self) {
++        self.summary_joined_count_known = false;
++        self.summary_invited_count_known = false;
++        self.summary_counts_invalidated_at = Some(ruma::MilliSecondsSinceUnixEpoch::now());
+     }
+ 
+     /// Mark this Room as having all the members synced.
+@@ -954,12 +982,12 @@
+             }
+ 
+             if let Some(joined) = summary.joined_member_count {
+-                self.summary.joined_member_count = joined.into();
++                self.update_joined_member_count(joined.into());
+                 changed = true;
+             }
+ 
+             if let Some(invited) = summary.invited_member_count {
+-                self.summary.invited_member_count = invited.into();
++                self.update_invited_member_count(invited.into());
+                 changed = true;
+             }
+         }
+@@ -974,11 +1002,35 @@
+     /// Updates the joined member count.
+     pub(crate) fn update_joined_member_count(&mut self, count: u64) {
+         self.summary.joined_member_count = count;
++        self.summary_joined_count_known = true;
+     }
+ 
+     /// Updates the invited member count.
+     pub(crate) fn update_invited_member_count(&mut self, count: u64) {
+         self.summary.invited_member_count = count;
++        self.summary_invited_count_known = true;
++    }
++
++    /// Server-supplied joined and invited counts for the current membership
++    /// epoch. Missing fields retain known values within an epoch; membership changes
++    /// and initial sync replacements
++    /// invalidate both. Legacy serialized summaries have no availability
++    /// evidence and return `(None, None)` until fresh fields arrive.
++    ///
++    /// Unlike the legacy numeric getters, these values never infer zero from
++    /// an omitted field. They do not imply that sync is currently connected.
++    pub fn summary_member_counts(&self) -> (Option<u64>, Option<u64>) {
++        (
++            self.summary_joined_count_known.then_some(self.summary.joined_member_count),
++            self.summary_invited_count_known.then_some(self.summary.invited_member_count),
++        )
++    }
++
++    /// Local time at which a membership change or initial sync replacement
++    /// invalidated summary counts.
++    /// A cold or legacy cache with no observed transition returns `None`.
++    pub fn summary_counts_invalidated_at(&self) -> Option<ruma::MilliSecondsSinceUnixEpoch> {
++        self.summary_counts_invalidated_at
+     }
+ 
+     /// Updates the room heroes.
+@@ -1574,6 +1626,9 @@
+                 invited_member_count: 0,
+                 active_service_members: None,
+             },
++            summary_joined_count_known: false,
++            summary_invited_count_known: false,
++            summary_counts_invalidated_at: None,
+             members_synced: true,
+             last_prev_batch: Some("pb".to_owned()),
+             sync_info: SyncInfo::FullySynced,
+--- a/src/store/migration_helpers.rs
++++ b/src/store/migration_helpers.rs
+@@ -13,6 +13,8 @@
+ // limitations under the License.
+ 
+ //! Data migration helpers for StateStore implementations.
++
++// Axon modification: keep legacy summary count availability unknown.
+ 
+ use std::{collections::HashSet, sync::Arc};
+ 
+@@ -105,6 +107,9 @@
+             room_state: room_type,
+             notification_counts,
+             summary,
++            summary_joined_count_known: false,
++            summary_invited_count_known: false,
++            summary_counts_invalidated_at: None,
+             members_synced,
+             last_prev_batch,
+             sync_info,
+--- a/src/response_processors/room/msc4186/mod.rs
++++ b/src/response_processors/room/msc4186/mod.rs
+@@ -13,6 +13,8 @@
+ // limitations under the License.
+ 
+ pub mod extensions;
++
++// Axon modification: reset count provenance on initial room replacements.
+ 
+ use std::collections::BTreeMap;
+ #[cfg(feature = "e2e-encryption")]
+@@ -321,6 +323,12 @@
+     room_info: &mut RoomInfo,
+     is_new_room: bool,
+ ) {
++    // MSC4186 initial responses replace room data: an omitted count is unset,
++    // whereas an omitted incremental count leaves the previous value intact.
++    if room_response.initial == Some(true) {
++        room_info.invalidate_summary_member_counts();
++    }
++
+     // Handle the room's avatar.
+     //
+     // It can be updated via the state events, or via the

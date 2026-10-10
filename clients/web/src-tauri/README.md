@@ -19,6 +19,12 @@ a fresh clone has none — and `tauri::generate_context!()` says nothing about i
 The CLI is what runs the frontend build first (`beforeBuildCommand`); cargo on
 its own has no idea it needs to. The binary explains this if you hit it.
 
+The icon-badge target is baked from `TAURI_ENV_PLATFORM` during that frontend build.
+A `dist` from a plain `pnpm build` leaves it empty, and the shell then refuses to boot rather than claiming a desktop badge.
+`pnpm tauri build`, `pnpm tauri android build`, and `pnpm tauri ios build` run `beforeBuildCommand` and set the variable for the target they are building.
+CI does not cache `clients/web/dist`.
+The jobs that compile the crate run a plain `pnpm build` so the crate has a frontend to embed, and the jobs that ship a bundle build again through the CLI.
+
 ## macOS: build for both architectures
 
 `tauri build` targets the host, so a build on Apple Silicon produces an arm64

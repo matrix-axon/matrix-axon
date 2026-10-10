@@ -1,0 +1,913 @@
+// Copyright 2025 The Matrix.org Foundation C.I.C.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#![allow(clippy::assign_op_pattern)] // Triggered by bitflags! usage
+
+mod call;
+mod create;
+mod display_name;
+mod encryption;
+mod knock;
+mod latest_event;
+mod members;
+mod room_info;
+mod state;
+mod tags;
+mod tombstone;
+
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+pub use call::CallIntentConsensus;
+pub use create::*;
+pub use display_name::{RoomDisplayName, RoomHero, RoomHeroWithProfile};
+pub(crate) use display_name::{RoomSummary, UpdatedRoomDisplayName};
+pub use encryption::EncryptionState;
+use eyeball::{AsyncLock, SharedObservable};
+use futures_util::{Stream, StreamExt};
+pub use members::{RoomMember, RoomMembersUpdate, RoomMemberships};
+pub(crate) use room_info::SyncInfo;
+pub use room_info::{
+    BaseRoomInfo, RoomInfo, RoomInfoNotableUpdate, RoomInfoNotableUpdateReasons, RoomRecencyStamp,
+    apply_redaction,
+};
+#[cfg(feature = "unstable-msc4426")]
+use ruma::profile::{Call, Status};
+use ruma::{
+    EventId, OwnedEventId, OwnedMxcUri, OwnedRoomAliasId, OwnedRoomId, OwnedUserId, RoomId,
+    RoomVersionId, UserId,
+    events::{
+        direct::OwnedDirectUserIdentifier,
+        receipt::{Receipt, ReceiptThread, ReceiptType},
+        room::{
+            avatar,
+            guest_access::GuestAccess,
+            history_visibility::HistoryVisibility,
+            join_rules::JoinRule,
+            member::MembershipState,
+            power_levels::{RoomPowerLevels, RoomPowerLevelsEventContent, RoomPowerLevelsSource},
+            retention::RoomRetentionEventContent,
+        },
+    },
+    room::RoomType,
+};
+use serde::{Deserialize, Serialize};
+pub use state::{RoomState, RoomStateFilter};
+pub(crate) use tags::RoomNotableTags;
+use tokio::sync::broadcast;
+pub use tombstone::{PredecessorRoom, SuccessorRoom};
+use tracing::{info, instrument, trace, warn};
+
+use crate::{
+    DmRoomDefinition, Error, StateStore,
+    deserialized_responses::MemberEvent,
+    notification_settings::RoomNotificationMode,
+    read_receipts::ReadReceipts,
+    store::{Result as StoreResult, SaveLockedStateStore, StateStoreExt},
+    sync::UnreadNotificationsCount,
+};
+
+/// The underlying room data structure collecting state for joined, left and
+/// invited rooms.
+#[derive(Debug, Clone)]
+pub struct Room {
+    /// The room ID.
+    pub(super) room_id: OwnedRoomId,
+
+    /// Our own user ID.
+    pub(super) own_user_id: OwnedUserId,
+
+    pub(super) info: SharedObservable<RoomInfo>,
+
+    /// A clone of the [`BaseStateStore::room_info_notable_update_sender`].
+    ///
+    /// [`BaseStateStore::room_info_notable_update_sender`]: crate::store::BaseStateStore::room_info_notable_update_sender
+    pub(super) room_info_notable_update_sender: broadcast::Sender<RoomInfoNotableUpdate>,
+
+    /// A clone of the state store.
+    pub(super) store: SaveLockedStateStore,
+
+    /// A map for ids of room membership events in the knocking state linked to
+    /// the user id of the user affected by the member event, that the current
+    /// user has marked as seen so they can be ignored.
+    pub seen_knock_request_ids_map:
+        SharedObservable<Option<BTreeMap<OwnedEventId, OwnedUserId>>, AsyncLock>,
+
+    /// A sender that will notify receivers when room member updates happen.
+    pub room_member_updates_sender: broadcast::Sender<RoomMembersUpdate>,
+}
+
+impl Room {
+    pub(crate) fn new(
+        own_user_id: &UserId,
+        store: SaveLockedStateStore,
+        room_id: &RoomId,
+        room_state: RoomState,
+        room_info_notable_update_sender: broadcast::Sender<RoomInfoNotableUpdate>,
+    ) -> Self {
+        let room_info = RoomInfo::new(room_id, room_state);
+        Self::restore(own_user_id, store, room_info, room_info_notable_update_sender)
+    }
+
+    pub(crate) fn restore(
+        own_user_id: &UserId,
+        store: SaveLockedStateStore,
+        room_info: RoomInfo,
+        room_info_notable_update_sender: broadcast::Sender<RoomInfoNotableUpdate>,
+    ) -> Self {
+        let (room_member_updates_sender, _) = broadcast::channel(10);
+        Self {
+            own_user_id: own_user_id.into(),
+            room_id: room_info.room_id.clone(),
+            store,
+            info: SharedObservable::new(room_info),
+            room_info_notable_update_sender,
+            seen_knock_request_ids_map: SharedObservable::new_async(None),
+            room_member_updates_sender,
+        }
+    }
+
+    /// Get the unique room id of the room.
+    pub fn room_id(&self) -> &RoomId {
+        &self.room_id
+    }
+
+    /// Get a copy of the room creators.
+    pub fn creators(&self) -> Option<Vec<OwnedUserId>> {
+        self.info.read().creators()
+    }
+
+    /// Get our own user id.
+    pub fn own_user_id(&self) -> &UserId {
+        &self.own_user_id
+    }
+
+    /// Whether this room's [`RoomType`] is `m.space`.
+    pub fn is_space(&self) -> bool {
+        self.info.read().room_type().is_some_and(|t| *t == RoomType::Space)
+    }
+
+    /// Whether this room is a Call room as defined by [MSC3417].
+    ///
+    /// [MSC3417]: <https://github.com/matrix-org/matrix-spec-proposals/pull/3417>
+    pub fn is_call(&self) -> bool {
+        self.info.read().room_type().is_some_and(|t| *t == RoomType::Call)
+    }
+
+    /// Returns the room's type as defined in its creation event
+    /// (`m.room.create`).
+    pub fn room_type(&self) -> Option<RoomType> {
+        self.info.read().room_type().map(ToOwned::to_owned)
+    }
+
+    /// Get the unread notification counts computed server-side.
+    ///
+    /// Note: these might be incorrect for encrypted rooms, since the server
+    /// doesn't know which events are relevant standalone messages or not,
+    /// nor can it inspect mentions. If you need more precise counts for
+    /// encrypted rooms, consider using the client-side computed counts in
+    /// [`Self::num_unread_messages`], [`Self::num_unread_notifications`] and
+    /// [`Self::num_unread_mentions`].
+    pub fn unread_notification_counts(&self) -> UnreadNotificationsCount {
+        self.info.read().notification_counts
+    }
+
+    /// Get the number of unread messages (computed client-side).
+    ///
+    /// This might be more precise than [`Self::unread_notification_counts`] for
+    /// encrypted rooms.
+    pub fn num_unread_messages(&self) -> u64 {
+        self.info.read().read_receipts.num_unread
+    }
+
+    /// Get the number of unread notifications (computed client-side).
+    ///
+    /// This might be more precise than [`Self::unread_notification_counts`] for
+    /// encrypted rooms.
+    pub fn num_unread_notifications(&self) -> u64 {
+        self.info.read().read_receipts.num_notifications
+    }
+
+    /// Get the number of unread mentions (computed client-side), that is,
+    /// messages causing a highlight in a room.
+    ///
+    /// This might be more precise than [`Self::unread_notification_counts`] for
+    /// encrypted rooms.
+    pub fn num_unread_mentions(&self) -> u64 {
+        self.info.read().read_receipts.num_mentions
+    }
+
+    /// Get the detailed information about read receipts for the room.
+    pub fn read_receipts(&self) -> ReadReceipts {
+        self.info.read().read_receipts.clone()
+    }
+
+    /// Check if the room states have been synced
+    ///
+    /// States might be missing if we have only seen the room_id of this Room
+    /// so far, for example as the response for a `create_room` request without
+    /// being synced yet.
+    ///
+    /// Returns true if the state is fully synced, false otherwise.
+    pub fn is_state_fully_synced(&self) -> bool {
+        self.info.read().sync_info == SyncInfo::FullySynced
+    }
+
+    /// Check if the room state has been at least partially synced.
+    ///
+    /// See [`Room::is_state_fully_synced`] for more info.
+    pub fn is_state_partially_or_fully_synced(&self) -> bool {
+        self.info.read().sync_info != SyncInfo::NoState
+    }
+
+    /// Get the `prev_batch` token that was received from the last sync. May be
+    /// `None` if the last sync contained the full room history.
+    pub fn last_prev_batch(&self) -> Option<String> {
+        self.info.read().last_prev_batch.clone()
+    }
+
+    /// Get the avatar url of this room.
+    pub fn avatar_url(&self) -> Option<OwnedMxcUri> {
+        self.info.read().avatar_url().map(ToOwned::to_owned)
+    }
+
+    /// Get information about the avatar of this room.
+    pub fn avatar_info(&self) -> Option<avatar::ImageInfo> {
+        self.info.read().avatar_info().map(ToOwned::to_owned)
+    }
+
+    /// Get the canonical alias of this room.
+    pub fn canonical_alias(&self) -> Option<OwnedRoomAliasId> {
+        self.info.read().canonical_alias().map(ToOwned::to_owned)
+    }
+
+    /// Get the canonical alias of this room.
+    pub fn alt_aliases(&self) -> Vec<OwnedRoomAliasId> {
+        self.info.read().alt_aliases().to_owned()
+    }
+
+    /// Get the `m.room.create` content of this room.
+    ///
+    /// This usually isn't optional but some servers might not send an
+    /// `m.room.create` event as the first event for a given room, thus this can
+    /// be optional.
+    ///
+    /// For room versions earlier than room version 11, if the event is
+    /// redacted, all fields except `creator` will be set to their default
+    /// value.
+    pub fn create_content(&self) -> Option<RoomCreateWithCreatorEventContent> {
+        Some(self.info.read().base_info.create.as_ref()?.content.clone())
+    }
+
+    /// Is this room considered a direct message.
+    ///
+    /// Async because it can read room info from storage.
+    #[instrument(skip_all, fields(room_id = ?self.room_id))]
+    pub async fn is_direct(&self) -> StoreResult<bool> {
+        match self.state() {
+            RoomState::Joined | RoomState::Left | RoomState::Banned => {
+                Ok(!self.info.read().base_info.dm_targets.is_empty())
+            }
+
+            RoomState::Invited => {
+                let member = self.get_member(self.own_user_id()).await?;
+
+                match member {
+                    None => {
+                        info!("RoomMember not found for the user's own id");
+                        Ok(false)
+                    }
+                    Some(member) => match member.event.as_ref() {
+                        MemberEvent::Sync(_) => {
+                            warn!("Got MemberEvent::Sync in an invited room");
+                            Ok(false)
+                        }
+                        MemberEvent::Stripped(event) => {
+                            Ok(event.content.is_direct.unwrap_or(false))
+                        }
+                    },
+                }
+            }
+
+            // TODO: implement logic once we have the stripped events as we'd have with an Invite
+            RoomState::Knocked => Ok(false),
+        }
+    }
+
+    /// Computes if the current room is a DM based on the rules from the
+    /// [`DmRoomDefinition`], updating the active service members.
+    pub async fn compute_is_dm(&self, dm_room_definition: &DmRoomDefinition) -> StoreResult<bool> {
+        let is_direct = self.is_direct().await?;
+
+        match *dm_room_definition {
+            DmRoomDefinition::MatrixSpec => Ok(is_direct),
+            DmRoomDefinition::TwoMembers => {
+                if !is_direct {
+                    return Ok(false);
+                }
+                let active_service_member_count =
+                    self.update_active_service_members().await?.unwrap_or_default().len() as u64;
+                let has_at_most_two_members =
+                    self.active_members_count().saturating_sub(active_service_member_count) <= 2;
+                Ok(has_at_most_two_members)
+            }
+        }
+    }
+
+    /// If this room is a direct message, get the members that we're sharing the
+    /// room with.
+    ///
+    /// *Note*: The member list might have been modified in the meantime and
+    /// the targets might not even be in the room anymore. This setting should
+    /// only be considered as guidance. We leave members in this list to allow
+    /// us to re-find a DM with a user even if they have left, since we may
+    /// want to re-invite them.
+    pub fn direct_targets(&self) -> HashSet<OwnedDirectUserIdentifier> {
+        self.info.read().base_info.dm_targets.clone()
+    }
+
+    /// If this room is a direct message, returns the number of members that
+    /// we're sharing the room with.
+    pub fn direct_targets_length(&self) -> usize {
+        self.info.read().base_info.dm_targets.len()
+    }
+
+    /// Get the guest access policy of this room.
+    pub fn guest_access(&self) -> GuestAccess {
+        self.info.read().guest_access().clone()
+    }
+
+    /// Get the history visibility policy of this room.
+    pub fn history_visibility(&self) -> Option<HistoryVisibility> {
+        self.info.read().history_visibility().cloned()
+    }
+
+    /// Get the history visibility policy of this room, or a sensible default if
+    /// the event is missing.
+    pub fn history_visibility_or_default(&self) -> HistoryVisibility {
+        self.info.read().history_visibility_or_default().clone()
+    }
+
+    /// Is the room considered to be public.
+    ///
+    /// May return `None` if the join rule event is not available.
+    pub fn is_public(&self) -> Option<bool> {
+        self.info.read().join_rule().map(|join_rule| matches!(join_rule, JoinRule::Public))
+    }
+
+    /// Get the join rule policy of this room, if available.
+    pub fn join_rule(&self) -> Option<JoinRule> {
+        self.info.read().join_rule().cloned()
+    }
+
+    /// Get the maximum power level that this room contains.
+    ///
+    /// This is useful if one wishes to normalize the power levels, e.g. from
+    /// 0-100 where 100 would be the max power level.
+    pub fn max_power_level(&self) -> i64 {
+        self.info.read().base_info.max_power_level
+    }
+
+    /// Get the message retention policy of this room, if set.
+    pub fn retention(&self) -> Option<RoomRetentionEventContent> {
+        self.info.read().retention().cloned()
+    }
+
+    /// Get the service members in this room, if available.
+    pub fn service_members(&self) -> Option<BTreeSet<OwnedUserId>> {
+        self.info.read().service_members().cloned()
+    }
+
+    /// Get the current power levels of this room.
+    pub async fn power_levels(&self) -> Result<RoomPowerLevels, Error> {
+        let power_levels_content = self
+            .store
+            .get_state_event_static::<RoomPowerLevelsEventContent>(self.room_id())
+            .await?
+            .ok_or(Error::InsufficientData)?
+            .deserialize()?;
+        let creators = self.creators().ok_or(Error::InsufficientData)?;
+        let rules = self.info.read().room_version_rules_or_default();
+
+        Ok(power_levels_content.power_levels(&rules.authorization, creators))
+    }
+
+    /// Get the current power levels of this room, or a sensible default if they
+    /// are not known.
+    pub async fn power_levels_or_default(&self) -> RoomPowerLevels {
+        if let Ok(power_levels) = self.power_levels().await {
+            return power_levels;
+        }
+
+        // As a fallback, create the default power levels of a room.
+        let rules = self.info.read().room_version_rules_or_default();
+        RoomPowerLevels::new(
+            RoomPowerLevelsSource::None,
+            &rules.authorization,
+            self.creators().into_iter().flatten(),
+        )
+    }
+
+    /// Get the `m.room.name` of this room.
+    ///
+    /// The returned string may be empty if the event has been redacted, or it's
+    /// missing from storage.
+    pub fn name(&self) -> Option<String> {
+        self.info.read().name().map(ToOwned::to_owned)
+    }
+
+    /// Get the topic of the room.
+    pub fn topic(&self) -> Option<String> {
+        self.info.read().topic().map(ToOwned::to_owned)
+    }
+
+    /// Update the cached user defined notification mode.
+    ///
+    /// This is automatically recomputed on every successful sync, and the
+    /// cached result can be retrieved in
+    /// [`Self::cached_user_defined_notification_mode`].
+    pub fn update_cached_user_defined_notification_mode(&self, mode: RoomNotificationMode) {
+        self.info.update_if(|info| {
+            if info.cached_user_defined_notification_mode.as_ref() != Some(&mode) {
+                info.cached_user_defined_notification_mode = Some(mode);
+
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    /// Returns the cached user defined notification mode, if available.
+    ///
+    /// This cache is refilled every time we call
+    /// [`Self::update_cached_user_defined_notification_mode`].
+    pub fn cached_user_defined_notification_mode(&self) -> Option<RoomNotificationMode> {
+        self.info.read().cached_user_defined_notification_mode
+    }
+
+    /// Removes any existing cached value for the user defined notification
+    /// mode.
+    pub fn clear_user_defined_notification_mode(&self) {
+        self.info.update_if(|info| {
+            if info.cached_user_defined_notification_mode.is_some() {
+                info.cached_user_defined_notification_mode = None;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Get the list of users ids that are considered to be joined members of
+    /// this room.
+    pub async fn joined_user_ids(&self) -> StoreResult<Vec<OwnedUserId>> {
+        self.store.get_user_ids(self.room_id(), RoomMemberships::JOIN).await
+    }
+
+    /// The user IDs of this room's heroes, as stored, for cheaply checking
+    /// hero membership without loading their global profiles.
+    #[cfg(feature = "unstable-msc4426")]
+    pub(crate) fn hero_user_ids(&self) -> Vec<OwnedUserId> {
+        self.info.read().heroes().iter().map(|hero| hero.user_id.clone()).collect()
+    }
+
+    /// Get the heroes for this room.
+    ///
+    /// This also filters out possible service members from the list of heroes
+    /// returned by the homeserver.
+    #[cfg_attr(not(feature = "unstable-msc4426"), allow(clippy::unused_async))]
+    pub async fn heroes(&self) -> Vec<RoomHeroWithProfile> {
+        let heroes: Vec<RoomHero> = {
+            let guard = self.info.read();
+            let heroes = guard.heroes();
+
+            if let Some(service_members) = guard.service_members() {
+                heroes
+                    .iter()
+                    .filter(|hero| !service_members.contains(&hero.user_id))
+                    .cloned()
+                    .collect()
+            } else {
+                heroes.to_vec()
+            }
+        };
+
+        // Short-circuiting if there is no heroes: we can't do anything.
+        if heroes.is_empty() {
+            return Vec::new();
+        }
+
+        // Return with empty profile fields when the user status feature is disabled.
+        #[cfg(not(feature = "unstable-msc4426"))]
+        {
+            heroes.into_iter().map(RoomHeroWithProfile::from).collect()
+        }
+
+        // Merge any fields from the user's persisted global profile.
+        #[cfg(feature = "unstable-msc4426")]
+        {
+            let user_ids = heroes.iter().map(|hero| hero.user_id.clone()).collect::<Vec<_>>();
+
+            let mut global_profiles =
+                self.store.get_global_profiles(&user_ids).await.unwrap_or_else(|error| {
+                    tracing::warn!(?error, "Failed to load global profiles for room heroes");
+                    Default::default()
+                });
+
+            heroes
+                .into_iter()
+                .map(|hero| {
+                    let (status, call) = global_profiles
+                        .remove(&*hero.user_id)
+                        .map(|profile| {
+                            (
+                                profile.get_static::<Status>().ok().flatten(),
+                                profile.get_static::<Call>().ok().flatten(),
+                            )
+                        })
+                        .unwrap_or_default();
+
+                    RoomHeroWithProfile {
+                        user_id: hero.user_id,
+                        display_name: hero.display_name,
+                        avatar_url: hero.avatar_url,
+                        status,
+                        call,
+                    }
+                })
+                .collect()
+        }
+    }
+
+    /// Get the receipt as an `OwnedEventId` and `Receipt` tuple for the given
+    /// `receipt_type`, `thread` and `user_id` in this room.
+    pub async fn load_user_receipt(
+        &self,
+        receipt_type: ReceiptType,
+        receipt_thread: &ReceiptThread,
+        user_id: &UserId,
+    ) -> StoreResult<Option<(OwnedEventId, Receipt)>> {
+        self.store
+            .get_user_room_receipt_event(self.room_id(), receipt_type, receipt_thread, user_id)
+            .await
+    }
+
+    /// Load from storage the receipts as a list of `OwnedUserId` and `Receipt`
+    /// tuples for the given `receipt_type`, `thread` and `event_id` in this
+    /// room.
+    pub async fn load_event_receipts(
+        &self,
+        receipt_type: ReceiptType,
+        receipt_thread: &ReceiptThread,
+        event_id: &EventId,
+    ) -> StoreResult<Vec<(OwnedUserId, Receipt)>> {
+        self.store
+            .get_event_room_receipt_events(self.room_id(), receipt_type, receipt_thread, event_id)
+            .await
+    }
+
+    /// Returns a boolean indicating if this room has been manually marked as
+    /// unread
+    pub fn is_marked_unread(&self) -> bool {
+        self.info.read().base_info.is_marked_unread
+    }
+
+    /// Returns the event ID of the user's `m.fully_read` marker for this room,
+    /// if any.
+    pub fn fully_read_event_id(&self) -> Option<OwnedEventId> {
+        self.info.read().fully_read_event_id().map(ToOwned::to_owned)
+    }
+
+    /// Returns the [`RoomVersionId`] of the room, if known.
+    pub fn version(&self) -> Option<RoomVersionId> {
+        self.info.read().room_version().cloned()
+    }
+
+    /// Returns the recency stamp of the room.
+    ///
+    /// Please read `RoomInfo::recency_stamp` to learn more.
+    pub fn recency_stamp(&self) -> Option<RoomRecencyStamp> {
+        self.info.read().recency_stamp
+    }
+
+    /// Get a `Stream` of loaded pinned events for this room.
+    /// If no pinned events are found a single empty `Vec` will be returned.
+    pub fn pinned_event_ids_stream(&self) -> impl Stream<Item = Vec<OwnedEventId>> + use<> {
+        self.info
+            .subscribe()
+            .map(|i| i.base_info.pinned_events.and_then(|c| c.pinned).unwrap_or_default())
+    }
+
+    /// Returns the current pinned event ids for this room.
+    pub fn pinned_event_ids(&self) -> Option<Vec<OwnedEventId>> {
+        self.info.read().pinned_event_ids()
+    }
+
+    /// Computes and stores the list of service members that are either in a
+    /// joined or invited state in this room, checking the service member
+    /// list against the locally available room members.
+    pub async fn update_active_service_members(&self) -> StoreResult<Option<Vec<RoomMember>>> {
+        if let Some(service_members) = self.service_members() {
+            let mut found = Vec::new();
+            for user_id in service_members {
+                match self.get_member(&user_id).await {
+                    Ok(Some(member)) => {
+                        // We only care about active members (joined or invited)
+                        if matches!(
+                            member.membership(),
+                            MembershipState::Join | MembershipState::Invite
+                        ) {
+                            found.push(member);
+                        }
+                    }
+                    Ok(None) => (),
+                    Err(error) => return Err(error),
+                }
+            }
+
+            trace!("Updating active service members ({}) in room {}", found.len(), self.room_id());
+
+            let new_active_service_member_count = found.len() as u64;
+            let current_active_service_member_count =
+                self.info.read().summary.active_service_members.unwrap_or_default();
+            if new_active_service_member_count != current_active_service_member_count {
+                self.update_and_save_room_info(|mut info| {
+                    info.update_active_service_member_count(Some(new_active_service_member_count));
+                    (info, RoomInfoNotableUpdateReasons::ACTIVE_SERVICE_MEMBERS)
+                })
+                .await?;
+            }
+
+            Ok(Some(found))
+        } else {
+            if self.info.read().summary.active_service_members.is_some() {
+                self.update_and_save_room_info(|mut info| {
+                    info.update_active_service_member_count(None);
+                    (info, RoomInfoNotableUpdateReasons::ACTIVE_SERVICE_MEMBERS)
+                })
+                .await?;
+            }
+            Ok(None)
+        }
+    }
+
+    /// Computes the joined service members in this room.
+    ///
+    /// This result is useful for computing a room's display name, i.e.
+    #[instrument(skip_all, fields(room_id = ?self.room_id))]
+    pub async fn compute_joined_service_members(&self) -> StoreResult<Option<Vec<RoomMember>>> {
+        if !self.are_members_synced() {
+            trace!("Tried to compute joined service members in a room that is not synced");
+            return Ok(None);
+        }
+        if let Some(service_member_ids) = self.service_members() {
+            let mut ret = vec![];
+            for user_id in service_member_ids.iter() {
+                if let Some(member) = self.get_member(user_id).await.unwrap()
+                    && matches!(member.membership(), MembershipState::Join)
+                {
+                    trace!("Found a joined service member ({})", user_id);
+                    ret.push(member);
+                } else {
+                    trace!("Did not find a joined service member ({})", user_id);
+                }
+            }
+            trace!(
+                "Computed joined service members ({}) for service member count {}",
+                ret.len(),
+                service_member_ids.len()
+            );
+            Ok(Some(ret))
+        } else {
+            trace!("Tried to compute joined service members in a room that has no service members",);
+            Ok(None)
+        }
+    }
+
+    /// Returns a cached value containing the active (joined/invited) service
+    /// member count, if known.
+    pub fn active_service_members_count(&self) -> Option<u64> {
+        self.info.read().summary.active_service_members
+    }
+}
+
+// See https://github.com/matrix-org/matrix-rust-sdk/pull/3749#issuecomment-2312939823.
+#[cfg(not(feature = "test-send-sync"))]
+unsafe impl Send for Room {}
+
+// See https://github.com/matrix-org/matrix-rust-sdk/pull/3749#issuecomment-2312939823.
+#[cfg(not(feature = "test-send-sync"))]
+unsafe impl Sync for Room {}
+
+#[cfg(feature = "test-send-sync")]
+#[test]
+// See https://github.com/matrix-org/matrix-rust-sdk/pull/3749#issuecomment-2312939823.
+fn test_send_sync_for_room() {
+    fn assert_send_sync<
+        T: matrix_sdk_common::SendOutsideWasm + matrix_sdk_common::SyncOutsideWasm,
+    >() {
+    }
+
+    assert_send_sync::<Room>();
+}
+
+/// The possible sources of an account data type.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum AccountDataSource {
+    /// The source is account data with the stable prefix.
+    Stable,
+
+    /// The source is account data with the unstable prefix.
+    #[default]
+    Unstable,
+}
+
+#[cfg(test)]
+mod tests {
+    use matrix_sdk_test::{
+        JoinedRoomBuilder, SyncResponseBuilder, async_test, event_factory::EventFactory,
+    };
+    use ruma::{room_id, user_id};
+    use serde_json::json;
+
+    use super::*;
+    use crate::test_utils::logged_in_base_client;
+
+    #[async_test]
+    async fn test_room_heroes_filters_out_service_members() {
+        let client = logged_in_base_client(None).await;
+        let user_id = &client.session_meta().unwrap().user_id;
+        let service_member_id = user_id!("@service:example.org");
+        let alice_id = user_id!("@alice:example.org");
+        let room_id = room_id!("!room:example.org");
+
+        let room = client.get_or_create_room(room_id, RoomState::Joined);
+
+        // Create a room response with 2 heroes, one of them a service member.
+        let mut sync_builder = SyncResponseBuilder::new();
+        let response = sync_builder
+            .add_joined_room(
+                JoinedRoomBuilder::new(room_id)
+                    .set_room_summary(json!({
+                        "m.joined_member_count": 3,
+                        "m.invited_member_count": 0,
+                        "m.heroes": [alice_id.to_owned(), service_member_id.to_owned()],
+                    }))
+                    .add_state_event(
+                        EventFactory::new()
+                            .sender(user_id)
+                            .member_hints(BTreeSet::from([service_member_id.to_owned()])),
+                    ),
+            )
+            .build_sync_response();
+
+        client.receive_sync_response(response).await.unwrap();
+
+        // The service member should be filtered out.
+        let heroes = room.heroes().await;
+        assert_eq!(heroes.len(), 1);
+        assert_eq!(heroes[0].user_id, alice_id);
+    }
+
+    #[async_test]
+    async fn test_human_member_ids_filters_out_service_members() {
+        let client = logged_in_base_client(None).await;
+        let user_id = &client.session_meta().unwrap().user_id;
+        let service_member_id = user_id!("@service:example.org");
+        let alice_id = user_id!("@alice:example.org");
+        let bob_id = user_id!("@bob:example.org");
+        let room_id = room_id!("!room:example.org");
+
+        let room = client.get_or_create_room(room_id, RoomState::Joined);
+        let factory = EventFactory::new().room(room_id);
+
+        let service_member_hint =
+            factory.member_hints(BTreeSet::from([service_member_id.to_owned()])).sender(user_id);
+        let alice_joins = factory.member(alice_id);
+        let service_member_joins = factory.member(service_member_id);
+        let bob_leaves = factory.member(bob_id).membership(MembershipState::Leave);
+
+        let mut sync_builder = SyncResponseBuilder::new();
+        let response = sync_builder
+            .add_joined_room(
+                JoinedRoomBuilder::new(room_id)
+                    .add_state_event(service_member_hint)
+                    .add_state_event(alice_joins)
+                    .add_state_event(service_member_joins)
+                    .add_state_event(bob_leaves),
+            )
+            .build_sync_response();
+
+        client.receive_sync_response(response).await.unwrap();
+
+        assert_eq!(
+            room.human_member_ids(RoomMemberships::ACTIVE).await.unwrap(),
+            vec![alice_id.to_owned()]
+        );
+        assert_eq!(
+            room.human_member_ids(RoomMemberships::empty())
+                .await
+                .unwrap()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([alice_id.to_owned(), bob_id.to_owned()])
+        );
+    }
+
+    #[async_test]
+    async fn test_human_member_ids_without_member_hints() {
+        let client = logged_in_base_client(None).await;
+        let alice_id = user_id!("@alice:example.org");
+        let room_id = room_id!("!room:example.org");
+
+        let room = client.get_or_create_room(room_id, RoomState::Joined);
+        let factory = EventFactory::new().room(room_id);
+
+        let alice_joins = factory.member(alice_id);
+
+        let mut sync_builder = SyncResponseBuilder::new();
+        let response = sync_builder
+            .add_joined_room(JoinedRoomBuilder::new(room_id).add_state_event(alice_joins))
+            .build_sync_response();
+
+        client.receive_sync_response(response).await.unwrap();
+
+        assert_eq!(
+            room.human_member_ids(RoomMemberships::ACTIVE).await.unwrap(),
+            vec![alice_id.to_owned()]
+        );
+    }
+
+    #[cfg(feature = "unstable-msc4426")]
+    #[async_test]
+    async fn test_room_heroes_carry_global_profile() {
+        use ruma::{
+            SecondsSinceUnixEpoch,
+            profile::{
+                CallProfileField, ProfileFieldValue, StatusProfileField, UserProfileChanges,
+                UserProfileUpdate,
+            },
+        };
+
+        use crate::store::StateChanges;
+
+        let client = logged_in_base_client(None).await;
+        let alice_id = user_id!("@alice:example.org");
+        let room_id = room_id!("!room:example.org");
+
+        let room = client.get_or_create_room(room_id, RoomState::Joined);
+
+        let mut sync_builder = SyncResponseBuilder::new();
+        let response = sync_builder
+            .add_joined_room(JoinedRoomBuilder::new(room_id).set_room_summary(json!({
+                "m.joined_member_count": 2,
+                "m.invited_member_count": 0,
+                "m.heroes": [alice_id.to_owned()],
+            })))
+            .build_sync_response();
+        client.receive_sync_response(response).await.unwrap();
+
+        // Without a stored global profile, the hero carries no status or call.
+        let heroes = room.heroes().await;
+        assert_eq!(heroes.len(), 1);
+        assert_eq!(heroes[0].user_id, alice_id);
+        assert!(heroes[0].status.is_none());
+        assert!(heroes[0].call.is_none());
+
+        // Store a global profile carrying an `m.status` and `m.call` for the hero.
+        let mut call = CallProfileField::new();
+        call.call_joined_ts = Some(SecondsSinceUnixEpoch(1_700_000_000u32.into()));
+        let mut changes = StateChanges::default();
+        changes.global_profiles.insert(alice_id.to_owned(), {
+            let mut profile_changes = UserProfileChanges::new();
+            profile_changes.insert_updated_value(ProfileFieldValue::Status(
+                StatusProfileField::new("Working".to_owned(), "💻".to_owned()),
+            ));
+            profile_changes.insert_updated_value(ProfileFieldValue::Call(call));
+            UserProfileUpdate::Updated(profile_changes)
+        });
+        client.state_store().save_changes(&changes).await.unwrap();
+
+        // The hero now surfaces the status and call from the global profile.
+        let heroes = room.heroes().await;
+        let hero = &heroes[0];
+        let status = hero.status.as_ref().expect("status is set");
+        assert_eq!(status.text, "Working");
+        assert_eq!(status.emoji, "💻");
+        assert_eq!(
+            hero.call.as_ref().expect("call is set").call_joined_ts,
+            Some(SecondsSinceUnixEpoch(1_700_000_000u32.into()))
+        );
+    }
+}

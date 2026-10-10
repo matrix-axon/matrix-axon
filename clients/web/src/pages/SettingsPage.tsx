@@ -24,7 +24,6 @@ import {
 } from '../matrix-protocol'
 import {
   isInstalledDisplay,
-  isMobileShell,
   type NotificationPermissionState,
 } from '../platform'
 import {
@@ -973,28 +972,21 @@ function isBadgePermission(
 /**
  * The unread-count checkbox and the note that explains why it may paint
  * nothing. The browser keeps this under the install panel. A packaged shell
- * has nothing to install, so it renders the same fields in their own section:
- * the shell's setter is non-null on every desktop and on iOS, which used to
- * hide the only "not available" note.
+ * has nothing to install, so it renders the same fields in their own section.
+ *
+ * Which note appears is `platform.iconBadgeSupport`. The shell already knows
+ * its target, so this does not sniff the user agent, and a fixture does not
+ * have to omit `setIconBadge` to count as a browser.
  */
 function AppIconBadgeFields() {
   const { settings, platform: appPlatform } = useServices()
   const badgeAvailable = appBadgeAvailable()
-  const installPlatform = detectInstallPlatform()
-  const inShell = !appPlatform.browserCanAdoptApp
-  const androidShell = inShell && installPlatform === 'android'
-  const linuxShell = inShell && installPlatform === 'linux'
-  // An iPad's webview can report a desktop Mac user agent. A touch Mac counts
-  // as mobile; Android is the other mobile shell and has its own note.
-  const iosShell = inShell && isMobileShell() && installPlatform !== 'android'
-  // `==` so a fixture that omits the field (undefined) still counts as absent.
-  const badgeSetterAbsent = appPlatform.setIconBadge == null
+  const support = appPlatform.iconBadgeSupport
   const needsNotificationPermission =
+    support === 'web' &&
     badgeAvailable &&
     notificationPermissionAvailable() &&
-    badgeNeedsNotificationPermission() &&
-    badgeSetterAbsent &&
-    !iosShell
+    badgeNeedsNotificationPermission()
   const [notificationPermission, setNotificationPermission] =
     useState<NotificationPermission | null>(
       notificationPermissionAvailable() ? Notification.permission : null,
@@ -1004,7 +996,7 @@ function AppIconBadgeFields() {
     // Message notifications already read this for the whole page. The badge
     // notes use the answer only on the iOS shell and for Safari's permission
     // prompt, so every other Settings visit skips the extra round-trip.
-    if (!iosShell && !needsNotificationPermission) {
+    if (support !== 'permission' && !needsNotificationPermission) {
       return
     }
     let cancelled = false
@@ -1021,7 +1013,7 @@ function AppIconBadgeFields() {
       cancelled = true
       unsubscribe()
     }
-  }, [appPlatform, iosShell, needsNotificationPermission])
+  }, [appPlatform, support, needsNotificationPermission])
 
   const requestBadgePermission = () => {
     // Must run synchronously inside this click handler, with no `await`
@@ -1070,18 +1062,18 @@ function AppIconBadgeFields() {
         Badges the app icon with the number of unread messages while installed
         and open in the background. On by default.
       </p>
-      {androidShell && (
+      {support === 'none' && (
         <p class="muted">
           Not available on Android. The launcher does not show this count.
         </p>
       )}
-      {linuxShell && (
+      {support === 'launcher-dependent' && (
         <p class="muted">
           Shown when the desktop launcher supports a Unity unread count. Other
           desktops leave the icon unchanged.
         </p>
       )}
-      {!badgeAvailable && badgeSetterAbsent && !androidShell && !linuxShell && (
+      {support === 'web' && !badgeAvailable && (
         <p class="muted">
           Not available in this browser right now — some browsers (Safari on
           iOS/iPadOS) only support this once Axon is added to your home screen
@@ -1107,7 +1099,7 @@ function AppIconBadgeFields() {
           the app.
         </p>
       )}
-      {iosShell && notificationPermission === 'default' && (
+      {support === 'permission' && notificationPermission === 'default' && (
         <>
           <button type="button" onClick={requestShellBadgePermission}>
             Allow notifications to enable the badge
@@ -1118,7 +1110,7 @@ function AppIconBadgeFields() {
           </p>
         </>
       )}
-      {iosShell && notificationPermission === 'denied' && (
+      {support === 'permission' && notificationPermission === 'denied' && (
         <p class="muted">
           Enable notifications for Axon in Settings, then reopen Axon.
         </p>
