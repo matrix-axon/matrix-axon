@@ -476,7 +476,7 @@ impl App {
             let marker_ts = marker.origin_ts;
             // Reuse the room-list ts collected above instead of re-scanning
             // self.rooms.rooms per room (which made this O(n²) in room count).
-            if listed_ts.max(self.loaded_activity_ts(&key)) > marker_ts {
+            if listed_ts.max(self.loaded_content_activity_ts(&key)) > marker_ts {
                 self.rooms.unread.entry(key).or_insert(1);
             } else {
                 self.rooms.unread.remove(&key);
@@ -506,15 +506,23 @@ impl App {
             .find(|r| RoomKey::from(*r) == *room)
             .map(|r| r.last_activity_ts)
             .unwrap_or(0);
-        listed.max(self.loaded_activity_ts(room))
+        listed.max(self.loaded_content_activity_ts(room))
     }
 
-    /// The newest `origin_ts` among the room's loaded/live events, or 0.
-    fn loaded_activity_ts(&self, room: &RoomKey) -> i64 {
+    /// The newest `origin_ts` among the room's loaded/live events that count as
+    /// unread (see `EventDto::counts_as_unread`), or 0. A trailing reaction,
+    /// join or edit must not make a read room look newer than its marker.
+    fn loaded_content_activity_ts(&self, room: &RoomKey) -> i64 {
         self.messages
             .events
             .get(room)
-            .and_then(|events| events.iter().map(|e| e.origin_ts).max())
+            .and_then(|events| {
+                events
+                    .iter()
+                    .filter(|e| e.counts_as_unread())
+                    .map(|e| e.origin_ts)
+                    .max()
+            })
             .unwrap_or(0)
     }
 }
@@ -831,6 +839,44 @@ mod tests {
         assert_eq!(app.rooms.unread.get(&key("!behind:x")), Some(&1));
         assert!(!app.rooms.unread.contains_key(&key("!caught-up:x")));
         assert!(!app.rooms.unread.contains_key(&key("!unmarked:x")));
+    }
+
+    #[test]
+    fn trailing_non_message_events_do_not_make_a_read_room_unread() {
+        let mut app = app_with(vec![test_room("!r:x", 300)]);
+        let k = key("!r:x");
+        app.read_markers.insert(
+            k.clone(),
+            ReadMarker {
+                event_id: "$m".to_owned(),
+                origin_ts: 300,
+            },
+        );
+        let mk = |id: &str, ty: &str, ts: i64, body: Option<&str>| EventDto {
+            event_type: ty.to_owned(),
+            body: body.map(str::to_owned),
+            ..timeline_event(id, ts, None)
+        };
+        app.messages.events.insert(
+            k.clone(),
+            vec![
+                mk("$msg", "m.room.message", 300, Some("hi")),
+                mk("$react", "m.reaction", 400, None),
+                mk("$join", "m.room.member", 500, None),
+            ],
+        );
+        app.reconcile_unread_with_markers();
+        assert!(!app.rooms.unread.contains_key(&k));
+
+        // A real message after the marker still lights the room.
+        app.messages.events.get_mut(&k).unwrap().push(mk(
+            "$new",
+            "m.room.message",
+            600,
+            Some("later"),
+        ));
+        app.reconcile_unread_with_markers();
+        assert_eq!(app.rooms.unread.get(&k), Some(&1));
     }
 
     #[test]

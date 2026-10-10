@@ -271,6 +271,100 @@ fn hidden_live_event_for_known_unselected_room_does_not_update_unread() {
     );
 }
 
+fn unread_after_live_event(mut app: App, event: EventDto) -> Option<usize> {
+    let action = app.handle_live_frame(LiveFrame::Timeline(Box::new(event)));
+    assert_eq!(action, LiveFrameAction::None);
+    app.rooms
+        .unread
+        .get(&RoomKey {
+            account_id: Uuid::nil(),
+            room_id: "!room:example.com".to_owned(),
+        })
+        .copied()
+}
+
+fn unselected_room_app(show_state_events: bool) -> App {
+    let mut app = app_with_rooms(vec![room(
+        "!room:example.com",
+        Some("#room:example.com"),
+        Some("Room"),
+    )]);
+    app.display.show_state_events = show_state_events;
+    app
+}
+
+#[test]
+fn non_message_live_events_do_not_raise_room_unread() {
+    let membership = event_with_state_key(
+        "$join:example.com",
+        "m.room.member",
+        Some("@bob:example.com"),
+        None,
+        serde_json::json!({ "membership": "join" }),
+    );
+    let topic = event_with_state_key(
+        "$topic:example.com",
+        "m.room.topic",
+        Some(""),
+        None,
+        serde_json::json!({ "topic": "new" }),
+    );
+    let mut edit = event_with_id(
+        "$edit:example.com",
+        "m.room.message",
+        Some("* hello"),
+        serde_json::json!({ "msgtype": "m.text", "body": "* hello" }),
+    );
+    edit.relates_to = Some(serde_json::json!({
+        "rel_type": "m.replace",
+        "event_id": "$known:example.com"
+    }));
+    let sticker = event_with_id(
+        "$sticker:example.com",
+        "m.sticker",
+        Some("wave"),
+        serde_json::json!({ "body": "wave" }),
+    );
+    let utd = event_with_id(
+        "$utd:example.com",
+        "m.room.encrypted",
+        None,
+        serde_json::json!({}),
+    );
+    let empty = event_with_id(
+        "$empty:example.com",
+        "m.room.message",
+        Some("  "),
+        serde_json::json!({ "msgtype": "m.text", "body": "  " }),
+    );
+    // `show_state_events` widens what renders; it must not widen what counts.
+    for show_state_events in [false, true] {
+        for event in [&membership, &topic, &edit, &sticker, &utd, &empty] {
+            assert_eq!(
+                unread_after_live_event(unselected_room_app(show_state_events), event.clone()),
+                None,
+                "{} (show_state_events={show_state_events})",
+                event.event_id
+            );
+        }
+    }
+}
+
+#[test]
+fn own_live_message_does_not_raise_room_unread() {
+    let mut app = unselected_room_app(false);
+    app.live
+        .own_senders
+        .insert(Uuid::nil(), "@alice:example.com".to_owned());
+    let event = event_with_id(
+        "$mine:example.com",
+        "m.room.message",
+        Some("hello"),
+        serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
+    );
+    assert_eq!(unread_after_live_event(app, event), None);
+}
+
 #[test]
 pub(crate) fn find_room_matches_incomplete_alias_localpart() {
     let app = app_with_rooms(vec![room(

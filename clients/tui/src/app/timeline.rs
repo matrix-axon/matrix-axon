@@ -384,7 +384,7 @@ impl App {
             self.rooms.unread.remove(&key);
             LiveFrameAction::None
         } else {
-            if should_show_event(&event, &self.display) {
+            if event.counts_as_unread() && !self.is_own_event(&event) {
                 if let Some(root) = event.thread_relation().map(str::to_owned) {
                     if self.thread_event_counts_as_unread(&event, None) {
                         self.mark_thread_unread_from_event(&key, &root, &event);
@@ -424,7 +424,8 @@ impl App {
         event: &EventDto,
         open_thread_root: Option<&str>,
     ) -> bool {
-        should_show_event(event, &self.display)
+        event.counts_as_unread()
+            && should_show_event(event, &self.display)
             && open_thread_root != event.thread_relation()
             && !self.is_own_event(event)
     }
