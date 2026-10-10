@@ -56,10 +56,11 @@ runs:
     #
     # **The build id is pinned to the commit.** `vite.config.ts` appends
     # `-dirty` to the id when `git status` is non-empty for `clients/web`, and
-    # the sync step above deliberately edits `package.json` in this checkout,
-    # so every build where the committed version had drifted would ship as
-    # `<hash>-dirty`. A release build is the commit it was cut from; naming it
-    # otherwise is wrong. `-dirty` stays a development-only marker.
+    # the sync step above deliberately edits `package.json` in this checkout.
+    # On the Windows runner that leaves the tree reporting ` M package.json`
+    # before the build starts (Linux and macOS stay clean), so the build shipped
+    # as `<hash>-dirty`. A release build is the commit it was cut from; naming
+    # it otherwise is wrong. `-dirty` stays a development-only marker.
     - name: Build bundles
       shell: bash
       working-directory: clients/web
