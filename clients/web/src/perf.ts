@@ -33,6 +33,14 @@ export function setPerfEnabled(on: boolean): void {
   if (!on) {
     perfOverlayEntries.value = []
     recentMarks = []
+    // Traces handed out while marks were on are still live and will still
+    // call `end`; the epoch is how they know not to count themselves out.
+    openRequests = 0
+    traceEpoch += 1
+    failedWindowStart = Number.NEGATIVE_INFINITY
+    failedInWindow = 0
+    failedSkipped = 0
+    shownAt = null
     // The boot breakdown is memoised against `prepareResourceBuffer`'s clear,
     // so it has to be released here too — otherwise turning instrumentation
     // off and on again reports the *previous* session's startup.
@@ -61,9 +69,10 @@ const OVERLAY_PREFIXES = [
   // rooms. Cheap to leave on: at most two marks per socket, where the
   // ten-line buffer's real enemy is a mark that fires per scroll frame.
   'live:',
-  // A request the deadline failed, or one that answered after it had been
-  // given up on. Both are rare, and both are the reading a stuck placeholder
-  // needs.
+  // A request the deadline failed, one that failed outright, or one that
+  // answered after it had been given up on. The first and last are rare and
+  // the middle one is rate-limited (`markFailure`); all three are the reading
+  // a stuck placeholder or an error banner needs.
   'api:',
 ]
 
@@ -1044,6 +1053,16 @@ function headsOf(open: RoomOpen): string | null {
 export type RequestOutcome = 'ok' | 'timeout' | 'aborted' | 'failed'
 
 /**
+ * What kind of failure it was; `failureKind` in `api/client.ts` chooses.
+ *
+ * A closed set on purpose. The value is written to disk with `api:failed`,
+ * and the obvious thing to pass instead, the error's message, quotes a URL
+ * that names an account and a room. As a plain `string` only a comment stood
+ * in the way of that.
+ */
+export type FailureKind = 'send' | 'body' | 'cancelled' | 'fetch' | 'other'
+
+/**
  * Where a request was when it ended, or where it is now if it has not.
  * `token` is before it was sent at all: `getToken()` can be a network round
  * trip of its own (an OAuth refresh), and the deadline covers it.
@@ -1067,8 +1086,11 @@ export interface RequestTrace {
   sent(): void
   /** Response headers in. */
   headers(status: number): void
-  /** Settled: the body is in, or it failed. */
-  end(outcome: RequestOutcome): void
+  /**
+   * Settled: the body is in, or it failed. `kind` is the client's one-word
+   * classification of a failure (`failureKind` in `api/client.ts`).
+   */
+  end(outcome: RequestOutcome, kind?: FailureKind): void
   /**
    * Headers arrived after the request had already been given up on.
    *
@@ -1097,6 +1119,9 @@ export function perfTraceRequest(url: string): RequestTrace | null {
   if (!perfEnabled()) {
     return null
   }
+  watchVisibility()
+  openRequests += 1
+  const epoch = traceEpoch
   const record: RequestRecord = {
     url,
     start: performance.now(),
@@ -1119,25 +1144,147 @@ export function perfTraceRequest(url: string): RequestTrace | null {
       record.headersAt ??= performance.now()
       record.status = status
     },
-    end(outcome) {
+    end(outcome, kind) {
       if (record.endAt !== null) {
         return
       }
       record.endAt = performance.now()
       record.outcome = outcome
+      if (epoch !== traceEpoch) {
+        // Marks were turned off since this request began, and perhaps on
+        // again. It was never counted in the present session's
+        // `openRequests`, so it must not be taken out of it.
+        return
+      }
+      // Read before this request leaves the count, so a failure reports the
+      // crowd it failed in, itself included.
+      const inflight = openRequests
+      openRequests -= 1
       if (outcome === 'timeout') {
         perfMark('api:deadline', {
           route: shortRoute(url),
           stage: stageOf(record),
           hdr: sinceStart(record, record.headersAt),
           after: after(),
+          inflight,
         })
+      } else if (outcome === 'failed') {
+        markFailure(record, kind ?? 'other', after(), inflight)
       }
     },
     late() {
       perfMark('api:late', { route: shortRoute(url), after: after() })
     },
   }
+}
+
+/**
+ * `/v1` requests begun and not yet settled, counted only while marks are on.
+ *
+ * A failure's `inflight` is the reading that separates a bad link from a
+ * crowd. The packaged app opens a connection per request (`tauri-plugin-http`
+ * builds a new `reqwest` client for each, so nothing is pooled or
+ * multiplexed), and a room with a few hundred threads asks for every thread
+ * root at once (`stores/threads.ts`). One request failing alone on a phone is
+ * the network; one failing among 300 is the client.
+ */
+let openRequests = 0
+
+/**
+ * Which stretch of instrumentation a trace belongs to; bumped whenever marks
+ * are turned off.
+ *
+ * Turning them off zeroes `openRequests` while requests are still in flight.
+ * Without this, each of those would later take one off a count it was no
+ * longer part of, and five real requests could read as one. `inflight` is the
+ * figure a failure is judged by, so it has to be exact, not clamped.
+ */
+let traceEpoch = 0
+
+/** At most this many `api:failed` marks per window; the rest are counted. */
+const FAILED_MARKS_PER_WINDOW = 5
+const FAILED_MARKS_WINDOW_MS = 10_000
+
+let failedWindowStart = Number.NEGATIVE_INFINITY
+let failedInWindow = 0
+let failedSkipped = 0
+
+/** When the document last came back to the foreground, if it ever left it. */
+let shownAt: number | null = null
+
+/**
+ * How long after a return to the foreground a failure is still reported as
+ * following it. Past this `resumed` is `null`: the reading exists to catch
+ * sockets lost to a suspend, which fail at once, and a figure that kept
+ * growing for hours after one app switch said nothing and looked like data.
+ */
+const RESUMED_WINDOW_MS = 30_000
+let watchingVisibility = false
+
+/**
+ * Note each return to the foreground, for `api:failed`'s `resumed`.
+ *
+ * iOS suspends a backgrounded app and may reclaim its sockets, and the shell's
+ * requests are plain sockets rather than the webview's managed ones. A failure
+ * a few milliseconds after a resume is that, and not the link.
+ */
+function watchVisibility(): void {
+  if (watchingVisibility) {
+    return
+  }
+  watchingVisibility = true
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      shownAt = performance.now()
+    }
+  })
+}
+
+/**
+ * Record a request that failed outright, as an `api:failed` mark.
+ *
+ * Rate-limited because failures arrive in crowds: a burst that loses its link
+ * fails all at once, and a mark each would push every other mark out of the
+ * ring (`RECENT_MARKS_MAX`) and out of the stored session. What is dropped is
+ * counted, and the count rides on the next mark that is written as `skipped`.
+ *
+ * Nothing here identifies a room or an account: the route is collapsed by
+ * `shortRoute` and the cause is one of `failureKind`'s fixed words, never the
+ * transport's message, which quotes the URL.
+ */
+function markFailure(
+  record: RequestRecord,
+  kind: FailureKind,
+  after: number,
+  inflight: number,
+): void {
+  const at = performance.now()
+  if (at - failedWindowStart >= FAILED_MARKS_WINDOW_MS) {
+    failedWindowStart = at
+    failedInWindow = 0
+  }
+  if (failedInWindow >= FAILED_MARKS_PER_WINDOW) {
+    failedSkipped += 1
+    return
+  }
+  failedInWindow += 1
+  const skipped = failedSkipped
+  failedSkipped = 0
+  perfMark('api:failed', {
+    route: shortRoute(record.url),
+    kind,
+    stage: stageOf(record),
+    hdr: sinceStart(record, record.headersAt),
+    after,
+    inflight,
+    online: navigator.onLine,
+    hidden: document.visibilityState === 'hidden',
+    resumed:
+      shownAt === null || at - shownAt > RESUMED_WINDOW_MS
+        ? null
+        : Math.round(at - shownAt),
+    skipped,
+  })
 }
 
 function stageOf(record: RequestRecord): RequestStage {

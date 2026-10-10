@@ -113,7 +113,8 @@ volume is what a badge conventionally means.
   A paint that throws or rejects is forgotten, so the next run retries it unless a later value has already been sent.
   macOS sets the Dock tile.
   Linux sets the Unity launcher count, which leaves the icon unchanged on other desktops.
-  Windows draws a taskbar overlay.
+  Windows draws a taskbar overlay whose accessible name is the unread count, so Narrator can announce it.
+  `WebviewWindow::set_overlay_icon` takes only the picture, so the shell calls `ITaskbarList3::SetOverlayIcon`.
   iOS 16 uses `UNUserNotificationCenter.setBadgeCount`, so a clear does not remove delivered notifications.
   iOS 15 falls back to `UIApplication`'s icon number.
 - **Settings names the shell note from `Platform.iconBadgeSupport`.**

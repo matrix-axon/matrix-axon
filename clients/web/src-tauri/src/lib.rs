@@ -572,12 +572,16 @@ fn within_upload_limit(size: u64, max_bytes: u64) -> bool {
 /// of order and the icon keeps the older total. A plain command runs on the
 /// main thread in arrival order. That is also the thread the Dock tile, the
 /// taskbar overlay, and UIKit expect, so iOS does not hop again.
+/// Windows COM is already initialized on that thread. The overlay path does
+/// not call `CoInitializeEx`. An async command would run `CoCreateInstance`
+/// on a worker with no apartment.
 ///
 /// The notification plugin has no badge command. macOS and Linux call
 /// `WebviewWindow::set_badge_count`: the Dock tile, or the Unity launcher
 /// count (a no-op unless that launcher is running). That method is compiled
 /// only into Tauri's desktop builds. iOS sets the icon number itself.
-/// Windows ignores the count and gets an overlay picture instead. Android
+/// Windows ignores the count. It paints an overlay and passes the unread
+/// count as that overlay's accessible name, which Narrator reads. Android
 /// has no badge API in this stack. The page does not call this there
 /// (`setIconBadge` is null); the arm exists so this target does not type-check
 /// a method it cannot see.
@@ -708,17 +712,57 @@ unsafe fn notification_center() -> Option<*mut objc2::runtime::AnyObject> {
     }
 }
 
+/// Paint or clear the taskbar overlay.
+///
+/// Tauri's `set_overlay_icon` takes the picture and a null description, so
+/// Narrator announces nothing for the count. `ITaskbarList3::SetOverlayIcon`
+/// takes the name as well. The picture still stops at 99. The name says the
+/// real count.
+///
+/// Each call creates its own taskbar object. The command runs on the main
+/// thread, where COM is already initialized. A new object ignores an overlay
+/// until `HrInit`.
 #[cfg(target_os = "windows")]
 fn paint_windows_badge(window: &tauri::WebviewWindow, count: Option<i64>) -> Result<(), String> {
-    let icon = count.map(|count| {
-        tauri::image::Image::new_owned(
-            icon_badge::overlay(count),
-            icon_badge::OVERLAY_PX,
-            icon_badge::OVERLAY_PX,
+    use windows::core::{Owned, HSTRING};
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_SERVER};
+    use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
+    use windows::Win32::UI::WindowsAndMessaging::{CreateIcon, HICON};
+
+    let hwnd = window
+        .hwnd()
+        .map_err(|error| format!("icon badge: {error}"))?;
+    let taskbar: ITaskbarList3 = unsafe { CoCreateInstance(&TaskbarList, None, CLSCTX_SERVER) }
+        .map_err(|error| format!("icon badge: {error}"))?;
+    unsafe { taskbar.HrInit() }.map_err(|error| format!("icon badge: {error}"))?;
+
+    let Some(count) = count else {
+        return unsafe { taskbar.SetOverlayIcon(hwnd, HICON::default(), None) }
+            .map_err(|error| format!("icon badge: {error}"));
+    };
+
+    let rgba = icon_badge::overlay(count);
+    let (bgra, mask) = icon_badge::icon_bits(&rgba, icon_badge::OVERLAY_PX, icon_badge::OVERLAY_PX)
+        .ok_or_else(|| "icon badge: overlay has the wrong size".to_string())?;
+    // `CreateIcon` reads `width * height * 4` xor bytes and the monochrome
+    // mask from `icon_bits`. The handle is ours. The shell copies the icon
+    // before `SetOverlayIcon` returns, and dropping `icon` destroys the
+    // original.
+    let created = unsafe {
+        CreateIcon(
+            None,
+            icon_badge::OVERLAY_PX as i32,
+            icon_badge::OVERLAY_PX as i32,
+            1,
+            32,
+            mask.as_ptr(),
+            bgra.as_ptr(),
         )
-    });
-    window
-        .set_overlay_icon(icon)
+    }
+    .map_err(|error| format!("icon badge: {error}"))?;
+    let icon = unsafe { Owned::new(created) };
+    let description = HSTRING::from(icon_badge::accessible_name(count));
+    unsafe { taskbar.SetOverlayIcon(hwnd, *icon, &description) }
         .map_err(|error| format!("icon badge: {error}"))
 }
 
