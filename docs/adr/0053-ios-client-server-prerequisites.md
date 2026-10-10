@@ -19,9 +19,9 @@ Decisions already made that shape this list:
   auth UX on a new platform.
 - **Push notifications (APNs) are explicitly out of scope.** They are not a
   prerequisite for iOS client work to begin. No device-token endpoint, no
-  push router, no APNs integration is commissioned here.
-  [ADR 0113](0113-remote-push-for-suspended-mobile-clients.md) is the ADR this paragraph deferred to, and this list still does not commission the work.
-  (ADR 0031's framing of push as a "day-one" client concern is
+  push router, no APNs integration is commissioned here; that remains a
+  fully separate, unscoped future concern with its own ADR whenever someone
+  picks it up. (ADR 0031's framing of push as a "day-one" client concern is
   accordingly stale — see the ADR 0031 amendment below.)
 - **ADR 0031 contains a factual error**, repeated in the PRD, tech-spec, and
   implementation docs: "Generated SDK stubs for Swift already ship as part
@@ -119,7 +119,6 @@ similar) namespace at that point. No new server design is commissioned here.
   as a dependency, not scoped as new prerequisite work by this ADR.
 - Push notifications remain fully out of scope; no device-token endpoint,
   router, or APNs integration is commissioned here.
-  [ADR 0113](0113-remote-push-for-suspended-mobile-clients.md) commissions them as later work.
 - OAuth's internal design is deferred to its own follow-on ADR; this ADR
   only establishes that it is required before iOS ships.
 - ADR 0031 is amended (see below) to correct the false "Swift stubs already
@@ -137,3 +136,11 @@ similar) namespace at that point. No new server design is commissioned here.
   revisit if cross-client visibility becomes a real requirement later.
 - **Owner and timeline for each item**: not assigned. This ADR scopes the
   work; it does not schedule or staff it.
+
+## Amendment — remote push (2026-10-09, ADR 0113)
+
+The push bullets above still describe this list.
+They do not commission a device-token endpoint, a router, or APNs.
+[ADR 0113](0113-remote-push-for-suspended-mobile-clients.md) is the design this list deferred.
+It adds no code.
+Implementation is tracked in #604 and #605.
