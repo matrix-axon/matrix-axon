@@ -187,8 +187,9 @@ jobs:
 
       # Name the build for the commit, not the tree. vite.config.ts appends
       # `-dirty` to the build id when `git status` is non-empty for clients/web,
-      # and the sync above edits package.json in this checkout, so a build whose
-      # committed version had drifted would ship as `<hash>-dirty`. The override
+      # and the sync above edits package.json in this checkout, which can leave
+      # the tree reporting as modified (seen on the Windows runner), so the
+      # build would ship as `<hash>-dirty`. The override
       # is the one vite.config.ts already honours. Exported to later steps
       # through $GITHUB_ENV; same pin as `.github/actions/tauri-build`.
       - name: Pin the build id to the commit
@@ -344,8 +345,9 @@ jobs:
 
       # Name the build for the commit, not the tree. vite.config.ts appends
       # `-dirty` to the build id when `git status` is non-empty for clients/web,
-      # and the sync above edits package.json in this checkout, so a build whose
-      # committed version had drifted would ship as `<hash>-dirty`. The override
+      # and the sync above edits package.json in this checkout, which can leave
+      # the tree reporting as modified (seen on the Windows runner), so the
+      # build would ship as `<hash>-dirty`. The override
       # is the one vite.config.ts already honours. Exported to later steps
       # through $GITHUB_ENV; same pin as `.github/actions/tauri-build`.
       - name: Pin the build id to the commit
