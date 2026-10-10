@@ -210,6 +210,9 @@ impl Store {
     pub async fn purge_room(&self, account_id: Uuid, room_id: &str) -> Result<(), StoreError> {
         let through_event_id =
             Self::room_purge_watermark(account_id, room_id, false, &self.pool).await?;
+        // Clear before deleting history, even if a rejoin preserves metadata.
+        // A crash or a delayed retry must not leave a completed cursor over a hole.
+        self.delete_room_backfill(account_id, room_id).await?;
         self.delete_event_batches(account_id, Some(room_id), Some(through_event_id))
             .await?;
         self.delete_state_batches(account_id, Some(room_id), Some(through_event_id))
@@ -259,7 +262,7 @@ impl Store {
     {
         let (through_event_id,): (i64,) = sqlx_core::query_as::query_as(
             "INSERT INTO room_purge_intents (account_id, room_id, through_event_id) \
-             SELECT $1, $2, last_value FROM events_id_seq \
+             SELECT $1, $2, CASE WHEN is_called THEN last_value ELSE 0 END FROM events_id_seq \
              ON CONFLICT (account_id, room_id) DO UPDATE SET through_event_id = \
              CASE WHEN $3 THEN GREATEST(room_purge_intents.through_event_id, EXCLUDED.through_event_id) \
                   ELSE room_purge_intents.through_event_id END \
@@ -294,5 +297,47 @@ impl Store {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod purge_watermark_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unused_sequence_watermark_is_zero() {
+        let store = Store::connect(&std::env::var("DATABASE_URL").unwrap(), 1)
+            .await
+            .unwrap();
+        let account = store
+            .upsert_account(
+                &format!("@sequence-{}:localhost", Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .unwrap();
+        let mut tx = store.pool().begin().await.unwrap();
+        // RESTART is transactional, unlike setval: rollback restores the shared
+        // sequence even when an assertion fails and drops the transaction.
+        sqlx_core::query::query("ALTER SEQUENCE events_id_seq RESTART WITH 1")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let through =
+            Store::room_purge_watermark(account.account_id, "!empty:localhost", true, &mut *tx)
+                .await
+                .unwrap();
+        assert_eq!(through, 0);
+        let first: i64 = sqlx_core::query_scalar::query_scalar("SELECT nextval('events_id_seq')")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert!(
+            first > through,
+            "the first post-leave event is outside the purge generation"
+        );
+        tx.rollback().await.unwrap();
+        store.delete_account_row(account.account_id).await.unwrap();
     }
 }

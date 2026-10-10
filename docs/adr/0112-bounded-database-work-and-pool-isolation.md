@@ -37,7 +37,13 @@ Room purge captures a durable event watermark, deletes in committed batches with
 A new leave advances a pending watermark; an ordinary retry must not advance it or it could erase messages received after a rejoin.
 Local leave state and its purge intent commit in the same transaction; an enqueue failure rolls back the state write, and stale membership events cannot advance the intent.
 A supervised worker wakes on durable enqueue, retries every 30 seconds, and rotates pages past persistent failures.
+The SDK applies room membership before dispatching a Sliding Sync batch.
+When purge-on-leave is enabled, ingestion skips timeline, backfill, other state, and room account-data for SDK-left rooms; the local leave state still records the durable purge intent.
+This excludes leave/trailing timeline events even when they dispatch after the watermark or after cleanup has removed PostgreSQL membership.
+An engine regression drives real Sliding Sync responses through both Axon handler orders, including cleanup between the state and timeline callbacks.
 Later rejoin events and membership preserve current room metadata.
+Cleanup clears the backfill cursor before deleting history even if a rejoin preserves the room, so a completed cursor cannot permanently hide the purged history.
+An unused event sequence captures watermark zero rather than its initial unallocated value one.
 Account deletion retains its existing `deleting` breadcrumb until all final metadata is removed, and replaying an account-purge sentinel is safe.
 
 ## Transaction audit
@@ -66,3 +72,13 @@ Moving it to a shutdown-tracked server maintenance supervisor remains a follow-u
 
 A failed leave-state/intent transaction is logged under the existing best-effort sync policy.
 As with other failed ingestion writes, recovery of events already checkpointed by the SDK remains an ingestion-level concern; a successful leave projection can no longer commit without its purge intent.
+
+The sequence watermark is an allocation boundary, not a PostgreSQL commit barrier.
+A direct database writer whose pre-watermark insert is still uncommitted when cleanup finishes can escape that pass.
+Application ingestion uses short autocommit writes; coordinating outstanding writers with purge generations remains a follow-up for fully linearizable cleanup.
+
+A notification schedules a bounded rotated page; it does not guarantee the notified room is in that page or bypass a slow maintenance job.
+Prioritizing newly queued rooms and adding per-intent retry backoff remain scheduling follow-ups.
+Per-event search removals preserve later rejoin data, but large purges produce one outbox row per deleted event; generation-aware room obligations and deduplicated account sentinels are follow-ups.
+The indexer currently wakes on idle purge ticks and retries outbox pruning on idle drains; avoid redundant wakes/prunes and expose persistent pruning failures through monitoring in a separate maintenance change.
+Clients must distinguish unavailable optional status progress from an instance with no accounts; the web status indicator belongs in a separate client PR.

@@ -56,6 +56,21 @@ pub struct RoomStateUpsert<'a> {
     pub content: Option<Value>,
 }
 
+impl RoomStateUpsert<'_> {
+    /// A leave or ban of this account, shared by ingestion and durable cleanup.
+    pub fn is_local_departure(&self, local_user_id: Option<&str>) -> bool {
+        self.event_type == "m.room.member"
+            && local_user_id == Some(self.state_key)
+            && matches!(
+                self.content
+                    .as_ref()
+                    .and_then(|c| c.get("membership"))
+                    .and_then(Value::as_str),
+                Some("leave" | "ban")
+            )
+    }
+}
+
 /// Positive redaction evidence. An absent SDK marker does not prove that a
 /// homeserver supplied original rather than pruned/censored content.
 #[derive(Clone, Copy, Debug)]
@@ -240,16 +255,7 @@ impl Store {
         purge_on_leave: bool,
     ) -> Result<(), StoreError> {
         let (redacted, redaction_event_id) = evidence.columns();
-        let purge = purge_on_leave
-            && s.event_type == "m.room.member"
-            && local_user_id == Some(s.state_key)
-            && matches!(
-                s.content
-                    .as_ref()
-                    .and_then(|c| c.get("membership"))
-                    .and_then(serde_json::Value::as_str),
-                Some("leave" | "ban")
-            );
+        let purge = purge_on_leave && s.is_local_departure(local_user_id);
         let query = sqlx_core::query::query(
             "INSERT INTO room_state \
              (account_id, room_id, event_type, state_key, event_id, sender, origin_ts, content, redacted, redaction_event_id) \
