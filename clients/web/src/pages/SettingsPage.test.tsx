@@ -808,13 +808,10 @@ describe('the app icon badge', () => {
   }
 
   it('says the Android launcher cannot show the count', () => {
-    asUserAgent(
-      'Mozilla/5.0 (Linux; Android 14; sdk_gphone64_x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-    )
     const { getByText, queryByText } = render(
       <ServicesContext.Provider
         value={testServices({
-          platform: { browserCanAdoptApp: false, setIconBadge: null },
+          platform: { browserCanAdoptApp: false, iconBadgeSupport: 'none' },
         })}
       >
         <SettingsPage />
@@ -830,7 +827,6 @@ describe('the app icon badge', () => {
   })
 
   it('does not read notification permission for a badge note that ignores it', async () => {
-    asUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36')
     const notificationPermission = vi.fn(() =>
       Promise.resolve('default' as const),
     )
@@ -839,7 +835,7 @@ describe('the app icon badge', () => {
         value={testServices({
           platform: {
             browserCanAdoptApp: false,
-            setIconBadge: () => Promise.resolve(),
+            iconBadgeSupport: 'launcher-dependent',
             notificationPermission,
           },
         })}
@@ -853,13 +849,12 @@ describe('the app icon badge', () => {
   })
 
   it('says a Linux shell badges only through a Unity launcher', () => {
-    asUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36')
     const { getByText, queryByText } = render(
       <ServicesContext.Provider
         value={testServices({
           platform: {
             browserCanAdoptApp: false,
-            setIconBadge: () => Promise.resolve(),
+            iconBadgeSupport: 'launcher-dependent',
           },
         })}
       >
@@ -875,16 +870,13 @@ describe('the app icon badge', () => {
   })
 
   it('asks an iOS shell for notification permission without enabling message notifications', async () => {
-    asUserAgent(
-      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
-    )
     const requestNotificationPermission = vi.fn(() =>
       Promise.resolve('granted' as const),
     )
     const services = testServices({
       platform: {
         browserCanAdoptApp: false,
-        setIconBadge: () => Promise.resolve(),
+        iconBadgeSupport: 'permission',
         notificationPermission: () => Promise.resolve('default'),
         requestNotificationPermission,
       },
@@ -915,15 +907,12 @@ describe('the app icon badge', () => {
   })
 
   it('points a denied iOS shell at Settings', async () => {
-    asUserAgent(
-      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
-    )
     const { findByText, queryByRole } = render(
       <ServicesContext.Provider
         value={testServices({
           platform: {
             browserCanAdoptApp: false,
-            setIconBadge: () => Promise.resolve(),
+            iconBadgeSupport: 'permission',
             notificationPermission: () => Promise.resolve('denied'),
           },
         })}
@@ -943,40 +932,44 @@ describe('the app icon badge', () => {
     ).toBeNull()
   })
 
-  it('treats a touch Mac shell as able to badge like iOS', async () => {
+  it('does not treat a touch-screen Mac user agent as an iOS shell', async () => {
+    // An iPad webview can claim to be a Mac. The badge note follows the
+    // capability the shell was built with, not that string.
     asUserAgent(
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
       5,
     )
-    const { findByRole, queryByText } = render(
+    const notificationPermission = vi.fn(() =>
+      Promise.resolve('default' as const),
+    )
+    const { queryByRole, queryByText } = render(
       <ServicesContext.Provider
         value={testServices({
           platform: {
             browserCanAdoptApp: false,
-            setIconBadge: () => Promise.resolve(),
-            notificationPermission: () => Promise.resolve('default'),
+            iconBadgeSupport: 'native',
+            notificationPermission,
           },
         })}
       >
         <SettingsPage />
       </ServicesContext.Provider>,
     )
+    // Message notifications still read permission once. The badge section
+    // must not add a second call, and must not offer the iOS button.
+    await waitFor(() => expect(notificationPermission).toHaveBeenCalledTimes(1))
     expect(
-      await findByRole('button', {
+      queryByRole('button', {
         name: 'Allow notifications to enable the badge',
       }),
-    ).toBeTruthy()
+    ).toBeNull()
     expect(queryByText(/Safari only displays this badge/)).toBeNull()
     expect(queryByText(/Not available in this browser/)).toBeNull()
   })
 
-  it('shows the browser note when the setter field is missing', () => {
+  it('explains a browser whose Badging API is absent', () => {
     const { getByText } = render(
-      <ServicesContext.Provider
-        value={testServices({
-          platform: { setIconBadge: undefined },
-        })}
-      >
+      <ServicesContext.Provider value={testServices()}>
         <SettingsPage />
       </ServicesContext.Provider>,
     )

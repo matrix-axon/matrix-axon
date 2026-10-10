@@ -113,9 +113,21 @@ volume is what a badge conventionally means.
   A paint that throws or rejects is forgotten, so the next run retries it unless a later value has already been sent.
   macOS sets the Dock tile.
   Linux sets the Unity launcher count, which leaves the icon unchanged on other desktops.
-  Windows draws a taskbar overlay.
+  Windows draws a taskbar overlay whose accessible name is the unread count, so Narrator can announce it.
+  `WebviewWindow::set_overlay_icon` takes only the picture, so the shell calls `ITaskbarList3::SetOverlayIcon`.
   iOS 16 uses `UNUserNotificationCenter.setBadgeCount`, so a clear does not remove delivered notifications.
   iOS 15 falls back to `UIApplication`'s icon number.
+- **Settings names the shell note from `Platform.iconBadgeSupport`.**
+  The shell sets it from `TAURI_ENV_PLATFORM`, the OS field of the target triple the Tauri CLI already passes to the frontend build.
+  `'none'` is Android, which has no launcher-badge API in this stack.
+  `'launcher-dependent'` is Linux, where the count reaches a Unity launcher.
+  `'permission'` is iOS, where the icon number needs notification permission.
+  `'native'` is the macOS Dock and the Windows overlay.
+  `'web'` is a browser, which still uses the Badging API and the Safari permission note.
+  An iPad shell reports `'permission'` because that bundle was built for iOS, including when its webview claims to be a Mac.
+  A shell whose bundle has an empty target throws at boot instead of claiming `'native'`.
+  `darwin` and `windows` are named, and any other OS field throws.
+  An empty string is only the answer for a browser build and for unit tests.
 - **New `RoomsStore.unreadTotal` signal** (`stores/rooms.ts`), maintained
   alongside `unreadKeys` inside `setUnreadCounts`: each call that changes a
   room's `notificationCount` adds the delta (`next - previous`) to a running

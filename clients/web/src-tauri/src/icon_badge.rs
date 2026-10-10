@@ -1,10 +1,13 @@
-//! The picture Windows paints on a taskbar button.
+//! The picture Windows paints on a taskbar button, and the name Narrator reads.
 //!
 //! `Window::set_badge_count` is a no-op on Windows. The taskbar takes an
 //! overlay image instead, and this builds that image: a red disc with the
 //! count in white. Other platforms badge with a number and never call this.
 //! The disc is drawn here, rather than shipped as an asset, because the
 //! count is part of the picture.
+//!
+//! The picture stops at 99, because a third digit does not fit. The name says
+//! the real count. A screen reader has room for it.
 
 /// A count the icon should show. Zero and negative clear, matching the page,
 /// which clears when the unread total is zero.
@@ -13,6 +16,19 @@
 /// count that has already passed through here.
 pub fn visible_count(count: Option<i64>) -> Option<i64> {
     count.filter(|count| *count > 0)
+}
+
+/// The name Narrator reads for a count the overlay is showing.
+///
+/// English, like the rest of the shell. Callers pass a positive count.
+/// Zero clears the overlay and has no name.
+#[cfg(any(windows, test))]
+pub fn accessible_name(count: i64) -> String {
+    if count == 1 {
+        "1 unread message".to_string()
+    } else {
+        format!("{count} unread messages")
+    }
 }
 
 /// The Windows overlay. Compiled for tests on every host, so a non-Windows
@@ -38,6 +54,56 @@ mod drawing {
         fill_disc(&mut rgba);
         paint_count(&mut rgba, count.min(99));
         rgba
+    }
+
+    /// BGRA xor bits and the monochrome AND mask `CreateIcon` reads.
+    ///
+    /// The color bytes swap red and blue. Alpha stays, and it is what makes
+    /// the disc transparent. The mask is one bit per pixel, high bit on the
+    /// left. `CreateIcon` reads it as a monochrome bitmap, so each row is
+    /// padded to a 16-bit boundary. A set bit is transparent, and only a
+    /// fully transparent pixel is set. A partial alpha stays opaque in the
+    /// mask: a transparent bit on a pixel that still has color paints black
+    /// where the mask is honored. `overlay` draws only alpha 0 and 255, so
+    /// its mask is the same silhouette as that alpha.
+    ///
+    /// `None` means a side is zero, or `rgba` is not four bytes per pixel.
+    pub fn icon_bits(rgba: &[u8], width: u32, height: u32) -> Option<(Vec<u8>, Vec<u8>)> {
+        let width = usize::try_from(width).ok()?;
+        let height = usize::try_from(height).ok()?;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let bytes = width.checked_mul(height)?.checked_mul(4)?;
+        if rgba.len() != bytes {
+            return None;
+        }
+        let mut bgra = rgba.to_vec();
+        for pixel in bgra.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        Some((bgra, and_mask(rgba, width, height)?))
+    }
+
+    fn and_mask(rgba: &[u8], width: usize, height: usize) -> Option<Vec<u8>> {
+        let stride = mask_stride(width)?;
+        let mut mask = vec![0u8; stride.checked_mul(height)?];
+        for y in 0..height {
+            let row = y * width * 4;
+            for x in 0..width {
+                if rgba[row + x * 4 + 3] != 0 {
+                    continue;
+                }
+                mask[y * stride + x / 8] |= 1 << (7 - (x % 8));
+            }
+        }
+        Some(mask)
+    }
+
+    /// Bytes in one AND-mask row. Monochrome rows are WORD-aligned.
+    fn mask_stride(width: usize) -> Option<usize> {
+        let padded = width.checked_add(15)?;
+        Some(padded / 16 * 2)
     }
 
     fn fill_disc(rgba: &mut [u8]) {
@@ -158,11 +224,72 @@ mod drawing {
         }
 
         #[test]
+        fn the_overlay_is_fully_opaque_or_fully_clear() {
+            // No antialiased edge. A mask-only draw sees the same silhouette
+            // as the alpha channel.
+            for count in [1, 7, 10, 99] {
+                assert!(
+                    overlay(count)
+                        .chunks_exact(4)
+                        .all(|pixel| pixel[3] == 0 || pixel[3] == 255),
+                    "{count}"
+                );
+            }
+        }
+
+        #[test]
         fn different_counts_draw_different_pictures_and_past_99_does_not() {
             assert_ne!(overlay(7), overlay(8));
             assert_ne!(overlay(1), overlay(10));
             assert_eq!(overlay(99), overlay(100));
             assert_eq!(overlay(99), overlay(10_000));
+        }
+
+        #[test]
+        fn icon_bits_are_bgra_with_a_monochrome_mask() {
+            let (bgra, mask) = super::icon_bits(&[196, 30, 45, 255], 1, 1).unwrap();
+            assert_eq!(bgra, vec![45, 30, 196, 255]);
+            // One pixel, padded to a 16-bit row.
+            assert_eq!(mask, vec![0, 0]);
+
+            let (_, mask) = super::icon_bits(&[0, 0, 0, 0], 1, 1).unwrap();
+            // The high bit is the leftmost pixel, and a set bit is transparent.
+            assert_eq!(mask, vec![0x80, 0]);
+
+            // Partial alpha stays opaque in the mask.
+            let (_, mask) = super::icon_bits(&[1, 2, 3, 128], 1, 1).unwrap();
+            assert_eq!(mask, vec![0, 0]);
+
+            // 16px is the small-icon width. A WORD row is 2 bytes. A 32-bit
+            // pad would be 4, and the second row would start four bytes in.
+            let mut wide = vec![0u8; 16 * 2 * 4];
+            wide[4..8].copy_from_slice(&[1, 2, 3, 255]);
+            let (_, mask) = super::icon_bits(&wide, 16, 2).unwrap();
+            assert_eq!(mask, vec![0xBF, 0xFF, 0xFF, 0xFF]);
+
+            assert!(super::icon_bits(&[0, 0, 0, 0], 2, 2).is_none());
+            assert!(super::icon_bits(&[], 0, 1).is_none());
+
+            let rgba = overlay(7);
+            let (bgra, mask) = super::icon_bits(&rgba, OVERLAY_PX, OVERLAY_PX).unwrap();
+            assert_eq!(bgra.len(), rgba.len());
+            // 32px rows are 4 bytes under WORD alignment too.
+            assert_eq!(mask.len(), 128);
+            assert_eq!(pixel(&rgba, 0, 0), [0, 0, 0, 0]);
+            assert_ne!(mask[0] & 0x80, 0);
+            assert_eq!(pixel(&rgba, 1, 16), super::DISC_RED);
+            assert_eq!(
+                pixel(&bgra, 1, 16),
+                [
+                    super::DISC_RED[2],
+                    super::DISC_RED[1],
+                    super::DISC_RED[0],
+                    super::DISC_RED[3],
+                ]
+            );
+            // (16, 16) is inside the disc, so its mask bit is clear.
+            let center = 16 * 4 + 16 / 8;
+            assert_eq!(mask[center] & 0x80, 0);
         }
 
         fn pixel(rgba: &[u8], x: u32, y: u32) -> [u8; 4] {
@@ -175,11 +302,11 @@ mod drawing {
 // Linux tests compile `drawing` so the picture is checked, but only Windows
 // calls it. Re-exporting there as well is an unused import (`-D warnings`).
 #[cfg(windows)]
-pub use drawing::{overlay, OVERLAY_PX};
+pub use drawing::{icon_bits, overlay, OVERLAY_PX};
 
 #[cfg(test)]
 mod tests {
-    use super::visible_count;
+    use super::{accessible_name, visible_count};
 
     #[test]
     fn zero_and_negative_counts_clear() {
@@ -187,5 +314,14 @@ mod tests {
         assert_eq!(visible_count(Some(0)), None);
         assert_eq!(visible_count(Some(-3)), None);
         assert_eq!(visible_count(Some(7)), Some(7));
+    }
+
+    #[test]
+    fn the_name_says_the_real_count() {
+        assert_eq!(accessible_name(1), "1 unread message");
+        assert_eq!(accessible_name(2), "2 unread messages");
+        // The picture draws 100 as 99. The name does not.
+        assert_eq!(accessible_name(99), "99 unread messages");
+        assert_eq!(accessible_name(100), "100 unread messages");
     }
 }
