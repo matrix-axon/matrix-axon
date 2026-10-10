@@ -2133,6 +2133,25 @@ impl EventDto {
         )
     }
 
+    /// Whether this event should raise a room or thread unread indicator.
+    ///
+    /// Mirrors the web client's `isRoomUnreadEvent`: only a real, non-empty
+    /// `m.room.message` counts. Reactions, membership and other state events,
+    /// edits, redactions, stickers and undecryptable events never do. This is
+    /// deliberately separate from `should_show_event`, which decides what
+    /// *renders*.
+    pub fn counts_as_unread(&self) -> bool {
+        self.event_type == "m.room.message"
+            && self.state_key.is_none()
+            && !self.redacted
+            && self
+                .relates_to
+                .as_ref()
+                .and_then(|relates| relates.get("rel_type"))
+                .is_none_or(|rel| rel.as_str() != Some("m.replace"))
+            && self.body.as_deref().is_some_and(|b| !b.trim().is_empty())
+    }
+
     pub fn is_membership_event(&self) -> bool {
         self.event_type == "m.room.member"
     }
