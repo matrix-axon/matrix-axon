@@ -7,7 +7,8 @@ use crate::api::{ApiError, AxonClient, EventDto, MemberDto, RoomDto, TimelinePag
 
 use super::{
     display_body_with_sender, format_time, match_status, next_match_index, relative_room_index,
-    AccountSelection, App, RoomKey, RoomSort, RoomTargetResolution, Status, TIMELINE_LIMIT,
+    AccountSelection, App, LiveFrameAction, RoomKey, RoomSort, RoomTargetResolution, Status,
+    TIMELINE_LIMIT,
 };
 
 /// Rows either side of the visible room-list window that still get their titles
@@ -30,6 +31,7 @@ impl App {
         let previous_keys: Vec<RoomKey> = self.rooms.rooms.iter().map(RoomKey::from).collect();
         let refreshed_keys: HashSet<RoomKey> = rooms.iter().map(RoomKey::from).collect();
         self.rooms.rooms = rooms;
+        self.seed_unread_from_rooms();
         self.reconcile_spaces();
         for key in previous_keys {
             if !refreshed_keys.contains(&key) {
@@ -75,6 +77,59 @@ impl App {
         }
         self.sweep_visible_room_titles();
         self.maybe_start_pin_migration();
+    }
+
+    /// Set every listed room's unread badge from the server's
+    /// `notification_count` (ADR 0115). The selected room is left clear: it is
+    /// on screen, and the receipt for what is shown brings the server value to
+    /// zero.
+    fn seed_unread_from_rooms(&mut self) {
+        let selected = self.selected_room().map(RoomKey::from);
+        let counts: Vec<(RoomKey, u64)> = self
+            .rooms
+            .rooms
+            .iter()
+            .map(|room| (RoomKey::from(room), room.notification_count))
+            .collect();
+        for (key, count) in counts {
+            self.set_room_unread(key, count, selected.as_ref());
+        }
+    }
+
+    /// Apply a live `unread_counts.changed` frame. A room the TUI does not
+    /// know yet requests a room refresh, as the web client does.
+    pub(crate) fn apply_unread_counts(
+        &mut self,
+        account_id: Uuid,
+        payload: &crate::api::UnreadCountsChangedDto,
+    ) -> LiveFrameAction {
+        let key = RoomKey {
+            account_id,
+            room_id: payload.room_id.clone(),
+        };
+        let Some(room) = self
+            .rooms
+            .rooms
+            .iter_mut()
+            .find(|room| RoomKey::from(&**room) == key)
+        else {
+            return LiveFrameAction::RefreshRooms;
+        };
+        room.notification_count = payload.notification_count;
+        room.highlight_count = payload.highlight_count;
+        let selected = self.selected_room().map(RoomKey::from);
+        self.set_room_unread(key, payload.notification_count, selected.as_ref());
+        LiveFrameAction::None
+    }
+
+    fn set_room_unread(&mut self, key: RoomKey, count: u64, selected: Option<&RoomKey>) {
+        if count == 0 || selected == Some(&key) {
+            self.rooms.unread.remove(&key);
+        } else {
+            self.rooms
+                .unread
+                .insert(key, usize::try_from(count).unwrap_or(usize::MAX));
+        }
     }
 
     fn prune_room_caches(&mut self, key: &RoomKey) {
@@ -1433,6 +1488,8 @@ mod tests {
             room_type: None,
             last_activity_ts,
             last_event_id: None,
+            notification_count: 0,
+            highlight_count: 0,
             tags: Vec::new(),
             is_direct: false,
         }

@@ -3,8 +3,9 @@
 //! Each room's last-read position is mirrored to Axon's per-device state under
 //! the `read_markers` namespace (key = room id, value
 //! `{"event_id": …, "origin_ts": …}`, scoped by `account_id`), so reading a
-//! room on one device clears its unread badge on the user's other devices, and
-//! unread state survives a restart instead of resetting with the session.
+//! room on one device clears its unread badge on the user's other devices. The
+//! badge itself is the server's `notification_count` (ADR 0115); the marker
+//! only drives that immediate cross-device clear.
 //!
 //! The wire machinery is the drafts machinery ([`super::drafts`]): a debounced
 //! PUT per settled change, hydration from the merged view at startup and on
@@ -23,8 +24,7 @@
 //! Reading a room settles **two** independent positions, and this module tracks
 //! them separately. Do not merge them back into one:
 //!
-//! - [`ReadMarker`] is the cross-device device-state marker above, and the key
-//!   unread detection compares against (`origin_ts > marker_ts`). It is a
+//! - [`ReadMarker`] is the cross-device device-state marker above. It is a
 //!   *display-order* artifact — where to draw the "new messages" line — ordered
 //!   on `origin_ts`.
 //! - [`ReceiptTarget`] is what the Matrix read receipt names. A receipt is
@@ -394,8 +394,7 @@ impl App {
         });
     }
 
-    /// Apply the merged read-marker view for every account, then reconcile the
-    /// unread badges.
+    /// Apply the merged read-marker view for every account.
     ///
     /// The fetch half lives in [`super::bootstrap`] so startup and every WS
     /// (re)connect can run it off the event loop (#189); a failed read leaves
@@ -418,7 +417,6 @@ impl App {
                 );
             }
         }
-        self.reconcile_unread_with_markers();
     }
 
     /// Apply one live `read_markers` entry map from a sibling device.
@@ -436,8 +434,13 @@ impl App {
                 account_id,
                 room_id,
             };
+            // A marker that moves forward means the user has seen the room on
+            // another device; clear its badge now rather than waiting for the
+            // server count to follow (ADR 0115). A stale or repeated marker
+            // from a device that was offline says nothing new, so it clears
+            // nothing.
             if self.apply_marker(key.clone(), marker) {
-                self.clear_unread_if_read(&key);
+                self.rooms.unread.remove(&key);
             }
         }
         LiveFrameAction::None
@@ -455,75 +458,6 @@ impl App {
         }
         self.read_markers.insert(room, marker);
         true
-    }
-
-    /// Reconcile every room's unread badge with its marker: a room whose
-    /// latest known activity is newer than its marker shows as unread (this is
-    /// what survives a restart), one read to (or past) its latest activity
-    /// clears. Rooms with no marker are left alone — a first run must not
-    /// light up every room.
-    pub(crate) fn reconcile_unread_with_markers(&mut self) {
-        let rooms: Vec<(RoomKey, i64)> = self
-            .rooms
-            .rooms
-            .iter()
-            .map(|room| (RoomKey::from(room), room.last_activity_ts))
-            .collect();
-        for (key, listed_ts) in rooms {
-            let Some(marker) = self.read_markers.get(&key) else {
-                continue;
-            };
-            let marker_ts = marker.origin_ts;
-            // Reuse the room-list ts collected above instead of re-scanning
-            // self.rooms.rooms per room (which made this O(n²) in room count).
-            if listed_ts.max(self.loaded_content_activity_ts(&key)) > marker_ts {
-                self.rooms.unread.entry(key).or_insert(1);
-            } else {
-                self.rooms.unread.remove(&key);
-            }
-        }
-    }
-
-    /// Drop a room's unread badge when its marker has caught up with its
-    /// latest known activity — the user read it on another device.
-    fn clear_unread_if_read(&mut self, room: &RoomKey) {
-        let Some(marker) = self.read_markers.get(room) else {
-            return;
-        };
-        if marker.origin_ts >= self.latest_known_activity_ts(room) {
-            self.rooms.unread.remove(room);
-        }
-    }
-
-    /// The newest activity this client knows for a room: the room list's
-    /// `last_activity_ts` or the newest loaded/live event, whichever is later
-    /// (live events don't update the room-list timestamp between refreshes).
-    fn latest_known_activity_ts(&self, room: &RoomKey) -> i64 {
-        let listed = self
-            .rooms
-            .rooms
-            .iter()
-            .find(|r| RoomKey::from(*r) == *room)
-            .map(|r| r.last_activity_ts)
-            .unwrap_or(0);
-        listed.max(self.loaded_content_activity_ts(room))
-    }
-
-    /// The newest `origin_ts` among the room's loaded/live events that count as
-    /// unread (see `EventDto::counts_as_unread`), or 0. A trailing reaction,
-    /// join or edit must not make a read room look newer than its marker.
-    fn loaded_content_activity_ts(&self, room: &RoomKey) -> i64 {
-        self.messages
-            .events
-            .get(room)
-            .and_then(|events| {
-                events
-                    .iter()
-                    .filter(|e| e.counts_as_unread())
-                    .map(|e| e.origin_ts)
-                    .max()
-            })
-            .unwrap_or(0)
     }
 }
 
@@ -546,6 +480,8 @@ mod tests {
             room_type: None,
             last_activity_ts,
             last_event_id: None,
+            notification_count: 0,
+            highlight_count: 0,
             tags: Vec::new(),
             is_direct: false,
         }
@@ -769,7 +705,8 @@ mod tests {
         let k = key("!r:x");
         app.rooms.unread.insert(k.clone(), 3);
 
-        // A marker older than the room's latest activity: applied, badge stays.
+        // A first marker that moves the room forward is applied and clears the
+        // badge: the user read it on another device.
         let entries = HashMap::from([(
             "!r:x".to_owned(),
             marker_value(&ReadMarker {
@@ -779,9 +716,10 @@ mod tests {
         )]);
         app.handle_read_marker_frame(Uuid::nil(), entries);
         assert_eq!(app.read_markers.get(&k).unwrap().origin_ts, 100);
-        assert_eq!(app.rooms.unread.get(&k), Some(&3));
+        assert!(!app.rooms.unread.contains_key(&k));
 
-        // A marker at (or past) the latest activity clears the badge.
+        // A later, newer marker clears again.
+        app.rooms.unread.insert(k.clone(), 2);
         let entries = HashMap::from([(
             "!r:x".to_owned(),
             marker_value(&ReadMarker {
@@ -810,77 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_seeds_unread_only_for_marked_rooms_with_newer_activity() {
-        let mut app = app_with(vec![
-            test_room("!behind:x", 500),    // marker older than activity → unread
-            test_room("!caught-up:x", 300), // marker at activity → read
-            test_room("!unmarked:x", 900),  // no marker → left alone
-        ]);
-        app.read_markers.insert(
-            key("!behind:x"),
-            ReadMarker {
-                event_id: "$m1".to_owned(),
-                origin_ts: 400,
-            },
-        );
-        app.read_markers.insert(
-            key("!caught-up:x"),
-            ReadMarker {
-                event_id: "$m2".to_owned(),
-                origin_ts: 300,
-            },
-        );
-        // A stale badge on the caught-up room (e.g. counted while the socket
-        // was down, then read on another device) is dropped by reconcile.
-        app.rooms.unread.insert(key("!caught-up:x"), 2);
-
-        app.reconcile_unread_with_markers();
-
-        assert_eq!(app.rooms.unread.get(&key("!behind:x")), Some(&1));
-        assert!(!app.rooms.unread.contains_key(&key("!caught-up:x")));
-        assert!(!app.rooms.unread.contains_key(&key("!unmarked:x")));
-    }
-
-    #[test]
-    fn trailing_non_message_events_do_not_make_a_read_room_unread() {
-        let mut app = app_with(vec![test_room("!r:x", 300)]);
-        let k = key("!r:x");
-        app.read_markers.insert(
-            k.clone(),
-            ReadMarker {
-                event_id: "$m".to_owned(),
-                origin_ts: 300,
-            },
-        );
-        let mk = |id: &str, ty: &str, ts: i64, body: Option<&str>| EventDto {
-            event_type: ty.to_owned(),
-            body: body.map(str::to_owned),
-            ..timeline_event(id, ts, None)
-        };
-        app.messages.events.insert(
-            k.clone(),
-            vec![
-                mk("$msg", "m.room.message", 300, Some("hi")),
-                mk("$react", "m.reaction", 400, None),
-                mk("$join", "m.room.member", 500, None),
-            ],
-        );
-        app.reconcile_unread_with_markers();
-        assert!(!app.rooms.unread.contains_key(&k));
-
-        // A real message after the marker still lights the room.
-        app.messages.events.get_mut(&k).unwrap().push(mk(
-            "$new",
-            "m.room.message",
-            600,
-            Some("later"),
-        ));
-        app.reconcile_unread_with_markers();
-        assert_eq!(app.rooms.unread.get(&k), Some(&1));
-    }
-
-    #[test]
-    fn reconcile_does_not_shrink_a_live_count() {
+    fn stale_sibling_marker_does_not_clear_unread() {
         let mut app = app_with(vec![test_room("!r:x", 500)]);
         let k = key("!r:x");
         app.read_markers.insert(
@@ -890,11 +758,23 @@ mod tests {
                 origin_ts: 400,
             },
         );
-        // Three live events already counted this session; reconcile must not
-        // collapse the count to 1.
         app.rooms.unread.insert(k.clone(), 3);
-        app.reconcile_unread_with_markers();
+
+        // A device that was offline replays an older marker; it says nothing
+        // new, so the server's count stands (ADR 0115).
+        let stale = HashMap::from([(
+            "!r:x".to_owned(),
+            serde_json::json!({ "event_id": "$old", "origin_ts": 100 }),
+        )]);
+        app.handle_read_marker_frame(Uuid::nil(), stale);
         assert_eq!(app.rooms.unread.get(&k), Some(&3));
+
+        let newer = HashMap::from([(
+            "!r:x".to_owned(),
+            serde_json::json!({ "event_id": "$new", "origin_ts": 900 }),
+        )]);
+        app.handle_read_marker_frame(Uuid::nil(), newer);
+        assert!(!app.rooms.unread.contains_key(&k));
     }
 
     #[test]
