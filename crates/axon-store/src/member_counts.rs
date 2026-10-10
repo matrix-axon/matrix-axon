@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use crate::{Store, StoreError};
 
-/// A local SDK-cache observation, not an upstream synchronization timestamp.
+/// A changed local SDK-cache observation, not an upstream synchronization timestamp.
+/// Unchanged confirmations retain the timestamp of the current count pair.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomMemberCounts {
     pub joined: i64,
@@ -23,6 +24,19 @@ pub enum MemberCountWrite {
 }
 
 impl Store {
+    /// Capture the database clock before reading an SDK snapshot. Leave
+    /// invalidation uses this same clock; mixing host clocks can fence valid
+    /// rejoin observations indefinitely when PostgreSQL is ahead of Axon.
+    /// The caller bounds the entire observation with its reconciliation deadline.
+    pub async fn member_count_observation_time(&self) -> Result<i64, StoreError> {
+        let (observed_at,) = sqlx_core::query_as::query_as::<Postgres, (i64,)>(
+            "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(observed_at)
+    }
+
     /// Bound database execution as well as the caller's await. Dropping a
     /// timed-out future alone does not establish a PostgreSQL work deadline.
     pub(crate) async fn reconciliation_transaction(

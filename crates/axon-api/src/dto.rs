@@ -598,7 +598,8 @@ pub struct RoomInfoDto {
 pub struct RoomMemberCountsDto {
     pub joined: i64,
     pub invited: i64,
-    /// Local cache observation time in Unix milliseconds, not upstream freshness.
+    /// Database-clock time in Unix milliseconds when this count pair changed locally.
+    /// Unchanged confirmations retain this timestamp; it is not a freshness signal.
     pub observed_at: i64,
 }
 

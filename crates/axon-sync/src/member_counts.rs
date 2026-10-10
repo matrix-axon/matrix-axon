@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 // Only explicitly supplied counts from the current membership epoch qualify.
 // The lazy member list and the SDK's legacy zero defaults are never evidence.
-fn snapshot(info: &RoomInfo) -> Option<RoomMemberCounts> {
+fn snapshot(info: &RoomInfo, observed_at: i64) -> Option<RoomMemberCounts> {
     if info.state() != RoomState::Joined {
         return None;
     }
@@ -28,9 +28,7 @@ fn snapshot(info: &RoomInfo) -> Option<RoomMemberCounts> {
     Some(RoomMemberCounts {
         joined: joined.try_into().ok()?,
         invited: invited?.try_into().ok()?,
-        observed_at: u64::from(matrix_sdk::ruma::MilliSecondsSinceUnixEpoch::now().get())
-            .try_into()
-            .ok()?,
+        observed_at,
     })
 }
 
@@ -39,7 +37,16 @@ async fn reconcile(client: &Client, store: &Store, account_id: Uuid, room_id: &R
     let Some(room) = client.get_room(room_id) else {
         return false;
     };
-    persist_snapshot(&room.clone_info(), store, account_id, room_id).await
+    // Capture ordering before the SDK read, so a leave between this read and
+    // persistence fences this snapshot using the same PostgreSQL clock.
+    let observed_at = match store.member_count_observation_time().await {
+        Ok(observed_at) => observed_at,
+        Err(error) => {
+            tracing::warn!(%account_id, %room_id, source = "sdk_summary", reason = error.diagnostic_reason(), "member count observation clock failed; will retry");
+            return true;
+        }
+    };
+    persist_snapshot(&room.clone_info(), store, account_id, room_id, observed_at).await
 }
 
 async fn persist_snapshot(
@@ -47,26 +54,18 @@ async fn persist_snapshot(
     store: &Store,
     account_id: Uuid,
     room_id: &RoomId,
+    observed_at: i64,
 ) -> bool {
-    let result = if info.state() != RoomState::Joined {
-        store
-            .invalidate_room_member_counts(
-                account_id,
-                room_id.as_str(),
-                u64::from(matrix_sdk::ruma::MilliSecondsSinceUnixEpoch::now().get()) as i64,
-            )
-            .await
-    } else if let Some(counts) = snapshot(info) {
+    let result = if let Some(counts) = snapshot(info, observed_at) {
         store
             .set_room_member_counts(account_id, room_id.as_str(), counts)
             .await
-    } else if let Some(invalidated_at) = info.summary_counts_invalidated_at() {
+    } else if info.state() != RoomState::Joined
+        || info.summary_member_counts().0 == Some(0)
+        || info.summary_counts_invalidated_at().is_some()
+    {
         store
-            .invalidate_room_member_counts(
-                account_id,
-                room_id.as_str(),
-                u64::from(invalidated_at.get()) as i64,
-            )
+            .invalidate_room_member_counts(account_id, room_id.as_str(), observed_at)
             .await
     } else {
         return false;
@@ -74,10 +73,7 @@ async fn persist_snapshot(
     match result {
         Ok(outcome) => {
             tracing::trace!(%account_id, %room_id, source = "sdk_summary", ?outcome, "reconciled member count observation");
-            matches!(
-                outcome,
-                MemberCountWrite::Retry | MemberCountWrite::Superseded
-            )
+            outcome == MemberCountWrite::Retry
         }
         Err(error) => {
             tracing::warn!(%account_id, %room_id, source = "sdk_summary", reason = error.diagnostic_reason(), "member count persistence failed; will retry");
@@ -121,7 +117,11 @@ impl Worker {
         cancel: &CancellationToken,
         receive: impl FnMut() -> Result<OwnedRoomId, broadcast::error::TryRecvError>,
     ) -> bool {
+        if cancel.is_cancelled() {
+            return false;
+        }
         let Some(hinted) = take_hints(receive, &mut self.sweep) else {
+            tracing::warn!(%account_id, source = "sdk_summary", reason = "update_channel_closed", "member count watcher stopped because the SDK update channel closed");
             return false;
         };
         for room in hinted {
@@ -132,17 +132,21 @@ impl Worker {
             .0
             .drain(..self.pending.0.len().min(4))
             .collect::<Vec<_>>();
-        for room in self
+        let Some(page) = self
             .sweep
             .page(store, account_id, cancel, "member_counts")
             .await
-        {
+        else {
+            return false;
+        };
+        for room in page {
             if !rooms.iter().any(|(id, _)| id == &room) {
                 rooms.push((room, 0));
             }
         }
         for (room_id, attempts) in rooms {
             let retry = tokio::select! {
+                biased;
                 _ = cancel.cancelled() => return false,
                 result = tokio::time::timeout(Duration::from_secs(2), reconcile(client, store, account_id, &room_id)) => {
                     match result {
@@ -176,9 +180,10 @@ pub(crate) async fn watch(
     let mut worker = Worker::new();
     loop {
         tokio::select! {
+            biased;
             _ = cancel.cancelled() => return,
-            _ = refresh.notified() => { worker.sweep.wake(); continue; },
             _ = tick.tick() => {},
+            _ = refresh.notified() => { worker.sweep.wake(); continue; },
         }
         if !worker
             .step(&client, &store, account_id, &cancel, || {
@@ -222,6 +227,16 @@ mod tests {
         store::RoomLoadSettings,
         SessionMeta, SessionTokens, StateChanges,
     };
+
+    fn snapshot(info: &RoomInfo) -> Option<RoomMemberCounts> {
+        super::snapshot(info, 1)
+    }
+
+    #[test]
+    fn closed_update_channel_ends_hint_consumption() {
+        let mut sweep = crate::room_sweep::RoomSweep::new();
+        assert!(take_hints(|| Err(broadcast::error::TryRecvError::Closed), &mut sweep).is_none());
+    }
 
     #[tokio::test]
     async fn hint_bursts_and_lag_are_bounded_and_preserve_tail() {
@@ -283,6 +298,7 @@ mod tests {
         assert!(!info.are_members_synced());
         let counts = snapshot(&info).unwrap();
         assert_eq!((counts.joined, counts.invited), (500, 3));
+        assert_eq!(counts.observed_at, 1, "use the supplied database clock");
         info.mark_as_left();
         assert!(snapshot(&info).is_none());
         info.mark_as_invited();
@@ -449,7 +465,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn joined_epoch_without_counts_invalidates_previous_projection() {
+    async fn database_clock_fences_epochs_and_known_zero_clears_counts() {
         let store = Store::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
             .await
             .unwrap();
@@ -468,7 +484,8 @@ mod tests {
                 &info,
                 &store,
                 account.account_id,
-                room_id!("!counts:localhost")
+                room_id!("!counts:localhost"),
+                store.member_count_observation_time().await.unwrap(),
             )
             .await
         );
@@ -479,12 +496,78 @@ mod tests {
             .is_some());
         info.mark_as_left();
         info.mark_as_joined();
+        // An SDK invalidation time from a host clock far ahead must not leak
+        // into the database ordering clock and block fresh rejoin counts.
+        let mut encoded = serde_json::to_value(&info).unwrap();
+        encoded["summary_counts_invalidated_at"] = serde_json::json!(4000000000000u64);
+        let future_clock: RoomInfo = serde_json::from_value(encoded).unwrap();
         assert!(
             !persist_snapshot(
-                &info,
+                &future_clock,
                 &store,
                 account.account_id,
-                room_id!("!counts:localhost")
+                room_id!("!counts:localhost"),
+                store.member_count_observation_time().await.unwrap(),
+            )
+            .await
+        );
+        assert!(store
+            .room_member_counts(account.account_id, "!counts:localhost")
+            .await
+            .unwrap()
+            .is_none());
+        // Advance the database-clock observation by one millisecond rather
+        // than relying on the application host's time or task scheduling.
+        let now = store.member_count_observation_time().await.unwrap() + 1;
+        assert!(
+            !persist_snapshot(
+                &self::info(3, 0),
+                &store,
+                account.account_id,
+                room_id!("!counts:localhost"),
+                now,
+            )
+            .await
+        );
+        assert_eq!(
+            store
+                .room_member_counts(account.account_id, "!counts:localhost")
+                .await
+                .unwrap()
+                .unwrap()
+                .joined,
+            3
+        );
+        // A server-reported zero is positive evidence even with no invited
+        // count and no SDK transition marker. It must erase the old 3.
+        let mut zero = RoomInfo::new(room_id!("!counts:localhost"), RoomState::Joined);
+        let mut summary = RoomSummary::new();
+        summary.joined_member_count = Some(0u32.into());
+        zero.update_from_ruma_summary(&summary);
+        assert!(zero.summary_counts_invalidated_at().is_none());
+        assert!(
+            !persist_snapshot(
+                &zero,
+                &store,
+                account.account_id,
+                room_id!("!counts:localhost"),
+                now + 1
+            )
+            .await
+        );
+        assert!(store
+            .room_member_counts(account.account_id, "!counts:localhost")
+            .await
+            .unwrap()
+            .is_none());
+        // Superseded observations are terminal, never queued as retries.
+        assert!(
+            !persist_snapshot(
+                &self::info(4, 0),
+                &store,
+                account.account_id,
+                room_id!("!counts:localhost"),
+                now
             )
             .await
         );

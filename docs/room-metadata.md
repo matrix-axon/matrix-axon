@@ -107,13 +107,15 @@ Counts come from an atomic SDK `RoomInfo` summary snapshot, never from the lazil
 A temporary, version-pinned SDK base patch preserves whether each count was supplied and invalidates that evidence on membership transitions and `initial: true` room replacements.
 See `crates/third-party/README.md` for the upstream revision, release checksum, complete patch, and removal criteria.
 A pair is published only when both fields are known; an explicitly supplied zero invited count is valid, while a missing invited field remains unknown.
-A zero joined count is withheld because a joined room must include the account itself.
+A server-reported zero joined count clears any previous pair because a joined room must include the account itself.
 A missing SDK room, uninitialized summary, or count outside signed 64-bit storage range leaves the last persisted observation unchanged.
 Positive non-joined membership evidence or a known membership transition invalidates it, including a rejoin whose new summary omits counts.
 Existing rows start unknown; there is no membership backfill or new room-list aggregation.
 
-`observed_at` is when Axon read the changed summary from its local SDK cache, not when the homeserver last confirmed membership.
+`observed_at` is the database-clock timestamp captured before Axon read the current changed pair from its local SDK cache.
 Identical observations do not rewrite the summary row or advance its timestamp.
+It records when the current pair changed locally, rather than the most recent confirmation of that pair, and is not a freshness signal.
+Observations and leave watermarks both use the PostgreSQL clock, so a difference between the database and application host clocks cannot delay a valid rejoin observation.
 The database rejects observations older than the persisted observation or invalidation watermark.
 A recent observation can still reflect a disconnected SDK's old summary.
 Consumers must consider account sync health as well as the timestamp; this endpoint does not assert upstream freshness.
@@ -127,6 +129,7 @@ A slow key-backup request cannot hold up local member-count reconciliation.
 The worker subscribes before startup reconciliation.
 One-second ticks skip missed ticks and process at most four queued hints or retries plus four keyset-paged room-summary rows.
 A coalesced queue holds at most 32 rooms and makes up to four attempts for a projection-order race or transient failure; overflow and exhausted retries fall back to the progressive sweep.
+An observation superseded by an equal or newer database watermark is terminal and consumes no retry slot.
 At most 32 SDK notifications are consumed per tick, coalescing duplicates within that budget and preserving the receiver tail.
 Lagged notifications wake a sweep without rewinding its cursor, so continuous traffic cannot starve later rooms.
 Each page and each room observation has a two-second deadline, and every room failure is logged and skipped independently.
@@ -137,6 +140,8 @@ Recovery time scales with the number of cached summaries and local I/O, rather t
 There is no account-sized in-memory dedup map, unbounded room enumeration, or remote request.
 The worker only updates existing account/room summary rows; purge or account removal cannot be undone by a late completion.
 Its cancellation token and join handle are owned by the account run.
+Cancellation during a page read stops either worker before it drains hints or reads SDK state.
+An unexpectedly closed SDK update channel stops the member-count watcher with an account-scoped warning.
 The keyset traversal is shared with singleton-state redaction repair.
 Existing tracing controls suffice; warnings identify the worker, account, room where applicable, and an allowlisted database failure category or deadline without logging private metadata bodies.
 Set `RUST_LOG=warn,axon_sync::room_sweep=debug` to see `local SDK reconciliation sweep started` and `local SDK reconciliation sweep completed` for each account and worker.
@@ -146,6 +151,9 @@ Completion means every page was traversed; rooms whose SDK counts remain unknown
 Counts have no new live frame.
 Clients can re-read `/info` on reconnect and use bounded visible-panel polling, as for cached state details.
 Server counts complete [issue 620](https://github.com/matrix-axon/matrix-axon/issues/620); web and TUI presentation remain separate follow-ups.
+
+Two maintenance improvements remain deferred: sharing each account's traversal between the count and redaction workers to reduce database round trips, and automatically checking that the documented SDK patch reproduces the vendored source from the pinned release archive.
+The workers currently share traversal code but keep independent cursors and deadlines.
 
 ## Alias scope
 

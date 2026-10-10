@@ -42,17 +42,22 @@ pub(crate) async fn watch(
     // Every tick advances the sweep, even under continuous hint traffic.
     loop {
         tokio::select! {
+            biased;
             _ = cancel.cancelled() => return,
             _ = tick.tick() => {},
         }
-        let mut rooms = HashSet::new();
-        rooms.extend(
-            sweep
-                .page(&ctx.store, ctx.account_id, &cancel, "state_redaction")
-                .await,
-        );
+        let Some(page) = sweep
+            .page(&ctx.store, ctx.account_id, &cancel, "state_redaction")
+            .await
+        else {
+            return;
+        };
+        let mut rooms: HashSet<_> = page.into_iter().collect();
         rooms.extend(take_hints(&mut hints));
         for room_id in rooms {
+            if cancel.is_cancelled() {
+                return;
+            }
             let Some(room) = client.get_room(&room_id) else {
                 continue;
             };
@@ -60,6 +65,7 @@ pub(crate) async fn watch(
                 continue;
             }
             let outcome = tokio::select! {
+                biased;
                 _ = cancel.cancelled() => return,
                 result = tokio::time::timeout(Duration::from_secs(2), reconcile_room(&ctx, &client, &room_id)) => result,
             };

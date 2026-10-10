@@ -4472,7 +4472,8 @@ export interface components {
             joined: number;
             /**
              * Format: int64
-             * @description Local cache observation time in Unix milliseconds, not upstream freshness.
+             * @description Database-clock time in Unix milliseconds when this count pair changed locally.
+             *     Unchanged confirmations retain this timestamp; it is not a freshness signal.
              */
             observed_at: number;
         };

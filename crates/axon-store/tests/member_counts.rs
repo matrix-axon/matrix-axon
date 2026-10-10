@@ -55,6 +55,11 @@ async fn member_counts_restart_transitions_and_account_isolation() {
         version, after,
         "identical observations must not rewrite the wide summary row"
     );
+    assert_eq!(
+        store.room_member_counts(account, room).await.unwrap(),
+        Some(counts.clone()),
+        "observed_at belongs to the changed pair, not subsequent confirmations"
+    );
     let stale = RoomMemberCounts {
         joined: 499,
         observed_at: counts.observed_at - 1,

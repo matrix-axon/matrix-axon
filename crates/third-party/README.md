@@ -15,8 +15,10 @@ An absent field retains a known value within the same membership epoch; changing
 Legacy caches have no availability evidence and deserialize as unknown, including through the older room-info migration helper.
 The SDK's existing numeric getters retain their behavior for other consumers.
 Axon publishes a count pair only when both fields are known and joined is positive.
+A server-reported zero joined count actively clears the previous Axon pair, even if the invited count is absent.
 A positive transition invalidates the previous Axon observation even if the new joined summary is incomplete.
 Unknown cold caches do not erase existing timestamped Axon observations.
+The SDK transition timestamp establishes that invalidation occurred; Axon's persistence ordering captures PostgreSQL time before reading the SDK snapshot, sharing the leave trigger's clock.
 
 The regression tests in `crates/axon-sync/src/member_counts.rs` exercise the actual patched MSC4186 processor, missing fields, explicit zero, leave/rejoin, same-epoch deltas, initial replacements, serialization, legacy cache fallback, and persistent SQLite restart.
 Run `cargo test -p axon-sync --lib member_counts` and the PostgreSQL-gated version documented in `docs/room-metadata.md`.

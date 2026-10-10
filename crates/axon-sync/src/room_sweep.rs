@@ -105,9 +105,12 @@ impl RoomSweep {
         account_id: Uuid,
         cancel: &CancellationToken,
         worker: &'static str,
-    ) -> Vec<OwnedRoomId> {
+    ) -> Option<Vec<OwnedRoomId>> {
+        if cancel.is_cancelled() {
+            return None;
+        }
         if self.is_idle() {
-            return Vec::new();
+            return Some(Vec::new());
         }
         if self.started.is_none() {
             self.started = Some(tokio::time::Instant::now());
@@ -115,7 +118,8 @@ impl RoomSweep {
             tracing::debug!(%account_id, worker, source = "sdk_cache", "local SDK reconciliation sweep started");
         }
         let result = tokio::select! {
-            _ = cancel.cancelled() => return Vec::new(),
+            biased;
+            _ = cancel.cancelled() => return None,
             result = tokio::time::timeout(Duration::from_secs(2), store.state_reconciliation_rooms(account_id, &self.cursor)) => result,
         };
         match result {
@@ -129,15 +133,15 @@ impl RoomSweep {
                     tracing::debug!(%account_id, worker, source = "sdk_cache", rooms_visited = self.visited, elapsed_seconds, repeat_requested = self.repeat, "local SDK reconciliation sweep completed");
                 }
                 self.advance(&page);
-                page.into_iter().filter_map(|id| id.parse().ok()).collect()
+                Some(page.into_iter().filter_map(|id| id.parse().ok()).collect())
             }
             Ok(Err(error)) => {
                 tracing::warn!(%account_id, worker, source = "sdk_cache", reason = error.diagnostic_reason(), "local SDK reconciliation sweep page failed; will retry");
-                Vec::new()
+                Some(Vec::new())
             }
             Err(_) => {
                 tracing::warn!(%account_id, worker, source = "sdk_cache", reason = "deadline", "local SDK reconciliation sweep page timed out; will retry");
-                Vec::new()
+                Some(Vec::new())
             }
         }
     }
@@ -146,6 +150,34 @@ impl RoomSweep {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cancellation_interrupts_a_page_waiting_for_a_pool_connection() {
+        let store = Store::connect(&std::env::var("DATABASE_URL").unwrap(), 1)
+            .await
+            .unwrap();
+        let connection = store.pool().acquire().await.unwrap();
+        let cancel = CancellationToken::new();
+        let mut sweep = RoomSweep::new();
+        let page = sweep.page(&store, Uuid::new_v4(), &cancel, "state_redaction");
+        tokio::pin!(page);
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut page)
+            .await
+            .is_err());
+        cancel.cancel();
+        assert!(tokio::time::timeout(Duration::from_millis(100), page)
+            .await
+            .unwrap()
+            .is_none());
+        drop(connection);
+        // Cancellation is also distinct from an idle sweep's empty page.
+        let mut sweep = RoomSweep::new();
+        sweep.advance(&[]);
+        assert!(sweep
+            .page(&store, Uuid::new_v4(), &cancel, "member_counts")
+            .await
+            .is_none());
+    }
     #[tokio::test]
     async fn lag_wakes_idle_sweep_and_never_rewinds_active_traversal() {
         let mut sweep = RoomSweep::new();
