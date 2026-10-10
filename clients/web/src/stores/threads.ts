@@ -34,9 +34,9 @@ export interface ThreadsStore {
   /** Fetch the room's thread summaries and resolve their root events. */
   refresh(): Promise<void>
   /**
-   * Drop the root events still waiting to be fetched; call on leaving the
-   * room. Requests already sent finish, and a later `refresh` asks again for
-   * whatever was dropped.
+   * Drop the root events still waiting to be fetched and abort the ones in
+   * flight; call on leaving the room. A later `refresh` asks again for
+   * whatever was dropped or aborted.
    */
   stop(): void
 }
@@ -81,6 +81,10 @@ export function createThreadsStore(
   /** Root ids waiting for a slot, next first. */
   let queue: string[] = []
   let fetching = 0
+  /** Root ids whose request is out and unanswered, for `stop()` to forget. */
+  let sent = new Set<string>()
+  /** Aborts the requests in `sent`; replaced by `stop()`. */
+  let leaving = new AbortController()
   /**
    * Bumped by `stop()`. A `refresh` whose summaries arrive after one is
    * discarded: applying it would refill the queue that `stop()` just emptied
@@ -96,18 +100,28 @@ export function createThreadsStore(
         return
       }
       fetching += 1
+      const batch = sent
+      batch.add(id)
       inBackground(
         api
           .GET('/v1/accounts/{account_id}/events/{event_id}', {
             params: { path: { account_id: accountId, event_id: id } },
+            signal: leaving.signal,
           })
           .then(({ data }) => {
             if (data !== undefined) {
               roots.value = new Map(roots.value).set(id, data.data)
             }
           })
+          // A slot cannot be held forever: every typed call is failed by
+          // `API_REQUEST_TIMEOUT_MS` (`api/client.ts`) if nothing else ends
+          // it, and a rejection lands here like any other settle.
           .finally(() => {
             fetching -= 1
+            // The set this request went out in, which `stop()` may since
+            // have replaced. Deleting from the current one instead would
+            // un-track a fresh request for the same root.
+            batch.delete(id)
             pump()
           }),
       )
@@ -173,22 +187,32 @@ export function createThreadsStore(
           error.value = cause instanceof Error ? cause.message : String(cause)
         }
       } finally {
-        loading.value = false
-        perfMark('threads:refresh:end', {
-          roomId,
-          threads: summaries.value.size,
-          ok: error.value === null,
-        })
+        // A refresh that `stop()` overtook has nothing to report. Clearing
+        // `loading` here would also end the wait of a newer refresh still in
+        // flight on the same store.
+        if (generation === startedIn) {
+          loading.value = false
+          perfMark('threads:refresh:end', {
+            roomId,
+            threads: summaries.value.size,
+            ok: error.value === null,
+          })
+        }
       }
     },
 
     stop() {
       generation += 1
       // Forgotten as well as dropped, so they are not mistaken for misses.
-      for (const id of queue) {
+      for (const id of [...queue, ...sent]) {
         requestedRoots.delete(id)
       }
       queue = []
+      sent = new Set()
+      // On a phone each of these is a connection of its own (#663), and the
+      // next room's requests are about to want the link.
+      leaving.abort()
+      leaving = new AbortController()
     },
   }
 }

@@ -162,18 +162,20 @@ describe('createThreadsStore', () => {
     )
 
     store.stop()
+    // The six in flight were aborted, so answering them now changes nothing.
     room.releaseOpen()
-    await vi.waitFor(() =>
-      expect(store.roots.value.size).toBe(ROOT_FETCH_CONCURRENCY),
-    )
     await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(store.roots.value.size).toBe(0)
     expect(room.asked).toHaveLength(ROOT_FETCH_CONCURRENCY)
 
+    // Aborted is not missed: the same six newest roots are asked for again.
     await store.refresh()
     await vi.waitFor(() =>
       expect(room.asked).toHaveLength(2 * ROOT_FETCH_CONCURRENCY),
     )
-    expect(new Set(room.asked).size).toBe(2 * ROOT_FETCH_CONCURRENCY)
+    expect(room.asked.slice(ROOT_FETCH_CONCURRENCY).sort()).toEqual(
+      room.asked.slice(0, ROOT_FETCH_CONCURRENCY).sort(),
+    )
     while (store.roots.value.size < 20) {
       room.releaseOpen()
       await new Promise((resolve) => setTimeout(resolve, 5))
@@ -210,7 +212,9 @@ describe('createThreadsStore', () => {
 
     expect(room.asked).toEqual([])
     expect(store.summaries.value.size).toBe(0)
-    expect(store.loading.value).toBe(false)
+    // Still waiting, as far as this store knows: the answer it got was for a
+    // question `stop()` withdrew, and a newer refresh may be in flight.
+    expect(store.loading.value).toBe(true)
   })
 
   it('surfaces list errors', async () => {
