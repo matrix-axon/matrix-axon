@@ -32,6 +32,8 @@ CI (`.github/workflows/package.yml`) builds amd64 on `ubuntu-22.04` and arm64 on
 `ubuntu-22.04-arm` so Bookworm/Jammy can run the glibc-2.35 binary.
 On `v*` / `beta-*` / `alpha-*` tags it attaches the `.deb` and `.rpm` files to
 the GitHub Release (alongside the zip archives from `cross-build.yml`).
+Each is attached twice: under its versioned name, and under a name with no version (`axon-server_amd64.deb`, `axon-server_arm64.deb`, `axon-server.x86_64.rpm`, `axon-server.aarch64.rpm`).
+The second set is what `releases/latest/download/<name>` resolves, and the install blocks in the top-level `README.md` depend on those four names.
 The `.deb` version is `Cargo.toml`'s `version` (`scripts/release-version.sh print`).
 On a `v*` tag, the job fails unless the tag equals `v` plus that version (ADR 0106).
 
