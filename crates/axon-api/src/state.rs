@@ -197,6 +197,36 @@ pub struct AppState {
     /// config key is; the binary passes `[server] management_api` through
     /// [`with_management`](Self::with_management).
     pub management: ManagementConfig,
+    /// The web client's operator switch (ADR 0116). On by default, as the
+    /// config key is; the binary passes `[server] web_client` through
+    /// [`with_web_client`](Self::with_web_client).
+    pub web_client: WebClientConfig,
+}
+
+/// Whether the embedded web client is served (`[server] web_client`, ADR 0116).
+/// On in a build without the `embed-web` feature too, where there is nothing
+/// to serve and the fallback page says so.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebClientConfig {
+    pub enabled: bool,
+}
+
+impl Default for WebClientConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl WebClientConfig {
+    /// The bundle to serve: switched on, and compiled into this binary.
+    pub(crate) fn bundle(self) -> Option<&'static crate::web::Bundle> {
+        self.enabled.then(crate::web::embedded).flatten()
+    }
+
+    /// Whether this process answers non-API paths with the web client.
+    pub fn served(self) -> bool {
+        self.bundle().is_some()
+    }
 }
 
 /// Whether `/v1/management/*` is served (`[server] management_api`, ADR 0109).
@@ -359,6 +389,7 @@ impl AppState {
             oauth: None,
             bootstrap: None,
             management: ManagementConfig::default(),
+            web_client: WebClientConfig::default(),
         }
     }
 
@@ -513,6 +544,13 @@ impl AppState {
     /// `[server] management_api`; tests that don't care keep it enabled.
     pub fn with_management(mut self, enabled: bool) -> Self {
         self.management = ManagementConfig { enabled };
+        self
+    }
+
+    /// Set whether the embedded web client is served. The binary calls this
+    /// with `[server] web_client`.
+    pub fn with_web_client(mut self, enabled: bool) -> Self {
+        self.web_client = WebClientConfig { enabled };
         self
     }
 
@@ -900,6 +938,12 @@ impl StagedUploadService for DisabledStagedUploads {
         Err(StageUploadError::Internal(
             "staged upload service is not configured".to_owned(),
         ))
+    }
+}
+
+impl FromRef<AppState> for WebClientConfig {
+    fn from_ref(state: &AppState) -> WebClientConfig {
+        state.web_client
     }
 }
 

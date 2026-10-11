@@ -349,12 +349,20 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     .with_room_settings(room_settings)
     .with_power_levels(power_levels)
     .with_account_actions(account_actions)
-    .with_management(config.server.management_api);
+    .with_management(config.server.management_api)
+    .with_web_client(config.server.web_client);
     if !config.server.management_api {
         tracing::info!(
             "management API disabled (server.management_api = false); \
              /v1/management/* answers 403"
         );
+    }
+    if web_client_served(&config) {
+        tracing::info!("web client served at http://{addr}/");
+    } else if axon_api::web_client_embedded() {
+        tracing::info!("web client disabled (server.web_client = false); serving the API only");
+    } else {
+        tracing::info!("web client not built into this binary; serving the API only");
     }
     if let Some(oauth) = oauth {
         state = state.with_oauth(oauth);
@@ -450,13 +458,35 @@ async fn maybe_offer_web_bootstrap(
     tracing::info!(
         allow_remote = config.server.bootstrap_web_allow_remote,
         web_client_url_configured = config.server.web_client_url.is_some(),
+        web_client_served = web_client_served(config),
         "first-credential web bootstrap armed"
     );
     Ok(Some(axon_api::BootstrapConfig::new(
         config.server.bootstrap_web_allow_remote,
         generate_bootstrap_access_code(),
-        config.server.web_client_url.clone(),
+        bootstrap_web_client_url(config),
     )))
+}
+
+/// Whether this process answers non-API paths with the embedded web client
+/// (ADR 0116): built in, and not switched off.
+fn web_client_served(config: &Config) -> bool {
+    axon_api::WebClientConfig {
+        enabled: config.server.web_client,
+    }
+    .served()
+}
+
+/// Where the bootstrap success page hands the new credential. An explicit
+/// `server.web_client_url` wins. Without one, a process that serves the web
+/// client itself is its own answer: `/` is same-origin, so the page can sign
+/// the browser in and redirect with nothing to copy.
+fn bootstrap_web_client_url(config: &Config) -> Option<String> {
+    config
+        .server
+        .web_client_url
+        .clone()
+        .or_else(|| web_client_served(config).then(|| "/".to_owned()))
 }
 
 fn generate_bootstrap_access_code() -> String {

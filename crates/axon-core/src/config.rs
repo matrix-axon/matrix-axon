@@ -147,6 +147,16 @@ pub struct ServerConfig {
     /// subcommands are unaffected either way.
     #[serde(default = "default_management_api")]
     pub management_api: bool,
+    /// Serve the web client from this process (ADR 0116), at every path that
+    /// is not the API. Defaults to `true`.
+    ///
+    /// It only has an effect in a binary built with the web client inside it
+    /// (the `embed-web` feature and a built bundle, which release builds have); any other
+    /// build has nothing to serve. The web client shares the API's listener,
+    /// so it is reachable exactly where the API is: loopback only, unless
+    /// `host` says otherwise. Set `false` to serve the API alone.
+    #[serde(default = "default_web_client")]
+    pub web_client: bool,
 }
 
 /// Postgres connection settings.
@@ -664,6 +674,10 @@ fn default_management_api() -> bool {
     true
 }
 
+fn default_web_client() -> bool {
+    true
+}
+
 fn default_host() -> IpAddr {
     IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
@@ -986,6 +1000,7 @@ impl Default for ServerConfig {
             web_client_url: None,
             bootstrap_web_auto: false,
             management_api: default_management_api(),
+            web_client: default_web_client(),
         }
     }
 }
@@ -1393,6 +1408,30 @@ mod tests {
     }
 
     #[test]
+    fn web_client_defaults_on_and_can_be_switched_off() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://env@localhost/db");
+            assert!(Config::load(None).expect("load").server.web_client);
+
+            jail.create_file(
+                "axon.toml",
+                r#"
+                    [server]
+                    web_client = false
+                "#,
+            )?;
+            let config = Config::load(Some(Path::new("axon.toml"))).expect("load");
+            assert!(!config.server.web_client);
+
+            jail.set_env("AXON_SERVER__WEB_CLIENT", "true");
+            let config = Config::load(Some(Path::new("axon.toml"))).expect("load");
+            assert!(config.server.web_client, "env beats file");
+            Ok(())
+        });
+    }
+
+    #[test]
     fn socket_addr_combines_host_and_port() {
         let config = Config {
             server: ServerConfig {
@@ -1403,6 +1442,7 @@ mod tests {
                 web_client_url: None,
                 bootstrap_web_auto: false,
                 management_api: true,
+                web_client: true,
             },
             database: DatabaseConfig {
                 url: "x".into(),
