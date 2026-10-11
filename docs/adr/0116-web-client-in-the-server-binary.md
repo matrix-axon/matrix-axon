@@ -133,7 +133,8 @@ The packages do not ask whether to enable the web client.
 Without a prompt, the text the operator reads is the only place the choice is offered, so it is a requirement of step 3 and not a courtesy.
 The install output, and the documentation each format installs, must each state all of the following in plain words:
 
-- that the web client is on, and the address to open;
+- that the web client is on, and the one address to open, written the same way everywhere (`http://127.0.0.1:8080/`, which is also the host the bootstrap URL uses);
+- that `localhost` and `127.0.0.1` are different sites to a browser, each with its own stored sign-in, so signing in at one and returning at the other shows the sign-in screen again;
 - that it is reachable from this machine only, and why (`server.host`);
 - the one line that turns it off (`web_client = false` under `[server]`, and the restart that applies it), with the path of the config file on that platform;
 - how to reach it from another device, pointing at the reverse-proxy and Tailscale instructions below, and that this should wait until the first sign-in is done.
