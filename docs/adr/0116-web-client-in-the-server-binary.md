@@ -1,8 +1,8 @@
 # ADR 0116 — The web client ships inside the server binary
 
 **Status:** Accepted.
-Step 1 (the server serves an embedded bundle) is implemented with this record.
-Steps 2 to 4 are the sequence below.
+Steps 1 to 3 of the sequence below are implemented.
+Step 4, the Docker stack, is open.
 
 ## Context
 
@@ -153,13 +153,18 @@ Where that text lives:
 
 The Homebrew caveats are also shown again by `brew info axon-server`, which is where an operator looks later.
 
+An upgrade is the one case the install-time text does not reach: an operator who installed before the web client existed is never shown the first-install output again.
+The packages print a short notice on the first upgrade that brings the web client, and record in `/var/lib/axon-server/.web-client-notice` that they did.
+An operator who has already set `web_client = false` is not shown it.
+
 ### Reverse proxies: detect and advise, never edit
 
 Remote access needs TLS, and the server terminates none.
 The packages help with that and stop short of doing it.
 
 - The packages ship ready-to-use site files for Caddy, nginx and Apache under the package's documentation directory, each a complete same-origin proxy for this server including the `/v1/ws` upgrade and no request-body cap.
-- At install, the package detects which of those servers is present and prints the two or three commands that enable the matching file, and the `tailscale serve` line the Homebrew caveats already carry.
+- At install, the package detects which of those servers is present and prints the commands that enable the matching file, and the `tailscale serve` line the Homebrew caveats already carry.
+- The site files also ride in every server release zip, and the Homebrew formula installs them under its documentation directory.
 - The package never writes into another server's configuration directory and never reloads another service.
 
 The reasons it stops there:

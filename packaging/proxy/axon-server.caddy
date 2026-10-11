@@ -1,0 +1,26 @@
+# Caddy site for axon-server: the web client and the API on one HTTPS address.
+#
+# Sign in once on the server itself (http://127.0.0.1:8080/) BEFORE enabling
+# this. The one-time first-sign-in page is limited to requests from the local
+# machine, and behind this proxy every request comes from the local machine.
+#
+# Enable it:
+#
+#   sudo cp /usr/share/doc/axon-server/examples/axon-server.caddy /etc/caddy/
+#   sudoedit /etc/caddy/axon-server.caddy          # replace axon.example.com
+#   echo 'import axon-server.caddy' | sudo tee -a /etc/caddy/Caddyfile
+#   sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+#   sudo systemctl reload caddy
+#
+# Caddy obtains and renews the certificate itself. The name must resolve to
+# this machine and ports 80 and 443 must be reachable from the internet. For a
+# name that is only reachable on your own network, add `tls internal` inside
+# the block and trust Caddy's local authority on each device.
+#
+# Nothing else is needed: Caddy passes WebSocket upgrades (/v1/ws) through,
+# sets no request-body limit (media uploads), and leaves the path as the
+# client sent it. axon-server compresses its own responses.
+
+axon.example.com {
+	reverse_proxy 127.0.0.1:8080
+}

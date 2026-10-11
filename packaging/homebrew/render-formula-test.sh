@@ -176,6 +176,17 @@ RUBY
 
 grep -Fq 'macOS: ~/Library/Application Support/axon-server/config.toml' "$work/caveats-mac.txt"
 grep -Fq 'Linux: ~/.config/axon-server/config.toml' "$work/caveats-mac.txt"
+# The web client ships on by default with no install prompt, so the caveats are
+# the only place the operator is told (ADR 0116): where it is, that 127.0.0.1
+# and localhost are separate sign-ins, how to turn it off, where the proxy
+# site files are.
+for os in mac linux; do
+	grep -Fq 'http://127.0.0.1:8080/' "$work/caveats-$os.txt"
+	grep -Fq 'not localhost' "$work/caveats-$os.txt"
+	grep -Fq 'web_client = false' "$work/caveats-$os.txt"
+	grep -Fq 'share/doc/axon-server/examples' "$work/caveats-$os.txt"
+done
+grep -Fq '(doc/"examples").install' "$out"
 grep -Fq 'GLIBC' "$work/caveats-linux.txt"
 if grep -Fq 'GLIBC' "$work/caveats-mac.txt"; then
 	echo "macOS caveats mention the Linux glibc floor" >&2
