@@ -180,6 +180,9 @@ Two kinds of `AXON_`-prefixed environment variables exist:
 | `AXON_TOKEN`    | `axon utd redecrypt`, TUI                  | Bearer token sent with the request, in place of `--token` (web does not consume token from env)                                                                                             |
 | `RUST_LOG`      | server                                     | Overrides `log.level` / `AXON_LOG__LEVEL` with a raw `tracing` filter directive.                                                                                                            |
 
+On Unix, config discovery ends with `/etc/axon-server/config.toml`, where the `.deb` and `.rpm` put the service's config, so `sudo -u axon axon-server token issue --label laptop` on a packaged install needs no `--config`.
+A user's own file still wins over it.
+
 TUI-specific display vars (`AXON_FONT_SIZE`, `AXON_IMAGE_PROTOCOL`, `AXON_NO_IMAGE_QUERY`) are documented in [`clients/tui/README.md`](clients/tui/README.md).
 
 **Structured config overrides** — every field in `axon.toml` can also be set via `AXON_<SECTION>__<FIELD>` (double underscore between nesting levels), e.g. `AXON_SERVER__PORT=9090` or `AXON_MEDIA__MAX_BYTES=1048576`.

@@ -103,6 +103,22 @@ An explicit `web_client_url` still wins.
 The `.deb` and `.rpm` already arm the bootstrap and print its URL at install.
 With the web client embedded, opening that URL ends in a signed-in web client with nothing to copy.
 
+### Commands find the packaged configuration
+
+The `.deb` and `.rpm` write the service's config to `/etc/axon-server/config.toml`, and the unit passes that path with `--config`.
+Discovery (ADR 0050) never looked there, so `axon-server token issue` typed on a packaged install reported "No configuration file found" and offered first-time setup on a machine that was already set up.
+Accepting that offer would have written a second config, with a second `store_key`, beside a database encrypted with the first.
+
+On Unix, `/etc/axon-server/config.toml` is now the last discovery tier, after the working directory and the user's own platform directory.
+The packages make that file readable by the `axon` user alone.
+When it exists and the invoking user cannot read it, the command fails and says to run as the service's user; it does not fall through to "no configuration".
+
+Running as root finds the file and then fails to connect, because the packaged database URL uses peer authentication for the `axon` role.
+The supported form is `sudo -u axon axon-server <command>`, and step 3 puts that in the install output.
+
+Homebrew needs no equivalent.
+Its service runs as the installing user, `axon-server init` writes that user's platform directory, and a command typed by the same user already finds it.
+
 ### No prompt at install
 
 The packages do not ask whether to enable the web client.
