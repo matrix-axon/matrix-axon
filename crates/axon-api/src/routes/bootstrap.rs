@@ -351,7 +351,7 @@ fn web_client_link(bootstrap: &BootstrapConfig) -> String {
         return String::new();
     };
     format!(
-        r#"<p><a class="button" href="{url}">Open web client</a></p>"#,
+        r#"<p><a id="axon-open-web-client" class="button" href="{url}">Open web client</a></p>"#,
         url = html_escape(url)
     )
 }
@@ -363,34 +363,65 @@ fn web_client_link(bootstrap: &BootstrapConfig) -> String {
 const WEB_CLIENT_TOKEN_STORAGE_KEY: &str = "axon.token";
 
 /// Same-origin handoff for the web client (ADR 0052). When `web_client_url`
-/// resolves to *this* origin — the case behind the deployment front door, which
-/// serves the SPA and proxies `/bootstrap` on one origin — write the freshly
-/// minted token into the client's `localStorage` slot and redirect there, so the
-/// operator lands signed in with nothing to copy. The check runs in the browser
-/// (`new URL(...).origin`), so a cross-origin or JS-disabled client simply falls
-/// back to the copyable token and the "Open web client" link above.
+/// resolves to *this* origin — the server serving its own web client (ADR
+/// 0116), or a deployment front door that serves the SPA and proxies
+/// `/bootstrap` on one origin — the "Open web client" button writes the freshly
+/// minted token into the client's `localStorage` slot and goes there, so the
+/// operator lands signed in with nothing to paste.
+///
+/// It happens on the click, not on load. The page is the only time this token
+/// is ever shown, and redirecting at once took it off the screen before it
+/// could be read, under a sentence telling the operator to copy it now. The
+/// check runs in the browser (`new URL(...).origin`), so a cross-origin or
+/// JS-disabled client keeps the plain link and the copyable token.
 fn web_client_handoff_script(bootstrap: &BootstrapConfig) -> String {
     let Some(url) = bootstrap.web_client_url.as_deref() else {
         return String::new();
     };
     format!(
-        r#"<div id="axon-bootstrap" data-web-client-url="{url}" hidden></div>
+        r#"<p id="axon-handoff-note" class="muted" hidden>Opening the web client signs this browser in with this token. Copy it first if you want to use it somewhere else as well.</p>
+      <div id="axon-bootstrap" data-web-client-url="{url}" hidden></div>
       <script>(function () {{
   var host = document.getElementById('axon-bootstrap');
   var tokenEl = document.getElementById('axon-bootstrap-token');
-  if (!host || !tokenEl) return;
+  var link = document.getElementById('axon-open-web-client');
+  if (!host || !tokenEl || !link) return;
   var url = host.dataset.webClientUrl;
   if (!url) return;
   try {{
     if (new URL(url, location.href).origin !== location.origin) return;
-    localStorage.setItem('{key}', tokenEl.textContent.trim());
+  }} catch (e) {{ return; }}
+  var note = document.getElementById('axon-handoff-note');
+  if (note) note.hidden = false;
+  link.addEventListener('click', function (event) {{
+    try {{
+      localStorage.setItem('{key}', tokenEl.textContent.trim());
+    }} catch (e) {{ return; }}
+    event.preventDefault();
     location.replace(url);
-  }} catch (e) {{}}
+  }});
 }})();</script>"#,
         url = html_escape(url),
         key = WEB_CLIENT_TOKEN_STORAGE_KEY,
     )
 }
+
+/// "Copy token" for the bearer page. Selecting a long token by hand in a
+/// `<pre>` is easy to get wrong by one character. Without script, or where the
+/// clipboard is unavailable, the button stays hidden and the text is still
+/// selectable.
+const COPY_TOKEN_SCRIPT: &str = r#"<p><button type="button" id="axon-copy-token" hidden>Copy token</button></p>
+      <script>(function () {
+  var button = document.getElementById('axon-copy-token');
+  var tokenEl = document.getElementById('axon-bootstrap-token');
+  if (!button || !tokenEl || !navigator.clipboard) return;
+  button.hidden = false;
+  button.addEventListener('click', function () {
+    navigator.clipboard.writeText(tokenEl.textContent.trim()).then(function () {
+      button.textContent = 'Copied';
+    }, function () {});
+  });
+})();</script>"#;
 
 fn bearer_token_page(token: &str, bootstrap: &BootstrapConfig) -> String {
     let client_link = web_client_link(bootstrap);
@@ -409,6 +440,7 @@ fn bearer_token_page(token: &str, bootstrap: &BootstrapConfig) -> String {
       <h1>Bearer token created</h1>
       <p>Copy this token now. Axon stores only its hash and cannot show it again.</p>
       <pre id="axon-bootstrap-token">{token}</pre>
+      {COPY_TOKEN_SCRIPT}
       {client_link}
       {handoff}
     </main>
@@ -550,6 +582,26 @@ mod tests {
         assert!(page.contains(r#"id="axon-bootstrap-token""#));
         assert!(page.contains("localStorage.setItem('axon.token'"));
         assert!(page.contains("location.origin"));
+    }
+
+    /// The token is shown once, so the page must not leave on its own: the
+    /// write and the navigation both sit inside the button's click handler.
+    #[test]
+    fn bearer_token_page_hands_off_on_click_not_on_load() {
+        let bootstrap = BootstrapConfig::new(false, "ABC234".to_owned(), Some("/".to_owned()));
+        let page = bearer_token_page("tok", &bootstrap);
+        assert!(page.contains(r#"id="axon-open-web-client""#));
+        let handler = page
+            .find("link.addEventListener('click'")
+            .expect("a click handler on the button");
+        for deferred in ["localStorage.setItem(", "location.replace("] {
+            assert_eq!(page.matches(deferred).count(), 1, "{deferred}");
+            assert!(
+                page.find(deferred).expect("present") > handler,
+                "{deferred} runs before the click"
+            );
+        }
+        assert!(page.contains(r#"id="axon-copy-token""#));
     }
 
     #[test]

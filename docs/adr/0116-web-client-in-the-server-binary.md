@@ -100,9 +100,14 @@ The switch exists for an operator who does not want the server to offer a UI, no
 ### First sign-in
 
 When the process serves the web client and `server.web_client_url` is unset, the first-credential bootstrap treats the web client's address as `/`.
-The bootstrap success page is then same-origin with the client, writes the new token into its `localStorage`, and redirects (the ADR 0052 handoff).
+The bootstrap success page is then same-origin with the client, and its "Open web client" button writes the new token into the client's `localStorage` and goes there (the ADR 0052 handoff).
 An explicit `web_client_url` still wins.
 An operator who publishes the server under a path prefix, or whose web client lives at another address, must set it: `/` is then the proxy's root, not the web client.
+
+The handoff used to run as the page loaded.
+That page is the only time the token is ever shown, and it says "Copy this token now"; redirecting at once took the token off the screen before it could be read.
+With every packaged install now reaching that page, the handoff waits for the click, and the page gains a "Copy token" button.
+It is still zero-paste, and one click more.
 
 The `.deb` and `.rpm` already arm the bootstrap and print its URL at install.
 With the web client embedded, opening that URL ends in a signed-in web client with nothing to copy.
