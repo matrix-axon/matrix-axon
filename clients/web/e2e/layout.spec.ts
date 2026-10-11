@@ -693,6 +693,23 @@ test('narrow: user information opens from a sender and a DM uncovers the timelin
   )
   await expect(panel.getByRole('button', { name: 'Verify' })).toBeDisabled()
   await expect(panel.getByRole('button', { name: 'Ignore' })).toBeDisabled()
+  const comingSoon = await panel
+    .locator('.user-info-coming-soon')
+    .evaluateAll((wrappers) =>
+      wrappers.map((wrapper) => {
+        const button = wrapper.querySelector('button')
+        return {
+          title: wrapper.getAttribute('title'),
+          buttonIgnoresPointer:
+            button !== null &&
+            getComputedStyle(button).pointerEvents === 'none',
+        }
+      }),
+    )
+  expect(comingSoon).toEqual([
+    { title: 'coming soon', buttonIgnoresPointer: true },
+    { title: 'coming soon', buttonIgnoresPointer: true },
+  ])
   await expect(panel.getByRole('button', { name: 'Call' })).toHaveCount(0)
   await panel.getByRole('button', { name: 'Direct message' }).click()
 

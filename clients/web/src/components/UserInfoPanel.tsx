@@ -36,6 +36,17 @@ function blankToNull(value: string | null | undefined): string | null {
   return trimmed === '' ? null : trimmed
 }
 
+/** A disabled action. The title sits on the wrapper because a disabled button does not receive the hover that shows a tooltip. */
+function unavailableAction(label: string) {
+  return (
+    <span class="user-info-coming-soon" title="coming soon">
+      <button type="button" disabled>
+        {label}
+      </button>
+    </span>
+  )
+}
+
 function localTrustLabel(state: string): string {
   switch (state) {
     case 'verified':
@@ -268,13 +279,7 @@ export function UserInfoPanel({
 
         <div class="room-info-actions">
           {self ? (
-            <button
-              type="button"
-              disabled
-              title="Editing your display name is not available in the web client yet"
-            >
-              Edit display name
-            </button>
+            unavailableAction('Edit display name')
           ) : (
             <>
               <button
@@ -284,20 +289,8 @@ export function UserInfoPanel({
               >
                 {startingDm ? 'Starting…' : 'Direct message'}
               </button>
-              <button
-                type="button"
-                disabled
-                title="Ignoring a user is not available in the web client yet"
-              >
-                Ignore
-              </button>
-              <button
-                type="button"
-                disabled
-                title="Starting verification with this user is not available in the web client yet"
-              >
-                Verify
-              </button>
+              {unavailableAction('Ignore')}
+              {unavailableAction('Verify')}
             </>
           )}
         </div>

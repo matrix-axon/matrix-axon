@@ -115,6 +115,10 @@ function renderPanel({
   return { ...view, onClose }
 }
 
+function comingSoonTitle(button: Element): string | null {
+  return button.closest('.user-info-coming-soon')?.getAttribute('title') ?? null
+}
+
 const detail = (label: string): string => {
   const terms = [...document.querySelectorAll('.detail-list dt')]
   const term = terms.find((node) => node.textContent === label)
@@ -197,6 +201,12 @@ it('shows the room profile in the header and a differing global profile as detai
   )
   expect(getByRole('button', { name: 'Verify' }).hasAttribute('disabled')).toBe(
     true,
+  )
+  expect(comingSoonTitle(getByRole('button', { name: 'Ignore' }))).toBe(
+    'coming soon',
+  )
+  expect(comingSoonTitle(getByRole('button', { name: 'Verify' }))).toBe(
+    'coming soon',
   )
   expect(queryByRole('button', { name: 'Edit display name' })).toBeNull()
   expect(queryByRole('button', { name: 'Call' })).toBeNull()
@@ -307,6 +317,7 @@ it('shows your own information without a direct message, ignore, or verify actio
   })
   const edit = await findByRole('button', { name: 'Edit display name' })
   expect(edit.hasAttribute('disabled')).toBe(true)
+  expect(comingSoonTitle(edit)).toBe('coming soon')
   expect(queryByRole('button', { name: 'Direct message' })).toBeNull()
   expect(queryByRole('button', { name: 'Ignore' })).toBeNull()
   expect(queryByRole('button', { name: 'Verify' })).toBeNull()
