@@ -10,8 +10,11 @@ import {
   membershipLabel,
   type MemberDto,
 } from '../stores/room-list'
+import { useShortcuts } from '../shortcuts'
+import { BodyPortal } from './BodyPortal'
 import { DetailRow } from './DetailRow'
 import { Lightbox, LightboxImage } from './Lightbox'
+import { useModalFocus } from './use-modal-focus'
 import { useStartDm } from './use-start-dm'
 import { UserAvatar } from './UserAvatar'
 
@@ -36,14 +39,66 @@ function blankToNull(value: string | null | undefined): string | null {
   return trimmed === '' ? null : trimmed
 }
 
-/** A disabled action. The title sits on the wrapper because a disabled button does not receive the hover that shows a tooltip. */
-function unavailableAction(label: string) {
+/**
+ * An action the web client does not offer yet.
+ *
+ * It stays a real button, drawn quiet, because a `title` tooltip is not shown
+ * on touch and a disabled button does not receive the tap. Hover still shows
+ * "coming soon". A tap opens the same notice.
+ */
+function UnavailableAction({ label }: { label: string }) {
+  const [open, setOpen] = useState(false)
   return (
-    <span class="user-info-coming-soon" title="coming soon">
-      <button type="button" disabled>
+    <>
+      <button
+        type="button"
+        class="quiet"
+        title="coming soon"
+        aria-haspopup="dialog"
+        onClick={() => setOpen(true)}
+      >
         {label}
       </button>
-    </span>
+      {open && <ComingSoonNotice onClose={() => setOpen(false)} />}
+    </>
+  )
+}
+
+function ComingSoonNotice({ onClose }: { onClose: () => void }) {
+  const { containerRef } = useModalFocus<HTMLDivElement>()
+  useShortcuts(
+    {
+      Escape: (event) => {
+        event.preventDefault()
+        onClose()
+      },
+    },
+    { whileTyping: true, capture: true },
+  )
+  return (
+    <BodyPortal>
+      <div
+        ref={containerRef}
+        class="overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="user-info-coming-soon"
+        onClick={(event) => {
+          if (event.target === event.currentTarget) {
+            onClose()
+          }
+        }}
+      >
+        <div class="overlay-panel coming-soon-dialog">
+          <h2 id="user-info-coming-soon">Coming soon</h2>
+          <div class="dialog-actions">
+            <button type="button" onClick={onClose}>
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </BodyPortal>
   )
 }
 
@@ -279,7 +334,7 @@ export function UserInfoPanel({
 
         <div class="room-info-actions">
           {self ? (
-            unavailableAction('Edit display name')
+            <UnavailableAction label="Edit display name" />
           ) : (
             <>
               <button
@@ -289,8 +344,8 @@ export function UserInfoPanel({
               >
                 {startingDm ? 'Starting…' : 'Direct message'}
               </button>
-              {unavailableAction('Ignore')}
-              {unavailableAction('Verify')}
+              <UnavailableAction label="Ignore" />
+              <UnavailableAction label="Verify" />
             </>
           )}
         </div>

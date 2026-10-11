@@ -691,25 +691,15 @@ test('narrow: user information opens from a sender and a DM uncovers the timelin
   expect(placement.actionsBottom).toBeLessThanOrEqual(
     placement.detailsTop + placement.tolerance,
   )
-  await expect(panel.getByRole('button', { name: 'Verify' })).toBeDisabled()
-  await expect(panel.getByRole('button', { name: 'Ignore' })).toBeDisabled()
-  const comingSoon = await panel
-    .locator('.user-info-coming-soon')
-    .evaluateAll((wrappers) =>
-      wrappers.map((wrapper) => {
-        const button = wrapper.querySelector('button')
-        return {
-          title: wrapper.getAttribute('title'),
-          buttonIgnoresPointer:
-            button !== null &&
-            getComputedStyle(button).pointerEvents === 'none',
-        }
-      }),
-    )
-  expect(comingSoon).toEqual([
-    { title: 'coming soon', buttonIgnoresPointer: true },
-    { title: 'coming soon', buttonIgnoresPointer: true },
-  ])
+  await expect(panel.getByRole('button', { name: 'Verify' })).toHaveAttribute(
+    'title',
+    'coming soon',
+  )
+  await panel.getByRole('button', { name: 'Ignore' }).click()
+  const notice = page.getByRole('dialog', { name: 'Coming soon' })
+  await expect(notice).toBeVisible()
+  await notice.getByRole('button', { name: 'Close' }).click()
+  await expect(notice).toHaveCount(0)
   await expect(panel.getByRole('button', { name: 'Call' })).toHaveCount(0)
   await panel.getByRole('button', { name: 'Direct message' }).click()
 

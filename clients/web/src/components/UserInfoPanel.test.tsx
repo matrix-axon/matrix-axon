@@ -1,5 +1,11 @@
 import { signal } from '@preact/signals'
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import { LocationProvider } from 'preact-iso'
@@ -115,8 +121,14 @@ function renderPanel({
   return { ...view, onClose }
 }
 
-function comingSoonTitle(button: Element): string | null {
-  return button.closest('.user-info-coming-soon')?.getAttribute('title') ?? null
+function closeComingSoon(dialog: HTMLElement) {
+  const close = [...dialog.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Close',
+  )
+  if (close === undefined) {
+    throw new Error('missing close')
+  }
+  fireEvent.click(close)
 }
 
 const detail = (label: string): string => {
@@ -196,18 +208,17 @@ it('shows the room profile in the header and a differing global profile as detai
   expect(
     getByRole('button', { name: 'Direct message' }).hasAttribute('disabled'),
   ).toBe(false)
-  expect(getByRole('button', { name: 'Ignore' }).hasAttribute('disabled')).toBe(
-    true,
-  )
-  expect(getByRole('button', { name: 'Verify' }).hasAttribute('disabled')).toBe(
-    true,
-  )
-  expect(comingSoonTitle(getByRole('button', { name: 'Ignore' }))).toBe(
-    'coming soon',
-  )
-  expect(comingSoonTitle(getByRole('button', { name: 'Verify' }))).toBe(
-    'coming soon',
-  )
+  const ignore = getByRole('button', { name: 'Ignore' })
+  const verify = getByRole('button', { name: 'Verify' })
+  expect(ignore.hasAttribute('disabled')).toBe(false)
+  expect(verify.hasAttribute('disabled')).toBe(false)
+  expect(ignore.getAttribute('title')).toBe('coming soon')
+  expect(verify.getAttribute('title')).toBe('coming soon')
+  fireEvent.click(ignore)
+  const notice = screen.getByRole('dialog', { name: 'Coming soon' })
+  expect(notice.textContent).toContain('Coming soon')
+  closeComingSoon(notice)
+  expect(screen.queryByRole('dialog', { name: 'Coming soon' })).toBeNull()
   expect(queryByRole('button', { name: 'Edit display name' })).toBeNull()
   expect(queryByRole('button', { name: 'Call' })).toBeNull()
 })
@@ -316,8 +327,10 @@ it('shows your own information without a direct message, ignore, or verify actio
     rows: [member(ME, 'Me')],
   })
   const edit = await findByRole('button', { name: 'Edit display name' })
-  expect(edit.hasAttribute('disabled')).toBe(true)
-  expect(comingSoonTitle(edit)).toBe('coming soon')
+  expect(edit.hasAttribute('disabled')).toBe(false)
+  expect(edit.getAttribute('title')).toBe('coming soon')
+  fireEvent.click(edit)
+  expect(screen.getByRole('dialog', { name: 'Coming soon' })).toBeTruthy()
   expect(queryByRole('button', { name: 'Direct message' })).toBeNull()
   expect(queryByRole('button', { name: 'Ignore' })).toBeNull()
   expect(queryByRole('button', { name: 'Verify' })).toBeNull()

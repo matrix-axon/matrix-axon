@@ -4266,15 +4266,15 @@ span.composer-attachment-thumb {
   margin: 0;
 }
 
-/* A disabled button does not receive hover, so the tooltip lives on the
-   wrapper and the button lets the pointer through. */
-.user-info-coming-soon {
-  display: inline-flex;
-  cursor: default;
+.coming-soon-dialog {
+  display: grid;
+  gap: 0.8rem;
+  max-width: 18rem;
 }
 
-.user-info-coming-soon button {
-  pointer-events: none;
+.coming-soon-dialog h2 {
+  margin: 0;
+  font-size: 1.05rem;
 }
 
 .user-info-panel .room-info-identity .user-avatar {
