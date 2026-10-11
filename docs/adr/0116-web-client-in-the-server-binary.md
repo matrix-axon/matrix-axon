@@ -1,9 +1,8 @@
 # ADR 0116 — The web client ships inside the server binary
 
-**Status:** Proposed.
+**Status:** Accepted.
 Step 1 (the server serves an embedded bundle) is implemented with this record.
 Steps 2 to 4 are the sequence below.
-The two install-time decisions, no prompt and no automatic reverse-proxy edits, are recommendations awaiting sign-off.
 
 ## Context
 
@@ -115,7 +114,22 @@ The packages do not ask whether to enable the web client.
 - A prompt blocks or is silently defaulted under `DEBIAN_FRONTEND=noninteractive`, Ansible, image builds and CI, which is how a server package is most often installed.
 - The choice is one line in the config file and one restart, and it is as easy to make a week later as at install.
 
-The install output says that the web client is on, where it is, and how to turn it off.
+Without a prompt, the text the operator reads is the only place the choice is offered, so it is a requirement of step 3 and not a courtesy.
+The install output, and the documentation each format installs, must each state all of the following in plain words:
+
+- that the web client is on, and the address to open;
+- that it is reachable from this machine only, and why (`server.host`);
+- the one line that turns it off (`web_client = false` under `[server]`, and the restart that applies it), with the path of the config file on that platform;
+- how to reach it from another device, pointing at the reverse-proxy and Tailscale instructions below, and that this should wait until the first sign-in is done.
+
+Where that text lives:
+
+| Format         | At install                                        | Installed documentation                                                 |
+| -------------- | ------------------------------------------------- | ----------------------------------------------------------------------- |
+| `.deb`, `.rpm` | the postinstall output, next to the bootstrap URL | `/usr/share/doc/axon-server/README.Debian` and the man page             |
+| Homebrew       | the formula's caveats                             | the formula's `doc` directory, `$(brew --prefix)/share/doc/axon-server` |
+
+The Homebrew caveats are also shown again by `brew info axon-server`, which is where an operator looks later.
 
 ### Reverse proxies: detect and advise, never edit
 
