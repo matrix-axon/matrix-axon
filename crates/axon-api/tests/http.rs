@@ -252,8 +252,12 @@ async fn insert_redaction(store: &Store, account_id: Uuid, room_id: &str, ts: i6
 /// Build the read-API router over `store` with throwaway stubs for the ports the
 /// read endpoints don't touch (sender, lifecycle, verify, trust, media).
 fn read_app(store: Store) -> axum::Router {
+    axon_api::router(read_state(store))
+}
+
+fn read_state(store: Store) -> AppState {
     let (live, _rx) = tokio::sync::broadcast::channel(16);
-    axon_api::router(AppState::new(
+    AppState::new(
         store,
         live,
         Arc::new(StubSender::ok("$unused:localhost")),
@@ -264,7 +268,7 @@ fn read_app(store: Store) -> axum::Router {
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
         None,
-    ))
+    )
 }
 
 /// Build a router whose lifecycle routes are backed by `lifecycle`, gated by a
@@ -2024,7 +2028,9 @@ async fn matrix_oauth_qr_grant_routes_are_account_scoped_and_preserve_stage_fiel
 #[ignore = "requires Postgres"]
 async fn browser_fallback_serves_html_for_root_and_non_api_misses() {
     let store = store().await;
-    let app = read_app(store);
+    // Switched off, so the page is the same whether or not this build carries
+    // a web client (`embed-web`, ADR 0116).
+    let app = axon_api::router(read_state(store).with_web_client(false));
 
     for uri in ["/", "/not-a-route"] {
         let (status, headers, body) = request_text_parts(&app, "GET", uri, None).await;
@@ -2043,6 +2049,72 @@ async fn browser_fallback_serves_html_for_root_and_non_api_misses() {
         assert!(body.contains("/healthz"), "uri: {uri}");
         assert!(body.contains("/v1/"), "uri: {uri}");
     }
+}
+
+const WEB_INDEX: &[u8] = b"<!doctype html><title>fixture web client</title>";
+const WEB_CHUNK: &[u8] = b"export const fixture = 1";
+const WEB_FILES: &[(&str, &[u8])] = &[
+    ("/index.html", WEB_INDEX),
+    ("/assets/app-1a2b.js", WEB_CHUNK),
+];
+
+/// ADR 0116 through the real router: the web client owns every path that is
+/// not a route, and no path that is one.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn web_client_is_served_from_the_fallback_and_nowhere_else() {
+    let store = store().await;
+    let app = axon_api::router(read_state(store).with_web_client_files(WEB_FILES));
+
+    for uri in ["/", "/rooms/abc", "/oauth/callback"] {
+        let (status, headers, bytes) = send_request(&app, "GET", uri, None, None, None).await;
+        assert_eq!(status, StatusCode::OK, "uri: {uri}");
+        assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+        assert_eq!(headers["cache-control"], "no-cache", "uri: {uri}");
+        assert_eq!(bytes, WEB_INDEX, "uri: {uri}");
+    }
+
+    let (status, headers, bytes) =
+        send_request(&app, "GET", "/assets/app-1a2b.js", None, None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers["cache-control"],
+        "public, max-age=31536000, immutable"
+    );
+    assert_eq!(bytes, WEB_CHUNK);
+
+    // The ADR 0087 trap: a chunk this build does not have is a 404, not HTML.
+    let (status, headers, bytes) =
+        send_request(&app, "GET", "/assets/app-9z9z.js", None, None, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_ne!(bytes, WEB_INDEX);
+
+    // Routes are matched first, so the API and the probe are untouched.
+    let (status, body) = request(&app, "GET", "/healthz", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+    let (status, _, err) = request_parts(&app, "GET", "/v1/not-a-route", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(err["error"]["code"], "unauthorized");
+    let (status, body) = request(&app, "GET", "/v1/not-a-route", None, Some(&bearer())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+}
+
+/// `[server] web_client = false` wins over a bundle being present.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn web_client_switched_off_serves_the_informational_page() {
+    let store = store().await;
+    let state = read_state(store)
+        .with_web_client_files(WEB_FILES)
+        .with_web_client(false);
+    let app = axon_api::router(state);
+
+    let (status, _, body) = request_text_parts(&app, "GET", "/", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("No web interface is served at this address"));
 }
 
 #[tokio::test]

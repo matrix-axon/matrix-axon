@@ -471,10 +471,7 @@ async fn maybe_offer_web_bootstrap(
 /// Whether this process answers non-API paths with the embedded web client
 /// (ADR 0116): built in, and not switched off.
 fn web_client_served(config: &Config) -> bool {
-    axon_api::WebClientConfig {
-        enabled: config.server.web_client,
-    }
-    .served()
+    axon_api::WebClientConfig::new(config.server.web_client).served()
 }
 
 /// Where the bootstrap success page hands the new credential. An explicit

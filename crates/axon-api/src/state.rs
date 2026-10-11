@@ -206,21 +206,32 @@ pub struct AppState {
 /// Whether the embedded web client is served (`[server] web_client`, ADR 0116).
 /// On in a build without the `embed-web` feature too, where there is nothing
 /// to serve and the fallback page says so.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct WebClientConfig {
     pub enabled: bool,
+    /// What there is to serve: the bundle compiled into this binary, unless a
+    /// test supplied its own.
+    bundle: Option<&'static crate::web::Bundle>,
 }
 
 impl Default for WebClientConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self::new(true)
     }
 }
 
 impl WebClientConfig {
-    /// The bundle to serve: switched on, and compiled into this binary.
+    /// The switch, over whatever this binary carries.
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            bundle: crate::web::embedded(),
+        }
+    }
+
+    /// The bundle to serve, when switched on and there is one.
     pub(crate) fn bundle(self) -> Option<&'static crate::web::Bundle> {
-        self.enabled.then(crate::web::embedded).flatten()
+        self.bundle.filter(|_| self.enabled)
     }
 
     /// Whether this process answers non-API paths with the web client.
@@ -550,7 +561,18 @@ impl AppState {
     /// Set whether the embedded web client is served. The binary calls this
     /// with `[server] web_client`.
     pub fn with_web_client(mut self, enabled: bool) -> Self {
-        self.web_client = WebClientConfig { enabled };
+        self.web_client.enabled = enabled;
+        self
+    }
+
+    /// Serve `files` (URL path, bytes) as the web client instead of whatever
+    /// this binary carries. A test seam: the router's behavior with a bundle
+    /// should not depend on the `embed-web` feature or on a built
+    /// `clients/web/dist`. The table is leaked, which is fine for a test and
+    /// wrong anywhere else.
+    #[doc(hidden)]
+    pub fn with_web_client_files(mut self, files: &[(&'static str, &'static [u8])]) -> Self {
+        self.web_client.bundle = crate::web::Bundle::new(files).map(|b| &*Box::leak(Box::new(b)));
         self
     }
 

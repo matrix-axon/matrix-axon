@@ -61,7 +61,7 @@ pub(crate) struct Bundle {
 impl Bundle {
     /// `None` when there is no `/index.html`, which is the empty table of a
     /// build without the feature.
-    fn new(entries: &[(&'static str, &'static [u8])]) -> Option<Self> {
+    pub(crate) fn new(entries: &[(&'static str, &'static [u8])]) -> Option<Self> {
         let files: HashMap<_, _> = entries
             .iter()
             .map(|&(path, bytes)| {
