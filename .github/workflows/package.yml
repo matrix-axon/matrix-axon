@@ -18,6 +18,8 @@ on:
       - "crates/axon-crypto/**"
       - "crates/axon-search/**"
       - "crates/axon-media/**"
+      - ".github/actions/web-bundle/**"
+      - "scripts/assert-web-embedded.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - "clients/web/package.json"
@@ -74,6 +76,9 @@ jobs:
           shellcheck scripts/release-notes.sh scripts/release-notes-test.sh
           scripts/release-notes-test.sh
 
+      - name: Embedded web client scripts
+        run: shellcheck scripts/assert-web-embedded.sh scripts/embed-web-smoke.sh
+
   packages:
     name: .deb and .rpm (${{ matrix.arch }})
     needs: shellcheck
@@ -119,8 +124,16 @@ jobs:
           sudo mv /tmp/nfpm /usr/local/bin/nfpm
           nfpm --version
 
+      # The packages carry the web client (ADR 0116). The action exports
+      # AXON_WEB_DIST, which turns a missing bundle into a build error.
+      - name: Build the web bundle
+        uses: ./.github/actions/web-bundle
+
       - name: Build axon-server
-        run: cargo build --release -p axon-server --bin axon-server
+        run: cargo build --release -p axon-server --bin axon-server --features embed-web
+
+      - name: Assert the binary carries the web client
+        run: scripts/assert-web-embedded.sh target/release/axon-server "$AXON_WEB_DIST"
 
       - name: Package
         env:

@@ -129,8 +129,8 @@ class AxonServer < Formula
         tailscale serve --bg http://127.0.0.1:8080
       Use the Tailscale menu-bar app if you already have it. On a headless
       Mac mini, `brew install tailscale` is the formula; the cask
-      (tailscale-app) conflicts with that formula. This exposes the API,
-      not the web client.
+      (tailscale-app) conflicts with that formula. This exposes the API
+      and the web client the server carries, on one address.
     EOS
     if OS.linux?
       text += <<~EOS

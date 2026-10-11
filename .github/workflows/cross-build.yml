@@ -120,6 +120,28 @@ jobs:
           path: build/THIRDPARTY
           if-no-files-found: error
 
+  # The web client that every server binary below carries (ADR 0116). Built
+  # once, on Linux, and handed to the three platform jobs as an artifact: the
+  # bundle is the same bytes on every platform, and this keeps Node off the
+  # Windows and macOS builders.
+  web-bundle:
+    name: Build the web bundle
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout source code
+        uses: actions/checkout@v7
+
+      - name: Build the web bundle
+        id: bundle
+        uses: ./.github/actions/web-bundle
+
+      - name: Upload the web bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: ${{ steps.bundle.outputs.dist }}
+          if-no-files-found: error
+
   lint-fmt-test:
     name: rustfmt, clippy, and test
     runs-on: ubuntu-latest
@@ -157,7 +179,7 @@ jobs:
 
   windows:
     name: Build for Windows
-    needs: generate-thirdparty
+    needs: [generate-thirdparty, web-bundle]
     strategy:
       fail-fast: true
       matrix:
@@ -191,10 +213,23 @@ jobs:
           name: thirdparty-license
           path: build
 
+      - name: Download the web bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: web-dist
+
+      # AXON_WEB_DIST makes a missing bundle a build error (ADR 0116).
       - name: Build workspace (Windows native)
+        env:
+          AXON_WEB_DIST: ${{ github.workspace }}/web-dist
         run: |
           rustup target add x86_64-pc-windows-msvc
-          cargo build --workspace --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
+          cargo build --workspace --features axon-server/embed-web --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
+
+      - name: Assert the server carries the web client
+        shell: bash
+        run: scripts/assert-web-embedded.sh "target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-server.exe" web-dist
 
       # Windows runners have no `zip` (Git Bash doesn't ship one), so use
       # PowerShell's Compress-Archive. Like `zip -j` on the other platforms, it
@@ -233,7 +268,7 @@ jobs:
 
   macos:
     name: Build for MacOS (Intel and Silicon)
-    needs: generate-thirdparty
+    needs: [generate-thirdparty, web-bundle]
     strategy:
       fail-fast: true
       matrix:
@@ -279,11 +314,23 @@ jobs:
           name: thirdparty-license
           path: build
 
+      - name: Download the web bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: web-dist
+
+      # AXON_WEB_DIST makes a missing bundle a build error (ADR 0116).
       - name: Build workspace (macOS native)
+        env:
+          AXON_WEB_DIST: ${{ github.workspace }}/web-dist
         run: |
           rustup target add aarch64-apple-darwin
           rustup target add x86_64-apple-darwin
-          cargo build --workspace --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
+          cargo build --workspace --features axon-server/embed-web --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
+
+      - name: Assert the server carries the web client
+        run: scripts/assert-web-embedded.sh "target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-server" web-dist
 
       - name: Zip binaries
         run: |
@@ -315,7 +362,7 @@ jobs:
 
   linux:
     name: Build for Linux
-    needs: generate-thirdparty
+    needs: [generate-thirdparty, web-bundle]
     runs-on: ubuntu-latest
     if: ${{ github.event.inputs.linux != 'false' }}
     steps:
@@ -351,8 +398,20 @@ jobs:
           name: thirdparty-license
           path: build
 
+      - name: Download the web bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: web-dist
+
+      # AXON_WEB_DIST makes a missing bundle a build error (ADR 0116).
       - name: Build workspace (native Linux)
-        run: cargo build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
+        env:
+          AXON_WEB_DIST: ${{ github.workspace }}/web-dist
+        run: cargo build --workspace --features axon-server/embed-web --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
+
+      - name: Assert the server carries the web client
+        run: scripts/assert-web-embedded.sh "target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-server" web-dist
 
       - name: Zip binaries
         run: |

@@ -1,7 +1,8 @@
 # Native packages
 
 Debian and RPM packages via nFPM, Homebrew formulas for `axon-server` and `axon-tui`, and a Homebrew cask for the desktop app.
-Docker Compose remains the path that includes Postgres and the web client.
+The server binary in the packages and the formula carries the web client and serves it on the API's own address (ADR 0116).
+Docker Compose remains the path that includes Postgres.
 `docs/self-hosting.md` is a separate docs change.
 
 ## Debian and RPM
@@ -12,10 +13,17 @@ Postgres is recommended locally, not bundled.
 ## Build
 
 ```sh
-cargo build --release -p axon-server --bin axon-server
+pnpm --dir clients/web install --frozen-lockfile
+pnpm --dir clients/web build
+AXON_WEB_DIST=$PWD/clients/web/dist \
+  cargo build --release -p axon-server --bin axon-server --features embed-web
+scripts/assert-web-embedded.sh target/release/axon-server clients/web/dist
 # https://github.com/goreleaser/nfpm/releases
 packaging/package.sh
 ```
+
+`AXON_WEB_DIST` makes a missing bundle a build error instead of a warning.
+Leave out the first two commands, the variable and the feature to package a server with no web client; `package.sh` takes whatever binary is at `target/release/axon-server`.
 
 Artifacts land in `target/nfpm/`.
 Set `ARCH=arm64` for aarch64 packages.
