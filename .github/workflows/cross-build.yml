@@ -238,12 +238,14 @@ jobs:
         shell: pwsh
         run: |
           $BIN = "target/${{ matrix.target }}/${{ env.PROFILE_DIR }}"
+          # Reverse-proxy site files for the web client ride with every server
+          # zip. Compress-Archive expands the wildcard itself.
           Compress-Archive -Force -DestinationPath target/axon-tui-windows.zip `
             -Path "$BIN/axon-tui.exe", build/THIRDPARTY, LICENSE.md
           Compress-Archive -Force -DestinationPath target/axon-server-windows.zip `
-            -Path "$BIN/axon-server.exe", build/THIRDPARTY, LICENSE.md
+            -Path "$BIN/axon-server.exe", build/THIRDPARTY, LICENSE.md, packaging/proxy/axon-server.*
           Compress-Archive -Force -DestinationPath target/axon-windows.zip `
-            -Path "$BIN/axon-server.exe", "$BIN/axon-tui.exe", build/THIRDPARTY, LICENSE.md
+            -Path "$BIN/axon-server.exe", "$BIN/axon-tui.exe", build/THIRDPARTY, LICENSE.md, packaging/proxy/axon-server.*
 
       - name: Upload axon-tui artifact
         uses: actions/upload-artifact@v7
@@ -335,9 +337,11 @@ jobs:
       - name: Zip binaries
         run: |
           BIN=target/${{ matrix.target }}/${{ env.PROFILE_DIR }}
+          # Reverse-proxy site files for the web client ride with every server
+          # zip; the Homebrew formula installs them as documentation.
           zip -j target/axon-tui-macos-${{ matrix.arch }}.zip $BIN/axon-tui build/THIRDPARTY LICENSE.md
-          zip -j target/axon-server-macos-${{ matrix.arch }}.zip $BIN/axon-server build/THIRDPARTY LICENSE.md
-          zip -j target/axon-macos-${{ matrix.arch }}.zip $BIN/axon-server $BIN/axon-tui build/THIRDPARTY LICENSE.md
+          zip -j target/axon-server-macos-${{ matrix.arch }}.zip $BIN/axon-server build/THIRDPARTY LICENSE.md packaging/proxy/axon-server.*
+          zip -j target/axon-macos-${{ matrix.arch }}.zip $BIN/axon-server $BIN/axon-tui build/THIRDPARTY LICENSE.md packaging/proxy/axon-server.*
 
       - name: Upload axon-tui artifact
         uses: actions/upload-artifact@v7
@@ -416,9 +420,11 @@ jobs:
       - name: Zip binaries
         run: |
           BIN=target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}
+          # Reverse-proxy site files for the web client ride with every server
+          # zip; the Homebrew formula installs them as documentation.
           zip -j target/axon-tui-linux.zip $BIN/axon-tui build/THIRDPARTY LICENSE.md
-          zip -j target/axon-server-linux.zip $BIN/axon-server build/THIRDPARTY LICENSE.md
-          zip -j target/axon-linux.zip $BIN/axon-server $BIN/axon-tui build/THIRDPARTY LICENSE.md
+          zip -j target/axon-server-linux.zip $BIN/axon-server build/THIRDPARTY LICENSE.md packaging/proxy/axon-server.*
+          zip -j target/axon-linux.zip $BIN/axon-server $BIN/axon-tui build/THIRDPARTY LICENSE.md packaging/proxy/axon-server.*
 
       - name: Upload axon-tui artifact
         uses: actions/upload-artifact@v7

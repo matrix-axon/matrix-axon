@@ -287,36 +287,158 @@ wait_for_bootstrap_url() {
 	return 1
 }
 
+# Written once the operator has been told about the web client, so an upgrade
+# from a release without one says so exactly once (ADR 0116).
+WEB_NOTICE_STAMP=/var/lib/axon-server/.web-client-notice
+DOC=/usr/share/doc/axon-server
+
+mark_web_notice_shown() {
+	mkdir -p /var/lib/axon-server 2>/dev/null || return 0
+	: >"$WEB_NOTICE_STAMP" 2>/dev/null || true
+}
+
+# True when the operator has already switched the web client off.
+web_client_disabled() {
+	[ -f "$CONFIG" ] || return 1
+	grep -Eq '^[[:space:]]*web_client[[:space:]]*=[[:space:]]*false' "$CONFIG"
+}
+
+print_web_client_off() {
+	echo "To turn the web client off, add to $CONFIG:"
+	echo
+	echo "  [server]"
+	echo "  web_client = false"
+	echo
+	echo "then: sudo systemctl restart axon-server"
+}
+
+# The commands for whichever reverse proxy is already installed. Nothing here
+# touches another service: its configuration is the operator's to change, and
+# only the operator knows the hostname and the certificate (ADR 0116).
+print_remote_access() {
+	echo "To reach it from other devices, put TLS in front. Do this after the"
+	echo "first sign-in: behind a proxy on this machine every request looks"
+	echo "local, and the first-sign-in page is limited to local requests."
+	echo
+	found=0
+	if command -v tailscale >/dev/null 2>&1; then
+		found=1
+		echo "  Tailscale (private to your tailnet, no certificate to manage):"
+		echo "    sudo tailscale serve --bg http://127.0.0.1:8080"
+		echo
+	fi
+	if command -v caddy >/dev/null 2>&1; then
+		found=1
+		echo "  Caddy (obtains the certificate itself):"
+		echo "    sudo cp $DOC/examples/axon-server.caddy /etc/caddy/"
+		echo "    sudoedit /etc/caddy/axon-server.caddy    # set your hostname"
+		echo "    echo 'import axon-server.caddy' | sudo tee -a /etc/caddy/Caddyfile"
+		echo "    sudo systemctl reload caddy"
+		echo
+	fi
+	if command -v nginx >/dev/null 2>&1; then
+		found=1
+		echo "  nginx:"
+		if [ -d /etc/nginx/sites-available ]; then
+			echo "    sudo cp $DOC/examples/axon-server.nginx.conf /etc/nginx/sites-available/axon-server"
+			echo "    sudoedit /etc/nginx/sites-available/axon-server    # hostname and certificate paths"
+			echo "    sudo ln -s /etc/nginx/sites-available/axon-server /etc/nginx/sites-enabled/"
+		else
+			echo "    sudo cp $DOC/examples/axon-server.nginx.conf /etc/nginx/conf.d/axon-server.conf"
+			echo "    sudoedit /etc/nginx/conf.d/axon-server.conf    # hostname and certificate paths"
+		fi
+		echo "    sudo nginx -t && sudo systemctl reload nginx"
+		echo
+	fi
+	if command -v apache2 >/dev/null 2>&1; then
+		found=1
+		echo "  Apache:"
+		echo "    sudo cp $DOC/examples/axon-server.apache.conf /etc/apache2/sites-available/axon-server.conf"
+		echo "    sudoedit /etc/apache2/sites-available/axon-server.conf    # hostname and certificate paths"
+		echo "    sudo a2enmod ssl proxy proxy_http proxy_wstunnel && sudo a2ensite axon-server"
+		echo "    sudo apachectl configtest && sudo systemctl reload apache2"
+		echo
+	elif command -v httpd >/dev/null 2>&1; then
+		found=1
+		echo "  Apache:"
+		echo "    sudo cp $DOC/examples/axon-server.apache.conf /etc/httpd/conf.d/axon-server.conf"
+		echo "    sudoedit /etc/httpd/conf.d/axon-server.conf    # hostname and certificate paths"
+		echo "    sudo apachectl configtest && sudo systemctl reload httpd"
+		echo
+	fi
+	if [ "$found" = 0 ]; then
+		echo "  No Tailscale, Caddy, nginx or Apache was found on this machine."
+		echo "  Any of them will do; ready-made site files are in $DOC/examples/."
+		echo
+	fi
+	echo "Each step is explained in $DOC/README.Debian."
+}
+
 print_first_run_help() {
 	cursor=$1
 	echo
 	echo "axon-server is installed and the service is enabled."
-	echo "It listens on http://127.0.0.1:8080 (loopback only)."
+	echo
+	echo "The web client is on, at:"
+	echo
+	echo "  http://127.0.0.1:8080/"
+	echo
+	echo "It is reachable from this machine only. Always open it as 127.0.0.1,"
+	echo "not localhost: a browser treats those as two sites and keeps a"
+	echo "separate sign-in for each."
 	echo
 	url=
 	if is_systemd; then
 		url=$(wait_for_bootstrap_url "$cursor" || true)
 	fi
 	if [ -n "$url" ]; then
-		echo "Create the first client credential by opening this one-time URL"
-		echo "in a browser on this machine:"
+		echo "To sign in for the first time, open this one-time URL in a browser"
+		echo "on this machine and choose \"Create bearer token\":"
 		echo
 		echo "  $url"
 		echo
 	else
-		echo "Create the first client credential from the one-time bootstrap URL"
-		echo "in the journal (loopback only):"
+		echo "To sign in for the first time, open the one-time bootstrap URL from"
+		echo "the journal in a browser on this machine:"
 		echo
 		echo "  journalctl -u axon-server -e --no-pager | grep -i bootstrap"
 		echo
 	fi
-	echo "Or mint a token from the CLI:"
+	echo "With no browser on this machine, forward the port from one that has"
+	echo "one, then open the same URL there:"
 	echo
-	echo "  sudo -u axon axon-server --config /etc/axon-server/config.toml \\"
-	echo "    token issue --label first"
+	echo "  ssh -L 8080:127.0.0.1:8080 <this machine>"
 	echo
-	echo "Point axon-tui or another client at http://127.0.0.1:8080 with that token."
-	echo "See /usr/share/doc/axon-server/README.Debian."
+	echo "For every later sign-in (another browser, a phone, axon-tui), mint a"
+	echo "token and paste it into the client:"
+	echo
+	echo "  sudo -u axon axon-server token issue --label laptop"
+	echo
+	print_web_client_off
+	echo
+	print_remote_access
+	mark_web_notice_shown
+}
+
+# An upgrade from a release whose server had no web client. Said once.
+print_web_client_upgrade_notice() {
+	[ -e "$WEB_NOTICE_STAMP" ] && return 0
+	mark_web_notice_shown
+	web_client_disabled && return 0
+	echo
+	echo "New in this release: axon-server now serves the web client itself, at"
+	echo
+	echo "  http://127.0.0.1:8080/"
+	echo
+	echo "It is reachable from this machine only, and it needs a token to sign"
+	echo "in. Always open it as 127.0.0.1, not localhost: a browser keeps a"
+	echo "separate sign-in for each. Mint a token with:"
+	echo
+	echo "  sudo -u axon axon-server token issue --label browser"
+	echo
+	print_web_client_off
+	echo
+	print_remote_access
 }
 
 print_byo_postgres() {
@@ -391,6 +513,7 @@ configure() {
 			fi
 		fi
 		start_unit 0
+		print_web_client_upgrade_notice
 		return 0
 	fi
 

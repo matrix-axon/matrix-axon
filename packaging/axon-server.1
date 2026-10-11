@@ -12,6 +12,7 @@ axon-server \- personal Matrix state layer
 Axon sits between a Matrix homeserver and clients.
 It owns sync, E2EE decryption, search, and a media proxy,
 and exposes a versioned HTTP + WebSocket API at /v1/.
+It also serves its web client, at every path that is not the API.
 .PP
 With no command it runs the server.
 Every command honors
@@ -106,11 +107,40 @@ List bound identities.
 .TP
 .B oauth identities unbind \fIID\fR
 Unbind an identity and revoke tokens it minted.
+.SH WEB CLIENT
+A packaged server carries the web client and serves it on the address
+the API listens on, by default
+.IR http://127.0.0.1:8080/ ,
+which only this machine can reach.
+Open it as 127.0.0.1 and not as localhost:
+a browser keeps a separate sign-in for each name.
+.PP
+To serve the API alone, set
+.B web_client = false
+under
+.B [server]
+in the config file and restart the service.
+.PP
+To reach it from other devices, put a TLS-terminating proxy in front.
+Example site files for Caddy, nginx, and Apache are in
+.IR /usr/share/doc/axon-server/examples/ ,
+and
+.I /usr/share/doc/axon-server/README.Debian
+explains each step.
+.PP
+On a packaged install, run commands as the service's user:
+.PP
+.RS
+.B sudo \-u axon axon-server token issue \-\-label laptop
+.RE
 .SH FILES
 .TP
 .I /etc/axon-server/config.toml
 Packaged-install config (generated on first configure when a local
 Postgres cluster is reachable).
+.TP
+.I /usr/share/doc/axon-server/examples/
+Reverse-proxy site files for Caddy, nginx, and Apache.
 .TP
 .I /var/lib/axon-server
 Durable state (SDK store, search index, staged uploads).
