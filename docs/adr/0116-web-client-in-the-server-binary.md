@@ -2,7 +2,7 @@
 
 **Status:** Accepted.
 Steps 1 to 3 of the sequence below are implemented.
-Step 4, the Docker stack, is open.
+Step 4, the Docker stack, is deferred and tracked in #687.
 
 ## Context
 
@@ -207,6 +207,8 @@ The one-silo rule separates the layers anyway.
    The root `Dockerfile` gains the web build stage and the feature, and the `web` Caddy container becomes redundant once the server image serves the bundle.
    Removing it changes the stack's topology and is worth its own decision.
    Until then the stack keeps working unchanged, because Caddy answers non-API paths before the server sees them.
+   It is deferred (#687): the gain is maintenance only, one image and one copy of the cache rules instead of two, and existing compose users would have to migrate.
+   The optional TLS `caddy` profile is a different service and stays either way.
 
 ## Consequences
 
