@@ -31,8 +31,10 @@ A later `apt install` will not re-enable it (upgrades preserve the admin's
 enable/disable state). Start it with `sudo systemctl enable --now axon-server`.
 
 Data, search, cache, and upload paths are written into config.toml so
-`sudo -u axon axon-server --config /etc/axon-server/config.toml …`
-(for example `search reindex`) uses the same trees as the service.
+`sudo -u axon axon-server …` (for example `search reindex`) uses the same
+trees as the service. /etc/axon-server/config.toml is found without
+--config. Run commands as user `axon`: the database URL uses peer auth,
+so root cannot connect, and any other user cannot read the file.
 
 Bring your own Postgres
 -----------------------

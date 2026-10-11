@@ -713,6 +713,11 @@ const LEGACY_PROJECT_APPLICATION: &str = "axon";
 const PLATFORM_CONFIG_FILE: &str = "config.toml";
 /// Filename inside the pre-rename platform config directory, and the CWD override.
 const LEGACY_CONFIG_FILE: &str = "axon.toml";
+/// Where the `.deb` and `.rpm` put the service's config (ADR 0116). The last
+/// discovery tier on Unix, so a bare `axon-server <command>` on a packaged
+/// install finds the configuration the service runs with.
+#[cfg(unix)]
+const SYSTEM_CONFIG_FILE: &str = "/etc/axon-server/config.toml";
 
 /// The platform's Axon directory set — data / config / cache roots following OS
 /// conventions (XDG on Linux, `~/Library` on macOS, Known Folders on Windows).
@@ -1074,6 +1079,22 @@ impl Default for MediaConfig {
     }
 }
 
+/// The system-wide config file at `path`, if there is one.
+///
+/// "Permission denied" means the file, or the directory it is in, is there and
+/// closed to this user. Treating that as absent would tell an operator on a
+/// working install that no configuration exists and offer to generate a second
+/// one, with a second `store_key`.
+#[cfg(unix)]
+fn system_config(path: &Path) -> Result<Option<PathBuf>, ConfigError> {
+    let denied = |e: &std::io::Error| e.kind() == std::io::ErrorKind::PermissionDenied;
+    match std::fs::File::open(path) {
+        Ok(_) => Ok(Some(path.to_path_buf())),
+        Err(e) if denied(&e) => Err(ConfigError::UnreadableSystemConfig(path.to_path_buf())),
+        Err(_) => Ok(None),
+    }
+}
+
 impl Config {
     /// Load configuration from an optional TOML file plus environment overrides.
     ///
@@ -1147,7 +1168,13 @@ impl Config {
     /// Discover the config file path when none is passed explicitly:
     /// `AXON_CONFIG` if set, else `./axon.toml` if it exists, else
     /// `<platform config dir>/config.toml` if it exists, else the pre-rename
-    /// `<legacy platform config dir>/axon.toml` if it exists, else `None`.
+    /// `<legacy platform config dir>/axon.toml` if it exists, else on Unix the
+    /// system-wide `/etc/axon-server/config.toml` if it exists, else `None`.
+    ///
+    /// The system-wide file is last because a user's own file should win over
+    /// the machine's. It is the one tier that can exist and be unreadable (the
+    /// packages make it `0600` in a `0750` directory, both owned by `axon`);
+    /// that is an error, not a `None`.
     ///
     /// A `None` here is what tells the binary "no configuration is in place" — the
     /// signal `axon init` (ADR 0051) keys its first-run offer on.
@@ -1166,7 +1193,13 @@ impl Config {
         if let Some(path) = Self::platform_config_path().filter(|p| p.exists()) {
             return Ok(Some(path));
         }
-        Ok(Self::legacy_platform_config_path().filter(|p| p.exists()))
+        if let Some(path) = Self::legacy_platform_config_path().filter(|p| p.exists()) {
+            return Ok(Some(path));
+        }
+        #[cfg(unix)]
+        return system_config(Path::new(SYSTEM_CONFIG_FILE));
+        #[cfg(not(unix))]
+        Ok(None)
     }
 
     /// The platform config-dir target for a generated config
@@ -1403,6 +1436,39 @@ mod tests {
             jail.set_env("AXON_SERVER__MANAGEMENT_API", "true");
             let config = Config::load(Some(Path::new("axon.toml"))).expect("load");
             assert!(config.server.management_api, "env beats file");
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn system_config_is_found_absent_or_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        figment::Jail::expect_with(|jail| {
+            let dir = jail.directory().join("etc");
+            let file = dir.join("config.toml");
+            assert_eq!(system_config(&file).expect("absent dir"), None);
+
+            jail.create_dir("etc")?;
+            assert_eq!(system_config(&file).expect("absent file"), None);
+
+            jail.create_file("etc/config.toml", "")?;
+            assert_eq!(system_config(&file).expect("readable"), Some(file.clone()));
+
+            // The packaged layout as another user sees it: a directory that
+            // cannot be searched. Root ignores the mode bits, so there is
+            // nothing to assert when the suite runs as root.
+            let closed = std::fs::Permissions::from_mode(0o000);
+            std::fs::set_permissions(&dir, closed).expect("chmod");
+            let refused = system_config(&file);
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            if std::fs::read_dir("/root").is_err() {
+                assert!(
+                    matches!(refused, Err(ConfigError::UnreadableSystemConfig(ref p)) if *p == file),
+                    "{refused:?}"
+                );
+            }
             Ok(())
         });
     }
