@@ -393,7 +393,7 @@ print_first_run_help() {
 	fi
 	if [ -n "$url" ]; then
 		echo "To sign in for the first time, open this one-time URL in a browser"
-		echo "on this machine and choose \"Create bearer token\":"
+		echo "on this machine, choose \"Create bearer token\", then \"Open web client\":"
 		echo
 		echo "  $url"
 		echo

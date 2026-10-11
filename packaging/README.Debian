@@ -37,8 +37,10 @@ Signing in
 ----------
 First sign-in: the install prints a one-time URL of the form
 http://127.0.0.1:8080/bootstrap/<code>. Open it in a browser on this
-machine and choose "Create bearer token"; the web client opens already
-signed in. If you missed the URL:
+machine and choose "Create bearer token". The next page shows the
+token, once. Copy it if you want it for another client as well, then
+choose "Open web client": the browser is signed in with nothing to
+paste. If you missed the URL:
 
   journalctl -u axon-server -e --no-pager | grep -i bootstrap
 
