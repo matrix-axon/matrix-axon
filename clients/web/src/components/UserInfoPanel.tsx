@@ -237,32 +237,75 @@ export function UserInfoPanel({
         </button>
       </div>
 
-      <div class="room-info-identity">
-        {headerMxc === null ? (
-          <UserAvatar
-            accountId={accountId}
-            userId={userId}
-            displayName={headerName}
-            member={shownMember}
-          />
-        ) : (
-          <button
-            type="button"
-            class="room-info-avatar-button"
-            aria-label={`View the ${headerName} avatar at full size`}
-            onClick={() => setAvatarOpen(true)}
-          >
+      <div class="user-info-intro">
+        <div class="room-info-identity">
+          {headerMxc === null ? (
             <UserAvatar
               accountId={accountId}
               userId={userId}
               displayName={headerName}
               member={shownMember}
             />
-          </button>
-        )}
-        <div class="room-info-identity-copy">
-          <p class="room-info-identity-name">{headerName}</p>
+          ) : (
+            <button
+              type="button"
+              class="room-info-avatar-button"
+              aria-label={`View the ${headerName} avatar at full size`}
+              onClick={() => setAvatarOpen(true)}
+            >
+              <UserAvatar
+                accountId={accountId}
+                userId={userId}
+                displayName={headerName}
+                member={shownMember}
+              />
+            </button>
+          )}
+          <div class="room-info-identity-copy">
+            <p class="room-info-identity-name">{headerName}</p>
+          </div>
         </div>
+
+        <div class="room-info-actions">
+          {self ? (
+            <button
+              type="button"
+              disabled
+              title="Editing your display name is not available in the web client yet"
+            >
+              Edit display name
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                disabled={startingDm}
+                onClick={() => void startDm(userId)}
+              >
+                {startingDm ? 'Starting…' : 'Direct message'}
+              </button>
+              <button
+                type="button"
+                disabled
+                title="Ignoring a user is not available in the web client yet"
+              >
+                Ignore
+              </button>
+              <button
+                type="button"
+                disabled
+                title="Starting verification with this user is not available in the web client yet"
+              >
+                Verify
+              </button>
+            </>
+          )}
+        </div>
+        {dmError !== null && (
+          <p class="error" role="alert">
+            {dmError}
+          </p>
+        )}
       </div>
 
       <section class="room-info-section" aria-labelledby="user-info-details">
@@ -389,50 +432,6 @@ export function UserInfoPanel({
         {devices.status === 'ready' && devices.refreshError !== null && (
           <p class="error" role="alert">
             {devices.refreshError}
-          </p>
-        )}
-      </section>
-
-      <section class="room-info-section" aria-labelledby="user-info-actions">
-        <h3 id="user-info-actions">Actions</h3>
-        <div class="room-info-actions">
-          {self ? (
-            <button
-              type="button"
-              disabled
-              title="Editing your display name is not available in the web client yet"
-            >
-              Edit display name
-            </button>
-          ) : (
-            <>
-              <button
-                type="button"
-                disabled={startingDm}
-                onClick={() => void startDm(userId)}
-              >
-                {startingDm ? 'Starting…' : 'Direct message'}
-              </button>
-              <button
-                type="button"
-                disabled
-                title="Ignoring a user is not available in the web client yet"
-              >
-                Ignore
-              </button>
-              <button
-                type="button"
-                disabled
-                title="Starting verification with this user is not available in the web client yet"
-              >
-                Verify
-              </button>
-            </>
-          )}
-        </div>
-        {dmError !== null && (
-          <p class="error" role="alert">
-            {dmError}
           </p>
         )}
       </section>

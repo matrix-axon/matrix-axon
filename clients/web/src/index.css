@@ -4245,6 +4245,27 @@ span.composer-attachment-thumb {
   outline-offset: 2px;
 }
 
+/* The shared identity rule draws its divider under the name. Here the
+   actions belong with that name, so the divider moves below them. */
+.user-info-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.user-info-panel .room-info-identity {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.user-info-intro .error {
+  margin: 0;
+}
+
 .user-info-panel .room-info-identity .user-avatar {
   width: 3.5rem;
   height: 3.5rem;

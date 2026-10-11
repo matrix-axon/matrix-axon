@@ -153,6 +153,24 @@ it('shows the room profile in the header and a differing global profile as detai
   expect(document.querySelector('.room-info-identity-name')?.textContent).toBe(
     'Alice in room',
   )
+  expect(queryByRole('heading', { name: 'Actions' })).toBeNull()
+  const name = document.querySelector('.room-info-identity-name')
+  const directMessage = getByRole('button', { name: 'Direct message' })
+  const details = getByRole('heading', { name: 'Details' })
+  if (name === null) {
+    throw new Error('missing user name')
+  }
+  expect(directMessage.closest('.user-info-intro')).toBe(
+    name.closest('.user-info-intro'),
+  )
+  expect(
+    name.compareDocumentPosition(directMessage) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).not.toBe(0)
+  expect(
+    directMessage.compareDocumentPosition(details) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).not.toBe(0)
   expect(await findByRole('heading', { name: 'User information' })).toBeTruthy()
   await waitFor(() =>
     expect(detail('Global display name')).toBe('Alice Global'),

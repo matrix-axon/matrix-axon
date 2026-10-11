@@ -659,6 +659,38 @@ test('narrow: user information opens from a sender and a DM uncovers the timelin
   await page.getByRole('button', { name: '@bob:hs' }).first().click()
   const panel = page.getByRole('complementary', { name: 'User information' })
   await expect(panel).toBeVisible()
+  await expect(panel.getByRole('heading', { name: 'Actions' })).toHaveCount(0)
+  const placement = await panel.evaluate((element, tolerance) => {
+    const name = element.querySelector('.room-info-identity-name')
+    const avatar = element.querySelector('.user-avatar')
+    const actions = element.querySelector('.room-info-actions')
+    const details = element.querySelector('#user-info-details')
+    if (
+      name === null ||
+      avatar === null ||
+      actions === null ||
+      details === null
+    ) {
+      throw new Error('user information header is missing a layout piece')
+    }
+    const nameBox = name.getBoundingClientRect()
+    const avatarBox = avatar.getBoundingClientRect()
+    const actionsBox = actions.getBoundingClientRect()
+    const detailsBox = details.getBoundingClientRect()
+    return {
+      identityBottom: Math.max(nameBox.bottom, avatarBox.bottom),
+      actionsTop: actionsBox.top,
+      actionsBottom: actionsBox.bottom,
+      detailsTop: detailsBox.top,
+      tolerance,
+    }
+  }, LAYOUT_EDGE_TOLERANCE_PX)
+  expect(placement.actionsTop).toBeGreaterThanOrEqual(
+    placement.identityBottom - placement.tolerance,
+  )
+  expect(placement.actionsBottom).toBeLessThanOrEqual(
+    placement.detailsTop + placement.tolerance,
+  )
   await expect(panel.getByRole('button', { name: 'Verify' })).toBeDisabled()
   await expect(panel.getByRole('button', { name: 'Ignore' })).toBeDisabled()
   await expect(panel.getByRole('button', { name: 'Call' })).toHaveCount(0)
