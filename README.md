@@ -246,12 +246,21 @@ The bootstrap page is loopback-only by default.
 To allow a trusted remote browser during setup, set `server.bootstrap_web_allow_remote = true` (or `AXON_SERVER__BOOTSTRAP_WEB_ALLOW_REMOTE=true`) and make sure the server is fronted by TLS, a proxy, or a trusted network.
 If `server.web_client_url` is set, the bootstrap success page links to that web client after showing the token;
 the token is never placed in the URL.
+A server that serves the web client itself (below) uses `/` when that key is unset.
 
 The bootstrap is offered only on an interactive TTY by default (the operator answers a prompt).
 Headless or containerized deployments have no TTY, so they can arm it non-interactively with `server.bootstrap_web_auto = true` (`AXON_SERVER__BOOTSTRAP_WEB_AUTO=true`);
 it still only arms when no credential exists yet, and the loopback / `bootstrap_web_allow_remote` gate is unchanged.
 When `server.web_client_url` resolves to the **same origin** as the bootstrap page (e.g. a reverse proxy that serves the web client and proxies `/bootstrap` on one host), the bearer success page writes the freshly minted token into the web client's `localStorage` and redirects there — signing the operator in with nothing to copy, and still without the token ever appearing in a URL.
 (This same-origin hand-off is bearer-token only; the SSO flow shows its tokens to copy.)
+
+A binary built with the `embed-web` cargo feature carries the web client and serves it at every path that is not the API, on the same address and port (ADR 0116).
+Build one with `pnpm --dir clients/web install && pnpm --dir clients/web build`, then `cargo build --release -p axon-server --features embed-web`;
+Set `AXON_WEB_DIST` to the bundle's directory to make a missing bundle a build error: without it, an unbuilt `clients/web/dist` is only a cargo warning and the binary carries no web client.
+The server's startup log says which it is.
+The web client is reachable exactly where the API is, which is this machine only unless `server.host` says otherwise.
+To serve the API alone, set `server.web_client = false` (or `AXON_SERVER__WEB_CLIENT=false`).
+A binary built without the feature answers those paths with a page saying no web interface is served.
 
 With `bootstrap_web_allow_remote = true`, any client that can reach the bootstrap surface — including one just probing it — shares the same six-wrong-URL lockout as the operator: six bad requests to `/bootstrap`, `/bootstrap/token`, `/bootstrap/oauth/{provider}`, or a wrong `/bootstrap/{code}` permanently close the bootstrap surface for the rest of the process, forcing a restart to try again.
 This is an availability risk on top of the confidentiality one, so treat remote bootstrap as no safer than any other unauthenticated surface exposed off loopback.

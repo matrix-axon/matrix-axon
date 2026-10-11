@@ -7,6 +7,15 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = []
+# Compile the built web client (`clients/web/dist`, or `AXON_WEB_DIST`) into
+# the crate and serve it from the router's fallback (ADR 0116). Off by default
+# so a plain `cargo build` needs neither Node nor a built bundle. With
+# `AXON_WEB_DIST` set, a missing bundle fails the build; without it, an unbuilt
+# `clients/web/dist` only warns, because the gate runs `--all-features`.
+embed-web = []
+
 [dependencies]
 axon-core  = { workspace = true }
 axon-store = { workspace = true }

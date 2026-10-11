@@ -17,6 +17,9 @@ chrono = { workspace = true, features = ["clock"] }
 [features]
 default = []
 dev-tools = ["dep:sqlx-core", "dep:crc"]
+# Build the web client into the binary (ADR 0116) from `clients/web/dist`.
+# Set `AXON_WEB_DIST` to make a missing bundle a build error, as releases do.
+embed-web = ["axon-api/embed-web"]
 
 [dependencies]
 axon-core   = { workspace = true }
