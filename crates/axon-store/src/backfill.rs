@@ -314,6 +314,18 @@ mod purge_watermark_tests {
             )
             .await
             .unwrap();
+        // Check the real column's dependency before the temporary name shadows
+        // it: the watermark must track the sequence allocating production IDs.
+        let wired: bool = sqlx_core::query_scalar::query_scalar(
+            "SELECT pg_get_serial_sequence('events', 'id')::regclass = 'events_id_seq'::regclass",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert!(
+            wired,
+            "events.id must draw from the purge watermark sequence"
+        );
         let mut tx = store.pool().begin().await.unwrap();
         // A temporary relation shadows the production sequence only on this
         // transaction's connection; other tests can keep allocating event IDs.

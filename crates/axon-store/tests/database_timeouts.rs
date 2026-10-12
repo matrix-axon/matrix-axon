@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use axon_core::{DatabaseConfig, DatabaseTimeouts};
 use axon_store::Store;
-use common::{cleanup_account, insert_message, raw_pool, test_account};
+use common::{cleanup_account, insert_message, raw_pool, test_account, TriggerFixture};
 use sqlx_postgres::PgPool;
 use uuid::Uuid;
 
@@ -395,6 +395,7 @@ async fn room_purge_commits_batches_and_retries_durable_intent() {
     // Fail exactly the second deletion statement. Its rollback must not undo
     // the first committed batch or its corresponding search obligation.
     let function = format!("fail_batch_{}", account.simple());
+    let mut fixture = TriggerFixture::new(&function);
     sqlx_core::query::query(&format!(
         "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
          IF OLD.account_id = '{account}'::uuid AND \
@@ -429,14 +430,7 @@ async fn room_purge_commits_batches_and_retries_durable_intent() {
             .await
             .unwrap();
     assert_eq!(obligations, 1000);
-    sqlx_core::query::query(&format!("DROP TRIGGER {function} ON events"))
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx_core::query::query(&format!("DROP FUNCTION {function}()"))
-        .execute(&pool)
-        .await
-        .unwrap();
+    fixture.remove(&pool).await;
     let fresh = insert_message(&store, account, room, 9999, "after leave / rejoin").await;
     store.retry_room_purges().await.unwrap();
     assert!(
@@ -554,6 +548,7 @@ async fn purge_completion_retains_an_intent_advanced_during_cleanup() {
     // Deterministically advance the intent after cleanup captured its watermark,
     // just as a second leave could do before the first cleanup finishes.
     let function = format!("advance_intent_{}", account.simple());
+    let mut fixture = TriggerFixture::new(&function);
     sqlx_core::query::query(&format!(
         "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
          UPDATE room_purge_intents SET through_event_id = {fresh_id} \
@@ -579,14 +574,7 @@ async fn purge_completion_retains_an_intent_advanced_during_cleanup() {
         "old completion must not erase the new obligation"
     );
     assert!(store.get_event(account, &fresh).await.unwrap().is_some());
-    sqlx_core::query::query(&format!("DROP TRIGGER {function} ON events"))
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx_core::query::query(&format!("DROP FUNCTION {function}()"))
-        .execute(&pool)
-        .await
-        .unwrap();
+    fixture.remove(&pool).await;
     store.retry_room_purges().await.unwrap();
     assert!(store.get_event(account, &fresh).await.unwrap().is_none());
     cleanup_account(&pool, account).await;
@@ -635,6 +623,7 @@ async fn leave_state_and_purge_intent_commit_together() {
         sender: &user,
     };
     let function = format!("fail_enqueue_{}", account.simple());
+    let mut fixture = TriggerFixture::new(&function);
     sqlx_core::query::query(&format!(
         "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
          IF NEW.account_id = '{account}'::uuid THEN RAISE EXCEPTION 'enqueue fixture'; END IF; RETURN NEW; END $$"))
@@ -667,14 +656,7 @@ async fn leave_state_and_purge_intent_commit_together() {
         persisted.redacted, None,
         "enqueue failure rolls back evidence"
     );
-    sqlx_core::query::query(&format!("DROP TRIGGER {function} ON room_purge_intents"))
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx_core::query::query(&format!("DROP FUNCTION {function}()"))
-        .execute(&pool)
-        .await
-        .unwrap();
+    fixture.remove(&pool).await;
     store
         .upsert_room_state_with_redaction_and_purge(
             &leave,
@@ -752,6 +734,7 @@ async fn failed_purge_page_does_not_starve_later_rooms() {
             .unwrap();
     }
     let function = format!("fail_intent_{}", account.simple());
+    let mut fixture = TriggerFixture::new(&function);
     sqlx_core::query::query(&format!(
         "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
          IF OLD.account_id = '{account}'::uuid AND OLD.room_id <> '!fair-100:localhost' \
@@ -785,14 +768,7 @@ async fn failed_purge_page_does_not_starve_later_rooms() {
         !last_pending,
         "the next page reaches the later room despite failures"
     );
-    sqlx_core::query::query(&format!("DROP TRIGGER {function} ON room_purge_intents"))
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx_core::query::query(&format!("DROP FUNCTION {function}()"))
-        .execute(&pool)
-        .await
-        .unwrap();
+    fixture.remove(&pool).await;
     cleanup_account(&pool, account).await;
 }
 
@@ -963,6 +939,7 @@ async fn no_op_purge_retries_preserve_rejoined_backfill_cursor() {
         .unwrap();
     // Fail final intent removal after the event batch has committed.
     let function = format!("fail_completion_{}", account.simple());
+    let mut fixture = TriggerFixture::new(&function);
     sqlx_core::query::query(&format!(
         "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
          IF OLD.account_id = '{account}'::uuid THEN RAISE EXCEPTION 'completion fixture'; \
@@ -996,14 +973,7 @@ async fn no_op_purge_retries_preserve_rejoined_backfill_cursor() {
     assert!(cursor.complete);
     assert_eq!(cursor.oldest_seen_token.as_deref(), Some("new"));
     assert_eq!(cursor.events_backfilled, 7);
-    sqlx_core::query::query(&format!("DROP TRIGGER {function} ON room_purge_intents"))
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx_core::query::query(&format!("DROP FUNCTION {function}()"))
-        .execute(&pool)
-        .await
-        .unwrap();
+    fixture.remove(&pool).await;
     store.purge_room(account, room).await.unwrap();
     let cursor = store
         .get_room_backfill(account, room)
@@ -1014,5 +984,52 @@ async fn no_op_purge_retries_preserve_rejoined_backfill_cursor() {
     assert_eq!(cursor.oldest_seen_token.as_deref(), Some("new"));
     assert_eq!(cursor.events_backfilled, 7);
     assert!(store.get_event(account, &fresh).await.unwrap().is_some());
+    cleanup_account(&pool, account).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn trigger_fixture_cleans_up_after_panicking_test() {
+    let store = bounded_store(DatabaseTimeouts::default()).await;
+    let pool = raw_pool().await;
+    let account = test_account(&store, "after-fixture-panic").await;
+    for attach_trigger in [false, true] {
+        let function = format!("panic_fixture_{}", Uuid::new_v4().simple());
+        let task_function = function.clone();
+        let task_pool = pool.clone();
+        // A separate task covers panic during partial setup and after installing
+        // the trigger without failing the harness or affecting other accounts.
+        let panic = tokio::spawn(async move {
+            let _fixture = TriggerFixture::new(&task_function);
+            sqlx_core::query::query(&format!(
+                "CREATE FUNCTION {task_function}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN IF NEW.account_id = '{account}'::uuid THEN RAISE EXCEPTION 'fixture leaked'; \
+                 END IF; RETURN NEW; END $$"
+            )).execute(&task_pool).await.unwrap();
+            if attach_trigger {
+                sqlx_core::query::query(&format!(
+                    "CREATE TRIGGER {task_function} BEFORE INSERT ON room_purge_intents \
+                     FOR EACH ROW EXECUTE FUNCTION {task_function}()"
+                )).execute(&task_pool).await.unwrap();
+            }
+            panic!("intentional fixture cleanup test");
+        }).await.unwrap_err();
+        assert!(panic.is_panic());
+        let remaining: i64 = sqlx_core::query_scalar::query_scalar(
+            "SELECT count(*) FROM pg_proc WHERE proname = $1",
+        )
+        .bind(&function)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            remaining, 0,
+            "function and dependent trigger must be removed"
+        );
+        store
+            .queue_room_purge(account, "!after-panic:localhost")
+            .await
+            .unwrap();
+    }
     cleanup_account(&pool, account).await;
 }

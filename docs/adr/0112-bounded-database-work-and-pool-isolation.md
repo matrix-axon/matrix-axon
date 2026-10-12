@@ -43,7 +43,7 @@ This excludes leave/trailing timeline events even when they dispatch after the w
 An engine regression drives real Sliding Sync responses through both Axon handler orders, including cleanup between the state and timeline callbacks.
 Later rejoin events and membership preserve current room metadata.
 Each room-event deletion batch clears the backfill cursor in the same SQL transaction when it deletes history, even if a rejoin preserves the room.
-A completed cursor cannot permanently hide purged history, and retries that delete no history preserve the current cursor.
+This invalidation commits with each deleted batch; retries that delete no history preserve the current cursor.
 An unused event sequence captures watermark zero rather than its initial unallocated value one.
 Account deletion retains its existing `deleting` breadcrumb until all final metadata is removed, and replaying an account-purge sentinel is safe.
 
@@ -73,6 +73,14 @@ Moving it to a shutdown-tracked server maintenance supervisor remains a follow-u
 
 A failed leave-state/intent transaction is logged under the existing best-effort sync policy.
 As with other failed ingestion writes, recovery of events already checkpointed by the SDK remains an ingestion-level concern; a successful leave projection can no longer commit without its purge intent.
+
+Cursor saves and purge batches are not ordered against each other.
+After a rejoin, a purge of more than 1000 old events can repeatedly invalidate a new cursor and cause wasted re-backfill work.
+A page can also re-fetch an old event whose conflict insert retains its pre-watermark ID, then save a completed cursor after the final batch deletes that event.
+That cursor can hide deleted history until it is reset; atomic invalidation within each batch does not close this later-save race.
+Keep per-batch invalidation until a generation-aware cursor or coordinated backfill/purge protocol can reject stale page completion and avoid unnecessary resets.
+Resetting only the first batch without that coordination could let a cursor saved between batches survive later history deletion.
+This coordination remains a follow-up; no homeserver request should hold a SQL transaction or lock while fetching a page.
 
 The sequence watermark is an allocation boundary, not a PostgreSQL commit barrier.
 A direct database writer whose pre-watermark insert is still uncommitted when cleanup finishes can escape that pass.
