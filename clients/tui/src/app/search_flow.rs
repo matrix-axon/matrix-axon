@@ -778,7 +778,7 @@ impl App {
             .position(|event| event.event_id == hit.event_id)
             .unwrap_or(0);
         self.messages.events.insert(key.clone(), page.events);
-        self.rooms.unread.remove(&key);
+        self.clear_room_unread(&key);
         self.last_jump_ts = Some(hit.origin_ts);
         self.thread_panel = None;
         self.messages.selection = Some(hit.event_id.clone());

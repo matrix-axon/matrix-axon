@@ -363,6 +363,17 @@ fn prepare_space_rows(app: &mut App, area: Rect, wide: bool) {
     app.frame.sidebar = rows;
 }
 
+/// The room-list unread badge. The server count on a long-unread room can run
+/// to four or five digits, so it is capped to keep the title readable in a
+/// narrow pane.
+fn unread_badge(count: usize) -> String {
+    match count {
+        0 => String::new(),
+        1..=99 => format!(" ({count})"),
+        _ => " (99+)".to_owned(),
+    }
+}
+
 fn room_list_item(
     app: &App,
     full_index: usize,
@@ -383,11 +394,7 @@ fn room_list_item(
         " "
     };
     let indent = if indented { "  " } else { "" };
-    let unread_str = if unread_count > 0 {
-        format!(" ({unread_count})")
-    } else {
-        String::new()
-    };
+    let unread_str = unread_badge(unread_count);
     let latest = room
         .last_event_id
         .as_deref()
@@ -3351,6 +3358,15 @@ fn command_response_popup_area(response: &str, terminal: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unread_badge_caps_large_server_counts() {
+        assert_eq!(super::unread_badge(0), "");
+        assert_eq!(super::unread_badge(1), " (1)");
+        assert_eq!(super::unread_badge(99), " (99)");
+        assert_eq!(super::unread_badge(100), " (99+)");
+        assert_eq!(super::unread_badge(54_321), " (99+)");
+    }
+
     use super::*;
     use crate::api::{EventDto, RoomDto, SearchResultDto};
     use crate::app::{Status, UnreadThread, UnreadThreadPreview};

@@ -85,15 +85,26 @@ impl App {
     /// zero.
     fn seed_unread_from_rooms(&mut self) {
         let selected = self.selected_room().map(RoomKey::from);
+        // The list was fetched before any frame or local clear recorded here,
+        // so it must not overwrite them.
+        let touched = std::mem::take(&mut self.rooms.unread_touched);
         let counts: Vec<(RoomKey, u64)> = self
             .rooms
             .rooms
             .iter()
             .map(|room| (RoomKey::from(room), room.notification_count))
+            .filter(|(key, _)| !touched.contains(key))
             .collect();
         for (key, count) in counts {
             self.set_room_unread(key, count, selected.as_ref());
         }
+    }
+
+    /// Clear a room's badge because the user is looking at it, and remember
+    /// that so an older room-list response does not bring it back.
+    pub(crate) fn clear_room_unread(&mut self, key: &RoomKey) {
+        self.rooms.unread.remove(key);
+        self.rooms.unread_touched.insert(key.clone());
     }
 
     /// Apply a live `unread_counts.changed` frame. A room the TUI does not
@@ -118,6 +129,7 @@ impl App {
         room.notification_count = payload.notification_count;
         room.highlight_count = payload.highlight_count;
         let selected = self.selected_room().map(RoomKey::from);
+        self.rooms.unread_touched.insert(key.clone());
         self.set_room_unread(key, payload.notification_count, selected.as_ref());
         LiveFrameAction::None
     }
@@ -135,6 +147,7 @@ impl App {
     fn prune_room_caches(&mut self, key: &RoomKey) {
         self.rooms.display_names.remove(key);
         self.rooms.unread.remove(key);
+        self.rooms.unread_touched.remove(key);
         self.room_titles.remove(key);
         self.messages.events.remove(key);
         self.messages.history_cursors.remove(key);
@@ -350,7 +363,7 @@ impl App {
         for (account_id, root) in unseen_thread_roots {
             self.spawn_live_thread_root_fetch(account_id, &key, &root);
         }
-        self.rooms.unread.remove(&key);
+        self.clear_room_unread(&key);
         self.thread_panel = None;
         self.spawn_relations_refresh(room);
         if !self.is_mid_command() {

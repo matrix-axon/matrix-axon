@@ -36,11 +36,28 @@ A room on screen counts as read.
 A count above zero for the selected room, from a load or a frame, is ignored; the receipt the TUI sends for the shown message brings the server value to zero.
 This matches the existing rule that opening a room clears its badge.
 
+### A room-list response does not overwrite a newer badge
+
+The room list is fetched asynchronously, so a response can carry a count from before a frame that has since arrived.
+The server will not resend a frame until the count changes again, so overwriting would leave a stale badge in place.
+Rooms whose badge a frame or a local clear set since the last apply are left alone by the next apply, which then clears that record.
+The guard covers one apply: a second response that was already in flight from before the touch is not protected, and heals on the next refresh or count change.
+That window is narrow and is accepted.
+
+### Large counts are capped when drawn
+
+The room list draws counts above 99 as `(99+)`.
+The stored value is the server's count; only the rendering is capped, so a long-unread room does not crowd its title in a narrow pane.
+
 ### Sibling-device reads clear immediately
 
 A `read_markers` entry from another device that moves the room's marker forward clears that badge without waiting for the server count to follow, which is what the web does.
 A stale or repeated marker, such as one from a device that was offline, clears nothing.
 The echo of this device's own writes is already suppressed upstream, and the marker is no longer compared with any timestamp.
+
+This clear is unconditional, like the web's.
+If the marker frame lands after a count frame for messages newer than the marker, it clears a badge that was still correct.
+That is a known gap shared by both clients, tracked in [issue 697](https://github.com/matrix-axon/matrix-axon/issues/697).
 
 ### What is removed
 

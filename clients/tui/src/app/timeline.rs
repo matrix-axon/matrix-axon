@@ -385,7 +385,7 @@ impl App {
             if should_select {
                 self.messages.selection = Some(event_id);
             }
-            self.rooms.unread.remove(&key);
+            self.clear_room_unread(&key);
             LiveFrameAction::None
         } else {
             // The room badge is the server's count (ADR 0115) and arrives as an

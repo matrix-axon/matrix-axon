@@ -377,6 +377,42 @@ fn room_refresh_seeds_badges_from_notification_count() {
 }
 
 #[test]
+fn room_refresh_does_not_overwrite_a_badge_a_frame_set_meanwhile() {
+    // The first listed room is the one a refresh selects, and a selected room
+    // is never badged, so the subject is the second.
+    let open = room("!open:example.com", None, Some("Open"));
+    let stale = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    let mut app = app_with_rooms(vec![open.clone(), stale.clone()]);
+
+    // A frame lands while an older list fetch is still in flight.
+    app.handle_live_frame(counts_frame("!room:example.com", 4));
+    // The older response carries the count from before the frame.
+    app.apply_room_refresh(vec![open.clone(), stale.clone()]);
+    assert_eq!(app.rooms.unread.get(&room_key()).copied(), Some(4));
+
+    // The guard covers one apply; the next fetch is authoritative again.
+    let mut fresh = stale;
+    fresh.notification_count = 6;
+    app.apply_room_refresh(vec![open, fresh]);
+    assert_eq!(app.rooms.unread.get(&room_key()).copied(), Some(6));
+}
+
+#[test]
+fn room_refresh_does_not_bring_back_a_locally_cleared_badge() {
+    let open = room("!open:example.com", None, Some("Open"));
+    let mut listed = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    listed.notification_count = 5;
+    let mut app = app_with_rooms(vec![open.clone(), listed.clone()]);
+    app.apply_room_refresh(vec![open.clone(), listed.clone()]);
+    assert_eq!(app.rooms.unread.get(&room_key()).copied(), Some(5));
+
+    // The user read the room; a response fetched before that still says 5.
+    app.clear_room_unread(&room_key());
+    app.apply_room_refresh(vec![open, listed]);
+    assert_eq!(app.rooms.unread.get(&room_key()), None);
+}
+
+#[test]
 pub(crate) fn find_room_matches_incomplete_alias_localpart() {
     let app = app_with_rooms(vec![room(
         "!abc:example.com",

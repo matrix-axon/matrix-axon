@@ -440,7 +440,7 @@ impl App {
             // from a device that was offline says nothing new, so it clears
             // nothing.
             if self.apply_marker(key.clone(), marker) {
-                self.rooms.unread.remove(&key);
+                self.clear_room_unread(&key);
             }
         }
         LiveFrameAction::None
