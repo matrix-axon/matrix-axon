@@ -158,13 +158,15 @@ jobs:
 
       # Name the build for the commit, not the tree. vite.config.ts appends
       # `-dirty` to the build id when `git status` is non-empty for clients/web,
-      # and the sync above edits package.json in this checkout, which can leave
-      # the tree reporting as modified (seen on the Windows runner), so the
-      # build would ship as `<hash>-dirty`. The override
-      # is the one vite.config.ts already honours. Exported to later steps
-      # through $GITHUB_ENV; same pin as `.github/actions/tauri-build`.
+      # and the sync above edits package.json in this checkout. That left the
+      # tree reporting ` M package.json` on the Windows desktop runner; this
+      # job does not run there, but it runs the same sync, so it gets the same
+      # pin rather than depending on the runner's git behaving. The override is
+      # the one vite.config.ts already honours; a value the job already set is
+      # kept. Exported to later steps through $GITHUB_ENV, in step with
+      # `.github/actions/tauri-build` (keep the `--short=12` format identical).
       - name: Pin the build id to the commit
-        run: echo "VITE_AXON_WEB_VERSION=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+        run: echo "VITE_AXON_WEB_VERSION=${VITE_AXON_WEB_VERSION:-$(git rev-parse --short=12 HEAD)}" >> "$GITHUB_ENV"
 
       # `generate_context!()` embeds `../dist` at compile time, so the frontend
       # has to exist before the crate will compile, including for clippy.
