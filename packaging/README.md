@@ -58,7 +58,7 @@ An upgrade from a release whose server had no web client prints a shorter form o
 ### Reverse proxies
 
 `packaging/proxy/` holds a site file each for Caddy, nginx and Apache.
-The packages install them to `/usr/share/doc/axon-server/examples/`, and `cross-build.yml` adds them to every server zip so the Homebrew formula can install them too.
+The packages install them to `/usr/share/doc/axon-server/examples/`, and `cross-build.yml` adds them to the macOS and Linux server zips so the Homebrew formula can install them too.
 Each proxies every path to `127.0.0.1:8080`, so the web client and the API stay on one origin, and each starts with the commands that enable it.
 
 The postinstall script looks for `tailscale`, `caddy`, `nginx`, and `apache2` or `httpd`, and prints the commands for the ones it finds.

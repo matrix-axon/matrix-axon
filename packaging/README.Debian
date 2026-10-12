@@ -93,9 +93,8 @@ and the API stay on one address. That matters: the web client only
 talks to the address it was loaded from.
 
 The install output lists the commands for whichever of these it found
-on the machine. To see that list again:
-
-  sudo dpkg-reconfigure axon-server      (Debian, Ubuntu)
+on the machine, once. They are not printed again on an upgrade or a
+reconfigure; the same commands are at the top of each site file.
 
 Running commands
 ----------------

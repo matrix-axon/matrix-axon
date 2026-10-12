@@ -297,10 +297,76 @@ mark_web_notice_shown() {
 	: >"$WEB_NOTICE_STAMP" 2>/dev/null || true
 }
 
+# server_setting <key>: the value of <key> in the [server] table of the
+# config, without quotes or a trailing comment. Empty when it is not set.
+server_setting() {
+	[ -f "$CONFIG" ] || return 0
+	awk -v key="$1" '
+		/^[[:space:]]*\[/ {
+			in_server = ($0 ~ /^[[:space:]]*\[server\][[:space:]]*(#.*)?$/)
+			next
+		}
+		in_server && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
+			sub(/^[^=]*=[[:space:]]*/, "")
+			sub(/[[:space:]]*(#.*)?$/, "")
+			gsub(/^["\047]|["\047]$/, "")
+			print
+			exit
+		}' "$CONFIG"
+}
+
+# unit_env <NAME>: an Environment= value from the unit or a drop-in, which
+# outranks the config file. Empty when unset or when there is no systemd.
+unit_env() {
+	is_systemd || return 0
+	systemctl show -p Environment --value axon-server 2>/dev/null |
+		tr ' ' '\n' | sed -n "s/^$1=//p" | tail -n 1
+}
+
+# effective <key> <ENV NAME> <default>: what the service will use.
+effective() {
+	value=$(unit_env "$2")
+	[ -n "$value" ] || value=$(server_setting "$1")
+	[ -n "$value" ] || value=$3
+	echo "$value"
+}
+
 # True when the operator has already switched the web client off.
 web_client_disabled() {
-	[ -f "$CONFIG" ] || return 1
-	grep -Eq '^[[:space:]]*web_client[[:space:]]*=[[:space:]]*false' "$CONFIG"
+	[ "$(effective web_client AXON_SERVER__WEB_CLIENT true)" = false ]
+}
+
+# Sets WEB_PORT, WEB_URL (an address to open on this machine) and WEB_HOST
+# (empty when the server listens on loopback only, else the address it listens
+# on). An operator may have widened `host` long before the server had a web
+# client; telling them it is local-only would be false.
+web_client_address() {
+	WEB_PORT=$(effective port AXON_SERVER__PORT 8080)
+	host=$(effective host AXON_SERVER__HOST 127.0.0.1)
+	WEB_HOST=
+	WEB_URL="http://127.0.0.1:$WEB_PORT/"
+	case $host in
+	127.* | localhost) ;;
+	::1) WEB_URL="http://[::1]:$WEB_PORT/" ;;
+	0.0.0.0) WEB_HOST=$host ;;
+	::) WEB_HOST=$host WEB_URL="http://[::1]:$WEB_PORT/" ;;
+	*:*) WEB_HOST=$host WEB_URL="http://[$host]:$WEB_PORT/" ;;
+	*) WEB_HOST=$host WEB_URL="http://$host:$WEB_PORT/" ;;
+	esac
+}
+
+# Who can reach the web client, in the operator's terms.
+print_web_client_reach() {
+	if [ -z "$WEB_HOST" ]; then
+		echo "It is reachable from this machine only. Always open it as 127.0.0.1,"
+		echo "not localhost: a browser treats those as two sites and keeps a"
+		echo "separate sign-in for each."
+	else
+		echo "This server is configured to listen on $WEB_HOST, not only on this"
+		echo "machine, and the web client shares the API's address and port: it is"
+		echo "reachable from other machines wherever the API is. Always open it by"
+		echo "the same address: a browser keeps a separate sign-in for each."
+	fi
 }
 
 print_web_client_off() {
@@ -324,7 +390,7 @@ print_remote_access() {
 	if command -v tailscale >/dev/null 2>&1; then
 		found=1
 		echo "  Tailscale (private to your tailnet, no certificate to manage):"
-		echo "    sudo tailscale serve --bg http://127.0.0.1:8080"
+		echo "    sudo tailscale serve --bg http://127.0.0.1:$WEB_PORT"
 		echo
 	fi
 	if command -v caddy >/dev/null 2>&1; then
@@ -332,7 +398,10 @@ print_remote_access() {
 		echo "  Caddy (obtains the certificate itself):"
 		echo "    sudo cp $DOC/examples/axon-server.caddy /etc/caddy/"
 		echo "    sudoedit /etc/caddy/axon-server.caddy    # set your hostname"
-		echo "    echo 'import axon-server.caddy' | sudo tee -a /etc/caddy/Caddyfile"
+		echo "    grep -qxF 'import axon-server.caddy' /etc/caddy/Caddyfile ||"
+		# printf, not echo: dash's echo would expand the \n meant for the operator.
+		printf '%s\n' "      printf '\\nimport axon-server.caddy\\n' | sudo tee -a /etc/caddy/Caddyfile >/dev/null"
+		echo "    sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile"
 		echo "    sudo systemctl reload caddy"
 		echo
 	fi
@@ -371,21 +440,25 @@ print_remote_access() {
 		echo "  Any of them will do; ready-made site files are in $DOC/examples/."
 		echo
 	fi
+	if [ "$WEB_PORT" != 8080 ]; then
+		echo "The site files assume port 8080; this server uses $WEB_PORT, so change"
+		echo "that in the file you copy."
+		echo
+	fi
 	echo "Each step is explained in $DOC/README.Debian."
 }
 
 print_first_run_help() {
 	cursor=$1
+	web_client_address
 	echo
 	echo "axon-server is installed and the service is enabled."
 	echo
 	echo "The web client is on, at:"
 	echo
-	echo "  http://127.0.0.1:8080/"
+	echo "  $WEB_URL"
 	echo
-	echo "It is reachable from this machine only. Always open it as 127.0.0.1,"
-	echo "not localhost: a browser treats those as two sites and keeps a"
-	echo "separate sign-in for each."
+	print_web_client_reach
 	echo
 	url=
 	if is_systemd; then
@@ -407,7 +480,7 @@ print_first_run_help() {
 	echo "With no browser on this machine, forward the port from one that has"
 	echo "one, then open the same URL there:"
 	echo
-	echo "  ssh -L 8080:127.0.0.1:8080 <this machine>"
+	echo "  ssh -L $WEB_PORT:127.0.0.1:$WEB_PORT <this machine>"
 	echo
 	echo "For every later sign-in (another browser, a phone, axon-tui), mint a"
 	echo "token and paste it into the client:"
@@ -425,14 +498,15 @@ print_web_client_upgrade_notice() {
 	[ -e "$WEB_NOTICE_STAMP" ] && return 0
 	mark_web_notice_shown
 	web_client_disabled && return 0
+	web_client_address
 	echo
 	echo "New in this release: axon-server now serves the web client itself, at"
 	echo
-	echo "  http://127.0.0.1:8080/"
+	echo "  $WEB_URL"
 	echo
-	echo "It is reachable from this machine only, and it needs a token to sign"
-	echo "in. Always open it as 127.0.0.1, not localhost: a browser keeps a"
-	echo "separate sign-in for each. Mint a token with:"
+	print_web_client_reach
+	echo
+	echo "It needs a token to sign in. Mint one with:"
 	echo
 	echo "  sudo -u axon axon-server token issue --label browser"
 	echo

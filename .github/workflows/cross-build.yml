@@ -238,14 +238,15 @@ jobs:
         shell: pwsh
         run: |
           $BIN = "target/${{ matrix.target }}/${{ env.PROFILE_DIR }}"
-          # Reverse-proxy site files for the web client ride with every server
-          # zip. Compress-Archive expands the wildcard itself.
+          # No reverse-proxy site files here, unlike the macOS and Linux zips:
+          # the Homebrew formula is what reads them, and their instructions
+          # are Linux paths.
           Compress-Archive -Force -DestinationPath target/axon-tui-windows.zip `
             -Path "$BIN/axon-tui.exe", build/THIRDPARTY, LICENSE.md
           Compress-Archive -Force -DestinationPath target/axon-server-windows.zip `
-            -Path "$BIN/axon-server.exe", build/THIRDPARTY, LICENSE.md, packaging/proxy/axon-server.*
+            -Path "$BIN/axon-server.exe", build/THIRDPARTY, LICENSE.md
           Compress-Archive -Force -DestinationPath target/axon-windows.zip `
-            -Path "$BIN/axon-server.exe", "$BIN/axon-tui.exe", build/THIRDPARTY, LICENSE.md, packaging/proxy/axon-server.*
+            -Path "$BIN/axon-server.exe", "$BIN/axon-tui.exe", build/THIRDPARTY, LICENSE.md
 
       - name: Upload axon-tui artifact
         uses: actions/upload-artifact@v7

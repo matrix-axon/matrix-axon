@@ -164,7 +164,7 @@ The packages help with that and stop short of doing it.
 
 - The packages ship ready-to-use site files for Caddy, nginx and Apache under the package's documentation directory, each a complete same-origin proxy for this server including the `/v1/ws` upgrade and no request-body cap.
 - At install, the package detects which of those servers is present and prints the commands that enable the matching file, and the `tailscale serve` line the Homebrew caveats already carry.
-- The site files also ride in every server release zip, and the Homebrew formula installs them under its documentation directory.
+- The site files also ride in the macOS and Linux server release zips, and the Homebrew formula installs them under its documentation directory.
 - The package never writes into another server's configuration directory and never reloads another service.
 
 The reasons it stops there:

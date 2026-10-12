@@ -8,7 +8,8 @@
 #
 #   sudo cp /usr/share/doc/axon-server/examples/axon-server.caddy /etc/caddy/
 #   sudoedit /etc/caddy/axon-server.caddy          # replace axon.example.com
-#   echo 'import axon-server.caddy' | sudo tee -a /etc/caddy/Caddyfile
+#   grep -qxF 'import axon-server.caddy' /etc/caddy/Caddyfile ||
+#     printf '\nimport axon-server.caddy\n' | sudo tee -a /etc/caddy/Caddyfile >/dev/null
 #   sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 #   sudo systemctl reload caddy
 #
