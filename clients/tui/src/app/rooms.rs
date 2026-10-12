@@ -368,7 +368,10 @@ impl App {
         self.spawn_relations_refresh(room);
         if !self.is_mid_command() {
             self.status = Status::Info(if has_more {
-                format!("showing {} (older history available later)", room.title())
+                format!(
+                    "showing {} — PageUp or /top for older history",
+                    room.title()
+                )
             } else {
                 format!("showing {}", room.title())
             });

@@ -828,3 +828,40 @@ fn account_data_changed_patches_is_direct() {
     assert!(app.rooms.rooms[0].is_direct);
     assert!(is_likely_dm(&app.rooms.rooms[0]));
 }
+
+#[test]
+fn opening_a_room_with_older_history_names_the_ways_to_reach_it() {
+    let room = room("!busy:example.com", None, Some("Busy"));
+    let mut app = app_with_rooms(vec![room.clone()]);
+    app.rooms.selected = Some(0);
+
+    // A full page carries a cursor: the status must say how to page back.
+    app.apply_timeline_page(
+        &room,
+        TimelinePage {
+            events: Vec::new(),
+            next_cursor: Some("older".to_owned()),
+        },
+        None,
+    );
+    let text = app.status.text(false);
+    assert!(text.contains("PageUp"), "status: {text}");
+    assert!(text.contains("/top"), "status: {text}");
+
+    // A short page is the whole room: no hint, and no cursor kept.
+    app.apply_timeline_page(
+        &room,
+        TimelinePage {
+            events: Vec::new(),
+            next_cursor: None,
+        },
+        None,
+    );
+    let text = app.status.text(false);
+    assert!(!text.contains("PageUp"), "status: {text}");
+    assert!(!text.contains("/top"), "status: {text}");
+    assert!(!app
+        .messages
+        .history_cursors
+        .contains_key(&RoomKey::from(&room)));
+}
