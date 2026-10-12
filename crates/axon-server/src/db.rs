@@ -12,7 +12,7 @@ use axon_store::{embedded_migrations, EmbeddedMigration};
 use sqlx_core::query::query;
 use sqlx_core::query_as::query_as;
 use sqlx_core::query_scalar::query_scalar;
-use sqlx_postgres::{PgPool, PgPoolOptions};
+use sqlx_postgres::PgPool;
 
 use crate::cli::DbAction;
 
@@ -23,11 +23,8 @@ pub async fn run(action: DbAction, config: &Config) -> anyhow::Result<()> {
 }
 
 async fn repair_migrations(config: &Config, apply: bool) -> anyhow::Result<()> {
-    let pool = PgPoolOptions::new()
-        .max_connections(config.database.max_connections.max(1))
-        .connect(&config.database.url)
-        .await
-        .context("connecting to database without running migrations")?;
+    let pool = axon_store::Store::migration_pool(&config.database)
+        .context("configuring database repair deadlines")?;
 
     ensure_migrations_table(&pool).await?;
 

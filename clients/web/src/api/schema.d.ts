@@ -3067,6 +3067,8 @@ export interface components {
             free_bytes: number;
             /** @description Whether backfill is currently paused because free disk space is low. */
             paused: boolean;
+            /** @description False when progress could not be read; an empty list then means unavailable. */
+            progress_available: boolean;
             /**
              * @description Why backfill is paused, or `null` when it is not paused. Currently only
              *     `"low_disk"`.
