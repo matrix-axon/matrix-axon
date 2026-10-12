@@ -262,6 +262,7 @@ this table is the orientation copy.
   The feature is off by default, and the gate's `--all-features` builds on a checkout with no bundle only warn and embed nothing, so cargo and the pre-push gate need no Node.
   `AXON_WEB_DIST` is the explicit form: it must be an absolute path, and a directory there with no `index.html` fails the build, which is what release pipelines rely on.
   Every job that ships a server binary builds with `--features embed-web` and `AXON_WEB_DIST` set (the `web-bundle` action exports it), then runs `scripts/assert-web-embedded.sh` on the result; a new release lane must do the same.
+  The one exception is the Docker server image (the root `Dockerfile`, `publish-images.yml`), which stays without the web client because the stack's `web` container serves it; do not change that outside #687.
   `scripts/embed-web-smoke.sh` boots such a binary against a throwaway database and checks the bundle over HTTP, in CI (`embed-web.yml`) or by hand.
   The cache rules in `crates/axon-api/src/web.rs` and in `deploy/web/Caddyfile` are the same rules (ADR 0087): change one, change the other.
 - **Spelling:** U.S. English throughout all source files, comments, and docs (e.g. "initialize" not "initialise", "honors" not "honours").

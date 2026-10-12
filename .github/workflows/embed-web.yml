@@ -13,9 +13,9 @@ on:
       - main
   pull_request:
     paths:
-      - "crates/axon-api/**"
-      - "crates/axon-server/**"
-      - "crates/axon-core/src/config.rs"
+      # Every crate: the smoke boots the whole server, so a change to the
+      # store, sync, search or media crates can break it too.
+      - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
       # Not all of clients/web: a server build per web PR is too much, and
@@ -30,6 +30,7 @@ on:
       - ".github/workflows/embed-web.yml"
       - "scripts/assert-web-embedded.sh"
       - "scripts/embed-web-smoke.sh"
+      - "scripts/expect-tests.sh"
 
 permissions:
   contents: read
@@ -82,17 +83,18 @@ jobs:
         uses: ./.github/actions/web-bundle
 
       - name: Unit tests with the bundle embedded
-        run: cargo test -p axon-api --features embed-web --lib 'web::'
+        run: scripts/expect-tests.sh 10 cargo test -p axon-api --features embed-web --lib 'web::'
 
       # `#[ignore = "requires Postgres"]`, so no other job runs them. Each
-      # filter is its own invocation because cargo test takes one.
+      # filter is its own invocation because cargo test takes one, and each
+      # states how many tests it must run: a filter that matches nothing exits 0.
       - name: Router tests with the bundle embedded
         env:
           DATABASE_URL: postgres://axon:axon@localhost:5432/axon
         run: |
-          cargo test -p axon-api --features embed-web --test http web_client_ -- --ignored --test-threads=1
-          cargo test -p axon-api --features embed-web --test http browser_fallback -- --ignored
-          cargo test -p axon-api --features embed-web --test http unknown_v1_paths -- --ignored
+          scripts/expect-tests.sh 2 cargo test -p axon-api --features embed-web --test http web_client_ -- --ignored --test-threads=1
+          scripts/expect-tests.sh 1 cargo test -p axon-api --features embed-web --test http browser_fallback -- --ignored
+          scripts/expect-tests.sh 1 cargo test -p axon-api --features embed-web --test http unknown_v1_paths -- --ignored
 
       - name: Build axon-server with the bundle embedded
         run: cargo build -p axon-server --bin axon-server --features embed-web

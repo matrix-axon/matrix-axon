@@ -4,6 +4,8 @@
 #
 # Usage: DATABASE_URL=postgres://... scripts/embed-web-smoke.sh <binary> <dist>
 #
+# The server listens on 127.0.0.1:18473; set AXON_SMOKE_PORT for another port.
+#
 # DATABASE_URL must name an empty throwaway database the role can create
 # pgcrypto in. Sync state, search index and media go to a temp directory, and
 # the server gets an explicit --config, so no platform or system config file
@@ -20,9 +22,18 @@ if [ "$#" -ne 2 ] || [ -z "${DATABASE_URL:-}" ]; then
 	exit 2
 fi
 bin=$1
-dist=$2
-port=${PORT:-18473}
+# No trailing slash: URL paths below are file paths with this prefix removed.
+dist=${2%/}
+# Not PORT, which dev shells and hosting wrappers set for their own reasons.
+port=${AXON_SMOKE_PORT:-18473}
 base="http://127.0.0.1:$port"
+
+# Something already listening would pass the readiness check below in the
+# server's place, and every later check would be against the wrong process.
+if curl -sS -o /dev/null --max-time 2 "$base/healthz" 2>/dev/null; then
+	echo "something already answers on $base; set AXON_SMOKE_PORT to a free port" >&2
+	exit 1
+fi
 
 work=$(mktemp -d)
 server_pid=
@@ -92,7 +103,8 @@ status() {
 grep -q "web client served at" "$work/server.log" || fail "the startup log does not say the web client is served"
 
 # Every file in the bundle: served as itself, with a real type and the right
-# cache rule for where it lives.
+# cache rule for where it lives. Dotfiles and symlinks are not part of it: the
+# build script leaves them out (crates/axon-api/build.rs).
 files=0
 while IFS= read -r file; do
 	path=${file#"$dist"}
@@ -108,7 +120,7 @@ while IFS= read -r file; do
 	/assets/*) [ "$cache" = "public, max-age=31536000, immutable" ] || fail "$path cache-control is '$cache'" ;;
 	*) [ "$cache" = "no-cache" ] || fail "$path cache-control is '$cache'" ;;
 	esac
-done < <(find "$dist" -type f | sort)
+done < <(find "$dist" -mindepth 1 -name '.*' -prune -o -type f -print | sort)
 [ "$files" -gt 0 ] || fail "no files under $dist"
 
 # Client-side routes fall back to index.html.
