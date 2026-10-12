@@ -37,8 +37,8 @@ Two facts constrain how the rest is built.
 Axon requests a device authorization from the homeserver's advertised authorization server, hands the client a verification link and a short user code, and polls the token endpoint until the user has signed in and approved in a browser of their choosing.
 That browser may be on any device; it never needs to reach Axon.
 
-The method is offered only when the validated discovery metadata contains a `device_authorization_endpoint`.
-Without one the flow terminates with the existing stable `unsupported` classification, exactly as QR acquisition does, and password login, QR login, token import, recovery, and SAS are unaffected.
+The method is offered only when the validated discovery metadata contains a `device_authorization_endpoint` and, where the metadata lists `grant_types_supported`, that list includes `urn:ietf:params:oauth:grant-type:device_code`.
+Otherwise the flow terminates with the existing stable `unsupported` classification, exactly as QR acquisition does, and password login, QR login, token import, recovery, and SAS are unaffected.
 
 MAS remains the tested reference implementation and is not a server type in Axon's model.
 The identity provider behind the authorization server is invisible to Axon by construction.
@@ -53,13 +53,47 @@ The sequence is:
 1. Build the staging SDK client and run `MatrixOAuthRegistrationManager::prepare`, unchanged.
 2. Generate a fresh Matrix device ID locally.
 3. `POST` the device authorization endpoint with the client ID and the same two scopes the pinned SDK requests for QR login: full client-server API access and the scope that binds the token to that device ID.
-4. Publish the verification link and user code on the flow and enter `waiting_for_authorization`.
-5. Poll the token endpoint with the device code, honouring RFC 8628: the server's `interval` (default five seconds), `slow_down` (add five seconds), `authorization_pending` (keep polling), `access_denied`, and `expired_token`.
-6. Require a refresh token in the token response, as QR acquisition already does.
+4. Validate the returned verification link and user code (below), publish them on the flow, and enter `waiting_for_authorization`.
+5. Poll the token endpoint with the device code as RFC 8628 prescribes (below).
+6. On a token response, enter `finalizing`, which clears the link and user code, and require a refresh token, as QR acquisition already does.
 7. Assemble an `OAuthSession` from the client ID, the expected user ID, the generated device ID, and the tokens, and install it with the public `client.oauth().restore_session(...)`.
 8. Continue into the existing `whoami` identity validation and finalization.
 
-The poll deadline is the earlier of the server's `expires_in` and the engine's existing flow TTL, and the poll is cancellable at every wait.
+**One device ID.**
+The staging client built in step 1 is unauthenticated and has no crypto identity; the SDK creates the device's Olm machine only when `restore_session` activates the client in step 7.
+The device ID passed there is the one generated in step 2 and named in the step 3 scope, and no other device ID is ever derived.
+
+**Validating what the authorization server returns.**
+The verification link and user code are remote input that a client will render, so they are validated before they are published, and a response that fails validation ends the flow as `upstream` without exposing either value.
+Both `verification_uri` and `verification_uri_complete` must parse as absolute URLs with a host, use `https` (or `http` only to a loopback host when the homeserver itself is plain-HTTP loopback), carry no userinfo, and fit a fixed length bound.
+This is the rule `validate_qr_url` already applies to the grant flow's verification link, plus the length bound.
+The user code must fit a short fixed length bound and contain only printable ASCII.
+The link is not required to share an origin with the issuer, because RFC 8628 does not require it and the discovery metadata's own endpoints are not held to that either; clients show the link's host so the user can see where it leads.
+
+**Polling.**
+The first poll waits one interval after the device authorization response.
+The interval is the server's `interval`, five seconds when absent, clamped to between one and sixty seconds so a hostile value can neither hammer the endpoint nor stall the flow.
+Token-endpoint responses map as follows:
+
+| Response                                                         | Action                                                              |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `authorization_pending`                                          | keep polling                                                        |
+| `slow_down`                                                      | add five seconds to the interval, up to the sixty-second clamp      |
+| `access_denied`                                                  | fail as `authorization_denied`                                      |
+| `expired_token`                                                  | fail as `authorization_expired`                                     |
+| transport error, timeout, `429`, or `5xx`                        | retry at the current interval; five consecutive fail as `upstream`  |
+| any other OAuth error (`invalid_grant`, `server_error`, unknown) | fail as `upstream`                                                  |
+| success without a refresh token                                  | fail as `upstream`, after best-effort revocation                    |
+
+Only the stable classification and HTTP status are logged, never the error description.
+
+**Deadline.**
+The ten-minute flow TTL of ADR 0097 was sized for scanning a QR code and is too short for a sign-in that may pass through an upstream identity provider and a second factor on another device.
+The browser presentation therefore has its own thirty-minute TTL, measured from flow creation.
+The poll deadline is the earlier of that TTL and the server's `expires_in`, and reaching either while waiting fails as `authorization_expired`.
+`timeout` keeps its existing meaning of an individual request that did not answer.
+The QR presentations keep their ten-minute TTL.
+The poll is cancellable at every wait.
 
 If a later SDK release makes the grant public, the two requests can be replaced without changing the flow resource, storage, or clients.
 The scope strings are kept identical to the pinned SDK's so both acquisition methods present the same request to the authorization server, and are revisited together when the SDK moves to the stable names.
@@ -67,23 +101,46 @@ The scope strings are kept identical to the pinned SDK's so both acquisition met
 ### 3. Share the acquisition engine; add sibling routes
 
 Browser sign-in is a third presentation of the existing `MatrixOAuthAcquireEngine` rather than a second engine.
-It therefore inherits, without re-deciding them: one flow per expected Matrix user ID, the global concurrency and retention bounds, the overall TTL, the durable non-secret breadcrumb and boot reconciliation, single-owner terminal transitions, and best-effort revocation of a session that was minted but not adopted.
+It therefore inherits, without re-deciding them: the global concurrency and retention bounds, the durable non-secret breadcrumb and boot reconciliation, single-owner terminal transitions, and best-effort revocation of a session that was minted but not adopted.
 
-The existing routes say `qr` in their path, so the method gets sibling routes that return the same flow DTO:
+The bound of one flow per expected Matrix user ID spans all three presentations.
+Creating a browser flow while a QR flow for the same user is live, or the reverse, returns the existing `409` conflict, so two flows can never finalize against each other.
+
+The existing routes say `qr` in their path, so the method gets sibling routes:
 
 - `POST /v1/accounts/login/browser` — create a flow for an expected Matrix user ID.
 - `GET /v1/accounts/login/browser/{flow_id}` — read the current stage and its presentation-safe data.
 - `DELETE /v1/accounts/login/browser/{flow_id}` — cancel idempotently.
 
 There is no input route: nothing is scanned and no check code exists.
-The flow uses a subset of the ADR 0097 stages — `starting`, `waiting_for_authorization`, `done`, `failed`, `cancelled` — and during `waiting_for_authorization` returns the verification link and the user code.
+There is no list route, and flows are not carried in WebSocket frames, as in ADR 0097.
+
+Each route family sees only its own flows.
+A browser flow's ID is `404` on every `/login/qr/{flow_id}` route, including `DELETE`, and a QR flow's ID is `404` on every `/login/browser/{flow_id}` route, so a client cannot drive or cancel a flow through the wrong surface.
+
+The browser routes return their own flow DTO rather than the QR one, with their own stage enum:
+
+- `starting`
+- `waiting_for_authorization`
+- `finalizing`
+- `done`
+- `failed`
+- `cancelled`
+
+`finalizing` covers everything after the token response: session installation, `whoami`, the wait for the lifecycle lock, and adoption.
+A separate DTO keeps that stage out of the published QR stage enum, which existing clients match exhaustively, and omits the QR-only fields.
+
+During `waiting_for_authorization`, and only then, the DTO carries the verification link and the user code.
 The link is the authorization server's `verification_uri_complete` when it supplies one, so the user does not have to type the code, and the bare `verification_uri` otherwise.
 
-Two failure codes are added to the stable set: `authorization_denied` when the user refuses at the authorization server, and `authorization_expired` when the device code lapses before approval.
+Two failure codes are added for the browser presentation: `authorization_denied` when the user refuses at the authorization server, and `authorization_expired` when the device code or the flow TTL lapses before approval.
 The remaining codes are reused as they are.
+The QR presentations do not start emitting the new codes; their responses are unchanged by this decision.
+`error_code` is an open string in the API, not an enum, and clients must present a code they do not recognize as a generic failure rather than reject the response.
 
 The change is additive to `/v1/`.
 The breadcrumb table's `presentation` check constraint gains the new value through a new forward-only migration; no published migration is edited.
+The store is PostgreSQL, so the migration drops and re-adds the named check constraint in one transaction and does not rebuild the table.
 
 Homeserver resolution matches the QR display presentation: the server discovers it from the expected user ID's server name.
 
@@ -97,6 +154,7 @@ The user completes trust through the paths that already exist — recovery-key i
 Finalization keeps every other ADR 0097 step: `whoami` must return the expected user ID, the per-identity lifecycle lock is held, a concurrent active login or deletion wins and the new session is revoked, and the session and staged store are adopted atomically before activation.
 
 The trust check becomes a property of the acquisition method rather than of finalization as a whole, so the QR presentations keep failing closed.
+Finalization takes the requirement as an explicit enum argument with no default — cross-signed or none — rather than a boolean or an optional value, so no call site can weaken the QR path by omission.
 
 Clients must not describe a browser sign-in as verified, and should lead directly from a successful one into the recovery-key or verification step.
 
@@ -107,7 +165,14 @@ Three properties bound that:
 
 - The routes sit behind Axon's ordinary bearer-token gate, so only the Axon owner can create a flow or read its link.
 - The expected user ID is fixed when the flow is created, and a token belonging to any other Matrix user fails identity validation and is revoked.
-- The link and code are returned only while the flow is in `waiting_for_authorization` and are cleared on every stage transition.
+- The link and code are returned only while the flow is in `waiting_for_authorization`.
+  The flow leaves that stage for `finalizing` the moment a token response arrives, which clears both, so neither is readable during finalization or from any terminal flow.
+
+One risk remains and is accepted.
+The link is a bearer capability, and the expected-user check catches only a _different_ Matrix user.
+If the Axon owner passes the link to someone who can sign in as the same Matrix user, or it is read over their shoulder, that person can approve the device on the owner's behalf.
+The result is still a session for the expected account on the device ID Axon generated, held only by this Axon, so nothing is disclosed to the approver; what is lost is the owner's own act of consent.
+Clients should present the link as something to open, not something to share.
 
 As ADR 0097 already requires, the user code, any URL containing it, the device code, and all tokens never enter logs, errors, the flow breadcrumb, or retained artifacts.
 The device code never crosses `/v1/` at all.
@@ -124,8 +189,23 @@ Directly related documentation ships with each code PR.
 
 ### 7. Verification required before calling the feature complete
 
-Unit and contract tests cover: the device authorization request shape and scopes; every RFC 8628 poll outcome including `slow_down` and a missing `interval`; denial and expiry; a token response without a refresh token; oversized, non-JSON, and redirecting responses; non-HTTPS endpoints on an HTTPS homeserver; cancellation during the poll; the flow TTL; a Matrix user mismatch; a concurrent login, logout, or deletion; crash reconciliation; and that the link and user code appear only in `waiting_for_authorization` and nowhere in captured logs.
+Unit and contract tests cover:
+
+- the device authorization request shape and scopes, and that the staged store's device ID equals the one in the requested scope;
+- the capability gate, including an endpoint advertised without the grant type;
+- rejection of an unsafe verification link in either field (`javascript:`, `data:`, plain HTTP on an HTTPS homeserver, userinfo, over-long) and of an over-long or non-printable user code, with nothing published;
+- every row of the polling table, the wait before the first poll, a missing, zero, and oversized `interval`, repeated `slow_down` reaching the clamp, and the consecutive-failure budget;
+- the thirty-minute TTL and a shorter `expires_in`, both ending as `authorization_expired`, and that the QR TTL is unchanged;
+- oversized, non-JSON, and redirecting responses, and non-HTTPS endpoints on an HTTPS homeserver;
+- cancellation during the poll, a Matrix user mismatch, a concurrent login, logout, or deletion, and crash reconciliation;
+- that the link and user code are present in `waiting_for_authorization` and absent in `finalizing`, in every terminal stage, and from captured logs;
+- that a browser flow is `404` on the QR routes and a QR flow is `404` on the browser routes, for reads and for cancellation; and
+- that a second flow for the same expected user is a `409` across presentations.
+
 A regression test pins that the QR presentations still fail closed on an unverified device.
+
+The scope strings cannot be compared with the SDK's in a unit test, because the SDK's scope builder is private.
+Drift is caught instead by the real lane below, which runs both acquisition methods against the same authorization server, and by a line in the matrix-sdk upgrade checklist to re-read those two constants.
 
 The real Synapse plus MAS lane proves that a user who approves in a browser ends with an active, unverified account whose OAuth session refreshes after a restart beyond the test access-token lifetime, that a recovery key then verifies the device and decrypts history created before sign-in, that explicit rejection yields `authorization_denied`, and that the existing `unsupported` configuration still reports `unsupported`.
 
@@ -146,7 +226,7 @@ The device grant gives every client the same experience with no redirect at all.
 ### The legacy `m.login.sso` redirect
 
 It would also reach older homeservers that offer SSO without an OAuth authorization server, which nothing in this decision can.
-It is rejected here because on an OAuth-delegating homeserver it exists only as a compatibility layer the operator may disable, it yields a token with no refresh on a code path separate from ADR 0097, and it needs the same redirect handling as the authorization-code flow.
+It is rejected here because on an OAuth-delegating homeserver it exists only as a compatibility layer the operator may disable, it produces a legacy Matrix session on a code path separate from ADR 0097's OAuth session handling, and it needs the same redirect handling as the authorization-code flow.
 Support for those older homeservers would be a separate feature with its own decision.
 
 ### Driving the grant through the SDK's QR login
@@ -170,7 +250,7 @@ Rejected because sign-in and trust are separate steps everywhere else in the API
 
 - A user on an OAuth-delegating homeserver can add their account with only a browser and no second Matrix client.
 - Axon owns two small pieces of OAuth protocol code that the SDK also contains privately, and must keep their scopes in step with the SDK until it exposes them.
-- The acquisition engine serves three presentations, and the trust gate that was unconditional in ADR 0097 becomes a per-method property that tests must pin.
+- The acquisition engine serves three presentations, and the trust gate that was unconditional in ADR 0097 becomes a per-method property that tests must pin; ADR 0097 carries an amendment note saying so.
 - Accounts acquired this way start unverified, so the clients' verification prompts become part of the sign-in experience for these users rather than an occasional follow-up.
 - Homeservers that offer SSO without an OAuth authorization server remain unsupported except by token import.
 - Steering a user to this method before they try a password is a separate change ([issue 691](https://github.com/matrix-axon/matrix-axon/issues/691)).
