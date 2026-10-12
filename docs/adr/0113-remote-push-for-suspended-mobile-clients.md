@@ -136,18 +136,44 @@ Two limits are deliberate, so a later change does not have to break the route:
   Adding it is an extension of the eligibility list, not a new policy engine.
 
 The count can be held back while the SDK has unmatched receipts (ADR 0070).
-The router keeps one slot per account and room.
-The slot may hold only an eligible message whose push actions include notify.
-The ingest path passes those actions through.
+The count is published by the unread-count path, from room-info updates and the five-minute resweep, not by event ingest.
+A sliding-sync response can carry the message and the new `notification_count` together, and the unread path can publish that count before ingest stores the message.
+The router correlates the two by that response, not by which task finishes first.
+
+The router remembers the last `notification_count` it has observed for each account and room.
+Before it applies a response, it snapshots that count as `before`.
+The response's count is the count the response carries, or `before` when it carries none.
+
+#604 reads `push_actions` on the live ingest path and passes them to the router.
+The SDK sets them on a timeline event only when push context was supplied, and leaves them `None` otherwise.
+The live path supplies that context.
+Backfill and re-decryption keep passing `None`, and they still do not wake.
 The router does not evaluate the ruleset a second time.
-An eligible message whose actions do not notify clears the slot and does not fill it.
+`Some` actions that include notify mark the message as notifying.
+`Some` actions that do not include notify leave the slot unchanged and do not send.
+`None` means the actions are unknown, not that the rules declined to notify.
+On `None`, the router applies the other eligibility rules and the count correlation below, and it may wake that message.
+It logs a warning once per process when a live event arrives with `None`.
+A live path that never supplies context is a bug in #604, not the steady state.
+
+The router keeps one slot per account and room.
+The slot may hold only an eligible notifying message.
+A newer notifying message replaces the one already slotted.
+A non-notifying eligible message does not fill the slot and does not clear it.
 An event that is not an eligible message, including an invite, a call, a receipt, and a UTD, neither fills the slot, nor clears it, nor releases it.
 
-The slot records the `notification_count` observed when it was filled.
-It is released only when that count later rises and the slot is still occupied.
-A rise that happened before the fill does not release it.
+When the response contains a notifying eligible message and its count is greater than `before`, the rise belongs to this response.
+The router sends that message immediately.
+If the response contains several, it sends the latest.
+The slot is not left waiting.
+When the response's count equals `before`, the rise has not been published yet.
+The message fills the slot, or replaces the message already there, and the slot records `before`.
+A later response whose count is greater than that recorded value releases the slot.
+A response whose count is greater than `before`, and which contains no notifying eligible message, sends nothing.
+The router advances its observed count to that response's count, and the rise is consumed.
+A message in a later response does not inherit it.
 A rise with an empty slot sends nothing.
-The released payload is the slotted message, which the rules already marked as notifying.
+The sent payload is the notifying message.
 The slot is dropped, unsent, at the unread resweep interval (five minutes).
 The slot is not durable.
 A crash loses at most the wakes in flight, and the next notifying message wakes the device.
@@ -231,11 +257,21 @@ There is no separate rejection code.
 - `disclosure`: `activity`, `sender_and_room`, or `preview`.
   Required, so an omitted field cannot land on `preview`.
 - `environment`: `sandbox` or `production`, required for `apns` and omitted for `fcm`.
+  `apns` with a missing, empty, or other value is `400` with code `push_environment_invalid`.
+  `fcm` with `environment` present is the same `400`.
+  A re-PUT may change `environment`.
+  The same session updates it, and a different session sets it while re-homing the row.
+  A send to the wrong host can return `BadDeviceToken` and delete the row, so the client is allowed to correct the value before the next send.
 
 `PUT` is an upsert on `(provider, token)`.
 A repeat from the same session updates `disclosure`, `environment`, and the access token that last wrote the row, and returns the same row.
 A repeat from a different session re-homes the row onto that session.
 That is a sign-out followed by a sign-in on the same phone.
+Two sessions that are both live and register the same device token are not that case.
+The row belongs to the last writer.
+The other session's `DELETE` is a `204` with no effect, and revoking the owner drops the row for both.
+v1 accepts that.
+#693 tracks a later design for two live owners of one device token.
 The response is the row's `id`, `provider`, `disclosure`, and `environment`.
 It does not echo the token.
 
@@ -255,6 +291,15 @@ A non-expiring credential, whether issued by the CLI or by the management API, u
 Those credentials do not rotate.
 The session id is not `oauth_identity_id` and not `client_id`.
 Both of those are shared by every device of the same person.
+
+Rows that already exist have no shared id.
+An access token and its refresh token are not linked (ADR 0054), so the migration cannot pair them.
+It sets `tokens.session_id` to that row's own `id`, and `oauth_refresh_tokens.session_id` to that row's own `id`.
+Each legacy credential is its own session.
+The next refresh of a legacy refresh token copies that refresh token's session id onto the new access token and the new refresh token.
+The pre-migration access token keeps its own session id until it expires.
+`NULL` is not a session.
+The migration does not leave `session_id` null, a registration insert requires one, and the reaper skips a null rather than grouping every null row into one session.
 
 The row lives in `push_registrations`:
 
@@ -293,8 +338,13 @@ For a non-expiring credential, that is the transaction that sets `revoked_at`.
 For an OAuth session, that is the transaction that revokes the refresh token and the access tokens of that session.
 Boot deletes a registration whose session has no unrevoked unexpired access token and no unrevoked unexpired refresh token.
 An expired access token with a live refresh token does not reap the row.
-The foreign key uses `ON DELETE CASCADE` for a token row that is actually removed.
-Revocation itself is not a delete, which is why the transaction and the boot pass both exist.
+The same check runs before each provider send.
+A session that fails it drops that wake, deletes the registration, and does not call the provider.
+A process that stays up for weeks therefore stops pushing once the last credential for that session has expired, without waiting for the next boot.
+Neither `session_id` nor `token_id` has a foreign key.
+There is no session table for `session_id` to reference.
+A cascade from `token_id` to `tokens.id` would delete a live registration when that one access-token row is removed, which is the loss the session id exists to avoid.
+Revocation itself is not a delete of the registration's authorizing row, which is why the revoke transaction, the send-time check, and the boot pass all exist.
 
 `GET /v1/status` gains a `push` object, `{ "apns": bool, "fcm": bool }`, meaning that provider's key material is configured.
 It does not mean a device is registered.
@@ -401,6 +451,10 @@ The registrations stay.
   Each of those ids is written into the handled-id set #606 keeps.
   That set survives a cold start and stays capped at 2000.
   The reconnect slack must not post those ids again.
+- An alert the user dismissed while the process was suspended is not in that set.
+  No app code ran to record the swipe, and v1 does not add a background mode or a notification service extension to observe it.
+  The local notifier may toast that event again inside the reconnect slack.
+  v1 accepts this.
 - An alert that coalesce replaced is no longer delivered, so its event id was never shown.
   The local notifier may still toast it when it falls inside the reconnect slack.
   That is the first time the user sees it.
@@ -481,3 +535,16 @@ Per-device divergence from that shared ruleset is a later additive field, not pa
 Push is best-effort.
 The next eligible message is the retry.
 A queue is a second crash-recovery problem, and a 429 retry inside the sync loop is the failure mode the bounds exist to avoid.
+
+**Release a slotted message only when the count rises after the fill.**
+The unread path can publish the rise before ingest fills the slot, and one sliding-sync response can carry both.
+Waiting for a strictly later rise drops that wake at the five-minute resweep.
+The router correlates the message and the rise on the response, and a rise already in the response sends immediately.
+
+**Clear the slot when a non-notifying message arrives.**
+The slot never holds a message the rules did not mark as notifying, so the clear does not prevent a suppressed push.
+It does drop a notifying message whose count rise is still held.
+
+**Cascade `push_registrations.token_id` when `tokens` loses a row.**
+That access token is the last writer, not the owner.
+Removing that one row would delete a registration the session still owns.
