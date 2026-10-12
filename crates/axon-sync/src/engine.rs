@@ -695,10 +695,10 @@ pub(crate) fn parse_raw_json(
 
 /// SDK membership is updated before event dispatch; it remains available after
 /// PostgreSQL room metadata is purged. Rejoined rooms accept their new events.
-fn skip_left_room_ingestion(ctx: &PersistContext, room: &Room) -> bool {
-    let skip = ctx.purge_on_leave && room.state() == RoomState::Left;
+fn skip_departed_room_ingestion(ctx: &PersistContext, room: &Room) -> bool {
+    let skip = ctx.purge_on_leave && matches!(room.state(), RoomState::Left | RoomState::Banned);
     if skip {
-        tracing::debug!(account_id = %ctx.account_id, room_id = %room.room_id(), "skipping ingestion for purged left room");
+        tracing::debug!(account_id = %ctx.account_id, room_id = %room.room_id(), "skipping ingestion for purged departed room");
     }
     skip
 }
@@ -722,9 +722,9 @@ async fn persist_timeline_event(
     Ctx(ctx): Ctx<PersistContext>,
 ) {
     // The SDK updates room membership before dispatching a sync batch. Do not
-    // retain its leave/trailing events after the leave handler captures a purge
+    // retain its departure/trailing events after the state handler captures a purge
     // watermark, even if the worker has already finished deleting room state.
-    if skip_left_room_ingestion(&ctx, &room) {
+    if skip_departed_room_ingestion(&ctx, &room) {
         return;
     }
     let Some(raw_val) = parse_raw_json(raw.get(), ctx.account_id, "timeline event") else {
@@ -761,7 +761,7 @@ pub(crate) async fn persist_backfilled_event(
     room: &Room,
     tev: &matrix_sdk::deserialized_responses::TimelineEvent,
 ) {
-    if skip_left_room_ingestion(ctx, room) {
+    if skip_departed_room_ingestion(ctx, room) {
         return;
     }
     let raw = tev.raw();
@@ -1061,10 +1061,10 @@ async fn persist_room_state_event(
         origin_ts,
         content,
     };
-    // The local leave still writes its durable obligation. Other state from
-    // the same left-room batch must not recreate metadata after cleanup.
+    // The local leave or ban still writes its durable obligation. Other state from
+    // the same departed-room batch must not recreate metadata after cleanup.
     if !upsert.is_local_departure(Some(ctx.local_user_id.as_ref()))
-        && skip_left_room_ingestion(&ctx, &room)
+        && skip_departed_room_ingestion(&ctx, &room)
     {
         return;
     }
@@ -1108,7 +1108,7 @@ async fn persist_room_account_data(
     raw: RawEvent,
     Ctx(ctx): Ctx<PersistContext>,
 ) {
-    if skip_left_room_ingestion(&ctx, &room) {
+    if skip_departed_room_ingestion(&ctx, &room) {
         return;
     }
     let room_id = room.room_id().as_str().to_owned();
@@ -4012,17 +4012,19 @@ mod purge_ingestion_tests {
     use matrix_sdk::{SessionMeta, SessionTokens};
     use serde_json::json;
 
-    /// Real Sliding Sync updates the SDK room to Left before dispatch. Force
+    /// Real Sliding Sync updates the SDK room to Left or Banned before dispatch. Force
     /// both Axon handler orders, and run cleanup between them in the state-first
     /// case, so the test also catches late writes after all metadata is gone.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn sliding_sync_leave_purges_both_handler_orders() {
+    async fn sliding_sync_departure_purges_both_handler_orders() {
         let store = Store::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
             .await
             .unwrap();
-        for purge_on_leave in [false, true] {
-            for state_first in [false, true] {
+        for departure in ["leave", "ban"] {
+            for (purge_on_leave, state_first) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
                 let user = format!("@purge-{}:localhost", Uuid::new_v4());
                 let account = store
                     .upsert_account(&user, "http://localhost")
@@ -4050,8 +4052,8 @@ mod purge_ingestion_tests {
                             "timeline":[member("join","$join",1),message("$old",2)]
                         }}}),
                         json!({"pos":"2","lists":{},"rooms":{(room_id.as_str()):{
-                            "required_state":[member("leave","$leave",3)],
-                            "timeline":[member("leave","$leave",3),message("$trailing",4)]
+                            "required_state":[member(departure,"$departure",3)],
+                            "timeline":[member(departure,"$departure",3),message("$trailing",4)]
                         }}}),
                     ])));
                 let app = Router::new().fallback(move |request: Request| {
@@ -4124,10 +4126,14 @@ mod purge_ingestion_tests {
                         let state: Option<AnySyncStateEvent> = value
                             .get("state_key")
                             .and_then(|_| serde_json::from_value(value.clone()).ok());
-                        if value["content"]["membership"] == "leave" {
+                        if value["content"]["membership"] == departure {
                             assert_eq!(
                                 room.state(),
-                                RoomState::Left,
+                                if departure == "ban" {
+                                    RoomState::Banned
+                                } else {
+                                    RoomState::Left
+                                },
                                 "SDK applies membership before dispatch"
                             );
                         }
@@ -4140,7 +4146,8 @@ mod purge_ingestion_tests {
                                     Ctx(ctx.clone()),
                                 )
                                 .await;
-                                if value["content"]["membership"] == "leave" && ctx.purge_on_leave {
+                                if value["content"]["membership"] == departure && ctx.purge_on_leave
+                                {
                                     ctx.store.retry_room_purges().await.unwrap();
                                 }
                             }
@@ -4198,7 +4205,7 @@ mod purge_ingestion_tests {
                     .unwrap()
                     .unwrap();
                 store.retry_room_purges().await.unwrap();
-                for event in ["$old", "$leave", "$trailing"] {
+                for event in ["$old", "$departure", "$trailing"] {
                     assert_eq!(
                         store
                             .get_event(account.account_id, event)

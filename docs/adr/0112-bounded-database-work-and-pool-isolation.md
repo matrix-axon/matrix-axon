@@ -38,11 +38,12 @@ A new leave advances a pending watermark; an ordinary retry must not advance it 
 Local leave state and its purge intent commit in the same transaction; an enqueue failure rolls back the state write, and stale membership events cannot advance the intent.
 A supervised worker wakes on durable enqueue, retries every 30 seconds, and rotates pages past persistent failures.
 The SDK applies room membership before dispatching a Sliding Sync batch.
-When purge-on-leave is enabled, ingestion skips timeline, backfill, other state, and room account-data for SDK-left rooms; the local leave state still records the durable purge intent.
+When purge-on-leave is enabled, ingestion skips timeline, backfill, other state, and room account-data for SDK-left or SDK-banned rooms; the local departure state still records the durable purge intent.
 This excludes leave/trailing timeline events even when they dispatch after the watermark or after cleanup has removed PostgreSQL membership.
 An engine regression drives real Sliding Sync responses through both Axon handler orders, including cleanup between the state and timeline callbacks.
 Later rejoin events and membership preserve current room metadata.
-Cleanup clears the backfill cursor before deleting history even if a rejoin preserves the room, so a completed cursor cannot permanently hide the purged history.
+Each room-event deletion batch clears the backfill cursor in the same SQL transaction when it deletes history, even if a rejoin preserves the room.
+A completed cursor cannot permanently hide purged history, and retries that delete no history preserve the current cursor.
 An unused event sequence captures watermark zero rather than its initial unallocated value one.
 Account deletion retains its existing `deleting` breadcrumb until all final metadata is removed, and replaying an account-purge sentinel is safe.
 

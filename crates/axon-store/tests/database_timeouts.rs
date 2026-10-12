@@ -115,6 +115,10 @@ async fn bulk_jobs_use_one_separate_connection_and_a_longer_deadline() {
     let account = test_account(&store, "bulk-deadline").await;
     let room = format!("!bulk-{}:localhost", Uuid::new_v4());
     let event_id = insert_message(&store, account, &room, 1, "fixture").await;
+    store
+        .save_room_backfill(account, &room, Some("original"), true, 1)
+        .await
+        .unwrap();
     let token = store
         .issue_token("bulk responsiveness fixture")
         .await
@@ -169,7 +173,21 @@ async fn bulk_jobs_use_one_separate_connection_and_a_longer_deadline() {
     blocker.rollback().await.unwrap();
     // Timeout rolled the atomic purge back, and the maintenance pool recovers.
     assert!(store.get_event(account, &event_id).await.unwrap().is_some());
+    assert!(
+        store
+            .get_room_backfill(account, &room)
+            .await
+            .unwrap()
+            .unwrap()
+            .complete,
+        "failed deletion must not reset the cursor"
+    );
     store.purge_room(account, &room).await.expect("retry purge");
+    assert!(store
+        .get_room_backfill(account, &room)
+        .await
+        .unwrap()
+        .is_none());
     store.revoke_token(token.id).await.unwrap();
     cleanup_account(&pool, account).await;
 }
@@ -928,5 +946,73 @@ async fn hot_reads_have_configured_concurrency() {
         .unwrap();
     drop(first_read);
     let pool = raw_pool().await;
+    cleanup_account(&pool, account).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn no_op_purge_retries_preserve_rejoined_backfill_cursor() {
+    let store = bounded_store(DatabaseTimeouts::default()).await;
+    let pool = raw_pool().await;
+    let account = test_account(&store, "cursor-retry").await;
+    let room = "!cursor-retry:localhost";
+    let old = insert_message(&store, account, room, 1, "old history").await;
+    store
+        .save_room_backfill(account, room, Some("old"), true, 1)
+        .await
+        .unwrap();
+    // Fail final intent removal after the event batch has committed.
+    let function = format!("fail_completion_{}", account.simple());
+    sqlx_core::query::query(&format!(
+        "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+         IF OLD.account_id = '{account}'::uuid THEN RAISE EXCEPTION 'completion fixture'; \
+         END IF; RETURN OLD; END $$"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx_core::query::query(&format!(
+        "CREATE TRIGGER {function} BEFORE DELETE ON room_purge_intents FOR EACH ROW EXECUTE FUNCTION {function}()"
+    )).execute(&pool).await.unwrap();
+    assert!(store.purge_room(account, room).await.is_err());
+    assert!(store.get_event(account, &old).await.unwrap().is_none());
+    assert!(store
+        .get_room_backfill(account, room)
+        .await
+        .unwrap()
+        .is_none());
+    let fresh = insert_message(&store, account, room, 2, "rejoined history").await;
+    store
+        .save_room_backfill(account, room, Some("new"), true, 7)
+        .await
+        .unwrap();
+    // A persistently failing retry has no old events left to delete.
+    assert!(store.purge_room(account, room).await.is_err());
+    let cursor = store
+        .get_room_backfill(account, room)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cursor.complete);
+    assert_eq!(cursor.oldest_seen_token.as_deref(), Some("new"));
+    assert_eq!(cursor.events_backfilled, 7);
+    sqlx_core::query::query(&format!("DROP TRIGGER {function} ON room_purge_intents"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx_core::query::query(&format!("DROP FUNCTION {function}()"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    store.purge_room(account, room).await.unwrap();
+    let cursor = store
+        .get_room_backfill(account, room)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cursor.complete);
+    assert_eq!(cursor.oldest_seen_token.as_deref(), Some("new"));
+    assert_eq!(cursor.events_backfilled, 7);
+    assert!(store.get_event(account, &fresh).await.unwrap().is_some());
     cleanup_account(&pool, account).await;
 }

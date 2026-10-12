@@ -606,6 +606,8 @@ impl Store {
     /// row locks and pool slots between attempts; every partial deletion carries
     /// an atomic index obligation. Account teardown enqueues its purge sentinel;
     /// room cleanup enqueues deleted event IDs so a later rejoin is preserved.
+    /// Each room batch also atomically invalidates its backfill cursor if it
+    /// deletes history; a no-op retry preserves the current cursor.
     pub(crate) async fn delete_event_batches(
         &self,
         account_id: Uuid,
@@ -623,6 +625,9 @@ impl Store {
                  ), obligation AS ( \
                     INSERT INTO search_outbox (account_id, event_id) \
                     SELECT DISTINCT $1, CASE WHEN $2::text IS NULL THEN '' ELSE event_id END FROM deleted \
+                 ), reset_backfill AS ( \
+                    DELETE FROM room_backfill WHERE account_id = $1 AND room_id = $2 \
+                    AND EXISTS (SELECT 1 FROM deleted) \
                  ) SELECT count(*) FROM deleted",
             )
             .bind(account_id)

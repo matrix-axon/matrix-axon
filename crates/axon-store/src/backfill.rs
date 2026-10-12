@@ -210,9 +210,6 @@ impl Store {
     pub async fn purge_room(&self, account_id: Uuid, room_id: &str) -> Result<(), StoreError> {
         let through_event_id =
             Self::room_purge_watermark(account_id, room_id, false, &self.pool).await?;
-        // Clear before deleting history, even if a rejoin preserves metadata.
-        // A crash or a delayed retry must not leave a completed cursor over a hole.
-        self.delete_room_backfill(account_id, room_id).await?;
         self.delete_event_batches(account_id, Some(room_id), Some(through_event_id))
             .await?;
         self.delete_state_batches(account_id, Some(room_id), Some(through_event_id))
@@ -318,9 +315,9 @@ mod purge_watermark_tests {
             .await
             .unwrap();
         let mut tx = store.pool().begin().await.unwrap();
-        // RESTART is transactional, unlike setval: rollback restores the shared
-        // sequence even when an assertion fails and drops the transaction.
-        sqlx_core::query::query("ALTER SEQUENCE events_id_seq RESTART WITH 1")
+        // A temporary relation shadows the production sequence only on this
+        // transaction's connection; other tests can keep allocating event IDs.
+        sqlx_core::query::query("CREATE TEMP SEQUENCE events_id_seq START WITH 1")
             .execute(&mut *tx)
             .await
             .unwrap();
