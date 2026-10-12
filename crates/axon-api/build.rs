@@ -7,8 +7,9 @@
 //! With it, what a missing bundle means depends on who named the directory:
 //!
 //! - `AXON_WEB_DIST` is an explicit path, and an explicit path is a promise.
-//!   A directory there with no `index.html` fails the build. Release pipelines
-//!   set it, so an artifact cannot quietly ship without the web client.
+//!   It must be absolute, and a directory there with no `index.html` fails the
+//!   build. Release pipelines set it, so an artifact cannot quietly ship
+//!   without the web client.
 //! - The default, `clients/web/dist` in this checkout, may simply not have been
 //!   built. That is a warning and an empty table, because the lint gate and CI
 //!   run `cargo clippy --all-features` on checkouts that never ran `pnpm`.
@@ -57,6 +58,15 @@ fn dist_dir() -> Option<PathBuf> {
     let dir = match env::var_os("AXON_WEB_DIST") {
         Some(explicit) => {
             let dir = PathBuf::from(explicit);
+            // Cargo runs this script from the package directory, not from where
+            // `cargo` was invoked, so a relative path would name the wrong place.
+            assert!(
+                dir.is_absolute(),
+                "AXON_WEB_DIST must be an absolute path, and {} is not \
+                 (try AXON_WEB_DIST=\"$PWD/{}\").",
+                dir.display(),
+                dir.display()
+            );
             assert!(
                 dir.join("index.html").is_file(),
                 "AXON_WEB_DIST names {}, which has no index.html. \
@@ -87,15 +97,24 @@ fn dist_dir() -> Option<PathBuf> {
     )
 }
 
+/// Every regular file under `dir`. Dotfiles and symlinks are left out: a bundle
+/// has neither, and what is collected is served to anyone who asks, so a stray
+/// `.env` or a link out of the directory must not ride along.
 fn collect(dir: &Path, files: &mut Vec<PathBuf>) {
     let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
     for entry in entries {
-        let path = entry
-            .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
-            .path();
-        if path.is_dir() {
+        let entry = entry.unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
+        let path = entry.path();
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        // `DirEntry::file_type` does not follow symlinks.
+        let kind = entry
+            .file_type()
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        if kind.is_dir() {
             collect(&path, files);
-        } else {
+        } else if kind.is_file() {
             files.push(path);
         }
     }

@@ -87,17 +87,24 @@ async fn main() -> anyhow::Result<()> {
                 Ok(path) => path,
                 Err(_) => return Err(err).context("loading configuration"),
             };
-            let first_run = cli.command.is_none()
-                && cli.config.is_none()
-                && discovered.is_none()
-                && !config_env_present()
-                && std::io::stdin().is_terminal();
+            let unconfigured =
+                discovered.is_none() && cli.config.is_none() && !config_env_present();
+            // A packaged install seen by a user who cannot read its config is not
+            // an unconfigured machine: say whose config it is instead of offering
+            // to generate a second one, with a second `store_key`.
+            if unconfigured {
+                if let Some(path) = Config::unreadable_system_config() {
+                    return Err(axon_core::ConfigError::UnreadableSystemConfig(path))
+                        .context("loading configuration");
+                }
+            }
+            let first_run = cli.command.is_none() && unconfigured && std::io::stdin().is_terminal();
             if first_run {
                 match init::offer_on_first_run(cli.config.as_deref()).await? {
                     Some(config) => config,
                     None => return Err(err).context("loading configuration"),
                 }
-            } else if discovered.is_none() && cli.config.is_none() && !config_env_present() {
+            } else if unconfigured {
                 return Err(err).context(
                     "no configuration found. Run `axon init` to create one, or set the database \
                      URL via DATABASE_URL / AXON_DATABASE__URL. See axon.toml.example for the \
@@ -358,7 +365,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
     if web_client_served(&config) {
-        tracing::info!("web client served at http://{addr}/");
+        tracing::info!("web client served at {}", browsable_url(addr));
+        if !addr.ip().is_loopback() {
+            tracing::warn!(
+                "the web client shares the API's listener ({addr}), so it is reachable from \
+                 other machines; set server.web_client = false to serve the API only"
+            );
+        }
     } else if axon_api::web_client_embedded() {
         tracing::info!("web client disabled (server.web_client = false); serving the API only");
     } else {
@@ -466,6 +479,19 @@ async fn maybe_offer_web_bootstrap(
         generate_bootstrap_access_code(),
         bootstrap_web_client_url(config),
     )))
+}
+
+/// An address a browser on this machine can open for a listener on `addr`.
+/// `0.0.0.0` and `::` mean "every address" and are not ones to visit, so they
+/// become the loopback address of the same family.
+fn browsable_url(addr: std::net::SocketAddr) -> String {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    let ip = match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    format!("http://{}/", SocketAddr::new(ip, addr.port()))
 }
 
 /// Whether this process answers non-API paths with the embedded web client
@@ -764,6 +790,23 @@ async fn shutdown_signal() {
     }
 
     tracing::info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod browsable_url_tests {
+    use super::browsable_url;
+
+    #[test]
+    fn an_unspecified_bind_is_reported_as_loopback() {
+        for (bound, url) in [
+            ("127.0.0.1:8080", "http://127.0.0.1:8080/"),
+            ("0.0.0.0:8080", "http://127.0.0.1:8080/"),
+            ("[::]:8473", "http://[::1]:8473/"),
+            ("192.0.2.7:8080", "http://192.0.2.7:8080/"),
+        ] {
+            assert_eq!(browsable_url(bound.parse().expect("address")), url);
+        }
+    }
 }
 
 #[cfg(test)]

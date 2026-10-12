@@ -88,6 +88,8 @@ pub use uploads::{
 };
 pub use verification::{FlowStage, FlowSummary, VerificationService, VerifyError};
 pub use web::web_client_embedded;
+#[doc(hidden)]
+pub use web::Bundle as WebBundle;
 
 use axum::{
     body::Body,

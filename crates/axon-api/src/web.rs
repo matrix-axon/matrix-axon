@@ -54,14 +54,17 @@ struct File {
 }
 
 /// A built web client, keyed by URL path (`/index.html`, `/assets/app-1a2b.js`).
-pub(crate) struct Bundle {
+///
+/// Public, as `WebBundle`, only so a router test can build one from fixture
+/// files and hand it to `AppState::with_web_client_bundle`.
+pub struct Bundle {
     files: HashMap<&'static str, File>,
 }
 
 impl Bundle {
     /// `None` when there is no `/index.html`, which is the empty table of a
     /// build without the feature.
-    pub(crate) fn new(entries: &[(&'static str, &'static [u8])]) -> Option<Self> {
+    pub fn new(entries: &[(&'static str, &'static [u8])]) -> Option<Self> {
         let files: HashMap<_, _> = entries
             .iter()
             .map(|&(path, bytes)| {
@@ -142,21 +145,25 @@ fn plain(status: StatusCode, extra: impl FnOnce(&mut HeaderMap)) -> Response<Bod
     response
 }
 
-/// A strong validator from the content, so it survives a restart and agrees
-/// across instances of the same build.
+/// A validator from the content, so it survives a restart and agrees across
+/// instances of the same build. Weak, because the compression layer may send
+/// the same file under several content codings without touching this header,
+/// and a strong validator promises byte-for-byte identity (RFC 9110 § 8.8.1).
 fn etag(bytes: &[u8]) -> HeaderValue {
     let digest = Sha256::digest(bytes);
     let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
-    HeaderValue::from_str(&format!("\"{hex}\"")).expect("hex is a valid header value")
+    HeaderValue::from_str(&format!("W/\"{hex}\"")).expect("hex is a valid header value")
 }
 
 /// `If-None-Match` uses weak comparison (RFC 9110 § 13.1.2): a `W/` prefix is
-/// ignored, the header may list several validators, and `*` matches anything.
+/// ignored on both sides, the header may list several validators, and `*`
+/// matches anything.
 fn etag_matches(if_none_match: &str, etag: &HeaderValue) -> bool {
-    let etag = etag.to_str().unwrap_or_default();
+    let opaque = |tag: &str| tag.strip_prefix("W/").unwrap_or(tag).to_owned();
+    let etag = opaque(etag.to_str().unwrap_or_default());
     if_none_match.split(',').any(|candidate| {
         let candidate = candidate.trim();
-        candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
+        candidate == "*" || opaque(candidate) == etag
     })
 }
 
@@ -288,9 +295,11 @@ mod tests {
     #[tokio::test]
     async fn a_matching_validator_gets_a_304_with_no_body() {
         let etag = header(&get("/version.json"), "etag").to_owned();
+        // Weak: the compression layer serves the same file under several codings.
+        let strong = etag.strip_prefix("W/").expect("a weak validator");
         for sent in [
             etag.clone(),
-            format!("W/{etag}"),
+            strong.to_owned(),
             format!("\"other\", {etag}"),
             "*".to_owned(),
         ] {

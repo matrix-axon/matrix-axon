@@ -2057,6 +2057,8 @@ const WEB_FILES: &[(&str, &[u8])] = &[
     ("/index.html", WEB_INDEX),
     ("/assets/app-1a2b.js", WEB_CHUNK),
 ];
+static WEB_BUNDLE: std::sync::LazyLock<axon_api::WebBundle> =
+    std::sync::LazyLock::new(|| axon_api::WebBundle::new(WEB_FILES).expect("has an index.html"));
 
 /// ADR 0116 through the real router: the web client owns every path that is
 /// not a route, and no path that is one.
@@ -2064,7 +2066,7 @@ const WEB_FILES: &[(&str, &[u8])] = &[
 #[ignore = "requires Postgres"]
 async fn web_client_is_served_from_the_fallback_and_nowhere_else() {
     let store = store().await;
-    let app = axon_api::router(read_state(store).with_web_client_files(WEB_FILES));
+    let app = axon_api::router(read_state(store).with_web_client_bundle(&WEB_BUNDLE));
 
     for uri in ["/", "/rooms/abc", "/oauth/callback"] {
         let (status, headers, bytes) = send_request(&app, "GET", uri, None, None, None).await;
@@ -2108,7 +2110,7 @@ async fn web_client_is_served_from_the_fallback_and_nowhere_else() {
 async fn web_client_switched_off_serves_the_informational_page() {
     let store = store().await;
     let state = read_state(store)
-        .with_web_client_files(WEB_FILES)
+        .with_web_client_bundle(&WEB_BUNDLE)
         .with_web_client(false);
     let app = axon_api::router(state);
 

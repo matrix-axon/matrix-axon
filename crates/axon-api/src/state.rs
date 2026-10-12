@@ -565,14 +565,15 @@ impl AppState {
         self
     }
 
-    /// Serve `files` (URL path, bytes) as the web client instead of whatever
-    /// this binary carries. A test seam: the router's behavior with a bundle
-    /// should not depend on the `embed-web` feature or on a built
-    /// `clients/web/dist`. The table is leaked, which is fine for a test and
-    /// wrong anywhere else.
+    /// Serve `bundle` as the web client instead of whatever this binary
+    /// carries. A test seam: the router's behavior with a bundle should not
+    /// depend on the `embed-web` feature or on a built `clients/web/dist`.
+    /// The caller owns the bundle, so nothing is allocated or leaked here, and
+    /// [`with_web_client`](Self::with_web_client) still decides whether it is
+    /// served.
     #[doc(hidden)]
-    pub fn with_web_client_files(mut self, files: &[(&'static str, &'static [u8])]) -> Self {
-        self.web_client.bundle = crate::web::Bundle::new(files).map(|b| &*Box::leak(Box::new(b)));
+    pub fn with_web_client_bundle(mut self, bundle: &'static crate::web::Bundle) -> Self {
+        self.web_client.bundle = Some(bundle);
         self
     }
 

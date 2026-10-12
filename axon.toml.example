@@ -31,7 +31,9 @@ port = 8080
 bootstrap_web_allow_remote = false
 # Optional human-facing web-client URL. When set, the one-time bootstrap success
 # page links here after showing the freshly minted credential. Tokens are never
-# placed in this URL.
+# placed in this URL. Unset, a server that serves the web client itself (see
+# web_client below) uses "/"; set it when the web client is somewhere else, for
+# example behind a reverse proxy that publishes this server under a path prefix.
 # web_client_url = "https://axon.example.com/app"
 # The management API (/v1/management/*, ADR 0109) lets a signed-in client
 # administer this server without a shell on it: today, list the sign-in

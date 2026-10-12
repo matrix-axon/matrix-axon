@@ -1079,19 +1079,32 @@ impl Default for MediaConfig {
     }
 }
 
-/// The system-wide config file at `path`, if there is one.
-///
-/// "Permission denied" means the file, or the directory it is in, is there and
-/// closed to this user. Treating that as absent would tell an operator on a
-/// working install that no configuration exists and offer to generate a second
-/// one, with a second `store_key`.
+/// What discovery found at the system-wide config path.
 #[cfg(unix)]
-fn system_config(path: &Path) -> Result<Option<PathBuf>, ConfigError> {
-    let denied = |e: &std::io::Error| e.kind() == std::io::ErrorKind::PermissionDenied;
-    match std::fs::File::open(path) {
-        Ok(_) => Ok(Some(path.to_path_buf())),
-        Err(e) if denied(&e) => Err(ConfigError::UnreadableSystemConfig(path.to_path_buf())),
-        Err(_) => Ok(None),
+#[derive(Debug, PartialEq, Eq)]
+enum SystemConfig {
+    /// A file this user can read.
+    Found,
+    /// The file, or the directory it is in, is there and closed to this user.
+    Unreadable,
+    /// Nothing there, or something that is not a file.
+    Absent,
+}
+
+/// Probe the system-wide config file at `path`.
+///
+/// "Permission denied" is kept apart from "absent": the packages make the file
+/// `0600` in a `0750` directory, so to any other user a working install looks
+/// like this, and the caller must not mistake it for a machine with no
+/// configuration.
+#[cfg(unix)]
+fn system_config(path: &Path) -> SystemConfig {
+    match std::fs::File::open(path).and_then(|file| file.metadata()) {
+        // `open` succeeds on a directory too.
+        Ok(metadata) if metadata.is_file() => SystemConfig::Found,
+        Ok(_) => SystemConfig::Absent,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => SystemConfig::Unreadable,
+        Err(_) => SystemConfig::Absent,
     }
 }
 
@@ -1169,15 +1182,18 @@ impl Config {
     /// `AXON_CONFIG` if set, else `./axon.toml` if it exists, else
     /// `<platform config dir>/config.toml` if it exists, else the pre-rename
     /// `<legacy platform config dir>/axon.toml` if it exists, else on Unix the
-    /// system-wide `/etc/axon-server/config.toml` if it exists, else `None`.
+    /// system-wide `/etc/axon-server/config.toml` if this user can read it,
+    /// else `None`.
     ///
     /// The system-wide file is last because a user's own file should win over
-    /// the machine's. It is the one tier that can exist and be unreadable (the
-    /// packages make it `0600` in a `0750` directory, both owned by `axon`);
-    /// that is an error, not a `None`.
+    /// the machine's. It is the one tier that can exist and be unreadable; that
+    /// is a `None` here, so a process configured from the environment still
+    /// starts, and [`unreadable_system_config`](Config::unreadable_system_config)
+    /// tells the two apart for a caller about to report "no configuration".
     ///
-    /// A `None` here is what tells the binary "no configuration is in place" — the
-    /// signal `axon init` (ADR 0051) keys its first-run offer on.
+    /// A `None` here is what tells the binary "no configuration file is in
+    /// place" — the signal `axon init` (ADR 0051) keys its first-run offer on,
+    /// together with `unreadable_system_config`.
     pub fn discover_config_path() -> Result<Option<PathBuf>, ConfigError> {
         if let Ok(explicit) = std::env::var("AXON_CONFIG") {
             let path = PathBuf::from(explicit);
@@ -1197,9 +1213,27 @@ impl Config {
             return Ok(Some(path));
         }
         #[cfg(unix)]
-        return system_config(Path::new(SYSTEM_CONFIG_FILE));
-        #[cfg(not(unix))]
+        if system_config(Path::new(SYSTEM_CONFIG_FILE)) == SystemConfig::Found {
+            return Ok(Some(PathBuf::from(SYSTEM_CONFIG_FILE)));
+        }
         Ok(None)
+    }
+
+    /// The system-wide config file, when it exists and this user cannot read it
+    /// (a packaged install, seen by anyone but the service's user and root).
+    ///
+    /// Only meaningful after [`discover_config_path`](Config::discover_config_path)
+    /// returned `None`. A caller that would otherwise say "no configuration
+    /// found" or offer first-time setup reports
+    /// [`ConfigError::UnreadableSystemConfig`] instead, so an operator on a
+    /// working install is not led into generating a second config with a second
+    /// `store_key`. Always `None` off Unix.
+    pub fn unreadable_system_config() -> Option<PathBuf> {
+        #[cfg(unix)]
+        if system_config(Path::new(SYSTEM_CONFIG_FILE)) == SystemConfig::Unreadable {
+            return Some(PathBuf::from(SYSTEM_CONFIG_FILE));
+        }
+        None
     }
 
     /// The platform config-dir target for a generated config
@@ -1443,31 +1477,35 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn system_config_is_found_absent_or_refused() {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         figment::Jail::expect_with(|jail| {
             let dir = jail.directory().join("etc");
             let file = dir.join("config.toml");
-            assert_eq!(system_config(&file).expect("absent dir"), None);
+            assert_eq!(system_config(&file), SystemConfig::Absent, "absent dir");
 
             jail.create_dir("etc")?;
-            assert_eq!(system_config(&file).expect("absent file"), None);
+            assert_eq!(system_config(&file), SystemConfig::Absent, "absent file");
+
+            // `File::open` succeeds on a directory; it is still not a config.
+            jail.create_dir("etc/config.toml")?;
+            assert_eq!(system_config(&file), SystemConfig::Absent, "directory");
+            std::fs::remove_dir(&file).expect("rmdir");
 
             jail.create_file("etc/config.toml", "")?;
-            assert_eq!(system_config(&file).expect("readable"), Some(file.clone()));
+            assert_eq!(system_config(&file), SystemConfig::Found, "readable");
 
             // The packaged layout as another user sees it: a directory that
             // cannot be searched. Root ignores the mode bits, so there is
-            // nothing to assert when the suite runs as root.
+            // nothing to assert when the suite runs as root, which the owner
+            // of the file just created tells us.
+            let running_as_root = std::fs::metadata(&file).expect("metadata").uid() == 0;
             let closed = std::fs::Permissions::from_mode(0o000);
             std::fs::set_permissions(&dir, closed).expect("chmod");
             let refused = system_config(&file);
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-            if std::fs::read_dir("/root").is_err() {
-                assert!(
-                    matches!(refused, Err(ConfigError::UnreadableSystemConfig(ref p)) if *p == file),
-                    "{refused:?}"
-                );
+            if !running_as_root {
+                assert_eq!(refused, SystemConfig::Unreadable);
             }
             Ok(())
         });

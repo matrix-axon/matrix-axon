@@ -42,9 +42,10 @@ pub enum ConfigError {
     #[error("configuration file does not exist: {0}")]
     MissingConfigFile(PathBuf),
 
-    /// The system-wide config file is there, but this user may not read it.
-    /// Reported instead of "no configuration", which would offer first-time
-    /// setup on a machine that is already set up.
+    /// The system-wide config file is there, this user may not read it, and
+    /// nothing else configures the process. Reported instead of "no
+    /// configuration", which would offer first-time setup on a machine that is
+    /// already set up.
     #[error(
         "{0} exists but this user cannot read it. Run the command as the service's \
          user (for a packaged install: `sudo -u axon axon-server …`), or pass --config"

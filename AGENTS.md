@@ -249,7 +249,7 @@ this table is the orientation copy.
 - **Embedded web client (ADR 0116).**
   The `embed-web` cargo feature compiles `clients/web/dist` (or `AXON_WEB_DIST`) into `axon-server`, and the router's fallback serves it unless `[server] web_client` is off.
   The feature is off by default, and the gate's `--all-features` builds on a checkout with no bundle only warn and embed nothing, so cargo and the pre-push gate need no Node.
-  `AXON_WEB_DIST` is the explicit form: a directory there with no `index.html` fails the build, which is what release pipelines rely on.
+  `AXON_WEB_DIST` is the explicit form: it must be an absolute path, and a directory there with no `index.html` fails the build, which is what release pipelines rely on.
   The cache rules in `crates/axon-api/src/web.rs` and in `deploy/web/Caddyfile` are the same rules (ADR 0087): change one, change the other.
 - **Spelling:** U.S. English throughout all source files, comments, and docs (e.g. "initialize" not "initialise", "honors" not "honours").
   Note that the Matrix spec itself uses some Britishisms (`m.tag` `favourite`), in which case the standard should be used in code.
