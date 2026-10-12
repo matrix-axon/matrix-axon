@@ -23,7 +23,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Run an `oauth` subcommand against the configured database.
 pub async fn run(action: OauthAction, config: &Config) -> anyhow::Result<()> {
-    let store = Store::connect(&config.database.url, config.database.max_connections)
+    let store = Store::connect_for_cli(&config.database)
         .await
         .context("connecting to database")?;
 

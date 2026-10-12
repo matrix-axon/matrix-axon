@@ -624,7 +624,7 @@ impl Store {
             .bind(account_id)
             .bind(room_id)
             .bind(session_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.maintenance_pool)
             .await?;
         Ok(rows)
     }
@@ -643,7 +643,7 @@ impl Store {
         );
         let rows = sqlx_core::query_as::query_as::<Postgres, PendingUtd>(&sql)
             .bind(account_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.maintenance_pool)
             .await?;
         Ok(rows)
     }
@@ -663,7 +663,7 @@ impl Store {
         );
         let rows = sqlx_core::query_as::query_as::<Postgres, PendingUtd>(&sql)
             .bind(account_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.maintenance_pool)
             .await?;
         Ok(rows)
     }
@@ -802,7 +802,7 @@ impl Store {
         if let Some(cursor) = before {
             q = q.bind(cursor.origin_ts).bind(cursor.id);
         }
-        let rows = q.bind(limit).fetch_all(&self.pool).await?;
+        let rows = q.bind(limit).fetch_all(&self.read_pool).await?;
         Ok(rows)
     }
 
@@ -823,7 +823,7 @@ impl Store {
         let row = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
             .bind(event_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.read_pool)
             .await?;
         Ok(row)
     }
@@ -895,7 +895,7 @@ impl Store {
         let row = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
             .bind(event_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.read_pool)
             .await?;
         Ok(row)
     }
@@ -951,7 +951,7 @@ impl Store {
             .bind(account_id)
             .bind(room_id)
             .bind(&pinned_ids)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.read_pool)
             .await?;
 
         // `= ANY($3)` doesn't preserve array order, so reorder in Rust to match
@@ -1021,7 +1021,7 @@ impl Store {
         let rows = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
             .bind(event_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.read_pool)
             .await?;
         Ok(rows)
     }
@@ -1093,7 +1093,7 @@ impl Store {
         let rows = sqlx_core::query_as::query_as::<Postgres, ReactionTally>(&sql)
             .bind(account_id)
             .bind(event_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.read_pool)
             .await?;
         Ok(rows)
     }
@@ -1124,7 +1124,7 @@ impl Store {
         let rows = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
             .bind(event_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.read_pool)
             .await?;
         Ok(rows)
     }
@@ -1170,7 +1170,7 @@ impl Store {
         let rows = sqlx_core::query_as::query_as::<Postgres, ThreadSummary>(&sql)
             .bind(account_id)
             .bind(room_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.read_pool)
             .await?;
         Ok(rows)
     }
@@ -1207,7 +1207,7 @@ impl Store {
         if let Some(cursor) = before {
             q = q.bind(cursor.origin_ts).bind(cursor.id);
         }
-        let rows = q.bind(limit).fetch_all(&self.pool).await?;
+        let rows = q.bind(limit).fetch_all(&self.read_pool).await?;
         Ok(rows)
     }
 
@@ -1254,7 +1254,7 @@ impl Store {
         let row = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
             .bind(mxc_url)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.read_pool)
             .await?;
         Ok(row)
     }

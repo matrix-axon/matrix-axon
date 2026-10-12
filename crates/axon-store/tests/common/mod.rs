@@ -80,3 +80,81 @@ pub async fn cleanup_account(pool: &PgPool, account_id: Uuid) {
         .execute(pool)
         .await;
 }
+
+/// Removes a test trigger and its function on explicit cleanup or panic.
+/// Register before creating either object so partial setup is covered too.
+pub struct TriggerFixture {
+    function: String,
+    database_url: String,
+    removed: bool,
+}
+
+impl TriggerFixture {
+    pub fn new(function: &str) -> Self {
+        assert!(function.len() <= 63);
+        assert!(function
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_'));
+        Self {
+            function: function.to_owned(),
+            database_url: db_url(),
+            removed: false,
+        }
+    }
+
+    pub async fn remove(&mut self, pool: &PgPool) {
+        remove_trigger_function(pool, &self.function).await.unwrap();
+        self.removed = true;
+    }
+}
+
+async fn remove_trigger_function(pool: &PgPool, function: &str) -> Result<(), sqlx_core::Error> {
+    // Each function belongs to one fixture; CASCADE also removes its trigger.
+    sqlx_core::query::query(&format!("DROP FUNCTION IF EXISTS {function}() CASCADE"))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+impl Drop for TriggerFixture {
+    fn drop(&mut self) {
+        if self.removed {
+            return;
+        }
+        let database_url = self.database_url.clone();
+        let function = self.function.clone();
+        // Drop cannot await, and the test's runtime may already be unwinding.
+        // A separate thread/runtime owns a fresh connection and completes cleanup
+        // before the next test, bounded even if PostgreSQL is unavailable.
+        let cleaned = std::thread::Builder::new()
+            .name("sql-fixture-cleanup".into())
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return false;
+                };
+                let cleaned = runtime.block_on(async {
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        let pool = PgPoolOptions::new()
+                            .max_connections(1)
+                            .connect(&database_url)
+                            .await?;
+                        let result = remove_trigger_function(&pool, &function).await;
+                        pool.close().await;
+                        result
+                    })
+                    .await
+                    .is_ok_and(|result| result.is_ok())
+                });
+                runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+                cleaned
+            })
+            .is_ok_and(|thread| thread.join().unwrap_or(false));
+        if !cleaned {
+            // Connection errors may include credentials; keep diagnostics generic.
+            eprintln!("SQL test fixture cleanup failed");
+        }
+    }
+}

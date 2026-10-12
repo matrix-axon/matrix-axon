@@ -156,9 +156,84 @@ pub struct DatabaseConfig {
     /// Required — supplied via `DATABASE_URL`, `AXON_DATABASE__URL`, or the
     /// `[database].url` key in the TOML file.
     pub url: String,
-    /// Maximum size of the connection pool. Defaults to `5`.
+    /// Maximum size of the ordinary connection pool. Defaults to `5`.
+    /// Hot reads have another pool of this size; status, indexing, and maintenance
+    /// each reserve one additional connection.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    /// Finite SQL and pool deadlines, including slower bulk work.
+    #[serde(default)]
+    pub timeouts: DatabaseTimeouts,
+}
+
+/// PostgreSQL deadlines in seconds. Zero never disables a deadline.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DatabaseTimeouts {
+    /// Ordinary statements, including status and authentication. Default: 10.
+    pub statement_secs: u32,
+    /// Runtime lock waits. Migrations use their longer statement budget. Default: 3.
+    pub lock_secs: u32,
+    /// Waiting for a pool connection, including connecting. Default: 5.
+    pub acquire_secs: u32,
+    /// Bulk statements on the separate single-connection pool. Default: 120.
+    pub maintenance_statement_secs: u32,
+    /// Startup migrations and developer database repair. Default: 600.
+    pub migration_statement_secs: u32,
+    /// Idle sessions inside a transaction, including abandoned locks. Default: 30.
+    pub idle_transaction_secs: u32,
+}
+
+impl Default for DatabaseTimeouts {
+    fn default() -> Self {
+        Self {
+            statement_secs: 10,
+            lock_secs: 3,
+            acquire_secs: 5,
+            maintenance_statement_secs: 120,
+            migration_statement_secs: 600,
+            idle_transaction_secs: 30,
+        }
+    }
+}
+
+impl DatabaseConfig {
+    /// Validate before opening any connections, including for direct store users.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_connections == 0 {
+            return Err(ConfigError::Validation(
+                "database.max_connections must be positive".into(),
+            ));
+        }
+        for (name, seconds) in [
+            ("statement_secs", self.timeouts.statement_secs),
+            ("lock_secs", self.timeouts.lock_secs),
+            ("acquire_secs", self.timeouts.acquire_secs),
+            (
+                "maintenance_statement_secs",
+                self.timeouts.maintenance_statement_secs,
+            ),
+            (
+                "migration_statement_secs",
+                self.timeouts.migration_statement_secs,
+            ),
+            ("idle_transaction_secs", self.timeouts.idle_transaction_secs),
+        ] {
+            if !(1..=86_400).contains(&seconds) {
+                return Err(ConfigError::Validation(format!(
+                    "database.timeouts.{name} must be between 1 and 86400 seconds"
+                )));
+            }
+        }
+        if self.timeouts.maintenance_statement_secs < self.timeouts.statement_secs
+            || self.timeouts.migration_statement_secs < self.timeouts.maintenance_statement_secs
+        {
+            return Err(ConfigError::Validation(
+                "database statement deadlines must satisfy statement_secs <= maintenance_statement_secs <= migration_statement_secs".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Logging settings.
@@ -1091,6 +1166,8 @@ impl Config {
             .extract()
             .map_err(|err| ConfigError::Figment(Box::new(err)))?;
 
+        config.database.validate()?;
+
         if let Some(path) = path.filter(|p| path_is_legacy_platform_config(p)) {
             apply_legacy_dir_defaults(&figment, &mut config, true);
             config.legacy_config_path = Some(path.to_path_buf());
@@ -1188,6 +1265,83 @@ impl Config {
 // which is large; we cannot box it here.
 #[allow(clippy::result_large_err)]
 mod tests {
+    #[test]
+    fn database_deadlines_default_and_partial_override() {
+        let config: super::DatabaseConfig = figment::Figment::from(Toml::string(
+            "url = 'postgres://test@localhost/test'\n[timeouts]\nstatement_secs = 20",
+        ))
+        .extract()
+        .expect("database config");
+        config.validate().expect("valid deadlines");
+        assert_eq!(config.max_connections, 5);
+        assert_eq!(config.timeouts.statement_secs, 20);
+        assert_eq!(config.timeouts.lock_secs, 3);
+        assert_eq!(config.timeouts.acquire_secs, 5);
+        assert_eq!(config.timeouts.maintenance_statement_secs, 120);
+        assert_eq!(config.timeouts.migration_statement_secs, 600);
+        assert_eq!(config.timeouts.idle_transaction_secs, 30);
+    }
+
+    #[test]
+    fn database_deadlines_validate_file_and_environment_values() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("axon.toml", "[database]\nurl = 'postgres://test@localhost/test'\n[database.timeouts]\nstatement_secs = 0")?;
+            assert!(Config::load(Some(Path::new("axon.toml"))).is_err());
+            for (name, value) in [
+                ("STATEMENT_SECS", "20"),
+                ("LOCK_SECS", "4"),
+                ("ACQUIRE_SECS", "6"),
+                ("MAINTENANCE_STATEMENT_SECS", "240"),
+                ("MIGRATION_STATEMENT_SECS", "1200"),
+                ("IDLE_TRANSACTION_SECS", "40"),
+            ] {
+                jail.set_env(format!("AXON_DATABASE__TIMEOUTS__{name}"), value);
+            }
+            let config =
+                Config::load(Some(Path::new("axon.toml"))).expect("environment overrides file");
+            assert_eq!(config.database.timeouts.statement_secs, 20);
+            assert_eq!(config.database.timeouts.lock_secs, 4);
+            assert_eq!(config.database.timeouts.acquire_secs, 6);
+            assert_eq!(config.database.timeouts.maintenance_statement_secs, 240);
+            assert_eq!(config.database.timeouts.migration_statement_secs, 1200);
+            assert_eq!(config.database.timeouts.idle_transaction_secs, 40);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn database_deadlines_reject_disabled_overflowing_and_reversed_limits() {
+        for name in [
+            "statement_secs",
+            "lock_secs",
+            "acquire_secs",
+            "maintenance_statement_secs",
+            "migration_statement_secs",
+            "idle_transaction_secs",
+        ] {
+            for value in [0, 86_401, u32::MAX] {
+                let config: super::DatabaseConfig = figment::Figment::from(Toml::string(&format!(
+                    "url = 'postgres://test@localhost/test'\n[timeouts]\n{name} = {value}"
+                )))
+                .extract()
+                .expect("parsed database config");
+                assert!(config.validate().is_err(), "accepted {name} = {value}");
+            }
+        }
+        for values in [
+            "max_connections = 0",
+            "[timeouts]\nstatement_secs = 121",
+            "[timeouts]\nmigration_statement_secs = 119",
+        ] {
+            let config: super::DatabaseConfig = figment::Figment::from(Toml::string(&format!(
+                "url = 'postgres://test@localhost/test'\n{values}"
+            )))
+            .extract()
+            .expect("parsed database config");
+            assert!(config.validate().is_err());
+        }
+    }
+
     #[test]
     fn redaction_preserves_presence_without_formatting_contents() {
         struct NoDebug;
@@ -1407,6 +1561,7 @@ mod tests {
             database: DatabaseConfig {
                 url: "x".into(),
                 max_connections: 5,
+                timeouts: DatabaseTimeouts::default(),
             },
             log: LogConfig::default(),
             sync: SyncConfig::default(),

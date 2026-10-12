@@ -48,7 +48,27 @@ management_api = true
 # socket directory percent-encoded as the host (a blank host is rejected):
 # postgres://axon@%2Fvar%2Frun%2Fpostgresql/axon
 url = "postgres://axon:axon@127.0.0.1:5432/axon"
+# Ordinary auth/sync pool; hot reads have another pool of this size.
+# Status, indexing, and maintenance each reserve one more connection.
 max_connections = 5
+
+[database.timeouts]
+# Finite seconds, 1..86400; zero is rejected. Increase for slower machines.
+# Ordinary queries include authentication, status, and hot reads.
+# Status has its own connection, independently of concurrent timeline/media reads.
+statement_secs = 10
+# Runtime lock contention fails quickly; migrations/repair use their longer budget.
+lock_secs = 3
+# Pool acquisition includes establishing or replacing a connection.
+acquire_secs = 5
+# Account deletion, room purge/rebuild, search-index seeding, outbox pruning,
+# and stale refresh-token cleanup.
+# Maintenance and indexing each reserve a separate connection.
+maintenance_statement_secs = 120
+# Startup schema migrations and developer db repair run before normal serving.
+migration_statement_secs = 600
+# PostgreSQL terminates abandoned sessions holding an idle transaction.
+idle_transaction_secs = 30
 
 [log]
 # Full tracing EnvFilter directive. Overridden by RUST_LOG. The built-in default
