@@ -96,6 +96,9 @@ For a `v<semver>` tag build, `clients/web/package.json` is no longer the source 
 `.github/actions/tauri-build` rewrites that field from the tag in the runner's checkout before the build, so the tag is authoritative and the committed value only sets `release` for local builds, untagged CI, and `alpha-*`/`beta-*` tags. (Since superseded: the committed value now follows the workspace version, and every build syncs it from there. See ADR 0106.)
 The mechanism is unchanged — `release` still comes from that field, read the same way — only what writes it does.
 
+*(Amended by PR #675.)*
+The `-dirty` suffix is a development marker. The bundle build jobs (desktop, Android, iOS, macOS) set `VITE_AXON_WEB_VERSION` to the commit's `--short=12` hash before building, so a shipped build's `version` is the bare hash even when an earlier CI step, such as the `package.json` sync, leaves the checkout's tree reporting as modified (observed on the Windows desktop runner). A value a caller already set is kept.
+
 **The manifest is emitted by `generateBundle` — only by a real build.** In
 preview it is served out of `dist/` like any other asset. Synthesizing it at
 preview time would stamp a fresh `builtAt` that disagrees with the value baked

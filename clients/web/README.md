@@ -222,7 +222,9 @@ copied client they are seeing. It reads `release+version` — for example
 - **version** — the exact build id. By default the current git commit
   (`--short=12`), with `-dirty` appended when `clients/web` has uncommitted
   changes. This is what identifies a build; the release alone cannot, since
-  every build of a release shares it.
+  every build of a release shares it. CI bundle builds (desktop, Android, iOS
+  and macOS) set the override below to the bare commit hash, so a shipped
+  build never carries `-dirty`; the suffix is a development marker.
 
 For ad hoc test deploys, override the build id with:
 
