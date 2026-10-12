@@ -92,7 +92,7 @@ fn hidden_live_event_advances_neither_position() {
 }
 
 #[test]
-fn live_event_for_known_unselected_room_only_updates_unread() {
+fn live_event_for_known_unselected_room_does_not_touch_the_room_badge() {
     let mut app = app_with_rooms(vec![room(
         "!room:example.com",
         Some("#room:example.com"),
@@ -108,6 +108,7 @@ fn live_event_for_known_unselected_room_only_updates_unread() {
     let action = app.handle_live_frame(LiveFrame::Timeline(Box::new(event)));
 
     assert_eq!(action, LiveFrameAction::None);
+    // The room badge is the server's count (ADR 0115), not a live increment.
     assert_eq!(
         app.rooms
             .unread
@@ -116,7 +117,7 @@ fn live_event_for_known_unselected_room_only_updates_unread() {
                 room_id: "!room:example.com".to_owned(),
             })
             .copied(),
-        Some(1)
+        None
     );
 }
 
@@ -269,6 +270,146 @@ fn hidden_live_event_for_known_unselected_room_does_not_update_unread() {
         }),
         None
     );
+}
+
+fn room_key() -> RoomKey {
+    RoomKey {
+        account_id: Uuid::nil(),
+        room_id: "!room:example.com".to_owned(),
+    }
+}
+
+fn counts_frame(room_id: &str, notification_count: u64) -> LiveFrame {
+    LiveFrame::UnreadCounts {
+        account_id: Uuid::nil(),
+        payload: crate::api::UnreadCountsChangedDto {
+            room_id: room_id.to_owned(),
+            notification_count,
+            highlight_count: 0,
+        },
+    }
+}
+
+#[test]
+fn non_message_live_events_leave_the_room_badge_alone() {
+    let membership = event_with_state_key(
+        "$join:example.com",
+        "m.room.member",
+        Some("@bob:example.com"),
+        None,
+        serde_json::json!({ "membership": "join" }),
+    );
+    let mut edit = event_with_id(
+        "$edit:example.com",
+        "m.room.message",
+        Some("* hello"),
+        serde_json::json!({ "msgtype": "m.text", "body": "* hello" }),
+    );
+    edit.relates_to = Some(serde_json::json!({
+        "rel_type": "m.replace",
+        "event_id": "$known:example.com"
+    }));
+    for show_state_events in [false, true] {
+        for event in [&membership, &edit] {
+            let mut app = app_with_rooms(vec![room(
+                "!room:example.com",
+                Some("#room:example.com"),
+                Some("Room"),
+            )]);
+            app.display.show_state_events = show_state_events;
+            app.handle_live_frame(LiveFrame::Timeline(Box::new(event.clone())));
+            assert_eq!(app.rooms.unread.get(&room_key()), None);
+        }
+    }
+}
+
+#[test]
+fn unread_counts_frame_sets_and_clears_the_room_badge() {
+    let mut app = app_with_rooms(vec![room(
+        "!room:example.com",
+        Some("#room:example.com"),
+        Some("Room"),
+    )]);
+
+    let action = app.handle_live_frame(counts_frame("!room:example.com", 4));
+    assert_eq!(action, LiveFrameAction::None);
+    assert_eq!(app.rooms.unread.get(&room_key()).copied(), Some(4));
+
+    app.handle_live_frame(counts_frame("!room:example.com", 0));
+    assert_eq!(app.rooms.unread.get(&room_key()), None);
+}
+
+#[test]
+fn unread_counts_frame_for_unknown_room_requests_a_refresh() {
+    let mut app = app_with_rooms(vec![room(
+        "!room:example.com",
+        Some("#room:example.com"),
+        Some("Room"),
+    )]);
+    let action = app.handle_live_frame(counts_frame("!elsewhere:example.com", 2));
+    assert_eq!(action, LiveFrameAction::RefreshRooms);
+}
+
+#[test]
+fn unread_counts_frame_does_not_badge_the_selected_room() {
+    let mut app = app_with_rooms(vec![room(
+        "!room:example.com",
+        Some("#room:example.com"),
+        Some("Room"),
+    )]);
+    app.rooms.selected = Some(0);
+    app.handle_live_frame(counts_frame("!room:example.com", 3));
+    assert_eq!(app.rooms.unread.get(&room_key()), None);
+}
+
+#[test]
+fn room_refresh_seeds_badges_from_notification_count() {
+    let mut unread = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    unread.notification_count = 7;
+    let mut app = app_with_rooms(vec![unread.clone()]);
+    app.apply_room_refresh(vec![unread.clone()]);
+    assert_eq!(app.rooms.unread.get(&room_key()).copied(), Some(7));
+
+    // A later refresh with the count at zero clears it.
+    unread.notification_count = 0;
+    app.apply_room_refresh(vec![unread]);
+    assert_eq!(app.rooms.unread.get(&room_key()), None);
+}
+
+#[test]
+fn room_refresh_does_not_overwrite_a_badge_a_frame_set_meanwhile() {
+    // The first listed room is the one a refresh selects, and a selected room
+    // is never badged, so the subject is the second.
+    let open = room("!open:example.com", None, Some("Open"));
+    let stale = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    let mut app = app_with_rooms(vec![open.clone(), stale.clone()]);
+
+    // A frame lands while an older list fetch is still in flight.
+    app.handle_live_frame(counts_frame("!room:example.com", 4));
+    // The older response carries the count from before the frame.
+    app.apply_room_refresh(vec![open.clone(), stale.clone()]);
+    assert_eq!(app.rooms.unread.get(&room_key()).copied(), Some(4));
+
+    // The guard covers one apply; the next fetch is authoritative again.
+    let mut fresh = stale;
+    fresh.notification_count = 6;
+    app.apply_room_refresh(vec![open, fresh]);
+    assert_eq!(app.rooms.unread.get(&room_key()).copied(), Some(6));
+}
+
+#[test]
+fn room_refresh_does_not_bring_back_a_locally_cleared_badge() {
+    let open = room("!open:example.com", None, Some("Open"));
+    let mut listed = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+    listed.notification_count = 5;
+    let mut app = app_with_rooms(vec![open.clone(), listed.clone()]);
+    app.apply_room_refresh(vec![open.clone(), listed.clone()]);
+    assert_eq!(app.rooms.unread.get(&room_key()).copied(), Some(5));
+
+    // The user read the room; a response fetched before that still says 5.
+    app.clear_room_unread(&room_key());
+    app.apply_room_refresh(vec![open, listed]);
+    assert_eq!(app.rooms.unread.get(&room_key()), None);
 }
 
 #[test]

@@ -1057,6 +1057,12 @@ pub(crate) struct RoomsState {
     pub(crate) page_size: usize,
     pub(crate) display_names: HashMap<RoomKey, HashMap<String, String>>,
     pub(crate) unread: HashMap<RoomKey, usize>,
+    /// Rooms whose badge a live frame or a local action set since the last
+    /// room-list apply. A fetch that started earlier carries an older count, so
+    /// the next apply leaves these alone rather than clobber the newer value;
+    /// the server will not resend a frame until the count changes again (ADR
+    /// 0115).
+    pub(crate) unread_touched: HashSet<RoomKey>,
 }
 
 pub(crate) struct AccountsState {

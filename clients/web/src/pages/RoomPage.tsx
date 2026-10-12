@@ -24,6 +24,8 @@ import {
   MessageEventRow,
 } from '../components/MessageEventRow'
 import { RoomInfoPanel } from '../components/RoomInfoPanel'
+import { UserInfoPanel } from '../components/UserInfoPanel'
+import type { OpenUserHandler } from '../components/UserOpenTarget'
 import { ThreadPanel } from '../components/ThreadPanel'
 import {
   literalMessage,
@@ -180,6 +182,23 @@ function serverNameFromUserId(userId: string | null): string | null {
  * main timeline like the TUI, panel via `?thread=` per the deep-link
  * contract).
  */
+/**
+ * A click's `currentTarget` is the sender control. `document.activeElement`
+ * is often `body` for a pointer click in Safari and Firefox, and focusing
+ * `body` does not move focus, so it is not an opener.
+ */
+function userInfoOpenerFrom(
+  candidate: EventTarget | null | undefined,
+): HTMLElement | null {
+  if (!(candidate instanceof HTMLElement)) {
+    return null
+  }
+  if (candidate === document.body || candidate === document.documentElement) {
+    return null
+  }
+  return candidate
+}
+
 export function RoomPage() {
   const { params, query } = useRoute()
   const location = useLocation()
@@ -243,6 +262,17 @@ export function RoomPage() {
     string | null
   >(null)
   const [roomInfoOpen, setRoomInfoOpen] = useState(false)
+  const [userInfoUserId, setUserInfoUserId] = useState<string | null>(null)
+  /** The sender control that opened User information, restored on close. */
+  const userInfoOpener = useRef<HTMLElement | null>(null)
+  /** True only for the keyboard activation that opened a closed panel. */
+  const [userInfoFocusClose, setUserInfoFocusClose] = useState(false)
+  // The page does not remount on a route change, so an open user panel would
+  // otherwise keep describing the previous room's sender against this room's
+  // roster (or another account's profile read).
+  useEffect(() => {
+    setUserInfoUserId(null)
+  }, [accountId, roomId])
   const [jumpOpen, setJumpOpen] = useState(false)
   const [dateJumpStart, setDateJumpStart] = useState<number | null>(null)
   const [roomEntryStatus, setRoomEntryStatus] = useState<string | null>(null)
@@ -268,6 +298,17 @@ export function RoomPage() {
     loading: false,
   })
   const openThread = typeof query.thread === 'string' ? query.thread : null
+  const seenThread = useRef(openThread)
+  useEffect(() => {
+    const previous = seenThread.current
+    seenThread.current = openThread
+    // A thread that arrives by the route — a permalink, a notification, a
+    // search hit — has to be the thing on screen. Opening the panel itself
+    // does not change this param, so it stays up over the thread it covered.
+    if (openThread !== null && openThread !== previous) {
+      setUserInfoUserId(null)
+    }
+  }, [openThread])
   /**
    * Whether every thread in this room is known read — the room-list badge waits
    * on it. `threads`/`read_markers`/`thread_read_markers` must all have arrived
@@ -1784,6 +1825,7 @@ export function RoomPage() {
     (rootId: string | null) => {
       if (rootId !== null) {
         setRoomInfoOpen(false)
+        setUserInfoUserId(null)
       }
       const base = location.path
       location.route(
@@ -1795,9 +1837,55 @@ export function RoomPage() {
   )
 
   const openRoomInfo = useCallback(() => {
+    setUserInfoUserId(null)
     setThreadParam(null)
     setRoomInfoOpen(true)
   }, [setThreadParam])
+
+  const closeUserInfo = useCallback(
+    (restore: 'opener' | 'composer') => {
+      setUserInfoUserId(null)
+      const opener = userInfoOpener.current
+      userInfoOpener.current = null
+      if (restore === 'composer') {
+        composerFocus.value += 1
+        return
+      }
+      // After paint, so a thread that was inert while covered can take focus.
+      requestAnimationFrame(() => {
+        if (
+          opener !== null &&
+          opener.isConnected &&
+          !opener.inert &&
+          opener.getAttribute('aria-hidden') !== 'true'
+        ) {
+          opener.focus()
+          if (document.activeElement === opener) {
+            return
+          }
+        }
+        composerFocus.value += 1
+      })
+    },
+    [composerFocus],
+  )
+
+  const openUserInfo = useCallback<OpenUserHandler>(
+    (userId, opener, fromKeyboard = false) => {
+      const recorded =
+        userInfoOpenerFrom(opener) ?? userInfoOpenerFrom(document.activeElement)
+      const firstOpen = userInfoUserId === null
+      if (firstOpen) {
+        userInfoOpener.current = recorded
+      } else if (recorded !== null) {
+        userInfoOpener.current = recorded
+      }
+      setUserInfoFocusClose(firstOpen && fromKeyboard)
+      setRoomInfoOpen(false)
+      setUserInfoUserId(userId)
+    },
+    [userInfoUserId],
+  )
 
   useEffect(() => {
     setRoomChrome(title, openRoomInfo)
@@ -1806,9 +1894,20 @@ export function RoomPage() {
 
   const navigateBackOneMobilePane = () => {
     perfMark('room-page:mobile-back', {
-      target: openThread !== null ? 'thread-close' : 'room-list',
+      target:
+        userInfoUserId !== null
+          ? 'user-info-close'
+          : openThread !== null
+            ? 'thread-close'
+            : 'room-list',
     })
-    if (openThread !== null) {
+    // User information keeps `?thread=` so closing it restores the thread.
+    // A back swipe dismisses the panel first. With a thread open, the
+    // preview destination is that thread; otherwise it is the timeline.
+    if (userInfoUserId !== null) {
+      userInfoOpener.current = null
+      setUserInfoUserId(null)
+    } else if (openThread !== null) {
       setThreadParam(null)
     } else {
       perfMarkFrames('room-page:before-route-room-list')
@@ -1818,6 +1917,17 @@ export function RoomPage() {
 
   const mobileSwipeBack = useMobileSwipeBack<HTMLDivElement>({
     getPresentation: (surface) => {
+      if (userInfoUserId !== null) {
+        const foreground =
+          surface.querySelector<HTMLElement>('#user-info-panel')
+        const destination =
+          openThread !== null
+            ? surface.querySelector<HTMLElement>('.thread-panel')
+            : roomStream.current
+        return foreground === null || destination === null
+          ? null
+          : { foreground, destination }
+      }
       if (openThread === null) {
         return roomListBackPresentation(surface, roomStream.current)
       }
@@ -1867,8 +1977,9 @@ export function RoomPage() {
   /**
    * The staged Escape (ADR 0078). The edit-history modal claims it first in the
    * capture phase, and the focused composer claims it to cancel its own banner.
-   * What is left lands here: cancel a reply/edit, else close the thread panel,
-   * and either way hand the keyboard back to the composer.
+   * What is left lands here: cancel a reply/edit, else close user information,
+   * else room information, else the thread panel, and either way hand the
+   * keyboard back to the composer.
    *
    * The banner is cancelled here as well as in the composer because focus is
    * briefly on `<body>` while the composer remounts into edit mode — an Escape
@@ -1880,12 +1991,18 @@ export function RoomPage() {
         event.preventDefault()
         if (action !== null) {
           setAction(null)
+          composerFocus.value += 1
+        } else if (userInfoUserId !== null) {
+          closeUserInfo('composer')
         } else if (roomInfoOpen) {
           setRoomInfoOpen(false)
+          composerFocus.value += 1
         } else if (openThread !== null) {
           setThreadParam(null)
+          composerFocus.value += 1
+        } else {
+          composerFocus.value += 1
         }
-        composerFocus.value += 1
       },
     },
     // Escape has to reach us from inside the composer too — that is where the
@@ -1992,6 +2109,7 @@ export function RoomPage() {
                 onReply={(event) => setAction({ kind: 'reply', event })}
                 onEdit={(event) => setAction({ kind: 'edit', event })}
                 onOpenThread={setThreadParam}
+                onOpenUser={openUserInfo}
                 onMutation={search.clear}
               />
             </MediaViewerProvider>
@@ -2068,6 +2186,7 @@ export function RoomPage() {
 
         {openThread !== null && !roomInfoOpen && (
           <ThreadPanel
+            covered={userInfoUserId !== null}
             key={`${accountId}:${roomId}:${openThread}`}
             accountId={accountId}
             roomId={roomId}
@@ -2088,6 +2207,18 @@ export function RoomPage() {
             onCommand={handleThreadComposerCommand}
             roomCompletions={roomCompletions}
             onClose={() => setThreadParam(null)}
+            onOpenUser={openUserInfo}
+          />
+        )}
+        {userInfoUserId !== null && (
+          <UserInfoPanel
+            key={userInfoUserId}
+            accountId={accountId}
+            userId={userInfoUserId}
+            ownUserId={ownUserId}
+            members={members}
+            focusClose={userInfoFocusClose}
+            onClose={() => closeUserInfo('opener')}
           />
         )}
         {roomInfoOpen && (
@@ -2134,6 +2265,7 @@ function Timeline({
   onReply,
   onEdit,
   onOpenThread,
+  onOpenUser,
   onMutation,
 }: {
   timeline: TimelineStore
@@ -2157,6 +2289,7 @@ function Timeline({
   onReply: (event: EventDto) => void
   onEdit: (event: EventDto) => void
   onOpenThread: (rootId: string) => void
+  onOpenUser: OpenUserHandler
   onMutation: () => void
 }) {
   const topSentinel = useRef<HTMLDivElement>(null)
@@ -2906,6 +3039,7 @@ function Timeline({
       onReply={onReply}
       onEdit={onEdit}
       onOpenThread={onOpenThread}
+      onOpenUser={onOpenUser}
       onMutation={onMutation}
     />
   )

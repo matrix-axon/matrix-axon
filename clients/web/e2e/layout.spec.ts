@@ -645,6 +645,123 @@ test('narrow: starting a DM from room information uncovers the new timeline', as
   await expectPaneCenterUncovered(page, '.timeline')
 })
 
+test('narrow: user information opens from a sender and a DM uncovers the timeline', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.route(/\/rooms\/dm$/, (route) =>
+    route.fulfill({ json: { data: { room_id: '!dm:hs' } } }),
+  )
+
+  await page.goto(ROOM_URL)
+  await expect(page.locator('.timeline')).toBeVisible()
+  await page.getByRole('button', { name: '@bob:hs' }).first().click()
+  const panel = page.getByRole('complementary', { name: 'User information' })
+  await expect(panel).toBeVisible()
+  await expect(panel.getByRole('heading', { name: 'Actions' })).toHaveCount(0)
+  const placement = await panel.evaluate((element, tolerance) => {
+    const name = element.querySelector('.room-info-identity-name')
+    const avatar = element.querySelector('.user-avatar')
+    const actions = element.querySelector('.room-info-actions')
+    const details = element.querySelector('#user-info-details')
+    if (
+      name === null ||
+      avatar === null ||
+      actions === null ||
+      details === null
+    ) {
+      throw new Error('user information header is missing a layout piece')
+    }
+    const nameBox = name.getBoundingClientRect()
+    const avatarBox = avatar.getBoundingClientRect()
+    const actionsBox = actions.getBoundingClientRect()
+    const detailsBox = details.getBoundingClientRect()
+    return {
+      identityBottom: Math.max(nameBox.bottom, avatarBox.bottom),
+      actionsTop: actionsBox.top,
+      actionsBottom: actionsBox.bottom,
+      detailsTop: detailsBox.top,
+      tolerance,
+    }
+  }, LAYOUT_EDGE_TOLERANCE_PX)
+  expect(placement.actionsTop).toBeGreaterThanOrEqual(
+    placement.identityBottom - placement.tolerance,
+  )
+  expect(placement.actionsBottom).toBeLessThanOrEqual(
+    placement.detailsTop + placement.tolerance,
+  )
+  await expect(panel.getByRole('button', { name: 'Verify' })).toHaveAttribute(
+    'title',
+    'coming soon',
+  )
+  await panel.getByRole('button', { name: 'Ignore' }).click()
+  const notice = page.getByRole('dialog', { name: 'Coming soon' })
+  await expect(notice).toBeVisible()
+  await notice.getByRole('button', { name: 'Close' }).click()
+  await expect(notice).toHaveCount(0)
+  await expect(panel.getByRole('button', { name: 'Call' })).toHaveCount(0)
+  await panel.getByRole('button', { name: 'Direct message' }).click()
+
+  await expect(page).toHaveURL(
+    `/${ACCOUNT_ID}/rooms/${encodeURIComponent('!dm:hs')}`,
+  )
+  await expect(panel).toHaveCount(0)
+  await expect(page.locator('.timeline')).toBeVisible()
+  await expectPaneCenterUncovered(page, '.timeline')
+})
+
+test('narrow: user information covers a thread that stays mounted', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.route(/\/threads\/[^/]+\/timeline(?:\?.*)?$/, (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          events: [
+            {
+              account_id: ACCOUNT_ID,
+              event_id: '$reply',
+              room_id: ROOM_ID,
+              sender: '@bob:hs',
+              origin_ts: 2_000,
+              arrival_order: 2_000,
+              type: 'm.room.message',
+              body: 'inside the thread',
+              content: { msgtype: 'm.text', body: 'inside the thread' },
+              redacted: false,
+              edited: false,
+              edit_count: 0,
+              relates_to: { rel_type: 'm.thread', event_id: '$root' },
+            },
+          ],
+          next_cursor: null,
+        },
+      },
+    }),
+  )
+  await page.goto(`${ROOM_URL}?thread=${encodeURIComponent('$root')}`)
+  const thread = page.locator('.thread-panel')
+  await expect(thread.getByText('inside the thread')).toBeVisible()
+  await thread.getByRole('button', { name: '@bob:hs' }).click()
+  const panel = page.locator('#user-info-panel')
+  await expect(panel).toBeVisible()
+  await expect(thread).toBeAttached()
+  await expect(thread).toHaveAttribute('inert', '')
+  await expect(thread).toHaveClass(/thread-panel-covered/)
+  expect(
+    await panel.evaluate((element) => getComputedStyle(element).zIndex),
+  ).toBe('71')
+  await expectPaneCenterUncovered(page, '#user-info-panel')
+
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await expect(thread).toBeHidden()
+  await expect(panel).toBeVisible()
+  await expectPaneCenterUncovered(page, '.timeline')
+})
+
 test('room information derives a parent space from its child relationship', async ({
   page,
 }) => {
