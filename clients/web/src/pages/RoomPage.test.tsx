@@ -4761,6 +4761,70 @@ describe('RoomPage', () => {
       expect(document.getElementById('user-info-panel')).toBeNull(),
     )
   })
+
+  it('restores the clicked sender and does not move focus for a pointer open or a later person', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/users/:userId/profile`,
+        () =>
+          HttpResponse.json({
+            data: {
+              user_id: '@alice:hs',
+              display_name: 'Alice Global',
+              avatar_url: null,
+            },
+          }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/devices`, () =>
+        HttpResponse.json({
+          data: { user_id: '@alice:hs', devices: [] },
+        }),
+      ),
+    )
+    const { findByRole, getByRole } = renderRoom(
+      [
+        event('$alice', T0, { body: 'from alice' }),
+        event('$bob', T0 + 1, {
+          sender: '@bob:hs',
+          body: 'from bob',
+        }),
+      ],
+      {
+        members: [
+          member('@alice:hs', 'join', 'Alice'),
+          member('@bob:hs', 'join', 'Bob'),
+        ],
+      },
+    )
+    const alice = await findByRole('button', { name: 'Alice' })
+    await findByRole('button', { name: 'Bob' })
+    expect(document.activeElement).toBe(document.body)
+    fireEvent.click(alice, { detail: 1 })
+    expect(
+      await findByRole('complementary', { name: 'User information' }),
+    ).toBeTruthy()
+    expect(document.activeElement).not.toBe(
+      getByRole('button', { name: 'Close' }),
+    )
+    fireEvent.click(getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(document.activeElement).toBe(alice))
+
+    fireEvent.click(alice)
+    expect(document.activeElement?.textContent).toBe('Close')
+    fireEvent.click(getByRole('button', { name: 'Bob' }), { detail: 0 })
+    await waitFor(() =>
+      expect(
+        document.querySelector('.room-info-identity-name')?.textContent,
+      ).toBe('Bob'),
+    )
+    expect(document.activeElement).not.toBe(
+      getByRole('button', { name: 'Close' }),
+    )
+    fireEvent.click(getByRole('button', { name: 'Close' }))
+    await waitFor(() =>
+      expect(document.activeElement).toBe(getByRole('button', { name: 'Bob' })),
+    )
+  })
 })
 
 /**

@@ -94,7 +94,8 @@ it('opens user information from the sender name and avatar without the action ba
   fireEvent.click(name)
   fireEvent.click(avatar!)
   expect(onOpenUser).toHaveBeenCalledTimes(2)
-  expect(onOpenUser).toHaveBeenCalledWith(ALICE)
+  expect(onOpenUser).toHaveBeenNthCalledWith(1, ALICE, name, true)
+  expect(onOpenUser).toHaveBeenNthCalledWith(2, ALICE, avatar, true)
   expect(view.onOpenActions).not.toHaveBeenCalled()
 })
 
@@ -124,6 +125,8 @@ it('opens user information from a reply quote and leaves reaction taps alone', (
     fireEvent.click(button)
   }
   expect(onOpenUser).toHaveBeenCalledTimes(2)
+  expect(onOpenUser).toHaveBeenNthCalledWith(1, ALICE, quoteButtons[0], true)
+  expect(onOpenUser).toHaveBeenNthCalledWith(2, ALICE, quoteButtons[1], true)
   fireEvent.click(view.getByRole('button', { name: /👍/ }))
   expect(onOpenUser).toHaveBeenCalledTimes(2)
   expect(view.timeline.toggleReaction).toHaveBeenCalledOnce()

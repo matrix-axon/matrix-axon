@@ -19,6 +19,7 @@ import { UserInfoPanel } from './UserInfoPanel'
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
 const ME = '@me:hs'
 const ALICE = '@alice:hs'
+const BOB = '@bob:hs'
 const EXISTING = '!existing:hs'
 const CREATED = '!created:hs'
 
@@ -98,27 +99,46 @@ function renderPanel({
   ownUserId = ME,
   rows = [member(ALICE, 'Alice in room')],
   onClose = vi.fn(),
+  focusClose = false,
 }: {
   userId?: string
   ownUserId?: string | null
   rows?: readonly MemberDto[]
   onClose?: () => void
+  focusClose?: boolean
 } = {}) {
   const services = testServices()
-  const view = render(
+  const members = membersStore(rows)
+  const element = (
+    next: {
+      userId?: string
+      ownUserId?: string | null
+      focusClose?: boolean
+    } = {},
+  ) => (
     <ServicesContext.Provider value={services}>
       <LocationProvider>
         <UserInfoPanel
           accountId={ACCOUNT}
-          userId={userId}
-          ownUserId={ownUserId}
-          members={membersStore(rows)}
+          userId={next.userId ?? userId}
+          ownUserId={next.ownUserId === undefined ? ownUserId : next.ownUserId}
+          members={members}
           onClose={onClose}
+          focusClose={next.focusClose ?? focusClose}
         />
       </LocationProvider>
-    </ServicesContext.Provider>,
+    </ServicesContext.Provider>
   )
-  return { ...view, onClose }
+  const view = render(element())
+  return {
+    ...view,
+    onClose,
+    rerenderPanel: (next: {
+      userId?: string
+      ownUserId?: string | null
+      focusClose?: boolean
+    }) => view.rerender(element(next)),
+  }
 }
 
 function closeComingSoon(dialog: HTMLElement) {
@@ -337,6 +357,126 @@ it('shows your own information without a direct message, ignore, or verify actio
   expect(queryByRole('button', { name: 'Call' })).toBeNull()
 })
 
+it('hides actions until the account user id is known', async () => {
+  server.use(profileHandler('Alice Global'), deviceHandler())
+  const { queryByRole, findByText } = renderPanel({ ownUserId: null })
+  await findByText('Axon has not tracked any devices for this user.')
+  expect(queryByRole('button', { name: 'Direct message' })).toBeNull()
+  expect(queryByRole('button', { name: 'Ignore' })).toBeNull()
+  expect(queryByRole('button', { name: 'Verify' })).toBeNull()
+  expect(queryByRole('button', { name: 'Edit display name' })).toBeNull()
+})
+
+it('drops the previous person before showing the next one', async () => {
+  let releaseBob: () => void = () => {}
+  const bobGate = new Promise<void>((resolve) => {
+    releaseBob = resolve
+  })
+  let releaseBobDevices: () => void = () => {}
+  const bobDevices = new Promise<void>((resolve) => {
+    releaseBobDevices = resolve
+  })
+  let deviceReads = 0
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/users/:userId/profile`,
+      ({ params }) => {
+        const body = {
+          data: {
+            user_id: String(params.userId),
+            display_name: params.userId === BOB ? 'Bob Global' : 'Alice Global',
+            avatar_url: null,
+          },
+        }
+        if (params.userId === BOB) {
+          return bobGate.then(() => HttpResponse.json(body))
+        }
+        return HttpResponse.json(body)
+      },
+    ),
+    http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/devices`, () => {
+      deviceReads += 1
+      const payload = HttpResponse.json({
+        data: {
+          user_id: ALICE,
+          devices:
+            deviceReads === 1
+              ? [
+                  {
+                    device_id: 'ALICEPHONE',
+                    display_name: 'Phone',
+                    algorithms: ['m.megolm.v1.aes-sha2'],
+                    is_verified: true,
+                    is_cross_signed_by_owner: false,
+                    local_trust_state: 'unset',
+                  },
+                ]
+              : [],
+        },
+      })
+      if (deviceReads > 1) {
+        return bobDevices.then(() => payload)
+      }
+      return payload
+    }),
+  )
+  const view = renderPanel({
+    rows: [member(ALICE, 'Alice in room'), member(BOB, 'Bob in room')],
+  })
+  await waitFor(() =>
+    expect(detail('Global display name')).toBe('Alice Global'),
+  )
+  await view.findByText('Phone')
+  view.rerenderPanel({ userId: BOB })
+  expect(detail('Global display name')).toBe('')
+  expect(view.getByText('Loading…')).toBeTruthy()
+  expect(view.getByText('Loading devices…')).toBeTruthy()
+  expect(view.queryByText('Alice Global')).toBeNull()
+  expect(view.queryByText('Phone')).toBeNull()
+  expect(document.querySelector('.room-info-identity-name')?.textContent).toBe(
+    'Bob in room',
+  )
+  releaseBob()
+  releaseBobDevices()
+  await waitFor(() => expect(detail('Global display name')).toBe('Bob Global'))
+  await view.findByText('Axon has not tracked any devices for this user.')
+})
+
+it('focuses Close for a keyboard open and leaves focus put when the person changes', () => {
+  server.use(profileHandler('Alice Global'), deviceHandler())
+  const services = testServices()
+  const members = membersStore([
+    member(ALICE, 'Alice in room'),
+    member(BOB, 'Bob in room'),
+  ])
+  const tree = (userId: string) => (
+    <>
+      <button type="button">elsewhere</button>
+      <ServicesContext.Provider value={services}>
+        <LocationProvider>
+          <UserInfoPanel
+            accountId={ACCOUNT}
+            userId={userId}
+            ownUserId={ME}
+            members={members}
+            onClose={() => {}}
+            focusClose
+          />
+        </LocationProvider>
+      </ServicesContext.Provider>
+    </>
+  )
+  const view = render(tree(ALICE))
+  expect(document.activeElement?.textContent).toBe('Close')
+  const elsewhere = view.getByRole('button', { name: 'elsewhere' })
+  elsewhere.focus()
+  view.rerender(tree(BOB))
+  expect(document.activeElement).toBe(elsewhere)
+  expect(document.querySelector('.room-info-identity-name')?.textContent).toBe(
+    'Bob in room',
+  )
+})
+
 it('reports a profile read failure and still lists devices', async () => {
   server.use(
     http.get(
@@ -349,7 +489,7 @@ it('reports a profile read failure and still lists devices', async () => {
     ),
     deviceHandler(),
   )
-  const { findByRole, findByText } = renderPanel()
+  const { findByRole, findByText } = renderPanel({ focusClose: true })
   expect(document.activeElement?.textContent).toBe('Close')
   expect((await findByRole('alert')).textContent).toBe('profile down')
   await findByText('Axon has not tracked any devices for this user.')

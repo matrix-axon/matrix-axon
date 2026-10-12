@@ -28,7 +28,11 @@ import { EditHistory } from './EditHistory'
 import { EventBody } from './EventBody'
 import { EventTime, FailedSend } from './EventStatus'
 import { UserAvatar } from './UserAvatar'
-import { UserOpenAvatar, UserOpenName } from './UserOpenTarget'
+import {
+  UserOpenAvatar,
+  UserOpenName,
+  type OpenUserHandler,
+} from './UserOpenTarget'
 import { useModalFocus } from './use-modal-focus'
 import type { MembersStore } from '../stores/members'
 import { EventActionIcon } from './EventActionIcon'
@@ -309,7 +313,7 @@ export function MessageEventRow({
   /** Let a thread timeline load a reply target without closing its panel. */
   onReplyContextJump?: (eventId: string) => void
   /** Opens User information for this sender. Absent, the name stays a label. */
-  onOpenUser?: (userId: string) => void
+  onOpenUser?: OpenUserHandler
   /** Clears transient UI state after a successful event mutation. */
   onMutation?: () => void
 }) {
@@ -1475,7 +1479,7 @@ function ReplyContext({
   targetId: string
   members: MembersStore
   onJump: ((eventId: string) => void) | undefined
-  onOpenUser?: (userId: string) => void
+  onOpenUser?: OpenUserHandler
 }) {
   const href =
     threadRootId === undefined

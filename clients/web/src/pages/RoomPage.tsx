@@ -25,6 +25,7 @@ import {
 } from '../components/MessageEventRow'
 import { RoomInfoPanel } from '../components/RoomInfoPanel'
 import { UserInfoPanel } from '../components/UserInfoPanel'
+import type { OpenUserHandler } from '../components/UserOpenTarget'
 import { ThreadPanel } from '../components/ThreadPanel'
 import {
   literalMessage,
@@ -181,6 +182,23 @@ function serverNameFromUserId(userId: string | null): string | null {
  * main timeline like the TUI, panel via `?thread=` per the deep-link
  * contract).
  */
+/**
+ * A click's `currentTarget` is the sender control. `document.activeElement`
+ * is often `body` for a pointer click in Safari and Firefox, and focusing
+ * `body` does not move focus, so it is not an opener.
+ */
+function userInfoOpenerFrom(
+  candidate: EventTarget | null | undefined,
+): HTMLElement | null {
+  if (!(candidate instanceof HTMLElement)) {
+    return null
+  }
+  if (candidate === document.body || candidate === document.documentElement) {
+    return null
+  }
+  return candidate
+}
+
 export function RoomPage() {
   const { params, query } = useRoute()
   const location = useLocation()
@@ -247,6 +265,8 @@ export function RoomPage() {
   const [userInfoUserId, setUserInfoUserId] = useState<string | null>(null)
   /** The sender control that opened User information, restored on close. */
   const userInfoOpener = useRef<HTMLElement | null>(null)
+  /** True only for the keyboard activation that opened a closed panel. */
+  const [userInfoFocusClose, setUserInfoFocusClose] = useState(false)
   // The page does not remount on a route change, so an open user panel would
   // otherwise keep describing the previous room's sender against this room's
   // roster (or another account's profile read).
@@ -1850,12 +1870,22 @@ export function RoomPage() {
     [composerFocus],
   )
 
-  const openUserInfo = useCallback((userId: string) => {
-    const active = document.activeElement
-    userInfoOpener.current = active instanceof HTMLElement ? active : null
-    setRoomInfoOpen(false)
-    setUserInfoUserId(userId)
-  }, [])
+  const openUserInfo = useCallback<OpenUserHandler>(
+    (userId, opener, fromKeyboard = false) => {
+      const recorded =
+        userInfoOpenerFrom(opener) ?? userInfoOpenerFrom(document.activeElement)
+      const firstOpen = userInfoUserId === null
+      if (firstOpen) {
+        userInfoOpener.current = recorded
+      } else if (recorded !== null) {
+        userInfoOpener.current = recorded
+      }
+      setUserInfoFocusClose(firstOpen && fromKeyboard)
+      setRoomInfoOpen(false)
+      setUserInfoUserId(userId)
+    },
+    [userInfoUserId],
+  )
 
   useEffect(() => {
     setRoomChrome(title, openRoomInfo)
@@ -2182,10 +2212,12 @@ export function RoomPage() {
         )}
         {userInfoUserId !== null && (
           <UserInfoPanel
+            key={userInfoUserId}
             accountId={accountId}
             userId={userInfoUserId}
             ownUserId={ownUserId}
             members={members}
+            focusClose={userInfoFocusClose}
             onClose={() => closeUserInfo('opener')}
           />
         )}
@@ -2257,7 +2289,7 @@ function Timeline({
   onReply: (event: EventDto) => void
   onEdit: (event: EventDto) => void
   onOpenThread: (rootId: string) => void
-  onOpenUser: (userId: string) => void
+  onOpenUser: OpenUserHandler
   onMutation: () => void
 }) {
   const topSentinel = useRef<HTMLDivElement>(null)

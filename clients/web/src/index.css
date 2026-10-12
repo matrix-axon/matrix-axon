@@ -2971,11 +2971,11 @@ a.utd-recover:hover {
 
 /* The context jump covers the quote, but quoted content links retain their
    own targets instead of navigating to the replied-to event. The sender
-   name and avatar sit in that same layer so they open User information
-   instead of jumping. */
+   button and avatar sit in that same layer so they open User information
+   instead of jumping. A plain sender label stays under the jump. */
 .reply-context-copy a,
 .reply-context > .event-person,
-.reply-context .event-sender {
+.reply-context button.event-sender {
   position: relative;
   z-index: 2;
 }

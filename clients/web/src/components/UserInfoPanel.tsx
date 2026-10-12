@@ -152,12 +152,19 @@ export function UserInfoPanel({
   ownUserId,
   members,
   onClose,
+  focusClose = false,
 }: {
   accountId: string
   userId: string
   ownUserId: string | null
   members: MembersStore
   onClose: () => void
+  /**
+   * Move focus to Close. Set only for the keyboard activation that opened a
+   * closed panel. A pointer open, and a switch to another person, leave focus
+   * where it was.
+   */
+  focusClose?: boolean
 }) {
   const location = useLocation()
   const { api, live } = useServices()
@@ -170,6 +177,17 @@ export function UserInfoPanel({
     status: 'loading',
   })
   const [avatarOpen, setAvatarOpen] = useState(false)
+  // Drop the previous person before paint. An effect runs too late: the first
+  // paint would label their profile and devices with the new id. A reconnect
+  // is not a subject change, so the reads below refresh in place.
+  const subjectKey = `${accountId}\0${userId}`
+  const [shownSubject, setShownSubject] = useState(subjectKey)
+  if (shownSubject !== subjectKey) {
+    setShownSubject(subjectKey)
+    setProfile({ status: 'loading' })
+    setDevices({ status: 'loading' })
+    setAvatarOpen(false)
+  }
   const {
     startDm,
     pendingUserId,
@@ -180,20 +198,21 @@ export function UserInfoPanel({
     onClose()
   })
 
-  // The close control is the landing spot. The name button keeps the visible
-  // name as its accessible name, so opening the panel has to move focus here
-  // or the keyboard stays on the timeline (and on a covered thread, on a
-  // control that is no longer reachable).
+  // Keyboard opens land on Close. The name button's accessible name is the
+  // visible name, so otherwise the keyboard stays on the timeline (and, on a
+  // covered thread, on a control that is no longer reachable). A pointer open
+  // does not move focus, and this does not run again when the person changes.
   useEffect(() => {
+    if (!focusClose) {
+      return
+    }
     closeButton.current?.focus()
-  }, [userId])
+  }, [focusClose])
 
-  // A new subject discards what the previous one showed. A reconnect does not:
-  // the reads below refresh in place, and an open avatar stays open.
+  // Cancel a direct-message start aimed at the previous person. Profile and
+  // device state was reset above; setting it loading again here can land
+  // after the new read and blank a result that already arrived.
   useEffect(() => {
-    setProfile({ status: 'loading' })
-    setDevices({ status: 'loading' })
-    setAvatarOpen(false)
     invalidate()
   }, [accountId, userId, invalidate])
 
@@ -332,23 +351,25 @@ export function UserInfoPanel({
           </div>
         </div>
 
-        <div class="room-info-actions">
-          {self ? (
-            <UnavailableAction label="Edit display name" />
-          ) : (
-            <>
-              <button
-                type="button"
-                disabled={startingDm}
-                onClick={() => void startDm(userId)}
-              >
-                {startingDm ? 'Starting…' : 'Direct message'}
-              </button>
-              <UnavailableAction label="Ignore" />
-              <UnavailableAction label="Verify" />
-            </>
-          )}
-        </div>
+        {ownUserId !== null && (
+          <div class="room-info-actions">
+            {self ? (
+              <UnavailableAction label="Edit display name" />
+            ) : (
+              <>
+                <button
+                  type="button"
+                  disabled={startingDm}
+                  onClick={() => void startDm(userId)}
+                >
+                  {startingDm ? 'Starting…' : 'Direct message'}
+                </button>
+                <UnavailableAction label="Ignore" />
+                <UnavailableAction label="Verify" />
+              </>
+            )}
+          </div>
+        )}
         {dmError !== null && (
           <p class="error" role="alert">
             {dmError}

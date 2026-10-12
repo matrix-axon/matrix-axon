@@ -6,7 +6,9 @@ import { useServices } from '../services'
  *
  * The result is dropped when the caller invalidates (the panel moved to
  * another user or room) or unmounts, so a slow `createDm` cannot route away
- * from whatever the user is looking at now.
+ * from whatever the user is looking at now. A thrown `createDm` is the same
+ * failure as `{ ok: false }`. An older start must not clear a newer one's
+ * pending state.
  */
 export function useStartDm(
   accountId: string,
@@ -49,17 +51,28 @@ export function useStartDm(
     pendingRef.current = userId
     setError(null)
     setPendingUserId(userId)
-    const result = await rooms.createDm(accountId, userId)
-    if (request !== generation.current) {
-      return
+    try {
+      const result = await rooms.createDm(accountId, userId)
+      if (request !== generation.current) {
+        return
+      }
+      if (!result.ok) {
+        setError(`Could not start DM with ${userId}: ${result.message}`)
+        return
+      }
+      onStartedRef.current(result.roomId)
+    } catch (cause) {
+      if (request !== generation.current) {
+        return
+      }
+      const message = cause instanceof Error ? cause.message : String(cause)
+      setError(`Could not start DM with ${userId}: ${message}`)
+    } finally {
+      if (request === generation.current) {
+        pendingRef.current = null
+        setPendingUserId(null)
+      }
     }
-    pendingRef.current = null
-    setPendingUserId(null)
-    if (!result.ok) {
-      setError(`Could not start DM with ${userId}: ${result.message}`)
-      return
-    }
-    onStartedRef.current(result.roomId)
   }
 
   return { startDm, pendingUserId, error, invalidate }

@@ -33,7 +33,11 @@ import { DaySeparator } from './DaySeparator'
 import { groupMediaRuns, rowTs } from '../timeline/group-media-runs'
 import { EventBody } from './EventBody'
 import { isEditable, MessageEventRow } from './MessageEventRow'
-import { UserOpenAvatar, UserOpenName } from './UserOpenTarget'
+import {
+  UserOpenAvatar,
+  UserOpenName,
+  type OpenUserHandler,
+} from './UserOpenTarget'
 import { useMessageComposer, type ComposerAction } from './use-message-composer'
 
 type ThreadCommandHandler = (
@@ -62,7 +66,7 @@ function ThreadRoot({
   root: EventDto | undefined
   members: MembersStore
   compact?: boolean
-  onOpenUser?: (userId: string) => void
+  onOpenUser?: OpenUserHandler
 }) {
   const senderDisplay =
     root === undefined ? '' : members.displayName(root.sender)
@@ -149,7 +153,7 @@ export function ThreadPanel({
   roomCompletions?(query: string): ComposerAutocompleteOption[]
   onClose: () => void
   /** Opens User information for a sender in this thread. */
-  onOpenUser?: (userId: string) => void
+  onOpenUser?: OpenUserHandler
   /**
    * User information is open over this thread. The panel stays mounted so its
    * scroll and composer survive. `inert` takes it out of the tab order, and
