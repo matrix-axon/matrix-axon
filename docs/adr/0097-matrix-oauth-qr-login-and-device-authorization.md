@@ -166,6 +166,8 @@ After matrix-rust-sdk reports success, Axon:
 
 If the identity became active concurrently, Axon revokes or discards the new OAuth session, removes the staging store, and returns a stable conflict rather than replacing the live device.
 If the QR protocol completes but the device is not actually cross-signed, the flow fails closed and does not claim the combined “sign in and verify” outcome.
+_(Amended by ADR 0117 — step 4 and this fail-closed rule apply to the two QR presentations only.
+Browser sign-in, a third acquisition method that makes no verification claim, finalizes through the same steps without the cross-signing requirement and activates an unverified account.)_
 
 The staged-store adoption and account activation form a crash-safe multistep operation.
 A durable, non-secret cleanup breadcrumb names the flow and staging location before work starts; boot reconciliation removes abandoned staging state or completes an idempotent finalization whose database state already committed.
