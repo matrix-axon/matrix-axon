@@ -33,7 +33,11 @@ import { DaySeparator } from './DaySeparator'
 import { groupMediaRuns, rowTs } from '../timeline/group-media-runs'
 import { EventBody } from './EventBody'
 import { isEditable, MessageEventRow } from './MessageEventRow'
-import { UserAvatar } from './UserAvatar'
+import {
+  UserOpenAvatar,
+  UserOpenName,
+  type OpenUserHandler,
+} from './UserOpenTarget'
 import { useMessageComposer, type ComposerAction } from './use-message-composer'
 
 type ThreadCommandHandler = (
@@ -55,29 +59,35 @@ function ThreadRoot({
   root,
   members,
   compact = false,
+  onOpenUser,
 }: {
   accountId: string
   rootId: string
   root: EventDto | undefined
   members: MembersStore
   compact?: boolean
+  onOpenUser?: OpenUserHandler
 }) {
+  const senderDisplay =
+    root === undefined ? '' : members.displayName(root.sender)
   return (
     <div class={`thread-root${compact ? ' compact' : ''}`}>
       {root !== undefined ? (
         <>
-          <UserAvatar
+          <UserOpenAvatar
             accountId={accountId}
             userId={root.sender}
-            displayName={members.displayName(root.sender)}
+            displayName={senderDisplay}
             member={members.members.value.get(root.sender)}
+            onOpenUser={onOpenUser}
           />
           <span class="thread-root-copy">
-            <span class="event-sender">{members.displayName(root.sender)}</span>{' '}
-            <EventBody
-              event={root}
-              senderDisplay={members.displayName(root.sender)}
-            />
+            <UserOpenName
+              userId={root.sender}
+              displayName={senderDisplay}
+              onOpenUser={onOpenUser}
+            />{' '}
+            <EventBody event={root} senderDisplay={senderDisplay} />
           </span>
         </>
       ) : (
@@ -110,6 +120,8 @@ export function ThreadPanel({
   onCommand,
   roomCompletions,
   onClose,
+  onOpenUser,
+  covered = false,
   highlightedEventId = null,
 }: {
   accountId: string
@@ -140,6 +152,14 @@ export function ThreadPanel({
   onCommand?: ThreadCommandHandler
   roomCompletions?(query: string): ComposerAutocompleteOption[]
   onClose: () => void
+  /** Opens User information for a sender in this thread. */
+  onOpenUser?: OpenUserHandler
+  /**
+   * User information is open over this thread. The panel stays mounted so its
+   * scroll and composer survive. `inert` takes it out of the tab order, and
+   * wide layouts hide it so it does not become a fourth column.
+   */
+  covered?: boolean
   /** An event in this thread to fetch, reveal, and highlight. */
   highlightedEventId?: string | null
 }) {
@@ -564,14 +584,16 @@ export function ThreadPanel({
       showThreadAction={false}
       threadRootId={rootId}
       onReplyContextJump={jumpToReplyContext}
+      onOpenUser={onOpenUser}
       onMutation={search.clear}
     />
   )
 
   return (
     <aside
-      class="thread-panel"
+      class={`thread-panel${covered ? ' thread-panel-covered' : ''}`}
       aria-label="Thread"
+      inert={covered}
       {...(attachable ? dropHandlers : {})}
     >
       {dropProblem !== null && !dragging && (
@@ -602,6 +624,7 @@ export function ThreadPanel({
               root={root}
               members={members}
               compact
+              onOpenUser={onOpenUser}
             />
           </div>
         )}
@@ -632,6 +655,7 @@ export function ThreadPanel({
                   showThreadAction={false}
                   threadRootId={rootId}
                   onReplyContextJump={jumpToReplyContext}
+                  onOpenUser={onOpenUser}
                   onMutation={() => {
                     search.clear()
                     refetchRoot()

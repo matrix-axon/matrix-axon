@@ -2352,6 +2352,7 @@ p.timeline-edge {
 }
 
 .event-row.gesture-swipe-reveal > .user-avatar,
+.event-row.gesture-swipe-reveal > .event-person,
 .event-row.gesture-swipe-reveal > .event-content,
 .gallery-cell.gesture-swipe-reveal > .gallery-cell-box {
   position: relative;
@@ -2361,6 +2362,7 @@ p.timeline-edge {
 }
 
 .event-row.gesture-swipe-settling > .user-avatar,
+.event-row.gesture-swipe-settling > .event-person,
 .event-row.gesture-swipe-settling > .event-content,
 .gallery-cell.gesture-swipe-settling > .gallery-cell-box {
   transition: transform 180ms ease-out;
@@ -2420,6 +2422,7 @@ p.timeline-edge {
 
 @media (prefers-reduced-motion: reduce) {
   .event-row.gesture-swipe-settling > .user-avatar,
+  .event-row.gesture-swipe-settling > .event-person,
   .event-row.gesture-swipe-settling > .event-content,
   .gallery-cell.gesture-swipe-settling > .gallery-cell-box,
   .gesture-swipe-affordance,
@@ -2536,6 +2539,41 @@ p.timeline-edge {
   white-space: nowrap;
   font-weight: 600;
   font-size: 0.9rem;
+}
+
+/* A sender name or avatar that opens User information. Reset the global
+   button chrome so the control still reads as the label it replaced. */
+button.event-sender,
+button.event-person {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+button.event-sender {
+  display: inline-block;
+  max-width: 100%;
+}
+
+button.event-sender:hover,
+button.event-sender:focus-visible {
+  color: var(--accent);
+}
+
+button.event-person {
+  min-width: 0;
+  border-radius: 999px;
+  line-height: 0;
+}
+
+button.event-person:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .event-head > time,
@@ -2932,8 +2970,12 @@ a.utd-recover:hover {
 }
 
 /* The context jump covers the quote, but quoted content links retain their
-   own targets instead of navigating to the replied-to event. */
-.reply-context-copy a {
+   own targets instead of navigating to the replied-to event. The sender
+   button and avatar sit in that same layer so they open User information
+   instead of jumping. A plain sender label stays under the jump. */
+.reply-context-copy a,
+.reply-context > .event-person,
+.reply-context button.event-sender {
   position: relative;
   z-index: 2;
 }
@@ -3845,6 +3887,15 @@ span.composer-attachment-thumb {
   padding-bottom: calc(1rem + var(--safe-bottom));
 }
 
+/* User information covers a thread that stays mounted. Below 64rem both
+   drawers share z-index 70, and a swipe transform would let the thread paint
+   through a later sibling. At 64rem the covered thread is hidden so it does
+   not become a fourth column; below that it stays painted so a back swipe
+   can reveal it. */
+#user-info-panel {
+  z-index: 71;
+}
+
 @media (max-width: 47.99rem) {
   .mobile-back-surface {
     position: relative;
@@ -3930,6 +3981,10 @@ span.composer-attachment-thumb {
 
   .room-stream {
     min-width: 22rem;
+  }
+
+  .thread-panel.thread-panel-covered {
+    display: none;
   }
 }
 
@@ -4188,6 +4243,69 @@ span.composer-attachment-thumb {
 .room-info-avatar-button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* The shared identity rule draws its divider under the name. Here the
+   actions belong with that name, so the divider moves below them. */
+.user-info-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.user-info-panel .room-info-identity {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.user-info-intro .error {
+  margin: 0;
+}
+
+.coming-soon-dialog {
+  display: grid;
+  gap: 0.8rem;
+  max-width: 18rem;
+}
+
+.coming-soon-dialog h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.user-info-panel .room-info-identity .user-avatar {
+  width: 3.5rem;
+  height: 3.5rem;
+  margin-top: 0;
+  font-size: 1.35rem;
+}
+
+.user-info-panel .room-info-avatar-button {
+  border-radius: 999px;
+}
+
+.user-device-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.user-device {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.user-device-name {
+  font-weight: 600;
 }
 
 /* Hidden from sight but kept in the accessibility tree and focusable, unlike

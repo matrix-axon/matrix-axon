@@ -4651,6 +4651,180 @@ describe('RoomPage', () => {
       expect(await findByText('body of $jump')).toBeTruthy()
     })
   })
+
+  it('keeps a covered thread mounted and closes user information when the room or thread changes', async () => {
+    const OTHER = '!other:hs'
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: {
+              events: [
+                event('$reply', T0 + 1, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'inside the thread',
+                  content: { msgtype: 'm.text', body: 'inside the thread' },
+                }),
+              ],
+              next_cursor: null,
+            },
+          }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`, () =>
+        HttpResponse.json({ data: event('$root', T0) }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/users/:userId/profile`,
+        () =>
+          HttpResponse.json({
+            data: {
+              user_id: '@alice:hs',
+              display_name: 'Alice Global',
+              avatar_url: null,
+            },
+          }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/devices`, () =>
+        HttpResponse.json({
+          data: { user_id: '@alice:hs', devices: [] },
+        }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(OTHER)}/timeline`,
+        () => HttpResponse.json({ data: { events: [], next_cursor: null } }),
+      ),
+    )
+    const { findByRole, findByText, getByRole } = renderRoom(
+      [event('$root', T0)],
+      {
+        members: [member('@alice:hs', 'join', 'Alice')],
+        url: `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=${encodeURIComponent('$root')}`,
+      },
+    )
+    expect(await findByText('inside the thread')).toBeTruthy()
+    const thread = getByRole('complementary', { name: 'Thread' })
+    expect(thread.hasAttribute('inert')).toBe(false)
+    const [name] = await within(thread).findAllByRole('button', {
+      name: 'Alice',
+    })
+    fireEvent.click(name)
+    expect(
+      await findByRole('complementary', { name: 'User information' }),
+    ).toBeTruthy()
+    expect(thread.isConnected).toBe(true)
+    expect(thread.hasAttribute('inert')).toBe(true)
+    expect(thread.classList.contains('thread-panel-covered')).toBe(true)
+    expect(document.activeElement?.textContent).toBe('Close')
+
+    window.history.pushState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    expect(
+      await findByRole('complementary', { name: 'User information' }),
+    ).toBeTruthy()
+    await waitFor(() =>
+      expect(document.querySelector('.thread-panel')).toBeNull(),
+    )
+
+    window.history.pushState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=${encodeURIComponent('$other')}`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await waitFor(() =>
+      expect(document.getElementById('user-info-panel')).toBeNull(),
+    )
+    const nextThread = document.querySelector('.thread-panel')
+    expect(nextThread).not.toBeNull()
+    expect(nextThread!.hasAttribute('inert')).toBe(false)
+
+    const [reopened] = await within(nextThread as HTMLElement).findAllByRole(
+      'button',
+      { name: 'Alice' },
+    )
+    fireEvent.click(reopened)
+    expect(
+      await findByRole('complementary', { name: 'User information' }),
+    ).toBeTruthy()
+    window.history.pushState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(OTHER)}`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await waitFor(() =>
+      expect(document.getElementById('user-info-panel')).toBeNull(),
+    )
+  })
+
+  it('restores the clicked sender and does not move focus for a pointer open or a later person', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/users/:userId/profile`,
+        () =>
+          HttpResponse.json({
+            data: {
+              user_id: '@alice:hs',
+              display_name: 'Alice Global',
+              avatar_url: null,
+            },
+          }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/devices`, () =>
+        HttpResponse.json({
+          data: { user_id: '@alice:hs', devices: [] },
+        }),
+      ),
+    )
+    const { findByRole, getByRole } = renderRoom(
+      [
+        event('$alice', T0, { body: 'from alice' }),
+        event('$bob', T0 + 1, {
+          sender: '@bob:hs',
+          body: 'from bob',
+        }),
+      ],
+      {
+        members: [
+          member('@alice:hs', 'join', 'Alice'),
+          member('@bob:hs', 'join', 'Bob'),
+        ],
+      },
+    )
+    const alice = await findByRole('button', { name: 'Alice' })
+    await findByRole('button', { name: 'Bob' })
+    expect(document.activeElement).toBe(document.body)
+    fireEvent.click(alice, { detail: 1 })
+    expect(
+      await findByRole('complementary', { name: 'User information' }),
+    ).toBeTruthy()
+    expect(document.activeElement).not.toBe(
+      getByRole('button', { name: 'Close' }),
+    )
+    fireEvent.click(getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(document.activeElement).toBe(alice))
+
+    fireEvent.click(alice)
+    expect(document.activeElement?.textContent).toBe('Close')
+    fireEvent.click(getByRole('button', { name: 'Bob' }), { detail: 0 })
+    await waitFor(() =>
+      expect(
+        document.querySelector('.room-info-identity-name')?.textContent,
+      ).toBe('Bob'),
+    )
+    expect(document.activeElement).not.toBe(
+      getByRole('button', { name: 'Close' }),
+    )
+    fireEvent.click(getByRole('button', { name: 'Close' }))
+    await waitFor(() =>
+      expect(document.activeElement).toBe(getByRole('button', { name: 'Bob' })),
+    )
+  })
 })
 
 /**

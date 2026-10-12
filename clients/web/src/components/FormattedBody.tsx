@@ -200,6 +200,10 @@ function routeLocalMentionPillClick(
     return false
   }
   event.preventDefault()
+  // preact-iso follows the href from a window listener and ignores
+  // defaultPrevented, so the click has to stop before it reaches window.
+  // Otherwise /rooms/dm opens before createDm can select an existing room.
+  event.stopPropagation()
   void rooms.createDm(accountId, userId).then((result) => {
     const next = result.ok
       ? localRoomHref(accountId, result.roomId, null)

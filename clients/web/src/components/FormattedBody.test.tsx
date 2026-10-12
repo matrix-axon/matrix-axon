@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
+import { LocationProvider } from 'preact-iso'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { ServicesContext } from '../services'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -331,6 +332,97 @@ describe('FormattedBody plain-text linkification', () => {
         `/${ACCOUNT}/rooms/${encodeURIComponent(createdRoom)}`,
       ),
     )
+  })
+
+  it('opens an existing DM from a user pill without visiting the start-DM form', async () => {
+    const dmRoom = '!existing-dm:hs'
+    let dmCalls = 0
+    const services = await servicesWithRooms([
+      room({
+        room_id: dmRoom,
+        name: 'Alice',
+        canonical_alias: null,
+        is_direct: true,
+      }),
+    ])
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(dmRoom)}/members`,
+        () =>
+          HttpResponse.json({
+            data: [
+              {
+                user_id: '@me:hs',
+                membership: 'join',
+                display_name: 'Me',
+              },
+              {
+                user_id: '@alice:hs',
+                membership: 'join',
+                display_name: 'Alice',
+              },
+            ],
+          }),
+      ),
+      http.post(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/dm`, () => {
+        dmCalls += 1
+        return HttpResponse.json({ data: { room_id: '!new-dm:hs' } })
+      }),
+    )
+    const { container } = render(
+      <LocationProvider>
+        <ServicesContext.Provider value={services}>
+          <FormattedBody
+            accountId={ACCOUNT}
+            body="ping https://matrix.to/#/%40alice%3Ahs"
+            content={null}
+          />
+        </ServicesContext.Provider>
+      </LocationProvider>,
+    )
+
+    fireEvent.click(container.querySelector('a')!)
+
+    expect(window.location.pathname).toBe('/')
+    await waitFor(() =>
+      expect(window.location.pathname).toBe(
+        `/${ACCOUNT}/rooms/${encodeURIComponent(dmRoom)}`,
+      ),
+    )
+    expect(dmCalls).toBe(0)
+  })
+
+  it('opens the start-DM form when a user pill cannot open or create a room', async () => {
+    const services = await servicesWithRooms([
+      room({ room_id: '!ops:hs', name: 'Ops', canonical_alias: '#ops:hs' }),
+    ])
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/dm`, () =>
+        HttpResponse.json(
+          { error: { code: 'forbidden', message: 'blocked' } },
+          { status: 403 },
+        ),
+      ),
+    )
+    const { container } = render(
+      <LocationProvider>
+        <ServicesContext.Provider value={services}>
+          <FormattedBody
+            accountId={ACCOUNT}
+            body="ping https://matrix.to/#/%40alice%3Ahs"
+            content={null}
+          />
+        </ServicesContext.Provider>
+      </LocationProvider>,
+    )
+
+    fireEvent.click(container.querySelector('a')!)
+
+    expect(window.location.pathname).toBe('/')
+    await waitFor(() => {
+      expect(window.location.pathname).toBe('/rooms/dm')
+      expect(window.location.search).toBe('?user=%40alice%3Ahs')
+    })
   })
 
   it('turns known Matrix.to room anchors in formatted bodies into local room pills', async () => {

@@ -67,6 +67,7 @@ shows it.
 | Spaces: picker, filtering, hierarchy (ADR 0084)         | **not covered**       | `spaces`                                                                                                  | `rooms`         |
 | Single-pane navigation and Back (ADR 0062)              | **n/a**               | **n/a**                                                                                                   | `rooms`         |
 | Room information panel                                  | **not covered**       | `rooms`                                                                                                   | `timeline`      |
+| User information panel                                  | **n/a**               | **not covered** — no demo scene opens a timeline sender                                                   | **not covered** |
 | Unread thread picker (Alt-T)                            | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Search result sort / group / edit toggles               | **not covered**       | **not covered**                                                                                           | **not covered** |
 | Sending media                                           | **not covered**       | **not covered**                                                                                           | **not covered** |
@@ -154,6 +155,9 @@ shows it.
   Neither exercises an `m.reaction` frame arriving over the WS for someone else's reaction, which is a different code path — the frame patches the target message's aggregate rather than being rendered as a row of its own.
 - **Room information in the TUI.** `/whereami` now renders cached room metadata and authoritative member counts (ADR 0114).
   No pilot scene opens it yet, so the row stays not covered until the remaining steps of #653 settle what the popup shows.
+- **User information on the web.** Tapping a timeline sender opens the panel.
+  No demo scene does that, so both web columns stay not covered.
+  The TUI has no such panel.
 - **Spaces in the TUI.** The client now renders a shallow space tree with session collapse/expand, per-group favorites, and instance root ordering (ADR 0103).
   The existing `rooms` pilot does not exercise those interactions, so coverage remains a gap until the separate testing-silo follow-up (#385).
   That follow-up should also show the containing space header remaining visible while scrolling through a large group.

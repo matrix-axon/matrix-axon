@@ -16,6 +16,7 @@ import { useServices } from '../services'
 import type { MembersStore } from '../stores/members'
 import {
   memberDisplay,
+  membershipLabel,
   roomKey,
   roomListAvatarUrl,
   roomTitle,
@@ -25,12 +26,14 @@ import {
 import { useShortcuts } from '../shortcuts'
 import { formatInviteeList, inviteErrorMessage } from '../invite'
 import { BodyPortal } from './BodyPortal'
-import { CopyableText, useCopyFeedback } from './CopyableText'
+import { useCopyFeedback } from './CopyableText'
+import { DetailRow } from './DetailRow'
 import { Lightbox, LightboxImage } from './Lightbox'
 import { RoomAvatar, roomAvatarColor } from './RoomAvatar'
 import { RoomSettingsForm } from './RoomSettingsForm'
 import { ErrorBanner } from './ErrorBanner'
 import { useModalFocus } from './use-modal-focus'
+import { useStartDm } from './use-start-dm'
 import { UserAvatar } from './UserAvatar'
 
 type RoomInfoDto = components['schemas']['RoomInfoDto']
@@ -95,8 +98,18 @@ export function RoomInfoPanel({
   const inviteInput = useRef<HTMLInputElement>(null)
   const { status: copyStatus, copy } = useCopyFeedback()
   const [filter, setFilter] = useState('')
-  const [dmUserId, setDmUserId] = useState<string | null>(null)
-  const [dmError, setDmError] = useState<string | null>(null)
+  const {
+    startDm,
+    pendingUserId: dmUserId,
+    error: dmError,
+    invalidate: invalidateDm,
+  } = useStartDm(accountId, (startedRoomId) => {
+    location.route(localRoomHref(accountId, startedRoomId, null))
+    onClose()
+  })
+  useEffect(() => {
+    invalidateDm()
+  }, [roomId, invalidateDm])
   const [inviteOpen, setInviteOpen] = useState(false)
   const [inviteValue, setInviteValue] = useState('')
   const [inviteStatus, setInviteStatus] = useState<string | null>(null)
@@ -379,21 +392,6 @@ export function RoomInfoPanel({
     await copy(href)
   }
 
-  const startDm = async (userId: string) => {
-    if (dmUserId !== null) {
-      return
-    }
-    setDmError(null)
-    setDmUserId(userId)
-    const result = await rooms.createDm(accountId, userId)
-    setDmUserId(null)
-    if (!result.ok) {
-      setDmError(`Could not start DM with ${userId}: ${result.message}`)
-      return
-    }
-    location.route(localRoomHref(accountId, result.roomId, null))
-    onClose()
-  }
   const submitInvite = async (event: Event) => {
     event.preventDefault()
     setInviteStatus(null)
@@ -1419,45 +1417,6 @@ function LeaveRoomDialog({
   )
 }
 
-/** Placeholders are not worth copying; real IDs, names, and state are. */
-function isPopulatedDetail(value: string | null | undefined): value is string {
-  return (
-    typeof value === 'string' &&
-    value !== '' &&
-    value !== 'None' &&
-    value !== 'Unavailable' &&
-    value !== 'Loading…' &&
-    !value.startsWith('Unavailable from')
-  )
-}
-
-function DetailRow({
-  label,
-  value,
-  code = false,
-}: {
-  label: string
-  value: string | null | undefined
-  code?: boolean
-}) {
-  const text = value ?? ''
-  const displayed = code ? <code>{text}</code> : text
-  return (
-    <>
-      <dt>{label}</dt>
-      <dd>
-        {isPopulatedDetail(value) ? (
-          <CopyableText text={value} label={label}>
-            {displayed}
-          </CopyableText>
-        ) : (
-          displayed
-        )}
-      </dd>
-    </>
-  )
-}
-
 function filteredMembers(members: MemberDto[], filter: string): MemberDto[] {
   const query = filter.trim().toLocaleLowerCase()
   return members
@@ -1481,21 +1440,6 @@ function filteredMembers(members: MemberDto[], filter: string): MemberDto[] {
         }) || left.user_id.localeCompare(right.user_id)
       )
     })
-}
-
-function membershipLabel(membership: string): string {
-  switch (membership) {
-    case 'join':
-      return 'Joined'
-    case 'invite':
-      return 'Invited'
-    case 'leave':
-      return 'Left'
-    case 'ban':
-      return 'Banned'
-    default:
-      return membership || 'Unknown'
-  }
 }
 
 function isOnlyJoinedMember(
