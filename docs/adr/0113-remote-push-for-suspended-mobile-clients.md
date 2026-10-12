@@ -63,7 +63,8 @@ This ADR declines that.
 
 ### When a push is sent
 
-The router wakes a device only when ADR 0070's `notification_count` or `highlight_count` for a room rises, and that rise belongs to a newly stored `m.room.message`.
+The router wakes a device for a newly stored eligible `m.room.message` when an observation of that room's `notification_count` or `highlight_count` rises, or when a fall in the same observation would otherwise hide that message.
+The observations below are the whole rule.
 
 The message is eligible when all of these hold:
 
@@ -136,13 +137,34 @@ Two limits are deliberate, so a later change does not have to break the route:
   Adding it is an extension of the eligibility list, not a new policy engine.
 
 The count can be held back while the SDK has unmatched receipts (ADR 0070).
-The count is published by the unread-count path, from room-info updates and the five-minute resweep, not by event ingest.
-A sliding-sync response can carry the message and the new `notification_count` together, and the unread path can publish that count before ingest stores the message.
-The router correlates the two by that response, not by which task finishes first.
+Both `notification_count` and `highlight_count` live in `room_unread_counts`.
+The unread path writes that row from room-info updates and from the five-minute resweep.
+Event ingest does not write it.
 
-The router remembers the last `notification_count` it has observed for each account and room.
-Before it applies a response, it snapshots that count as `before`.
-The response's count is the count the response carries, or `before` when it carries none.
+The router is the only writer of the pair it compares against.
+It does not read the unread task's memory.
+A rise is either count strictly increasing.
+One count rising still counts when the other falls.
+In the cases below, `after` rose when either count is greater than its `before`.
+`after` fell when neither rose and at least one count is lower.
+`after` equals `before` when both counts are unchanged.
+
+On startup the router seeds its observed pair from `room_unread_counts`, before it handles a live response.
+That seed is not a rise.
+A restart does not push unreads already stored, and it does not treat them as a `before` of zero.
+The slot does not survive the restart.
+The next notifying message after startup wakes the device.
+
+For one sliding-sync response, #604 reads `room_unread_counts` before the unread path writes this response's count, and reads it again after that write.
+The router receives that pair as `before` and `after`, together with the messages ingested from the same response.
+The unread path publishing first cannot change `before`, because `before` was already the row.
+
+A resweep, or a room-info update that is not part of a response the router is applying, is its own observation.
+Its `before` is the pair the router last stored.
+Its `after` is the pair the unread path just persisted.
+It carries no message.
+That observation can release a slot.
+The release does not have to be a later sync response.
 
 #604 reads `push_actions` on the live ingest path and passes them to the router.
 The SDK sets them on a timeline event only when push context was supplied, and leaves them `None` otherwise.
@@ -150,30 +172,58 @@ The live path supplies that context.
 Backfill and re-decryption keep passing `None`, and they still do not wake.
 The router does not evaluate the ruleset a second time.
 `Some` actions that include notify mark the message as notifying.
-`Some` actions that do not include notify leave the slot unchanged and do not send.
+`Some` actions that do not include notify leave the slot unchanged, do not send, and do not consume an unpaired rise.
 `None` means the actions are unknown, not that the rules declined to notify.
-On `None`, the router applies the other eligibility rules and the count correlation below, and it may wake that message.
-It logs a warning once per process when a live event arrives with `None`.
+`None` may wake only when this same observation's count rose and the slot is empty, and only as that immediate send.
+It never fills the slot, it does not claim an unpaired rise, and it does not send when the count fell.
+A slotted notifying message is not replaced by it.
+When none of those send conditions hold, the router drops that message.
+The router logs each live `None` at warn with the account, the room, and the event id.
+A once-per-process warning is not used, so a path that flaps stays visible.
 A live path that never supplies context is a bug in #604, not the steady state.
 
 The router keeps one slot per account and room.
-The slot may hold only an eligible notifying message.
-A newer notifying message replaces the one already slotted.
+The slot may hold only an eligible message whose actions are `Some` and include notify.
+A newer message of that kind replaces the one already slotted.
 A non-notifying eligible message does not fill the slot and does not clear it.
 An event that is not an eligible message, including an invite, a call, a receipt, and a UTD, neither fills the slot, nor clears it, nor releases it.
 
-When the response contains a notifying eligible message and its count is greater than `before`, the rise belongs to this response.
-The router sends that message immediately.
-If the response contains several, it sends the latest.
-The slot is not left waiting.
-When the response's count equals `before`, the rise has not been published yet.
-The message fills the slot, or replaces the message already there, and the slot records `before`.
-A later response whose count is greater than that recorded value releases the slot.
-A response whose count is greater than `before`, and which contains no notifying eligible message, sends nothing.
-The router advances its observed count to that response's count, and the rise is consumed.
-A message in a later response does not inherit it.
-A rise with an empty slot sends nothing.
-The sent payload is the notifying message.
+The router decides, and only then stores `after`.
+The first matching case wins.
+A case that sends, releases, or re-bases also drops any unpaired rise.
+
+- `after` rose and the observation has a notifying message.
+  The router sends the latest one immediately and clears the slot for that account and room.
+  One rise produces one wake.
+  A message already slotted for that room is not sent as well.
+- `after` rose, the slot is occupied, and the observation has no notifying message.
+  The router releases the slot and sends the slotted message.
+  This is the held-receipt case, including a resweep that publishes the rise on its own.
+  A `None` message in that observation does not replace the slotted one.
+- `after` rose, the slot is empty, and the observation has a `None` message.
+  The router sends the latest such message immediately and does not fill the slot.
+- `after` rose, the slot is empty, and there is no message to send.
+  The router does not send.
+  It remembers the rise as unpaired instead of consuming it.
+  The unpaired rise expires, unsent, at the same five-minute interval as the slot.
+- `after` equals `before`, an unpaired rise matches that count, and the observation has a notifying message.
+  The router sends that message immediately and clears the slot.
+  This is the rise that was published before the message arrived.
+  A `None` message does not claim an unpaired rise, and a message does not otherwise inherit an earlier rise.
+- `after` equals `before`, there is a notifying message, and no unpaired rise matches.
+  The message fills the slot, or replaces the message already there, and the slot records `before`.
+- `after` fell and the observation contains a notifying message.
+  A read on another client can land in the same observation as the new message, so the net count is below `before` even though the message should wake.
+  The router sends that message immediately, clears the slot, and stores `after`.
+  It does not wait for a later count above the old `before`.
+  A `None` message does not take this path.
+- `after` fell and there is no notifying message.
+  The room was read elsewhere.
+  The router clears the slot without sending, drops any unpaired rise, and stores `after`.
+
+Anything else leaves an occupied slot as it is.
+A rise with an empty slot and no message sends nothing beyond the unpaired memory above.
+The sent or released payload is that one message.
 The slot is dropped, unsent, at the unread resweep interval (five minutes).
 The slot is not durable.
 A crash loses at most the wakes in flight, and the next notifying message wakes the device.
@@ -301,6 +351,16 @@ The pre-migration access token keeps its own session id until it expires.
 `NULL` is not a session.
 The migration does not leave `session_id` null, a registration insert requires one, and the reaper skips a null rather than grouping every null row into one session.
 
+A `PUT` with an expiring access token whose session has no refresh token is `400` with code `push_session_refresh_required`.
+The row is not written.
+That token is a legacy access token: its session id is its own row id, and the device's refresh token is a different session.
+Registering it would make the send-time check delete the row when the access token expires, even though the refresh token is still valid, and a suspended app cannot re-`PUT`.
+#605 refreshes once before the first `PUT`, and refreshes again when it receives that code, then repeats the `PUT` with the new access token.
+That token carries the refresh token's session id, so expiry of the access token does not reap the registration.
+A non-expiring credential has no refresh token and is not rejected by this check.
+The liveness check does not treat another device's refresh token as belonging to this session.
+`oauth_identity_id` and `client_id` are shared by every device of the same person, so they are the wrong key for that.
+
 The row lives in `push_registrations`:
 
 - `id` UUID primary key.
@@ -412,6 +472,12 @@ It does not wait.
 One router task owns the channel.
 Provider calls take a permit from a semaphore of four, and each call times out at 10 seconds.
 A hung peer then returns the permit.
+The send-time liveness check runs in that router task, on the same permit and under the same 10-second timeout as the provider call.
+It does not run on the sync loop.
+A failed check, whether the query errors or the timeout fires, is fail-open: the router sends, logs, and does not delete the registration.
+The next send checks again.
+Only a successful answer that the session has no live credential drops the wake and deletes the row.
+A transient database error must not wipe a registration, just as a failed name read still sends.
 One account, one registration, or one provider failing is logged and skipped.
 It is never fatal to sync, and sync never awaits a provider.
 
@@ -440,6 +506,9 @@ The registrations stay.
 - The client does not keep a foreground service so the socket can survive Doze.
 - macOS, Windows, Linux, and the browser do not request a remote token.
 - On sign-out of the Axon session, and when message notifications are turned off, the client deletes the registration.
+- Before the first `PUT`, the client refreshes an OAuth session once, and it refreshes again when the server answers `push_session_refresh_required`.
+  The `PUT` uses the access token from that refresh.
+  A non-expiring credential is registered as it is.
 - A tap uses the listener #606 registered and opens the room.
 - While the process is in the foreground, the client does not present the remote alert.
   The local notifier owns that toast.
@@ -536,10 +605,20 @@ Push is best-effort.
 The next eligible message is the retry.
 A queue is a second crash-recovery problem, and a 429 retry inside the sync loop is the failure mode the bounds exist to avoid.
 
-**Release a slotted message only when the count rises after the fill.**
-The unread path can publish the rise before ingest fills the slot, and one sliding-sync response can carry both.
-Waiting for a strictly later rise drops that wake at the five-minute resweep.
-The router correlates the message and the rise on the response, and a rise already in the response sends immediately.
+**Release a slotted message only when a later sync response carries a higher count.**
+The held-receipt rise is published by the unread path or the resweep, which may not be a response at all.
+Waiting only for a later response drops that wake at five minutes.
+The router reads `room_unread_counts` itself, and a resweep observation can release the slot.
+
+**Consume a rise that arrives with no message.**
+The resweep can publish that rise before ingest stores the message.
+Forgetting it leaves the message slotted at the new count, with no later rise to release it.
+The router remembers an unpaired rise until a notifying message claims it or the five-minute interval expires it.
+
+**Keep a legacy registration alive because some other refresh token for the same person is unexpired.**
+`oauth_identity_id` and `client_id` are shared by every device.
+That would keep pushing a session whose own refresh token is gone.
+The server rejects the `PUT` until the client refreshes, so the registration is born on the refresh token's session.
 
 **Clear the slot when a non-notifying message arrives.**
 The slot never holds a message the rules did not mark as notifying, so the clear does not prevent a suppressed push.
