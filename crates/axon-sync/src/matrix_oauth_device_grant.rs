@@ -36,7 +36,6 @@ const MAX_DEVICE_CODE_BYTES: usize = 4_096;
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const MAX_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const SLOW_DOWN_STEP: Duration = Duration::from_secs(5);
 /// Consecutive transient token-endpoint failures tolerated before giving up.
 const MAX_CONSECUTIVE_POLL_FAILURES: u32 = 5;
@@ -245,7 +244,7 @@ fn parse_device_authorization(
         verification_uri: verification_uri_complete
             .unwrap_or(verification_uri)
             .to_string(),
-        interval: clamp_interval(seconds("interval")?),
+        interval: poll_interval(seconds("interval")?),
         expires_in: seconds("expires_in")?.map(Duration::from_secs),
     })
 }
@@ -289,13 +288,18 @@ fn is_loopback(url: &Url) -> bool {
     })
 }
 
-/// The server's `interval`, five seconds when absent, clamped so a hostile
-/// value can neither hammer the token endpoint nor stall the flow.
-fn clamp_interval(seconds: Option<u64>) -> Duration {
+/// The server's `interval`, five seconds when absent, and never less than one
+/// second so a zero cannot make Axon hammer the token endpoint.
+///
+/// There is deliberately no upper bound. RFC 8628 §3.5 makes `interval` the
+/// *minimum* wait, so polling sooner than asked invites throttling or a failed
+/// authorization. A server that asks for an absurd wait only shortens its own
+/// flow: the deadline ends it as `authorization_expired`.
+fn poll_interval(seconds: Option<u64>) -> Duration {
     seconds
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_POLL_INTERVAL)
-        .clamp(MIN_POLL_INTERVAL, MAX_POLL_INTERVAL)
+        .max(MIN_POLL_INTERVAL)
 }
 
 /// Poll the token endpoint once with the device code.
@@ -435,7 +439,9 @@ where
             PollOutcome::Pending => consecutive_failures = 0,
             PollOutcome::SlowDown => {
                 consecutive_failures = 0;
-                interval = (interval + SLOW_DOWN_STEP).min(MAX_POLL_INTERVAL);
+                // Every `slow_down` adds five seconds, with no ceiling
+                // (RFC 8628 §3.5); the deadline bounds the total.
+                interval = interval.saturating_add(SLOW_DOWN_STEP);
             }
             PollOutcome::Denied => {
                 tracing::warn!(
@@ -789,14 +795,17 @@ mod tests {
     }
 
     #[test]
-    fn interval_defaults_to_five_seconds_and_is_clamped() {
-        assert_eq!(clamp_interval(None), Duration::from_secs(5));
-        assert_eq!(clamp_interval(Some(0)), Duration::from_secs(1));
-        assert_eq!(clamp_interval(Some(1)), Duration::from_secs(1));
-        assert_eq!(clamp_interval(Some(30)), Duration::from_secs(30));
-        assert_eq!(clamp_interval(Some(60)), Duration::from_secs(60));
-        assert_eq!(clamp_interval(Some(86_400)), Duration::from_secs(60));
-        assert_eq!(clamp_interval(Some(u64::MAX)), Duration::from_secs(60));
+    fn interval_defaults_to_five_seconds_and_is_never_shortened() {
+        assert_eq!(poll_interval(None), Duration::from_secs(5));
+        // Zero would hammer the endpoint, so it alone is raised.
+        assert_eq!(poll_interval(Some(0)), Duration::from_secs(1));
+        assert_eq!(poll_interval(Some(1)), Duration::from_secs(1));
+        assert_eq!(poll_interval(Some(30)), Duration::from_secs(30));
+        // `interval` is the server's minimum wait (RFC 8628 §3.5): a long one
+        // is honoured, never cut down to something Axon finds convenient.
+        assert_eq!(poll_interval(Some(120)), Duration::from_secs(120));
+        assert_eq!(poll_interval(Some(86_400)), Duration::from_secs(86_400));
+        assert_eq!(poll_interval(Some(u64::MAX)), Duration::from_secs(u64::MAX));
 
         let mut absent = valid_authorization();
         absent.as_object_mut().unwrap().remove("interval");
@@ -947,7 +956,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn slow_down_adds_five_seconds_up_to_the_clamp() {
+    async fn every_slow_down_adds_five_seconds_without_a_ceiling() {
         let mut outcomes: Vec<PollOutcome> = (0..13).map(|_| PollOutcome::SlowDown).collect();
         outcomes.push(tokens());
         let script = Script::new(outcomes);
@@ -962,7 +971,53 @@ mod tests {
         .unwrap();
         let polled = script.polled_at_secs();
         let gaps: Vec<u64> = polled.windows(2).map(|pair| pair[1] - pair[0]).collect();
-        assert_eq!(gaps, [10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 60, 60]);
+        assert_eq!(gaps, [10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70]);
+    }
+
+    /// RFC 8628 §3.5: the server's interval is a minimum, and `slow_down`
+    /// raises it by five seconds however long it already is.
+    #[tokio::test(start_paused = true)]
+    async fn a_long_server_interval_is_honoured_and_still_slows_down() {
+        let script = Script::new(vec![PollOutcome::SlowDown, tokens()]);
+        poll_for_tokens(
+            || script.poll(),
+            Duration::from_secs(120),
+            far_deadline(),
+            &CancellationToken::new(),
+        )
+        .await
+        .ok()
+        .unwrap();
+        assert_eq!(script.polled_at_secs(), [120, 245]);
+    }
+
+    /// A server cannot stall a flow by asking for a long wait: the deadline
+    /// ends it, without a poll sooner than the server allowed.
+    #[tokio::test(start_paused = true)]
+    async fn the_deadline_bounds_a_wait_the_server_made_too_long() {
+        for interval in [Duration::from_secs(120), Duration::from_secs(u64::MAX)] {
+            let script = Script::new(vec![tokens()]);
+            let result = poll_for_tokens(
+                || script.poll(),
+                interval,
+                tokio::time::Instant::now() + Duration::from_secs(100),
+                &CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(result.err(), Some(DeviceGrantFailure::Expired));
+            assert!(script.polled_at_secs().is_empty());
+        }
+
+        // Growth by `slow_down` cannot overflow the interval either.
+        let script = Script::new(vec![PollOutcome::SlowDown]);
+        let result = poll_for_tokens(
+            || script.poll(),
+            Duration::MAX - Duration::from_secs(1),
+            tokio::time::Instant::now() + Duration::from_secs(100),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(result.err(), Some(DeviceGrantFailure::Expired));
     }
 
     #[tokio::test(start_paused = true)]

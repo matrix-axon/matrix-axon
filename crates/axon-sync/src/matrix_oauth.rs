@@ -69,23 +69,25 @@ impl MatrixOAuthRegistrationManager {
         }
         let homeserver = client.homeserver();
         restore_after_resolving(client, async {
-            Ok(self.resolve(&homeserver).await?.client_id)
+            let server = self.discover(&homeserver).await?;
+            self.register(&homeserver, &server).await
         })
         .await
     }
 
-    /// Everything [`prepare`](Self::prepare) does except installing the client
-    /// ID, also returning the validated discovery metadata and the bounded
-    /// HTTP client it was fetched with.
+    /// The first half of [`prepare`](Self::prepare): fetch and validate the
+    /// homeserver's authorization-server metadata.
     ///
-    /// For a caller that talks to the authorization server itself and then
-    /// hands the SDK a complete session (ADR 0117). The SDK accepts
-    /// authentication data exactly once, so such a caller must not install the
-    /// client ID separately first.
-    pub(crate) async fn resolve(
+    /// Split from [`register`](Self::register) for a caller that talks to the
+    /// authorization server itself (ADR 0117). Such a caller checks the
+    /// metadata for the capability it needs before registering anything, so a
+    /// server that lacks it is reported as unsupported whether or not it would
+    /// also have refused registration, and no client is registered with a
+    /// server Axon cannot use.
+    pub(crate) async fn discover(
         &self,
         homeserver: &Url,
-    ) -> Result<PreparedMatrixOAuthClient, SyncError> {
+    ) -> Result<DiscoveredMatrixOAuthServer, SyncError> {
         validate_config(&self.config)?;
         let timeout = Duration::from_secs(self.config.request_timeout_secs);
         let http = reqwest::Client::builder()
@@ -95,23 +97,31 @@ impl MatrixOAuthRegistrationManager {
             .build()
             .map_err(|_| SyncError::MatrixOAuthConfiguration)?;
         let metadata = discover_metadata(&http, homeserver, timeout).await?;
-        let client_id = self.register(homeserver, &http, &metadata, timeout).await?;
-        Ok(PreparedMatrixOAuthClient {
-            client_id,
+        Ok(DiscoveredMatrixOAuthServer {
             metadata,
             http,
+            timeout,
         })
     }
 
-    /// Find or create the durable registration for the discovered issuer.
-    /// Returns only once the client ID is persisted.
-    async fn register(
+    /// Find or create the durable registration for the discovered issuer,
+    /// without installing it on any client. Returns only once the client ID
+    /// is persisted.
+    ///
+    /// The SDK accepts authentication data exactly once, so a caller that
+    /// later hands it a complete session must not install the client ID
+    /// separately first.
+    pub(crate) async fn register(
         &self,
         homeserver: &Url,
-        http: &reqwest::Client,
-        metadata: &AuthorizationServerMetadata,
-        timeout: Duration,
+        server: &DiscoveredMatrixOAuthServer,
     ) -> Result<ClientId, SyncError> {
+        let DiscoveredMatrixOAuthServer {
+            metadata,
+            http,
+            timeout,
+        } = server;
+        let timeout = *timeout;
         let issuer = metadata.issuer.clone();
         let issuer_url = issuer.as_str();
         if issuer_url.len() > MAX_SERVER_URL_BYTES
@@ -209,13 +219,13 @@ impl MatrixOAuthRegistrationManager {
     }
 }
 
-/// A registered client together with what registration discovered.
-pub(crate) struct PreparedMatrixOAuthClient {
-    pub(crate) client_id: ClientId,
+/// A homeserver's validated authorization-server metadata.
+pub(crate) struct DiscoveredMatrixOAuthServer {
     pub(crate) metadata: AuthorizationServerMetadata,
-    /// Bounded exactly as discovery and registration were: connect and total
-    /// timeouts, redirects disabled.
+    /// The client discovery used, for further requests to the same server
+    /// under the same bounds: connect and total timeouts, redirects disabled.
     pub(crate) http: reqwest::Client,
+    timeout: Duration,
 }
 
 /// Install a client ID on `client` only after it has been resolved, which

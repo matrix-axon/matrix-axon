@@ -56,6 +56,8 @@ struct Behaviour {
     whoami_user: Option<String>,
     /// `whoami`'s device ID; `None` echoes the one named in the scope.
     whoami_device: Option<String>,
+    /// Leave `device_id` out of the `whoami` response altogether.
+    whoami_omits_device: bool,
     /// How long `whoami` takes, to hold a flow in `finalizing`.
     whoami_delay: Duration,
 }
@@ -84,6 +86,7 @@ impl Default for Behaviour {
             ),
             whoami_user: None,
             whoami_device: None,
+            whoami_omits_device: false,
             whoami_delay: Duration::ZERO,
         }
     }
@@ -115,6 +118,7 @@ struct Server {
     token_script: Mutex<VecDeque<(StatusCode, Value)>>,
     device_requests: Mutex<Vec<String>>,
     token_requests: AtomicUsize,
+    registrations: AtomicUsize,
 }
 
 impl Server {
@@ -189,18 +193,21 @@ async fn token(State(server): State<Arc<Server>>) -> (StatusCode, Json<Value>) {
 
 async fn whoami(State(server): State<Arc<Server>>) -> Json<Value> {
     tokio::time::sleep(server.behaviour.whoami_delay).await;
-    Json(json!({
+    let mut response = json!({
         "user_id": server
             .behaviour
             .whoami_user
             .clone()
             .unwrap_or_else(|| server.user_id.clone()),
-        "device_id": server
+    });
+    if !server.behaviour.whoami_omits_device {
+        response["device_id"] = json!(server
             .behaviour
             .whoami_device
             .clone()
-            .unwrap_or_else(|| server.requested_device_id()),
-    }))
+            .unwrap_or_else(|| server.requested_device_id()));
+    }
+    Json(response)
 }
 
 /// One engine wired to one stand-in server and the test database.
@@ -227,13 +234,17 @@ impl Harness {
             behaviour,
             device_requests: Mutex::new(Vec::new()),
             token_requests: AtomicUsize::new(0),
+            registrations: AtomicUsize::new(0),
         });
         let app = Router::new()
             .route("/_matrix/client/versions", get(versions))
             .route("/_matrix/client/v1/auth_metadata", get(auth_metadata))
             .route(
                 "/register",
-                post(|| async { Json(json!({ "client_id": "browser-test-client" })) }),
+                post(|State(server): State<Arc<Server>>| async move {
+                    server.registrations.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({ "client_id": "browser-test-client" }))
+                }),
             )
             .route("/device", post(device_authorization))
             .route("/token", post(token))
@@ -638,36 +649,55 @@ async fn refusal_and_expiry_have_their_own_error_codes() {
     other.finish().await;
 }
 
+/// The capability gate runs on the discovery metadata alone, before anything
+/// is registered: a server without the device grant is `unsupported` even
+/// when it would also have refused registration, and Axon leaves no client
+/// registered with a server it cannot use.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn a_server_without_the_device_grant_is_unsupported() {
-    let no_endpoint = Harness::start(Behaviour {
-        metadata: json!({ "device_authorization_endpoint": null }),
-        ..Behaviour::default()
-    })
-    .await;
-    assert_eq!(no_endpoint.fail().await, "unsupported");
-    assert!(no_endpoint
-        .server
-        .device_requests
-        .lock()
-        .unwrap()
-        .is_empty());
-    no_endpoint.finish().await;
+    let cases = [
+        (
+            "no device authorization endpoint",
+            json!({ "device_authorization_endpoint": null }),
+        ),
+        (
+            "endpoint advertised without the grant type",
+            json!({ "grant_types_supported": ["authorization_code", "refresh_token"] }),
+        ),
+        (
+            "neither the device grant nor dynamic registration",
+            json!({ "device_authorization_endpoint": null, "registration_endpoint": null }),
+        ),
+    ];
+    for (case, metadata) in cases {
+        let harness = Harness::start(Behaviour {
+            metadata,
+            ..Behaviour::default()
+        })
+        .await;
+        assert_eq!(harness.fail().await, "unsupported", "{case}");
+        assert_eq!(
+            harness.server.registrations.load(Ordering::SeqCst),
+            0,
+            "{case}: nothing may be registered"
+        );
+        assert!(
+            harness.server.device_requests.lock().unwrap().is_empty(),
+            "{case}"
+        );
+        harness.finish().await;
+    }
 
-    let no_grant_type = Harness::start(Behaviour {
-        metadata: json!({ "grant_types_supported": ["authorization_code", "refresh_token"] }),
+    // A supported server that offers no way to register is a different
+    // failure, and is still reported as one.
+    let unregistrable = Harness::start(Behaviour {
+        metadata: json!({ "registration_endpoint": null }),
         ..Behaviour::default()
     })
     .await;
-    assert_eq!(no_grant_type.fail().await, "unsupported");
-    assert!(no_grant_type
-        .server
-        .device_requests
-        .lock()
-        .unwrap()
-        .is_empty());
-    no_grant_type.finish().await;
+    assert_eq!(unregistrable.fail().await, "upstream");
+    unregistrable.finish().await;
 }
 
 /// A link or code that fails validation ends the flow before either is
@@ -733,6 +763,14 @@ async fn a_session_for_the_wrong_identity_or_without_refresh_is_refused() {
             "a different device than the scope named",
             Behaviour {
                 whoami_device: Some("SOMEOTHERDEVICE".to_owned()),
+                ..Behaviour::default()
+            },
+            "upstream",
+        ),
+        (
+            "no device at all, which confirms nothing",
+            Behaviour {
+                whoami_omits_device: true,
                 ..Behaviour::default()
             },
             "upstream",
