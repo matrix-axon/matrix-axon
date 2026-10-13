@@ -43,6 +43,7 @@ What a missing bundle means depends on who named the directory.
 
 - `AXON_WEB_DIST` is an explicit path, and the project treats explicit paths as promises.
   It must be absolute, because cargo runs build scripts from the package directory, and a directory there with no `index.html` fails the build.
+  A symbolic link does not count as one, because symbolic links are never embedded.
   The release pipelines set it (step 2), because a release artifact that silently lacks the web client would be worse than a failed build.
 - The default location may simply not have been built.
   That is a cargo warning and an empty table.
@@ -115,7 +116,7 @@ Accepting that offer would have written a second config, with a second `store_ke
 On Unix, `/etc/axon-server/config.toml` is now the last discovery tier, after the working directory and the user's own platform directory.
 The packages make that file readable by the `axon` user alone.
 When it exists and the invoking user cannot read it, discovery treats it as not found, so a process configured entirely from the environment still starts and `axon-server init` can still write that user's own config (with a note that it is separate from the packaged one).
-Only when nothing else configures the process (no file, no `--config`, no `DATABASE_URL` or `AXON_*` variables) does the command fail, saying whose file it is and to run as the service's user, instead of reporting "no configuration" and offering first-time setup.
+Only when nothing else gives the process a database (no file, no `--config`, no `DATABASE_URL` or `AXON_DATABASE__URL`) does the command fail, saying whose file it is and to run as the service's user, instead of reporting "no configuration" and offering first-time setup.
 
 Running as root finds the file and then fails to connect, because the packaged database URL uses peer authentication for the `axon` role.
 The supported form is `sudo -u axon axon-server <command>`, and step 3 puts that in the install output.

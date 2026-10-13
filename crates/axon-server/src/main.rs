@@ -91,8 +91,11 @@ async fn main() -> anyhow::Result<()> {
                 discovered.is_none() && cli.config.is_none() && !config_env_present();
             // A packaged install seen by a user who cannot read its config is not
             // an unconfigured machine: say whose config it is instead of offering
-            // to generate a second one, with a second `store_key`.
-            if unconfigured {
+            // to generate a second one, with a second `store_key`. The test is
+            // "no database URL from anywhere", not `unconfigured`, because an
+            // unrelated `AXON_*` variable (a client's `AXON_BASE_URL`, say) does
+            // not make up for the file this user cannot read.
+            if discovered.is_none() && cli.config.is_none() && !database_url_env_present() {
                 if let Some(path) = Config::unreadable_system_config() {
                     return Err(axon_core::ConfigError::UnreadableSystemConfig(path))
                         .context("loading configuration");
@@ -392,7 +395,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     tracing::info!(%addr, "axon listening");
     if let Some(bootstrap) = &bootstrap {
         println!(
-            "First-credential web bootstrap is armed: open http://{addr}{}",
+            "First-credential web bootstrap is armed: open {}{}",
+            browsable_origin(addr),
             bootstrap.url_path()
         );
         if bootstrap.allow_remote {
@@ -485,13 +489,18 @@ async fn maybe_offer_web_bootstrap(
 /// `0.0.0.0` and `::` mean "every address" and are not ones to visit, so they
 /// become the loopback address of the same family.
 fn browsable_url(addr: std::net::SocketAddr) -> String {
+    format!("{}/", browsable_origin(addr))
+}
+
+/// [`browsable_url`] without the trailing slash, for a path to follow.
+fn browsable_origin(addr: std::net::SocketAddr) -> String {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     let ip = match addr.ip() {
         IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
         IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
         ip => ip,
     };
-    format!("http://{}/", SocketAddr::new(ip, addr.port()))
+    format!("http://{}", SocketAddr::new(ip, addr.port()))
 }
 
 /// Whether this process answers non-API paths with the embedded web client
@@ -763,6 +772,19 @@ fn config_env_present() -> bool {
         })
 }
 
+/// Whether the environment supplies the one setting with no default, the
+/// database URL (`DATABASE_URL` or `AXON_DATABASE__URL`, in any case, as the
+/// config loader reads them).
+fn database_url_env_present() -> bool {
+    database_url_among(std::env::vars_os().filter_map(|(key, _)| key.into_string().ok()))
+}
+
+fn database_url_among(keys: impl IntoIterator<Item = String>) -> bool {
+    keys.into_iter().any(|key| {
+        key.eq_ignore_ascii_case("DATABASE_URL") || key.eq_ignore_ascii_case("AXON_DATABASE__URL")
+    })
+}
+
 /// Resolve when the process receives Ctrl-C or (on Unix) SIGTERM, so the server
 /// drains in-flight requests before exiting — important under a container
 /// orchestrator.
@@ -794,7 +816,7 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod browsable_url_tests {
-    use super::browsable_url;
+    use super::{browsable_origin, browsable_url};
 
     #[test]
     fn an_unspecified_bind_is_reported_as_loopback() {
@@ -806,6 +828,35 @@ mod browsable_url_tests {
         ] {
             assert_eq!(browsable_url(bound.parse().expect("address")), url);
         }
+    }
+
+    #[test]
+    fn the_origin_takes_a_path_without_a_doubled_slash() {
+        let origin = browsable_origin("0.0.0.0:8473".parse().expect("address"));
+        assert_eq!(
+            format!("{origin}/bootstrap/abc"),
+            "http://127.0.0.1:8473/bootstrap/abc"
+        );
+    }
+}
+
+#[cfg(test)]
+mod database_url_env_tests {
+    use super::database_url_among;
+
+    fn among(keys: &[&str]) -> bool {
+        database_url_among(keys.iter().map(|key| (*key).to_owned()))
+    }
+
+    #[test]
+    fn only_a_database_url_counts() {
+        assert!(among(&["DATABASE_URL"]));
+        assert!(among(&["AXON_DATABASE__URL"]));
+        assert!(among(&["axon_database__url"]));
+        // A client's variable, or a server setting that is not the database,
+        // leaves the process without one.
+        assert!(!among(&["AXON_BASE_URL", "AXON_SERVER__PORT", "HOME"]));
+        assert!(!among(&[]));
     }
 }
 

@@ -7,8 +7,8 @@
 //! With it, what a missing bundle means depends on who named the directory:
 //!
 //! - `AXON_WEB_DIST` is an explicit path, and an explicit path is a promise.
-//!   It must be absolute, and a directory there with no `index.html` fails the
-//!   build. Release pipelines set it, so an artifact cannot quietly ship
+//!   It must be absolute, and a directory there with no `index.html` (a
+//!   symlink does not count) fails the build. Release pipelines set it, so an artifact cannot quietly ship
 //!   without the web client.
 //! - The default, `clients/web/dist` in this checkout, may simply not have been
 //!   built. That is a warning and an empty table, because the lint gate and CI
@@ -68,8 +68,9 @@ fn dist_dir() -> Option<PathBuf> {
                 dir.display()
             );
             assert!(
-                dir.join("index.html").is_file(),
-                "AXON_WEB_DIST names {}, which has no index.html. \
+                has_index(&dir),
+                "AXON_WEB_DIST names {}, which has no index.html that is a regular file \
+                 (symbolic links are not embedded). \
                  Point it at a built web client (`pnpm --dir clients/web build` writes clients/web/dist).",
                 dir.display()
             );
@@ -80,7 +81,7 @@ fn dist_dir() -> Option<PathBuf> {
                 .join("../../clients/web/dist");
             // Watched even when absent, so building the bundle later reruns this.
             println!("cargo:rerun-if-changed={}", dir.display());
-            if !dir.join("index.html").is_file() {
+            if !has_index(&dir) {
                 println!(
                     "cargo:warning=`embed-web` is on but clients/web/dist is not built, so this \
                      binary carries no web client. Run `pnpm --dir clients/web install && \
@@ -95,6 +96,13 @@ fn dist_dir() -> Option<PathBuf> {
         dir.canonicalize()
             .unwrap_or_else(|e| panic!("resolving {}: {e}", dir.display())),
     )
+}
+
+/// Whether `dir` holds an `index.html` that [`collect`] will embed. A symlink
+/// does not count: `collect` skips it, and a bundle without its entry point is
+/// no web client at all.
+fn has_index(dir: &Path) -> bool {
+    fs::symlink_metadata(dir.join("index.html")).is_ok_and(|meta| meta.is_file())
 }
 
 /// Every regular file under `dir`. Dotfiles and symlinks are left out: a bundle

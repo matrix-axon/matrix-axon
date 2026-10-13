@@ -43,7 +43,7 @@ pub enum ConfigError {
     MissingConfigFile(PathBuf),
 
     /// The system-wide config file is there, this user may not read it, and
-    /// nothing else configures the process. Reported instead of "no
+    /// nothing else gives the process a database URL. Reported instead of "no
     /// configuration", which would offer first-time setup on a machine that is
     /// already set up.
     #[error(
