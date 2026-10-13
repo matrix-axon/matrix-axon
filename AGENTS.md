@@ -420,6 +420,8 @@ Use `scripts/smoke-gate.sh <mode>` before pushing component changes that cross p
 The pre-push hook does not run Docker-backed smoke by default.
 Opt in with `RUN_SMOKE=tui`, `RUN_SMOKE=server`, `RUN_SMOKE=tui-true-local`, or `RUN_SMOKE=all` — the `smoke-gate` hook is a no-op unless that variable names a lane, and works the same under `git push` and `jj push`.
 
+CI can also run the Docker-backed lanes by hand: dispatch `smoke.yml` with a `lane` of `tui-true-local`, `server` or `all`, or with `matrix-oauth-all` (or one of `matrix-oauth-api`, `-acquire`, `-grant`, `-unsupported`) to run the Matrix OAuth QR suite alone.
+
 ## Current state
 
 **Through M19 landed;
