@@ -1019,20 +1019,28 @@ impl MatrixOAuthAcquireEngine {
         )
         .await
         .map_err(classify_client_build_error)?;
-        // Resolve the registration without installing it: `restore_session`
-        // below supplies the client ID together with the tokens, and the SDK
-        // accepts authentication data only once.
-        let prepared = self
+        let homeserver = client.homeserver();
+        let server = self
             .inner
             .registrations
-            .resolve(&client.homeserver())
+            .discover(&homeserver)
             .await
             .map_err(classify_registration_error)?;
-        let endpoints =
-            DeviceGrantEndpoints::from_metadata(&client.homeserver(), &prepared.metadata)
-                .map_err(DriverFailure::from)?;
-        let client_id = prepared.client_id;
-        let http = prepared.http;
+        // The capability gate comes before registration: a server without the
+        // device grant is unsupported whatever else it would have refused,
+        // and Axon registers no client with a server it cannot use.
+        let endpoints = DeviceGrantEndpoints::from_metadata(&homeserver, &server.metadata)
+            .map_err(DriverFailure::from)?;
+        // The registration is found or created but not installed on the
+        // client: `restore_session` below supplies the client ID together
+        // with the tokens, and the SDK accepts authentication data only once.
+        let client_id = self
+            .inner
+            .registrations
+            .register(&homeserver, &server)
+            .await
+            .map_err(classify_registration_error)?;
+        let http = server.http;
         if flow.cancel.is_cancelled() {
             return Err(DriverFailure::Cancelled);
         }
@@ -1191,9 +1199,10 @@ impl MatrixOAuthAcquireEngine {
     /// can be refreshed, revoking it otherwise.
     ///
     /// `requested_device_id` is set by browser sign-in, which chose the device
-    /// ID itself: a homeserver that reports the token bound to a different
-    /// device ignored the requested scope, and the staged crypto store would
-    /// belong to a device that does not exist.
+    /// ID itself. The homeserver must then report the token bound to exactly
+    /// that device. One that names another device, or none, has not confirmed
+    /// the requested scope took effect, and the staged crypto store may belong
+    /// to a device that does not exist.
     async fn validate_completed_client(
         &self,
         flow: &Arc<Flow>,
@@ -1221,8 +1230,9 @@ impl MatrixOAuthAcquireEngine {
                 log_driver_failure("identity_validation", &failure, None);
                 return Err(failure);
             }
-            if let (Some(requested), Some(reported)) = (requested_device_id, &who.device_id) {
-                if requested != reported {
+            // A missing device ID proves nothing, so it fails like a wrong one.
+            if let Some(requested) = requested_device_id {
+                if who.device_id.as_deref() != Some(requested) {
                     let failure = DriverFailure::Upstream;
                     log_driver_failure("device_validation", &failure, None);
                     return Err(failure);
