@@ -316,6 +316,7 @@ The link is valid for up to thirty minutes and is returned only while the flow w
 It needs a homeserver whose authorization server offers the OAuth device authorization grant, and reports `unsupported` otherwise.
 An account added this way is signed in but its device is not verified; verify it afterwards with a recovery key or interactive verification.
 No client exposes browser sign-in yet.
+[Browser sign-in](docs/matrix-oauth-browser-sign-in.md) lists the failure codes and how to diagnose a failed sign-in from the server log.
 The web client exposes both QR presentations on its unified `/accounts` page, including camera or image scanning, check-code handling, authorization approval, cancellation, and reload resume.
 The TUI presentation remains a later client-specific slice.
 The existing password and token-import account routes remain available.
